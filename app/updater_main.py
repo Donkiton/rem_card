@@ -23,6 +23,70 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+try:
+    from rem_card.ui.styles.theme import (
+        BG_LIGHT,
+        COLOR_PRIMARY,
+        COLOR_PRIMARY_DARK,
+        CUSTOM_DIALOG_BORDER,
+        CUSTOM_DIALOG_RADIUS,
+        STYLE_CUSTOM_DIALOG,
+        TEXT_PRIMARY,
+        TEXT_SECONDARY,
+    )
+except Exception:
+    BG_LIGHT = "#e9ecef"
+    COLOR_PRIMARY = "#007bff"
+    COLOR_PRIMARY_DARK = "#0056b3"
+    CUSTOM_DIALOG_BORDER = "#bdc3c7"
+    CUSTOM_DIALOG_RADIUS = "5px"
+    TEXT_PRIMARY = "#2c3e50"
+    TEXT_SECONDARY = "#495057"
+    STYLE_CUSTOM_DIALOG = f"""
+        QDialog {{ background-color: transparent; }}
+        QFrame#DialogMainFrame {{
+            background-color: #ffffff;
+            border: 1px solid {CUSTOM_DIALOG_BORDER};
+            border-radius: {CUSTOM_DIALOG_RADIUS};
+        }}
+        QFrame#DialogTitleBar {{
+            background-color: {BG_LIGHT};
+            border-top-left-radius: {CUSTOM_DIALOG_RADIUS};
+            border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+            border-bottom: 1px solid {CUSTOM_DIALOG_BORDER};
+        }}
+        QLabel#DialogTitleText {{
+            color: {TEXT_PRIMARY};
+            font-weight: bold;
+            font-size: 14px;
+            padding-left: 5px;
+            background-color: transparent;
+        }}
+        QPushButton#DialogCloseBtn {{
+            background-color: transparent;
+            color: {TEXT_PRIMARY};
+            font-weight: bold;
+            font-size: 14px;
+            border: none;
+            padding: 2px 10px;
+            border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+        }}
+        QPushButton#DialogCloseBtn:hover {{
+            background-color: #e74c3c;
+            color: white;
+        }}
+        QPushButton#DialogOkBtn {{
+            background-color: {BG_LIGHT};
+            color: {TEXT_PRIMARY};
+            font-size: 13px;
+            font-weight: bold;
+            padding: 6px 20px;
+            border: 1px solid {CUSTOM_DIALOG_BORDER};
+            border-radius: {CUSTOM_DIALOG_RADIUS};
+        }}
+        QPushButton#DialogOkBtn:hover {{ background-color: #d8dde2; }}
+    """
+
 
 READY_FILE_NAME = "ready.ok"
 MANIFEST_FILE_NAME = "manifest.json"
@@ -522,73 +586,57 @@ class UpdateWorker(QObject):
 
 
 def _show_custom_notice(parent, title: str, message: str):
+    try:
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        CustomMessageBox.warning(parent, title, message)
+        return
+    except Exception:
+        pass
+
     dialog = QDialog(parent)
     dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
     dialog.setAttribute(Qt.WA_TranslucentBackground)
     dialog.setModal(True)
     dialog.setFixedWidth(390)
-    dialog.setStyleSheet(
-        """
-        QDialog { background: transparent; }
-        QFrame#NoticeCard {
-            background: #ffffff;
-            border: 1px solid #cfd8e3;
-            border-radius: 8px;
-        }
-        QFrame#NoticeTitleBar {
-            background: #1f2937;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-        }
-        QLabel#NoticeTitle {
-            color: #ffffff;
-            font-size: 13px;
-            font-weight: 700;
-        }
-        QLabel#NoticeMessage {
-            color: #374151;
-            font-size: 13px;
-        }
-        QPushButton#NoticeOk {
-            min-height: 30px;
-            padding: 0 18px;
-            border-radius: 4px;
-            border: 1px solid #2f80ed;
-            background: #2f80ed;
-            color: #ffffff;
-            font-weight: 600;
-        }
-        QPushButton#NoticeOk:hover { background: #1f6ed4; }
-        """
-    )
+    dialog.setStyleSheet(STYLE_CUSTOM_DIALOG)
 
     root = QVBoxLayout(dialog)
     root.setContentsMargins(0, 0, 0, 0)
 
     card = QFrame(dialog)
-    card.setObjectName("NoticeCard")
+    card.setObjectName("DialogMainFrame")
     card_layout = QVBoxLayout(card)
     card_layout.setContentsMargins(0, 0, 0, 0)
     card_layout.setSpacing(0)
 
     title_bar = QFrame(card)
-    title_bar.setObjectName("NoticeTitleBar")
-    title_bar.setFixedHeight(34)
+    title_bar.setObjectName("DialogTitleBar")
+    title_bar.setFixedHeight(30)
     title_layout = QHBoxLayout(title_bar)
-    title_layout.setContentsMargins(12, 0, 12, 0)
+    title_layout.setContentsMargins(5, 0, 0, 0)
+    title_layout.setSpacing(0)
     title_label = QLabel(title)
-    title_label.setObjectName("NoticeTitle")
+    title_label.setObjectName("DialogTitleText")
+    close_button = QPushButton("✕")
+    close_button.setObjectName("DialogCloseBtn")
+    close_button.setFixedSize(30, 30)
+    close_button.clicked.connect(dialog.reject)
     title_layout.addWidget(title_label)
+    title_layout.addStretch()
+    title_layout.addWidget(close_button)
 
     content = QFrame(card)
     content_layout = QVBoxLayout(content)
-    content_layout.setContentsMargins(18, 16, 18, 16)
-    content_layout.setSpacing(14)
+    content_layout.setContentsMargins(20, 20, 20, 20)
+    content_layout.setSpacing(20)
     message_label = QLabel(message)
-    message_label.setObjectName("NoticeMessage")
+    message_label.setObjectName("DialogMessageText")
     message_label.setWordWrap(True)
+    message_label.setMinimumWidth(250)
+    message_label.setAlignment(Qt.AlignCenter)
     ok_button = QPushButton("Понятно")
-    ok_button.setObjectName("NoticeOk")
+    ok_button.setObjectName("DialogOkBtn")
     ok_button.clicked.connect(dialog.accept)
     content_layout.addWidget(message_label)
     content_layout.addWidget(ok_button, 0, Qt.AlignRight)
@@ -625,91 +673,65 @@ class UpdateWindow(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedWidth(460)
         self.setStyleSheet(
-            """
-            QDialog { background: transparent; }
-            QFrame#Card {
-                background: white;
-                border: 1px solid #cfd8e3;
-                border-radius: 8px;
-            }
-            QFrame#UpdaterTitleBar {
-                background: #1f2937;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }
-            QLabel#UpdaterWindowTitle {
-                color: #ffffff;
+            STYLE_CUSTOM_DIALOG
+            + f"""
+            QLabel#UpdateTitle {{
+                color: {TEXT_PRIMARY};
+                font-size: 15px;
+                font-weight: bold;
+                background-color: transparent;
+            }}
+            QLabel#UpdateStatus {{
+                color: {TEXT_PRIMARY};
                 font-size: 13px;
-                font-weight: 700;
-            }
-            QPushButton#UpdaterCloseBtn {
-                width: 32px;
-                height: 28px;
-                border: none;
-                border-radius: 0;
-                background: transparent;
-                color: #ffffff;
-                font-size: 16px;
-                font-weight: 700;
-            }
-            QPushButton#UpdaterCloseBtn:hover { background: #dc2626; }
-            QLabel#Title {
-                color: #1f2937;
-                font-size: 18px;
-                font-weight: 700;
-            }
-            QLabel#Status {
-                color: #374151;
-                font-size: 13px;
-            }
-            QLabel#Hint {
-                color: #6b7280;
+                font-weight: bold;
+                background-color: transparent;
+            }}
+            QLabel#UpdateHint {{
+                color: {TEXT_SECONDARY};
                 font-size: 12px;
-            }
-            QProgressBar {
-                border: 1px solid #cbd5e1;
-                border-radius: 4px;
+                background-color: transparent;
+            }}
+            QProgressBar#UpdateProgress {{
+                border: 1px solid {CUSTOM_DIALOG_BORDER};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
                 height: 18px;
                 text-align: center;
-                color: #111827;
-                background: #eef2f7;
-            }
-            QProgressBar::chunk {
-                background: #2f80ed;
-                border-radius: 3px;
-            }
-            QPushButton {
-                min-height: 30px;
-                padding: 0 18px;
-                border-radius: 4px;
-                border: 1px solid #9ca3af;
-                background: #ffffff;
-                color: #111827;
-            }
-            QPushButton:hover { background: #f3f4f6; }
+                color: {TEXT_PRIMARY};
+                background-color: {BG_LIGHT};
+                font-weight: bold;
+            }}
+            QProgressBar#UpdateProgress::chunk {{
+                background-color: {COLOR_PRIMARY};
+                border-radius: {CUSTOM_DIALOG_RADIUS};
+            }}
+            QProgressBar#UpdateProgress::chunk:hover {{
+                background-color: {COLOR_PRIMARY_DARK};
+            }}
             """
         )
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
+        root.setContentsMargins(0, 0, 0, 0)
 
         card = QFrame(self)
-        card.setObjectName("Card")
+        card.setObjectName("DialogMainFrame")
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
 
         self.title_bar = QFrame(card)
-        self.title_bar.setObjectName("UpdaterTitleBar")
-        self.title_bar.setFixedHeight(34)
+        self.title_bar.setObjectName("DialogTitleBar")
+        self.title_bar.setFixedHeight(30)
         self.title_bar.installEventFilter(self)
         title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(12, 0, 0, 0)
+        title_layout.setContentsMargins(5, 0, 0, 0)
         title_layout.setSpacing(0)
         window_title = QLabel("Обновление РЕМКАРТА")
-        window_title.setObjectName("UpdaterWindowTitle")
-        self.window_close_button = QPushButton("×")
-        self.window_close_button.setObjectName("UpdaterCloseBtn")
+        window_title.setObjectName("DialogTitleText")
+        self.window_close_button = QPushButton("✕")
+        self.window_close_button.setObjectName("DialogCloseBtn")
+        self.window_close_button.setFixedSize(30, 30)
         self.window_close_button.clicked.connect(self.close)
         title_layout.addWidget(window_title)
         title_layout.addStretch()
@@ -717,21 +739,23 @@ class UpdateWindow(QDialog):
 
         content = QFrame(card)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(22, 18, 22, 18)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
         self.title_label = QLabel("Обновление РЕМКАРТА")
-        self.title_label.setObjectName("Title")
+        self.title_label.setObjectName("UpdateTitle")
         self.status_label = QLabel("Подготовка...")
-        self.status_label.setObjectName("Status")
+        self.status_label.setObjectName("UpdateStatus")
         self.status_label.setWordWrap(True)
         self.progress = QProgressBar()
+        self.progress.setObjectName("UpdateProgress")
         self.progress.setRange(0, 100)
         self.progress.setValue(self._displayed_progress)
         self.hint_label = QLabel("Не запускайте программу до завершения обновления.")
-        self.hint_label.setObjectName("Hint")
+        self.hint_label.setObjectName("UpdateHint")
         self.hint_label.setWordWrap(True)
         self.close_button = QPushButton("Закрыть")
+        self.close_button.setObjectName("DialogOkBtn")
         self.close_button.setVisible(False)
         self.close_button.clicked.connect(self.accept)
 
