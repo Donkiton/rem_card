@@ -850,8 +850,7 @@ class UpdateWindow(QDialog):
         self.status_label.setText(f"Установлена версия {version}.")
         self.hint_label.setText("Можно запускать программу.")
         self.close_button.setVisible(True)
-        if str(self.args.restart_exe or "").strip():
-            QTimer.singleShot(1800, self.accept)
+        QTimer.singleShot(2500, self.accept)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
