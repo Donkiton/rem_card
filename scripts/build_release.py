@@ -95,7 +95,11 @@ def normalize_subject(value: str) -> str:
         return ""
     if subject.lower().startswith("merge "):
         return ""
-    if re.match(r"^(release|version|bump version)\b", subject, flags=re.IGNORECASE):
+    if re.match(
+        r"^(release|version|bump version|релиз|версия|поднятие версии)(\b|:)",
+        subject,
+        flags=re.IGNORECASE,
+    ):
         return ""
     return subject
 
@@ -158,7 +162,7 @@ def run_build(root: Path) -> None:
 
 def commit_release(root: Path, version: str) -> None:
     run(["git", "add", *VERSIONED_FILES], cwd=root)
-    run(["git", "commit", "-m", f"release {version}"], cwd=root)
+    run(["git", "commit", "-m", f"Релиз {version}"], cwd=root)
 
 
 def push_current_branch(root: Path) -> None:
