@@ -14,7 +14,7 @@ from rem_card.app.runtime_paths import (
     is_compiled,
     write_configured_baza_dir,
 )
-from rem_card.app.version import APP_DISPLAY_TITLE
+from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 
 
 def _show_native_warning(title: str, message: str):
@@ -98,8 +98,14 @@ def _launch_startup_update_if_needed() -> bool:
         candidate = find_best_update()
         if not candidate:
             return False
+        _write_startup_local_log(
+            "startup update found: "
+            f"current={APP_VERSION}; target={candidate.version}; source={candidate.prog_dir}"
+        )
         if launch_update(candidate, restart_exe=current_exe_name(), wait_for_parent=True):
+            _write_startup_local_log(f"startup update launched: target={candidate.version}")
             return True
+        _write_startup_local_log(f"startup update launch failed: target={candidate.version}; source={candidate.prog_dir}")
         _show_custom_warning(
             "Обновление программы",
             "Найдена новая версия программы, но не удалось запустить обновление. "
@@ -125,7 +131,16 @@ def _launch_exit_update_if_needed() -> bool:
         candidate = find_best_update()
         if not candidate:
             return False
-        return launch_update(candidate, restart_exe=None, wait_for_parent=True)
+        _write_startup_local_log(
+            "exit update found: "
+            f"current={APP_VERSION}; target={candidate.version}; source={candidate.prog_dir}"
+        )
+        launched = launch_update(candidate, restart_exe=None, wait_for_parent=True)
+        _write_startup_local_log(
+            f"exit update launch {'ok' if launched else 'failed'}: "
+            f"target={candidate.version}; source={candidate.prog_dir}"
+        )
+        return launched
     except Exception as exc:
         _write_startup_local_log(f"exit update check failed: {exc}")
         return False

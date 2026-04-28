@@ -516,10 +516,19 @@ class UpdateWindow(QDialog):
         self._thread: Optional[QThread] = None
         self._worker: Optional[UpdateWorker] = None
         self._setup_ui()
+        app = QApplication.instance()
+        if app:
+            self.finished.connect(app.quit)
 
     def _setup_ui(self):
         self.setWindowTitle("Обновление РЕМКАРТА")
-        self.setWindowFlags(Qt.Window | Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.CustomizeWindowHint
+            | Qt.WindowTitleHint
+            | Qt.WindowCloseButtonHint
+            | Qt.WindowStaysOnTopHint
+        )
         self.setFixedWidth(460)
         self.setStyleSheet(
             """
@@ -662,8 +671,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> int:
     args = _parse_args(list(sys.argv[1:] if argv is None else argv))
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
     window = UpdateWindow(args)
     window.show()
+    window.raise_()
+    window.activateWindow()
     QTimer.singleShot(0, window.start)
     return app.exec()
 
