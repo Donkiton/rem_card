@@ -62,6 +62,11 @@ def is_valid_version(value: str) -> bool:
 
 def get_update_root(baza_dir: Optional[str] = None) -> str:
     root = baza_dir or resolve_baza_dir()
+    return os.path.join(os.path.abspath(root), UPDATE_DIR_NAME)
+
+
+def get_legacy_update_root(baza_dir: Optional[str] = None) -> str:
+    root = baza_dir or resolve_baza_dir()
     return os.path.join(os.path.dirname(os.path.abspath(root)), UPDATE_DIR_NAME)
 
 
@@ -129,18 +134,19 @@ def find_available_updates(
     current_version: str = APP_VERSION,
     update_root: Optional[str] = None,
 ) -> list[UpdateCandidate]:
-    root = os.path.abspath(update_root or get_update_root())
-    if not os.path.isdir(root):
-        return []
-
     candidates: list[UpdateCandidate] = []
-    for release_dir in _release_dirs(root):
-        candidate = _load_candidate(release_dir)
-        if not candidate:
+    roots = [os.path.abspath(update_root)] if update_root else _default_update_roots()
+    for root in roots:
+        if not os.path.isdir(root):
             continue
-        if compare_versions(candidate.version, current_version) <= 0:
-            continue
-        candidates.append(candidate)
+
+        for release_dir in _release_dirs(root):
+            candidate = _load_candidate(release_dir)
+            if not candidate:
+                continue
+            if compare_versions(candidate.version, current_version) <= 0:
+                continue
+            candidates.append(candidate)
 
     return sorted(candidates, key=lambda item: _version_tuple(item.version), reverse=True)
 
@@ -152,3 +158,16 @@ def find_best_update(
 ) -> Optional[UpdateCandidate]:
     updates = find_available_updates(current_version=current_version, update_root=update_root)
     return updates[0] if updates else None
+
+
+def _default_update_roots() -> list[str]:
+    roots = [get_update_root(), get_legacy_update_root()]
+    result: list[str] = []
+    seen: set[str] = set()
+    for root in roots:
+        normalized = os.path.normcase(os.path.abspath(root))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(os.path.abspath(root))
+    return result

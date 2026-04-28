@@ -6,10 +6,10 @@
 \\test-fileserver.example.test\share\TestDepartment\Patients\remcard\Prog
 ```
 
-Пакет обновления кладется в соседнюю папку `UPD`:
+Пакет обновления кладется в папку `UPD` внутри папки базы:
 
 ```text
-\\test-fileserver.example.test\share\TestDepartment\Patients\remcard\UPD
+\\test-fileserver.example.test\share\TestDepartment\Patients\remcard\Baza_rao3_jurnal\UPD
 ```
 
 Внутри `UPD` должны лежать сами файлы сборки, без вложенной папки `Prog`:
