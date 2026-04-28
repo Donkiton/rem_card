@@ -17,6 +17,12 @@ from rem_card.app.runtime_paths import (
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 
 
+_STARTUP_UPDATE_LOCKS = (
+    ("remcard_update.lock", 30 * 60),
+    ("remcard_update_starting.lock", 5 * 60),
+)
+
+
 def _show_native_warning(title: str, message: str):
     try:
         ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
@@ -74,15 +80,88 @@ def _show_custom_info(title: str, message: str):
         print(f"{title}: {message}")
 
 
-def _show_update_in_progress_if_needed() -> bool:
-    if not is_compiled():
-        return False
+def _read_startup_lock_payload(path: str) -> Optional[dict]:
     try:
-        from rem_card.app.update_launcher import describe_update_lock, is_update_in_progress
+        import json
 
-        if not is_update_in_progress():
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return {"timestamp": _safe_mtime(path)}
+
+
+def _safe_mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except Exception:
+        return 0.0
+
+
+def _startup_lock_age(payload: dict, path: str) -> float:
+    try:
+        timestamp = payload.get("timestamp")
+        if isinstance(timestamp, (int, float)):
+            import time
+
+            return max(0.0, time.time() - float(timestamp))
+    except Exception:
+        pass
+
+    mtime = _safe_mtime(path)
+    if not mtime:
+        return 10**9
+    import time
+
+    return max(0.0, time.time() - mtime)
+
+
+def _active_update_lock_payload_for_startup() -> Optional[dict]:
+    if not is_compiled():
+        return None
+    try:
+        from rem_card.app.runtime_paths import resolve_baza_dir
+
+        lock_dir = os.path.join(os.path.abspath(resolve_baza_dir()), "locks")
+    except Exception:
+        return None
+
+    for file_name, stale_sec in _STARTUP_UPDATE_LOCKS:
+        path = os.path.join(lock_dir, file_name)
+        payload = _read_startup_lock_payload(path)
+        if payload is None:
+            continue
+        if _startup_lock_age(payload, path) > stale_sec:
+            try:
+                os.remove(path)
+                continue
+            except Exception:
+                return payload
+        return payload
+    return None
+
+
+def _describe_startup_update_lock(payload: dict) -> str:
+    host = payload.get("host") or "неизвестно"
+    started_at = payload.get("started_at") or ""
+    version = payload.get("target_version") or ""
+    details = []
+    if version:
+        details.append(f"версия {version}")
+    details.append(f"компьютер: {host}")
+    if started_at:
+        details.append(f"начато: {started_at}")
+    return "Обновление программы уже выполняется.\n\n" + "\n".join(details)
+
+
+def _show_update_in_progress_if_needed() -> bool:
+    try:
+        payload = _active_update_lock_payload_for_startup()
+        if not payload:
             return False
-        _show_custom_warning("Обновление программы", describe_update_lock())
+        _show_custom_warning("Обновление программы", _describe_startup_update_lock(payload))
         return True
     except Exception:
         return False
