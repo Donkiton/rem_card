@@ -54,6 +54,7 @@ class DoctorRemCardWidget(QWidget):
         self._monitor_connected = False
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        self._is_closing = False
         self.diet_intake_widget = None
         self._add_patient_lock = self._build_add_patient_lock()
         self._add_patient_lock_held = False
@@ -94,6 +95,17 @@ class DoctorRemCardWidget(QWidget):
             logger=logger,
         )
 
+    @staticmethod
+    def _is_qobject_alive(obj) -> bool:
+        if obj is None:
+            return False
+        try:
+            import shiboken6  # type: ignore
+
+            return bool(shiboken6.isValid(obj))
+        except Exception:
+            return True
+
     def _acquire_add_patient_lock(self) -> bool:
         if self._add_patient_lock_held:
             return True
@@ -114,9 +126,11 @@ class DoctorRemCardWidget(QWidget):
             self._add_patient_lock_held = False
 
     def _set_add_patient_button_hint(self, text: str):
-        if hasattr(self, "sector8_panel") and hasattr(self.sector8_panel, "btn_add_patient"):
+        panel = getattr(self, "sector8_panel", None)
+        button = getattr(panel, "btn_add_patient", None)
+        if self._is_qobject_alive(panel) and self._is_qobject_alive(button):
             # Tooltip intentionally disabled for this button.
-            self.sector8_panel.btn_add_patient.setToolTip("")
+            button.setToolTip("")
 
     def _force_beds_refresh_after_journal_exit(self):
         """Локально обновляет список коек сразу после выхода из режима журнала."""
@@ -148,13 +162,29 @@ class DoctorRemCardWidget(QWidget):
             return mode
 
         stack = layout.selection_stack
-        current_idx = stack.currentIndex()
+        if not self._is_qobject_alive(stack):
+            return mode
+        try:
+            current_idx = stack.currentIndex()
+        except RuntimeError as exc:
+            logger.warning("Failed to resolve selection stack current index (doctor): %s", exc)
+            return mode
 
-        journal_idx = stack.indexOf(getattr(layout, "journal_view", None)) if hasattr(layout, "journal_view") else -1
-        beds_idx = stack.indexOf(getattr(layout, "beds_view", None)) if hasattr(layout, "beds_view") else -1
-        card_idx = stack.indexOf(getattr(layout, "right_area", None)) if hasattr(layout, "right_area") else -1
-        archive_idx = stack.indexOf(getattr(layout, "archive_view", None)) if hasattr(layout, "archive_view") else -1
-        admin_idx = stack.indexOf(getattr(layout, "admin_view", None)) if hasattr(layout, "admin_view") else -1
+        def safe_index_of(attr_name: str) -> int:
+            widget = getattr(layout, attr_name, None)
+            if not self._is_qobject_alive(widget):
+                return -1
+            try:
+                return stack.indexOf(widget)
+            except RuntimeError as exc:
+                logger.warning("Failed to resolve selection stack index %s (doctor): %s", attr_name, exc)
+                return -1
+
+        journal_idx = safe_index_of("journal_view")
+        beds_idx = safe_index_of("beds_view")
+        card_idx = safe_index_of("right_area")
+        archive_idx = safe_index_of("archive_view")
+        admin_idx = safe_index_of("admin_view")
 
         if current_idx == journal_idx and journal_idx != -1:
             return "journal"
@@ -170,11 +200,16 @@ class DoctorRemCardWidget(QWidget):
         return str(getattr(layout, "current_mode", mode) or mode)
 
     def _apply_add_patient_button_state(self):
-        if not hasattr(self, "sector8_panel") or not hasattr(self.sector8_panel, "set_add_patient_enabled"):
+        panel = getattr(self, "sector8_panel", None)
+        if not self._is_qobject_alive(panel):
             return
         is_beds_mode = self._selection_mode == "beds"
         enabled = is_beds_mode and not self._add_patient_locked_by_other
-        self.sector8_panel.set_add_patient_enabled(enabled)
+        try:
+            panel.set_add_patient_enabled(enabled)
+        except RuntimeError as exc:
+            logger.warning("Failed to update add-patient button state (doctor): %s", exc)
+            return
 
         if self._add_patient_locked_by_other:
             holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
@@ -185,23 +220,30 @@ class DoctorRemCardWidget(QWidget):
             self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
 
     def _refresh_add_patient_button_lock_state(self):
-        resolved_mode = self._resolve_selection_mode()
-        if resolved_mode:
-            self._selection_mode = resolved_mode
-
-        # Fail-safe: если уже вышли из журнала, lock должен быть снят
-        # даже если сигнал смены режима по какой-то причине не пришел.
-        if self._selection_mode != "journal" and self._add_patient_lock_held:
-            self._release_add_patient_lock()
-
-        locked_by_other = False
         try:
-            if self._add_patient_lock and not self._add_patient_lock_held:
-                locked_by_other = self._add_patient_lock.is_held_by_other()
+            if self._is_closing or not self._is_qobject_alive(self):
+                return
+            resolved_mode = self._resolve_selection_mode()
+            if resolved_mode:
+                self._selection_mode = resolved_mode
+
+            # Fail-safe: если уже вышли из журнала, lock должен быть снят
+            # даже если сигнал смены режима по какой-то причине не пришел.
+            if self._selection_mode != "journal" and self._add_patient_lock_held:
+                self._release_add_patient_lock()
+
+            locked_by_other = False
+            try:
+                if self._add_patient_lock and not self._add_patient_lock_held:
+                    locked_by_other = self._add_patient_lock.is_held_by_other()
+            except Exception as exc:
+                logger.warning("Failed to check add-patient lock state (doctor): %s", exc)
+            self._add_patient_locked_by_other = bool(locked_by_other)
+            self._apply_add_patient_button_state()
+        except RuntimeError as exc:
+            logger.warning("Failed to refresh add-patient button lock state (doctor): %s", exc)
         except Exception as exc:
-            logger.warning("Failed to check add-patient lock state (doctor): %s", exc)
-        self._add_patient_locked_by_other = bool(locked_by_other)
-        self._apply_add_patient_button_state()
+            logger.warning("Unexpected add-patient button lock refresh failure (doctor): %s", exc)
 
     def _get_data_service(self):
         return getattr(self.service, "data_service", None)
@@ -1754,6 +1796,7 @@ class DoctorRemCardWidget(QWidget):
         self._request_card_snapshot(show_empty_message=show_empty_message)
 
     def closeEvent(self, event):
+        self._is_closing = True
         self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
             self._add_patient_lock_watch_timer.stop()

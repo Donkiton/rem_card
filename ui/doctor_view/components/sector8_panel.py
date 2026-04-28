@@ -135,5 +135,14 @@ class Sector8Panel(QWidget):
         self.layout.addWidget(self.btn_exit)
 
     def set_add_patient_enabled(self, enabled: bool):
-        if hasattr(self, "btn_add_patient"):
-            self.btn_add_patient.setEnabled(enabled)
+        button = getattr(self, "btn_add_patient", None)
+        if button is None:
+            return
+        try:
+            import shiboken6  # type: ignore
+
+            if not shiboken6.isValid(button):
+                return
+        except Exception:
+            pass
+        button.setEnabled(enabled)
