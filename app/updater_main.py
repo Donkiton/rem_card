@@ -202,10 +202,48 @@ def _read_json(path: str) -> Optional[dict[str, Any]]:
         return None
 
 
-def _role_lock_active(path: str) -> bool:
+def _host_aliases() -> set[str]:
+    aliases: set[str] = set()
+    for value in (
+        socket.gethostname(),
+        socket.getfqdn(),
+        os.environ.get("COMPUTERNAME"),
+        os.environ.get("HOSTNAME"),
+    ):
+        if not value:
+            continue
+        host = str(value).strip().lower()
+        if not host:
+            continue
+        aliases.add(host)
+        aliases.add(host.split(".", 1)[0])
+    return aliases
+
+
+def _is_local_host(value: Any) -> bool:
+    if not value:
+        return False
+    host = str(value).strip().lower()
+    if not host:
+        return False
+    aliases = _host_aliases()
+    return host in aliases or host.split(".", 1)[0] in aliases
+
+
+def _role_lock_active(path: str, *, local_only: bool = True) -> bool:
     if not os.path.exists(path):
         return False
     payload = _read_json(path)
+    if local_only:
+        if not payload or not _is_local_host(payload.get("host")):
+            return False
+        try:
+            pid = int(payload.get("pid") or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and not _is_pid_alive(pid):
+            return False
+
     ts = payload.get("timestamp") if payload else None
     if isinstance(ts, (int, float)):
         return (time.time() - float(ts)) <= ROLE_LOCK_STALE_SEC
@@ -223,7 +261,7 @@ def _wait_for_active_sessions(baza_dir: str, status: Callable[[str, int], None])
     while True:
         active = []
         for file_name, label in lock_names.items():
-            if _role_lock_active(os.path.join(session_dir, file_name)):
+            if _role_lock_active(os.path.join(session_dir, file_name), local_only=True):
                 active.append(label)
         if not active:
             return
@@ -231,9 +269,9 @@ def _wait_for_active_sessions(baza_dir: str, status: Callable[[str, int], None])
             raise RuntimeError(
                 "Не удалось начать обновление: слишком долго открыты окна "
                 + ", ".join(active)
-                + ". Закройте РЕМКАРТА на всех рабочих местах и запустите программу снова."
+                + " на этом компьютере. Закройте РЕМКАРТА и запустите программу снова."
             )
-        status("Ожидание закрытия окон " + ", ".join(active) + "...", 12)
+        status("Ожидание закрытия окон " + ", ".join(active) + " на этом компьютере...", 12)
         time.sleep(2.0)
 
 
