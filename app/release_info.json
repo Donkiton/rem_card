@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "version": "1.2.4",
-  "date": "2026-04-28",
+  "version": "1.2.5",
+  "date": "2026-04-29",
   "changes": [
-    "keep update check off startup path"
+    "Сортировка коек по статусу W1"
   ]
 }
