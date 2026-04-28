@@ -6,6 +6,10 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.1.1 - 2026-04-28
+
+- Fix order add crash during concurrent snapshots
+
 ## 1.1.0 - 2026-04-28
 
 - add automated release builder
