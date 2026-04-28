@@ -6,6 +6,7 @@ from PySide6.QtGui import QDesktopServices, QPainter, QPixmap
 from .nurse_patient_bed_row import NursePatientBedRow
 import os
 from rem_card.app.paths import get_icon_dir
+from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
 import pathlib
 import datetime
 
@@ -49,8 +50,20 @@ class NurseBedsSelectionWidget(QWidget):
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QScrollArea.NoFrame)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.viewport().setStyleSheet("background: transparent;")
-        self.scroll.setStyleSheet("background: transparent; border: none; padding: 0;")
+        self.scroll.setStyleSheet("""
+            QScrollArea {
+                background: transparent;
+                border: none;
+                padding: 0;
+            }
+            QScrollBar:vertical {
+                width: 0px;
+                margin: 0px;
+                background: transparent;
+            }
+        """)
         
         self.container = QWidget()
         self.container.setObjectName("beds_container")
@@ -116,6 +129,7 @@ class NurseBedsSelectionWidget(QWidget):
         now = snapshot.get("now") or datetime.datetime.now()
         yesterday = snapshot.get("yesterday") or (now - datetime.timedelta(days=1))
         runtime_snapshot = dict(snapshot.get("runtime_snapshot") or {})
+        active_patients = sort_patients_for_w1(active_patients, runtime_snapshot)
 
         ordered_ids = []
         for patient in active_patients:
