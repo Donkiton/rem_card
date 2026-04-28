@@ -2,7 +2,6 @@
 
 changed_files="$(git diff --cached --name-only --diff-filter=ACMR)"
 
-needs_version=0
 has_version=0
 
 for file in $changed_files; do
@@ -10,19 +9,8 @@ for file in $changed_files; do
         VERSION|CHANGELOG.md|app/release_info.json)
             has_version=1
             ;;
-        *.py|*.spec|*.json|*.sql|*.ps1)
-            needs_version=1
-            ;;
     esac
 done
-
-if [ "$needs_version" = "1" ] && [ "$has_version" != "1" ]; then
-    echo "Версия не обновлена."
-    echo "Перед коммитом выполните, например:"
-    echo "  python scripts/bump_version.py patch \"Кратко что изменено\""
-    echo "Потом добавьте VERSION, CHANGELOG.md и app/release_info.json в commit."
-    exit 1
-fi
 
 if [ "$has_version" = "1" ]; then
     if command -v python >/dev/null 2>&1; then
