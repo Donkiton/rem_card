@@ -69,6 +69,7 @@ class NurseOrdersWidget(QWidget):
         self._active_request_priority = "MEDIUM"
         self._snapshot_stale = False
         self._snapshot_seq = 0
+        self._last_applied_snapshot_signature = None
         self._cached_has_administrations = False
         self._cached_has_orders = False
         self._legacy_direct_snapshot_warned = False
@@ -103,6 +104,7 @@ class NurseOrdersWidget(QWidget):
     def _reset_cached_state(self):
         self._cached_has_administrations = False
         self._cached_has_orders = False
+        self._last_applied_snapshot_signature = None
 
     def has_drafts(self) -> bool:
         return False
@@ -544,6 +546,18 @@ class NurseOrdersWidget(QWidget):
             )
             return False
 
+        snapshot_signature = self._snapshot_apply_signature(snapshot, context_key)
+        if snapshot_signature is not None and snapshot_signature == self._last_applied_snapshot_signature:
+            logger.info(
+                "[NurseOrdersWidget] skip duplicate applied snapshot admission_id=%s context_hash=%s trace_id=%s version=%s",
+                admission_id,
+                snapshot.get("context_hash"),
+                snapshot.get("load_trace_id"),
+                snapshot.get("version"),
+            )
+            self._clear_soft_update_state()
+            return True
+
         self._ensure_model_initialized()
         self.model.apply_snapshot(snapshot)
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
@@ -570,7 +584,19 @@ class NurseOrdersWidget(QWidget):
             snapshot.get("load_trace_id"),
             snapshot.get("version"),
         )
+        self._last_applied_snapshot_signature = snapshot_signature
         return True
+
+    def _snapshot_apply_signature(self, snapshot, context_key):
+        try:
+            return (
+                context_key or snapshot.get("cache_key"),
+                int(snapshot.get("version") or snapshot.get("change_id") or 0),
+                str(snapshot.get("load_trace_id") or ""),
+                id(snapshot),
+            )
+        except Exception:
+            return None
 
     def _on_snapshot_failed(self, exc):
         self._clear_soft_update_state()

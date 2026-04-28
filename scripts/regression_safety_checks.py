@@ -930,6 +930,95 @@ def _check_doctor_orders_late_model_binding(temp_root: str) -> tuple[bool, str]:
         widget.close()
 
 
+def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime, timedelta
+
+    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+
+    class DummyOrdersService(QObject):
+        patient_context_changed = Signal(int)
+
+        def get_day_period(self, shift_date):
+            start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
+            return start, start + timedelta(hours=24)
+
+    app = QApplication.instance() or QApplication([])
+    shift_date = datetime(2026, 4, 24, 12)
+    service = DummyOrdersService()
+    widget = OrdersWidget(service=service, admission_id=1, shift_date=shift_date, defer_ui=True)
+    try:
+        widget._ensure_model_initialized()
+        if widget.model is None:
+            return False, "model was not initialized"
+
+        original_apply_snapshot = widget.model.apply_snapshot
+        apply_count = 0
+
+        def counted_apply_snapshot(snapshot):
+            nonlocal apply_count
+            apply_count += 1
+            return original_apply_snapshot(snapshot)
+
+        widget.model.apply_snapshot = counted_apply_snapshot
+        snapshot = {
+            "admission_id": 1,
+            "shift_date": shift_date,
+            "only_committed": False,
+            "orders": [
+                OrderDTO(
+                    id=10,
+                    admission_id=1,
+                    drug_key="duplicate_snapshot_probe",
+                    latin="Duplicate Snapshot Probe",
+                    type=OrderType.MEDICATION,
+                    status=OrderStatus.ACTIVE,
+                    is_committed=1,
+                    created_at=datetime(2026, 4, 24, 9),
+                )
+            ],
+            "admin_rows": [],
+            "patient_context": None,
+            "has_any_draft": False,
+            "has_any_administrations": False,
+            "has_any_orders": True,
+            "change_id": 7,
+            "version": 7,
+            "context_hash": "duplicate-snapshot",
+            "load_trace_id": "orders-duplicate-000001",
+            "source": "refresh",
+        }
+
+        first_ok = widget._apply_snapshot_data(
+            snapshot=snapshot,
+            admission_id=1,
+            shift_date=shift_date,
+            context_key=("live", 1, "2026-04-24T12:00:00", "doctor", "live", "full", "duplicate-snapshot"),
+        )
+        second_ok = widget._apply_snapshot_data(
+            snapshot=snapshot,
+            admission_id=1,
+            shift_date=shift_date,
+            context_key=("live", 1, "2026-04-24T12:00:00", "doctor", "live", "full", "duplicate-snapshot"),
+        )
+        app.processEvents()
+
+        if not first_ok or not second_ok:
+            return False, f"snapshot apply returned first={first_ok} second={second_ok}"
+        if apply_count != 1:
+            return False, f"duplicate snapshot reset was not skipped, apply_count={apply_count}"
+        if len(widget.model.orders) != 1:
+            return False, f"unexpected model rows after duplicate skip: {len(widget.model.orders)}"
+        return True, "ok"
+    finally:
+        widget.close()
+
+
 def _check_order_row_delete_without_times_marks_draft(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -1031,6 +1120,7 @@ def main():
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
+        ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
     ]
 

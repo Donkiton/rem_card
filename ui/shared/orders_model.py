@@ -1,4 +1,5 @@
 import os
+from copy import copy
 from PySide6.QtCore import QAbstractTableModel, Qt, QModelIndex, Signal, QTimer
 from PySide6.QtGui import QIcon
 from datetime import datetime, timedelta
@@ -171,20 +172,22 @@ class OrdersModel(QAbstractTableModel):
 
     def apply_snapshot(self, snapshot: Dict[str, object]):
         self.beginResetModel()
-        self.admission_id = snapshot.get("admission_id", self.admission_id)
-        self.shift_date = snapshot.get("shift_date", self.shift_date)
-        self.only_committed = bool(snapshot.get("only_committed", self.only_committed))
-        self._rebuild_time_slots()
-        self.orders = list(snapshot.get("orders") or [])
-        self._renumber_local_sort_order()
-        admin_rows = list(snapshot.get("admin_rows") or [])
-        self.admin_map = self._build_admin_map(admin_rows)
-        self.patient_context = snapshot.get("patient_context")
-        self.has_any_draft = bool(snapshot.get("has_any_draft", False))
-        sync_cursor = self._compute_sync_cursor(admin_rows)
-        self.last_sync_cursor = sync_cursor
-        self.last_sync_ts = sync_cursor["updated_at"]
-        self.endResetModel()
+        try:
+            self.admission_id = snapshot.get("admission_id", self.admission_id)
+            self.shift_date = snapshot.get("shift_date", self.shift_date)
+            self.only_committed = bool(snapshot.get("only_committed", self.only_committed))
+            self._rebuild_time_slots()
+            self.orders = [copy(order) for order in (snapshot.get("orders") or [])]
+            self._renumber_local_sort_order()
+            admin_rows = list(snapshot.get("admin_rows") or [])
+            self.admin_map = self._build_admin_map(admin_rows)
+            self.patient_context = snapshot.get("patient_context")
+            self.has_any_draft = bool(snapshot.get("has_any_draft", False))
+            sync_cursor = self._compute_sync_cursor(admin_rows)
+            self.last_sync_cursor = sync_cursor
+            self.last_sync_ts = sync_cursor["updated_at"]
+        finally:
+            self.endResetModel()
 
     def refresh_admin_marks_only(self) -> bool:
         """
