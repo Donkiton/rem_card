@@ -173,6 +173,38 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
 
         if readonly_open_count != 1:
             return False, "inside transaction unexpectedly opened readonly central connection"
+
+        read_started = threading.Event()
+        read_finished = threading.Event()
+        read_errors: list[str] = []
+
+        def background_read():
+            read_started.set()
+            try:
+                row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
+                if not row or int(row[0]) != 2:
+                    read_errors.append("background read returned wrong value")
+            except Exception as exc:
+                read_errors.append(str(exc))
+            finally:
+                read_finished.set()
+
+        manager._central_io_lock.acquire()
+        try:
+            thread = threading.Thread(target=background_read, daemon=True)
+            thread.start()
+            if not read_started.wait(1.0):
+                return False, "background read did not start"
+            if read_finished.wait(0.15):
+                return False, "central read did not wait for central IO gate"
+        finally:
+            manager._central_io_lock.release()
+
+        thread.join(timeout=2.0)
+        if thread.is_alive():
+            return False, "background read stayed blocked after central IO gate released"
+        if read_errors:
+            return False, read_errors[0]
         return True, "ok"
     finally:
         manager.close()

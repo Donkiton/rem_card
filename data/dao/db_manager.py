@@ -156,6 +156,7 @@ class DatabaseManager:
         self._changelog_live_trim_grace_until = time.time() + CHANGELOG_LIVE_TRIM_STARTUP_GRACE_SEC
         self._last_local_cache_cleanup_ts = 0.0
         self._thread_state = threading.local()
+        self._central_io_lock = threading.RLock()
 
         self._maybe_rotate_db_lifecycle()
 
@@ -221,10 +222,11 @@ class DatabaseManager:
         self._journal_conn = conn
 
     def _reconnect(self):
-        if self._remcard_conn:
-            with self.write_controller.connection_guard(self._remcard_conn):
-                self._remcard_conn.close()
-        self._init_connections()
+        with self._central_io_lock:
+            if self._remcard_conn:
+                with self.write_controller.connection_guard(self._remcard_conn):
+                    self._remcard_conn.close()
+            self._init_connections()
         if self._local_replica:
             self._local_replica.trigger_fast_sync()
 
@@ -576,22 +578,23 @@ class DatabaseManager:
         if not self._remcard_conn:
             self._init_connections()
 
-        with self.write_controller.transaction(self._remcard_conn, source=f"outbox_replay:{operation.source}") as cursor:
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO sync_applied_ops (op_id, source, node_id)
-                VALUES (?, ?, ?)
-                """,
-                (operation.op_id, operation.source, self._node_id),
-            )
-            if cursor.rowcount == 0:
-                return True
+        with self._central_io_lock:
+            with self.write_controller.transaction(self._remcard_conn, source=f"outbox_replay:{operation.source}") as cursor:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO sync_applied_ops (op_id, source, node_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (operation.op_id, operation.source, self._node_id),
+                )
+                if cursor.rowcount == 0:
+                    return True
 
-            for statement in operation.statements:
-                cursor.execute(statement.sql, tuple(statement.params))
+                for statement in operation.statements:
+                    cursor.execute(statement.sql, tuple(statement.params))
 
-        self._maybe_create_periodic_backup(source=f"outbox_replay:{operation.source}")
-        self._after_write_committed()
+            self._maybe_create_periodic_backup(source=f"outbox_replay:{operation.source}")
+            self._after_write_committed()
         return True
 
     def _enqueue_outbox_fallback(self, statements: list[tuple[str, tuple]], source: str, exc: Exception) -> Optional[str]:
@@ -722,21 +725,22 @@ class DatabaseManager:
         deleted_total = 0
         for _ in range(8):
             try:
-                cursor = self.write_controller.execute(
-                    self._remcard_conn,
-                    """
-                    DELETE FROM change_log
-                    WHERE id IN (
-                        SELECT id
-                        FROM change_log
-                        WHERE id <= ?
-                        ORDER BY id ASC
-                        LIMIT ?
+                with self._central_io_lock:
+                    cursor = self.write_controller.execute(
+                        self._remcard_conn,
+                        """
+                        DELETE FROM change_log
+                        WHERE id IN (
+                            SELECT id
+                            FROM change_log
+                            WHERE id <= ?
+                            ORDER BY id ASC
+                            LIMIT ?
+                        )
+                        """,
+                        (cutoff_id, self._changelog_live_trim_batch),
+                        source="changelog_live_trim",
                     )
-                    """,
-                    (cutoff_id, self._changelog_live_trim_batch),
-                    source="changelog_live_trim",
-                )
             except sqlite3.OperationalError as exc:
                 if is_retryable_write_error(exc):
                     logger.debug("Live change_log trim write skipped due to lock: %s", exc)
@@ -796,7 +800,7 @@ class DatabaseManager:
         conn = sqlite3.connect(
             uri,
             uri=True,
-            check_same_thread=False,
+            check_same_thread=True,
             isolation_level=None,
             timeout=5.0,
         )
@@ -807,20 +811,24 @@ class DatabaseManager:
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
         # Обычные фоновые чтения открывают отдельный read-only connection, чтобы
         # QThread-снимки не делили один sqlite3.Connection с очередью записи.
+        # Central IO gate не дает network SQLite открывать read-only connection
+        # одновременно с локальной write-транзакцией.
         try:
             if use_write_connection or self._in_current_thread_remcard_transaction():
-                with self.write_controller.connection_guard(self._remcard_conn):
-                    cursor = self._remcard_conn.cursor()
+                with self._central_io_lock:
+                    with self.write_controller.connection_guard(self._remcard_conn):
+                        cursor = self._remcard_conn.cursor()
+                        cursor.execute(query, params)
+                        return cursor.fetchall()
+
+            with self._central_io_lock:
+                conn = self._open_readonly_central_connection()
+                try:
+                    cursor = conn.cursor()
                     cursor.execute(query, params)
                     return cursor.fetchall()
-
-            conn = self._open_readonly_central_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute(query, params)
-                return cursor.fetchall()
-            finally:
-                conn.close()
+                finally:
+                    conn.close()
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger) from exc
@@ -829,18 +837,20 @@ class DatabaseManager:
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
         try:
             if use_write_connection or self._in_current_thread_remcard_transaction():
-                with self.write_controller.connection_guard(self._remcard_conn):
-                    cursor = self._remcard_conn.cursor()
+                with self._central_io_lock:
+                    with self.write_controller.connection_guard(self._remcard_conn):
+                        cursor = self._remcard_conn.cursor()
+                        cursor.execute(query, params)
+                        return cursor.fetchone()
+
+            with self._central_io_lock:
+                conn = self._open_readonly_central_connection()
+                try:
+                    cursor = conn.cursor()
                     cursor.execute(query, params)
                     return cursor.fetchone()
-
-            conn = self._open_readonly_central_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute(query, params)
-                return cursor.fetchone()
-            finally:
-                conn.close()
+                finally:
+                    conn.close()
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger) from exc
@@ -941,15 +951,16 @@ class DatabaseManager:
         backup_name = f"{prefix}_{db_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = os.path.join(BACKUPS_VALID_DIR, backup_name)
         try:
-            with self.write_controller.connection_guard(self._remcard_conn):
-                backup_connection(
-                    self._remcard_conn,
-                    backup_path,
-                    invalid_dir=INVALID_BACKUPS_DIR,
-                    logger=logger,
-                    lock_path=DB_LOCK_PATH,
-                    source=f"{prefix}_backup",
-                )
+            with self._central_io_lock:
+                with self.write_controller.connection_guard(self._remcard_conn):
+                    backup_connection(
+                        self._remcard_conn,
+                        backup_path,
+                        invalid_dir=INVALID_BACKUPS_DIR,
+                        logger=logger,
+                        lock_path=DB_LOCK_PATH,
+                        source=f"{prefix}_backup",
+                    )
             self._rotate_backups()
             self._last_backup_ts = time.time()
             logger.info("%s backup created (%s): %s", prefix.capitalize(), source, backup_path)
@@ -1063,13 +1074,14 @@ class DatabaseManager:
         statement_sink: list[tuple[str, tuple]] = []
         outer_transaction = not self._in_current_thread_remcard_transaction()
         try:
-            with self.write_controller.transaction(self._remcard_conn, source=source) as cursor:
-                with self._mark_current_thread_remcard_transaction():
-                    wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
-                    yield wrapped_cursor
-            if self._remcard_conn and outer_transaction:
-                self._maybe_create_periodic_backup(source=source)
-                self._after_write_committed()
+            with self._central_io_lock:
+                with self.write_controller.transaction(self._remcard_conn, source=source) as cursor:
+                    with self._mark_current_thread_remcard_transaction():
+                        wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
+                        yield wrapped_cursor
+                if self._remcard_conn and outer_transaction:
+                    self._maybe_create_periodic_backup(source=source)
+                    self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context=f"remcard_transaction:{source}", logger=logger) from exc
@@ -1089,10 +1101,11 @@ class DatabaseManager:
     def execute_remcard(self, query, params=(), source: str = "execute_remcard"):
         logger.debug("SQL RemCard Exec: %s | Params: %s", query, params)
         try:
-            cursor = self.write_controller.execute(self._remcard_conn, query, params, source=source)
-            if self._remcard_conn and not self._in_current_thread_remcard_transaction():
-                self._maybe_create_periodic_backup(source=source)
-                self._after_write_committed()
+            with self._central_io_lock:
+                cursor = self.write_controller.execute(self._remcard_conn, query, params, source=source)
+                if self._remcard_conn and not self._in_current_thread_remcard_transaction():
+                    self._maybe_create_periodic_backup(source=source)
+                    self._after_write_committed()
             return cursor
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
@@ -1102,10 +1115,11 @@ class DatabaseManager:
             if is_retryable_write_error(exc):
                 try:
                     self._reconnect()
-                    cursor = self.write_controller.execute(self._remcard_conn, query, params, source=f"{source}:reconnect")
-                    if self._remcard_conn and not self._in_current_thread_remcard_transaction():
-                        self._maybe_create_periodic_backup(source=f"{source}:reconnect")
-                        self._after_write_committed()
+                    with self._central_io_lock:
+                        cursor = self.write_controller.execute(self._remcard_conn, query, params, source=f"{source}:reconnect")
+                        if self._remcard_conn and not self._in_current_thread_remcard_transaction():
+                            self._maybe_create_periodic_backup(source=f"{source}:reconnect")
+                            self._after_write_committed()
                     return cursor
                 except Exception:
                     pass
@@ -1301,8 +1315,9 @@ class DatabaseManager:
         self._stop_local_replica_sync()
 
         if self._remcard_conn:
-            with self.write_controller.connection_guard(self._remcard_conn):
-                self._create_shutdown_backup()
-                self._remcard_conn.close()
+            with self._central_io_lock:
+                with self.write_controller.connection_guard(self._remcard_conn):
+                    self._create_shutdown_backup()
+                    self._remcard_conn.close()
         self._remcard_conn = None
         self._journal_conn = None
