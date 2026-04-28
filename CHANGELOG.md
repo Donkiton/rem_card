@@ -6,6 +6,11 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.2.1 - 2026-04-28
+
+- look for updates inside baza directory
+- update after app exit
+
 ## 1.2.0 - 2026-04-28
 
 - add updater launch diagnostics
