@@ -74,6 +74,63 @@ def _show_custom_info(title: str, message: str):
         print(f"{title}: {message}")
 
 
+def _show_update_in_progress_if_needed() -> bool:
+    if not is_compiled():
+        return False
+    try:
+        from rem_card.app.update_launcher import describe_update_lock, is_update_in_progress
+
+        if not is_update_in_progress():
+            return False
+        _show_custom_warning("Обновление программы", describe_update_lock())
+        return True
+    except Exception:
+        return False
+
+
+def _launch_startup_update_if_needed() -> bool:
+    if not is_compiled():
+        return False
+    try:
+        from rem_card.app.update_checker import find_best_update
+        from rem_card.app.update_launcher import current_exe_name, launch_update
+
+        candidate = find_best_update()
+        if not candidate:
+            return False
+        if launch_update(candidate, restart_exe=current_exe_name(), wait_for_parent=True):
+            return True
+        _show_custom_warning(
+            "Обновление программы",
+            "Найдена новая версия программы, но не удалось запустить обновление. "
+            "Сообщите ответственному.",
+        )
+        return True
+    except DataPathConfigurationError:
+        return False
+    except Exception as exc:
+        _write_startup_local_log(f"startup update check failed: {exc}")
+        return False
+
+
+def _launch_exit_update_if_needed() -> bool:
+    if not is_compiled():
+        return False
+    try:
+        from rem_card.app.update_checker import find_best_update
+        from rem_card.app.update_launcher import is_update_in_progress, launch_update
+
+        if is_update_in_progress():
+            return False
+        candidate = find_best_update()
+        if not candidate:
+            return False
+        return launch_update(candidate, restart_exe=None, wait_for_parent=True)
+    except Exception as exc:
+        _write_startup_local_log(f"exit update check failed: {exc}")
+        return False
+
+
 def _run_path_setup():
     os.environ["REMCARD_PATH_SETUP_MODE"] = "1"
 
@@ -220,6 +277,12 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         args.role = forced_role
     path_setup = bool(path_setup or args.path_setup)
 
+    if _show_update_in_progress_if_needed():
+        sys.exit(0)
+
+    if not path_setup and _launch_startup_update_if_needed():
+        sys.exit(0)
+
     if path_setup:
         sys.exit(_run_path_setup())
 
@@ -333,6 +396,8 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 role_lock.release()
         except Exception:
             pass
+        if exit_code == 0:
+            _launch_exit_update_if_needed()
 
     sys.exit(exit_code)
 

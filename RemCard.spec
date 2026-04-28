@@ -2,6 +2,8 @@
 
 import os
 import shutil
+import json
+from datetime import datetime
 
 block_cipher = None
 
@@ -41,6 +43,7 @@ a = Analysis(
         os.path.join(APP_ROOT, 'run_doctor.py'),
         os.path.join(APP_ROOT, 'run_nurse.py'),
         os.path.join(APP_ROOT, 'run_path_setup.py'),
+        os.path.join(APP_ROOT, 'run_updater.py'),
     ],
     pathex=[PROJECT_ROOT, APP_ROOT],
     binaries=[],
@@ -124,10 +127,25 @@ path_setup_exe = EXE(
     icon=[os.path.join(APP_ROOT, 'icon', 'remcardicon.ico')],
 )
 
+updater_exe = EXE(
+    pyz,
+    _script_toc('run_updater.py'),
+    [],
+    exclude_binaries=True,
+    name='RemCardUpdater',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    icon=[os.path.join(APP_ROOT, 'icon', 'remcardicon.ico')],
+)
+
 coll = COLLECT(
     doctor_exe,
     nurse_exe,
     path_setup_exe,
+    updater_exe,
     a.binaries,
     a.datas,
     strip=False,
@@ -143,30 +161,70 @@ print("===> Post-build: Moving files to target directory <===")
 build_root = os.path.dirname(globals().get('WARNFILE', os.path.join(PROJECT_ROOT, 'build', 'RemCard', 'warn-RemCard.txt')))
 dist_root = globals().get('DISTPATH', os.path.join(APP_ROOT, 'dist'))
 dist_dir = os.path.join(dist_root, 'Prog')
-target_dir = os.path.abspath(os.path.join(PROJECT_ROOT, 'Baza_rao3_jurnal', 'Prog'))
+target_dir = os.path.abspath(os.path.join(PROJECT_ROOT, 'Baza_rao3_jurnal', 'UPD'))
+
+
+def _read_release_info():
+    path = os.path.join(APP_ROOT, 'app', 'release_info.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_version():
+    path = os.path.join(APP_ROOT, 'VERSION')
+    with open(path, 'r', encoding='utf-8') as fh:
+        return fh.readline().strip()
+
+
+def _write_update_manifest(directory):
+    release_info = _read_release_info()
+    version = _read_version()
+    manifest = {
+        "schema_version": 1,
+        "app": "rem_card",
+        "version": version,
+        "min_client_version": version,
+        "prog_dir": ".",
+        "built_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "release_info": release_info,
+    }
+    with open(os.path.join(directory, 'manifest.json'), 'w', encoding='utf-8') as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2)
 
 if os.path.exists(dist_dir):
-    if not os.path.exists(target_dir):
-        os.makedirs(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
 
     print(f"Moving contents of {dist_dir} to {target_dir}...")
 
-    # Убираем старые исполняемые файлы и старую _internal, но сохраняем
-    # remcard_data_path.json и локальные logs.
-    for stale_exe in ('RemCard.exe', 'RemCardDoctor.exe', 'RemCardNurse.exe', 'RemCardPathSetup.exe'):
-        stale_path = os.path.join(target_dir, stale_exe)
-        if os.path.exists(stale_path):
-            os.remove(stale_path)
-    shutil.rmtree(os.path.join(target_dir, '_internal'), ignore_errors=True)
+    ready_path = os.path.join(target_dir, 'ready.ok')
+    if os.path.exists(ready_path):
+        os.remove(ready_path)
+
+    for name in os.listdir(target_dir):
+        path = os.path.join(target_dir, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
 
     # копирование с перезаписью
     shutil.copytree(dist_dir, target_dir, dirs_exist_ok=True)
+    _write_update_manifest(target_dir)
+    with open(ready_path, 'w', encoding='utf-8') as fh:
+        fh.write(datetime.now().astimezone().isoformat(timespec="seconds") + "\n")
 
     # очистка
     shutil.rmtree(os.path.dirname(build_root), ignore_errors=True)
     shutil.rmtree(dist_root, ignore_errors=True)
     shutil.rmtree(os.path.join(APP_ROOT, '__pycache__'), ignore_errors=True)
 
-    print(f"===> Success! The applications are ready in {target_dir} <===")
+    print(f"===> Success! The update package is ready in {target_dir} <===")
 else:
     print("Error: dist folder not found")
