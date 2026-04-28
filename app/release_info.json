@@ -1,9 +1,8 @@
 {
   "schema_version": 1,
-  "version": "1.2.1",
+  "version": "1.2.2",
   "date": "2026-04-28",
   "changes": [
-    "look for updates inside baza directory",
-    "update after app exit"
+    "match updater window styling"
   ]
 }

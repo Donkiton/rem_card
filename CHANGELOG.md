@@ -6,6 +6,10 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.2.2 - 2026-04-28
+
+- match updater window styling
+
 ## 1.2.1 - 2026-04-28
 
 - look for updates inside baza directory
