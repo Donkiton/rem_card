@@ -6,6 +6,11 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.1.2 - 2026-04-28
+
+- ignore remote sessions during updater wait
+- Пропуск повторного снимка назначений
+
 ## 1.1.1 - 2026-04-28
 
 - Fix order add crash during concurrent snapshots

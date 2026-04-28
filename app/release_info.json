@@ -1,8 +1,9 @@
 {
   "schema_version": 1,
-  "version": "1.1.1",
+  "version": "1.1.2",
   "date": "2026-04-28",
   "changes": [
-    "Fix order add crash during concurrent snapshots"
+    "ignore remote sessions during updater wait",
+    "Пропуск повторного снимка назначений"
   ]
 }
