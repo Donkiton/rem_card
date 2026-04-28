@@ -11,13 +11,13 @@ import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QPoint, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QFrame,
+    QHBoxLayout,
     QLabel,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
@@ -300,6 +300,17 @@ def _remove_path(path: str):
         os.remove(path)
 
 
+def _remove_file_quietly(path: str):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
 def _retry(action: Callable[[], None], description: str, attempts: int = 50, delay_sec: float = 0.5):
     last_exc: Optional[Exception] = None
     for _ in range(attempts):
@@ -476,6 +487,7 @@ class UpdateWorker(QObject):
             lock = UpdateLock(os.path.abspath(self.args.lock), payload)
             self._status("Получение блокировки обновления...", 5)
             lock.acquire()
+            _remove_file_quietly(str(self.args.starting_lock or ""))
             _write_log(baza_dir, f"update started source={source} target={target} version={payload['target_version']}")
 
             _wait_for_parent(int(self.args.parent_pid or 0), self._status)
@@ -501,11 +513,90 @@ class UpdateWorker(QObject):
                 pass
             self.failed.emit(str(exc))
         finally:
+            _remove_file_quietly(str(self.args.starting_lock or ""))
             if lock:
                 lock.release()
 
     def _status(self, text: str, progress: int):
         self.status_changed.emit(text, max(0, min(100, int(progress))))
+
+
+def _show_custom_notice(parent, title: str, message: str):
+    dialog = QDialog(parent)
+    dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+    dialog.setAttribute(Qt.WA_TranslucentBackground)
+    dialog.setModal(True)
+    dialog.setFixedWidth(390)
+    dialog.setStyleSheet(
+        """
+        QDialog { background: transparent; }
+        QFrame#NoticeCard {
+            background: #ffffff;
+            border: 1px solid #cfd8e3;
+            border-radius: 8px;
+        }
+        QFrame#NoticeTitleBar {
+            background: #1f2937;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+        }
+        QLabel#NoticeTitle {
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        QLabel#NoticeMessage {
+            color: #374151;
+            font-size: 13px;
+        }
+        QPushButton#NoticeOk {
+            min-height: 30px;
+            padding: 0 18px;
+            border-radius: 4px;
+            border: 1px solid #2f80ed;
+            background: #2f80ed;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#NoticeOk:hover { background: #1f6ed4; }
+        """
+    )
+
+    root = QVBoxLayout(dialog)
+    root.setContentsMargins(0, 0, 0, 0)
+
+    card = QFrame(dialog)
+    card.setObjectName("NoticeCard")
+    card_layout = QVBoxLayout(card)
+    card_layout.setContentsMargins(0, 0, 0, 0)
+    card_layout.setSpacing(0)
+
+    title_bar = QFrame(card)
+    title_bar.setObjectName("NoticeTitleBar")
+    title_bar.setFixedHeight(34)
+    title_layout = QHBoxLayout(title_bar)
+    title_layout.setContentsMargins(12, 0, 12, 0)
+    title_label = QLabel(title)
+    title_label.setObjectName("NoticeTitle")
+    title_layout.addWidget(title_label)
+
+    content = QFrame(card)
+    content_layout = QVBoxLayout(content)
+    content_layout.setContentsMargins(18, 16, 18, 16)
+    content_layout.setSpacing(14)
+    message_label = QLabel(message)
+    message_label.setObjectName("NoticeMessage")
+    message_label.setWordWrap(True)
+    ok_button = QPushButton("Понятно")
+    ok_button.setObjectName("NoticeOk")
+    ok_button.clicked.connect(dialog.accept)
+    content_layout.addWidget(message_label)
+    content_layout.addWidget(ok_button, 0, Qt.AlignRight)
+
+    card_layout.addWidget(title_bar)
+    card_layout.addWidget(content)
+    root.addWidget(card)
+    dialog.exec()
 
 
 class UpdateWindow(QDialog):
@@ -515,6 +606,14 @@ class UpdateWindow(QDialog):
         self._finished = False
         self._thread: Optional[QThread] = None
         self._worker: Optional[UpdateWorker] = None
+        self._is_dragging = False
+        self._drag_pos = QPoint()
+        self._started_at = 0.0
+        self._target_progress = 1
+        self._displayed_progress = 1
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(80)
+        self._progress_timer.timeout.connect(self._tick_progress)
         self._setup_ui()
         app = QApplication.instance()
         if app:
@@ -522,22 +621,38 @@ class UpdateWindow(QDialog):
 
     def _setup_ui(self):
         self.setWindowTitle("Обновление РЕМКАРТА")
-        self.setWindowFlags(
-            Qt.Window
-            | Qt.CustomizeWindowHint
-            | Qt.WindowTitleHint
-            | Qt.WindowCloseButtonHint
-            | Qt.WindowStaysOnTopHint
-        )
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedWidth(460)
         self.setStyleSheet(
             """
-            QDialog { background: #f4f7fb; }
+            QDialog { background: transparent; }
             QFrame#Card {
                 background: white;
                 border: 1px solid #cfd8e3;
                 border-radius: 8px;
             }
+            QFrame#UpdaterTitleBar {
+                background: #1f2937;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+            }
+            QLabel#UpdaterWindowTitle {
+                color: #ffffff;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton#UpdaterCloseBtn {
+                width: 32px;
+                height: 28px;
+                border: none;
+                border-radius: 0;
+                background: transparent;
+                color: #ffffff;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QPushButton#UpdaterCloseBtn:hover { background: #dc2626; }
             QLabel#Title {
                 color: #1f2937;
                 font-size: 18px;
@@ -576,12 +691,33 @@ class UpdateWindow(QDialog):
         )
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        root.setContentsMargins(10, 10, 10, 10)
 
         card = QFrame(self)
         card.setObjectName("Card")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(22, 20, 22, 18)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+
+        self.title_bar = QFrame(card)
+        self.title_bar.setObjectName("UpdaterTitleBar")
+        self.title_bar.setFixedHeight(34)
+        self.title_bar.installEventFilter(self)
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(12, 0, 0, 0)
+        title_layout.setSpacing(0)
+        window_title = QLabel("Обновление РЕМКАРТА")
+        window_title.setObjectName("UpdaterWindowTitle")
+        self.window_close_button = QPushButton("×")
+        self.window_close_button.setObjectName("UpdaterCloseBtn")
+        self.window_close_button.clicked.connect(self.close)
+        title_layout.addWidget(window_title)
+        title_layout.addStretch()
+        title_layout.addWidget(self.window_close_button)
+
+        content = QFrame(card)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 18, 22, 18)
         layout.setSpacing(12)
 
         self.title_label = QLabel("Обновление РЕМКАРТА")
@@ -591,7 +727,7 @@ class UpdateWindow(QDialog):
         self.status_label.setWordWrap(True)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setValue(0)
+        self.progress.setValue(self._displayed_progress)
         self.hint_label = QLabel("Не запускайте программу до завершения обновления.")
         self.hint_label.setObjectName("Hint")
         self.hint_label.setWordWrap(True)
@@ -604,9 +740,13 @@ class UpdateWindow(QDialog):
         layout.addWidget(self.progress)
         layout.addWidget(self.hint_label)
         layout.addWidget(self.close_button, 0, Qt.AlignRight)
+        card_layout.addWidget(self.title_bar)
+        card_layout.addWidget(content)
         root.addWidget(card)
 
     def start(self):
+        self._started_at = time.time()
+        self._progress_timer.start()
         self._thread = QThread(self)
         self._worker = UpdateWorker(self.args)
         self._worker.moveToThread(self._thread)
@@ -623,21 +763,56 @@ class UpdateWindow(QDialog):
         if self._finished:
             event.accept()
             return
-        QMessageBox.warning(
+        _show_custom_notice(
             self,
             "Обновление выполняется",
             "Закрывать окно во время обновления нельзя. Дождитесь завершения процесса.",
         )
         event.ignore()
 
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "title_bar", None):
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._is_dragging = True
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                return True
+            if event.type() == QEvent.MouseMove and self._is_dragging:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+                return True
+            if event.type() == QEvent.MouseButtonRelease:
+                self._is_dragging = False
+                return True
+        return super().eventFilter(obj, event)
+
+    def _tick_progress(self):
+        if not self._started_at:
+            return
+        elapsed = max(0.0, time.time() - self._started_at)
+        slow_elapsed_progress = min(96, 1 + int(elapsed / 4.5))
+        desired = max(self._target_progress, slow_elapsed_progress)
+        if self._finished:
+            desired = self._target_progress
+        desired = max(1, min(100, desired))
+
+        if self._displayed_progress < desired:
+            self._displayed_progress = min(desired, self._displayed_progress + 1)
+            self.progress.setValue(self._displayed_progress)
+        elif self._displayed_progress > desired:
+            self._displayed_progress = desired
+            self.progress.setValue(self._displayed_progress)
+
+        if self._finished and self._displayed_progress >= desired:
+            self._progress_timer.stop()
+
     @Slot(str, int)
     def _on_status(self, text: str, progress: int):
         self.status_label.setText(text)
-        self.progress.setValue(progress)
+        self._target_progress = max(self._target_progress, max(1, min(100, int(progress))))
 
     @Slot(str)
     def _on_failed(self, message: str):
         self._finished = True
+        self._target_progress = max(self._displayed_progress, self._target_progress)
         self.title_label.setText("Обновление не выполнено")
         self.status_label.setText(message)
         self.hint_label.setText("Старая версия программы оставлена без изменений.")
@@ -646,6 +821,7 @@ class UpdateWindow(QDialog):
     @Slot(str)
     def _on_succeeded(self, version: str):
         self._finished = True
+        self._target_progress = 100
         self.title_label.setText("Обновление завершено")
         self.status_label.setText(f"Установлена версия {version}.")
         self.hint_label.setText("Можно запускать программу.")
@@ -660,6 +836,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--target", required=True)
     parser.add_argument("--baza-dir", required=True)
     parser.add_argument("--lock", required=True)
+    parser.add_argument("--starting-lock", default="")
     parser.add_argument("--parent-pid", default="0")
     parser.add_argument("--current-version", default="")
     parser.add_argument("--target-version", default="")

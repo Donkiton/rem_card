@@ -15,6 +15,7 @@ MANIFEST_FILE_NAME = "manifest.json"
 DEFAULT_PROG_DIR_NAME = "."
 APP_ID = "rem_card"
 UPDATE_LOCK_FILE_NAME = "remcard_update.lock"
+UPDATE_STARTING_LOCK_FILE_NAME = "remcard_update_starting.lock"
 REQUIRED_RELEASE_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
@@ -73,6 +74,11 @@ def get_legacy_update_root(baza_dir: Optional[str] = None) -> str:
 def get_update_lock_path(baza_dir: Optional[str] = None) -> str:
     root = baza_dir or resolve_baza_dir()
     return os.path.join(os.path.abspath(root), "locks", UPDATE_LOCK_FILE_NAME)
+
+
+def get_update_starting_lock_path(baza_dir: Optional[str] = None) -> str:
+    root = baza_dir or resolve_baza_dir()
+    return os.path.join(os.path.abspath(root), "locks", UPDATE_STARTING_LOCK_FILE_NAME)
 
 
 def _release_dirs(update_root: str) -> Iterable[str]:

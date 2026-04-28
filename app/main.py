@@ -88,37 +88,6 @@ def _show_update_in_progress_if_needed() -> bool:
         return False
 
 
-def _launch_startup_update_if_needed() -> bool:
-    if not is_compiled():
-        return False
-    try:
-        from rem_card.app.update_checker import find_best_update
-        from rem_card.app.update_launcher import current_exe_name, launch_update
-
-        candidate = find_best_update()
-        if not candidate:
-            return False
-        _write_startup_local_log(
-            "startup update found: "
-            f"current={APP_VERSION}; target={candidate.version}; source={candidate.prog_dir}"
-        )
-        if launch_update(candidate, restart_exe=current_exe_name(), wait_for_parent=True):
-            _write_startup_local_log(f"startup update launched: target={candidate.version}")
-            return True
-        _write_startup_local_log(f"startup update launch failed: target={candidate.version}; source={candidate.prog_dir}")
-        _show_custom_warning(
-            "Обновление программы",
-            "Найдена новая версия программы, но не удалось запустить обновление. "
-            "Сообщите ответственному.",
-        )
-        return True
-    except DataPathConfigurationError:
-        return False
-    except Exception as exc:
-        _write_startup_local_log(f"startup update check failed: {exc}")
-        return False
-
-
 def _launch_exit_update_if_needed() -> bool:
     if not is_compiled():
         return False
@@ -293,9 +262,6 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     path_setup = bool(path_setup or args.path_setup)
 
     if _show_update_in_progress_if_needed():
-        sys.exit(0)
-
-    if not path_setup and _launch_startup_update_if_needed():
         sys.exit(0)
 
     if path_setup:
