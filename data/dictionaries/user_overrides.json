@@ -194,13 +194,7 @@
       "_deleted": true
     },
     "bezrastvora": {
-      "latin": "No_rastvor",
-      "display": "Без растворителя",
-      "short": "",
-      "adds_volume": false,
-      "default_volumes": [
-        0
-      ]
+      "_deleted": true
     },
     "nacl_09": {
       "latin": "Natrii chloridi 0.9%",
