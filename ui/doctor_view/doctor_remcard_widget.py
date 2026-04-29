@@ -51,6 +51,7 @@ class DoctorRemCardWidget(QWidget):
         self._archive_readonly_db_manager = None
         self._snapshot_worker = None
         self._snapshot_pending = None
+        self._create_card_after_snapshot = False
         self._monitor_connected = False
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
@@ -462,6 +463,15 @@ class DoctorRemCardWidget(QWidget):
     def _on_card_snapshot_finished(self, worker):
         if self._snapshot_worker is worker:
             self._snapshot_worker = None
+        if self._is_closing:
+            self._snapshot_pending = None
+            self._create_card_after_snapshot = False
+            return
+        if self._create_card_after_snapshot:
+            self._create_card_after_snapshot = False
+            self._snapshot_pending = None
+            QTimer.singleShot(0, self.on_create_card_clicked)
+            return
         if self._snapshot_pending:
             pending = self._snapshot_pending
             self._snapshot_pending = None
@@ -773,7 +783,7 @@ class DoctorRemCardWidget(QWidget):
             return fallback_patient.admission_datetime
         return datetime.now()
 
-    def load_patient_card(self, admission_id, date):
+    def load_patient_card(self, admission_id, date, *, request_snapshot: bool = True):
         """Обновляет данные карты для нового пациента/даты."""
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
@@ -821,11 +831,12 @@ class DoctorRemCardWidget(QWidget):
         self._last_change_id = 0
         self._apply_archive_read_only_state()
         self._reset_balance_view_state()
-        self._request_card_snapshot(
-            ensure_initial_status=not self._archive_read_only_mode,
-            show_empty_message=False,
-            load_scope="patient_open_vitals",
-        )
+        if request_snapshot:
+            self._request_card_snapshot(
+                ensure_initial_status=not self._archive_read_only_mode,
+                show_empty_message=False,
+                load_scope="patient_open_vitals",
+            )
         
         if hasattr(self, 'layout_manager'):
             self.layout_manager.set_active_tab("Витальные функции")
@@ -1246,6 +1257,15 @@ class DoctorRemCardWidget(QWidget):
     def on_create_card_clicked(self):
         if self._archive_read_only_mode:
             self._show_read_only_hint()
+            return
+        if self._snapshot_worker and self._snapshot_worker.isRunning():
+            if not self._create_card_after_snapshot:
+                logger.info(
+                    "DoctorRemCardWidget defers create-card write until snapshot load finishes admission_id=%s",
+                    self.admission_id,
+                )
+            self._create_card_after_snapshot = True
+            self._snapshot_pending = None
             return
         if self.admission_id and self.service.status_service:
             now = datetime.now()
@@ -1717,7 +1737,7 @@ class DoctorRemCardWidget(QWidget):
             self.layout_manager.set_patient_selection_mode("card")
         elif action_type == "create":
             target_date = datetime.now()
-            self.load_patient_card(patient.id, target_date)
+            self.load_patient_card(patient.id, target_date, request_snapshot=False)
             self._prime_patient_header_from_w1(patient, target_date)
             self.layout_manager.set_patient_selection_mode("card")
             self.on_create_card_clicked()

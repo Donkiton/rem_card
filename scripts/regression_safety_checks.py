@@ -9,6 +9,7 @@ Usage:
 
 from __future__ import annotations
 
+import ast
 import glob
 import json
 import os
@@ -1102,6 +1103,62 @@ def _check_order_row_delete_without_times_marks_draft(temp_root: str) -> tuple[b
         manager.close()
 
 
+def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source_path = Path(__file__).resolve().parents[1] / "ui" / "doctor_view" / "doctor_remcard_widget.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"]
+    if not class_defs:
+        return False, "DoctorRemCardWidget class not found"
+    methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+
+    load_method = methods.get("load_patient_card")
+    if load_method is None:
+        return False, "load_patient_card not found"
+    request_snapshot_kw = [
+        (arg, default)
+        for arg, default in zip(load_method.args.kwonlyargs, load_method.args.kw_defaults)
+        if arg.arg == "request_snapshot"
+    ]
+    if (
+        not request_snapshot_kw
+        or not isinstance(request_snapshot_kw[0][1], ast.Constant)
+        or request_snapshot_kw[0][1].value is not True
+    ):
+        return False, "load_patient_card must accept request_snapshot=True keyword"
+
+    select_method = methods.get("on_patient_selected_from_list")
+    if select_method is None:
+        return False, "on_patient_selected_from_list not found"
+    create_branch_uses_deferred_snapshot = False
+    for node in ast.walk(select_method):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr != "load_patient_card":
+            continue
+        for keyword in node.keywords:
+            if (
+                keyword.arg == "request_snapshot"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is False
+            ):
+                create_branch_uses_deferred_snapshot = True
+                break
+    if not create_branch_uses_deferred_snapshot:
+        return False, "create action should load patient card with request_snapshot=False"
+
+    create_method = methods.get("on_create_card_clicked")
+    if create_method is None:
+        return False, "on_create_card_clicked not found"
+    create_source = ast.get_source_segment(source_text, create_method) or ""
+    if "_create_card_after_snapshot" not in create_source or ".isRunning()" not in create_source:
+        return False, "create-card write is not deferred while snapshot worker is running"
+
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -1122,6 +1179,7 @@ def main():
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
+        ("doctor_create_card_avoids_open_snapshot_race", _check_doctor_create_card_avoids_open_snapshot_race),
     ]
 
     result_items = []
