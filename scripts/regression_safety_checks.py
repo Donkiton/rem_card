@@ -1202,6 +1202,123 @@ def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) 
     return True, "ok"
 
 
+def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    cases = [
+        ("doctor", "ui/doctor_view/components/beds_selection_widget.py", "BedsSelectionWidget"),
+        ("nurse", "ui/nurse_view/components/nurse_beds_selection_widget.py", "NurseBedsSelectionWidget"),
+        ("shared", "ui/shared/report_controller.py", "RemCardReportController"),
+    ]
+    root = Path(__file__).resolve().parents[1]
+    for role, relative_path, class_name in cases:
+        source_path = root / relative_path
+        source_text = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source_text)
+        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        if not class_defs:
+            return False, f"{role}: {class_name} class not found"
+        if class_name == "RemCardReportController":
+            base_names = [
+                base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+                for base in class_defs[0].bases
+            ]
+            if "QObject" not in base_names:
+                return False, "shared: RemCardReportController must inherit QObject for queued report callbacks"
+        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+
+        required_slots = {
+            "_on_daily_report_collected": "dict",
+            "_on_daily_report_error": "str",
+            "_on_full_report_collected": "list",
+            "_on_full_report_error": "str",
+        }
+        def has_slot_decorator(method: ast.FunctionDef, slot_arg: str) -> bool:
+            for decorator in method.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                if not isinstance(decorator.func, ast.Name) or decorator.func.id != "Slot":
+                    continue
+                if not decorator.args:
+                    continue
+                arg = decorator.args[0]
+                if isinstance(arg, ast.Name) and arg.id == slot_arg:
+                    return True
+            return False
+
+        for method_name, slot_arg in required_slots.items():
+            method = methods.get(method_name)
+            if method is None:
+                return False, f"{role}: {method_name} not found"
+            if not has_slot_decorator(method, slot_arg):
+                return False, f"{role}: {method_name} must be a Qt Slot({slot_arg})"
+
+        daily_method_name = "run_daily_report" if class_name == "RemCardReportController" else "on_daily_report_requested"
+        full_method_name = "run_full_report" if class_name == "RemCardReportController" else "on_full_report_requested"
+        daily_method = methods.get(daily_method_name)
+        full_method = methods.get(full_method_name)
+        if daily_method is None or full_method is None:
+            return False, f"{role}: report request methods not found"
+        daily_source = ast.get_source_segment(source_text, daily_method) or ""
+        full_source = ast.get_source_segment(source_text, full_method) or ""
+        if "def on_finished" in daily_source or "def on_error" in daily_source:
+            return False, f"{role}: daily report must not use nested callbacks"
+        if "def on_finished" in full_source or "def on_error" in full_source:
+            return False, f"{role}: full report must not use nested callbacks"
+        if "finished.connect(self._on_daily_report_collected)" not in daily_source:
+            return False, f"{role}: daily report must connect to QObject slot"
+        if "error.connect(self._on_daily_report_error)" not in daily_source:
+            return False, f"{role}: daily report error must connect to QObject slot"
+        if "finished.connect(self._on_full_report_collected)" not in full_source:
+            return False, f"{role}: full report must connect to QObject slot"
+        if "error.connect(self._on_full_report_error)" not in full_source:
+            return False, f"{role}: full report error must connect to QObject slot"
+
+    return True, "ok"
+
+
+def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source_path = Path(__file__).resolve().parents[1] / "ui" / "doctor_view" / "doctor_remcard_widget.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"]
+    if not class_defs:
+        return False, "DoctorRemCardWidget class not found"
+    methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+
+    load_method = methods.get("load_patient_card")
+    if load_method is None:
+        return False, "load_patient_card not found"
+    ensure_kw = [
+        (arg, default)
+        for arg, default in zip(load_method.args.kwonlyargs, load_method.args.kw_defaults)
+        if arg.arg == "ensure_initial_status"
+    ]
+    if not ensure_kw or not isinstance(ensure_kw[0][1], ast.Constant) or ensure_kw[0][1].value is not None:
+        return False, "load_patient_card must accept ensure_initial_status=None keyword"
+
+    yest_clicked_source = ast.get_source_segment(source_text, methods.get("on_yest_card_clicked")) or ""
+    if "QTimer.singleShot" not in yest_clicked_source or "safe_load_archived_card" not in yest_clicked_source:
+        return False, "open-card yesterday action must defer archive loading through QTimer.singleShot"
+
+    select_source = ast.get_source_segment(source_text, methods.get("on_patient_selected_from_list")) or ""
+    if "QTimer.singleShot" not in select_source or "_open_w1_yesterday_card" not in select_source:
+        return False, "W1 yesterday action must defer loading through QTimer.singleShot"
+
+    open_w1_source = ast.get_source_segment(source_text, methods.get("_open_w1_yesterday_card")) or ""
+    if "ensure_initial_status=False" not in open_w1_source:
+        return False, "W1 yesterday card must skip initial status writes"
+
+    archive_source = ast.get_source_segment(source_text, methods.get("safe_load_archived_card")) or ""
+    if "current_start <= selected_date < current_end" not in archive_source:
+        return False, "safe_load_archived_card must only write initial status for the current card day"
+    if "skip initial status write for historical card" not in archive_source:
+        return False, "safe_load_archived_card must log skipped historical status writes"
+
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -1227,6 +1344,8 @@ def main():
             "orders_widgets_defer_snapshot_reload_thread_creation",
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
+        ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
+        ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
     ]
 
     result_items = []

@@ -783,7 +783,7 @@ class DoctorRemCardWidget(QWidget):
             return fallback_patient.admission_datetime
         return datetime.now()
 
-    def load_patient_card(self, admission_id, date, *, request_snapshot: bool = True):
+    def load_patient_card(self, admission_id, date, *, request_snapshot: bool = True, ensure_initial_status=None):
         """Обновляет данные карты для нового пациента/даты."""
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
@@ -832,8 +832,13 @@ class DoctorRemCardWidget(QWidget):
         self._apply_archive_read_only_state()
         self._reset_balance_view_state()
         if request_snapshot:
+            should_ensure_initial_status = (
+                not self._archive_read_only_mode
+                if ensure_initial_status is None
+                else bool(ensure_initial_status)
+            )
             self._request_card_snapshot(
-                ensure_initial_status=not self._archive_read_only_mode,
+                ensure_initial_status=should_ensure_initial_status,
                 show_empty_message=False,
                 load_scope="patient_open_vitals",
             )
@@ -1301,7 +1306,12 @@ class DoctorRemCardWidget(QWidget):
     def on_yest_card_clicked(self):
         from datetime import timedelta
         yest = self._current_date - timedelta(days=1)
-        self.safe_load_archived_card(yest)
+        logger.info(
+            "[DOCTOR_VIEW] yesterday card requested from card admission_id=%s target_date=%s",
+            self.admission_id,
+            yest.isoformat() if hasattr(yest, "isoformat") else yest,
+        )
+        QTimer.singleShot(0, lambda target_date=yest: self.safe_load_archived_card(target_date))
 
     def show_archive(self, patient=None):
         if self._is_loading: return
@@ -1341,16 +1351,29 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self.layout_manager, 'orders_widget'):
             ow = self.layout_manager.orders_widget
         try:
+            logger.info(
+                "[ARCHIVE] loading card admission_id=%s date=%s",
+                target_id,
+                selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
+            )
             self.blockSignals(True)
             if ow: 
                 ow.blockSignals(True)
                 ow.stop_timer()
             
             if target_id and self.service.status_service and not self._archive_read_only_mode:
-                s_start, _ = self.service.get_day_period(selected_date)
-                patient = self.service.get_patient(target_id)
-                adm_dt = patient.admission_datetime if patient else None
-                self.service.status_service.ensure_initial_status(target_id, s_start, adm_dt)
+                current_start, current_end = self.service.get_day_period(datetime.now())
+                if current_start <= selected_date < current_end:
+                    s_start, _ = self.service.get_day_period(selected_date)
+                    patient = self.service.get_patient(target_id)
+                    adm_dt = patient.admission_datetime if patient else None
+                    self.service.status_service.ensure_initial_status(target_id, s_start, adm_dt)
+                else:
+                    logger.info(
+                        "[ARCHIVE] skip initial status write for historical card admission_id=%s date=%s",
+                        target_id,
+                        selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
+                    )
 
             if admission_id is not None:
                 self.admission_id = admission_id
@@ -1374,6 +1397,11 @@ class DoctorRemCardWidget(QWidget):
             self.blockSignals(False)
             self._is_loading = False
             self.update()
+            logger.info(
+                "[ARCHIVE] card load finished admission_id=%s date=%s",
+                target_id,
+                selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
+            )
 
     def force_reload_all(self):
         self._ensure_card_widgets_initialized()
@@ -1730,6 +1758,11 @@ class DoctorRemCardWidget(QWidget):
 
     def on_patient_selected_from_list(self, patient, action_type):
         self._exit_archive_read_only_mode()
+        logger.info(
+            "[DOCTOR_VIEW] W1 action requested admission_id=%s action=%s",
+            getattr(patient, "id", None),
+            action_type,
+        )
         if action_type == "show":
             target_date = datetime.now()
             self.load_patient_card(patient.id, target_date)
@@ -1744,11 +1777,27 @@ class DoctorRemCardWidget(QWidget):
         elif action_type == "yest":
             from datetime import timedelta
             yest = datetime.now() - timedelta(days=1)
-            self.load_patient_card(patient.id, yest)
-            self._prime_patient_header_from_w1(patient, yest)
-            self.layout_manager.set_patient_selection_mode("card")
+            QTimer.singleShot(
+                0,
+                lambda target_patient=patient, target_date=yest: self._open_w1_yesterday_card(
+                    target_patient,
+                    target_date,
+                ),
+            )
         elif action_type == "archive":
             self.show_archive(patient)
+
+    def _open_w1_yesterday_card(self, patient, target_date):
+        if self._is_closing:
+            return
+        logger.info(
+            "[DOCTOR_VIEW] W1 yesterday card load admission_id=%s target_date=%s",
+            getattr(patient, "id", None),
+            target_date.isoformat() if hasattr(target_date, "isoformat") else target_date,
+        )
+        self.load_patient_card(patient.id, target_date, ensure_initial_status=False)
+        self._prime_patient_header_from_w1(patient, target_date)
+        self.layout_manager.set_patient_selection_mode("card")
 
     def on_clear_orders_clicked(self):
         if self._archive_read_only_mode:
