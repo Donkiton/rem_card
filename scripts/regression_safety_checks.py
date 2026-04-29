@@ -1159,6 +1159,49 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     return True, "ok"
 
 
+def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    cases = [
+        ("doctor", "ui/doctor_view/orders_widget.py", "OrdersWidget"),
+        ("nurse", "ui/nurse_view/components/nurse_orders_widget.py", "NurseOrdersWidget"),
+    ]
+    root = Path(__file__).resolve().parents[1]
+    for role, relative_path, class_name in cases:
+        source_path = root / relative_path
+        source_text = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source_text)
+        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        if not class_defs:
+            return False, f"{role}: {class_name} class not found"
+        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+        for method_name in (
+            "_request_snapshot",
+            "_queue_forced_reload_after_stale_snapshot",
+            "_on_snapshot_finished",
+            "_defer_snapshot_request",
+        ):
+            if method_name not in methods:
+                return False, f"{role}: {method_name} not found"
+
+        request_source = ast.get_source_segment(source_text, methods["_request_snapshot"]) or ""
+        if "self._snapshot_worker is not None" not in request_source:
+            return False, f"{role}: snapshot worker must stay busy until finished signal"
+
+        stale_source = ast.get_source_segment(source_text, methods["_queue_forced_reload_after_stale_snapshot"]) or ""
+        if "_defer_snapshot_request" not in stale_source:
+            return False, f"{role}: stale snapshot reload must be deferred"
+
+        finished_source = ast.get_source_segment(source_text, methods["_on_snapshot_finished"]) or ""
+        if "_defer_snapshot_request" not in finished_source:
+            return False, f"{role}: pending reload after worker finish must be deferred"
+
+        defer_source = ast.get_source_segment(source_text, methods["_defer_snapshot_request"]) or ""
+        if "QTimer.singleShot" not in defer_source:
+            return False, f"{role}: deferred reload helper must use QTimer.singleShot"
+
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -1180,6 +1223,10 @@ def main():
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
         ("doctor_create_card_avoids_open_snapshot_race", _check_doctor_create_card_avoids_open_snapshot_race),
+        (
+            "orders_widgets_defer_snapshot_reload_thread_creation",
+            _check_orders_widgets_defer_snapshot_reload_thread_creation,
+        ),
     ]
 
     result_items = []

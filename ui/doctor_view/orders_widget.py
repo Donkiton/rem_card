@@ -470,7 +470,7 @@ class OrdersWidget(QWidget):
         return has_relevant_change, max_scoped_change_id
 
     def _queue_forced_reload_after_stale_snapshot(self, *, reason: str):
-        pending_inflight = bool(self._snapshot_worker and self._snapshot_worker.isRunning())
+        pending_inflight = bool(self._snapshot_worker is not None)
         try:
             context_hash = self._build_orders_context().hash()
         except Exception:
@@ -490,7 +490,7 @@ class OrdersWidget(QWidget):
             reason=reason,
             immediate=True,
         )
-        if self._snapshot_worker and self._snapshot_worker.isRunning():
+        if self._snapshot_worker is not None:
             self._snapshot_pending = True
             self._snapshot_force_pending = True
             self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, "HIGH")
@@ -498,11 +498,29 @@ class OrdersWidget(QWidget):
             self._snapshot_pending_reason = reason
             return
 
-        self._request_snapshot(
+        self._defer_snapshot_request(
             force=True,
             source="stale_snapshot",
             priority="HIGH",
             invalidate_reason=reason,
+        )
+
+    def _defer_snapshot_request(
+        self,
+        *,
+        force: bool,
+        source: str,
+        priority: str,
+        invalidate_reason: str | None = None,
+    ):
+        QTimer.singleShot(
+            0,
+            lambda: self._request_snapshot(
+                force=force,
+                source=source,
+                priority=priority,
+                invalidate_reason=invalidate_reason,
+            ),
         )
 
     def _request_snapshot(
@@ -534,8 +552,16 @@ class OrdersWidget(QWidget):
         priority_name = self._normalize_priority(priority)
         context_key = context.cache_key()
 
-        if self._snapshot_worker and self._snapshot_worker.isRunning():
-            if self._is_request_covered_by_active(context_key=context_key, force=force, priority=priority_name):
+        if self._snapshot_worker is not None:
+            worker_running = self._snapshot_worker.isRunning()
+            if (
+                worker_running
+                and self._is_request_covered_by_active(
+                    context_key=context_key,
+                    force=force,
+                    priority=priority_name,
+                )
+            ):
                 if hasattr(coordinator, "record_orders_ui_event"):
                     coordinator.record_orders_ui_event(
                         "duplicate_load_prevented",
@@ -771,7 +797,7 @@ class OrdersWidget(QWidget):
             self._snapshot_pending_source = "refresh"
             self._snapshot_pending_priority = "MEDIUM"
             self._snapshot_pending_reason = None
-            self._request_snapshot(
+            self._defer_snapshot_request(
                 force=force,
                 source=source,
                 priority=priority,
