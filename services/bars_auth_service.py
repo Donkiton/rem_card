@@ -19,6 +19,7 @@ from rem_card.app.paths import LOCAL_APPDATA, LOGS_DIR
 DEFAULT_BARS_URL = "http://10.30.30.12/"
 DEFAULT_DEBUG_PORT = 9338
 DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
+INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
 
@@ -226,12 +227,15 @@ class BarsAuthService:
 
     def prepare_background_session(self):
         self._diag("prepare_background_session_start", debug_port=self.debug_port)
-        page = self._ensure_bars_debug_page(background=False, allow_open=False)
+        page = self._ensure_bars_debug_page(background=True, allow_open=False)
+        if page:
+            self._prepare_background_page(page)
+        minimized = self.minimize_bars_windows()
         self._diag(
             "prepare_background_session_done",
             page_found=bool(page),
-            minimized_windows=0,
-            window_mode="visible",
+            minimized_windows=minimized,
+            window_mode="background",
             pages=self._summarize_pages(self._get_debug_pages(log_failures=False)),
         )
 
@@ -677,15 +681,15 @@ class BarsAuthService:
                 department=department,
             )
 
-        page = self._ensure_bars_debug_page(background=False, allow_open=False)
+        page = self._ensure_bars_debug_page(background=True, allow_open=False)
         if not page:
             return BarsPatientListResult(
                 False,
                 "Вкладка БАРС недоступна. Нажмите БАРС и завершите вход.",
                 department=department,
             )
-        self._activate_debug_page(page)
-        self.restore_bars_windows()
+        self._prepare_background_page(page)
+        self.minimize_bars_windows()
 
         ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
         page_title = str(page.get("title") or "")
@@ -702,7 +706,10 @@ class BarsAuthService:
         self._install_network_capture(page)
         self._clear_network_capture(page)
         steps.append(self._select_department_filter(page, department))
-        patients = self._wait_for_department_patient_rows(page, department, timeout_sec=10.0)
+        steps.append(self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"]))
+        patients = self._wait_for_department_patients_from_requests(page, department, timeout_sec=5.0)
+        if not patients:
+            patients = self._wait_for_department_patient_rows(page, department, timeout_sec=7.0)
 
         text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.8)
         if not patients:
@@ -1026,6 +1033,53 @@ class BarsAuthService:
                 )
         return {}
 
+    def _prepare_background_page(self, page: dict[str, Any]) -> bool:
+        ws_url = str(page.get("webSocketDebuggerUrl") or "")
+        if not ws_url:
+            return False
+
+        ok = True
+        calls = [
+            ("Page.enable", {}),
+            ("Runtime.enable", {}),
+            (
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 1920,
+                    "height": 1080,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                    "screenWidth": 1920,
+                    "screenHeight": 1080,
+                },
+            ),
+            ("Emulation.setVisibleSize", {"width": 1920, "height": 1080}),
+        ]
+        errors: list[str] = []
+        for method, params in calls:
+            payload = {
+                "id": int(time.time() * 1000) % 1000000,
+                "method": method,
+                "params": params,
+            }
+            try:
+                response = self._cdp_call(ws_url, payload, timeout_sec=3.0)
+                if response.get("error"):
+                    ok = False
+                    errors.append(f"{method}: {response.get('error')}")
+            except Exception as exc:
+                ok = False
+                errors.append(f"{method}: {type(exc).__name__}: {exc}")
+
+        self._diag(
+            "prepare_background_page_done",
+            ok=ok,
+            page=self._summarize_pages([page])[0],
+            errors=errors[:4],
+            log_to_main=False,
+        )
+        return ok
+
     def _activate_debug_page(self, page: dict[str, Any]) -> bool:
         page_id = str(page.get("id") or "")
         if not page_id:
@@ -1247,29 +1301,150 @@ class BarsAuthService:
         text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
         steps: list[str] = []
         if not self._looks_like_inpatient_doctor_page(text):
-            steps.append(self._hover_visible_text(page, ["Рабочие места"]))
-            time.sleep(0.35)
-            if not self._page_contains_text(page, ["Пациенты в стационаре"]):
-                steps.append(self._click_visible_text(page, ["Рабочие места"]))
-                time.sleep(0.45)
+            steps.append(self._open_inpatient_doctor_form_via_api(page))
+            text = self._wait_for_inpatient_doctor_page(page, timeout_sec=6.0)
+            if not self._looks_like_inpatient_doctor_page(text):
+                steps.append(self._hover_visible_text(page, ["Рабочие места"]))
+                time.sleep(0.35)
+                if not self._page_contains_text(page, ["Пациенты в стационаре"]):
+                    steps.append(self._click_visible_text(page, ["Рабочие места"]))
+                    time.sleep(0.45)
 
-            steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
-            time.sleep(0.45)
-            if not self._page_contains_text(page, ["Лечащий врач (new)"]):
-                steps.append(self._click_visible_text(page, ["Пациенты в стационаре"]))
-                time.sleep(0.45)
                 steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
                 time.sleep(0.45)
+                if not self._page_contains_text(page, ["Лечащий врач (new)"]):
+                    steps.append(self._click_visible_text(page, ["Пациенты в стационаре"]))
+                    time.sleep(0.45)
+                    steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
+                    time.sleep(0.45)
 
-            steps.append(self._click_visible_text(page, ["Лечащий врач (new)"]))
-            self._wait_for_inpatient_doctor_page(page, timeout_sec=5.0)
+                steps.append(self._click_visible_text(page, ["Лечащий врач (new)"]))
+                self._wait_for_inpatient_doctor_page(page, timeout_sec=5.0)
         else:
             self._diag("open_inpatient_duty_doctor_already_open")
             steps.append("Лечащий врач (new) уже открыт")
 
-        steps.append(self._click_visible_text(page, ["Дежурный врач"]))
+        steps.append(self._select_inpatient_tab(page, "Дежурный врач"))
         time.sleep(0.7)
         return steps
+
+    def _open_inpatient_doctor_form_via_api(self, page: dict[str, Any]) -> str:
+        form_json = json.dumps(INPATIENT_DOCTOR_FORM, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const formName = {form_json};
+  const result = {{
+    ok: false,
+    hasOpenWindow: typeof window.openWindow === 'function',
+    hasD3ApiOpenWindow: Boolean(window.D3Api && typeof window.D3Api.openWindow === 'function'),
+    method: '',
+    error: ''
+  }};
+  const attempts = [];
+  if (typeof window.openWindow === 'function') {{
+    attempts.push(['openWindow-object', () => window.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, true)]);
+    attempts.push(['openWindow-string', () => window.openWindow(formName, true)]);
+  }}
+  if (window.D3Api && typeof window.D3Api.openWindow === 'function') {{
+    attempts.push(['D3Api.openWindow-object', () => window.D3Api.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, true)]);
+    attempts.push(['D3Api.openWindow-string', () => window.D3Api.openWindow(formName, true)]);
+  }}
+  for (const [name, fn] of attempts) {{
+    try {{
+      fn();
+      result.ok = true;
+      result.method = name;
+      break;
+    }} catch (err) {{
+      result.error = String(err && (err.message || err) || '');
+    }}
+  }}
+  return JSON.stringify(result);
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "open_inpatient_doctor_form_api_success",
+                form=INPATIENT_DOCTOR_FORM,
+                method=payload.get("method"),
+            )
+            return f"Форма открыта через API БАРС: {payload.get('method') or INPATIENT_DOCTOR_FORM}"
+        self._diag(
+            "open_inpatient_doctor_form_api_failed",
+            level="warning",
+            form=INPATIENT_DOCTOR_FORM,
+            has_open_window=payload.get("hasOpenWindow"),
+            has_d3api_open_window=payload.get("hasD3ApiOpenWindow"),
+            error=payload.get("error"),
+        )
+        return "Форма через API БАРС не открылась"
+
+    def _select_inpatient_tab(self, page: dict[str, Any], label: str) -> str:
+        label_json = json.dumps(label, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const label = {label_json}.toLowerCase();
+  const docs = [];
+  const walk = (win) => {{
+    try {{
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {{
+        try {{ walk(frame.contentWindow); }} catch (_) {{}}
+      }}
+    }} catch (_) {{}}
+  }};
+  walk(window);
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const visible = (el) => {{
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  }};
+  const clickableTarget = (el) => el.closest('button,a,li,[role="tab"],[role="button"],[onclick],[tabindex]') || el;
+  let best = null;
+  let bestScore = -1;
+  for (const doc of docs) {{
+    const elements = Array.from(doc.querySelectorAll('button,a,li,span,div,[role="tab"],[role="button"],[onclick],[tabindex]'));
+    for (const el of elements) {{
+      if (!visible(el)) continue;
+      const text = norm(el.innerText || el.textContent || el.value || '');
+      const lower = text.toLowerCase();
+      if (!lower.includes(label)) continue;
+      let score = lower === label ? 1000 : 200;
+      if (String(el.getAttribute('role') || '').toLowerCase() === 'tab') score += 150;
+      if (['button', 'a', 'li'].includes(String(el.tagName || '').toLowerCase())) score += 80;
+      score -= Math.min(text.length, 300) / 5;
+      if (score > bestScore) {{
+        best = el;
+        bestScore = score;
+      }}
+    }}
+  }}
+  if (!best) return JSON.stringify({{ok: false, reason: 'tab not found'}});
+  const target = clickableTarget(best);
+  try {{
+    if (typeof target.click === 'function') target.click();
+    else target.dispatchEvent(new target.ownerDocument.defaultView.MouseEvent('click', {{bubbles: true, cancelable: true}}));
+  }} catch (err) {{
+    return JSON.stringify({{ok: false, reason: String(err && (err.message || err) || '')}});
+  }}
+  return JSON.stringify({{ok: true, text: norm(best.innerText || best.textContent || ''), score: bestScore, tag: String(target.tagName || '').toLowerCase()}});
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "select_inpatient_tab_success",
+                label=label,
+                text=self._trim_value(str(payload.get("text") or ""), max_len=120),
+                score=payload.get("score"),
+                tag=payload.get("tag"),
+            )
+            return f"Вкладка выбрана: {label}"
+        self._diag("select_inpatient_tab_failed", level="warning", label=label, reason=payload.get("reason"))
+        return f"Вкладка не найдена: {label}"
 
     def _wait_for_hospitalization_journal(self, page: dict[str, Any], timeout_sec: float) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
@@ -1458,6 +1633,10 @@ class BarsAuthService:
         input.closest('td,tr,div,fieldset') ? input.closest('td,tr,div,fieldset').innerText : ''
       ].map(x => String(x || '').toLowerCase()).join(' ');
       let score = attrs.includes('отделение') ? 100 : 0;
+      if (attrs.includes('griddutydoctor')) score += 900;
+      if (attrs.includes('dsdutydoctor')) score += 500;
+      if (attrs.includes('direction_observations')) score -= 700;
+      if (attrs.includes('prescribes')) score -= 500;
       for (const header of departmentHeaders) {{
         const hrect = header.getBoundingClientRect();
         const overlapsX = rect.left < hrect.right + 18 && rect.right > hrect.left - 18;
@@ -1659,6 +1838,185 @@ class BarsAuthService:
             text_preview=self._compact_text_preview(self._read_page_text_with_retry(page, attempts=1, delay_sec=0)),
         )
         return last_patients
+
+    def _wait_for_department_patients_from_requests(
+        self,
+        page: dict[str, Any],
+        department: str,
+        timeout_sec: float,
+    ) -> list[dict[str, str]]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_patients: list[dict[str, str]] = []
+        while time.monotonic() < deadline:
+            last_patients = self._extract_department_patients_from_requests(self._get_network_capture(page), department)
+            if last_patients:
+                self._diag(
+                    "wait_for_department_patients_from_requests_success",
+                    department=department,
+                    patients_count=len(last_patients),
+                )
+                return last_patients
+            time.sleep(0.35)
+
+        self._diag(
+            "wait_for_department_patients_from_requests_timeout",
+            level="warning",
+            department=department,
+            patients_count=len(last_patients),
+        )
+        return last_patients
+
+    def _extract_department_patients_from_requests(
+        self,
+        requests: list[dict[str, Any]],
+        department: str,
+    ) -> list[dict[str, str]]:
+        target_department = self._normalize_history_fragment(department)
+        if not target_department:
+            return []
+
+        patients: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in requests:
+            if not isinstance(item, dict):
+                continue
+            response_text = str(item.get("response_preview") or "")
+            if not response_text or '"data"' not in response_text:
+                continue
+            try:
+                payload = json.loads(response_text)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            for dataset_name, dataset in payload.items():
+                if not isinstance(dataset, dict):
+                    continue
+                rows = dataset.get("data")
+                if not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    patient = self._patient_from_json_row(row, department)
+                    if not patient:
+                        continue
+                    normalized_row = self._normalize_history_fragment(" ".join(str(value or "") for value in row.values()))
+                    if target_department not in normalized_row:
+                        continue
+                    key = (patient["history_number"], patient["full_name"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    patients.append(patient)
+
+        patients.sort(key=lambda item: item.get("full_name", ""))
+        if patients:
+            self._diag(
+                "extract_department_patients_from_requests_done",
+                department=department,
+                patients_count=len(patients),
+                sample=patients[:5],
+            )
+        return patients
+
+    def _patient_from_json_row(self, row: dict[str, Any], department: str) -> dict[str, str] | None:
+        history_number = self._first_row_value(
+            row,
+            "HOSP_HISTORY",
+            "DEPBED",
+            "DEP_BED",
+            "HH_NUMBER",
+            "HH_NUM",
+        )
+        if not history_number:
+            pref = self._first_row_value(row, "HH_PREF", "HOSP_HISTORY_PREF")
+            number = self._first_row_value(row, "HH_NUMB", "HH_NUM", "HOSP_HISTORY_NUMB")
+            altern = self._first_row_value(row, "HH_NUMB_ALTERN", "HH_ALTERN", "HOSP_HISTORY_ALTERN")
+            if pref and number and altern:
+                history_number = f"{pref} - {number}\\{altern}"
+        full_name = self._first_row_value(
+            row,
+            "PATIENT_FIO",
+            "PATIENT_NAME",
+            "PATIENT_FULLNAME",
+            "PATIENT_ACTUAL",
+            "PATIENT_TEXT",
+            "FIO",
+            "FULL_NAME",
+        )
+        if not full_name:
+            full_name = self._guess_name_from_row(row)
+        full_name = self._guess_full_name(full_name) or full_name
+        if not history_number or not full_name or not self._guess_full_name(full_name):
+            return None
+
+        department_value = self._first_row_value(
+            row,
+            "DEP_NAME",
+            "HH_DEP_NAME",
+            "DEPARTMENT",
+            "DEP",
+            "SHOWDEP",
+        ) or department
+        birthdate = self._first_row_value(
+            row,
+            "PATIENT_BIRTHDATE",
+            "BIRTHDATE",
+            "BIRTH_DATE",
+            "DATE_BIRTH",
+            "BIRTHDAY",
+        )
+        age = self._first_row_value(row, "AGE", "PATIENT_AGE")
+        doctor = self._first_row_value(row, "HEALING_EMP_NAME", "HEALING_DOCTOR", "DOCTOR", "EMP_NAME")
+        diagnosis = self._first_row_value(
+            row,
+            "DIAGNOSIS",
+            "DIAGNOSIS_FROM",
+            "HOSP_MKB",
+            "MKB",
+            "MKB_NAME",
+            "DIAG_NAME",
+        )
+        return {
+            "history_number": self._trim_value(history_number, max_len=260),
+            "full_name": self._trim_value(full_name, max_len=220),
+            "birthdate": self._trim_value(birthdate, max_len=40),
+            "age": self._trim_value(age, max_len=40),
+            "doctor": self._trim_value(doctor, max_len=120),
+            "department": self._trim_value(department_value, max_len=220),
+            "diagnosis": self._trim_value(diagnosis, max_len=300),
+        }
+
+    @staticmethod
+    def _first_row_value(row: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            value = row.get(key)
+            if value is None:
+                continue
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _guess_name_from_row(self, row: dict[str, Any]) -> str:
+        preferred_keys = sorted(
+            row.keys(),
+            key=lambda key: (
+                0
+                if any(marker in str(key).upper() for marker in ("FIO", "NAME", "PATIENT", "PACIENT"))
+                else 1,
+                str(key),
+            ),
+        )
+        for key in preferred_keys:
+            value = row.get(key)
+            if not isinstance(value, str):
+                continue
+            candidate = self._guess_full_name(value)
+            if candidate and "отделение" not in candidate.lower():
+                return candidate
+        return ""
 
     def _extract_patient_rows_from_text(self, text: str, department: str) -> list[dict[str, str]]:
         lines = [self._trim_value(line.strip(), max_len=700) for line in str(text or "").splitlines()]
@@ -2461,7 +2819,7 @@ class BarsAuthService:
         else:
             logger.info(message)
 
-    def _cdp_runtime_evaluate(self, ws_url: str, payload: dict[str, Any]) -> str:
+    def _cdp_call(self, ws_url: str, payload: dict[str, Any], timeout_sec: float = 5.0) -> dict[str, Any]:
         parsed = urlparse(ws_url)
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or self.debug_port
@@ -2470,11 +2828,11 @@ class BarsAuthService:
             path = f"{path}?{parsed.query}"
 
         with socket.create_connection((host, port), timeout=2.0) as sock:
-            sock.settimeout(5.0)
+            sock.settimeout(timeout_sec)
             self._websocket_handshake(sock, host, port, path)
             self._websocket_send_text(sock, json.dumps(payload, ensure_ascii=False))
 
-            deadline = time.monotonic() + 5.0
+            deadline = time.monotonic() + max(0.5, float(timeout_sec))
             while time.monotonic() < deadline:
                 frame = self._websocket_read_frame(sock)
                 if frame is None:
@@ -2487,11 +2845,15 @@ class BarsAuthService:
                 response = json.loads(data.decode("utf-8", errors="replace"))
                 if response.get("id") != payload["id"]:
                     continue
-                result = response.get("result", {}).get("result", {})
-                value = result.get("value")
-                return str(value or "")
+                return response
 
-        return ""
+        return {}
+
+    def _cdp_runtime_evaluate(self, ws_url: str, payload: dict[str, Any]) -> str:
+        response = self._cdp_call(ws_url, payload, timeout_sec=5.0)
+        result = response.get("result", {}).get("result", {}) if isinstance(response, dict) else {}
+        value = result.get("value")
+        return str(value or "")
 
     def _websocket_handshake(self, sock: socket.socket, host: str, port: int, path: str):
         key = base64.b64encode(os.urandom(16)).decode("ascii")
