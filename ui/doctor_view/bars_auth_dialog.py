@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QP
 from rem_card.services.bars_auth_service import (
     BarsAuthCheckResult,
     BarsAuthService,
+    BarsPatientListResult,
     BarsPatientProbeResult,
 )
 from rem_card.ui.shared.async_call import AsyncCallThread
@@ -18,6 +19,7 @@ class BarsAuthDialog(BaseStyledDialog):
         self._launch_worker = None
         self._check_worker = None
         self._patient_probe_worker = None
+        self._patient_list_worker = None
         self._background_worker = None
         self._auto_accept_scheduled = False
 
@@ -68,8 +70,12 @@ class BarsAuthDialog(BaseStyledDialog):
         self.btn_patient_probe = QPushButton("Проба ФИО")
         self.btn_patient_probe.setObjectName("DialogOkBtn")
         self.btn_patient_probe.clicked.connect(self._probe_patient_async)
+        self.btn_patient_list = QPushButton("Список пациентов")
+        self.btn_patient_list.setObjectName("DialogOkBtn")
+        self.btn_patient_list.clicked.connect(self._load_patient_list_async)
         search_layout.addWidget(self.history_input, 1)
         search_layout.addWidget(self.btn_patient_probe)
+        search_layout.addWidget(self.btn_patient_list)
 
         self.probe_text = QPlainTextEdit()
         self.probe_text.setReadOnly(True)
@@ -87,6 +93,7 @@ class BarsAuthDialog(BaseStyledDialog):
     def _set_busy(self, busy: bool):
         self.btn_check.setEnabled(not busy)
         self.btn_patient_probe.setEnabled(not busy)
+        self.btn_patient_list.setEnabled(not busy)
 
     def _open_browser_async(self):
         if self._launch_worker and self._launch_worker.isRunning():
@@ -148,6 +155,26 @@ class BarsAuthDialog(BaseStyledDialog):
         if result.ok:
             self.authorized = True
 
+    def _load_patient_list_async(self):
+        if self._patient_list_worker and self._patient_list_worker.isRunning():
+            return
+        self._set_busy(True)
+        self.status_label.setText("Получаю список пациентов отделения...")
+        self._patient_list_worker = AsyncCallThread(
+            self.auth_service.list_department_patients,
+            parent=self,
+        )
+        self._patient_list_worker.succeeded.connect(self._on_patient_list_loaded)
+        self._patient_list_worker.failed.connect(self._on_worker_failed)
+        self._patient_list_worker.finished.connect(lambda: self._set_busy(False))
+        self._patient_list_worker.start()
+
+    def _on_patient_list_loaded(self, result: BarsPatientListResult):
+        self.status_label.setText(result.message)
+        self.probe_text.setPlainText(self._format_patient_list_result(result))
+        if result.ok:
+            self.authorized = True
+
     def _mark_authorized_manually(self):
         result = self.auth_service.mark_authorized_manually()
         self._complete_authorization(result)
@@ -179,6 +206,35 @@ class BarsAuthDialog(BaseStyledDialog):
         if result.text_preview:
             lines.append("")
             lines.append("Фрагмент прочитанного текста:")
+            lines.append(result.text_preview)
+        return "\n".join(lines)
+
+    def _format_patient_list_result(self, result: BarsPatientListResult) -> str:
+        lines = [result.message]
+        if result.department:
+            lines.append(f"Отделение: {result.department}")
+
+        patients = result.patients or []
+        if patients:
+            lines.append("")
+            for index, patient in enumerate(patients, start=1):
+                line = f"{index}. {patient.get('history_number', '')} - {patient.get('full_name', '')}"
+                details = []
+                if patient.get("age"):
+                    details.append(patient["age"])
+                if patient.get("birthdate"):
+                    details.append(patient["birthdate"])
+                if patient.get("doctor"):
+                    details.append(f"врач: {patient['doctor']}")
+                if details:
+                    line = f"{line} ({', '.join(details)})"
+                lines.append(line)
+                if patient.get("diagnosis"):
+                    lines.append(f"   {patient['diagnosis']}")
+
+        if result.text_preview and not patients:
+            lines.append("")
+            lines.append("Контекст:")
             lines.append(result.text_preview)
         return "\n".join(lines)
 

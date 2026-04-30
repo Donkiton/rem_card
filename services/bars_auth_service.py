@@ -18,6 +18,7 @@ from rem_card.app.paths import LOCAL_APPDATA, LOGS_DIR
 
 DEFAULT_BARS_URL = "http://10.30.30.12/"
 DEFAULT_DEBUG_PORT = 9338
+DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
 
@@ -63,6 +64,15 @@ class BarsNetworkCaptureResult:
     text_preview: str = ""
 
 
+@dataclass
+class BarsPatientListResult:
+    ok: bool
+    message: str
+    department: str = ""
+    patients: list[dict[str, str]] | None = None
+    text_preview: str = ""
+
+
 class BarsAuthService:
     """
     Открывает БАРС в обычном профиле Яндекс-Браузера и проверяет авторизацию.
@@ -86,6 +96,7 @@ class BarsAuthService:
         "журнал госпитализации",
         "заказ исследований",
         "запись в регистратуру",
+        "лечащий врач",
         "рабочий лист",
         "список направлений",
     )
@@ -112,6 +123,7 @@ class BarsAuthService:
         self.bars_url = (bars_url or os.environ.get("REMCARD_BARS_URL") or DEFAULT_BARS_URL).strip()
         self.browser_path = browser_path or self._find_yandex_browser()
         self.profile_dir = profile_dir or os.environ.get("REMCARD_BARS_BROWSER_PROFILE_DIR") or self._default_profile_dir()
+        self.duty_department = os.environ.get("REMCARD_BARS_DUTY_DEPARTMENT") or DEFAULT_DUTY_DEPARTMENT
         self._use_user_data_dir = bool(profile_dir) or os.environ.get("REMCARD_BARS_USE_USER_DATA_DIR") == "1"
         self._enable_devtools = os.environ.get("REMCARD_BARS_DISABLE_DEVTOOLS") != "1"
         self.debug_port = int(os.environ.get("REMCARD_BARS_DEBUG_PORT") or debug_port or DEFAULT_DEBUG_PORT)
@@ -124,6 +136,7 @@ class BarsAuthService:
             bars_url=self.bars_url,
             browser_path=self.browser_path,
             profile_dir=self.profile_dir,
+            duty_department=self.duty_department,
             use_user_data_dir=self._use_user_data_dir,
             enable_devtools=self._enable_devtools,
             launch_mode="explicit_user_data_dir" if self._use_user_data_dir else "system_default_profile",
@@ -212,11 +225,11 @@ class BarsAuthService:
     def prepare_background_session(self):
         self._diag("prepare_background_session_start", debug_port=self.debug_port)
         page = self._ensure_bars_debug_page(background=False, allow_open=False)
-        minimized = self.minimize_bars_windows() if page else 0
         self._diag(
             "prepare_background_session_done",
             page_found=bool(page),
-            minimized_windows=minimized,
+            minimized_windows=0,
+            window_mode="visible",
             pages=self._summarize_pages(self._get_debug_pages(log_failures=False)),
         )
 
@@ -265,6 +278,53 @@ class BarsAuthService:
         if minimized:
             self._diag("minimize_bars_windows_done", minimized_windows=minimized)
         return minimized
+
+    def restore_bars_windows(self) -> int:
+        if os.name != "nt":
+            return 0
+        try:
+            import ctypes
+        except Exception:
+            return 0
+
+        user32 = ctypes.windll.user32
+        markers = (
+            "медицинская информационная система",
+            "журнал госпитализации",
+            "лечащий врач",
+            "заказ исследований",
+            "10.30.30.12",
+            "барс",
+        )
+        restored = 0
+
+        def callback(hwnd, _lparam):
+            nonlocal restored
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = str(buffer.value or "").lower()
+            if any(marker in title for marker in markers):
+                user32.ShowWindow(hwnd, 9)
+                try:
+                    user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+                restored += 1
+            return True
+
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(callback)
+        try:
+            user32.EnumWindows(enum_proc, 0)
+        except Exception as exc:
+            self._diag("restore_bars_windows_failed", level="warning", error=repr(exc))
+            return restored
+
+        if restored:
+            self._diag("restore_bars_windows_done", restored_windows=restored)
+        return restored
 
     def mark_authorized_manually(self) -> BarsAuthCheckResult:
         self._last_authorized = True
@@ -573,6 +633,74 @@ class BarsAuthService:
             matches=matches,
             requests=requests,
             text_preview=preview or "; ".join(steps),
+        )
+
+    def list_department_patients(self, department: Optional[str] = None) -> BarsPatientListResult:
+        department = " ".join(str(department or self.duty_department or "").split())
+        self._diag("list_department_patients_start", department=department)
+        if not department:
+            return BarsPatientListResult(False, "Не задано отделение")
+        if not self._enable_devtools:
+            return BarsPatientListResult(
+                False,
+                "DevTools-чтение отключено настройкой REMCARD_BARS_DISABLE_DEVTOOLS=1.",
+                department=department,
+            )
+
+        page = self._ensure_bars_debug_page(background=False, allow_open=False)
+        if not page:
+            return BarsPatientListResult(
+                False,
+                "Вкладка БАРС недоступна. Нажмите БАРС и завершите вход.",
+                department=department,
+            )
+        self._activate_debug_page(page)
+        self.restore_bars_windows()
+
+        ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
+        page_title = str(page.get("title") or "")
+        if not self._looks_like_bars_work_screen(ready_text, page_title):
+            return BarsPatientListResult(
+                False,
+                "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета.",
+                department=department,
+                text_preview=self._compact_text_preview(ready_text),
+            )
+
+        steps: list[str] = []
+        steps.extend(self._open_inpatient_duty_doctor(page))
+        steps.append(self._select_department_filter(page, department))
+        time.sleep(0.4)
+        steps.append(self._click_visible_text(page, ["<<< Отобрать >>>", "Отобрать", "Найти"]))
+        patients = self._wait_for_department_patient_rows(page, department, timeout_sec=6.0)
+
+        text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.8)
+        if not patients:
+            patients = self._extract_visible_patient_rows(page, department)
+        self._diag(
+            "list_department_patients_done",
+            ok=bool(patients),
+            department=department,
+            patients_count=len(patients),
+            patients=patients[:40],
+            steps=steps,
+            text_preview=self._compact_text_preview(text),
+        )
+
+        if patients:
+            return BarsPatientListResult(
+                True,
+                f"Найдено пациентов: {len(patients)}",
+                department=department,
+                patients=patients,
+                text_preview="; ".join(step for step in steps if step),
+            )
+        return BarsPatientListResult(
+            False,
+            "Пациенты по выбранному отделению не найдены в видимой таблице",
+            department=department,
+            patients=[],
+            text_preview=self._compact_text_preview(text) or "; ".join(step for step in steps if step),
         )
 
     def _apply_check_result(self, result: BarsAuthCheckResult):
@@ -916,7 +1044,7 @@ class BarsAuthService:
             "отделение сотрудника",
             "специальность сотрудника",
         )
-        if success_count >= 4 and any(marker in normalized for marker in user_context_markers):
+        if len(normalized) > 500 and success_count >= 4 and any(marker in normalized for marker in user_context_markers):
             return True
 
         normalized_title = str(title or "").lower()
@@ -1003,6 +1131,34 @@ class BarsAuthService:
         self._wait_for_hospitalization_journal(page, timeout_sec=4.0)
         return steps
 
+    def _open_inpatient_duty_doctor(self, page: dict[str, Any]) -> list[str]:
+        text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
+        steps: list[str] = []
+        if not self._looks_like_inpatient_doctor_page(text):
+            steps.append(self._hover_visible_text(page, ["Рабочие места"]))
+            time.sleep(0.35)
+            if not self._page_contains_text(page, ["Пациенты в стационаре"]):
+                steps.append(self._click_visible_text(page, ["Рабочие места"]))
+                time.sleep(0.45)
+
+            steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
+            time.sleep(0.45)
+            if not self._page_contains_text(page, ["Лечащий врач (new)"]):
+                steps.append(self._click_visible_text(page, ["Пациенты в стационаре"]))
+                time.sleep(0.45)
+                steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
+                time.sleep(0.45)
+
+            steps.append(self._click_visible_text(page, ["Лечащий врач (new)"]))
+            self._wait_for_inpatient_doctor_page(page, timeout_sec=5.0)
+        else:
+            self._diag("open_inpatient_duty_doctor_already_open")
+            steps.append("Лечащий врач (new) уже открыт")
+
+        steps.append(self._click_visible_text(page, ["Дежурный врач"]))
+        time.sleep(0.7)
+        return steps
+
     def _wait_for_hospitalization_journal(self, page: dict[str, Any], timeout_sec: float) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         last_text = ""
@@ -1027,6 +1183,407 @@ class BarsAuthService:
             and "№ иб" in normalized
             and "пациент" in normalized
         )
+
+    @staticmethod
+    def _looks_like_inpatient_doctor_page(text: str) -> bool:
+        normalized = str(text or "").lower()
+        return (
+            "лечащий врач (new)" in normalized
+            and "дежурный врач" in normalized
+            and "пациенты под наблюдением" in normalized
+        )
+
+    def _wait_for_inpatient_doctor_page(self, page: dict[str, Any], timeout_sec: float) -> str:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_text = ""
+        while time.monotonic() < deadline:
+            last_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            if self._looks_like_inpatient_doctor_page(last_text):
+                self._diag("open_inpatient_duty_doctor_ready", text_len=len(last_text))
+                return last_text
+            time.sleep(0.35)
+        self._diag(
+            "open_inpatient_duty_doctor_not_ready",
+            level="warning",
+            text_preview=self._compact_text_preview(last_text),
+        )
+        return last_text
+
+    def _select_department_filter(self, page: dict[str, Any], department: str) -> str:
+        department_json = json.dumps(department, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const department = {department_json};
+  const docs = [];
+  const walk = (win) => {{
+    try {{
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {{
+        try {{ walk(frame.contentWindow); }} catch (_) {{}}
+      }}
+    }} catch (_) {{}}
+  }};
+  walk(window);
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const visible = (el) => {{
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  }};
+  const textOf = (el) => norm(el.innerText || el.value || el.textContent || el.getAttribute('title') || '');
+  const dispatchMouse = (el) => {{
+    const win = el.ownerDocument.defaultView;
+    for (const type of ['mousemove', 'mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click']) {{
+      el.dispatchEvent(new win.MouseEvent(type, {{bubbles: true, cancelable: true, view: win}}));
+    }}
+    if (typeof el.click === 'function') el.click();
+  }};
+  const setValue = (input) => {{
+    input.focus();
+    try {{
+      const proto = input instanceof input.ownerDocument.defaultView.HTMLTextAreaElement
+        ? input.ownerDocument.defaultView.HTMLTextAreaElement.prototype
+        : input.ownerDocument.defaultView.HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      setter.call(input, department);
+    }} catch (_) {{
+      input.value = department;
+    }}
+    input.dispatchEvent(new Event('input', {{bubbles: true}}));
+    input.dispatchEvent(new Event('change', {{bubbles: true}}));
+    input.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
+    input.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
+  }};
+  const selectComboValue = (input) => {{
+    const combo = input.closest('[cmptype="ComboBox"], .ctrl_combobox');
+    if (!combo) return {{used: false}};
+    const items = Array.from(combo.querySelectorAll('[cmptype="ComboItem"][value], tr[value]'));
+    const item = items.find(el => norm(el.textContent).toLowerCase().includes(department.toLowerCase()));
+    if (!item) return {{used: true, selected: false, reason: 'combo item not found'}};
+
+    const caption = norm(item.textContent) || department;
+    const value = item.getAttribute('value') || '';
+    const button = combo.querySelector('.cmbb-button,[title*="Выбрать"]');
+
+    try {{ if (button) dispatchMouse(button); }} catch (_) {{}}
+    try {{ dispatchMouse(item); }} catch (_) {{}}
+
+    combo.setAttribute('keyvalue', value);
+    combo.setAttribute('value', value);
+    combo.setAttribute('keycaption', caption);
+    input.focus();
+    try {{
+      const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, caption);
+    }} catch (_) {{
+      input.value = caption;
+    }}
+    input.dispatchEvent(new Event('input', {{bubbles: true}}));
+    input.dispatchEvent(new Event('change', {{bubbles: true}}));
+    combo.dispatchEvent(new Event('change', {{bubbles: true}}));
+    try {{
+      if (window.D3Api && window.D3Api.GridCtrl && typeof window.D3Api.GridCtrl.filterOnChange === 'function') {{
+        window.D3Api.GridCtrl.filterOnChange(combo);
+      }}
+    }} catch (_) {{}}
+    input.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
+    input.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
+    return {{used: true, selected: true, value, caption}};
+  }};
+  let best = null;
+  let bestScore = -1;
+  for (const doc of docs) {{
+    const headers = Array.from(doc.querySelectorAll('td,th,div,span,label')).filter(visible);
+    const bottomBoundary = headers
+      .filter(el => textOf(el).toLowerCase() === 'осмотры' || textOf(el).toLowerCase().includes('осмотры / назначения'))
+      .map(el => el.getBoundingClientRect().top)
+      .sort((a, b) => a - b)[0] || Number.POSITIVE_INFINITY;
+    const departmentHeaders = headers.filter(el => {{
+      const text = textOf(el).toLowerCase();
+      const rect = el.getBoundingClientRect();
+      return rect.top < bottomBoundary && (text === 'отделение' || text.includes(' отделение'));
+    }});
+    const inputs = Array.from(doc.querySelectorAll(
+      'input:not([type=hidden]):not([disabled]):not([type=checkbox]):not([type=radio]), textarea:not([disabled]), select:not([disabled])'
+    )).filter(visible);
+    for (const input of inputs) {{
+      const rect = input.getBoundingClientRect();
+      if (rect.top > bottomBoundary) continue;
+      if (rect.width < 40 || rect.height < 12) continue;
+      if (String(input.className || '').includes('SelectListItem')) continue;
+      const attrs = [
+        input.name, input.id, input.placeholder, input.title, input.getAttribute('aria-label'),
+        input.closest('td,tr,div,fieldset') ? input.closest('td,tr,div,fieldset').innerText : ''
+      ].map(x => String(x || '').toLowerCase()).join(' ');
+      let score = attrs.includes('отделение') ? 100 : 0;
+      for (const header of departmentHeaders) {{
+        const hrect = header.getBoundingClientRect();
+        const overlapsX = rect.left < hrect.right + 18 && rect.right > hrect.left - 18;
+        const below = rect.top >= hrect.top - 4;
+        if (overlapsX && below) score += 220 - Math.min(Math.abs(rect.top - hrect.bottom), 180);
+      }}
+      if (score > bestScore) {{
+        best = input;
+        bestScore = score;
+      }}
+    }}
+  }}
+  if (!best) return JSON.stringify({{ok: false, reason: 'department input not found'}});
+  if (String(best.tagName || '').toLowerCase() === 'select') {{
+    const option = Array.from(best.options || []).find(opt => norm(opt.textContent).toLowerCase().includes(department.toLowerCase()));
+    if (option) best.value = option.value;
+    best.dispatchEvent(new Event('change', {{bubbles: true}}));
+  }} else {{
+    var comboResult = selectComboValue(best);
+    if (!comboResult.selected) setValue(best);
+  }}
+  return JSON.stringify({{
+    ok: true,
+    score: bestScore,
+    name: best.name || best.id || best.placeholder || '',
+    value: best.value || '',
+    combo: comboResult || null
+  }});
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "select_department_filter_success",
+                department=department,
+                input_name=payload.get("name"),
+                input_value=payload.get("value"),
+                score=payload.get("score"),
+            )
+            return f"Отделение выбрано: {department}"
+        self._diag(
+            "select_department_filter_failed",
+            level="warning",
+            department=department,
+            reason=payload.get("reason"),
+        )
+        return f"Поле отделения не найдено: {payload.get('reason') or ''}".strip()
+
+    def _extract_visible_patient_rows(self, page: dict[str, Any], department: str) -> list[dict[str, str]]:
+        expression = """
+(() => {
+  const docs = [];
+  const walk = (win) => {
+    try {
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {
+        try { walk(frame.contentWindow); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  walk(window);
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const visible = (el) => {
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const rows = [];
+  const addRow = (cells) => {
+    const clean = cells.map(norm).filter(Boolean);
+    if (clean.length >= 2) rows.push(clean);
+  };
+  for (const doc of docs) {
+    for (const tr of Array.from(doc.querySelectorAll('tr')).filter(visible)) {
+      const cells = Array.from(tr.querySelectorAll('td,th')).filter(visible).map(cell => cell.innerText || cell.textContent || '');
+      addRow(cells);
+    }
+    for (const row of Array.from(doc.querySelectorAll('[role="row"], .x-grid-row, .grid-row')).filter(visible)) {
+      const cellNodes = Array.from(row.querySelectorAll('[role="gridcell"], .x-grid-cell, .grid-cell, td')).filter(visible);
+      const cells = cellNodes.length ? cellNodes.map(cell => cell.innerText || cell.textContent || '') : String(row.innerText || '').split('\\n');
+      addRow(cells);
+    }
+  }
+  return JSON.stringify({ok: true, rows});
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        raw_rows = payload.get("rows")
+        if not isinstance(raw_rows, list):
+            text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.4)
+            return self._extract_patient_rows_from_text(text, department)
+
+        target_department = self._normalize_history_fragment(department)
+        patients: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_row in raw_rows:
+            if not isinstance(raw_row, list):
+                continue
+            cells = [self._trim_value(str(cell or ""), max_len=500) for cell in raw_row]
+            cells = [cell for cell in cells if cell]
+            joined = " ".join(cells)
+            normalized = joined.lower()
+            if not cells or "номер иб" in normalized or "пациент" == normalized.strip():
+                continue
+            if target_department and target_department not in self._normalize_history_fragment(joined):
+                continue
+
+            history_number = next((cell for cell in cells if re.search(r"\\\d{2,}", cell)), "")
+            full_name = ""
+            for cell in cells:
+                if cell == history_number or self._normalize_history_fragment(cell) == target_department:
+                    continue
+                candidate = self._guess_full_name(cell)
+                if candidate and "Отделение" not in candidate:
+                    full_name = candidate
+                    break
+            if not history_number or not full_name:
+                continue
+
+            birthdate = next((cell for cell in cells if re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", cell)), "")
+            age = next((cell for cell in cells if re.search(r"\b\d+\s*(?:год|года|лет)\b", cell.lower())), "")
+            department_value = next((cell for cell in cells if "отделение" in cell.lower()), department)
+            diagnosis = next(
+                (
+                    cell
+                    for cell in cells
+                    if re.search(r"\b[A-ZА-Я]\d{2}(?:\.\d)?\b", cell)
+                    or "диагноз" in cell.lower()
+                ),
+                "",
+            )
+            doctor = ""
+            dept_index = cells.index(department_value) if department_value in cells else -1
+            if dept_index > 0:
+                for cell in reversed(cells[:dept_index]):
+                    if cell not in {history_number, full_name, birthdate, age} and self._guess_full_name(cell):
+                        doctor = cell
+                        break
+
+            key = (history_number, full_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            patients.append(
+                {
+                    "history_number": history_number,
+                    "full_name": full_name,
+                    "birthdate": birthdate,
+                    "age": age,
+                    "doctor": self._trim_value(doctor, max_len=120),
+                    "department": self._trim_value(department_value, max_len=220),
+                    "diagnosis": self._trim_value(diagnosis, max_len=300),
+                }
+            )
+        patients.sort(key=lambda item: item.get("full_name", ""))
+        self._diag(
+            "extract_visible_patient_rows_done",
+            raw_rows_count=len(raw_rows),
+            patients_count=len(patients),
+        )
+        if not patients:
+            text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.4)
+            patients = self._extract_patient_rows_from_text(text, department)
+        return patients
+
+    def _wait_for_department_patient_rows(
+        self,
+        page: dict[str, Any],
+        department: str,
+        timeout_sec: float,
+    ) -> list[dict[str, str]]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_patients: list[dict[str, str]] = []
+        while time.monotonic() < deadline:
+            last_patients = self._extract_visible_patient_rows(page, department)
+            if last_patients:
+                self._diag(
+                    "wait_for_department_patient_rows_success",
+                    department=department,
+                    patients_count=len(last_patients),
+                )
+                return last_patients
+            time.sleep(0.45)
+
+        self._diag(
+            "wait_for_department_patient_rows_timeout",
+            level="warning",
+            department=department,
+            patients_count=len(last_patients),
+            text_preview=self._compact_text_preview(self._read_page_text_with_retry(page, attempts=1, delay_sec=0)),
+        )
+        return last_patients
+
+    def _extract_patient_rows_from_text(self, text: str, department: str) -> list[dict[str, str]]:
+        lines = [self._trim_value(line.strip(), max_len=700) for line in str(text or "").splitlines()]
+        lines = [line for line in lines if line]
+        target_department = self._normalize_history_fragment(department)
+        patients: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for index, line in enumerate(lines):
+            if not re.search(r"\\\d{2,}", line):
+                continue
+            context = lines[index : index + 14]
+            context_text = " ".join(context)
+            if target_department and target_department not in self._normalize_history_fragment(context_text):
+                continue
+
+            history_number = self._trim_value(line, max_len=260)
+            full_name = ""
+            for candidate in context[1:8]:
+                if self._normalize_history_fragment(candidate) == target_department:
+                    continue
+                guessed_name = self._guess_full_name(candidate)
+                if guessed_name and "отделение" not in guessed_name.lower():
+                    full_name = guessed_name
+                    break
+            if not full_name:
+                full_name = self._guess_full_name(context_text)
+            if not full_name:
+                continue
+
+            birthdate = next((item for item in context if re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", item)), "")
+            age = next((item for item in context if re.search(r"\b\d+\s*(?:год|года|лет)\b", item.lower())), "")
+            department_value = next((item for item in context if target_department in self._normalize_history_fragment(item)), department)
+            diagnosis = next(
+                (
+                    item
+                    for item in context
+                    if re.search(r"\b[A-ZА-Я]\d{2}(?:\.\d)?\b", item)
+                    or "диагноз" in item.lower()
+                ),
+                "",
+            )
+            doctor = ""
+            for item in context:
+                if item in {history_number, full_name, birthdate, age, department_value}:
+                    continue
+                if self._guess_full_name(item):
+                    doctor = item
+                    break
+
+            key = (history_number, full_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            patients.append(
+                {
+                    "history_number": history_number,
+                    "full_name": full_name,
+                    "birthdate": birthdate,
+                    "age": age,
+                    "doctor": self._trim_value(doctor, max_len=120),
+                    "department": self._trim_value(department_value, max_len=220),
+                    "diagnosis": self._trim_value(diagnosis, max_len=300),
+                }
+            )
+
+        patients.sort(key=lambda item: item.get("full_name", ""))
+        self._diag(
+            "extract_patient_rows_from_text_done",
+            department=department,
+            lines_count=len(lines),
+            patients_count=len(patients),
+        )
+        return patients
 
     def _page_contains_text(self, page: dict[str, Any], labels: list[str]) -> bool:
         labels_json = json.dumps(labels, ensure_ascii=False)
@@ -1618,8 +2175,18 @@ class BarsAuthService:
 
         expression = (
             "(() => {"
-            "const body = document.body ? document.body.innerText : '';"
-            "return [document.title, location.href, body].join('\\n');"
+            "const parts = [document.title, location.href];"
+            "const walk = (win) => {"
+            "try {"
+            "if (!win || !win.document) return;"
+            "if (win.document.body) parts.push(win.document.body.innerText || win.document.body.textContent || '');"
+            "for (const frame of win.document.querySelectorAll('iframe,frame')) {"
+            "try { walk(frame.contentWindow); } catch (_) {}"
+            "}"
+            "} catch (_) {}"
+            "};"
+            "walk(window);"
+            "return parts.join('\\n');"
             "})()"
         )
         return self._evaluate_page_expression(page, expression)
