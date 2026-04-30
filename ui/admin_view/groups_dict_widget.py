@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QComboBox, QFrame
 )
 from PySide6.QtCore import Qt
-from ...services.prescription_engine import engine
+from rem_card.services.prescription_engine import engine
 
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 

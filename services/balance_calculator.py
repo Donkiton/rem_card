@@ -3,9 +3,9 @@ import time
 import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
-from ..data.dto.remcard_dto import OrderDTO, AdministrationDTO, OrderStatus
+from rem_card.data.dto.remcard_dto import OrderDTO, AdministrationDTO, OrderStatus
 from rem_card.app.logger import logger
-from .prescription_engine import engine
+from rem_card.services.prescription_engine import engine
 
 class BalanceCalculator:
     """РљР»Р°СЃСЃ РґР»СЏ СЂР°СЃС‡РµС‚Р° Р±Р°Р»Р°РЅСЃР° РІРІРµРґРµРЅРЅС‹С… Р¶РёРґРєРѕСЃС‚РµР№ РЅР° РѕСЃРЅРѕРІРµ РЅР°Р·РЅР°С‡РµРЅРёР№."""

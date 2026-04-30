@@ -401,7 +401,7 @@ class MainWindow(QMainWindow):
     def _run_maintenance_async(self):
         def _worker():
             try:
-                from ..app.backup_and_cleanup import perform_daily_backup_and_cleanup
+                from rem_card.app.backup_and_cleanup import perform_daily_backup_and_cleanup
 
                 perform_daily_backup_and_cleanup()
             except Exception:
@@ -497,7 +497,8 @@ class MainWindow(QMainWindow):
             return False
         try:
             import shiboken6  # type: ignore
-            return bool(shiboken6.isValid(obj))
+            is_valid = getattr(shiboken6, "isValid", None)
+            return bool(is_valid(obj)) if callable(is_valid) else True
         except Exception:
             return True
 

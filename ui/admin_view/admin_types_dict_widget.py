@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QFormLayout, QDialog, QDialogButtonBox, QFrame
 )
 from PySide6.QtCore import Qt
-from ...services.prescription_engine import engine
+from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 
 class AdminTypeDialog(BaseStyledDialog):

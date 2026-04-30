@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QApplication
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QPoint
-from ...services.prescription_engine import engine
+from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 
 class TemplateDrugCharacteristicsDialog(BaseStyledDialog):
