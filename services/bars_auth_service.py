@@ -21,6 +21,8 @@ DEFAULT_DEBUG_PORT = 9338
 DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
 DEFAULT_BARS_LOAD_TIMEOUT_SEC = 40.0
 DIRECT_FORM_API_TIMEOUT_SEC = 4.0
+DEPARTMENT_SELECT_TIMEOUT_SEC = 8.0
+NETWORK_CAPTURE_WAIT_SEC = 8.0
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
@@ -736,19 +738,53 @@ class BarsAuthService:
 
         steps: list[str] = []
         steps.extend(self._open_inpatient_duty_doctor(page, timeout_sec=self._remaining_timeout(deadline)))
-        if self._deadline_expired(deadline) and not self._looks_like_inpatient_doctor_page(
-            self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
-        ):
-            return self._bars_load_timeout_result(department, steps, "форму Лечащий врач (new)", started_at)
+        current_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+        failed_step = self._first_failed_step(steps)
+        if failed_step or not self._looks_like_inpatient_doctor_page(current_text):
+            if self._deadline_expired(deadline):
+                return self._bars_load_timeout_result(department, steps, "форму Лечащий врач (new)", started_at)
+            return self._bars_scenario_failed_result(
+                department,
+                steps,
+                failed_step or "Форма Лечащий врач (new) не открылась",
+                current_text,
+                started_at,
+            )
 
         self._install_network_capture(page)
         self._clear_network_capture(page)
-        steps.append(self._select_department_filter(page, department))
-        steps.append(self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"]))
+        department_step = self._select_department_filter(
+            page,
+            department,
+            timeout_sec=min(DEPARTMENT_SELECT_TIMEOUT_SEC, self._remaining_timeout(deadline)),
+        )
+        steps.append(department_step)
+        failed_step = self._first_failed_step([department_step])
+        if failed_step:
+            return self._bars_scenario_failed_result(
+                department,
+                steps,
+                failed_step,
+                self._read_page_text_with_retry(page, attempts=1, delay_sec=0),
+                started_at,
+            )
+
+        find_step = self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"])
+        steps.append(find_step)
+        failed_step = self._first_failed_step([find_step])
+        if failed_step:
+            return self._bars_scenario_failed_result(
+                department,
+                steps,
+                failed_step,
+                self._read_page_text_with_retry(page, attempts=1, delay_sec=0),
+                started_at,
+            )
+
         patients = self._wait_for_department_patients_from_requests(
             page,
             department,
-            timeout_sec=self._remaining_timeout(deadline),
+            timeout_sec=min(NETWORK_CAPTURE_WAIT_SEC, self._remaining_timeout(deadline)),
         )
         if not patients:
             patients = self._wait_for_department_patient_rows(
@@ -858,6 +894,47 @@ class BarsAuthService:
             patients=[],
             text_preview="; ".join(step for step in steps if step),
         )
+
+    def _bars_scenario_failed_result(
+        self,
+        department: str,
+        steps: list[str],
+        failed_step: str,
+        text: str,
+        started_at: float,
+    ) -> BarsPatientListResult:
+        message = f"Сценарий БАРС остановлен: {failed_step}"
+        self._diag(
+            "bars_scenario_failed",
+            level="warning",
+            department=department,
+            failed_step=failed_step,
+            elapsed_sec=round(time.monotonic() - started_at, 2),
+            steps=steps,
+            text_preview=self._compact_text_preview(text),
+        )
+        return BarsPatientListResult(
+            False,
+            message,
+            department=department,
+            patients=[],
+            text_preview=self._compact_text_preview(text) or "; ".join(step for step in steps if step),
+        )
+
+    @staticmethod
+    def _first_failed_step(steps: list[str]) -> str:
+        failure_markers = (
+            "не найден",
+            "не выбра",
+            "не откры",
+            "не загруз",
+            "не удалось",
+        )
+        for step in steps:
+            normalized = str(step or "").lower()
+            if any(marker in normalized for marker in failure_markers):
+                return str(step or "")
+        return ""
 
     def _build_browser_args(self, background: bool = False) -> list[str]:
         args = [self.browser_path]
@@ -1410,27 +1487,51 @@ class BarsAuthService:
                 if self._deadline_expired(deadline):
                     steps.append("Форма Лечащий врач (new) не загрузилась за отведенное время")
                     return steps
-                steps.append(self._hover_visible_text(page, ["Рабочие места"]))
+                step = self._hover_visible_text(page, ["Рабочие места"])
+                steps.append(step)
+                if self._first_failed_step([step]):
+                    return steps
                 time.sleep(0.35)
                 if not self._page_contains_text(page, ["Пациенты в стационаре"]):
-                    steps.append(self._click_visible_text(page, ["Рабочие места"]))
+                    step = self._click_visible_text(page, ["Рабочие места"])
+                    steps.append(step)
+                    if self._first_failed_step([step]):
+                        return steps
                     time.sleep(0.45)
 
-                steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
+                step = self._hover_visible_text(page, ["Пациенты в стационаре"])
+                steps.append(step)
+                if self._first_failed_step([step]):
+                    return steps
                 time.sleep(0.45)
                 if not self._page_contains_text(page, ["Лечащий врач (new)"]):
-                    steps.append(self._click_visible_text(page, ["Пациенты в стационаре"]))
+                    step = self._click_visible_text(page, ["Пациенты в стационаре"])
+                    steps.append(step)
+                    if self._first_failed_step([step]):
+                        return steps
                     time.sleep(0.45)
-                    steps.append(self._hover_visible_text(page, ["Пациенты в стационаре"]))
+                    step = self._hover_visible_text(page, ["Пациенты в стационаре"])
+                    steps.append(step)
+                    if self._first_failed_step([step]):
+                        return steps
                     time.sleep(0.45)
 
-                steps.append(self._click_visible_text(page, ["Лечащий врач (new)"]))
-                self._wait_for_inpatient_doctor_page(page, timeout_sec=self._remaining_timeout(deadline))
+                step = self._click_visible_text(page, ["Лечащий врач (new)"])
+                steps.append(step)
+                if self._first_failed_step([step]):
+                    return steps
+                text = self._wait_for_inpatient_doctor_page(page, timeout_sec=self._remaining_timeout(deadline))
+                if not self._looks_like_inpatient_doctor_page(text):
+                    steps.append("Форма Лечащий врач (new) не открылась")
+                    return steps
         else:
             self._diag("open_inpatient_duty_doctor_already_open")
             steps.append("Лечащий врач (new) уже открыт")
 
-        steps.append(self._select_inpatient_tab(page, "Дежурный врач"))
+        step = self._select_inpatient_tab(page, "Дежурный врач")
+        steps.append(step)
+        if self._first_failed_step([step]):
+            return steps
         time.sleep(0.7)
         return steps
 
@@ -1602,7 +1703,12 @@ class BarsAuthService:
         )
         return last_text
 
-    def _select_department_filter(self, page: dict[str, Any], department: str) -> str:
+    def _select_department_filter(
+        self,
+        page: dict[str, Any],
+        department: str,
+        timeout_sec: float = DEPARTMENT_SELECT_TIMEOUT_SEC,
+    ) -> str:
         department_json = json.dumps(department, ensure_ascii=False)
         expression = f"""
 (() => {{
@@ -1756,13 +1862,20 @@ class BarsAuthService:
     }}
   }}
   if (!best) return JSON.stringify({{ok: false, reason: 'department input not found'}});
+  var comboResult = null;
   if (String(best.tagName || '').toLowerCase() === 'select') {{
     const option = Array.from(best.options || []).find(opt => norm(opt.textContent).toLowerCase().includes(department.toLowerCase()));
-    if (option) best.value = option.value;
+    if (!option) {{
+      return JSON.stringify({{ok: false, reason: 'department option not found', score: bestScore, name: best.name || best.id || best.placeholder || '', value: best.value || ''}});
+    }}
+    best.value = option.value;
     best.dispatchEvent(new Event('change', {{bubbles: true}}));
   }} else {{
-    var comboResult = selectComboValue(best);
-    if (!comboResult.selected) setValue(best);
+    comboResult = selectComboValue(best);
+    if (comboResult.used && !comboResult.selected) {{
+      return JSON.stringify({{ok: false, reason: comboResult.reason || 'combo item not selected', combo: comboResult, score: bestScore, name: best.name || best.id || best.placeholder || '', value: best.value || ''}});
+    }}
+    if (!comboResult.used) setValue(best);
   }}
   return JSON.stringify({{
     ok: true,
@@ -1773,24 +1886,38 @@ class BarsAuthService:
   }});
 }})()
 """
-        payload = self._evaluate_json_expression(page, expression)
-        if payload.get("ok"):
-            self._diag(
-                "select_department_filter_success",
-                department=department,
-                input_name=payload.get("name"),
-                input_value=payload.get("value"),
-                combo=payload.get("combo"),
-                score=payload.get("score"),
-            )
-            return f"Отделение выбрано: {department}"
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        payload: dict[str, Any] = {}
+        while True:
+            payload = self._evaluate_json_expression(page, expression)
+            if payload.get("ok"):
+                self._diag(
+                    "select_department_filter_success",
+                    department=department,
+                    input_name=payload.get("name"),
+                    input_value=payload.get("value"),
+                    combo=payload.get("combo"),
+                    score=payload.get("score"),
+                )
+                return f"Отделение выбрано: {department}"
+
+            reason = str(payload.get("reason") or "")
+            retryable = reason in {"combo item not found", "department option not found"}
+            if not retryable or time.monotonic() >= deadline:
+                break
+            time.sleep(0.5)
+
         self._diag(
             "select_department_filter_failed",
             level="warning",
             department=department,
             reason=payload.get("reason"),
+            combo=payload.get("combo"),
+            input_name=payload.get("name"),
+            input_value=payload.get("value"),
+            score=payload.get("score"),
         )
-        return f"Поле отделения не найдено: {payload.get('reason') or ''}".strip()
+        return f"Отделение не выбрано: {payload.get('reason') or ''}".strip()
 
     def _extract_visible_patient_rows(self, page: dict[str, Any], department: str) -> list[dict[str, str]]:
         expression = """
@@ -1852,10 +1979,15 @@ class BarsAuthService:
             if target_department and target_department not in self._normalize_history_fragment(joined):
                 continue
 
-            history_number = next((cell for cell in cells if re.search(r"\\\d{2,}", cell)), "")
-            full_name = ""
+            history_cell = next((cell for cell in cells if re.search(r"\\\d{2,}", cell)), "")
+            history_match = re.search(r"(.+?\\\d{2,})", history_cell)
+            history_number = self._trim_value(history_match.group(1), max_len=260) if history_match else history_cell
+            inline_tail = history_cell[history_match.end() :].strip() if history_match else ""
+            full_name = self._guess_full_name(inline_tail)
             for cell in cells:
-                if cell == history_number or self._normalize_history_fragment(cell) == target_department:
+                if full_name:
+                    break
+                if cell in {history_cell, history_number} or self._normalize_history_fragment(cell) == target_department:
                     continue
                 candidate = self._guess_full_name(cell)
                 if candidate and "Отделение" not in candidate:
@@ -1864,22 +1996,23 @@ class BarsAuthService:
             if not history_number or not full_name:
                 continue
 
-            birthdate = next((cell for cell in cells if re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", cell)), "")
-            age = next((cell for cell in cells if re.search(r"\b\d+\s*(?:год|года|лет)\b", cell.lower())), "")
-            department_value = next((cell for cell in cells if "отделение" in cell.lower()), department)
-            diagnosis = next(
+            birthdate = self._first_regex_match(cells, r"\b\d{2}\.\d{2}\.\d{4}\b")
+            age = self._first_regex_match(cells, r"\b\d+\s*(?:год|года|лет)\b")
+            department_value = next(
                 (
-                    cell
+                    department if len(cell) > len(department) + 30 else cell
                     for cell in cells
-                    if re.search(r"\b[A-ZА-Я]\d{2}(?:\.\d)?\b", cell)
-                    or "диагноз" in cell.lower()
+                    if target_department in self._normalize_history_fragment(cell)
                 ),
-                "",
+                department,
             )
+            diagnosis = self._first_diagnosis_match(cells)
             doctor = ""
             dept_index = cells.index(department_value) if department_value in cells else -1
             if dept_index > 0:
                 for cell in reversed(cells[:dept_index]):
+                    if re.search(r"\\\d{2,}", cell):
+                        continue
                     if cell not in {history_number, full_name, birthdate, age} and self._guess_full_name(cell):
                         doctor = cell
                         break
@@ -2132,16 +2265,20 @@ class BarsAuthService:
         seen: set[tuple[str, str]] = set()
 
         for index, line in enumerate(lines):
-            if not re.search(r"\\\d{2,}", line):
+            history_match = re.search(r"(.+?\\\d{2,})", line)
+            if not history_match:
                 continue
             context = lines[index : index + 14]
             context_text = " ".join(context)
             if target_department and target_department not in self._normalize_history_fragment(context_text):
                 continue
 
-            history_number = self._trim_value(line, max_len=260)
-            full_name = ""
+            history_number = self._trim_value(history_match.group(1), max_len=260)
+            inline_tail = line[history_match.end() :].strip()
+            full_name = self._guess_full_name(inline_tail)
             for candidate in context[1:8]:
+                if full_name:
+                    break
                 if self._normalize_history_fragment(candidate) == target_department:
                     continue
                 guessed_name = self._guess_full_name(candidate)
@@ -2153,20 +2290,22 @@ class BarsAuthService:
             if not full_name:
                 continue
 
-            birthdate = next((item for item in context if re.search(r"\b\d{2}\.\d{2}\.\d{4}\b", item)), "")
-            age = next((item for item in context if re.search(r"\b\d+\s*(?:год|года|лет)\b", item.lower())), "")
-            department_value = next((item for item in context if target_department in self._normalize_history_fragment(item)), department)
-            diagnosis = next(
+            data_context = [line, *context[1:]]
+            birthdate = self._first_regex_match(data_context, r"\b\d{2}\.\d{2}\.\d{4}\b")
+            age = self._first_regex_match(data_context, r"\b\d+\s*(?:год|года|лет)\b")
+            department_value = next(
                 (
-                    item
+                    department if len(item) > len(department) + 30 else item
                     for item in context
-                    if re.search(r"\b[A-ZА-Я]\d{2}(?:\.\d)?\b", item)
-                    or "диагноз" in item.lower()
+                    if target_department in self._normalize_history_fragment(item)
                 ),
-                "",
+                department,
             )
+            diagnosis = self._first_diagnosis_match(data_context)
             doctor = ""
             for item in context:
+                if re.search(r"\\\d{2,}", item):
+                    continue
                 if item in {history_number, full_name, birthdate, age, department_value}:
                     continue
                 if self._guess_full_name(item):
@@ -2756,6 +2895,27 @@ class BarsAuthService:
     @staticmethod
     def _normalize_history(value: str) -> str:
         return re.sub(r"\s+", "", str(value or "").lower())
+
+    @staticmethod
+    def _first_regex_match(values: list[str], pattern: str) -> str:
+        compiled = re.compile(pattern, re.IGNORECASE)
+        for value in values:
+            match = compiled.search(str(value or ""))
+            if match:
+                return match.group(0)
+        return ""
+
+    @staticmethod
+    def _first_diagnosis_match(values: list[str]) -> str:
+        pattern = re.compile(r"\b[A-ZА-Я]\d{2}(?:\.\d)?\b")
+        for value in values:
+            text = str(value or "")
+            match = pattern.search(text)
+            if match:
+                return text[match.start() :].strip()
+            if "диагноз" in text.lower():
+                return text.strip()
+        return ""
 
     @staticmethod
     def _guess_full_name(text: str) -> str:
