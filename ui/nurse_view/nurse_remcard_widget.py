@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QFrame, QScrollArea, QDateEdit)
-from PySide6.QtCore import QDate, QTimer
+from PySide6.QtCore import QDate, QTimer, Qt
 from ..shared.vitals_widget import VitalsWidget
 from ..shared.chart_widget import ChartWidget
 from datetime import datetime

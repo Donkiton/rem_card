@@ -1,4 +1,4 @@
-﻿from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.base_sector import BaseSectorWidget
 
 
 class Sector2v(BaseSectorWidget):

@@ -1,4 +1,4 @@
-﻿import re
+import re
 import time
 import threading
 from datetime import datetime, timedelta

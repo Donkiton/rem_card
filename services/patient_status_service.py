@@ -1,4 +1,4 @@
-﻿from typing import Dict, List, Tuple, Optional, Callable, Any, Sequence
+from typing import Dict, List, Tuple, Optional, Callable, Any, Sequence
 from datetime import datetime
 from ..data.dao.patient_status_dao import PatientStatusDAO
 from ..data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO

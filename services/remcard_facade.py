@@ -1,4 +1,4 @@
-﻿from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
+from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta

@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """
-Fail-fast sanity runner for stress/benchmark safety checks.
+Fail-fast sanity runner for quality, stress and benchmark safety checks.
 
 Runs a short sequence:
-1) regression_safety_checks.py
-2) multi_client_stress.py
-3) orders_click_latency_benchmark.py
+1) code_quality_checks.py
+2) regression_safety_checks.py
+3) multi_client_stress.py
+4) orders_click_latency_benchmark.py
 
 Stops on first failure and writes a JSON report.
 """
@@ -132,6 +133,20 @@ def _validate_regression(exit_code: int, payload: dict[str, Any] | None) -> tupl
     return True, f"Passed {passed}/{total}"
 
 
+def _validate_quality(exit_code: int, payload: dict[str, Any] | None) -> tuple[bool, str]:
+    if exit_code != 0:
+        return False, f"Process exit code {exit_code}"
+    if not payload:
+        return False, "Missing JSON payload"
+    status = str(payload.get("status") or "")
+    failed = int(payload.get("checks_failed", 0) or 0)
+    passed = int(payload.get("checks_passed", 0) or 0)
+    total = int(payload.get("checks_total", 0) or 0)
+    if status != "passed" or failed:
+        return False, f"Quality checks failed: passed={passed}, failed={failed}, total={total}"
+    return True, f"Quality OK: passed={passed}/{total}"
+
+
 def _validate_stress(expected_ops: int) -> Callable[[int, dict[str, Any] | None], tuple[bool, str]]:
     def _inner(exit_code: int, payload: dict[str, Any] | None) -> tuple[bool, str]:
         if exit_code != 0:
@@ -194,6 +209,7 @@ def main() -> int:
     parser.add_argument("--stress-timeout-s", type=float, default=180.0, help="Timeout for stress script")
     parser.add_argument("--benchmark-clicks", type=int, default=5, help="Clicks for orders latency benchmark")
     parser.add_argument("--benchmark-timeout-s", type=float, default=120.0, help="Hard timeout for benchmark script")
+    parser.add_argument("--quality-timeout-s", type=float, default=60.0, help="Timeout for static quality checks")
     parser.add_argument("--regression-timeout-s", type=float, default=120.0, help="Timeout for regression checks")
     args = parser.parse_args()
 
@@ -205,6 +221,12 @@ def main() -> int:
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
 
     checks_plan = [
+        {
+            "name": "code_quality_checks",
+            "command": [args.python, str(SCRIPT_DIR / "code_quality_checks.py")],
+            "timeout": float(args.quality_timeout_s),
+            "validate": _validate_quality,
+        },
         {
             "name": "regression_safety_checks",
             "command": [args.python, str(SCRIPT_DIR / "regression_safety_checks.py")],

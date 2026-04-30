@@ -1,4 +1,4 @@
-﻿import os
+import os
 from datetime import datetime, timedelta
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushButton, QFrame)

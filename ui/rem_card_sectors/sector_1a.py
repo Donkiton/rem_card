@@ -1,4 +1,4 @@
-﻿from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QLabel
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QLabel
 from PySide6.QtCore import Qt
 
 from rem_card.ui.shared.base_sector import BaseSectorWidget

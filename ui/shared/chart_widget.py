@@ -1,4 +1,4 @@
-﻿import os
+import os
 import pyqtgraph as pg
 import warnings
 import numpy as np

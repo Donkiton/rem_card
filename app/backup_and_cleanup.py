@@ -1,4 +1,4 @@
-﻿import glob
+import glob
 import os
 import sqlite3
 import time
