@@ -454,6 +454,34 @@ class ChartWidget(QWidget):
         # РЎС‚Р°СЂС‹Р№ РјРµС…Р°РЅРёР·Рј РІС‹РґРµР»РµРЅРёСЏ С‡Р°СЃР° РѕС‚РєР»СЋС‡РµРЅ
         pass
 
+    def clear_for_context(self, *, admission_id=None, start_time: datetime = None):
+        """Immediately remove previous patient curves while a new snapshot is loading."""
+        self.admission_id = admission_id
+        self.vitals_data = []
+        self.current_vitals = []
+        self.start_time = start_time
+        self._last_render_key = None
+
+        if self.fade_timeline.state() == QTimeLine.Running:
+            self.fade_timeline.stop()
+        self._fade_action = None
+        self._fade_target_state = None
+
+        for item in self.curve_items:
+            self.plot_widget.removeItem(item)
+        for item in self.fill_items:
+            self.plot_widget.removeItem(item)
+        self.curve_items.clear()
+        self.fill_items.clear()
+
+        self.scatter_vitals.setData([])
+        self.slice_line.hide()
+        self.slice_line.setOpacity(0)
+        self.tooltip.hide()
+        self.tooltip.setOpacity(0)
+        self.header_spacer.update()
+        self.plot_widget.viewport().update()
+
     @staticmethod
     def _normalize_key_dt(value):
         if value is None:

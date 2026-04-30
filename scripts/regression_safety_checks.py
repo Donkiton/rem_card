@@ -1382,6 +1382,107 @@ def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tu
     return True, "ok"
 
 
+def _check_chart_clears_on_patient_context_change(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+
+    chart_source = (root / "ui" / "shared" / "chart_widget.py").read_text(encoding="utf-8")
+    if "def clear_for_context" not in chart_source:
+        return False, "ChartWidget.clear_for_context not found"
+    if "self.scatter_vitals.setData([])" not in chart_source:
+        return False, "ChartWidget.clear_for_context must clear previous vital markers"
+
+    cases = [
+        ("doctor", "ui/doctor_view/doctor_remcard_widget.py", "DoctorRemCardWidget"),
+        ("nurse", "ui/nurse_view/nurse_main_widget.py", "NurseMainWidget"),
+    ]
+    for role, relative_path, class_name in cases:
+        source_path = root / relative_path
+        source_text = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source_text)
+        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        if not class_defs:
+            return False, f"{role}: {class_name} class not found"
+        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+        load_method = methods.get("load_patient_card")
+        if load_method is None:
+            return False, f"{role}: load_patient_card not found"
+        load_source = ast.get_source_segment(source_text, load_method) or ""
+        if "clear_for_context" not in load_source:
+            return False, f"{role}: chart must be cleared immediately on patient card switch"
+
+    return True, "ok"
+
+
+def _check_journal_prewarm_is_opt_in(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    cases = [
+        ("doctor", root / "ui" / "doctor_view" / "doctor_remcard_widget.py"),
+        ("nurse", root / "ui" / "nurse_view" / "nurse_main_widget.py"),
+    ]
+    for role, source_path in cases:
+        source = source_path.read_text(encoding="utf-8")
+        if 'JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"' not in source:
+            return False, f"{role}: journal prewarm must be disabled by default"
+        if 'JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"' not in source:
+            return False, f"{role}: journal widget prewarm must be disabled by default"
+        if "if JOURNAL_PREWARM_ENABLED:" not in source:
+            return False, f"{role}: startup journal prewarm timer must be gated"
+
+    return True, "ok"
+
+
+def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    cases = [
+        ("doctor", root / "ui" / "doctor_view" / "doctor_main_widget.py"),
+        ("nurse", root / "ui" / "nurse_view" / "nurse_main_widget.py"),
+    ]
+    required_entities = {
+        "vitals",
+        "vital_settings",
+        "patient_status_events",
+        "fluids",
+        "orders",
+        "administrations",
+    }
+    for role, source_path in cases:
+        source = source_path.read_text(encoding="utf-8")
+        if "W1_REFRESH_ENTITIES" not in source:
+            return False, f"{role}: W1 refresh entity set not found"
+        if "queue_if_running=False" not in source:
+            return False, f"{role}: startup W1 refresh should not queue a duplicate refresh"
+        missing = [entity for entity in required_entities if f'"{entity}"' not in source]
+        if missing:
+            return False, f"{role}: W1 refresh entities missing {missing}"
+        tree = ast.parse(source)
+        methods = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_on_data_changes"
+        ]
+        if not methods:
+            return False, f"{role}: _on_data_changes not found"
+        method_source = ast.get_source_segment(source, methods[0]) or ""
+        if "W1_REFRESH_ENTITIES" not in method_source:
+            return False, f"{role}: W1 beds refresh must use W1_REFRESH_ENTITIES"
+
+    widget_cases = [
+        ("doctor", root / "ui" / "doctor_view" / "components" / "beds_selection_widget.py"),
+        ("nurse", root / "ui" / "nurse_view" / "components" / "nurse_beds_selection_widget.py"),
+    ]
+    for role, source_path in widget_cases:
+        source = source_path.read_text(encoding="utf-8")
+        if "def refresh(self, *, queue_if_running: bool = True)" not in source:
+            return False, f"{role}: W1 refresh must support non-queued startup refresh"
+        if "if queue_if_running:" not in source:
+            return False, f"{role}: W1 refresh must respect queue_if_running"
+
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -1409,6 +1510,9 @@ def main():
         ),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
+        ("chart_clears_on_patient_context_change", _check_chart_clears_on_patient_context_change),
+        ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
+        ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
     ]
 
     result_items = []

@@ -93,9 +93,10 @@ class NurseBedsSelectionWidget(QWidget):
             y = (self.height() - pixmap.height()) // 2
             painter.drawPixmap(x, y, pixmap)
 
-    def refresh(self):
+    def refresh(self, *, queue_if_running: bool = True):
         if self._refresh_worker and self._refresh_worker.isRunning():
-            self._refresh_pending = True
+            if queue_if_running:
+                self._refresh_pending = True
             return
 
         self._refresh_pending = False

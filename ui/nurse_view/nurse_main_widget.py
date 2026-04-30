@@ -13,8 +13,24 @@ ADD_PATIENT_LOCK_KEY = "add_patient_button"
 CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
-JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "1200")))
-JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "1") != "0"
+JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
+JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
+JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
+W1_REFRESH_ENTITIES = {
+    "patients",
+    "admissions",
+    "beds",
+    "operations",
+    "vitals",
+    "vital_settings",
+    "patient_status_events",
+    "fluids",
+    "orders",
+    "administrations",
+    "diet_templates",
+    "diet_plan",
+    "oral_intake_events",
+}
 
 class NurseMainWidget(QWidget):
     """Главный виджет медсестры с изолированным UI и исправленной навигацией."""
@@ -55,7 +71,8 @@ class NurseMainWidget(QWidget):
         QTimer.singleShot(0, self._refresh_add_patient_button_lock_state)
         if CARD_UI_PREWARM_ENABLED:
             QTimer.singleShot(CARD_UI_PREWARM_DELAY_MS, self._schedule_card_ui_prewarm)
-        QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
+        if JOURNAL_PREWARM_ENABLED:
+            QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
 
     def _build_add_patient_lock(self) -> RoleSessionLock:
         owner_id = f"{socket.gethostname()}:{os.getpid()}:nurse_add_patient"
@@ -504,7 +521,7 @@ class NurseMainWidget(QWidget):
                 if change.get("entity_name")
             }
         orders_entities = {"orders", "administrations"}
-        if self._selection_mode == "beds" and (payload.get("forced") or changed_entities.intersection({"patients", "admissions", "beds", "operations"})):
+        if self._selection_mode == "beds" and (payload.get("forced") or changed_entities.intersection(W1_REFRESH_ENTITIES)):
             if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
                 self.layout_manager.beds_selection_widget.refresh()
         if self._selection_mode == "archive":
@@ -555,10 +572,10 @@ class NurseMainWidget(QWidget):
     def start_auto_refresh(self):
         self._ensure_monitor_subscription()
         if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
-            self.layout_manager.beds_selection_widget.refresh()
+            self.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
         data_service = self._get_data_service()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=True)
+            data_service.request_immediate_refresh(force_emit=False)
 
     def stop_auto_refresh(self):
         self._disconnect_monitor()
@@ -818,6 +835,8 @@ class NurseMainWidget(QWidget):
             )
 
         self.chart.admission_id = admission_id
+        if hasattr(self.chart, "clear_for_context"):
+            self.chart.clear_for_context(admission_id=admission_id, start_time=start_dt)
         self.vitals_input.admission_id = admission_id
         self.vitals_input.shift_date = date
         self.vitals_input.mark_dirty()

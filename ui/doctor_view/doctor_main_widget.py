@@ -2,6 +2,21 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QStackedWidget)
 from PySide6.QtCore import Qt
 
 DOCTOR_BEDS_POLL_INTERVAL_MS = 7000
+W1_REFRESH_ENTITIES = {
+    "patients",
+    "admissions",
+    "beds",
+    "operations",
+    "vitals",
+    "vital_settings",
+    "patient_status_events",
+    "fluids",
+    "orders",
+    "administrations",
+    "diet_templates",
+    "diet_plan",
+    "oral_intake_events",
+}
 
 class DoctorMainWidget(QWidget):
     """Главный виджет врача. Теперь является оберткой над DoctorRemCardWidget."""
@@ -20,9 +35,9 @@ class DoctorMainWidget(QWidget):
             data_service.changes_detected.connect(self._on_data_changes, Qt.QueuedConnection)
             self._monitor_connected = True
         if hasattr(self.remcard_widget.layout_manager, 'beds_selection_widget'):
-            self.remcard_widget.layout_manager.beds_selection_widget.refresh()
+            self.remcard_widget.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
         if data_service:
-            data_service.request_immediate_refresh(force_emit=True)
+            data_service.request_immediate_refresh(force_emit=False)
 
     def auto_refresh(self, force: bool = False):
         data_service = self._get_data_service()
@@ -48,11 +63,24 @@ class DoctorMainWidget(QWidget):
     def _on_data_changes(self, payload: dict):
         if self.remcard_widget.admission_id is not None:
             return
-        changed_entities = set(payload.get("changed_entities") or [])
-        if not payload.get("forced") and not changed_entities.intersection({"patients", "admissions", "beds", "operations"}):
+        layout = getattr(self.remcard_widget, "layout_manager", None)
+        if layout is not None and getattr(layout, "current_mode", "beds") != "beds":
             return
-        if hasattr(self.remcard_widget.layout_manager, 'beds_selection_widget'):
-            self.remcard_widget.layout_manager.beds_selection_widget.refresh()
+        changed_entities = {
+            str(entity)
+            for entity in (payload.get("changed_entities") or [])
+            if entity is not None
+        }
+        if not changed_entities:
+            changed_entities = {
+                str(change.get("entity_name") or "")
+                for change in (payload.get("changes") or [])
+                if change.get("entity_name")
+            }
+        if not payload.get("forced") and not changed_entities.intersection(W1_REFRESH_ENTITIES):
+            return
+        if layout is not None and hasattr(layout, 'beds_selection_widget'):
+            layout.beds_selection_widget.refresh()
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
