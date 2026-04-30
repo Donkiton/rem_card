@@ -189,18 +189,114 @@ class OrdersModel(QAbstractTableModel):
         finally:
             self.endResetModel()
 
+    def _current_order_signature(self):
+        return [self._order_signature(order) for order in self.orders]
+
+    @staticmethod
+    def _order_signature(order):
+        return (
+            getattr(order, "id", None),
+            getattr(getattr(order, "status", None), "value", getattr(order, "status", None)),
+            int(getattr(order, "is_committed", 0) or 0),
+            getattr(order, "draft_sort_order", None),
+        )
+
+    @classmethod
+    def _orders_signature(cls, orders):
+        return [cls._order_signature(order) for order in (orders or [])]
+
+    def _emit_admin_cell_changes(self, changed_keys):
+        if not changed_keys:
+            return
+        row_lookup = {
+            order.id: idx
+            for idx, order in enumerate(self.orders)
+            if order and order.id is not None
+        }
+        col_lookup = {
+            slot.isoformat(): col + 1
+            for col, slot in enumerate(self.time_slots)
+        }
+        emitted = set()
+        for order_id, planned_iso in changed_keys:
+            row_idx = row_lookup.get(order_id)
+            col_idx = col_lookup.get(planned_iso)
+            if row_idx is None or col_idx is None:
+                continue
+            cell_key = (row_idx, col_idx)
+            if cell_key in emitted:
+                continue
+            emitted.add(cell_key)
+            cell_idx = self.index(row_idx, col_idx)
+            self.dataChanged.emit(cell_idx, cell_idx, [Qt.UserRole])
+
+    def apply_admin_rows_snapshot(self, snapshot: Dict[str, object]) -> bool:
+        """
+        Применяет snapshot без reset модели, если список назначений не изменился.
+        Это сохраняет позицию таблицы и не съедает быстрые клики по отметкам.
+        """
+        snapshot_orders = [copy(order) for order in (snapshot.get("orders") or [])]
+        for idx, order in enumerate(snapshot_orders):
+            if order is not None:
+                order.sort_order = idx
+
+        if self._current_order_signature() != self._orders_signature(snapshot_orders):
+            return False
+        if snapshot.get("admission_id", self.admission_id) != self.admission_id:
+            return False
+        if snapshot.get("shift_date", self.shift_date) != self.shift_date:
+            return False
+        if bool(snapshot.get("only_committed", self.only_committed)) != bool(self.only_committed):
+            return False
+
+        patient_context = snapshot.get("patient_context")
+        patient_context_changed = patient_context != self.patient_context
+        admin_rows = list(snapshot.get("admin_rows") or [])
+        new_admin_map = self._build_admin_map(admin_rows)
+        changed_keys = {
+            key
+            for key in set(self.admin_map.keys()) | set(new_admin_map.keys())
+            if self.admin_map.get(key) != new_admin_map.get(key)
+        }
+
+        self.admin_map = new_admin_map
+        self.patient_context = patient_context
+        self.has_any_draft = bool(snapshot.get("has_any_draft", False))
+        sync_cursor = self._compute_sync_cursor(admin_rows)
+        self.last_sync_cursor = sync_cursor
+        self.last_sync_ts = sync_cursor["updated_at"]
+
+        self._emit_admin_cell_changes(changed_keys)
+        if patient_context_changed and self.rowCount() > 0:
+            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, 0), [Qt.DisplayRole])
+        return True
+
     def refresh_admin_marks_only(self) -> bool:
         """
         Легкое Delta-обновление: подтягивает только измененные ячейки из БД.
         Возвращает True, если данные реально изменились.
         """
         if not self.orders or not self.time_slots:
+            from rem_card.app.logger import logger
+            logger.info(
+                "[OrdersClick] model_delta_skip admission_id=%s reason=empty rows=%s slots=%s",
+                self.admission_id,
+                len(self.orders),
+                len(self.time_slots),
+            )
             return False
 
         try:
+            started = datetime.now()
             # Используем Delta-загрузку по updated_at
             rows = self._fetch_latest_admin_rows(delta_only=True)
             if not rows:
+                from rem_card.app.logger import logger
+                logger.info(
+                    "[OrdersClick] model_delta_no_rows admission_id=%s cursor=%s",
+                    self.admission_id,
+                    self.last_sync_cursor,
+                )
                 return False
 
             changed = False
@@ -249,6 +345,13 @@ class OrdersModel(QAbstractTableModel):
             if not changed:
                 self.last_sync_cursor = new_sync_cursor
                 self.last_sync_ts = new_sync_cursor["updated_at"]
+                from rem_card.app.logger import logger
+                logger.info(
+                    "[OrdersClick] model_delta_no_change admission_id=%s rows=%s cursor=%s",
+                    self.admission_id,
+                    len(rows),
+                    self.last_sync_cursor,
+                )
                 return False
 
             self._recompute_draft_flag()
@@ -273,7 +376,14 @@ class OrdersModel(QAbstractTableModel):
                 self.dataChanged.emit(top_left, bottom_right, [Qt.UserRole])
                 
             from rem_card.app.logger import logger
-            logger.debug(f"[OrdersModel] Admin marks updated for ID {self.admission_id}. Changes detected.")
+            logger.info(
+                "[OrdersClick] model_delta_changed admission_id=%s rows=%s changed_cells=%s cursor=%s elapsed_ms=%s",
+                self.admission_id,
+                len(rows),
+                len(changed_cells),
+                self.last_sync_cursor,
+                round((datetime.now() - started).total_seconds() * 1000.0, 1),
+            )
             return True
         except Exception as e:
             from rem_card.app.logger import logger

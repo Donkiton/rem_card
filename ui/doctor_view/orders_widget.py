@@ -62,6 +62,9 @@ class OrdersWidget(QWidget):
         self._cached_has_drafts = False
         self._cached_has_administrations = False
         self._cached_has_orders = False
+        self._admin_only_snapshot_until = 0.0
+        self._orders_click_seq = 0
+        self._pending_admin_write_count = 0
         self._legacy_direct_snapshot_warned = False
         self._patient_context_signal_bound = False
         self._load_yesterday_worker = None
@@ -133,6 +136,14 @@ class OrdersWidget(QWidget):
         if self.model is not None:
             return bool(self._cached_has_administrations)
         return False
+
+    def _model_has_administrations(self) -> bool:
+        if self.model is None:
+            return False
+        return any(
+            admin is not None and str(getattr(admin, "status", "") or "") not in ("deleted", "cancelled")
+            for admin in getattr(self.model, "admin_map", {}).values()
+        )
 
     def has_orders(self) -> bool:
         if self.model is not None:
@@ -263,8 +274,13 @@ class OrdersWidget(QWidget):
             self._applying_pending_structure_sync = False
 
     def request_refresh(self, *, force: bool = False):
+        logger.info(
+            "[OrdersClick] request_refresh role=doctor admission_id=%s force=%s",
+            self.admission_id,
+            int(bool(force)),
+        )
         self._request_snapshot(
-            force=True,
+            force=force,
             source="refresh",
             priority="HIGH",
             invalidate_reason="widget_refresh_force" if force else "widget_refresh",
@@ -661,6 +677,28 @@ class OrdersWidget(QWidget):
         except Exception:
             logger.exception("[OrdersWidget] Failed to apply orders snapshot")
 
+    def _capture_table_scroll(self):
+        if not hasattr(self, "table_view"):
+            return None
+        try:
+            return int(self.table_view.verticalScrollBar().value())
+        except Exception:
+            return None
+
+    def _restore_table_scroll(self, value):
+        if value is None or not hasattr(self, "table_view"):
+            return
+
+        def restore():
+            try:
+                bar = self.table_view.verticalScrollBar()
+                bar.setValue(max(0, min(int(value), bar.maximum())))
+            except Exception:
+                pass
+
+        restore()
+        QTimer.singleShot(0, restore)
+
     def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
         if admission_id != self.admission_id:
             return False
@@ -749,8 +787,30 @@ class OrdersWidget(QWidget):
             return True
 
         self._ensure_model_initialized()
+        scroll_value = self._capture_table_scroll()
+        if self._try_apply_admin_only_snapshot(
+            snapshot=snapshot,
+            admission_id=admission_id,
+            known_change_id=known_change_id,
+            snapshot_change_id=snapshot_change_id,
+            current_context_key=current_context_key,
+            snapshot_signature=snapshot_signature,
+        ):
+            return True
+
+        logger.info(
+            "[OrdersClick] snapshot_apply_reset role=doctor admission_id=%s source=%s trace_id=%s rows_before=%s orders=%s admin_rows=%s scroll=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("load_trace_id"),
+            self.model.rowCount() if self.model is not None else None,
+            len(snapshot.get("orders") or []),
+            len(snapshot.get("admin_rows") or []),
+            scroll_value,
+        )
         self.model.apply_snapshot(snapshot)
         self._apply_pending_reorder_to_model()
+        self._restore_table_scroll(scroll_value)
         self._cached_has_drafts = bool(snapshot.get("has_any_draft", False)) or bool(self._pending_reorder_order_ids)
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
@@ -776,6 +836,63 @@ class OrdersWidget(QWidget):
             snapshot.get("context_hash"),
             snapshot.get("load_trace_id"),
             snapshot.get("version"),
+        )
+        self._last_applied_snapshot_signature = snapshot_signature
+        return True
+
+    def _try_apply_admin_only_snapshot(
+        self,
+        *,
+        snapshot,
+        admission_id,
+        known_change_id,
+        snapshot_change_id,
+        current_context_key,
+        snapshot_signature,
+    ) -> bool:
+        if self._pending_admin_write_count > 0:
+            logger.info(
+                "[OrdersClick] snapshot_skip_pending_local_write role=doctor admission_id=%s pending=%s source=%s trace_id=%s change_id=%s",
+                admission_id,
+                self._pending_admin_write_count,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+                snapshot.get("change_id"),
+            )
+            return True
+        if (
+            self.model is None
+            or self._pending_reorder_order_ids
+            or time.monotonic() >= self._admin_only_snapshot_until
+            or not hasattr(self.model, "apply_admin_rows_snapshot")
+            or not self.model.apply_admin_rows_snapshot(snapshot)
+        ):
+            return False
+
+        self._cached_has_drafts = bool(snapshot.get("has_any_draft", False))
+        self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
+        self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
+        self._last_polled_change_id = max(known_change_id, snapshot_change_id)
+        if self._last_polled_change_id > 0:
+            self._last_polled_context_key = current_context_key
+        self.check_drafts()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+        self._clear_soft_update_state()
+        record_orders_sync_event(
+            "applied",
+            role="doctor",
+            admission_id=int(admission_id or 0),
+            context_hash=snapshot.get("context_hash"),
+            reason=str(snapshot.get("source") or ""),
+        )
+        logger.info(
+            "[OrdersClick] snapshot_apply_admin_only role=doctor admission_id=%s source=%s trace_id=%s rows=%s admin_rows=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("load_trace_id"),
+            self.model.rowCount(),
+            len(snapshot.get("admin_rows") or []),
         )
         self._last_applied_snapshot_signature = snapshot_signature
         return True
@@ -939,12 +1056,25 @@ class OrdersWidget(QWidget):
         if not self.service:
             return
 
+        queued_at = time.perf_counter()
+        logger.info(
+            "[OrdersClick] write_enqueue role=doctor admission_id=%s description=%s block_ui=%s",
+            self.admission_id,
+            description,
+            int(bool(block_ui)),
+        )
         if block_ui and hasattr(self, "frame_container"):
             self.frame_container.setEnabled(False)
 
         def _on_success(_):
             if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
+            logger.info(
+                "[OrdersClick] write_success role=doctor admission_id=%s description=%s elapsed_ms=%s",
+                self.admission_id,
+                description,
+                round((time.perf_counter() - queued_at) * 1000.0, 1),
+            )
             self._perf_mark_click(perf_click_id, "write_ok")
             if on_success:
                 on_success()
@@ -952,6 +1082,13 @@ class OrdersWidget(QWidget):
         def _on_error(exc):
             if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
+            logger.info(
+                "[OrdersClick] write_error role=doctor admission_id=%s description=%s elapsed_ms=%s error=%s",
+                self.admission_id,
+                description,
+                round((time.perf_counter() - queued_at) * 1000.0, 1),
+                exc,
+            )
             if show_error:
                 self._show_warning(f"Ошибка сохранения: {exc}")
             self._perf_mark_click(perf_click_id, "write_error", extra=str(exc))
@@ -972,6 +1109,12 @@ class OrdersWidget(QWidget):
     def _schedule_state_sync(self, delay_ms: int = 120):
         self._state_sync_timer.start(delay_ms)
 
+    def _begin_admin_write(self):
+        self._pending_admin_write_count += 1
+
+    def _finish_admin_write(self):
+        self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
+
     def _run_fast_sync(self):
         """
         После optimistic update делаем фоновый snapshot-refresh.
@@ -979,9 +1122,24 @@ class OrdersWidget(QWidget):
         """
         t0 = time.perf_counter() if self._perf_enabled else None
         try:
-            self.request_refresh(force=True)
+            logger.info("[OrdersClick] fast_sync_start role=doctor admission_id=%s", self.admission_id)
+            delta_changed = self.model.refresh_admin_marks_only() if self.model is not None else False
+            logger.info(
+                "[OrdersClick] fast_sync_delta role=doctor admission_id=%s changed=%s",
+                self.admission_id,
+                int(bool(delta_changed)),
+            )
+            if self.model is not None and delta_changed:
+                self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
+                self._cached_has_administrations = self._model_has_administrations()
+                self.check_drafts()
+                if hasattr(self, "table_view"):
+                    self.table_view.viewport().update()
+            else:
+                self.check_drafts()
             self._schedule_state_sync()
         except Exception:
+            logger.info("[OrdersClick] fast_sync_exception_fallback role=doctor admission_id=%s", self.admission_id)
             self.request_refresh(force=True)
         finally:
             if self._perf_enabled and t0 is not None:
@@ -1050,6 +1208,17 @@ class OrdersWidget(QWidget):
         *,
         perf_click_id: int | None = None,
     ):
+        self._admin_only_snapshot_until = time.monotonic() + 3.0
+        self._begin_admin_write()
+
+        def on_success():
+            self._finish_admin_write()
+            self._schedule_fast_sync()
+
+        def on_error(exc):
+            self._finish_admin_write()
+            self._on_cell_write_failed(exc)
+
         self._apply_optimistic_single_cell(
             index,
             order,
@@ -1060,8 +1229,8 @@ class OrdersWidget(QWidget):
         self._enqueue_write(
             description,
             operation=operation,
-            on_success=self._schedule_fast_sync,
-            on_error=self._on_cell_write_failed,
+            on_success=on_success,
+            on_error=on_error,
             block_ui=False,
             perf_click_id=perf_click_id,
         )
@@ -1514,6 +1683,9 @@ class OrdersWidget(QWidget):
                     )
                     return True
                 if index.column() > 0:
+                    if event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier:
+                        self.on_cell_clicked(index)
+                        return True
                     if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() == Qt.AltModifier):
                         self.on_cell_middle_clicked(index)
                         return True
@@ -1543,6 +1715,10 @@ class OrdersWidget(QWidget):
     def on_cell_right_clicked(self, index):
         self._handle_cell_action(index, "orders_right_click", self.service.apply_order_right_click)
 
+    def _next_orders_click_seq(self) -> int:
+        self._orders_click_seq += 1
+        return self._orders_click_seq
+
     def _handle_cell_action(self, index, op_prefix: str, service_action):
         if self._is_read_only():
             return
@@ -1560,9 +1736,24 @@ class OrdersWidget(QWidget):
         order = self.model.orders[row]
         admin = self.model.data(index, Qt.UserRole)
         planned_time = self.model.time_slots[time_slot_idx]
+        click_seq = self._next_orders_click_seq()
+        logger.info(
+            "[OrdersClick] click_accept role=doctor seq=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s admin_id=%s admin_status=%s admin_role=%s admin_mark=%s",
+            click_seq,
+            op_prefix,
+            self.admission_id,
+            row,
+            col,
+            getattr(order, "id", None),
+            planned_time.isoformat(),
+            getattr(admin, "id", None),
+            getattr(admin, "status", None),
+            getattr(admin, "cell_role", None),
+            getattr(admin, "comment", None),
+        )
         perf_click_id = self._perf_start_click(index, op_prefix)
         self._enqueue_cell_write(
-            f"{op_prefix}:{order.id}:{planned_time.isoformat()}",
+            f"{op_prefix}:{order.id}:{planned_time.isoformat()}:seq={click_seq}",
             operation=lambda: service_action(order, admin, planned_time),
             index=index,
             order=order,

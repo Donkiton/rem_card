@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from datetime import datetime, timedelta
+from copy import copy
 import os
 import sqlite3
 import time
@@ -73,6 +74,9 @@ class NurseOrdersWidget(QWidget):
         self._last_applied_snapshot_signature = None
         self._cached_has_administrations = False
         self._cached_has_orders = False
+        self._admin_only_snapshot_until = 0.0
+        self._orders_click_seq = 0
+        self._pending_admin_write_count = 0
         self._legacy_direct_snapshot_warned = False
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
         self._pending_change_context_key = None
@@ -116,6 +120,14 @@ class NurseOrdersWidget(QWidget):
             return False
         return bool(self._cached_has_administrations)
 
+    def _model_has_administrations(self) -> bool:
+        if self.model is None:
+            return False
+        return any(
+            admin is not None and str(getattr(admin, "status", "") or "") not in ("deleted", "cancelled")
+            for admin in getattr(self.model, "admin_map", {}).values()
+        )
+
     def has_orders(self) -> bool:
         if self.model is not None:
             return bool(self._cached_has_orders)
@@ -127,8 +139,13 @@ class NurseOrdersWidget(QWidget):
         self.ordersPresenceChanged.emit(self.has_orders())
 
     def request_refresh(self, *, force: bool = False):
+        logger.info(
+            "[OrdersClick] request_refresh role=nurse admission_id=%s force=%s",
+            self.admission_id,
+            int(bool(force)),
+        )
         self._request_snapshot(
-            force=True,
+            force=force,
             source="refresh",
             priority="HIGH",
             invalidate_reason="widget_refresh_force" if force else "widget_refresh",
@@ -513,6 +530,28 @@ class NurseOrdersWidget(QWidget):
         except Exception:
             logger.exception("[NurseOrdersWidget] Failed to apply orders snapshot")
 
+    def _capture_table_scroll(self):
+        if not hasattr(self, "table_view"):
+            return None
+        try:
+            return int(self.table_view.verticalScrollBar().value())
+        except Exception:
+            return None
+
+    def _restore_table_scroll(self, value):
+        if value is None or not hasattr(self, "table_view"):
+            return
+
+        def restore():
+            try:
+                bar = self.table_view.verticalScrollBar()
+                bar.setValue(max(0, min(int(value), bar.maximum())))
+            except Exception:
+                pass
+
+        restore()
+        QTimer.singleShot(0, restore)
+
     def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
         if admission_id != self.admission_id:
             return False
@@ -597,7 +636,29 @@ class NurseOrdersWidget(QWidget):
             return True
 
         self._ensure_model_initialized()
+        scroll_value = self._capture_table_scroll()
+        if self._try_apply_admin_only_snapshot(
+            snapshot=snapshot,
+            admission_id=admission_id,
+            known_change_id=known_change_id,
+            snapshot_change_id=snapshot_change_id,
+            current_context_key=current_context_key,
+            snapshot_signature=snapshot_signature,
+        ):
+            return True
+
+        logger.info(
+            "[OrdersClick] snapshot_apply_reset role=nurse admission_id=%s source=%s trace_id=%s rows_before=%s orders=%s admin_rows=%s scroll=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("load_trace_id"),
+            self.model.rowCount() if self.model is not None else None,
+            len(snapshot.get("orders") or []),
+            len(snapshot.get("admin_rows") or []),
+            scroll_value,
+        )
         self.model.apply_snapshot(snapshot)
+        self._restore_table_scroll(scroll_value)
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
         self._last_polled_change_id = max(known_change_id, snapshot_change_id)
@@ -623,6 +684,62 @@ class NurseOrdersWidget(QWidget):
             snapshot.get("context_hash"),
             snapshot.get("load_trace_id"),
             snapshot.get("version"),
+        )
+        self._last_applied_snapshot_signature = snapshot_signature
+        return True
+
+    def _try_apply_admin_only_snapshot(
+        self,
+        *,
+        snapshot,
+        admission_id,
+        known_change_id,
+        snapshot_change_id,
+        current_context_key,
+        snapshot_signature,
+    ) -> bool:
+        if self._pending_admin_write_count > 0:
+            logger.info(
+                "[OrdersClick] snapshot_skip_pending_local_write role=nurse admission_id=%s pending=%s source=%s trace_id=%s change_id=%s",
+                admission_id,
+                self._pending_admin_write_count,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+                snapshot.get("change_id"),
+            )
+            return True
+        if (
+            self.model is None
+            or time.monotonic() >= self._admin_only_snapshot_until
+            or not hasattr(self.model, "apply_admin_rows_snapshot")
+            or not self.model.apply_admin_rows_snapshot(snapshot)
+        ):
+            return False
+
+        self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
+        self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
+        self._last_polled_change_id = max(known_change_id, snapshot_change_id)
+        if self._last_polled_change_id > 0:
+            self._last_polled_context_key = current_context_key
+        self._restore_highlight()
+        self.check_drafts()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+        self._clear_soft_update_state()
+        record_orders_sync_event(
+            "applied",
+            role="nurse",
+            admission_id=int(admission_id or 0),
+            context_hash=snapshot.get("context_hash"),
+            reason=str(snapshot.get("source") or ""),
+        )
+        logger.info(
+            "[OrdersClick] snapshot_apply_admin_only role=nurse admission_id=%s source=%s trace_id=%s rows=%s admin_rows=%s",
+            admission_id,
+            snapshot.get("source"),
+            snapshot.get("load_trace_id"),
+            self.model.rowCount(),
+            len(snapshot.get("admin_rows") or []),
         )
         self._last_applied_snapshot_signature = snapshot_signature
         return True
@@ -772,23 +889,45 @@ class NurseOrdersWidget(QWidget):
             self.update_state_label.setText("")
             self.update_state_label.setVisible(False)
 
-    def _enqueue_write(self, description: str, operation, on_success=None):
+    def _enqueue_write(self, description: str, operation, on_success=None, on_error=None, *, block_ui: bool = True):
         if not self.service:
             return
 
-        if hasattr(self, "frame_container"):
+        queued_at = time.perf_counter()
+        logger.info(
+            "[OrdersClick] write_enqueue role=nurse admission_id=%s description=%s block_ui=%s",
+            self.admission_id,
+            description,
+            int(bool(block_ui)),
+        )
+        if block_ui and hasattr(self, "frame_container"):
             self.frame_container.setEnabled(False)
 
         def _on_success(_):
-            if hasattr(self, "frame_container"):
+            if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
+            logger.info(
+                "[OrdersClick] write_success role=nurse admission_id=%s description=%s elapsed_ms=%s",
+                self.admission_id,
+                description,
+                round((time.perf_counter() - queued_at) * 1000.0, 1),
+            )
             if on_success:
                 on_success()
 
         def _on_error(exc):
-            if hasattr(self, "frame_container"):
+            if block_ui and hasattr(self, "frame_container"):
                 self.frame_container.setEnabled(True)
+            logger.info(
+                "[OrdersClick] write_error role=nurse admission_id=%s description=%s elapsed_ms=%s error=%s",
+                self.admission_id,
+                description,
+                round((time.perf_counter() - queued_at) * 1000.0, 1),
+                exc,
+            )
             self._show_warning(f"Ошибка сохранения: {exc}")
+            if on_error:
+                on_error(exc)
 
         self.service.enqueue_write(
             description=description,
@@ -965,6 +1104,38 @@ class NurseOrdersWidget(QWidget):
         self.highlighted_order_id = None
         self.delegate.highlighted_row = None
 
+    def _next_orders_click_seq(self) -> int:
+        self._orders_click_seq += 1
+        return self._orders_click_seq
+
+    def _begin_admin_write(self):
+        self._pending_admin_write_count += 1
+
+    def _finish_admin_write(self):
+        self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
+
+    def _apply_optimistic_nurse_mark(self, index, admin, mark: str):
+        if not self.model or not index.isValid() or admin is None:
+            return
+        planned_time = getattr(admin, "planned_time", None)
+        if isinstance(planned_time, str):
+            try:
+                planned_time = datetime.fromisoformat(planned_time)
+            except Exception:
+                planned_time = None
+        if planned_time is None:
+            return
+        key = (getattr(admin, "order_id", None), planned_time.isoformat())
+        if key[0] is None:
+            return
+        optimistic_admin = copy(admin)
+        optimistic_admin.comment = mark or ""
+        optimistic_admin.actual_time = datetime.now() if mark else None
+        self.model.admin_map[key] = optimistic_admin
+        self.model.dataChanged.emit(index, index, [Qt.UserRole])
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
         if obj is self.table_view.viewport() and event.type() == QEvent.MouseButtonPress:
@@ -995,25 +1166,62 @@ class NurseOrdersWidget(QWidget):
 
                         role = getattr(admin, "cell_role", "")
                         operation = None
+                        next_mark = ""
                         admin_id = admin.id
+                        click_seq = self._next_orders_click_seq()
                         if event.button() == Qt.LeftButton:
                             if role == "end":
+                                logger.info(
+                                    "[OrdersClick] click_ignore role=nurse seq=%s reason=end_cell admission_id=%s row=%s col=%s admin_id=%s",
+                                    click_seq,
+                                    self.admission_id,
+                                    index.row(),
+                                    index.column(),
+                                    admin_id,
+                                )
                                 return True
                             if mark in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
                                 operation = lambda aid=admin_id: self.service.cancel_nurse_order_mark(aid)
                             else:
+                                next_mark = NURSE_MARK_EXECUTED
                                 operation = lambda aid=admin_id: self.service.set_nurse_order_mark(aid, NURSE_MARK_EXECUTED)
                         elif event.button() == Qt.RightButton:
                             if mark in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
                                 operation = lambda aid=admin_id: self.service.cancel_nurse_order_mark(aid)
                             else:
+                                next_mark = NURSE_MARK_NOT_EXECUTED
                                 operation = lambda aid=admin_id: self.service.set_nurse_order_mark(aid, NURSE_MARK_NOT_EXECUTED)
 
                         if operation:
+                            logger.info(
+                                "[OrdersClick] click_accept role=nurse seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s button=%s",
+                                click_seq,
+                                self.admission_id,
+                                index.row(),
+                                index.column(),
+                                admin_id,
+                                mark,
+                                next_mark,
+                                str(event.button()),
+                            )
+                            self._admin_only_snapshot_until = time.monotonic() + 3.0
+                            self._apply_optimistic_nurse_mark(index, admin, next_mark)
+                            self._begin_admin_write()
+
+                            def on_success():
+                                self._finish_admin_write()
+                                self._on_mark_updated()
+
+                            def on_error(exc):
+                                self._finish_admin_write()
+                                self.request_refresh(force=True)
+
                             self._enqueue_write(
-                                f"nurse_order_mark:{admin_id}",
+                                f"nurse_order_mark:{admin_id}:seq={click_seq}",
                                 operation=operation,
-                                on_success=self._on_mark_updated,
+                                on_success=on_success,
+                                on_error=on_error,
+                                block_ui=False,
                             )
                             return True
         return super().eventFilter(obj, event)
@@ -1040,7 +1248,20 @@ class NurseOrdersWidget(QWidget):
                     self.table_view.viewport().update()
 
     def _on_mark_updated(self):
-        self.request_refresh(force=True)
+        logger.info("[OrdersClick] mark_updated_start role=nurse admission_id=%s", self.admission_id)
+        delta_changed = self.model.refresh_admin_marks_only() if self.model is not None else False
+        logger.info(
+            "[OrdersClick] mark_updated_delta role=nurse admission_id=%s changed=%s",
+            self.admission_id,
+            int(bool(delta_changed)),
+        )
+        if self.model is not None and delta_changed:
+            self._cached_has_administrations = self._model_has_administrations()
+            self.check_drafts()
+            if hasattr(self, "table_view"):
+                self.table_view.viewport().update()
+        else:
+            self.check_drafts()
         self.orderMarked.emit()
 
     def _show_warning(self, text: str):
