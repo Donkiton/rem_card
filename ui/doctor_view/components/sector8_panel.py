@@ -16,11 +16,13 @@ class Sector8Panel(QWidget):
     calc_clicked = Signal()
     add_patient_clicked = Signal()
     bonus_clicked = Signal()
+    bars_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon")
         self.icon_dir = os.path.normpath(self.icon_dir)
+        self._bars_auth_state = False
         self.init_ui()
 
     def init_ui(self):
@@ -81,6 +83,14 @@ class Sector8Panel(QWidget):
         self.btn_add_patient.setStyleSheet(button_style)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
 
+        # 1.3 Кнопка БАРС с индикатором авторизации
+        self.btn_bars = QPushButton(" БАРС")
+        self.btn_bars.setIconSize(QSize(18, 18))
+        self.btn_bars.setMinimumHeight(32)
+        self.btn_bars.setStyleSheet(button_style)
+        self.btn_bars.clicked.connect(self.bars_clicked.emit)
+        self.set_bars_auth_state(False)
+
         # Кнопка Калькулятор
         self.btn_calc = QPushButton(" Калькулятор")
         calc_icon = os.path.join(self.icon_dir, "calc.png")
@@ -128,6 +138,7 @@ class Sector8Panel(QWidget):
         self.layout.addWidget(self.btn_archive)
         self.layout.addWidget(self.btn_refresh)
         self.layout.addWidget(self.btn_add_patient)
+        self.layout.addWidget(self.btn_bars)
         self.layout.addWidget(self.btn_calc)
         self.layout.addWidget(self.btn_bonus)
         self.layout.addWidget(self.btn_settings)
@@ -146,3 +157,13 @@ class Sector8Panel(QWidget):
         except Exception:
             pass
         button.setEnabled(enabled)
+
+    def set_bars_auth_state(self, authorized: bool):
+        self._bars_auth_state = bool(authorized)
+        button = getattr(self, "btn_bars", None)
+        if button is None:
+            return
+        icon_name = "done.png" if self._bars_auth_state else "notdone.png"
+        icon_path = os.path.join(self.icon_dir, icon_name)
+        button.setIcon(QIcon(icon_path))
+        button.setToolTip("БАРС: авторизация пройдена" if self._bars_auth_state else "БАРС: требуется авторизация")
