@@ -4,8 +4,6 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QP
 from rem_card.services.bars_auth_service import (
     BarsAuthCheckResult,
     BarsAuthService,
-    BarsNetworkCaptureResult,
-    BarsPageProbeResult,
     BarsPatientProbeResult,
 )
 from rem_card.ui.shared.async_call import AsyncCallThread
@@ -19,9 +17,7 @@ class BarsAuthDialog(BaseStyledDialog):
         self.authorized = bool(auth_service.last_authorized)
         self._launch_worker = None
         self._check_worker = None
-        self._probe_worker = None
         self._patient_probe_worker = None
-        self._network_capture_worker = None
         self._background_worker = None
         self._auto_accept_scheduled = False
 
@@ -49,17 +45,9 @@ class BarsAuthDialog(BaseStyledDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        self.btn_open = QPushButton("Открыть снова")
-        self.btn_open.setObjectName("DialogOkBtn")
-        self.btn_open.clicked.connect(self._open_browser_async)
-
         self.btn_check = QPushButton("Проверить")
         self.btn_check.setObjectName("DialogOkBtn")
         self.btn_check.clicked.connect(self._check_authorized_async)
-
-        self.btn_probe = QPushButton("Считать страницу")
-        self.btn_probe.setObjectName("DialogOkBtn")
-        self.btn_probe.clicked.connect(self._probe_page_async)
 
         self.btn_manual_done = QPushButton("Я вошел")
         self.btn_manual_done.setObjectName("DialogOkBtn")
@@ -69,9 +57,7 @@ class BarsAuthDialog(BaseStyledDialog):
         self.btn_close.setObjectName("DialogOkBtn")
         self.btn_close.clicked.connect(self.reject)
 
-        button_layout.addWidget(self.btn_open)
         button_layout.addWidget(self.btn_check)
-        button_layout.addWidget(self.btn_probe)
         button_layout.addWidget(self.btn_manual_done)
         button_layout.addWidget(self.btn_close)
 
@@ -82,16 +68,12 @@ class BarsAuthDialog(BaseStyledDialog):
         self.btn_patient_probe = QPushButton("Проба ФИО")
         self.btn_patient_probe.setObjectName("DialogOkBtn")
         self.btn_patient_probe.clicked.connect(self._probe_patient_async)
-        self.btn_network_probe = QPushButton("Проба API")
-        self.btn_network_probe.setObjectName("DialogOkBtn")
-        self.btn_network_probe.clicked.connect(self._capture_network_async)
         search_layout.addWidget(self.history_input, 1)
         search_layout.addWidget(self.btn_patient_probe)
-        search_layout.addWidget(self.btn_network_probe)
 
         self.probe_text = QPlainTextEdit()
         self.probe_text.setReadOnly(True)
-        self.probe_text.setPlaceholderText("Здесь появится пробное чтение текущей страницы БАРС или результат поиска ФИО.")
+        self.probe_text.setPlaceholderText("Здесь появится результат поиска ФИО.")
         self.probe_text.setMinimumHeight(170)
         self.probe_text.setStyleSheet("font-size: 12px; color: #2c3e50; background: #ffffff;")
 
@@ -103,11 +85,8 @@ class BarsAuthDialog(BaseStyledDialog):
         self.resize(680, 380)
 
     def _set_busy(self, busy: bool):
-        self.btn_open.setEnabled(not busy)
         self.btn_check.setEnabled(not busy)
-        self.btn_probe.setEnabled(not busy)
         self.btn_patient_probe.setEnabled(not busy)
-        self.btn_network_probe.setEnabled(not busy)
 
     def _open_browser_async(self):
         if self._launch_worker and self._launch_worker.isRunning():
@@ -144,23 +123,6 @@ class BarsAuthDialog(BaseStyledDialog):
         if result.authorized:
             self._complete_authorization(result)
 
-    def _probe_page_async(self):
-        if self._probe_worker and self._probe_worker.isRunning():
-            return
-        self._set_busy(True)
-        self.status_label.setText("Читаю текущую страницу БАРС...")
-        self._probe_worker = AsyncCallThread(self.auth_service.probe_current_page, parent=self)
-        self._probe_worker.succeeded.connect(self._on_page_probed)
-        self._probe_worker.failed.connect(self._on_worker_failed)
-        self._probe_worker.finished.connect(lambda: self._set_busy(False))
-        self._probe_worker.start()
-
-    def _on_page_probed(self, result: BarsPageProbeResult):
-        self.status_label.setText(result.message)
-        self.probe_text.setPlainText(self._format_probe_result(result))
-        if result.ok and result.markers:
-            self.authorized = True
-
     def _probe_patient_async(self):
         if self._patient_probe_worker and self._patient_probe_worker.isRunning():
             return
@@ -186,31 +148,6 @@ class BarsAuthDialog(BaseStyledDialog):
         if result.ok:
             self.authorized = True
 
-    def _capture_network_async(self):
-        if self._network_capture_worker and self._network_capture_worker.isRunning():
-            return
-        history_number = self.history_input.text().strip()
-        if not history_number:
-            self.status_label.setText("Введите номер истории")
-            return
-        self._set_busy(True)
-        self.status_label.setText("Перехватываю внутренние запросы БАРС...")
-        self._network_capture_worker = AsyncCallThread(
-            self.auth_service.capture_patient_search_requests,
-            history_number,
-            parent=self,
-        )
-        self._network_capture_worker.succeeded.connect(self._on_network_captured)
-        self._network_capture_worker.failed.connect(self._on_worker_failed)
-        self._network_capture_worker.finished.connect(lambda: self._set_busy(False))
-        self._network_capture_worker.start()
-
-    def _on_network_captured(self, result: BarsNetworkCaptureResult):
-        self.status_label.setText(result.message)
-        self.probe_text.setPlainText(self._format_network_capture_result(result))
-        if result.ok:
-            self.authorized = True
-
     def _mark_authorized_manually(self):
         result = self.auth_service.mark_authorized_manually()
         self._complete_authorization(result)
@@ -229,30 +166,6 @@ class BarsAuthDialog(BaseStyledDialog):
         self._background_worker.failed.connect(lambda exc: None)
         self._background_worker.start()
 
-    def _format_probe_result(self, result: BarsPageProbeResult) -> str:
-        lines = [result.message]
-        if result.url:
-            lines.append(f"URL: {result.url}")
-        if result.title:
-            lines.append(f"Заголовок: {result.title}")
-
-        if result.fields:
-            lines.append("")
-            lines.append("Поля со страницы:")
-            for key, value in result.fields.items():
-                lines.append(f"- {key}: {value}")
-
-        if result.markers:
-            lines.append("")
-            lines.append("Найденные признаки:")
-            lines.append(", ".join(result.markers))
-
-        if result.text_preview:
-            lines.append("")
-            lines.append("Первые строки текста:")
-            lines.append(result.text_preview)
-        return "\n".join(lines)
-
     def _format_patient_probe_result(self, result: BarsPatientProbeResult) -> str:
         lines = [result.message]
         if result.history_number:
@@ -266,43 +179,6 @@ class BarsAuthDialog(BaseStyledDialog):
         if result.text_preview:
             lines.append("")
             lines.append("Фрагмент прочитанного текста:")
-            lines.append(result.text_preview)
-        return "\n".join(lines)
-
-    def _format_network_capture_result(self, result: BarsNetworkCaptureResult) -> str:
-        lines = [result.message]
-        if result.history_number:
-            lines.append(f"Фрагмент истории: {result.history_number}")
-
-        matches = result.matches or []
-        if matches:
-            lines.append("")
-            lines.append("Совпадения:")
-            for item in matches:
-                lines.append(f"- {item.get('history_number')} - {item.get('full_name')}")
-            return "\n".join(lines)
-
-        if result.full_name:
-            lines.append(f"ФИО: {result.full_name}")
-        if result.matched_line:
-            lines.append(f"Совпадение на странице: {result.matched_line}")
-
-        requests = result.requests or []
-        lines.append("")
-        lines.append(f"Перехвачено запросов: {len(requests)}")
-        for index, request in enumerate(requests[:10], start=1):
-            marker = " *" if request.get("contains_history") else ""
-            lines.append("")
-            lines.append(f"{index}. {request.get('method')} {request.get('url')}{marker}")
-            lines.append(f"   Тип: {request.get('kind')}, статус: {request.get('status')}, ответ: {request.get('response_len')} симв.")
-            if request.get("request_preview"):
-                lines.append(f"   Запрос: {request.get('request_preview')}")
-            if request.get("response_preview"):
-                lines.append(f"   Ответ: {request.get('response_preview')}")
-
-        if result.text_preview:
-            lines.append("")
-            lines.append("Контекст:")
             lines.append(result.text_preview)
         return "\n".join(lines)
 

@@ -82,6 +82,25 @@ class BarsAuthService:
         "заказ исследований",
         "аптека/склад",
     )
+    AUTHORIZED_TITLE_MARKERS = (
+        "журнал госпитализации",
+        "заказ исследований",
+        "запись в регистратуру",
+        "рабочий лист",
+        "список направлений",
+    )
+    AUTH_PROMPT_MARKERS = (
+        "выберите способ входа",
+        "выберите сертификат",
+        "выбор сертификата",
+        "выберите кабинет",
+        "выбор кабинета",
+        "войти через",
+        "логин",
+        "пароль",
+        "есиа",
+        "аутентификац",
+    )
 
     def __init__(
         self,
@@ -147,7 +166,7 @@ class BarsAuthService:
                 page_url = str(existing_page.get("url") or "")
                 title = str(existing_page.get("title") or "")
                 text = self._read_page_text(existing_page)
-                if self._looks_like_bars_work_screen(text) or self._looks_like_hospitalization_journal(text):
+                if self._looks_like_bars_work_screen(text, title) or self._looks_like_hospitalization_journal(text):
                     result = BarsAuthCheckResult(True, "Авторизация БАРС уже пройдена", url=page_url, title=title)
                     self._apply_check_result(result)
                     self._diag("open_auth_window_reused_existing_authorized", url=page_url, title=title)
@@ -270,6 +289,8 @@ class BarsAuthService:
         best_result = BarsAuthCheckResult(False, "Авторизация не определена")
         self._diag("check_authorized_pages", pages=self._summarize_pages(pages))
         for page in pages:
+            if str(page.get("type") or "") != "page":
+                continue
             page_url = str(page.get("url") or "")
             title = str(page.get("title") or "")
             if not self._looks_like_bars_page(page_url, title):
@@ -284,7 +305,7 @@ class BarsAuthService:
                 text_len=len(text),
                 marker_count=marker_count,
             )
-            if self._looks_like_bars_work_screen(text):
+            if self._looks_like_bars_work_screen(text, title) or self._looks_like_hospitalization_journal(text):
                 result = BarsAuthCheckResult(
                     True,
                     "Авторизация БАРС пройдена",
@@ -398,7 +419,8 @@ class BarsAuthService:
             )
 
         ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
-        if not self._looks_like_bars_work_screen(ready_text) and "журнал госпитализации" not in ready_text.lower():
+        page_title = str(page.get("title") or "")
+        if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
             self._diag(
                 "probe_patient_page_not_authorized",
                 level="warning",
@@ -483,7 +505,8 @@ class BarsAuthService:
             )
 
         ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
-        if not self._looks_like_bars_work_screen(ready_text) and "журнал госпитализации" not in ready_text.lower():
+        page_title = str(page.get("title") or "")
+        if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
             return BarsNetworkCaptureResult(
                 False,
                 "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета.",
@@ -714,7 +737,7 @@ class BarsAuthService:
         while time.monotonic() < deadline:
             last_text = self._read_page_text(page)
             normalized = last_text.lower()
-            if self._looks_like_bars_work_screen(last_text) or "журнал госпитализации" in normalized:
+            if self._looks_like_bars_work_screen(last_text, str(page.get("title") or "")) or "журнал госпитализации" in normalized:
                 return last_text
             time.sleep(0.35)
         return last_text
@@ -844,7 +867,7 @@ class BarsAuthService:
             text = self._read_page_text(page) if page.get("webSocketDebuggerUrl") else ""
             if self._looks_like_hospitalization_journal(text):
                 score += 120
-            elif self._looks_like_bars_work_screen(text):
+            elif self._looks_like_bars_work_screen(text, title):
                 score += 70
             elif text:
                 score += min(len(text), 1000) // 100
@@ -867,8 +890,14 @@ class BarsAuthService:
         normalized = str(text or "").lower()
         return sum(1 for marker in self.SUCCESS_MARKERS if marker in normalized)
 
-    def _looks_like_bars_work_screen(self, text: str) -> bool:
+    def _looks_like_bars_auth_prompt(self, text: str) -> bool:
         normalized = str(text or "").lower()
+        return any(marker in normalized for marker in self.AUTH_PROMPT_MARKERS)
+
+    def _looks_like_bars_work_screen(self, text: str, title: str = "") -> bool:
+        normalized = str(text or "").lower()
+        if self._looks_like_bars_auth_prompt(normalized):
+            return False
         nav_markers = (
             "регистратура",
             "рабочий лист",
@@ -876,7 +905,22 @@ class BarsAuthService:
             "список направлений",
             "заказ исследований",
         )
-        return self._count_success_markers(text) >= 3 and any(marker in normalized for marker in nav_markers)
+        success_count = self._count_success_markers(text)
+        if success_count >= 3 and any(marker in normalized for marker in nav_markers):
+            return True
+
+        user_context_markers = (
+            "пользователь",
+            "кабинет:",
+            "лпу:",
+            "отделение сотрудника",
+            "специальность сотрудника",
+        )
+        if success_count >= 4 and any(marker in normalized for marker in user_context_markers):
+            return True
+
+        normalized_title = str(title or "").lower()
+        return len(normalized) > 500 and any(marker in normalized_title for marker in self.AUTHORIZED_TITLE_MARKERS)
 
     def _extract_dashboard_fields(self, text: str) -> dict[str, str]:
         result: dict[str, str] = {}
