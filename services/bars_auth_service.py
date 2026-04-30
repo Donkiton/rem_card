@@ -19,6 +19,7 @@ from rem_card.app.paths import LOCAL_APPDATA, LOGS_DIR
 DEFAULT_BARS_URL = "http://10.30.30.12/"
 DEFAULT_DEBUG_PORT = 9338
 DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
+DEFAULT_BARS_LOAD_TIMEOUT_SEC = 40.0
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
@@ -125,6 +126,7 @@ class BarsAuthService:
         self.browser_path = browser_path or self._find_yandex_browser()
         self.profile_dir = profile_dir or os.environ.get("REMCARD_BARS_BROWSER_PROFILE_DIR") or self._default_profile_dir()
         self.duty_department = os.environ.get("REMCARD_BARS_DUTY_DEPARTMENT") or DEFAULT_DUTY_DEPARTMENT
+        self.load_timeout_sec = self._read_float_env("REMCARD_BARS_LOAD_TIMEOUT_SEC", DEFAULT_BARS_LOAD_TIMEOUT_SEC)
         self._use_user_data_dir = bool(profile_dir) or os.environ.get("REMCARD_BARS_USE_USER_DATA_DIR") == "1"
         self._enable_devtools = os.environ.get("REMCARD_BARS_DISABLE_DEVTOOLS") != "1"
         self.debug_port = int(os.environ.get("REMCARD_BARS_DEBUG_PORT") or debug_port or DEFAULT_DEBUG_PORT)
@@ -138,6 +140,7 @@ class BarsAuthService:
             browser_path=self.browser_path,
             profile_dir=self.profile_dir,
             duty_department=self.duty_department,
+            load_timeout_sec=self.load_timeout_sec,
             use_user_data_dir=self._use_user_data_dir,
             enable_devtools=self._enable_devtools,
             launch_mode="explicit_user_data_dir" if self._use_user_data_dir else "system_default_profile",
@@ -484,7 +487,9 @@ class BarsAuthService:
 
     def probe_patient_by_history(self, history_number: str) -> BarsPatientProbeResult:
         history_number = " ".join(str(history_number or "").split())
-        self._diag("probe_patient_start", history_number=history_number)
+        started_at = time.monotonic()
+        deadline = started_at + self.load_timeout_sec
+        self._diag("probe_patient_start", history_number=history_number, timeout_sec=self.load_timeout_sec)
         if not history_number:
             self._diag("probe_patient_empty_history", level="warning")
             return BarsPatientProbeResult(False, "Введите номер истории")
@@ -512,23 +517,28 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
+        ready_text = self._wait_for_bars_ready(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
+            timed_out = self._deadline_expired(deadline)
             self._diag(
                 "probe_patient_page_not_authorized",
                 level="warning",
+                timed_out=timed_out,
+                elapsed_sec=round(time.monotonic() - started_at, 2),
                 text_preview=self._compact_text_preview(ready_text),
             )
             return BarsPatientProbeResult(
                 False,
-                "БАРС открылся, но рабочий экран не найден. Вероятно, сессия истекла или кабинет не выбран.",
+                f"Не удалось загрузить рабочий экран БАРС за {int(self.load_timeout_sec)} секунд."
+                if timed_out
+                else "БАРС открылся, но рабочий экран не найден. Вероятно, сессия истекла или кабинет не выбран.",
                 history_number=history_number,
                 text_preview=self._compact_text_preview(ready_text),
             )
 
         steps: list[str] = []
-        steps.extend(self._open_hospitalization_journal(page))
+        steps.extend(self._open_hospitalization_journal(page, timeout_sec=self._remaining_timeout(deadline)))
         steps.append(self._fill_history_search(page, history_number))
         time.sleep(0.4)
         steps.append(self._click_visible_text(page, ["Найти", "Поиск", "Искать"]))
@@ -580,7 +590,9 @@ class BarsAuthService:
 
     def capture_patient_search_requests(self, history_number: str) -> BarsNetworkCaptureResult:
         history_number = " ".join(str(history_number or "").split())
-        self._diag("capture_patient_requests_start", history_number=history_number)
+        started_at = time.monotonic()
+        deadline = started_at + self.load_timeout_sec
+        self._diag("capture_patient_requests_start", history_number=history_number, timeout_sec=self.load_timeout_sec)
         if not history_number:
             return BarsNetworkCaptureResult(False, "Введите номер истории")
         if not self._enable_devtools:
@@ -598,12 +610,15 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
+        ready_text = self._wait_for_bars_ready(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
+            timed_out = self._deadline_expired(deadline)
             return BarsNetworkCaptureResult(
                 False,
-                "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета.",
+                f"Не удалось загрузить рабочий экран БАРС за {int(self.load_timeout_sec)} секунд."
+                if timed_out
+                else "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета.",
                 history_number=history_number,
                 text_preview=self._compact_text_preview(ready_text),
             )
@@ -612,7 +627,7 @@ class BarsAuthService:
         self._clear_network_capture(page)
 
         steps = [install_result]
-        steps.extend(self._open_hospitalization_journal(page))
+        steps.extend(self._open_hospitalization_journal(page, timeout_sec=self._remaining_timeout(deadline)))
         steps.append(self._fill_history_search(page, history_number))
         time.sleep(0.4)
         steps.append(self._click_visible_text(page, ["Найти", "Поиск", "Искать"]))
@@ -671,7 +686,9 @@ class BarsAuthService:
 
     def list_department_patients(self, department: Optional[str] = None) -> BarsPatientListResult:
         department = " ".join(str(department or self.duty_department or "").split())
-        self._diag("list_department_patients_start", department=department)
+        started_at = time.monotonic()
+        deadline = started_at + self.load_timeout_sec
+        self._diag("list_department_patients_start", department=department, timeout_sec=self.load_timeout_sec)
         if not department:
             return BarsPatientListResult(False, "Не задано отделение")
         if not self._enable_devtools:
@@ -691,25 +708,51 @@ class BarsAuthService:
         self._prepare_background_page(page)
         self.minimize_bars_windows()
 
-        ready_text = self._wait_for_bars_ready(page, timeout_sec=4.0)
+        ready_text = self._wait_for_bars_ready(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title):
+            timed_out = self._deadline_expired(deadline)
+            message = (
+                f"Не удалось загрузить рабочий экран БАРС за {int(self.load_timeout_sec)} секунд."
+                if timed_out
+                else "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета."
+            )
+            self._diag(
+                "list_department_patients_work_screen_not_loaded",
+                level="warning",
+                timed_out=timed_out,
+                elapsed_sec=round(time.monotonic() - started_at, 2),
+                text_preview=self._compact_text_preview(ready_text),
+            )
             return BarsPatientListResult(
                 False,
-                "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета.",
+                message,
                 department=department,
                 text_preview=self._compact_text_preview(ready_text),
             )
 
         steps: list[str] = []
-        steps.extend(self._open_inpatient_duty_doctor(page))
+        steps.extend(self._open_inpatient_duty_doctor(page, timeout_sec=self._remaining_timeout(deadline)))
+        if self._deadline_expired(deadline) and not self._looks_like_inpatient_doctor_page(
+            self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+        ):
+            return self._bars_load_timeout_result(department, steps, "форму Лечащий врач (new)", started_at)
+
         self._install_network_capture(page)
         self._clear_network_capture(page)
         steps.append(self._select_department_filter(page, department))
         steps.append(self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"]))
-        patients = self._wait_for_department_patients_from_requests(page, department, timeout_sec=5.0)
+        patients = self._wait_for_department_patients_from_requests(
+            page,
+            department,
+            timeout_sec=self._remaining_timeout(deadline),
+        )
         if not patients:
-            patients = self._wait_for_department_patient_rows(page, department, timeout_sec=7.0)
+            patients = self._wait_for_department_patient_rows(
+                page,
+                department,
+                timeout_sec=self._remaining_timeout(deadline),
+            )
 
         text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.8)
         if not patients:
@@ -723,6 +766,7 @@ class BarsAuthService:
             patients=patients[:40],
             steps=steps,
             requests=captured_requests[:12],
+            elapsed_sec=round(time.monotonic() - started_at, 2),
             text_preview=self._compact_text_preview(text),
         )
 
@@ -734,6 +778,8 @@ class BarsAuthService:
                 patients=patients,
                 text_preview="; ".join(step for step in steps if step),
             )
+        if self._deadline_expired(deadline):
+            return self._bars_load_timeout_result(department, steps, "список пациентов отделения", started_at)
         return BarsPatientListResult(
             False,
             "Пациенты по выбранному отделению не найдены в видимой таблице",
@@ -767,6 +813,48 @@ class BarsAuthService:
         if os.path.isdir(existing_profile):
             return existing_profile
         return ISOLATED_PROFILE_DIR
+
+    @staticmethod
+    def _read_float_env(name: str, default: float) -> float:
+        try:
+            value = float(os.environ.get(name, "") or default)
+        except (TypeError, ValueError):
+            return float(default)
+        return max(1.0, value)
+
+    @staticmethod
+    def _deadline_expired(deadline: float) -> bool:
+        return time.monotonic() >= deadline
+
+    @staticmethod
+    def _remaining_timeout(deadline: float, minimum: float = 0.2) -> float:
+        return max(float(minimum), deadline - time.monotonic())
+
+    def _bars_load_timeout_result(
+        self,
+        department: str,
+        steps: list[str],
+        target: str,
+        started_at: float,
+    ) -> BarsPatientListResult:
+        elapsed_sec = round(time.monotonic() - started_at, 2)
+        message = f"Не удалось загрузить {target} в БАРС за {int(self.load_timeout_sec)} секунд."
+        self._diag(
+            "bars_load_timeout",
+            level="warning",
+            department=department,
+            target=target,
+            timeout_sec=self.load_timeout_sec,
+            elapsed_sec=elapsed_sec,
+            steps=steps,
+        )
+        return BarsPatientListResult(
+            False,
+            message,
+            department=department,
+            patients=[],
+            text_preview="; ".join(step for step in steps if step),
+        )
 
     def _build_browser_args(self, background: bool = False) -> list[str]:
         args = [self.browser_path]
@@ -1272,7 +1360,8 @@ class BarsAuthService:
                 break
         return "\n".join(lines)
 
-    def _open_hospitalization_journal(self, page: dict[str, Any]) -> list[str]:
+    def _open_hospitalization_journal(self, page: dict[str, Any], timeout_sec: Optional[float] = None) -> list[str]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec or self.load_timeout_sec))
         text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
         if self._looks_like_hospitalization_journal(text):
             self._diag("open_hospitalization_journal_already_open")
@@ -1294,16 +1383,22 @@ class BarsAuthService:
             time.sleep(0.45)
 
         steps.append(self._click_visible_text(page, ["Журнал госпитализации"]))
-        self._wait_for_hospitalization_journal(page, timeout_sec=4.0)
+        self._wait_for_hospitalization_journal(page, timeout_sec=self._remaining_timeout(deadline))
         return steps
 
-    def _open_inpatient_duty_doctor(self, page: dict[str, Any]) -> list[str]:
+    def _open_inpatient_duty_doctor(self, page: dict[str, Any], timeout_sec: Optional[float] = None) -> list[str]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec or self.load_timeout_sec))
         text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
         steps: list[str] = []
         if not self._looks_like_inpatient_doctor_page(text):
-            steps.append(self._open_inpatient_doctor_form_via_api(page))
-            text = self._wait_for_inpatient_doctor_page(page, timeout_sec=6.0)
+            api_step = self._open_inpatient_doctor_form_via_api(page)
+            steps.append(api_step)
+            if api_step.startswith("Форма открыта"):
+                text = self._wait_for_inpatient_doctor_page(page, timeout_sec=self._remaining_timeout(deadline))
             if not self._looks_like_inpatient_doctor_page(text):
+                if self._deadline_expired(deadline):
+                    steps.append("Форма Лечащий врач (new) не загрузилась за отведенное время")
+                    return steps
                 steps.append(self._hover_visible_text(page, ["Рабочие места"]))
                 time.sleep(0.35)
                 if not self._page_contains_text(page, ["Пациенты в стационаре"]):
@@ -1319,7 +1414,7 @@ class BarsAuthService:
                     time.sleep(0.45)
 
                 steps.append(self._click_visible_text(page, ["Лечащий врач (new)"]))
-                self._wait_for_inpatient_doctor_page(page, timeout_sec=5.0)
+                self._wait_for_inpatient_doctor_page(page, timeout_sec=self._remaining_timeout(deadline))
         else:
             self._diag("open_inpatient_duty_doctor_already_open")
             steps.append("Лечащий врач (new) уже открыт")
