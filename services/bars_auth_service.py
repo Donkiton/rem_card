@@ -26,6 +26,7 @@ NETWORK_CAPTURE_WAIT_SEC = 8.0
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
+AUTOMATION_PAGE_NAME = "remcard-bars-automation"
 
 
 @dataclass
@@ -235,7 +236,7 @@ class BarsAuthService:
 
     def prepare_background_session(self):
         self._diag("prepare_background_session_start", debug_port=self.debug_port)
-        page = self._ensure_bars_debug_page(background=True, allow_open=False)
+        page = self._ensure_fresh_bars_automation_page(background=True)
         if page:
             self._prepare_background_page(page)
         minimized = self.minimize_bars_windows()
@@ -342,7 +343,7 @@ class BarsAuthService:
 
     def mark_authorized_manually(self) -> BarsAuthCheckResult:
         self._diag("mark_authorized_manually")
-        page = self._find_bars_debug_page() if self._enable_devtools else None
+        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True) if self._enable_devtools else None
         if page:
             page_url = str(page.get("url") or "")
             title = str(page.get("title") or "")
@@ -506,7 +507,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        page = self._ensure_bars_debug_page(background=True, allow_open=False)
+        page = self._ensure_fresh_bars_automation_page(background=True)
         if not page:
             self._diag(
                 "probe_patient_no_bars_page",
@@ -522,7 +523,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        ready_text = self._wait_for_bars_ready(page, timeout_sec=self._remaining_timeout(deadline))
+        ready_text = self._reset_bars_page_to_root(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
             timed_out = self._deadline_expired(deadline)
@@ -607,7 +608,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        page = self._ensure_bars_debug_page(background=True, allow_open=False)
+        page = self._ensure_fresh_bars_automation_page(background=True)
         if not page:
             return BarsNetworkCaptureResult(
                 False,
@@ -615,7 +616,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        ready_text = self._wait_for_bars_ready(page, timeout_sec=self._remaining_timeout(deadline))
+        ready_text = self._reset_bars_page_to_root(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
             timed_out = self._deadline_expired(deadline)
@@ -703,7 +704,7 @@ class BarsAuthService:
                 department=department,
             )
 
-        page = self._ensure_bars_debug_page(background=True, allow_open=False)
+        page = self._ensure_fresh_bars_automation_page(background=True)
         if not page:
             return BarsPatientListResult(
                 False,
@@ -713,7 +714,7 @@ class BarsAuthService:
         self._prepare_background_page(page)
         self.minimize_bars_windows()
 
-        ready_text = self._wait_for_bars_ready(page, timeout_sec=self._remaining_timeout(deadline))
+        ready_text = self._reset_bars_page_to_root(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title):
             timed_out = self._deadline_expired(deadline)
@@ -1086,9 +1087,16 @@ class BarsAuthService:
         self._diag("debug_port_unresolved", level="warning", preferred_port=preferred_port)
         return preferred_port
 
-    def _ensure_bars_debug_page(self, background: bool = False, allow_open: bool = True) -> Optional[dict[str, Any]]:
-        page = self._find_bars_debug_page()
+    def _ensure_bars_debug_page(
+        self,
+        background: bool = False,
+        allow_open: bool = True,
+        automation: bool = False,
+    ) -> Optional[dict[str, Any]]:
+        page = self._find_bars_debug_page(automation_only=automation)
         if page:
+            if automation:
+                self._mark_bars_automation_page(page)
             if background:
                 self.minimize_bars_windows()
             return page
@@ -1122,16 +1130,30 @@ class BarsAuthService:
                 return None
             self._wait_for_devtools(timeout_sec=5.0)
 
+        opened_page_id = ""
         if self._devtools_available(self.debug_port):
             opened_page = self._open_bars_tab_via_devtools()
             if opened_page:
                 self._diag("ensure_bars_debug_page_opened_tab", background=background, opened_page=opened_page)
+                opened_page_id = str(opened_page.get("id") or "")
+                if automation:
+                    self._mark_bars_automation_page(opened_page)
                 time.sleep(1.0)
 
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
-            page = self._find_bars_debug_page()
+            if automation and opened_page_id:
+                for candidate in self._get_debug_pages(log_failures=False):
+                    if str(candidate.get("id") or "") == opened_page_id:
+                        self._mark_bars_automation_page(candidate)
+                        if self._is_bars_automation_page(candidate):
+                            if background:
+                                self.minimize_bars_windows()
+                            return candidate
+            page = self._find_bars_debug_page(automation_only=automation)
             if page:
+                if automation:
+                    self._mark_bars_automation_page(page)
                 if background:
                     self.minimize_bars_windows()
                 return page
@@ -1145,6 +1167,125 @@ class BarsAuthService:
             pages=self._summarize_pages(self._get_debug_pages(log_failures=False)),
         )
         return None
+
+    def _ensure_fresh_bars_automation_page(self, background: bool = True) -> Optional[dict[str, Any]]:
+        old_page = self._find_bars_debug_page(automation_only=True)
+        if old_page:
+            self._close_debug_page(old_page)
+            time.sleep(0.35)
+        page = self._ensure_bars_debug_page(background=background, allow_open=True, automation=True)
+        if page:
+            self._mark_bars_automation_page(page)
+        return page
+
+    def _close_debug_page(self, page: dict[str, Any]) -> bool:
+        page_id = str(page.get("id") or "")
+        if not page_id:
+            return False
+        endpoint = f"http://127.0.0.1:{self.debug_port}/json/close/{quote(page_id, safe='')}"
+        for method in ("GET", "PUT"):
+            try:
+                request = Request(endpoint, method=method)
+                with urlopen(request, timeout=1.0) as response:
+                    ok = 200 <= response.status < 300
+                self._diag(
+                    "close_debug_page_done",
+                    ok=ok,
+                    method=method,
+                    page=self._summarize_pages([page])[0],
+                    log_to_main=False,
+                )
+                return ok
+            except Exception as exc:
+                self._diag(
+                    "close_debug_page_failed",
+                    level="warning",
+                    method=method,
+                    page=self._summarize_pages([page])[0],
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+        return False
+
+    def _mark_bars_automation_page(self, page: dict[str, Any]) -> bool:
+        name_json = json.dumps(AUTOMATION_PAGE_NAME)
+        expression = f"""
+(() => {{
+  try {{
+    window.name = {name_json};
+    try {{ window.sessionStorage.setItem('remcardBarsAutomationPage', '1'); }} catch (_) {{}}
+    return JSON.stringify({{ok: true, name: window.name || '', url: String(location.href || ''), title: document.title || ''}});
+  }} catch (err) {{
+    return JSON.stringify({{ok: false, error: String(err && (err.message || err) || '')}});
+  }}
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        ok = bool(payload.get("ok"))
+        self._diag(
+            "mark_bars_automation_page_done",
+            ok=ok,
+            page=self._summarize_pages([page])[0],
+            name=payload.get("name"),
+            error=payload.get("error"),
+            log_to_main=False,
+        )
+        return ok
+
+    def _is_bars_automation_page(self, page: dict[str, Any]) -> bool:
+        expression = """
+(() => {
+  try {
+    const marker = (() => {
+      try { return window.sessionStorage.getItem('remcardBarsAutomationPage') || ''; } catch (_) { return ''; }
+    })();
+    return JSON.stringify({ok: true, name: window.name || '', marker});
+  } catch (err) {
+    return JSON.stringify({ok: false, error: String(err && (err.message || err) || '')});
+  }
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        return payload.get("name") == AUTOMATION_PAGE_NAME or payload.get("marker") == "1"
+
+    def _reset_bars_page_to_root(self, page: dict[str, Any], timeout_sec: float) -> str:
+        ws_url = str(page.get("webSocketDebuggerUrl") or "")
+        if not ws_url:
+            return ""
+
+        self._prepare_background_page(page)
+        self._mark_bars_automation_page(page)
+        self._diag("reset_bars_page_to_root_start", page=self._summarize_pages([page])[0])
+        try:
+            current_url = str(page.get("url") or "").rstrip("/")
+            root_url = self.bars_url.rstrip("/")
+            command = (
+                {"method": "Page.reload", "params": {"ignoreCache": False}}
+                if current_url == root_url
+                else {"method": "Page.navigate", "params": {"url": self.bars_url}}
+            )
+            response = self._cdp_call(
+                ws_url,
+                {
+                    "id": int(time.time() * 1000) % 1000000,
+                    **command,
+                },
+                timeout_sec=4.0,
+            )
+            if response.get("error"):
+                self._diag("reset_bars_page_to_root_cdp_error", level="warning", error=response.get("error"))
+        except Exception as exc:
+            self._diag("reset_bars_page_to_root_failed", level="warning", error_type=type(exc).__name__, error=str(exc))
+
+        text = self._wait_for_bars_ready(page, timeout_sec=timeout_sec)
+        self._mark_bars_automation_page(page)
+        self._diag(
+            "reset_bars_page_to_root_done",
+            ready=self._looks_like_bars_work_screen(text, str(page.get("title") or "")),
+            text_len=len(text),
+            text_preview=self._compact_text_preview(text),
+        )
+        return text
 
     def _wait_for_bars_ready(self, page: dict[str, Any], timeout_sec: float = 4.0) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
@@ -1312,7 +1453,11 @@ class BarsAuthService:
                 )
             return []
 
-    def _find_bars_debug_page(self) -> Optional[dict[str, Any]]:
+    def _find_bars_debug_page(
+        self,
+        prefer_automation: bool = True,
+        automation_only: bool = False,
+    ) -> Optional[dict[str, Any]]:
         best_page: Optional[dict[str, Any]] = None
         best_score = -1
         for page in self._get_debug_pages():
@@ -1323,7 +1468,13 @@ class BarsAuthService:
             if not self._looks_like_bars_page(page_url, title):
                 continue
 
+            is_automation = self._is_bars_automation_page(page) if page.get("webSocketDebuggerUrl") else False
+            if automation_only and not is_automation:
+                continue
+
             score = 10
+            if prefer_automation and is_automation:
+                score += 10000
             if "журнал госпитализации" in title.lower():
                 score += 100
             text = self._read_page_text(page) if page.get("webSocketDebuggerUrl") else ""
@@ -1337,7 +1488,13 @@ class BarsAuthService:
                 best_page = page
                 best_score = score
         if best_page:
-            self._diag("find_bars_debug_page_selected", score=best_score, page=self._summarize_pages([best_page])[0])
+            self._diag(
+                "find_bars_debug_page_selected",
+                score=best_score,
+                automation=self._is_bars_automation_page(best_page) if best_page.get("webSocketDebuggerUrl") else False,
+                automation_only=automation_only,
+                page=self._summarize_pages([best_page])[0],
+            )
         return best_page
 
     def _looks_like_bars_page(self, page_url: str, title: str) -> bool:
@@ -2637,7 +2794,14 @@ class BarsAuthService:
                 target_tag=payload.get("target_tag"),
             )
             return f"Наведено: {text}"
-        self._diag("hover_visible_text_not_found", level="warning", labels=labels)
+        self._diag(
+            "hover_visible_text_not_found",
+            level="warning",
+            labels=labels,
+            reason=payload.get("reason"),
+            score=payload.get("score"),
+            text=self._trim_value(str(payload.get("text") or ""), max_len=180),
+        )
         return f"Не найдено для наведения: {', '.join(labels)}"
 
     def _click_visible_text(self, page: dict[str, Any], labels: list[str]) -> str:
@@ -2655,7 +2819,14 @@ class BarsAuthService:
                 target_tag=payload.get("target_tag"),
             )
             return f"Нажато: {clicked_preview}"
-        self._diag("click_visible_text_not_found", level="warning", labels=labels)
+        self._diag(
+            "click_visible_text_not_found",
+            level="warning",
+            labels=labels,
+            reason=payload.get("reason"),
+            score=payload.get("score"),
+            text=self._trim_value(str(payload.get("text") or ""), max_len=180),
+        )
         return f"Не найдено: {', '.join(labels)}"
 
     def _act_on_visible_text(self, page: dict[str, Any], labels: list[str], action: str) -> dict[str, Any]:
@@ -2738,6 +2909,7 @@ class BarsAuthService:
         if (style.cursor === 'pointer') score += 50;
         if (text.length <= label.length + 8) score += 120;
         if (hasChildWithLabel(el, label) && own !== label) score -= 450;
+        if (text.includes('→') && normalized !== label) score -= 700;
         score -= Math.min(text.length, 500) / 4;
         candidates.push({{el, label, text, score, tag}});
       }}
@@ -2746,6 +2918,7 @@ class BarsAuthService:
   candidates.sort((a, b) => b.score - a.score);
   if (!candidates.length) return JSON.stringify({{ok: false}});
   const best = candidates[0];
+  if (best.score < 100) return JSON.stringify({{ok: false, reason: 'candidate score too low', score: best.score, text: best.text}});
   const target = clickElement(best.el);
   return JSON.stringify({{
     ok: true,
@@ -3053,6 +3226,7 @@ class BarsAuthService:
         for page in pages:
             summary.append(
                 {
+                    "id": str(page.get("id") or "")[:80],
                     "url": str(page.get("url") or "")[:220],
                     "title": str(page.get("title") or "")[:160],
                     "type": str(page.get("type") or ""),
