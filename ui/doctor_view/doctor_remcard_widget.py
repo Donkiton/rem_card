@@ -1038,7 +1038,7 @@ class DoctorRemCardWidget(QWidget):
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
         self.sector8_panel.bars_clicked.connect(self.on_bars_clicked)
         self.sector8_panel.set_bars_auth_state(False)
-        QTimer.singleShot(1200, self._check_bars_auth_async)
+        logger.info("[StartupDiag] phase=bars_auth_autocheck_disabled")
 
         if hasattr(self.layout_manager, 'beds_selection_widget'):
             self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected_from_list)

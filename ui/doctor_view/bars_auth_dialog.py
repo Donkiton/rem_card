@@ -20,26 +20,24 @@ class BarsAuthDialog(BaseStyledDialog):
         self._check_worker = None
         self._patient_probe_worker = None
         self._patient_list_worker = None
-        self._background_worker = None
-        self._auto_accept_scheduled = False
+        self._browser_launch_requested = False
 
         self._init_content()
 
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1800)
         self._poll_timer.timeout.connect(self._check_authorized_async)
-
-        QTimer.singleShot(0, self._open_browser_async)
+        QTimer.singleShot(250, self._check_authorized_async)
 
     def _init_content(self):
-        self.status_label = QLabel("Открываю БАРС...")
+        self.status_label = QLabel("Окно БАРС готово. Браузер не открывается автоматически.")
         self.status_label.setWordWrap(True)
         self.status_label.setMinimumWidth(460)
         self.status_label.setStyleSheet("font-size: 14px; color: #2c3e50;")
 
         self.hint_label = QLabel(
-            "В открытом окне Яндекс-Браузера выберите способ входа, ЭЦП и кабинет. "
-            "После входа РЕМКАРТА будет использовать служебную сессию БАРС без ручной навигации в браузере."
+            "Нажмите «Открыть браузер», завершите вход в БАРС и выберите кабинет. "
+            "РЕМКАРТА сама проверит авторизацию после открытия браузера."
         )
         self.hint_label.setWordWrap(True)
         self.hint_label.setStyleSheet("font-size: 12px; color: #5d6d7e;")
@@ -47,32 +45,24 @@ class BarsAuthDialog(BaseStyledDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        self.btn_check = QPushButton("Проверить")
-        self.btn_check.setObjectName("DialogOkBtn")
-        self.btn_check.clicked.connect(self._check_authorized_async)
-
-        self.btn_manual_done = QPushButton("Я вошел")
-        self.btn_manual_done.setObjectName("DialogOkBtn")
-        self.btn_manual_done.clicked.connect(self._mark_authorized_manually)
-
-        self.btn_close = QPushButton("Закрыть")
-        self.btn_close.setObjectName("DialogOkBtn")
-        self.btn_close.clicked.connect(self.reject)
-
-        button_layout.addWidget(self.btn_check)
-        button_layout.addWidget(self.btn_manual_done)
-        button_layout.addWidget(self.btn_close)
+        self.btn_open_browser = QPushButton("Открыть браузер")
+        self.btn_open_browser.setObjectName("DialogOkBtn")
+        self.btn_open_browser.clicked.connect(self._open_browser_async)
+        button_layout.addWidget(self.btn_open_browser)
 
         search_layout = QHBoxLayout()
         self.history_input = QLineEdit()
         self.history_input.setPlaceholderText("Номер истории")
         self.history_input.returnPressed.connect(self._probe_patient_async)
+
         self.btn_patient_probe = QPushButton("Проба ФИО")
         self.btn_patient_probe.setObjectName("DialogOkBtn")
         self.btn_patient_probe.clicked.connect(self._probe_patient_async)
+
         self.btn_patient_list = QPushButton("Список пациентов")
         self.btn_patient_list.setObjectName("DialogOkBtn")
         self.btn_patient_list.clicked.connect(self._load_patient_list_async)
+
         search_layout.addWidget(self.history_input, 1)
         search_layout.addWidget(self.btn_patient_probe)
         search_layout.addWidget(self.btn_patient_list)
@@ -91,13 +81,14 @@ class BarsAuthDialog(BaseStyledDialog):
         self.resize(680, 380)
 
     def _set_busy(self, busy: bool):
-        self.btn_check.setEnabled(not busy)
+        self.btn_open_browser.setEnabled(not busy)
         self.btn_patient_probe.setEnabled(not busy)
         self.btn_patient_list.setEnabled(not busy)
 
     def _open_browser_async(self):
         if self._launch_worker and self._launch_worker.isRunning():
             return
+        self._browser_launch_requested = True
         self._set_busy(True)
         self.status_label.setText("Открываю окно БАРС...")
         self._launch_worker = AsyncCallThread(self.auth_service.open_auth_window, parent=self)
@@ -126,9 +117,13 @@ class BarsAuthDialog(BaseStyledDialog):
         self._check_worker.start()
 
     def _on_auth_checked(self, result: BarsAuthCheckResult):
-        self.status_label.setText(result.message)
         if result.authorized:
             self._complete_authorization(result)
+            return
+        if self._browser_launch_requested or result.url:
+            self.status_label.setText(result.message)
+        else:
+            self.status_label.setText("Нажмите «Открыть браузер» и завершите вход в БАРС.")
 
     def _probe_patient_async(self):
         if self._patient_probe_worker and self._patient_probe_worker.isRunning():
@@ -175,26 +170,10 @@ class BarsAuthDialog(BaseStyledDialog):
         if result.ok:
             self.authorized = True
 
-    def _mark_authorized_manually(self):
-        result = self.auth_service.mark_authorized_manually()
-        if result.authorized:
-            self._complete_authorization(result)
-        else:
-            self.status_label.setText(result.message)
-
     def _complete_authorization(self, result: BarsAuthCheckResult):
         self.authorized = True
         self._poll_timer.stop()
-        self.status_label.setText(f"{result.message}. Служебная сессия подготовлена для работы из РЕМКАРТЫ.")
-        self.btn_close.setText("Готово")
-        self._prepare_background_session_async()
-
-    def _prepare_background_session_async(self):
-        if self._background_worker and self._background_worker.isRunning():
-            return
-        self._background_worker = AsyncCallThread(self.auth_service.prepare_background_session, parent=self)
-        self._background_worker.failed.connect(lambda exc: None)
-        self._background_worker.start()
+        self.status_label.setText(f"{result.message}. Служебная сессия БАРС доступна для работы из РЕМКАРТЫ.")
 
     def _format_patient_probe_result(self, result: BarsPatientProbeResult) -> str:
         lines = [result.message]

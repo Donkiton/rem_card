@@ -3702,6 +3702,7 @@ class BarsAuthService:
                 encoding="cp866",
                 errors="replace",
                 timeout=1.5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0,
             )
         except Exception as exc:
             return []
