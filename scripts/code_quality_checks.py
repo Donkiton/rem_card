@@ -45,7 +45,6 @@ ALLOWED_F_BLOCKS = {
     ("ui/doctor_view/components/order_input_handler.py", "OrderInputHandler.parse_input_to_dto"),
     ("ui/rem_card_sectors/sector_events.py", "SectorEvents.refresh"),
     ("ui/rem_card_sectors/sector_print.py", "DataCollectorWorker.transform_data_static"),
-    ("ui/shared/orders_delegate.py", "OrdersDelegate.paint"),
 }
 
 
