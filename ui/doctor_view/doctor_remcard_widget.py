@@ -15,8 +15,9 @@ ADD_PATIENT_LOCK_KEY = "add_patient_button"
 CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
-JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "1200")))
-JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "1") != "0"
+JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
+JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
+JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
 
 class DoctorRemCardWidget(QWidget):
     archive_requested = Signal()
@@ -85,7 +86,8 @@ class DoctorRemCardWidget(QWidget):
         QTimer.singleShot(0, self._refresh_add_patient_button_lock_state)
         if CARD_UI_PREWARM_ENABLED:
             QTimer.singleShot(CARD_UI_PREWARM_DELAY_MS, self._schedule_card_ui_prewarm)
-        QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
+        if JOURNAL_PREWARM_ENABLED:
+            QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
 
     def _build_add_patient_lock(self) -> RoleSessionLock:
         owner_id = f"{socket.gethostname()}:{os.getpid()}:doctor_add_patient"
@@ -801,20 +803,25 @@ class DoctorRemCardWidget(QWidget):
         self.current_date = date
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        try:
+            card_start_dt, card_end_dt = self.service.get_day_period(date)
+        except Exception:
+            card_start_dt, card_end_dt = date, None
 
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
         if hasattr(self, 'chart'):
             self.chart.admission_id = admission_id
+            if hasattr(self.chart, "clear_for_context"):
+                self.chart.clear_for_context(admission_id=admission_id, start_time=card_start_dt)
 
         if hasattr(self.layout_manager, "set_events_context"):
-            s_start, s_end = self.service.get_day_period(date)
             self.layout_manager.set_events_context(
                 admission_id=admission_id,
                 status_service=self.service.status_service,
                 shift_date=date,
-                shift_start=s_start,
-                shift_end=s_end,
+                shift_start=card_start_dt,
+                shift_end=card_end_dt,
             )
         
         if hasattr(self, 'vitals_input'):
@@ -824,9 +831,16 @@ class DoctorRemCardWidget(QWidget):
             
         if hasattr(self.layout_manager, 'orders_widget'):
             ow = self.layout_manager.orders_widget
-            ow.service = self.service
-            ow.admission_id = admission_id
-            ow.shift_date = date
+            if hasattr(ow, "set_context"):
+                ow.set_context(
+                    service=self.service,
+                    admission_id=admission_id,
+                    shift_date=date,
+                )
+            else:
+                ow.service = self.service
+                ow.admission_id = admission_id
+                ow.shift_date = date
             if not self._archive_read_only_mode:
                 ow.clear_drafts()
 
@@ -1580,7 +1594,7 @@ class DoctorRemCardWidget(QWidget):
         if reply == CustomMessageBox.Yes: ow.clear_drafts()
 
     def on_exit_clicked(self):
-        reply = CustomMessageBox.question(self, "Подтверждение", "Убегаешь как трус?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
+        reply = CustomMessageBox.question(self, "Подтверждение", "Выйти из программы?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
         if reply == CustomMessageBox.Yes: self.window().close()
 
     def on_back_clicked(self):

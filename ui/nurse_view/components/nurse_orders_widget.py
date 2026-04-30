@@ -56,6 +56,7 @@ class NurseOrdersWidget(QWidget):
         self.model = None
         self.highlighted_order_id = None
         self._last_polled_change_id = 0
+        self._last_polled_context_key = None
         self._last_poll_monotonic = 0.0
         self._min_poll_interval_sec = max(0.1, float(os.getenv("REMCARD_ORDERS_POLL_MIN_INTERVAL_SEC", "0.8")))
         self._snapshot_worker = None
@@ -100,6 +101,7 @@ class NurseOrdersWidget(QWidget):
     def _reset_change_cursor(self):
         self._last_poll_monotonic = 0.0
         self._last_polled_change_id = 0
+        self._last_polled_context_key = None
 
     def _reset_cached_state(self):
         self._cached_has_administrations = False
@@ -264,10 +266,11 @@ class NurseOrdersWidget(QWidget):
         except Exception:
             logger.exception("[NurseOrdersWidget] Failed to build context for handle_data_changes")
             return
+        context_key = context.cache_key()
         self._snapshot_stale = True
         if scoped_change_id > 0:
             self._last_polled_change_id = max(int(self._last_polled_change_id or 0), scoped_change_id)
-        context_key = context.cache_key()
+            self._last_polled_context_key = context_key
         if self._pending_change_context_key not in (None, context_key):
             self._reset_change_batch(stop_timer=True)
         self._pending_change_context_key = context_key
@@ -542,6 +545,15 @@ class NurseOrdersWidget(QWidget):
             return False
         snapshot_change_id = int(snapshot.get("change_id") or 0)
         known_change_id = int(self._last_polled_change_id or 0)
+        if known_change_id > 0 and self._last_polled_context_key not in (None, current_context_key):
+            logger.info(
+                "[NurseOrdersWidget] reset stale cursor after context drift previous_context=%s current_context=%s known_change_id=%s",
+                self._last_polled_context_key,
+                current_context_key,
+                known_change_id,
+            )
+            self._reset_change_cursor()
+            known_change_id = 0
         self._snapshot_stale = snapshot_change_id < known_change_id
         if self._snapshot_stale:
             coordinator = self._get_read_coordinator()
@@ -589,6 +601,8 @@ class NurseOrdersWidget(QWidget):
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
         self._last_polled_change_id = max(known_change_id, snapshot_change_id)
+        if self._last_polled_change_id > 0:
+            self._last_polled_context_key = current_context_key
         self._apply_table_header_layout()
         self._restore_highlight()
         self.check_drafts()
