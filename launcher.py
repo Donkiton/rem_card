@@ -1,6 +1,9 @@
 import sys
 import os
 
+from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+
 def _strip_legacy_jornal_role(argv):
     normalized = [argv[0]]
     i = 1
@@ -17,11 +20,8 @@ def _strip_legacy_jornal_role(argv):
     return normalized
 
 def run_rem_card():
-    # Добавляем родительскую директорию в sys.path, чтобы импорт rem_card работал
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if base_dir not in sys.path:
-        sys.path.insert(0, base_dir)
-        
+    bootstrap_local_rem_card()
+
     from rem_card.app.main import main
     main()
 

@@ -1,10 +1,9 @@
 import os
 import sys
 
+from _local_rem_card_bootstrap import bootstrap_local_rem_card
 
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+PROJECT_ROOT = bootstrap_local_rem_card()
 
 try:
     import PySide6.QtOpenGL  # noqa: F401
