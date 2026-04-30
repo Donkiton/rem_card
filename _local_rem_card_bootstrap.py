@@ -4,6 +4,10 @@ import types
 from importlib.machinery import ModuleSpec
 
 
+def _is_frozen_app() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
 def bootstrap_local_rem_card() -> str:
     """
     Bind the package name `rem_card` to this checkout.
@@ -12,6 +16,15 @@ def bootstrap_local_rem_card() -> str:
     in C:/Project/rem_card. Most project imports are absolute `rem_card.*`, so
     running from the renamed folder needs an explicit local package alias.
     """
+    if _is_frozen_app():
+        # In PyInstaller builds the real modules live in the bundled archive.
+        # Replacing sys.modules["rem_card"] with a filesystem-only alias hides
+        # those bundled modules and breaks imports such as rem_card.app.main.
+        runtime_root = os.path.abspath(getattr(sys, "_MEIPASS", os.path.dirname(sys.executable)))
+        if runtime_root not in sys.path:
+            sys.path.insert(0, runtime_root)
+        return runtime_root
+
     repo_root = os.path.dirname(os.path.abspath(__file__))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)

@@ -3,13 +3,20 @@
 import os
 import shutil
 import json
+import sys
 from datetime import datetime
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
 APP_ROOT = os.path.abspath(SPECPATH)
 PROJECT_ROOT = os.path.dirname(APP_ROOT)
 DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
+
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+HIDDEN_IMPORTS = collect_submodules("rem_card")
 
 
 def _data_dir(relative_path):
@@ -66,7 +73,7 @@ a = Analysis(
 		_data_dir('Rao_jornal/fonts'),
 		_data_dir('Rao_jornal/mkb'),
 ],
-    hiddenimports=['rem_card.Rao_jornal.main'],
+    hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
