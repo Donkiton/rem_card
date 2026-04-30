@@ -195,8 +195,18 @@ class BarsAuthService:
                 pages=self._summarize_pages(self._get_debug_pages(log_failures=False)),
             )
 
+        if self._enable_devtools:
+            prep_message = self._prepare_devtools_auth_launch()
+            if prep_message:
+                self._last_message = prep_message
+                return BarsAuthCheckResult(False, prep_message)
+            self.debug_port = self._resolve_debug_port(self.debug_port)
+
         try:
-            self._start_auth_browser_process()
+            if self._enable_devtools:
+                self._start_browser_process(background=False, event_prefix="open_auth_window")
+            else:
+                self._start_auth_browser_process()
         except Exception as exc:
             message = f"Не удалось открыть Яндекс-Браузер: {exc}"
             self._last_message = message
@@ -319,10 +329,31 @@ class BarsAuthService:
         return restored
 
     def mark_authorized_manually(self) -> BarsAuthCheckResult:
-        self._last_authorized = True
-        self._last_message = "Авторизация подтверждена пользователем"
         self._diag("mark_authorized_manually")
-        return BarsAuthCheckResult(True, self._last_message)
+        page = self._find_bars_debug_page() if self._enable_devtools else None
+        if page:
+            page_url = str(page.get("url") or "")
+            title = str(page.get("title") or "")
+            self._last_authorized = True
+            self._last_message = "Авторизация подтверждена пользователем"
+            self._diag("mark_authorized_manually_ready", url=page_url, title=title)
+            return BarsAuthCheckResult(True, self._last_message, url=page_url, title=title)
+
+        self._last_authorized = False
+        self._last_message = (
+            "Вход подтвержден, но РЕМКАРТА не видит вкладку БАРС для чтения. "
+            "Полностью закройте Яндекс-Браузер, включая значок в трее, и нажмите БАРС снова."
+        )
+        self._diag(
+            "mark_authorized_manually_no_debug_page",
+            level="warning",
+            debug_port=self.debug_port,
+            devtools_available=self._devtools_available(self.debug_port),
+            pages=self._summarize_pages(self._get_debug_pages(log_failures=False)),
+            running_browser_pids=self._running_yandex_pids(),
+            visible_windows=self._visible_yandex_window_titles(),
+        )
+        return BarsAuthCheckResult(False, self._last_message)
 
     def check_authorized(self) -> BarsAuthCheckResult:
         self._diag("check_authorized_start", debug_port=self.debug_port)
@@ -333,7 +364,14 @@ class BarsAuthService:
             return result
         pages = self._get_debug_pages()
         if not pages:
-            result = BarsAuthCheckResult(False, "Окно БАРС еще не готово")
+            if self._devtools_available(self.debug_port):
+                message = "Окно БАРС еще не готово"
+            else:
+                message = (
+                    "Яндекс-Браузер открыт без служебного подключения. "
+                    "Закройте Яндекс полностью, включая трей, и нажмите БАРС снова."
+                )
+            result = BarsAuthCheckResult(False, message)
             self._apply_check_result(result)
             self._diag("check_authorized_no_pages", message=result.message)
             return result
@@ -747,6 +785,40 @@ class BarsAuthService:
     def _build_auth_browser_args(self) -> list[str]:
         return [self.browser_path, self.bars_url]
 
+    def _prepare_devtools_auth_launch(self) -> str:
+        pages = self._get_debug_pages(log_failures=False)
+        if pages:
+            return ""
+
+        visible_windows = self._visible_yandex_window_titles()
+        if visible_windows:
+            self._diag(
+                "prepare_devtools_auth_launch_visible_windows",
+                level="warning",
+                visible_windows=visible_windows,
+                running_browser_pids=self._running_yandex_pids(),
+            )
+            return (
+                "Яндекс-Браузер уже открыт без служебного подключения. "
+                "Закройте все окна Яндекса и значок в трее, затем нажмите БАРС снова."
+            )
+
+        running_pids = self._running_yandex_pids()
+        if running_pids:
+            stopped = self._stop_background_yandex_processes(running_pids)
+            self._diag(
+                "prepare_devtools_auth_launch_background_stopped",
+                requested_pids=running_pids,
+                stopped_pids=stopped,
+            )
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not self._running_yandex_pids() and not self._devtools_available(self.debug_port):
+                    break
+                time.sleep(0.25)
+
+        return ""
+
     def _start_auth_browser_process(self) -> subprocess.Popen:
         args = self._build_auth_browser_args()
         creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
@@ -765,6 +837,30 @@ class BarsAuthService:
             debug_port=self.debug_port,
         )
         return self._process
+
+    def _stop_background_yandex_processes(self, pids: list[int]) -> list[int]:
+        stopped: list[int] = []
+        if os.name != "nt":
+            return stopped
+        for pid in sorted(set(int(pid) for pid in pids if pid)):
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                stopped.append(pid)
+            except Exception as exc:
+                self._diag(
+                    "stop_background_yandex_process_failed",
+                    level="warning",
+                    pid=pid,
+                    error=repr(exc),
+                )
+        return stopped
 
     def _start_browser_process(self, background: bool, event_prefix: str) -> subprocess.Popen:
         if self._enable_devtools and self._running_yandex_pids() and not self._devtools_available(self.debug_port):
@@ -2247,6 +2343,46 @@ class BarsAuthService:
             except Exception:
                 continue
         return pids
+
+    def _visible_yandex_window_titles(self) -> list[str]:
+        if os.name != "nt":
+            return []
+        try:
+            import ctypes
+        except Exception:
+            return []
+
+        yandex_pids = set(self._running_yandex_pids())
+        if not yandex_pids:
+            return []
+
+        user32 = ctypes.windll.user32
+        titles: list[str] = []
+
+        def callback(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value or 0) not in yandex_pids:
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = self._trim_value(str(buffer.value or ""), max_len=220)
+            if title:
+                titles.append(title)
+            return True
+
+        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)(callback)
+        try:
+            user32.EnumWindows(enum_proc, 0)
+        except Exception as exc:
+            self._diag("visible_yandex_window_titles_failed", level="warning", error=repr(exc))
+            return []
+        return titles
 
     @staticmethod
     def _summarize_pages(pages: list[dict[str, Any]]) -> list[dict[str, str]]:

@@ -177,7 +177,10 @@ class BarsAuthDialog(BaseStyledDialog):
 
     def _mark_authorized_manually(self):
         result = self.auth_service.mark_authorized_manually()
-        self._complete_authorization(result)
+        if result.authorized:
+            self._complete_authorization(result)
+        else:
+            self.status_label.setText(result.message)
 
     def _complete_authorization(self, result: BarsAuthCheckResult):
         self.authorized = True
