@@ -9,7 +9,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from rem_card.app.logger import logger
@@ -19,9 +19,10 @@ from rem_card.app.paths import LOCAL_APPDATA, LOGS_DIR
 DEFAULT_BARS_URL = "http://10.30.30.12/"
 DEFAULT_DEBUG_PORT = 9338
 DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
+DEFAULT_DUTY_DEPARTMENT_ID = "12849353824"
 DEFAULT_BARS_LOAD_TIMEOUT_SEC = 40.0
-DIRECT_FORM_API_TIMEOUT_SEC = 40.0
-DEPARTMENT_SELECT_TIMEOUT_SEC = 8.0
+DIRECT_FORM_API_TIMEOUT_SEC = 12.0
+DEPARTMENT_SELECT_TIMEOUT_SEC = 15.0
 NETWORK_CAPTURE_WAIT_SEC = 8.0
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
@@ -754,6 +755,7 @@ class BarsAuthService:
 
         self._install_network_capture(page)
         self._clear_network_capture(page)
+        self._remember_bars_scroll_state(page)
         department_step = self._select_department_filter(
             page,
             department,
@@ -762,6 +764,44 @@ class BarsAuthService:
         steps.append(department_step)
         failed_step = self._first_failed_step([department_step])
         if failed_step:
+            if "grid not ready" in failed_step.lower() and not self._deadline_expired(deadline):
+                self._diag(
+                    "list_department_patients_retry_after_department_grid_not_ready",
+                    level="warning",
+                    failed_step=failed_step,
+                    elapsed_sec=round(time.monotonic() - started_at, 2),
+                )
+                steps.append("Повторное открытие формы после зависания фильтра отделения")
+                self._close_bars_internal_windows(page)
+                reopen_steps = self._open_inpatient_duty_doctor(page, timeout_sec=self._remaining_timeout(deadline))
+                steps.extend(reopen_steps)
+                reopen_failed_step = self._first_failed_step(reopen_steps)
+                current_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+                if reopen_failed_step or not self._looks_like_inpatient_doctor_page(current_text):
+                    return self._bars_scenario_failed_result(
+                        department,
+                        steps,
+                        reopen_failed_step or "Форма Лечащий врач (new) не открылась после повторного открытия",
+                        current_text,
+                        started_at,
+                    )
+                self._install_network_capture(page)
+                self._clear_network_capture(page)
+                department_step = self._select_department_filter(
+                    page,
+                    department,
+                    timeout_sec=min(DEPARTMENT_SELECT_TIMEOUT_SEC, self._remaining_timeout(deadline)),
+                )
+                steps.append(department_step)
+                failed_step = self._first_failed_step([department_step])
+                if not failed_step:
+                    self._diag(
+                        "list_department_patients_retry_after_department_grid_not_ready_success",
+                        elapsed_sec=round(time.monotonic() - started_at, 2),
+                    )
+
+        if failed_step:
+            self._restore_bars_scroll_state(page)
             return self._bars_scenario_failed_result(
                 department,
                 steps,
@@ -770,12 +810,18 @@ class BarsAuthService:
                 started_at,
             )
 
+        empty_department_response = False
         patients = self._wait_for_department_patients_from_requests(
             page,
             department,
             timeout_sec=min(NETWORK_CAPTURE_WAIT_SEC, self._remaining_timeout(deadline)),
         )
         if not patients:
+            empty_department_response = self._has_empty_department_patients_response(
+                self._get_network_capture(page),
+                department,
+            )
+        if not patients and not empty_department_response:
             find_step = self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"])
             steps.append(find_step)
             failed_step = self._first_failed_step([find_step])
@@ -792,7 +838,12 @@ class BarsAuthService:
                 department,
                 timeout_sec=min(NETWORK_CAPTURE_WAIT_SEC, self._remaining_timeout(deadline)),
             )
-        if not patients:
+            if not patients:
+                empty_department_response = self._has_empty_department_patients_response(
+                    self._get_network_capture(page),
+                    department,
+                )
+        if not patients and not empty_department_response:
             patients = self._wait_for_department_patient_rows(
                 page,
                 department,
@@ -800,15 +851,21 @@ class BarsAuthService:
             )
 
         text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.8)
-        if not patients:
+        if not patients and not empty_department_response:
             patients = self._extract_visible_patient_rows(page, department)
         captured_requests = self._summarize_captured_requests(self._get_network_capture(page), department)
+        self._restore_bars_scroll_state(page)
+        empty_department_response = empty_department_response or self._has_empty_department_patients_response(
+            self._get_network_capture(page),
+            department,
+        )
         self._diag(
             "list_department_patients_done",
-            ok=bool(patients),
+            ok=bool(patients) or empty_department_response,
             department=department,
             patients_count=len(patients),
             patients=patients[:40],
+            empty_department_response=empty_department_response,
             steps=steps,
             requests=captured_requests[:12],
             elapsed_sec=round(time.monotonic() - started_at, 2),
@@ -821,6 +878,14 @@ class BarsAuthService:
                 f"Найдено пациентов: {len(patients)}",
                 department=department,
                 patients=patients,
+                text_preview="; ".join(step for step in steps if step),
+            )
+        if empty_department_response:
+            return BarsPatientListResult(
+                True,
+                "Пациентов в выбранном отделении не найдено",
+                department=department,
+                patients=[],
                 text_preview="; ".join(step for step in steps if step),
             )
         if self._deadline_expired(deadline):
@@ -1298,8 +1363,9 @@ class BarsAuthService:
       '.d3-window-close',
       '.window-close',
       '.modal-close',
-      '[class*="close"]',
-      '[class*="Close"]'
+      '.win_close',
+      '[class~="close"]',
+      '[class~="win_close"]'
     ].join(',')));
     for (const el of nodes) {
       try {
@@ -1311,7 +1377,7 @@ class BarsAuthService:
         const aria = String(el.getAttribute('aria-label') || '');
         const all = `${text} ${cls} ${title} ${aria}`.toLowerCase();
         if (all.includes('выход') || all.includes('очистить') || all.includes('скрыть фильтр')) continue;
-        const closeMarker = all.includes('закрыть') || all.includes('close');
+        const closeMarker = all.includes('закрыть') || /(^|[\s_-])close($|[\s_-])/.test(all) || /(^|[\s_-])win_close($|[\s_-])/.test(all);
         const small = rect.width <= 80 && rect.height <= 50;
         if (!closeMarker && !small) continue;
         let z = 0;
@@ -1696,9 +1762,9 @@ class BarsAuthService:
             attempted_direct_api = False
             if self._use_direct_form_api:
                 api_step = self._open_inpatient_doctor_form_via_api(page)
-                steps.append(api_step)
                 attempted_direct_api = api_step.startswith("Форма открыта")
                 if api_step.startswith("Форма открыта"):
+                    steps.append(api_step)
                     api_timeout = min(DIRECT_FORM_API_TIMEOUT_SEC, self._remaining_timeout(deadline))
                     text = self._wait_for_inpatient_doctor_page(page, timeout_sec=api_timeout)
             else:
@@ -1708,8 +1774,16 @@ class BarsAuthService:
                     log_to_main=False,
                 )
             if attempted_direct_api and not self._looks_like_inpatient_doctor_page(text):
-                steps.append("Форма Лечащий врач (new) не загрузилась после прямого вызова")
-                return steps
+                self._diag(
+                    "open_inpatient_doctor_form_api_fallback_to_menu",
+                    level="warning",
+                    text_preview=self._compact_text_preview(text),
+                )
+                if steps and steps[-1] == api_step:
+                    steps[-1] = "Запасной путь через меню после прямого вызова формы"
+                else:
+                    steps.append("Запасной путь через меню после прямого вызова формы")
+                self._close_bars_internal_windows(page)
             if not self._looks_like_inpatient_doctor_page(text):
                 if self._deadline_expired(deadline):
                     steps.append("Форма Лечащий врач (new) не загрузилась за отведенное время")
@@ -1757,7 +1831,11 @@ class BarsAuthService:
         steps.append(step)
         if self._first_failed_step([step]):
             return steps
-        time.sleep(0.7)
+        grid_ready = self._ensure_duty_doctor_grid_ready(
+            page,
+            timeout_sec=min(5.0, self._remaining_timeout(deadline)),
+        )
+        steps.append("Грид Дежурный врач готов" if grid_ready else "Грид Дежурный врач пока не готов")
         return steps
 
     def _open_inpatient_doctor_form_via_api(self, page: dict[str, Any]) -> str:
@@ -1878,6 +1956,111 @@ class BarsAuthService:
         self._diag("select_inpatient_tab_failed", level="warning", label=label, reason=payload.get("reason"))
         return f"Вкладка не найдена: {label}"
 
+    def _ensure_duty_doctor_grid_ready(self, page: dict[str, Any], timeout_sec: float) -> bool:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        next_reclick = time.monotonic() + 0.8
+        last_payload: dict[str, Any] = {}
+        while time.monotonic() < deadline:
+            payload = self._probe_duty_doctor_grid(page)
+            last_payload = payload
+            if payload.get("ready"):
+                self._diag(
+                    "duty_doctor_grid_ready",
+                    datasets=payload.get("datasets"),
+                    controls=payload.get("controls"),
+                    inputs=payload.get("inputs"),
+                )
+                return True
+            if time.monotonic() >= next_reclick:
+                self._diag(
+                    "duty_doctor_grid_reclick_tab",
+                    datasets=payload.get("datasets"),
+                    controls=payload.get("controls"),
+                    inputs=payload.get("inputs"),
+                    log_to_main=False,
+                )
+                self._select_inpatient_tab(page, "Дежурный врач")
+                next_reclick = time.monotonic() + 0.9
+            time.sleep(0.25)
+
+        self._diag(
+            "duty_doctor_grid_not_ready",
+            level="warning",
+            datasets=last_payload.get("datasets"),
+            controls=last_payload.get("controls"),
+            inputs=last_payload.get("inputs"),
+        )
+        return False
+
+    def _probe_duty_doctor_grid(self, page: dict[str, Any]) -> dict[str, Any]:
+        expression = """
+(() => {
+  const docs = [];
+  const walk = (win) => {
+    try {
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {
+        try { walk(frame.contentWindow); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  walk(window);
+  const visible = (el) => {
+    try {
+      const style = el.ownerDocument.defaultView.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    } catch (_) {
+      return false;
+    }
+  };
+  const d3ApiOf = (el) => {
+    try {
+      const win = el && el.ownerDocument ? el.ownerDocument.defaultView : null;
+      return (win && win.D3Api) || window.D3Api || null;
+    } catch (_) {
+      return window.D3Api || null;
+    }
+  };
+  const datasetOf = (el) => {
+    try {
+      const api = d3ApiOf(el);
+      const combo = el.closest ? el.closest('[cmptype="ComboBox"], .ctrl_combobox') : null;
+      const target = combo || el;
+      const grid = api && api.getControlByDom ? api.getControlByDom(target, 'Grid') : null;
+      return grid && grid.D3Store ? String(grid.D3Store.dataSetName || '') : '';
+    } catch (_) {
+      return '';
+    }
+  };
+  const datasets = [];
+  let controls = 0;
+  let inputs = 0;
+  for (const doc of docs) {
+    const nodes = Array.from(doc.querySelectorAll(
+      '[cmptype="ComboBox"], .ctrl_combobox, input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled])'
+    ));
+    for (const node of nodes) {
+      if (!visible(node)) continue;
+      const dataset = datasetOf(node);
+      if (!dataset) continue;
+      controls += 1;
+      if (/^(input|textarea|select)$/i.test(String(node.tagName || ''))) inputs += 1;
+      if (!datasets.includes(dataset)) datasets.push(dataset);
+    }
+  }
+  return JSON.stringify({
+    ok: true,
+    ready: datasets.some(name => String(name || '').toLowerCase() === 'dsdutydoctor'),
+    datasets,
+    controls,
+    inputs
+  });
+})()
+"""
+        return self._evaluate_json_expression(page, expression)
+
     def _wait_for_hospitalization_journal(self, page: dict[str, Any], timeout_sec: float) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         last_text = ""
@@ -1920,6 +2103,14 @@ class BarsAuthService:
             if self._looks_like_inpatient_doctor_page(last_text):
                 self._diag("open_inpatient_duty_doctor_ready", text_len=len(last_text))
                 return last_text
+            normalized = str(last_text or "").lower()
+            if "class not found" in normalized or "popupmenu" in normalized:
+                self._diag(
+                    "open_inpatient_duty_doctor_js_error",
+                    level="warning",
+                    text_preview=self._compact_text_preview(last_text),
+                )
+                return last_text
             time.sleep(0.35)
         self._diag(
             "open_inpatient_duty_doctor_not_ready",
@@ -1935,9 +2126,11 @@ class BarsAuthService:
         timeout_sec: float = DEPARTMENT_SELECT_TIMEOUT_SEC,
     ) -> str:
         department_json = json.dumps(department, ensure_ascii=False)
+        department_id_json = json.dumps(self._known_department_id(department), ensure_ascii=False)
         expression = f"""
 (() => {{
   const department = {department_json};
+  const knownDepartmentId = {department_id_json};
   const docs = [];
   const walk = (win) => {{
     try {{
@@ -1963,6 +2156,25 @@ class BarsAuthService:
     }}
     if (typeof el.click === 'function') el.click();
   }};
+  const d3ApiOf = (el) => {{
+    try {{
+      const win = el && el.ownerDocument ? el.ownerDocument.defaultView : null;
+      return (win && win.D3Api) || window.D3Api || null;
+    }} catch (_) {{
+      return window.D3Api || null;
+    }}
+  }};
+  const gridDatasetOf = (input) => {{
+    try {{
+      const api = d3ApiOf(input);
+      const combo = input.closest('[cmptype="ComboBox"], .ctrl_combobox');
+      const target = combo || input;
+      const grid = api && api.getControlByDom ? api.getControlByDom(target, 'Grid') : null;
+      return grid && grid.D3Store ? String(grid.D3Store.dataSetName || '') : '';
+    }} catch (_) {{
+      return '';
+    }}
+  }};
   const setValue = (input) => {{
     input.focus();
     try {{
@@ -1982,25 +2194,32 @@ class BarsAuthService:
   const selectComboValue = (input) => {{
     const combo = input.closest('[cmptype="ComboBox"], .ctrl_combobox');
     if (!combo) return {{used: false}};
-    try {{
-      if (window.D3Api && window.D3Api.ComboBoxCtrl && typeof window.D3Api.ComboBoxCtrl.setOptions === 'function') {{
-        window.D3Api.ComboBoxCtrl.setOptions(combo);
-      }}
-    }} catch (_) {{}}
+    const initialGridDataset = gridDatasetOf(input);
 
     const items = Array.from(combo.options || combo.querySelectorAll('[cmptype="ComboItem"][value], tr[value]'));
-    const item = items.find(el => norm(el.textContent).toLowerCase().includes(department.toLowerCase()));
-    if (!item) return {{used: true, selected: false, reason: 'combo item not found', options: items.length}};
+    const exactItem = items.find(el => norm(el.textContent).toLowerCase() === department.toLowerCase());
+    const valueItem = knownDepartmentId ? items.find(el => String(el.getAttribute('value') || '') === knownDepartmentId) : null;
+    const item = exactItem
+      || valueItem
+      || items.find(el => {{
+        const text = norm(el.textContent);
+        return text.toLowerCase().includes(department.toLowerCase()) && !/^\\d{{2}}\\.\\d{{2}}\\.\\d{{4}}\\b/.test(text);
+      }})
+      || (knownDepartmentId ? null : items.find(el => norm(el.textContent).toLowerCase().includes(department.toLowerCase())));
+    if (!item && knownDepartmentId && items.length > 0 && String(initialGridDataset || '').toLowerCase() !== 'dsdutydoctor') {{
+      return {{used: true, selected: false, reason: 'department combo item not found', options: items.length, gridDataset: initialGridDataset}};
+    }}
+    if (!item && !knownDepartmentId) return {{used: true, selected: false, reason: 'combo item not found', options: items.length}};
 
-    const caption = norm(item.textContent) || department;
-    const value = item.getAttribute('value') || '';
-    const button = combo.querySelector('.cmbb-button,[title*="Выбрать"]');
+    const caption = item ? (norm(item.textContent) || department) : department;
+    const value = item ? (item.getAttribute('value') || knownDepartmentId || '') : knownDepartmentId;
 
     try {{
-      if (window.D3Api && typeof window.D3Api.setControlPropertyByDom === 'function') {{
-        window.D3Api.setControlPropertyByDom(combo, 'value', value);
-      }} else if (window.D3Api && window.D3Api.ComboBoxCtrl && typeof window.D3Api.ComboBoxCtrl.setValue === 'function') {{
-        window.D3Api.ComboBoxCtrl.setValue(combo, value, {{}});
+      const api = d3ApiOf(combo);
+      if (api && typeof api.setControlPropertyByDom === 'function') {{
+        api.setControlPropertyByDom(combo, 'value', value);
+      }} else if (api && api.ComboBoxCtrl && typeof api.ComboBoxCtrl.setValue === 'function') {{
+        api.ComboBoxCtrl.setValue(combo, value, {{}});
       }} else {{
         combo.setAttribute('keyvalue', value);
         combo.setAttribute('value', value);
@@ -2010,83 +2229,138 @@ class BarsAuthService:
       combo.setAttribute('value', value);
     }}
 
-    try {{ if (button) dispatchMouse(button); }} catch (_) {{}}
-    try {{ dispatchMouse(item); }} catch (_) {{}}
-
     combo.setAttribute('keyvalue', value);
     combo.setAttribute('value', value);
-    input.focus();
     if (input.value !== caption) input.value = caption;
     input.dispatchEvent(new Event('input', {{bubbles: true}}));
     input.dispatchEvent(new Event('change', {{bubbles: true}}));
     combo.dispatchEvent(new Event('change', {{bubbles: true}}));
 
-    let gridDataset = '';
+    let gridDataset = initialGridDataset || gridDatasetOf(input);
     let filterCalled = false;
     try {{
-      if (window.D3Api && window.D3Api.GridCtrl && typeof window.D3Api.GridCtrl.searchFilter === 'function') {{
-        const grid = window.D3Api.getControlByDom ? window.D3Api.getControlByDom(combo, 'Grid') : null;
+      const api = d3ApiOf(combo);
+      if (api && api.GridCtrl && typeof api.GridCtrl.searchFilter === 'function') {{
+        const grid = api.getControlByDom ? api.getControlByDom(combo, 'Grid') : null;
         gridDataset = grid && grid.D3Store ? String(grid.D3Store.dataSetName || '') : '';
-        window.D3Api.GridCtrl.searchFilter(combo, false, true);
+        api.GridCtrl.searchFilter(combo, false, true);
         filterCalled = true;
       }}
     }} catch (_) {{}}
     input.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
     input.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
+    const getActualValue = () => {{
+      try {{
+        const api = d3ApiOf(combo);
+        return api && api.ComboBoxCtrl ? api.ComboBoxCtrl.getValue(combo) : combo.getAttribute('keyvalue') || '';
+      }} catch (_) {{
+        return combo.getAttribute('keyvalue') || combo.getAttribute('value') || '';
+      }}
+    }};
+    const getActualCaption = () => {{
+      try {{
+        const api = d3ApiOf(combo);
+        return api && api.ComboBoxCtrl ? api.ComboBoxCtrl.getCaption(combo) : input.value || '';
+      }} catch (_) {{
+        return input.value || caption || '';
+      }}
+    }};
     return {{
       used: true,
       selected: true,
       value,
       caption,
-      actualValue: window.D3Api && window.D3Api.ComboBoxCtrl ? window.D3Api.ComboBoxCtrl.getValue(combo) : combo.getAttribute('keyvalue') || '',
-      actualCaption: window.D3Api && window.D3Api.ComboBoxCtrl ? window.D3Api.ComboBoxCtrl.getCaption(combo) : input.value || '',
+      actualValue: getActualValue(),
+      actualCaption: getActualCaption(),
       gridDataset,
-      filterCalled
+      filterCalled,
+      source: item ? 'combo-item' : 'known-department-id'
     }};
   }};
   let best = null;
   let bestScore = -1;
   for (const doc of docs) {{
     const headers = Array.from(doc.querySelectorAll('td,th,div,span,label')).filter(visible);
-    const bottomBoundary = headers
-      .filter(el => textOf(el).toLowerCase() === 'осмотры' || textOf(el).toLowerCase().includes('осмотры / назначения'))
+    const bottomBoundaryTops = headers
+      .filter(el => {{
+        const text = textOf(el).toLowerCase();
+        if (!text || text.length > 120) return false;
+        return text === 'осмотры'
+          || text === 'назначения'
+          || text.includes('осмотры назначения')
+          || text.includes('осмотры / назначения')
+          || text.includes('провести осмотр');
+      }})
       .map(el => el.getBoundingClientRect().top)
-      .sort((a, b) => a - b)[0] || Number.POSITIVE_INFINITY;
+      .sort((a, b) => a - b);
+    const bottomBoundary = bottomBoundaryTops.length ? bottomBoundaryTops[0] : Number.POSITIVE_INFINITY;
     const departmentHeaders = headers.filter(el => {{
       const text = textOf(el).toLowerCase();
       const rect = el.getBoundingClientRect();
-      return rect.top < bottomBoundary && (text === 'отделение' || text.includes(' отделение'));
+      return rect.top < bottomBoundary && text === 'отделение';
     }});
     const inputs = Array.from(doc.querySelectorAll(
       'input:not([type=hidden]):not([disabled]):not([type=checkbox]):not([type=radio]), textarea:not([disabled]), select:not([disabled])'
     )).filter(visible);
     for (const input of inputs) {{
       const rect = input.getBoundingClientRect();
-      if (rect.top > bottomBoundary) continue;
       if (rect.width < 40 || rect.height < 12) continue;
       if (String(input.className || '').includes('SelectListItem')) continue;
+      const tagName = String(input.tagName || '').toLowerCase();
       const attrs = [
-        input.name, input.id, input.placeholder, input.title, input.getAttribute('aria-label'),
-        input.closest('td,tr,div,fieldset') ? input.closest('td,tr,div,fieldset').innerText : ''
+        input.name, input.id, input.placeholder, input.title, input.getAttribute('aria-label')
       ].map(x => String(x || '').toLowerCase()).join(' ');
-      let score = attrs.includes('отделение') ? 100 : 0;
+      const gridDataset = gridDatasetOf(input).toLowerCase();
+      const currentValue = norm(input.value || input.getAttribute('value') || input.getAttribute('keyvalue') || '');
+      const combo = input.closest('[cmptype="ComboBox"], .ctrl_combobox');
+      const isSelect = tagName === 'select';
+      if (!combo && !isSelect) continue;
+      if (gridDataset && gridDataset !== 'dsdutydoctor') continue;
+      const comboItems = isSelect
+        ? Array.from(input.options || [])
+        : (combo ? Array.from(combo.options || combo.querySelectorAll('[cmptype="ComboItem"][value], tr[value]')) : []);
+      const targetOption = comboItems.find(el => norm(el.textContent).toLowerCase() === department.toLowerCase());
+      const containsTargetOption = targetOption || comboItems.find(el => norm(el.textContent).toLowerCase().includes(department.toLowerCase()));
+      const looksLikeDepartmentControl =
+        gridDataset === 'dsdutydoctor'
+        || Boolean(targetOption)
+        || Boolean(containsTargetOption)
+        || attrs.includes('отделение')
+        || attrs.includes('dep');
+      if (!looksLikeDepartmentControl) continue;
+      if (rect.top > bottomBoundary && gridDataset !== 'dsdutydoctor' && !containsTargetOption) continue;
+      let score = attrs.includes('отделение') ? 500 : 0;
+      let exactDepartmentHeader = false;
+      if (gridDataset === 'dsdutydoctor') score += 5000;
+      else if (gridDataset) score -= 900;
       if (attrs.includes('griddutydoctor')) score += 900;
       if (attrs.includes('dsdutydoctor')) score += 500;
       if (attrs.includes('direction_observations')) score -= 700;
       if (attrs.includes('prescribes')) score -= 500;
+      if (attrs.includes('осмотры') || attrs.includes('наблюдений')) score -= 500;
+      if (/^\\d{{2}}\\.\\d{{2}}\\.\\d{{4}}\\b/.test(currentValue)) score -= 1200;
+      if (targetOption) score += 3000;
+      else if (containsTargetOption) score += 1800;
+      if (combo) score += 300;
       for (const header of departmentHeaders) {{
         const hrect = header.getBoundingClientRect();
         const overlapsX = rect.left < hrect.right + 18 && rect.right > hrect.left - 18;
         const below = rect.top >= hrect.top - 4;
-        if (overlapsX && below) score += 220 - Math.min(Math.abs(rect.top - hrect.bottom), 180);
+        if (overlapsX && below) {{
+          exactDepartmentHeader = true;
+          score += 4000 - Math.min(Math.abs(rect.top - hrect.bottom), 180);
+        }}
       }}
+      if (!exactDepartmentHeader && !containsTargetOption) score -= 3000;
+      if (!combo && !exactDepartmentHeader) score -= 1500;
+      if (gridDataset !== 'dsdutydoctor') score -= 6000;
       if (score > bestScore) {{
         best = input;
         bestScore = score;
       }}
     }}
   }}
-  if (!best) return JSON.stringify({{ok: false, reason: 'department input not found'}});
+  if (!best) return JSON.stringify({{ok: false, reason: 'duty doctor department grid not ready'}});
   var comboResult = null;
   if (String(best.tagName || '').toLowerCase() === 'select') {{
     const option = Array.from(best.options || []).find(opt => norm(opt.textContent).toLowerCase().includes(department.toLowerCase()));
@@ -2100,11 +2374,14 @@ class BarsAuthService:
     if (comboResult.used && !comboResult.selected) {{
       return JSON.stringify({{ok: false, reason: comboResult.reason || 'combo item not selected', combo: comboResult, score: bestScore, name: best.name || best.id || best.placeholder || '', value: best.value || ''}});
     }}
-    if (!comboResult.used) setValue(best);
+    if (!comboResult.used) {{
+      return JSON.stringify({{ok: false, reason: 'department combobox not found', score: bestScore, name: best.name || best.id || best.placeholder || '', value: best.value || ''}});
+    }}
   }}
   return JSON.stringify({{
     ok: true,
     score: bestScore,
+    candidateGridDataset: gridDatasetOf(best),
     name: best.name || best.id || best.placeholder || '',
     value: best.value || '',
     combo: comboResult || null
@@ -2116,6 +2393,31 @@ class BarsAuthService:
         while True:
             payload = self._evaluate_json_expression(page, expression)
             if payload.get("ok"):
+                combo = payload.get("combo")
+                combo_ready = True
+                if isinstance(combo, dict) and combo.get("used"):
+                    grid_dataset = str(combo.get("gridDataset") or "").strip()
+                    filter_called = bool(combo.get("filterCalled"))
+                    source = str(combo.get("source") or "")
+                    combo_ready = filter_called or grid_dataset.lower() == "dsdutydoctor"
+                    if source == "known-department-id" and not combo_ready:
+                        combo_ready = False
+
+                if not combo_ready:
+                    if time.monotonic() >= deadline:
+                        payload = dict(payload)
+                        payload["reason"] = "department grid not ready"
+                        break
+                    self._diag(
+                        "select_department_filter_wait_grid_ready",
+                        department=department,
+                        combo=combo,
+                        score=payload.get("score"),
+                        log_to_main=False,
+                    )
+                    time.sleep(0.5)
+                    continue
+
                 self._diag(
                     "select_department_filter_success",
                     department=department,
@@ -2127,7 +2429,11 @@ class BarsAuthService:
                 return f"Отделение выбрано: {department}"
 
             reason = str(payload.get("reason") or "")
-            retryable = reason in {"combo item not found", "department option not found"}
+            retryable = reason in {
+                "combo item not found",
+                "department option not found",
+                "duty doctor department grid not ready",
+            }
             if not retryable or time.monotonic() >= deadline:
                 break
             time.sleep(0.5)
@@ -2312,7 +2618,8 @@ class BarsAuthService:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         last_patients: list[dict[str, str]] = []
         while time.monotonic() < deadline:
-            last_patients = self._extract_department_patients_from_requests(self._get_network_capture(page), department)
+            requests = self._get_network_capture(page)
+            last_patients = self._extract_department_patients_from_requests(requests, department)
             if last_patients:
                 self._diag(
                     "wait_for_department_patients_from_requests_success",
@@ -2320,6 +2627,12 @@ class BarsAuthService:
                     patients_count=len(last_patients),
                 )
                 return last_patients
+            if self._has_empty_department_patients_response(requests, department):
+                self._diag(
+                    "wait_for_department_patients_from_requests_empty",
+                    department=department,
+                )
+                return []
             time.sleep(0.35)
 
         self._diag(
@@ -2344,6 +2657,8 @@ class BarsAuthService:
         for item in requests:
             if not isinstance(item, dict):
                 continue
+            body_text = unquote(str(item.get("body") or ""))
+            body_matches_department = self._request_body_matches_department(body_text, department)
             response_text = str(item.get("response_preview") or "")
             if not response_text or '"data"' not in response_text:
                 continue
@@ -2359,6 +2674,7 @@ class BarsAuthService:
                 rows = dataset.get("data")
                 if not isinstance(rows, list):
                     continue
+                is_duty_doctor_dataset = str(dataset_name or "").lower() == "dsdutydoctor"
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
@@ -2366,7 +2682,10 @@ class BarsAuthService:
                     if not patient:
                         continue
                     normalized_row = self._normalize_history_fragment(" ".join(str(value or "") for value in row.values()))
-                    if target_department not in normalized_row:
+                    if (
+                        target_department not in normalized_row
+                        and not (is_duty_doctor_dataset and body_matches_department)
+                    ):
                         continue
                     key = (patient["history_number"], patient["full_name"])
                     if key in seen:
@@ -2383,6 +2702,63 @@ class BarsAuthService:
                 sample=patients[:5],
             )
         return patients
+
+    def _has_empty_department_patients_response(
+        self,
+        requests: list[dict[str, Any]],
+        department: str,
+    ) -> bool:
+        for item in requests:
+            if not isinstance(item, dict):
+                continue
+            body_text = unquote(str(item.get("body") or ""))
+            if "dsDutyDoctor" not in body_text and "dsdutydoctor" not in body_text.lower():
+                continue
+            if not self._request_body_matches_department(body_text, department):
+                continue
+
+            response_text = str(item.get("response_preview") or "")
+            if '"dsDutyDoctor"' not in response_text and '"dsdutydoctor"' not in response_text.lower():
+                continue
+            try:
+                payload = json.loads(response_text)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            dataset = None
+            for dataset_name, candidate in payload.items():
+                if str(dataset_name or "").lower() == "dsdutydoctor" and isinstance(candidate, dict):
+                    dataset = candidate
+                    break
+            if not dataset:
+                continue
+
+            rows = dataset.get("data")
+            rowcount = dataset.get("rowcount")
+            try:
+                rowcount_value = int(rowcount)
+            except (TypeError, ValueError):
+                rowcount_value = 0 if rowcount in (None, "") else -1
+            if isinstance(rows, list) and not rows and rowcount_value == 0:
+                self._diag(
+                    "empty_department_patients_response",
+                    department=department,
+                    request_len=len(body_text),
+                    response_len=len(response_text),
+                )
+                return True
+        return False
+
+    def _request_body_matches_department(self, body_text: str, department: str) -> bool:
+        body_text = str(body_text or "")
+        department_id = self._known_department_id(department)
+        if department_id:
+            return department_id in body_text
+        normalized_body = self._normalize_history_fragment(body_text)
+        normalized_department = self._normalize_history_fragment(department)
+        return bool(normalized_department and normalized_department in normalized_body)
 
     def _patient_from_json_row(self, row: dict[str, Any], department: str) -> dict[str, str] | None:
         history_number = self._first_row_value(
@@ -2825,6 +3201,94 @@ class BarsAuthService:
         matches.sort(key=lambda item: item.get("history_number", ""))
         return matches
 
+    def _remember_bars_scroll_state(self, page: dict[str, Any]):
+        expression = """
+(() => {
+  let windows = 0;
+  let elements = 0;
+  const visible = (win, el) => {
+    try {
+      const style = win.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    } catch (_) {
+      return false;
+    }
+  };
+  const walk = (win) => {
+    try {
+      if (!win || !win.document) return;
+      const state = {
+        x: win.scrollX || 0,
+        y: win.scrollY || 0,
+        elements: []
+      };
+      const nodes = Array.from(win.document.querySelectorAll('*'));
+      for (const el of nodes) {
+        try {
+          const canScroll = el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1;
+          if (!canScroll || !visible(win, el)) continue;
+          state.elements.push({el, left: el.scrollLeft || 0, top: el.scrollTop || 0});
+        } catch (_) {}
+      }
+      win.__remcardBarsScrollState = state;
+      windows += 1;
+      elements += state.elements.length;
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {
+        try { walk(frame.contentWindow); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  walk(window);
+  return JSON.stringify({ok: true, windows, elements});
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        self._diag(
+            "remember_bars_scroll_state",
+            windows=payload.get("windows"),
+            elements=payload.get("elements"),
+            log_to_main=False,
+        )
+
+    def _restore_bars_scroll_state(self, page: dict[str, Any]):
+        expression = """
+(() => {
+  let windows = 0;
+  let elements = 0;
+  const walk = (win) => {
+    try {
+      if (!win || !win.document) return;
+      const state = win.__remcardBarsScrollState;
+      if (state) {
+        try { win.scrollTo(state.x || 0, state.y || 0); } catch (_) {}
+        for (const item of Array.from(state.elements || [])) {
+          try {
+            if (!item || !item.el) continue;
+            item.el.scrollLeft = item.left || 0;
+            item.el.scrollTop = item.top || 0;
+            elements += 1;
+          } catch (_) {}
+        }
+        windows += 1;
+      }
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {
+        try { walk(frame.contentWindow); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  walk(window);
+  return JSON.stringify({ok: true, windows, elements});
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        self._diag(
+            "restore_bars_scroll_state",
+            windows=payload.get("windows"),
+            elements=payload.get("elements"),
+            log_to_main=False,
+        )
+
     def _parse_dataset_rows(self, xml_text: str) -> list[dict[str, str]]:
         try:
             root = ET.fromstring(str(xml_text or "").strip())
@@ -2847,6 +3311,12 @@ class BarsAuthService:
     @staticmethod
     def _normalize_history_fragment(value: str) -> str:
         return re.sub(r"\s+", "", str(value or "").lower())
+
+    def _known_department_id(self, department: str) -> str:
+        normalized = self._normalize_history_fragment(department)
+        if normalized == self._normalize_history_fragment(DEFAULT_DUTY_DEPARTMENT):
+            return DEFAULT_DUTY_DEPARTMENT_ID
+        return ""
 
     def _hover_visible_text(self, page: dict[str, Any], labels: list[str]) -> str:
         payload = self._act_on_visible_text(page, labels, action="hover")
