@@ -205,267 +205,283 @@ class SectorEvents(BaseSectorWidget):
         self.shift_end = shift_end
         self.refresh()
 
-    def refresh(self, force=False):
+    def _should_skip_refresh(self, force=False):
         if not self.admission_id or not self.status_service:
             from rem_card.app.logger import logger
             logger.debug(f"[SectorEvents] Refresh skipped: id={self.admission_id}, service={bool(self.status_service)}")
-            return
-            
-        # 1. Если мы сейчас редактируем время или комментарий (флаг взведен)
+            return True
+
         if self._is_editing_time and not force:
-            return
-            
-        # 2. ЖЕСТКАЯ ПРОВЕРКА ФОКУСА: если курсор в любом поле ввода этой вкладки - не обновляем!
+            return True
+
+        return self._is_focus_blocking_refresh(force)
+
+    def _is_focus_blocking_refresh(self, force=False):
         focused_widget = QApplication.focusWidget()
-        if focused_widget and not force:
-            # Проверяем, принадлежит ли виджет с фокусом нашему контейнеру списка
-            if self.history_list_container.isAncestorOf(focused_widget):
-                return
-            # И также для верхнего поля комментария
-            if focused_widget == self.edit_reason_text:
-                return
+        if not focused_widget or force:
+            return False
+        if self.history_list_container.isAncestorOf(focused_widget):
+            return True
+        return focused_widget == self.edit_reason_text
 
-        # Если границы смены установлены - фильтруем, иначе берем всё
-        is_archive = False
-        if self.shift_start and self.shift_end:
-            events = self.status_service.get_events_in_range(self.admission_id, self.shift_start, self.shift_end)
-            is_archive = self.shift_end < datetime.now()
-            from rem_card.app.logger import logger
-            logger.debug(f"[SectorEvents] Refreshing for {self.shift_start.strftime('%d.%m %H:%M')}. Found {len(events)} events. Archive: {is_archive}")
-        else:
-            events = self.status_service.get_events(self.admission_id)
-        
-        if not events and self.shift_start:
-            # Если событий нет совсем (даже начального), это странно.
-            # Но мы должны очистить список, чтобы не показывать старые данные другого пациента.
-            pass
+    def _load_events_for_refresh(self):
+        if not (self.shift_start and self.shift_end):
+            return self.status_service.get_events(self.admission_id), False
 
+        events = self.status_service.get_events_in_range(self.admission_id, self.shift_start, self.shift_end)
+        is_archive = self.shift_end < datetime.now()
+        from rem_card.app.logger import logger
+        logger.debug(f"[SectorEvents] Refreshing for {self.shift_start.strftime('%d.%m %H:%M')}. Found {len(events)} events. Archive: {is_archive}")
+        return events, is_archive
+
+    def _clear_history_rows(self):
         while self.history_list_layout.count() > 1:
             item = self.history_list_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-            
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+    def _create_reason_edit(self, event):
+        reason_edit = QLineEdit(_movement_comment_text(event.status, event.reason_text))
+        reason_edit.setPlaceholderText("Комментарий...")
+        reason_edit.setStyleSheet("border: 1px solid #dcdde1; border-radius: 2px; padding: 1px 5px;")
+        return reason_edit
+
+    def _create_change_handler(self, btn, style):
+        def handler():
+            self._is_editing_time = True
+            btn.setStyleSheet(style)
+            btn.setToolTip("Нажмите, чтобы сохранить изменения")
+        return handler
+
+    def _add_start_time_control(self, layout, event, is_start_outside):
+        if is_start_outside:
+            dt_start_view = QLabel("...")
+            dt_start_view.setFixedWidth(60)
+            dt_start_view.setAlignment(Qt.AlignCenter)
+            dt_start_view.setStyleSheet("font-weight: bold; color: #7f8c8d;")
+            dt_start_view.setToolTip(event.start_time.strftime("%d.%m.%y %H:%M"))
+            layout.addWidget(dt_start_view)
+
+            dt_start = QDateTimeEdit(event.start_time)
+            dt_start.hide()
+            return dt_start
+
+        dt_start = QDateTimeEdit(event.start_time)
+        dt_start.setDisplayFormat("HH:mm")
+        dt_start.setButtonSymbols(QDateTimeEdit.NoButtons)
+        dt_start.setFixedWidth(60)
+        dt_start.setStyleSheet("border: none; background: transparent; font-weight: bold;")
+        layout.addWidget(dt_start)
+        return dt_start
+
+    def _add_time_separator(self, layout):
+        sep = QLabel("-")
+        sep.setFixedWidth(12)
+        sep.setAlignment(Qt.AlignCenter)
+        sep.setStyleSheet("border: none; background: transparent;")
+        layout.addWidget(sep)
+
+    def _is_start_outside_shift(self, event):
+        return self.shift_start and event.start_time < self.shift_start
+
+    def _is_end_outside_shift(self, event):
+        if event.end_time:
+            return bool(self.shift_end and event.end_time > self.shift_end)
+        return bool(self.shift_end and self.shift_end < datetime.now())
+
+    def _add_end_outside_placeholder(self, layout, event):
+        dt_end_view = QLabel("...")
+        dt_end_view.setFixedWidth(60)
+        dt_end_view.setAlignment(Qt.AlignCenter)
+        dt_end_view.setStyleSheet("font-weight: bold; color: #7f8c8d;")
+        layout.addWidget(dt_end_view)
+
+        dt_end = QDateTimeEdit(event.end_time or self.shift_end)
+        dt_end.hide()
+        return dt_end
+
+    def _create_button_container(self):
+        btn_container = QWidget()
+        btn_container.setFixedWidth(30)
+        btn_lay = QHBoxLayout(btn_container)
+        btn_lay.setContentsMargins(0, 0, 0, 0)
+        return btn_container, btn_lay
+
+    def _create_round_save_button(self, saved_style):
+        btn = QPushButton("✓")
+        btn.setFixedSize(20, 20)
+        btn.setToolTip("Данные сохранены")
+        btn.setStyleSheet(saved_style)
+        return btn
+
+    def _should_block_save_button(self, is_start_outside, is_end_outside, is_archive):
+        if is_start_outside and is_end_outside:
+            return True
+        return bool(is_archive and is_end_outside)
+
+    def _disable_save_button(self, btn, tooltip):
+        btn.setEnabled(False)
+        btn.setStyleSheet("QPushButton { border-radius: 10px; background-color: #bdc3c7; color: white; border: 1px solid #bdc3c7; }")
+        btn.setToolTip(tooltip)
+
+    def _add_completed_event_controls(self, layout, event, dt_start, reason_edit, is_start_outside, is_end_outside, is_archive):
+        dt_end = QDateTimeEdit(event.end_time)
+        dt_end.setDisplayFormat("HH:mm")
+        dt_end.setButtonSymbols(QDateTimeEdit.NoButtons)
+        dt_end.setFixedWidth(60)
+        dt_end.setStyleSheet("border: none; background: transparent; font-weight: bold;")
+        layout.addWidget(dt_end)
+
+        dt_start.dateTimeChanged.connect(lambda: setattr(self, '_is_editing_time', True))
+        dt_end.dateTimeChanged.connect(lambda: setattr(self, '_is_editing_time', True))
+        reason_edit.textChanged.connect(lambda: setattr(self, '_is_editing_time', True))
+
+        btn_container, btn_lay = self._create_button_container()
+        style_saved = "QPushButton { border-radius: 10px; background-color: #2ecc71; color: white; font-weight: bold; border: 1px solid #2ecc71; }"
+        style_changed = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #2ecc71; color: white; }"
+        btn_save_time = self._create_round_save_button(style_saved)
+
+        change_handler = self._create_change_handler(btn_save_time, style_changed)
+        dt_start.dateTimeChanged.connect(change_handler)
+        dt_end.dateTimeChanged.connect(change_handler)
+        reason_edit.textChanged.connect(change_handler)
+
+        if is_start_outside or is_archive:
+            dt_start.setEnabled(False)
+        if is_end_outside:
+            dt_end.setEnabled(False)
+        if self._should_block_save_button(is_start_outside, is_end_outside, is_archive):
+            self._disable_save_button(btn_save_time, "Редактирование этого события запрещено")
+
+        btn_save_time.clicked.connect(lambda checked=False, e=event, s=dt_start, ed=dt_end, r=reason_edit: self.on_save_time_clicked(e, s, ed, r))
+        btn_lay.addWidget(btn_save_time)
+        layout.addWidget(btn_container)
+
+    def _add_open_event_controls(self, layout, event, dt_start, reason_edit, is_archive):
+        l_end = QLabel("...")
+        l_end.setFixedWidth(60)
+        l_end.setStyleSheet("border: none; background: transparent; font-weight: bold;")
+        layout.addWidget(l_end)
+
+        btn_container, btn_lay = self._create_button_container()
+        style_saved_comm = "QPushButton { border-radius: 10px; background-color: #3498db; color: white; font-weight: bold; border: 1px solid #3498db; }"
+        style_changed_comm = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #3498db; color: white; }"
+        btn_save_comm = self._create_round_save_button(style_saved_comm)
+
+        change_handler_comm = self._create_change_handler(btn_save_comm, style_changed_comm)
+        reason_edit.textChanged.connect(change_handler_comm)
+
+        if is_archive:
+            self._disable_save_button(btn_save_comm, "Редактирование архива запрещено")
+
+        btn_save_comm.clicked.connect(lambda checked=False, e=event, s=dt_start, r=reason_edit: self.on_save_time_clicked(e, s, None, r))
+        btn_lay.addWidget(btn_save_comm)
+        layout.addWidget(btn_container)
+
+    def _add_end_time_controls(self, layout, event, dt_start, reason_edit, is_start_outside, is_end_outside, is_archive):
+        if is_end_outside:
+            self._add_end_outside_placeholder(layout, event)
+            return
+        elif event.end_time:
+            self._add_completed_event_controls(layout, event, dt_start, reason_edit, is_start_outside, is_end_outside, is_archive)
+            return
+        else:
+            self._add_open_event_controls(layout, event, dt_start, reason_edit, is_archive)
+            return
+
+    def _status_badge_values(self, event):
+        status_map = {
+            PatientStatus.ACTIVE: ("В отделении", "#2ecc71"),
+            PatientStatus.OUT: ("Вне отд.", "#f39c12"),
+            PatientStatus.OR: ("Операционная", "#e74c3c"),
+            PatientStatus.TRANSFERRED: ("Переведен", "#968c8c"),
+            PatientStatus.DEAD: ("Умер", "#968c8c")
+        }
+        return status_map.get(event.status, (event.status.value, "grey"))
+
+    def _add_status_badge(self, layout, event):
+        s_name, s_color = self._status_badge_values(event)
+
+        s_lbl = QLabel(s_name)
+        s_lbl.setFixedWidth(155) # Увеличено на 40% (110 -> 155)
+        s_lbl.setAlignment(Qt.AlignCenter)
+        s_lbl.setStyleSheet(
+            f"\n"
+            f"                QLabel {{\n"
+            f"                    color: {s_color}; \n"
+            f"                    font-weight: bold; \n"
+            f"                    border: 1.5px solid {s_color}; \n"
+            f"                    border-radius: 4px; \n"
+            f"                    background-color: rgba({QColor(s_color).red()}, {QColor(s_color).green()}, {QColor(s_color).blue()}, 25);\n"
+            f"                    padding: 2px;\n"
+            f"                }}\n"
+            f"            "
+        )
+        layout.addWidget(s_lbl)
+
+    def _prepare_reason_edit_for_archive(self, reason_edit, is_archive):
+        if is_archive:
+            reason_edit.setReadOnly(True)
+            reason_edit.setStyleSheet("border: none; background: transparent; color: #444;")
+
+    def _creator_display(self, event):
+        creator_raw = str(event.created_by or "SYSTEM").upper()
+        creator_map = {
+            "SYSTEM": "Система",
+            "USER": self.role,
+            "ADMIN": "Админ"
+        }
+        return creator_map.get(creator_raw, creator_raw)
+
+    def _add_creator_label(self, layout, event):
+        creator = QLabel(f"[{self._creator_display(event)}]")
+        creator.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        layout.addWidget(creator)
+
+    def _build_event_row(self, event, is_archive):
+        row = QFrame()
+        row.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dcdde1; border-radius: 3px; margin: 2px;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(10, 5, 10, 5)
+
+        reason_edit = self._create_reason_edit(event)
+        is_start_outside = self._is_start_outside_shift(event)
+        is_end_outside = self._is_end_outside_shift(event)
+
+        dt_start = self._add_start_time_control(layout, event, is_start_outside)
+        self._add_time_separator(layout)
+        self._add_end_time_controls(layout, event, dt_start, reason_edit, is_start_outside, is_end_outside, is_archive)
+        self._add_status_badge(layout, event)
+        self._prepare_reason_edit_for_archive(reason_edit, is_archive)
+        layout.addWidget(reason_edit, 1)
+        self._add_creator_label(layout, event)
+        return row
+
+    def _populate_history_rows(self, events, is_archive):
         current_ev = None
-        for ev in reversed(events):
-            if ev.end_time is None: current_ev = ev
-            
-            row = QFrame()
-            row.setStyleSheet("background-color: #f8f9fa; border: 1px solid #dcdde1; border-radius: 3px; margin: 2px;")
-            l = QHBoxLayout(row)
-            l.setContentsMargins(10, 5, 10, 5)
-            
-            # Поле комментария и флаг редактирования (общие для всех типов строк)
-            reason_edit = QLineEdit(_movement_comment_text(ev.status, ev.reason_text))
-            reason_edit.setPlaceholderText("Комментарий...")
-            reason_edit.setStyleSheet("border: 1px solid #dcdde1; border-radius: 2px; padding: 1px 5px;")
-            
-            def create_change_handler(btn, style):
-                def handler():
-                    self._is_editing_time = True
-                    btn.setStyleSheet(style)
-                    btn.setToolTip("Нажмите, чтобы сохранить изменения")
-                return handler
+        for event in reversed(events):
+            if event.end_time is None:
+                current_ev = event
+            self.history_list_layout.insertWidget(0, self._build_event_row(event, is_archive))
+        return current_ev
 
-            # ТАБЛИЧНОЕ ВЫРАВНИВАНИЕ (Фиксированные колонки)
-            # 1. Время начала (Увеличили логику отображения ...)
-            is_start_outside = self.shift_start and ev.start_time < self.shift_start
-            
-            if is_start_outside:
-                dt_start_view = QLabel("...")
-                dt_start_view.setFixedWidth(60)
-                dt_start_view.setAlignment(Qt.AlignCenter)
-                dt_start_view.setStyleSheet("font-weight: bold; color: #7f8c8d;")
-                dt_start_view.setToolTip(ev.start_time.strftime("%d.%m.%y %H:%M"))
-                l.addWidget(dt_start_view)
-                
-                # Скрытый виджет для сохранения структуры данных, если нужно
-                dt_start = QDateTimeEdit(ev.start_time)
-                dt_start.hide()
-            else:
-                dt_start = QDateTimeEdit(ev.start_time)
-                dt_start.setDisplayFormat("HH:mm")
-                dt_start.setButtonSymbols(QDateTimeEdit.NoButtons)
-                dt_start.setFixedWidth(60)
-                dt_start.setStyleSheet("border: none; background: transparent; font-weight: bold;")
-                l.addWidget(dt_start)
-            
-            sep = QLabel("-")
-            sep.setFixedWidth(12)
-            sep.setAlignment(Qt.AlignCenter)
-            sep.setStyleSheet("border: none; background: transparent;")
-            l.addWidget(sep)
-            
-            # 2. Время конца
-            is_end_outside = False
-            if ev.end_time:
-                if self.shift_end and ev.end_time > self.shift_end:
-                    is_end_outside = True
-            else:
-                # Если события еще нет, но смена УЖЕ ЗАКОНЧИЛАСЬ в прошлом
-                if self.shift_end and self.shift_end < datetime.now():
-                    is_end_outside = True
-
-            if is_end_outside:
-                dt_end_view = QLabel("...")
-                dt_end_view.setFixedWidth(60)
-                dt_end_view.setAlignment(Qt.AlignCenter)
-                dt_end_view.setStyleSheet("font-weight: bold; color: #7f8c8d;")
-                l.addWidget(dt_end_view)
-                
-                # Технические объекты для обработчиков
-                dt_end = QDateTimeEdit(ev.end_time or self.shift_end)
-                dt_end.hide()
-            elif ev.end_time:
-                dt_end = QDateTimeEdit(ev.end_time)
-                dt_end.setDisplayFormat("HH:mm")
-                dt_end.setButtonSymbols(QDateTimeEdit.NoButtons)
-                dt_end.setFixedWidth(60)
-                dt_end.setStyleSheet("border: none; background: transparent; font-weight: bold;")
-                l.addWidget(dt_end)
-                
-                # Блокируем автообновление при начале взаимодействия с полем
-                dt_start.dateTimeChanged.connect(lambda: setattr(self, '_is_editing_time', True))
-                dt_end.dateTimeChanged.connect(lambda: setattr(self, '_is_editing_time', True))
-
-                # 3. Кнопка сохранения (Колонка фикс. ширины)
-                btn_container = QWidget()
-                btn_container.setFixedWidth(30)
-                btn_lay = QHBoxLayout(btn_container)
-                btn_lay.setContentsMargins(0, 0, 0, 0)
-                
-                # Привязываем изменение комментария к флагу редактирования
-                reason_edit.textChanged.connect(lambda: setattr(self, '_is_editing_time', True))
-
-                btn_save_time = QPushButton("✓")
-                btn_save_time.setFixedSize(20, 20)
-                btn_save_time.setToolTip("Данные сохранены")
-                
-                style_saved = "QPushButton { border-radius: 10px; background-color: #2ecc71; color: white; font-weight: bold; border: 1px solid #2ecc71; }"
-                style_changed = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #2ecc71; color: white; }"
-                
-                btn_save_time.setStyleSheet(style_saved)
-                
-                change_handler = create_change_handler(btn_save_time, style_changed)
-                dt_start.dateTimeChanged.connect(change_handler)
-                dt_end.dateTimeChanged.connect(change_handler)
-                reason_edit.textChanged.connect(change_handler)
-
-                # Управление доступностью полей ввода времени
-                if is_start_outside or is_archive:
-                    dt_start.setEnabled(False)
-                
-                if is_end_outside:
-                    dt_end.setEnabled(False)
-                
-                # Логика блокировки кнопки сохранения (одна на всю строку)
-                should_block_save = False
-                
-                # 1. Если и старт, и конец вне границ смены (строка выглядит как ... - ...)
-                if is_start_outside and is_end_outside:
-                    should_block_save = True
-                
-                # 2. Если мы в архиве, и время окончания тоже вне этой смены
-                if is_archive and is_end_outside:
-                    should_block_save = True
-                
-                if should_block_save:
-                    btn_save_time.setEnabled(False)
-                    btn_save_time.setStyleSheet("QPushButton { border-radius: 10px; background-color: #bdc3c7; color: white; border: 1px solid #bdc3c7; }")
-                    btn_save_time.setToolTip("Редактирование этого события запрещено")
-                
-                btn_save_time.clicked.connect(lambda checked=False, e=ev, s=dt_start, ed=dt_end, r=reason_edit: self.on_save_time_clicked(e, s, ed, r))
-                btn_lay.addWidget(btn_save_time)
-                l.addWidget(btn_container)
-            elif not is_end_outside:
-                l_end = QLabel("...")
-                l_end.setFixedWidth(60)
-                l_end.setStyleSheet("border: none; background: transparent; font-weight: bold;")
-                l.addWidget(l_end)
-                
-                # Заполнитель для кнопки
-                btn_container = QWidget()
-                btn_container.setFixedWidth(30)
-                btn_lay = QHBoxLayout(btn_container)
-                btn_lay.setContentsMargins(0, 0, 0, 0)
-                
-                btn_save_comm = QPushButton("✓")
-                btn_save_comm.setFixedSize(20, 20)
-                
-                style_saved_comm = "QPushButton { border-radius: 10px; background-color: #3498db; color: white; font-weight: bold; border: 1px solid #3498db; }"
-                style_changed_comm = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #3498db; color: white; }"
-                
-                btn_save_comm.setStyleSheet(style_saved_comm)
-                btn_save_comm.setToolTip("Данные сохранены")
-
-                change_handler_comm = create_change_handler(btn_save_comm, style_changed_comm)
-                reason_edit.textChanged.connect(change_handler_comm)
-
-                if is_archive:
-                    btn_save_comm.setEnabled(False)
-                    btn_save_comm.setStyleSheet("QPushButton { border-radius: 10px; background-color: #bdc3c7; color: white; border: 1px solid #bdc3c7; }")
-                    btn_save_comm.setToolTip("Редактирование архива запрещено")
-
-                btn_save_comm.clicked.connect(lambda checked=False, e=ev, s=dt_start, r=reason_edit: self.on_save_time_clicked(e, s, None, r))
-                btn_lay.addWidget(btn_save_comm)
-                l.addWidget(btn_container)
-            else:
-                # Если событие выходит за правую границу, добавляем пустой заполнитель для выравнивания
-                btn_spacer = QWidget()
-                btn_spacer.setFixedWidth(30)
-                l.addWidget(btn_spacer)
-            
-            # 4. Статус (Колонка фикс. ширины)
-            status_map = {
-                PatientStatus.ACTIVE: ("В отделении", "#2ecc71"),
-                PatientStatus.OUT: ("Вне отд.", "#f39c12"),
-                PatientStatus.OR: ("Операционная", "#e74c3c"),
-                PatientStatus.TRANSFERRED: ("Переведен", "#968c8c"),
-                PatientStatus.DEAD: ("Умер", "#968c8c")
-            }
-            s_name, s_color = status_map.get(ev.status, (ev.status.value, "grey"))
-            
-            s_lbl = QLabel(s_name)
-            s_lbl.setFixedWidth(155) # Увеличено на 40% (110 -> 155)
-            s_lbl.setAlignment(Qt.AlignCenter)
-            # Бейдж статуса с цветной рамкой и легким фоном
-            s_lbl.setStyleSheet(f"""
-                QLabel {{
-                    color: {s_color}; 
-                    font-weight: bold; 
-                    border: 1.5px solid {s_color}; 
-                    border-radius: 4px; 
-                    background-color: rgba({QColor(s_color).red()}, {QColor(s_color).green()}, {QColor(s_color).blue()}, 25);
-                    padding: 2px;
-                }}
-            """)
-            l.addWidget(s_lbl)
-            
-            # 5. Комментарий (Тянется)
-            if is_archive:
-                reason_edit.setReadOnly(True)
-                reason_edit.setStyleSheet("border: none; background: transparent; color: #444;")
-            l.addWidget(reason_edit, 1)
-            
-            # 6. Автор (Колонка фикс. ширины)
-            creator_raw = str(ev.created_by or "SYSTEM").upper()
-            creator_map = {
-                "SYSTEM": "Система",
-                "USER": self.role,
-                "ADMIN": "Админ"
-            }
-            creator_display = creator_map.get(creator_raw, creator_raw)
-            
-            creator = QLabel(f"[{creator_display}]")
-            creator.setStyleSheet("color: #7f8c8d; font-size: 11px;")
-            l.addWidget(creator)
-            
-            self.history_list_layout.insertWidget(0, row)
-
+    def _update_refresh_controls(self, current_ev, events, is_archive):
         if current_ev:
             self._update_buttons_state(current_ev.status, is_archive)
             self.btn_rollback.setEnabled(len(events) > 1 and not is_archive)
         else:
             self._update_buttons_state(None, is_archive)
             self.btn_rollback.setEnabled(False)
+
+    def refresh(self, force=False):
+        if self._should_skip_refresh(force):
+            return
+
+        events, is_archive = self._load_events_for_refresh()
+        self._clear_history_rows()
+        current_ev = self._populate_history_rows(events, is_archive)
+        self._update_refresh_controls(current_ev, events, is_archive)
 
     def _schedule_post_status_refresh(self, *, emit_status_changed: bool = True, delay_ms: int = 150):
         if emit_status_changed:

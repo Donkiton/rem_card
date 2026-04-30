@@ -993,6 +993,159 @@ def _check_sector_print_transform_snapshot(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton, QDateTimeEdit, QFrame, QWidget
+
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.ui.rem_card_sectors import sector_events
+    from rem_card.ui.rem_card_sectors.sector_events import SectorEvents
+
+    fixed_now = datetime(2026, 4, 24, 12, 0)
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return fixed_now.replace(tzinfo=tz)
+            return fixed_now
+
+    class FakeStatusService:
+        def __init__(self, events):
+            self.events = events
+            self.calls = []
+
+        def get_events_in_range(self, admission_id, shift_start, shift_end):
+            self.calls.append(("range", admission_id, shift_start.isoformat(), shift_end.isoformat()))
+            return list(self.events)
+
+        def get_events(self, admission_id):
+            self.calls.append(("all", admission_id))
+            return list(self.events)
+
+    def make_events(start):
+        return [
+            PatientStatusEventDTO(id=1, admission_id=7, status=PatientStatus.ACTIVE, reason_text="Начало смены", start_time=start - timedelta(hours=2), end_time=start + timedelta(hours=1), created_by="SYSTEM"),
+            PatientStatusEventDTO(id=2, admission_id=7, status=PatientStatus.OR, reason_text="Операционная", start_time=start + timedelta(hours=1, minutes=30), end_time=start + timedelta(hours=2, minutes=45), created_by="USER"),
+            PatientStatusEventDTO(id=3, admission_id=7, status=PatientStatus.OUT, reason_text="КТ", start_time=start + timedelta(hours=3), end_time=start + timedelta(hours=8), created_by="ADMIN"),
+            PatientStatusEventDTO(id=4, admission_id=7, status=PatientStatus.DEAD, reason_text="Биологическая смерть: подтверждена", start_time=start + timedelta(hours=4), end_time=None, created_by="doctor42"),
+        ]
+
+    def row_parts(row):
+        parts = []
+        layout = row.layout()
+        for i in range(layout.count()):
+            widget = layout.itemAt(i).widget()
+            if isinstance(widget, QLabel):
+                parts.append(("label", widget.text(), widget.width(), widget.styleSheet(), widget.toolTip()))
+            elif isinstance(widget, QLineEdit):
+                parts.append(("edit", widget.text(), widget.isReadOnly(), widget.styleSheet()))
+            elif isinstance(widget, QDateTimeEdit):
+                parts.append(("dt", widget.dateTime().toPython().strftime("%H:%M"), widget.isEnabled(), widget.styleSheet()))
+            elif isinstance(widget, QWidget) and widget.layout() is not None:
+                nested = []
+                for j in range(widget.layout().count()):
+                    child = widget.layout().itemAt(j).widget()
+                    if isinstance(child, QPushButton):
+                        nested.append(("button", child.text(), child.isEnabled(), child.toolTip(), child.styleSheet()))
+                parts.append(("container", widget.width(), nested))
+            elif isinstance(widget, QWidget):
+                parts.append(("spacer", widget.width()))
+            else:
+                parts.append((type(widget).__name__,))
+        return parts
+
+    def capture(*, archive=False, empty=False, no_admission=False):
+        shift_start = datetime(2026, 4, 24, 8, 0)
+        shift_end = shift_start + (timedelta(hours=2) if archive else timedelta(hours=4))
+        service = FakeStatusService([] if empty else make_events(shift_start))
+        widget = SectorEvents()
+        widget.role = "Врач"
+        widget.admission_id = None if no_admission else 7
+        widget.status_service = service
+        widget.shift_start = shift_start
+        widget.shift_end = shift_end
+        widget.refresh(force=True)
+        rows = []
+        for i in range(widget.history_list_layout.count() - 1):
+            row = widget.history_list_layout.itemAt(i).widget()
+            if isinstance(row, QFrame):
+                rows.append(row_parts(row))
+        return {
+            "calls": service.calls,
+            "rows": rows,
+            "rollback": widget.btn_rollback.isEnabled(),
+            "buttons": {
+                "active": (widget.btn_active.isChecked(), widget.btn_active.isEnabled()),
+                "out": (widget.btn_out.isChecked(), widget.btn_out.isEnabled()),
+                "or": (widget.btn_or.isChecked(), widget.btn_or.isEnabled()),
+                "trans": (widget.btn_trans.isChecked(), widget.btn_trans.isEnabled()),
+                "dead": (widget.btn_dead.isChecked(), widget.btn_dead.isEnabled()),
+            },
+        }
+
+    app = QApplication.instance() or QApplication([])
+    _ = app, temp_root
+    old_datetime = sector_events.datetime
+    sector_events.datetime = FixedDateTime
+    try:
+        live = capture()
+        archive = capture(archive=True)
+        empty = capture(empty=True)
+        no_admission = capture(no_admission=True)
+    finally:
+        sector_events.datetime = old_datetime
+
+    if live["calls"] != [("range", 7, "2026-04-24T08:00:00", "2026-04-24T12:00:00")]:
+        return False, f"unexpected live service calls: {live['calls']}"
+    if len(live["rows"]) != 4 or live["rollback"] is not True:
+        return False, f"unexpected live rows/rollback: rows={len(live['rows'])}, rollback={live['rollback']}"
+    if live["buttons"]["dead"] != (True, False):
+        return False, f"unexpected live current-status buttons: {live['buttons']}"
+
+    live_statuses = [row[-3][1] for row in live["rows"]]
+    if live_statuses != ["В отделении", "Операционная", "Вне отд.", "Умер"]:
+        return False, f"unexpected event order/status labels: {live_statuses}"
+    live_comments = [row[-2][1] for row in live["rows"]]
+    if live_comments != ["Начало смены", "Операционная", "КТ", ""]:
+        return False, f"unexpected event comments: {live_comments}"
+    live_creators = [row[-1][1] for row in live["rows"]]
+    if live_creators != ["[Система]", "[Врач]", "[Админ]", "[DOCTOR42]"]:
+        return False, f"unexpected creator labels: {live_creators}"
+
+    if live["rows"][0][0][0:3] != ("label", "...", 60) or live["rows"][0][0][4] != "24.04.26 06:00":
+        return False, f"start-outside marker changed: {live['rows'][0][0]}"
+    if live["rows"][2][2][0:3] != ("label", "...", 60):
+        return False, f"end-outside marker changed: {live['rows'][2][2]}"
+    if any(part[0] == "container" for part in live["rows"][2]):
+        return False, "end-outside row unexpectedly has save button container"
+    if not any(part[0] == "container" for part in live["rows"][3]):
+        return False, "open live row lost comment save button"
+
+    if archive["rollback"] is not False or archive["buttons"]["dead"] != (True, False):
+        return False, f"unexpected archive controls: rollback={archive['rollback']}, buttons={archive['buttons']}"
+    if not all(row[-2][2] for row in archive["rows"]):
+        return False, "archive comments must be read-only"
+    if any(part[0] == "container" for row in archive["rows"][1:] for part in row):
+        return False, "archive outside rows unexpectedly have save button containers"
+
+    if len(empty["rows"]) != 0 or empty["rollback"] is not False:
+        return False, f"empty events state changed: rows={len(empty['rows'])}, rollback={empty['rollback']}"
+    if empty["buttons"] != {
+        "active": (False, True),
+        "out": (False, True),
+        "or": (False, True),
+        "trans": (False, True),
+        "dead": (False, True),
+    }:
+        return False, f"empty buttons changed: {empty['buttons']}"
+    if no_admission["calls"] != [] or len(no_admission["rows"]) != 0:
+        return False, f"no-admission guard changed: calls={no_admission['calls']}, rows={len(no_admission['rows'])}"
+
+    return True, "ok"
+
+
 def _check_vitals_boundary_minutes(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -1901,6 +2054,7 @@ def main():
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
+        ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
