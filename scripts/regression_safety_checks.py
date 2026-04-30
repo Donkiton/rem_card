@@ -777,6 +777,222 @@ def _check_print_hourly_input_planned_time(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_sector_print_transform_snapshot(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from rem_card.data.dto.remcard_dto import (
+        FluidDTO,
+        OrderDTO,
+        OrderStatus,
+        OrderType,
+        PatientStatus,
+        PatientStatusEventDTO,
+        VentilationEventDTO,
+        VentilationEventType,
+        VentilationMode,
+        VitalDTO,
+    )
+    from rem_card.ui.rem_card_sectors import sector_print
+    from rem_card.ui.rem_card_sectors.sector_print import DataCollectorWorker
+
+    real_datetime = datetime
+    fixed_now = real_datetime(2026, 4, 24, 14, 30)
+
+    class FixedDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return fixed_now.replace(tzinfo=tz)
+            return fixed_now
+
+    class FakeStatusService:
+        def get_admission_outcome_context(self, admission_id):
+            return {
+                "outcome": "dead",
+                "death_datetime": "2026-04-24T13:10:00",
+                "clinical_death_datetime": "2026-04-24T13:00:00",
+                "cardiac_arrest_cause": "Асистолия",
+                "cardiac_arrest_measures_json": json.dumps(
+                    {
+                        "comment": "Реанимационные мероприятия без эффекта",
+                        "measures": [{"name": "СЛР", "value": "30 мин"}],
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+
+    class FakeService:
+        status_service = FakeStatusService()
+
+        def get_vital_settings_cached(self, admission_id, start_dt):
+            return {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 1, "cvp": 1}
+
+        def get_latest_administrations_for_order_ids(self, **kwargs):
+            start = kwargs["start_dt"]
+            return [
+                {
+                    "id": 101,
+                    "order_id": 1,
+                    "chain_id": "c1",
+                    "big_chain_id": None,
+                    "cell_role": "single",
+                    "planned_time": (start + timedelta(hours=0)).isoformat(sep=" "),
+                    "actual_time": (start + timedelta(minutes=5)).isoformat(sep=" "),
+                    "status": "planned",
+                    "volume_ml": 100.0,
+                    "comment": "nurse_executed",
+                },
+                {
+                    "id": 201,
+                    "order_id": 2,
+                    "chain_id": "c2",
+                    "big_chain_id": "bc2",
+                    "cell_role": "start",
+                    "planned_time": start + timedelta(hours=2),
+                    "actual_time": None,
+                    "status": "planned",
+                    "volume_ml": 0.0,
+                    "comment": "",
+                },
+                {
+                    "id": 202,
+                    "order_id": 2,
+                    "chain_id": "c2",
+                    "big_chain_id": "bc2",
+                    "cell_role": "end",
+                    "planned_time": start + timedelta(hours=3),
+                    "actual_time": None,
+                    "status": "planned",
+                    "volume_ml": 0.0,
+                    "comment": "nurse_not_executed",
+                },
+                {
+                    "id": 401,
+                    "order_id": 4,
+                    "chain_id": None,
+                    "big_chain_id": None,
+                    "cell_role": "single",
+                    "planned_time": start + timedelta(hours=4),
+                    "actual_time": None,
+                    "status": "planned",
+                    "volume_ml": 0.0,
+                    "comment": "",
+                },
+            ]
+
+        def get_oral_intake_totals(self, admission_id, start_dt, current_time=None):
+            return {"current": 150, "daily": 300}
+
+        def get_oral_intake_events(self, admission_id, start_dt):
+            return [SimpleNamespace(event_time=start_dt + timedelta(hours=1), amount_ml=50)]
+
+    start = real_datetime(2026, 4, 24, 8, 0)
+    end = start + timedelta(hours=24)
+    data = {
+        "admission_id": 7,
+        "patient_name": "Тест Пациент",
+        "diagnosis": "Тестовый диагноз",
+        "icu_day": "2",
+        "start_dt": start,
+        "end_dt": end,
+        "vitals": [
+            VitalDTO(id=1, admission_id=7, timestamp=start + timedelta(minutes=20), sys=120, dia=70, pulse=80, temp=36.6, spo2=98, rr=16, cvp=-1),
+            VitalDTO(id=2, admission_id=7, timestamp=start + timedelta(hours=1, minutes=20), sys=125, dia=75, pulse=82, temp=None, spo2=97, rr=18, cvp=4),
+        ],
+        "prescriptions": [
+            OrderDTO(id=1, admission_id=7, drug_key="ceftriaxone", latin="Ceftriaxoni", type=OrderType.MEDICATION, status=OrderStatus.ACTIVE, dose_value=1, dose_unit="g", duration_min=60, is_committed=1, created_at=start, comment="S. NaCl 0,9% 100 мл [DUR:60]"),
+            OrderDTO(id=2, admission_id=7, drug_key="mix", latin="DrugA + DrugB", type=OrderType.INFUSION_CONTINUOUS, status=OrderStatus.ACTIVE, dose_value=2.5, dose_unit="mg", is_per_kg=True, duration_min=120, is_committed=1, created_at=start, comment="[DIL:S. Glucose 5% 200 мл] [ROUTE:инфузия] [DUR:120]"),
+            OrderDTO(id=3, admission_id=7, drug_key="old", latin="Deleted", type=OrderType.MEDICATION, status=OrderStatus.DELETED, dose_value=1, dose_unit="mg", is_committed=1, created_at=start, comment=""),
+            OrderDTO(id=4, admission_id=7, drug_key="draft", latin="Draft cancelled", type=OrderType.MEDICATION, status=OrderStatus.CANCELLED, dose_value=5, dose_unit="ml", is_committed=0, created_at=start, comment=""),
+        ],
+        "events": [
+            PatientStatusEventDTO(id=1, admission_id=7, status=PatientStatus.OR, reason_text="Операция", start_time=start + timedelta(hours=2), end_time=start + timedelta(hours=3)),
+            PatientStatusEventDTO(id=2, admission_id=7, status=PatientStatus.DEAD, reason_text="Биологическая смерть: подтверждена", start_time=start + timedelta(hours=5, minutes=10), end_time=None),
+            PatientStatusEventDTO(id=3, admission_id=7, status=PatientStatus.OUT, reason_text=None, start_time=start + timedelta(hours=15, minutes=50), end_time=start + timedelta(hours=16, minutes=10)),
+        ],
+        "fluids_raw": [
+            FluidDTO(id=1, admission_id=7, timestamp=start + timedelta(hours=1), urine=200, drain_output=15),
+        ],
+        "ventilation_events": [
+            VentilationEventDTO(id=1, admission_id=7, timestamp=start + timedelta(hours=2), event_type=VentilationEventType.MODE_CHANGE, mode=VentilationMode.PSV, parameters={"PEEP": 5, "FiO2": 40}, o2_flow=3),
+        ],
+    }
+
+    old_datetime = sector_print.datetime.datetime
+    sector_print.datetime.datetime = FixedDateTime
+    try:
+        result = DataCollectorWorker.transform_data_static(data, FakeService(), {"balance": True, "death_outcome": True})
+    finally:
+        sector_print.datetime.datetime = old_datetime
+
+    expected_keys = [
+        "admission_id",
+        "patient_name",
+        "diagnosis",
+        "icu_day",
+        "start_dt",
+        "end_dt",
+        "vitals",
+        "prescriptions",
+        "events",
+        "fluids_raw",
+        "ventilation_events",
+        "vitals_matrix",
+        "vital_settings",
+        "prescriptions_matrix",
+        "balance_final",
+        "events_struct",
+        "death_outcome",
+        "ventilation_struct",
+    ]
+    if list(result.keys()) != expected_keys:
+        return False, f"unexpected print data key order: {list(result.keys())}"
+
+    if result["vitals_matrix"].get(0, {}).get("hr") != 80 or result["vitals_matrix"].get(1, {}).get("sys") != 125:
+        return False, f"unexpected vitals matrix: {result['vitals_matrix']}"
+
+    prescriptions = result["prescriptions_matrix"]
+    if len(prescriptions) != 3:
+        return False, f"expected 3 prescription rows, got {len(prescriptions)}"
+    expected_names = [
+        ["Ceftriaxoni 1 g", "S. NaCl 0,9% 100 мл"],
+        ["DrugA", "DrugB 2.5 mg/кг", "S. Glucose 5% 200 мл"],
+        ["Draft cancelled 5 мл"],
+    ]
+    actual_names = [row["name"] for row in prescriptions]
+    if actual_names != expected_names:
+        return False, f"unexpected prescription names: {actual_names}"
+    if prescriptions[0]["marks"][0]["nurse_mark"] != "nurse_executed":
+        return False, "single administration mark was not preserved"
+    if prescriptions[1]["marks"][2]["role"] != "start" or prescriptions[1]["marks"][3]["role"] != "end":
+        return False, "chain administration roles were not preserved"
+    if prescriptions[1]["marks"][3]["nurse_mark"] != "nurse_not_executed":
+        return False, "not-executed chain mark was not preserved"
+
+    expected_events = [
+        {"time": "24.04.2026 10:00 - 11:00", "status": "Оперблок", "desc": "Операция"},
+        {"time": "24.04.2026 13:10", "status": "Умер", "desc": "—"},
+        {"time": "24.04 23:50 - 25.04 00:10", "status": "Вне отд.", "desc": "—"},
+    ]
+    if result["events_struct"] != expected_events:
+        return False, f"unexpected events struct: {result['events_struct']}"
+
+    death = result["death_outcome"]
+    if death.get("clinical_time") != "24.04.2026 13:00" or death.get("biological_time") != "24.04.2026 13:10":
+        return False, f"unexpected death outcome times: {death}"
+    if death.get("cause") != "Асистолия" or death.get("measures") != [{"name": "СЛР", "value": "30 мин"}]:
+        return False, f"unexpected death outcome details: {death}"
+
+    ventilation = result["ventilation_struct"]
+    if len(ventilation) != 1 or ventilation[0]["event"] != "Смена режима" or ventilation[0]["mode"] != "PSV":
+        return False, f"unexpected ventilation struct: {ventilation}"
+    if set(result["balance_final"].keys()) != {"current", "full", "out_cur", "out_full", "out_hourly", "in_hourly", "in_cur"}:
+        return False, f"unexpected balance keys: {result['balance_final'].keys()}"
+
+    return True, "ok"
+
+
 def _check_vitals_boundary_minutes(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -1684,6 +1900,7 @@ def main():
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
+        ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),

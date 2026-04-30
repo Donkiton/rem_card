@@ -205,134 +205,191 @@ class DataCollectorWorker(QThread):
         return items
 
     @staticmethod
-    def transform_data_static(data: dict, remcard_service, config) -> dict:
-        start_dt = data["start_dt"]
-        end_dt = data["end_dt"]
+    def _bounded_current_time(end_dt):
         current_time = datetime.datetime.now()
-        if current_time > end_dt: current_time = end_dt
+        if current_time > end_dt:
+            current_time = end_dt
+        return current_time
 
-        # 1. ВИТАЛЬНЫЕ: Почасовая таблица с 30-минутными окнами без "дыр"
-        # (старт/финиш суток обработаны отдельно).
-        vitals = data.get("vitals", [])
+    @staticmethod
+    def _build_vitals_matrix(vitals, start_dt, end_dt):
         vitals_matrix = {}
-
         selected_by_hour = select_latest_vitals_by_report_hour(vitals, start_dt, end_dt)
         for i, chosen_v in selected_by_hour.items():
             vitals_matrix[i] = {}
             for k, attr in [('hr', 'pulse'), ('sys', 'sys'), ('dia', 'dia'), ('spo2', 'spo2'), ('temp', 'temp'), ('rr', 'rr'), ('cvp', 'cvp')]:
                 val = getattr(chosen_v, attr, None)
-                if val is not None: vitals_matrix[i][k] = val
-            
-        data["vitals_matrix"] = vitals_matrix
+                if val is not None:
+                    vitals_matrix[i][k] = val
+        return vitals_matrix
+
+    @staticmethod
+    def _attach_vitals_section(data: dict, remcard_service, start_dt, end_dt):
+        vitals = data.get("vitals", [])
+        data["vitals_matrix"] = DataCollectorWorker._build_vitals_matrix(vitals, start_dt, end_dt)
         data["vital_settings"] = remcard_service.get_vital_settings_cached(data.get("admission_id", 0) or data.get("id", 0), start_dt)
 
-        # 2. НАЗНАЧЕНИЯ
-        orders = data.get("prescriptions", [])
-        prescriptions_matrix = []
-        order_ids = [o.id for o in orders if o.id is not None]
-        
-        all_admins = []
-        if order_ids:
-            rows = remcard_service.get_latest_administrations_for_order_ids(
-                order_ids=order_ids,
-                start_dt=start_dt,
-                end_dt=end_dt,
-                only_committed=True,
-                include_deleted=False,
-                include_cancelled=False,
-                include_deleted_orders=True,
-            )
-            all_admins = [dict(r) for r in rows]
+    @staticmethod
+    def _fetch_print_administration_rows(remcard_service, order_ids, start_dt, end_dt):
+        if not order_ids:
+            return []
+        rows = remcard_service.get_latest_administrations_for_order_ids(
+            order_ids=order_ids,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            only_committed=True,
+            include_deleted=False,
+            include_cancelled=False,
+            include_deleted_orders=True,
+        )
+        return [dict(r) for r in rows]
 
-        for o in orders:
-            status_val = o.status.value if hasattr(o.status, 'value') else str(o.status)
-            is_committed = getattr(o, 'is_committed', 1)
-            
+    @staticmethod
+    def _group_admin_rows_by_order(all_admins):
+        grouped = {}
+        for admin_row in all_admins:
+            grouped.setdefault(admin_row['order_id'], []).append(admin_row)
+        return grouped
+
+    @staticmethod
+    def _should_skip_print_order(order) -> bool:
+        status_val = order.status.value if hasattr(order.status, 'value') else str(order.status)
+        is_committed = getattr(order, 'is_committed', 1)
+        return status_val in ("deleted", "cancelled") and is_committed == 1
+
+    @staticmethod
+    def _dose_text(order) -> str:
+        dose = f"{getattr(order, 'dose_value', 0):g} {getattr(order, 'dose_unit', '')}".strip()
+        if dose == "0":
+            dose = ""
+        return dose
+
+    @staticmethod
+    def _dosage_text(order, dose: str) -> str:
+        unit = str(getattr(order, 'dose_unit', '')).lower()
+        if unit in ("мл", "ml"):
+            dosage_str = f"{getattr(order, 'dose_value', 0):g} мл"
+        else:
+            # Убираем (volume) из основной строки, так как растворитель идет новой строкой.
+            dosage_str = dose
+        if getattr(order, 'is_per_kg', False) and dosage_str:
+            dosage_str += "/кг"
+        return dosage_str
+
+    @staticmethod
+    def _base_display_parts(latin_name: str, dosage_str: str):
+        if "+" in latin_name:
+            display_parts = [p.strip() for p in latin_name.split("+")]
+            if dosage_str and display_parts:
+                display_parts[-1] = f"{display_parts[-1]} {dosage_str}".strip()
+            return display_parts
+        return [f"{latin_name} {dosage_str}".strip()]
+
+    @staticmethod
+    def _append_diluent_display_part(display_parts, comment: str, latin_name: str):
+        diluent_match = re.search(r'\[DIL:(.*?)\]', comment)
+        if diluent_match:
+            diluent_text = diluent_match.group(1).strip()
+            if diluent_text:
+                diluent_text = re.sub(r'\[ROUTE:.*?\]', '', diluent_text).strip()
+                diluent_text = re.sub(r'\[DUR:.*?\]', '', diluent_text).strip()
+                if diluent_text:
+                    display_parts.append(diluent_text)
+            return
+
+        comment_clean = re.sub(r'\[ROUTE:.*?\]', '', comment).strip()
+        comment_clean = re.sub(r'\[DUR:.*?\]', '', comment_clean).strip()
+        if comment_clean.startswith("+"):
+            comment_clean = comment_clean[1:].strip()
+
+        if comment_clean and "S." in comment_clean and comment_clean not in latin_name:
+            display_parts.append(comment_clean)
+
+    @staticmethod
+    def _prescription_display_name(order):
+        dose = DataCollectorWorker._dose_text(order)
+        comment = getattr(order, "comment", "")
+        re.search(r'(\d+)\s*мл', comment.lower())
+        dosage_str = DataCollectorWorker._dosage_text(order, dose)
+        latin_name = getattr(order, 'latin', 'Без названия')
+        display_parts = DataCollectorWorker._base_display_parts(latin_name, dosage_str)
+        DataCollectorWorker._append_diluent_display_part(display_parts, comment, latin_name)
+        return display_parts
+
+    @staticmethod
+    def _administration_from_row(order, admin_row, planned_time, actual_time):
+        return AdministrationDTO(
+            id=admin_row['id'], order_id=order.id, chain_id=admin_row.get('chain_id'),
+            big_chain_id=admin_row.get('big_chain_id'), cell_role=admin_row.get('cell_role', 'single'),
+            planned_time=planned_time, actual_time=actual_time, status=admin_row.get('status', 'planned'),
+            volume_ml=admin_row.get('volume_ml', 0.0), comment=admin_row.get('comment', '')
+        )
+
+    @staticmethod
+    def _mark_from_admin_row(admin_row, planned_time):
+        return {
+            "role": admin_row.get('cell_role', 'single'),
+            "nurse_mark": admin_row.get('comment', ''),
+            "planned_time": planned_time,
+            "chain_key": admin_row.get('big_chain_id') or admin_row.get('chain_id'),
+        }
+
+    @staticmethod
+    def _apply_admin_rows_to_order(order, admin_rows, start_dt):
+        marks = [None] * 24
+        order.administrations = []
+
+        for admin_row in admin_rows:
+            planned_time = datetime.datetime.fromisoformat(str(admin_row['planned_time']).replace(" ", "T"))
+            actual_raw = admin_row.get('actual_time')
+            actual_time = datetime.datetime.fromisoformat(str(actual_raw).replace(" ", "T")) if actual_raw else None
+            order.administrations.append(
+                DataCollectorWorker._administration_from_row(order, admin_row, planned_time, actual_time)
+            )
+            idx = int((planned_time - start_dt).total_seconds() / 3600)
+            if 0 <= idx < 24:
+                marks[idx] = DataCollectorWorker._mark_from_admin_row(admin_row, planned_time)
+        return marks
+
+    @staticmethod
+    def _build_prescription_row(order, admin_rows, start_dt):
+        display_name = DataCollectorWorker._prescription_display_name(order)
+        marks = DataCollectorWorker._apply_admin_rows_to_order(order, admin_rows, start_dt)
+        return {"name": display_name, "marks": marks, "created_at": order.created_at}
+
+    @staticmethod
+    def _build_prescriptions_matrix(orders, admin_rows_by_order, start_dt):
+        prescriptions_matrix = []
+        for order in orders:
             # В отчете скрываем только те, что были окончательно удалены/отменены в базе.
             # Если это черновик (is_committed=0), то продолжаем показывать старое состояние.
-            if status_val in ("deleted", "cancelled") and is_committed == 1:
+            if DataCollectorWorker._should_skip_print_order(order):
                 continue
-            
-            dose = f"{getattr(o, 'dose_value', 0):g} {getattr(o, 'dose_unit', '')}".strip()
-            if dose == "0":
-                dose = ""
-            comment = getattr(o, "comment", "")
-            m = re.search(r'(\d+)\s*мл', comment.lower())
-            volume = f"{m.group(1)} мл" if m else ""
-            
-            unit = str(getattr(o, 'dose_unit', '')).lower()
-            if unit in ("мл", "ml"): 
-                dosage_str = f"{getattr(o, 'dose_value', 0):g} мл"
-            else: 
-                # Убираем (volume) из основной строки, так как растворитель идет новой строкой
-                dosage_str = dose
-            if getattr(o, 'is_per_kg', False) and dosage_str: dosage_str += "/кг"
+            admin_rows = admin_rows_by_order.get(order.id, [])
+            prescriptions_matrix.append(
+                DataCollectorWorker._build_prescription_row(order, admin_rows, start_dt)
+            )
+        return prescriptions_matrix
 
-            latin_name = getattr(o, 'latin', 'Без названия')
-            display_parts = []
-            
-            # 1. Разбиваем основной состав по "+"
-            if "+" in latin_name:
-                display_parts = [p.strip() for p in latin_name.split("+")]
-                # Добавляем дозировку к последнему компоненту, если она есть
-                if dosage_str and display_parts:
-                    display_parts[-1] = f"{display_parts[-1]} {dosage_str}".strip()
-            else:
-                display_parts = [f"{latin_name} {dosage_str}".strip()]
+    @staticmethod
+    def _attach_prescriptions_section(data: dict, remcard_service, start_dt, end_dt):
+        orders = data.get("prescriptions", [])
+        order_ids = [o.id for o in orders if o.id is not None]
+        all_admins = DataCollectorWorker._fetch_print_administration_rows(
+            remcard_service,
+            order_ids,
+            start_dt,
+            end_dt,
+        )
+        admin_rows_by_order = DataCollectorWorker._group_admin_rows_by_order(all_admins)
+        data["prescriptions_matrix"] = DataCollectorWorker._build_prescriptions_matrix(
+            orders,
+            admin_rows_by_order,
+            start_dt,
+        )
 
-            # 2. Ищем растворитель в комментарии
-            # Проверяем наличие явного тега [DIL:...]
-            diluent_match = re.search(r'\[DIL:(.*?)\]', comment)
-            if diluent_match:
-                diluent_text = diluent_match.group(1).strip()
-                if diluent_text:
-                    # Очищаем от других возможных тегов внутри растворителя
-                    diluent_text = re.sub(r'\[ROUTE:.*?\]', '', diluent_text).strip()
-                    diluent_text = re.sub(r'\[DUR:.*?\]', '', diluent_text).strip()
-                    if diluent_text:
-                        display_parts.append(diluent_text)
-            else:
-                # Если тега нет, но в комментарии есть что-то похожее на растворитель (S. ...)
-                # и это не совпадает с тем, что уже есть в latin
-                comment_clean = re.sub(r'\[ROUTE:.*?\]', '', comment).strip()
-                comment_clean = re.sub(r'\[DUR:.*?\]', '', comment_clean).strip()
-                if comment_clean.startswith("+"): comment_clean = comment_clean[1:].strip()
-                
-                if comment_clean and "S." in comment_clean and comment_clean not in latin_name:
-                    display_parts.append(comment_clean)
-
-            # Передаем список строк. render_prescriptions должен уметь его готовить.
-            display_name = display_parts
-            marks = [None] * 24
-            order_admins_rows = [a for a in all_admins if a['order_id'] == o.id]
-            o.administrations = []
-            
-            for a in order_admins_rows:
-                p_time = datetime.datetime.fromisoformat(str(a['planned_time']).replace(" ", "T"))
-                actual_raw = a.get('actual_time')
-                actual_time = datetime.datetime.fromisoformat(str(actual_raw).replace(" ", "T")) if actual_raw else None
-                admin_dto = AdministrationDTO(
-                    id=a['id'], order_id=o.id, chain_id=a.get('chain_id'),
-                    big_chain_id=a.get('big_chain_id'), cell_role=a.get('cell_role', 'single'),
-                    planned_time=p_time, actual_time=actual_time, status=a.get('status', 'planned'),
-                    volume_ml=a.get('volume_ml', 0.0), comment=a.get('comment', '')
-                )
-                o.administrations.append(admin_dto)
-                idx = int((p_time - start_dt).total_seconds() / 3600)
-                if 0 <= idx < 24:
-                    marks[idx] = {
-                        "role": a.get('cell_role', 'single'),
-                        "nurse_mark": a.get('comment', ''),
-                        "planned_time": p_time,
-                        "chain_key": a.get('big_chain_id') or a.get('chain_id'),
-                    }
-
-            # Добавляем препарат в отчет всегда, даже если нет отметок времени (как просил пользователь)
-            prescriptions_matrix.append({"name": display_name, "marks": marks, "created_at": o.created_at})
-        
-        data["prescriptions_matrix"] = prescriptions_matrix
-
-        # 3. БАЛАНС
+    @staticmethod
+    def _attach_balance_section(data: dict, remcard_service, config, orders, start_dt, current_time, end_dt):
         admission_id = data.get("admission_id") or data.get("id")
         data["balance_final"] = build_print_balance_final(
             orders=orders,
@@ -345,29 +402,38 @@ class DataCollectorWorker(QThread):
             end_dt=end_dt,
         )
 
-        # 4. СОБЫТИЯ
-        events = data.get("events", [])
-        events_struct = []
+    @staticmethod
+    def _format_event_time(event):
+        st_time = getattr(event, 'start_time', None)
+        en_time = getattr(event, 'end_time', None)
+        time_str = st_time.strftime("%d.%m.%Y %H:%M") if st_time else ""
+        if en_time:
+            time_str += f" - {en_time.strftime('%H:%M')}"
+            if en_time.date() != (st_time.date() if st_time else None):
+                time_str = st_time.strftime("%d.%m %H:%M") + " - " + en_time.strftime("%d.%m %H:%M")
+        return time_str
+
+    @staticmethod
+    def _event_row(event, status_map):
+        status_val = str(getattr(event.status, 'value', event.status))
+        desc = _movement_comment_text(status_val, getattr(event, "reason_text", None)) or "—"
+        return {
+            "time": DataCollectorWorker._format_event_time(event),
+            "status": status_map.get(status_val, status_val),
+            "desc": desc
+        }
+
+    @staticmethod
+    def _build_events_struct(events):
         status_map = {"ACTIVE": "В отделении", "OUT": "Вне отд.", "OR": "Оперблок", "TRANSFERRED": "Переведен", "DEAD": "Умер"}
+        return [DataCollectorWorker._event_row(event, status_map) for event in events]
 
-        for ev in events:
-            status_val = str(getattr(ev.status, 'value', ev.status))
-            st_time = getattr(ev, 'start_time', None)
-            en_time = getattr(ev, 'end_time', None)
-            desc = _movement_comment_text(status_val, getattr(ev, "reason_text", None)) or "—"
-            
-            time_str = st_time.strftime("%d.%m.%Y %H:%M") if st_time else ""
-            if en_time:
-                time_str += f" - {en_time.strftime('%H:%M')}"
-                if en_time.date() != (st_time.date() if st_time else None):
-                    time_str = st_time.strftime("%d.%m %H:%M") + " - " + en_time.strftime("%d.%m %H:%M")
+    @staticmethod
+    def _attach_events_section(data: dict):
+        data["events_struct"] = DataCollectorWorker._build_events_struct(data.get("events", []))
 
-            events_struct.append({
-                "time": time_str,
-                "status": status_map.get(status_val, status_val),
-                "desc": desc
-            })
-        data["events_struct"] = events_struct
+    @staticmethod
+    def _attach_death_outcome_section(data: dict, remcard_service, config, start_dt, end_dt):
         if config.get("death_outcome", False):
             data["death_outcome"] = build_death_outcome_struct(
                 remcard_service,
@@ -378,10 +444,25 @@ class DataCollectorWorker(QThread):
         else:
             data["death_outcome"] = {}
 
-        # 5. ИВЛ
+    @staticmethod
+    def _attach_ventilation_section(data: dict):
         data["ventilation_struct"] = DataCollectorWorker.build_ventilation_struct(
             data.get("ventilation_events", [])
         )
+
+    @staticmethod
+    def transform_data_static(data: dict, remcard_service, config) -> dict:
+        start_dt = data["start_dt"]
+        end_dt = data["end_dt"]
+        current_time = DataCollectorWorker._bounded_current_time(end_dt)
+        orders = data.get("prescriptions", [])
+
+        DataCollectorWorker._attach_vitals_section(data, remcard_service, start_dt, end_dt)
+        DataCollectorWorker._attach_prescriptions_section(data, remcard_service, start_dt, end_dt)
+        DataCollectorWorker._attach_balance_section(data, remcard_service, config, orders, start_dt, current_time, end_dt)
+        DataCollectorWorker._attach_events_section(data)
+        DataCollectorWorker._attach_death_outcome_section(data, remcard_service, config, start_dt, end_dt)
+        DataCollectorWorker._attach_ventilation_section(data)
         return data
 
     def run(self):

@@ -42,7 +42,6 @@ ALLOWED_F_BLOCKS = {
     ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
     ("services/minigames/tamagotchi_service.py", "TamagotchiService.advance_state"),
     ("ui/rem_card_sectors/sector_events.py", "SectorEvents.refresh"),
-    ("ui/rem_card_sectors/sector_print.py", "DataCollectorWorker.transform_data_static"),
 }
 
 
