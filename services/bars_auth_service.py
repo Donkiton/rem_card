@@ -20,7 +20,7 @@ DEFAULT_BARS_URL = "http://10.30.30.12/"
 DEFAULT_DEBUG_PORT = 9338
 DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
 DEFAULT_BARS_LOAD_TIMEOUT_SEC = 40.0
-DIRECT_FORM_API_TIMEOUT_SEC = 4.0
+DIRECT_FORM_API_TIMEOUT_SEC = 40.0
 DEPARTMENT_SELECT_TIMEOUT_SEC = 8.0
 NETWORK_CAPTURE_WAIT_SEC = 8.0
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
@@ -131,7 +131,7 @@ class BarsAuthService:
         self.profile_dir = profile_dir or os.environ.get("REMCARD_BARS_BROWSER_PROFILE_DIR") or self._default_profile_dir()
         self.duty_department = os.environ.get("REMCARD_BARS_DUTY_DEPARTMENT") or DEFAULT_DUTY_DEPARTMENT
         self.load_timeout_sec = self._read_float_env("REMCARD_BARS_LOAD_TIMEOUT_SEC", DEFAULT_BARS_LOAD_TIMEOUT_SEC)
-        self._use_direct_form_api = os.environ.get("REMCARD_BARS_USE_DIRECT_FORM_API") == "1"
+        self._use_direct_form_api = os.environ.get("REMCARD_BARS_USE_DIRECT_FORM_API") != "0"
         self._use_user_data_dir = bool(profile_dir) or os.environ.get("REMCARD_BARS_USE_USER_DATA_DIR") == "1"
         self._enable_devtools = os.environ.get("REMCARD_BARS_DISABLE_DEVTOOLS") != "1"
         self.debug_port = int(os.environ.get("REMCARD_BARS_DEBUG_PORT") or debug_port or DEFAULT_DEBUG_PORT)
@@ -236,7 +236,7 @@ class BarsAuthService:
 
     def prepare_background_session(self):
         self._diag("prepare_background_session_start", debug_port=self.debug_port)
-        page = self._ensure_fresh_bars_automation_page(background=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
         if page:
             self._prepare_background_page(page)
         minimized = self.minimize_bars_windows()
@@ -507,7 +507,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        page = self._ensure_fresh_bars_automation_page(background=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
         if not page:
             self._diag(
                 "probe_patient_no_bars_page",
@@ -523,7 +523,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        ready_text = self._reset_bars_page_to_root(page, timeout_sec=self._remaining_timeout(deadline))
+        ready_text = self._prepare_bars_workspace(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
             timed_out = self._deadline_expired(deadline)
@@ -608,7 +608,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        page = self._ensure_fresh_bars_automation_page(background=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
         if not page:
             return BarsNetworkCaptureResult(
                 False,
@@ -616,7 +616,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        ready_text = self._reset_bars_page_to_root(page, timeout_sec=self._remaining_timeout(deadline))
+        ready_text = self._prepare_bars_workspace(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title) and "журнал госпитализации" not in ready_text.lower():
             timed_out = self._deadline_expired(deadline)
@@ -704,7 +704,7 @@ class BarsAuthService:
                 department=department,
             )
 
-        page = self._ensure_fresh_bars_automation_page(background=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
         if not page:
             return BarsPatientListResult(
                 False,
@@ -714,7 +714,7 @@ class BarsAuthService:
         self._prepare_background_page(page)
         self.minimize_bars_windows()
 
-        ready_text = self._reset_bars_page_to_root(page, timeout_sec=self._remaining_timeout(deadline))
+        ready_text = self._prepare_bars_workspace(page, timeout_sec=self._remaining_timeout(deadline))
         page_title = str(page.get("title") or "")
         if not self._looks_like_bars_work_screen(ready_text, page_title):
             timed_out = self._deadline_expired(deadline)
@@ -770,23 +770,28 @@ class BarsAuthService:
                 started_at,
             )
 
-        find_step = self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"])
-        steps.append(find_step)
-        failed_step = self._first_failed_step([find_step])
-        if failed_step:
-            return self._bars_scenario_failed_result(
-                department,
-                steps,
-                failed_step,
-                self._read_page_text_with_retry(page, attempts=1, delay_sec=0),
-                started_at,
-            )
-
         patients = self._wait_for_department_patients_from_requests(
             page,
             department,
             timeout_sec=min(NETWORK_CAPTURE_WAIT_SEC, self._remaining_timeout(deadline)),
         )
+        if not patients:
+            find_step = self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"])
+            steps.append(find_step)
+            failed_step = self._first_failed_step([find_step])
+            if failed_step:
+                return self._bars_scenario_failed_result(
+                    department,
+                    steps,
+                    failed_step,
+                    self._read_page_text_with_retry(page, attempts=1, delay_sec=0),
+                    started_at,
+                )
+            patients = self._wait_for_department_patients_from_requests(
+                page,
+                department,
+                timeout_sec=min(NETWORK_CAPTURE_WAIT_SEC, self._remaining_timeout(deadline)),
+            )
         if not patients:
             patients = self._wait_for_department_patient_rows(
                 page,
@@ -1168,45 +1173,6 @@ class BarsAuthService:
         )
         return None
 
-    def _ensure_fresh_bars_automation_page(self, background: bool = True) -> Optional[dict[str, Any]]:
-        old_page = self._find_bars_debug_page(automation_only=True)
-        if old_page:
-            self._close_debug_page(old_page)
-            time.sleep(0.35)
-        page = self._ensure_bars_debug_page(background=background, allow_open=True, automation=True)
-        if page:
-            self._mark_bars_automation_page(page)
-        return page
-
-    def _close_debug_page(self, page: dict[str, Any]) -> bool:
-        page_id = str(page.get("id") or "")
-        if not page_id:
-            return False
-        endpoint = f"http://127.0.0.1:{self.debug_port}/json/close/{quote(page_id, safe='')}"
-        for method in ("GET", "PUT"):
-            try:
-                request = Request(endpoint, method=method)
-                with urlopen(request, timeout=1.0) as response:
-                    ok = 200 <= response.status < 300
-                self._diag(
-                    "close_debug_page_done",
-                    ok=ok,
-                    method=method,
-                    page=self._summarize_pages([page])[0],
-                    log_to_main=False,
-                )
-                return ok
-            except Exception as exc:
-                self._diag(
-                    "close_debug_page_failed",
-                    level="warning",
-                    method=method,
-                    page=self._summarize_pages([page])[0],
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-        return False
-
     def _mark_bars_automation_page(self, page: dict[str, Any]) -> bool:
         name_json = json.dumps(AUTOMATION_PAGE_NAME)
         expression = f"""
@@ -1248,44 +1214,143 @@ class BarsAuthService:
         payload = self._evaluate_json_expression(page, expression)
         return payload.get("name") == AUTOMATION_PAGE_NAME or payload.get("marker") == "1"
 
-    def _reset_bars_page_to_root(self, page: dict[str, Any], timeout_sec: float) -> str:
+    def _prepare_bars_workspace(self, page: dict[str, Any], timeout_sec: float) -> str:
         ws_url = str(page.get("webSocketDebuggerUrl") or "")
         if not ws_url:
             return ""
 
         self._prepare_background_page(page)
         self._mark_bars_automation_page(page)
-        self._diag("reset_bars_page_to_root_start", page=self._summarize_pages([page])[0])
-        try:
-            current_url = str(page.get("url") or "").rstrip("/")
-            root_url = self.bars_url.rstrip("/")
-            command = (
-                {"method": "Page.reload", "params": {"ignoreCache": False}}
-                if current_url == root_url
-                else {"method": "Page.navigate", "params": {"url": self.bars_url}}
-            )
-            response = self._cdp_call(
-                ws_url,
-                {
-                    "id": int(time.time() * 1000) % 1000000,
-                    **command,
-                },
-                timeout_sec=4.0,
-            )
-            if response.get("error"):
-                self._diag("reset_bars_page_to_root_cdp_error", level="warning", error=response.get("error"))
-        except Exception as exc:
-            self._diag("reset_bars_page_to_root_failed", level="warning", error_type=type(exc).__name__, error=str(exc))
+        started_at = time.monotonic()
+        self._diag("prepare_bars_workspace_start", page=self._summarize_pages([page])[0])
 
-        text = self._wait_for_bars_ready(page, timeout_sec=timeout_sec)
+        close_result = self._close_bars_internal_windows(page)
+        if close_result.get("closed"):
+            time.sleep(0.5)
+
+        text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.4)
+        if not self._looks_like_bars_work_screen(text, str(page.get("title") or "")):
+            remaining = max(0.2, min(float(timeout_sec), max(0.2, timeout_sec - (time.monotonic() - started_at))))
+            text = self._wait_for_bars_ready(page, timeout_sec=remaining)
         self._mark_bars_automation_page(page)
         self._diag(
-            "reset_bars_page_to_root_done",
+            "prepare_bars_workspace_done",
             ready=self._looks_like_bars_work_screen(text, str(page.get("title") or "")),
+            close_result=close_result,
             text_len=len(text),
             text_preview=self._compact_text_preview(text),
         )
         return text
+
+    def _close_bars_internal_windows(self, page: dict[str, Any]) -> dict[str, Any]:
+        expression = """
+(() => {
+  const docs = [];
+  const walk = (win) => {
+    try {
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {
+        try { walk(frame.contentWindow); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  walk(window);
+
+  const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    const style = el.ownerDocument.defaultView.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const dispatchMouse = (el) => {
+    const win = el.ownerDocument.defaultView;
+    try { el.scrollIntoView({block: 'center', inline: 'center'}); } catch (_) {}
+    for (const type of ['mousemove', 'mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click']) {
+      el.dispatchEvent(new win.MouseEvent(type, {bubbles: true, cancelable: true, view: win}));
+    }
+    try { if (typeof el.click === 'function') el.click(); } catch (_) {}
+  };
+  const sendEscape = (doc) => {
+    const win = doc.defaultView;
+    for (const target of [doc.activeElement, doc.body, doc.documentElement, doc]) {
+      if (!target) continue;
+      for (const type of ['keydown', 'keyup']) {
+        try { target.dispatchEvent(new win.KeyboardEvent(type, {bubbles: true, cancelable: true, key: 'Escape', code: 'Escape'})); } catch (_) {}
+      }
+    }
+  };
+
+  let esc = 0;
+  for (const doc of docs) {
+    sendEscape(doc);
+    sendEscape(doc);
+    esc += 2;
+  }
+
+  const candidates = [];
+  for (const doc of docs) {
+    const nodes = Array.from(doc.querySelectorAll([
+      '[title*="Закрыть"]',
+      '[aria-label*="Закрыть"]',
+      '.x-tool-close',
+      '.ui-dialog-titlebar-close',
+      '.d3-window-close',
+      '.window-close',
+      '.modal-close',
+      '[class*="close"]',
+      '[class*="Close"]'
+    ].join(',')));
+    for (const el of nodes) {
+      try {
+        if (!visible(el)) continue;
+        const rect = el.getBoundingClientRect();
+        const text = norm(el.innerText || el.textContent || el.value || el.getAttribute('title') || el.getAttribute('aria-label') || '');
+        const cls = String(el.className || '');
+        const title = String(el.getAttribute('title') || '');
+        const aria = String(el.getAttribute('aria-label') || '');
+        const all = `${text} ${cls} ${title} ${aria}`.toLowerCase();
+        if (all.includes('выход') || all.includes('очистить') || all.includes('скрыть фильтр')) continue;
+        const closeMarker = all.includes('закрыть') || all.includes('close');
+        const small = rect.width <= 80 && rect.height <= 50;
+        if (!closeMarker && !small) continue;
+        let z = 0;
+        let node = el;
+        for (let i = 0; node && i < 5; i += 1, node = node.parentElement) {
+          const zi = parseInt(doc.defaultView.getComputedStyle(node).zIndex || '0', 10);
+          if (!Number.isNaN(zi)) z = Math.max(z, zi);
+        }
+        candidates.push({el, text, cls, title, aria, top: rect.top, left: rect.left, z});
+      } catch (_) {}
+    }
+  }
+
+  candidates.sort((a, b) => (b.z - a.z) || (a.top - b.top) || (b.left - a.left));
+  let closed = 0;
+  const clicked = [];
+  const seen = new Set();
+  for (const item of candidates.slice(0, 8)) {
+    try {
+      const key = `${Math.round(item.top)}:${Math.round(item.left)}:${item.text}:${item.title}:${item.cls}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      dispatchMouse(item.el);
+      closed += 1;
+      clicked.push({text: item.text.slice(0, 80), title: item.title.slice(0, 80), cls: String(item.cls).slice(0, 120), z: item.z});
+    } catch (_) {}
+  }
+  return JSON.stringify({ok: true, closed, escapeSent: esc, clicked});
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        self._diag(
+            "close_bars_internal_windows_done",
+            closed=payload.get("closed"),
+            escape_sent=payload.get("escapeSent"),
+            clicked=payload.get("clicked"),
+            log_to_main=False,
+        )
+        return payload
 
     def _wait_for_bars_ready(self, page: dict[str, Any], timeout_sec: float = 4.0) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
@@ -1628,18 +1693,23 @@ class BarsAuthService:
         text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
         steps: list[str] = []
         if not self._looks_like_inpatient_doctor_page(text):
+            attempted_direct_api = False
             if self._use_direct_form_api:
                 api_step = self._open_inpatient_doctor_form_via_api(page)
                 steps.append(api_step)
+                attempted_direct_api = api_step.startswith("Форма открыта")
                 if api_step.startswith("Форма открыта"):
                     api_timeout = min(DIRECT_FORM_API_TIMEOUT_SEC, self._remaining_timeout(deadline))
                     text = self._wait_for_inpatient_doctor_page(page, timeout_sec=api_timeout)
             else:
                 self._diag(
                     "open_inpatient_doctor_form_api_skipped",
-                    reason="disabled_by_default",
+                    reason="disabled_by_env",
                     log_to_main=False,
                 )
+            if attempted_direct_api and not self._looks_like_inpatient_doctor_page(text):
+                steps.append("Форма Лечащий врач (new) не загрузилась после прямого вызова")
+                return steps
             if not self._looks_like_inpatient_doctor_page(text):
                 if self._deadline_expired(deadline):
                     steps.append("Форма Лечащий врач (new) не загрузилась за отведенное время")
@@ -1649,29 +1719,27 @@ class BarsAuthService:
                 if self._first_failed_step([step]):
                     return steps
                 time.sleep(0.35)
-                if not self._page_contains_text(page, ["Пациенты в стационаре"]):
-                    step = self._click_visible_text(page, ["Рабочие места"])
-                    steps.append(step)
-                    if self._first_failed_step([step]):
-                        return steps
-                    time.sleep(0.45)
+                step = self._click_visible_text(page, ["Рабочие места"])
+                steps.append(step)
+                if self._first_failed_step([step]):
+                    return steps
+                time.sleep(0.45)
 
                 step = self._hover_visible_text(page, ["Пациенты в стационаре"])
                 steps.append(step)
                 if self._first_failed_step([step]):
                     return steps
                 time.sleep(0.45)
-                if not self._page_contains_text(page, ["Лечащий врач (new)"]):
-                    step = self._click_visible_text(page, ["Пациенты в стационаре"])
-                    steps.append(step)
-                    if self._first_failed_step([step]):
-                        return steps
-                    time.sleep(0.45)
-                    step = self._hover_visible_text(page, ["Пациенты в стационаре"])
-                    steps.append(step)
-                    if self._first_failed_step([step]):
-                        return steps
-                    time.sleep(0.45)
+                step = self._click_visible_text(page, ["Пациенты в стационаре"])
+                steps.append(step)
+                if self._first_failed_step([step]):
+                    return steps
+                time.sleep(0.45)
+                step = self._hover_visible_text(page, ["Пациенты в стационаре"])
+                steps.append(step)
+                if self._first_failed_step([step]):
+                    return steps
+                time.sleep(0.45)
 
                 step = self._click_visible_text(page, ["Лечащий врач (new)"])
                 steps.append(step)
@@ -2909,7 +2977,9 @@ class BarsAuthService:
         if (style.cursor === 'pointer') score += 50;
         if (text.length <= label.length + 8) score += 120;
         if (hasChildWithLabel(el, label) && own !== label) score -= 450;
-        if (text.includes('→') && normalized !== label) score -= 700;
+        if (text.includes('→') && normalized !== label) score -= 1200;
+        const rect = el.getBoundingClientRect();
+        if (rect.top >= 0 && rect.top <= 260) score += 180;
         score -= Math.min(text.length, 500) / 4;
         candidates.push({{el, label, text, score, tag}});
       }}
@@ -2918,7 +2988,7 @@ class BarsAuthService:
   candidates.sort((a, b) => b.score - a.score);
   if (!candidates.length) return JSON.stringify({{ok: false}});
   const best = candidates[0];
-  if (best.score < 100) return JSON.stringify({{ok: false, reason: 'candidate score too low', score: best.score, text: best.text}});
+  if (best.score < 300) return JSON.stringify({{ok: false, reason: 'candidate score too low', score: best.score, text: best.text}});
   const target = clickElement(best.el);
   return JSON.stringify({{
     ok: true,
