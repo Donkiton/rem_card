@@ -699,14 +699,15 @@ class BarsAuthService:
 
         steps: list[str] = []
         steps.extend(self._open_inpatient_duty_doctor(page))
+        self._install_network_capture(page)
+        self._clear_network_capture(page)
         steps.append(self._select_department_filter(page, department))
-        time.sleep(0.4)
-        steps.append(self._click_visible_text(page, ["<<< Отобрать >>>", "Отобрать", "Найти"]))
-        patients = self._wait_for_department_patient_rows(page, department, timeout_sec=6.0)
+        patients = self._wait_for_department_patient_rows(page, department, timeout_sec=10.0)
 
         text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.8)
         if not patients:
             patients = self._extract_visible_patient_rows(page, department)
+        captured_requests = self._summarize_captured_requests(self._get_network_capture(page), department)
         self._diag(
             "list_department_patients_done",
             ok=bool(patients),
@@ -714,6 +715,7 @@ class BarsAuthService:
             patients_count=len(patients),
             patients=patients[:40],
             steps=steps,
+            requests=captured_requests[:12],
             text_preview=self._compact_text_preview(text),
         )
 
@@ -1368,38 +1370,67 @@ class BarsAuthService:
   const selectComboValue = (input) => {{
     const combo = input.closest('[cmptype="ComboBox"], .ctrl_combobox');
     if (!combo) return {{used: false}};
-    const items = Array.from(combo.querySelectorAll('[cmptype="ComboItem"][value], tr[value]'));
+    try {{
+      if (window.D3Api && window.D3Api.ComboBoxCtrl && typeof window.D3Api.ComboBoxCtrl.setOptions === 'function') {{
+        window.D3Api.ComboBoxCtrl.setOptions(combo);
+      }}
+    }} catch (_) {{}}
+
+    const items = Array.from(combo.options || combo.querySelectorAll('[cmptype="ComboItem"][value], tr[value]'));
     const item = items.find(el => norm(el.textContent).toLowerCase().includes(department.toLowerCase()));
-    if (!item) return {{used: true, selected: false, reason: 'combo item not found'}};
+    if (!item) return {{used: true, selected: false, reason: 'combo item not found', options: items.length}};
 
     const caption = norm(item.textContent) || department;
     const value = item.getAttribute('value') || '';
     const button = combo.querySelector('.cmbb-button,[title*="Выбрать"]');
+
+    try {{
+      if (window.D3Api && typeof window.D3Api.setControlPropertyByDom === 'function') {{
+        window.D3Api.setControlPropertyByDom(combo, 'value', value);
+      }} else if (window.D3Api && window.D3Api.ComboBoxCtrl && typeof window.D3Api.ComboBoxCtrl.setValue === 'function') {{
+        window.D3Api.ComboBoxCtrl.setValue(combo, value, {{}});
+      }} else {{
+        combo.setAttribute('keyvalue', value);
+        combo.setAttribute('value', value);
+      }}
+    }} catch (_) {{
+      combo.setAttribute('keyvalue', value);
+      combo.setAttribute('value', value);
+    }}
 
     try {{ if (button) dispatchMouse(button); }} catch (_) {{}}
     try {{ dispatchMouse(item); }} catch (_) {{}}
 
     combo.setAttribute('keyvalue', value);
     combo.setAttribute('value', value);
-    combo.setAttribute('keycaption', caption);
     input.focus();
-    try {{
-      const setter = Object.getOwnPropertyDescriptor(input.ownerDocument.defaultView.HTMLInputElement.prototype, 'value').set;
-      setter.call(input, caption);
-    }} catch (_) {{
-      input.value = caption;
-    }}
+    if (input.value !== caption) input.value = caption;
     input.dispatchEvent(new Event('input', {{bubbles: true}}));
     input.dispatchEvent(new Event('change', {{bubbles: true}}));
     combo.dispatchEvent(new Event('change', {{bubbles: true}}));
+
+    let gridDataset = '';
+    let filterCalled = false;
     try {{
-      if (window.D3Api && window.D3Api.GridCtrl && typeof window.D3Api.GridCtrl.filterOnChange === 'function') {{
-        window.D3Api.GridCtrl.filterOnChange(combo);
+      if (window.D3Api && window.D3Api.GridCtrl && typeof window.D3Api.GridCtrl.searchFilter === 'function') {{
+        const grid = window.D3Api.getControlByDom ? window.D3Api.getControlByDom(combo, 'Grid') : null;
+        gridDataset = grid && grid.D3Store ? String(grid.D3Store.dataSetName || '') : '';
+        window.D3Api.GridCtrl.searchFilter(combo, false, true);
+        filterCalled = true;
       }}
     }} catch (_) {{}}
     input.dispatchEvent(new KeyboardEvent('keydown', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
     input.dispatchEvent(new KeyboardEvent('keyup', {{bubbles: true, key: 'Enter', code: 'Enter'}}));
-    return {{used: true, selected: true, value, caption}};
+    return {{
+      used: true,
+      selected: true,
+      value,
+      caption,
+      actualValue: window.D3Api && window.D3Api.ComboBoxCtrl ? window.D3Api.ComboBoxCtrl.getValue(combo) : combo.getAttribute('keyvalue') || '',
+      actualCaption: window.D3Api && window.D3Api.ComboBoxCtrl ? window.D3Api.ComboBoxCtrl.getCaption(combo) : input.value || '',
+      gridDataset,
+      filterCalled
+    }};
   }};
   let best = null;
   let bestScore = -1;
@@ -1464,6 +1495,7 @@ class BarsAuthService:
                 department=department,
                 input_name=payload.get("name"),
                 input_value=payload.get("value"),
+                combo=payload.get("combo"),
                 score=payload.get("score"),
             )
             return f"Отделение выбрано: {department}"
@@ -1587,6 +1619,13 @@ class BarsAuthService:
             "extract_visible_patient_rows_done",
             raw_rows_count=len(raw_rows),
             patients_count=len(patients),
+            sample_rows=[
+                [self._trim_value(str(cell or ""), max_len=120) for cell in row[:8]]
+                for row in raw_rows[:5]
+                if isinstance(row, list)
+            ]
+            if not patients
+            else [],
         )
         if not patients:
             text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.4)
