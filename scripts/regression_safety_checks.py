@@ -1483,6 +1483,67 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_w1_outcome_timer_ticks_without_beds_refresh(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.ui.rem_card_sectors.sector_4_sub import Sector4b
+
+    app = QApplication.instance() or QApplication([])
+    widget = Sector4b()
+    status = PatientStatusEventDTO(
+        admission_id=1,
+        status=PatientStatus.TRANSFERRED,
+        start_time=datetime.now(),
+    )
+    try:
+        widget.show()
+        app.processEvents()
+        widget.update_status(status)
+        widget.update_outcome_timer(status, delay_minutes=1)
+        first_text = widget.lbl_outcome_timer.text()
+        if widget.lbl_outcome_timer.isHidden():
+            return False, "outcome timer label is hidden"
+        if not widget._outcome_tick_timer.isActive():
+            return False, "outcome timer QTimer is not active"
+
+        deadline = time.monotonic() + 1.6
+        changed = False
+        while time.monotonic() < deadline:
+            app.processEvents()
+            if widget.lbl_outcome_timer.text() != first_text:
+                changed = True
+                break
+            time.sleep(0.05)
+        if not changed:
+            return False, "outcome timer text did not tick without beds refresh"
+        return True, "ok"
+    finally:
+        widget.close()
+
+
+def _check_build_release_reuses_prepared_version(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "scripts" / "build_release.py").read_text(encoding="utf-8")
+    required = [
+        "release_files_already_prepared",
+        "previous_release_commit == current_head",
+        "версия уже подготовлена",
+        "собираю текущий релиз без поднятия версии",
+        "push_current_branch(root)",
+    ]
+    missing = [item for item in required if item not in source]
+    if missing:
+        return False, f"build_release prepared-version flow missing {missing}"
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -1513,6 +1574,8 @@ def main():
         ("chart_clears_on_patient_context_change", _check_chart_clears_on_patient_context_change),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
+        ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
+        ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
     ]
 
     result_items = []

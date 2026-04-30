@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushButton, QFrame)
 from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, QSize, Signal
+from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from rem_card.services.shift_service import ShiftService
 
 class VitalBadge(QFrame):
@@ -58,6 +58,11 @@ class Sector4b(BaseSectorWidget):
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setStyleSheet("background: transparent;")
+        self._outcome_timer_status_dto = None
+        self._outcome_timer_delay_minutes = 30
+        self._outcome_tick_timer = QTimer(self)
+        self._outcome_tick_timer.setInterval(1000)
+        self._outcome_tick_timer.timeout.connect(self._refresh_outcome_timer_label)
         
         self.init_ui()
 
@@ -170,7 +175,7 @@ class Sector4b(BaseSectorWidget):
         if not status_dto:
             self.lbl_status.setText("Статус не опр.")
             self.lbl_status.setStyleSheet("background-color: #7f8c8d; color: white; font-weight: bold; border-radius: 4px;")
-            self.lbl_outcome_timer.setVisible(False)
+            self._clear_outcome_timer()
             return
 
         from rem_card.data.dto.remcard_dto import PatientStatus
@@ -188,10 +193,10 @@ class Sector4b(BaseSectorWidget):
         self.lbl_status.setStyleSheet(f"background-color: {color}; color: white; font-weight: bold; border-radius: 4px; padding: 2px;")
 
         if not status_dto.status.is_outcome():
-            self.lbl_outcome_timer.setVisible(False)
+            self._clear_outcome_timer()
 
     def update_outcome_timer(self, status_dto, delay_minutes: int = 30):
-        self.lbl_outcome_timer.setVisible(False)
+        self._clear_outcome_timer()
         if not status_dto or not getattr(status_dto, "status", None):
             return
         if not status_dto.status.is_outcome():
@@ -199,14 +204,36 @@ class Sector4b(BaseSectorWidget):
         if not status_dto.start_time:
             return
 
-        delay_minutes = max(0, int(delay_minutes))
-        deadline = status_dto.start_time + timedelta(minutes=delay_minutes)
+        self._outcome_timer_status_dto = status_dto
+        self._outcome_timer_delay_minutes = max(0, int(delay_minutes))
+        self._refresh_outcome_timer_label()
+        if not self.lbl_outcome_timer.isHidden() and self.lbl_outcome_timer.text() != "Снятие с койки: ожидается":
+            self._outcome_tick_timer.start()
+
+    def _clear_outcome_timer(self):
+        self._outcome_timer_status_dto = None
+        if self._outcome_tick_timer.isActive():
+            self._outcome_tick_timer.stop()
+        self.lbl_outcome_timer.setVisible(False)
+
+    def _refresh_outcome_timer_label(self):
+        status_dto = self._outcome_timer_status_dto
+        if not status_dto or not getattr(status_dto, "status", None):
+            self._clear_outcome_timer()
+            return
+        if not status_dto.status.is_outcome() or not status_dto.start_time:
+            self._clear_outcome_timer()
+            return
+
+        deadline = status_dto.start_time + timedelta(minutes=self._outcome_timer_delay_minutes)
         remaining = deadline - datetime.now()
         rem_sec = int(remaining.total_seconds())
 
         if rem_sec <= 0:
             self.lbl_outcome_timer.setText("Снятие с койки: ожидается")
             self.lbl_outcome_timer.setVisible(True)
+            if self._outcome_tick_timer.isActive():
+                self._outcome_tick_timer.stop()
             return
 
         rem_min, rem_s = divmod(rem_sec, 60)

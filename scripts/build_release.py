@@ -8,6 +8,7 @@ from pathlib import Path
 from bump_version import (
     BUMP_LEVELS,
     bump_version,
+    find_changelog_entry,
     parse_version,
     read_version,
     update_changelog,
@@ -70,6 +71,13 @@ def latest_version_commit(root: Path) -> str:
     commit = git_output(root, ["log", "-1", "--format=%H", "--", "VERSION"])
     if not commit:
         raise RuntimeError("Не удалось найти последний коммит, где менялся VERSION.")
+    return commit
+
+
+def head_commit(root: Path) -> str:
+    commit = git_output(root, ["rev-parse", "HEAD"])
+    if not commit:
+        raise RuntimeError("Не удалось определить текущий git-коммит.")
     return commit
 
 
@@ -156,6 +164,16 @@ def update_release_files(root: Path, level: str, changes: list[str], set_version
     return current, next_version
 
 
+def sync_current_release_info(root: Path, version: str) -> None:
+    date_text, changes = find_changelog_entry(root, version)
+    write_release_info(root, version, date_text, changes)
+
+
+def has_staged_or_unstaged_release_file_changes(root: Path) -> bool:
+    status = git_output(root, ["status", "--porcelain", "--", *VERSIONED_FILES])
+    return bool(status)
+
+
 def run_build(root: Path) -> None:
     run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)
 
@@ -195,7 +213,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--skip-build", action="store_true", help="Только обновить версию и changelog, без PyInstaller.")
     parser.add_argument("--no-commit", action="store_true", help="Не создавать release-коммит после сборки.")
-    parser.add_argument("--push", action="store_true", help="После release-коммита отправить текущую ветку в origin.")
+    parser.add_argument("--push", action="store_true", help="Отправить текущую ветку в origin после сборки/коммита.")
     parser.add_argument("--allow-empty", action="store_true", help="Разрешить релиз без новых git-коммитов.")
     return parser.parse_args(argv)
 
@@ -210,13 +228,44 @@ def main(argv: list[str] | None = None) -> int:
     ensure_clean_tree(root)
 
     previous_release_commit = latest_version_commit(root)
+    current_head = head_commit(root)
     subjects = collect_commit_subjects(root, previous_release_commit)
     changes = build_changelog_changes(subjects, args.change)
-    if not changes and not args.allow_empty:
-        raise RuntimeError(
-            "Нет новых git-коммитов после прошлого релиза. "
-            "Сделайте коммит с изменениями или добавьте --change \"Описание\"."
+    current_version = read_version(root)
+    release_files_already_prepared = (
+        not changes
+        and not args.allow_empty
+        and not args.set_version
+        and previous_release_commit == current_head
+    )
+    if release_files_already_prepared:
+        sync_current_release_info(root, current_version)
+        print(
+            f"Новых коммитов после версии {current_version} нет: "
+            "версия уже подготовлена, собираю текущий релиз без поднятия версии."
         )
+        if not args.skip_build:
+            run_build(root)
+        if args.no_commit:
+            print("Release files are not committed because --no-commit was used.")
+        elif has_staged_or_unstaged_release_file_changes(root):
+            commit_release(root, current_version)
+        if args.push:
+            push_current_branch(root)
+        print("Release build completed.")
+        return 0
+
+    if not changes and not args.allow_empty:
+        print(
+            f"Новых коммитов после версии {current_version} нет: "
+            "собираю текущий релиз без поднятия версии."
+        )
+        if not args.skip_build:
+            run_build(root)
+        if args.push:
+            push_current_branch(root)
+        print("Release build completed.")
+        return 0
     if not changes:
         changes = ["Техническая пересборка без изменений в коде"]
 
