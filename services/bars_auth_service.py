@@ -20,6 +20,7 @@ DEFAULT_BARS_URL = "http://10.30.30.12/"
 DEFAULT_DEBUG_PORT = 9338
 DEFAULT_DUTY_DEPARTMENT = "Амурск Отделение анестезиологии-реанимации №3"
 DEFAULT_BARS_LOAD_TIMEOUT_SEC = 40.0
+DIRECT_FORM_API_TIMEOUT_SEC = 4.0
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
@@ -127,6 +128,7 @@ class BarsAuthService:
         self.profile_dir = profile_dir or os.environ.get("REMCARD_BARS_BROWSER_PROFILE_DIR") or self._default_profile_dir()
         self.duty_department = os.environ.get("REMCARD_BARS_DUTY_DEPARTMENT") or DEFAULT_DUTY_DEPARTMENT
         self.load_timeout_sec = self._read_float_env("REMCARD_BARS_LOAD_TIMEOUT_SEC", DEFAULT_BARS_LOAD_TIMEOUT_SEC)
+        self._use_direct_form_api = os.environ.get("REMCARD_BARS_USE_DIRECT_FORM_API") == "1"
         self._use_user_data_dir = bool(profile_dir) or os.environ.get("REMCARD_BARS_USE_USER_DATA_DIR") == "1"
         self._enable_devtools = os.environ.get("REMCARD_BARS_DISABLE_DEVTOOLS") != "1"
         self.debug_port = int(os.environ.get("REMCARD_BARS_DEBUG_PORT") or debug_port or DEFAULT_DEBUG_PORT)
@@ -141,6 +143,7 @@ class BarsAuthService:
             profile_dir=self.profile_dir,
             duty_department=self.duty_department,
             load_timeout_sec=self.load_timeout_sec,
+            use_direct_form_api=self._use_direct_form_api,
             use_user_data_dir=self._use_user_data_dir,
             enable_devtools=self._enable_devtools,
             launch_mode="explicit_user_data_dir" if self._use_user_data_dir else "system_default_profile",
@@ -1391,10 +1394,18 @@ class BarsAuthService:
         text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
         steps: list[str] = []
         if not self._looks_like_inpatient_doctor_page(text):
-            api_step = self._open_inpatient_doctor_form_via_api(page)
-            steps.append(api_step)
-            if api_step.startswith("Форма открыта"):
-                text = self._wait_for_inpatient_doctor_page(page, timeout_sec=self._remaining_timeout(deadline))
+            if self._use_direct_form_api:
+                api_step = self._open_inpatient_doctor_form_via_api(page)
+                steps.append(api_step)
+                if api_step.startswith("Форма открыта"):
+                    api_timeout = min(DIRECT_FORM_API_TIMEOUT_SEC, self._remaining_timeout(deadline))
+                    text = self._wait_for_inpatient_doctor_page(page, timeout_sec=api_timeout)
+            else:
+                self._diag(
+                    "open_inpatient_doctor_form_api_skipped",
+                    reason="disabled_by_default",
+                    log_to_main=False,
+                )
             if not self._looks_like_inpatient_doctor_page(text):
                 if self._deadline_expired(deadline):
                     steps.append("Форма Лечащий врач (new) не загрузилась за отведенное время")
