@@ -244,6 +244,130 @@ def _check_blood_plasma_key_ru_prescription_parse(temp_root: str) -> tuple[bool,
     return True, "ok"
 
 
+def _check_order_input_real_examples(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.dto.remcard_dto import OrderType
+    from rem_card.ui.doctor_view.components.order_input_handler import OrderInputHandler
+
+    cases = [
+        (
+            "standard_infusion_with_route_duration",
+            "цефтриаксон 1 + NaCl 0,9% 100 мл [ROUTE:инфузия] [DUR:60]",
+            {
+                "drug_key": "ceftriaxone",
+                "latin": "Ceftriaxoni",
+                "type": OrderType.INFUSION_CONTINUOUS,
+                "dose_value": 1.0,
+                "dose_unit": "g",
+                "is_per_kg": False,
+                "frequency": 1,
+                "specific_times": ["08:00"],
+                "duration_min": 60,
+                "comment": "NaCl 0,9% 100 мл",
+            },
+        ),
+        (
+            "latin_prefix_kept_compatible",
+            "S. Ceftriaxoni 1 + NaCl 0,9% 100 мл [DUR:60]",
+            {
+                "drug_key": "ceftriaxone",
+                "latin": "Ceftriaxoni",
+                "type": OrderType.INFUSION_CONTINUOUS,
+                "dose_value": 1.0,
+                "dose_unit": "g",
+                "is_per_kg": False,
+                "frequency": 1,
+                "specific_times": ["08:00"],
+                "duration_min": 60,
+                "comment": "NaCl 0,9% 100 мл",
+            },
+        ),
+        (
+            "per_kg_unknown_drug",
+            "норэпинефрин 0.2 мкг/кг/мин [DUR:-1]",
+            {
+                "drug_key": None,
+                "latin": "Норэпинефрин",
+                "type": OrderType.MEDICATION,
+                "dose_value": 0.2,
+                "dose_unit": "g",
+                "is_per_kg": True,
+                "frequency": 1,
+                "specific_times": ["08:00"],
+                "duration_min": -1,
+                "comment": "",
+            },
+        ),
+        (
+            "manual_ru_with_route_duration",
+            "ruki Контроль дренажа [ROUTE:процедура] [DUR:30] [RU]",
+            {
+                "drug_key": "ruchnoivvod",
+                "latin": "ruki Контроль дренажа",
+                "type": OrderType.INFUSION_CONTINUOUS,
+                "dose_value": 0.0,
+                "dose_unit": "",
+                "is_per_kg": False,
+                "frequency": 1,
+                "specific_times": [],
+                "duration_min": 30,
+                "comment": "[ROUTE:процедура] [DUR:30]",
+            },
+        ),
+        (
+            "explicit_key_with_diluent",
+            "Meropenemi 1 [KEY:meropenem] + NaCl 0,9% 100 мл [DUR:180]",
+            {
+                "drug_key": "meropenem",
+                "latin": "Meropenemi",
+                "type": OrderType.INFUSION_CONTINUOUS,
+                "dose_value": 1.0,
+                "dose_unit": "g",
+                "is_per_kg": False,
+                "frequency": 1,
+                "specific_times": ["08:00"],
+                "duration_min": 180,
+                "comment": "NaCl 0,9% 100 мл",
+            },
+        ),
+        (
+            "end_of_day_legacy_text",
+            "Пиперациллин 4 + NaCl 0,9% 100 мл до конца суток",
+            {
+                "drug_key": None,
+                "latin": "Пиперациллин",
+                "type": OrderType.MEDICATION,
+                "dose_value": 4.0,
+                "dose_unit": "g",
+                "is_per_kg": False,
+                "frequency": 1,
+                "specific_times": ["08:00"],
+                "duration_min": -1,
+                "comment": "NaCl 0,9% 100 мл до конца суток",
+            },
+        ),
+    ]
+
+    for name, text, expected in cases:
+        dto = OrderInputHandler.parse_input_to_dto(text, admission_id=3)
+        actual = {
+            "drug_key": dto.drug_key,
+            "latin": dto.latin,
+            "type": dto.type,
+            "dose_value": dto.dose_value,
+            "dose_unit": dto.dose_unit,
+            "is_per_kg": dto.is_per_kg,
+            "frequency": dto.frequency,
+            "specific_times": dto.specific_times,
+            "duration_min": dto.duration_min,
+            "comment": dto.comment,
+        }
+        for key, expected_value in expected.items():
+            if actual[key] != expected_value:
+                return False, f"{name}: {key}={actual[key]!r}, expected {expected_value!r}"
+
+    return True, "ok"
+
+
 def _create_sqlite_file(path: str):
     conn = sqlite3.connect(path)
     try:
@@ -1554,6 +1678,7 @@ def main():
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
         ("blood_plasma_key_ru_prescription_parse", _check_blood_plasma_key_ru_prescription_parse),
+        ("order_input_real_examples", _check_order_input_real_examples),
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),

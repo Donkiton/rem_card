@@ -47,7 +47,7 @@ def _extract_last_json_dict(text: str) -> dict[str, Any] | None:
         return None
     decoder = json.JSONDecoder()
     best_obj: dict[str, Any] | None = None
-    best_span = -1
+    best_end = -1
     for idx, ch in enumerate(text):
         if ch != "{":
             continue
@@ -56,9 +56,9 @@ def _extract_last_json_dict(text: str) -> dict[str, Any] | None:
         except Exception:
             continue
         if isinstance(obj, dict):
-            span = int(end)
-            if span >= best_span:
-                best_span = span
+            absolute_end = idx + int(end)
+            if absolute_end >= best_end:
+                best_end = absolute_end
                 best_obj = obj
     return best_obj
 
