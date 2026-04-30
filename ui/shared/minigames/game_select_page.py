@@ -6,9 +6,7 @@ from PySide6.QtWidgets import QGridLayout, QLabel, QPushButton, QVBoxLayout, QWi
 
 class GameSelectPage(QWidget):
     snake_requested = Signal()
-    tamagotchi_requested = Signal()
     leaderboard_requested = Signal()
-    tamagotchi_leaderboard_requested = Signal()
     arcade_requested = Signal(str)
     arcade_leaderboard_requested = Signal(str)
     back_requested = Signal()
@@ -31,27 +29,22 @@ class GameSelectPage(QWidget):
         games = [
             ("1. Змейка", lambda checked=False: self.snake_requested.emit(), lambda checked=False: self.leaderboard_requested.emit()),
             (
-                "2. Тамагочи",
-                lambda checked=False: self.tamagotchi_requested.emit(),
-                lambda checked=False: self.tamagotchi_leaderboard_requested.emit(),
-            ),
-            (
-                "3. Dodge",
+                "2. Dodge",
                 lambda checked=False: self.arcade_requested.emit("dodge"),
                 lambda checked=False: self.arcade_leaderboard_requested.emit("dodge"),
             ),
             (
-                "4. Тетрис",
+                "3. Тетрис",
                 lambda checked=False: self.arcade_requested.emit("tetris"),
                 lambda checked=False: self.arcade_leaderboard_requested.emit("tetris"),
             ),
             (
-                "5. Сапёр",
+                "4. Сапёр",
                 lambda checked=False: self.arcade_requested.emit("minesweeper"),
                 lambda checked=False: self.arcade_leaderboard_requested.emit("minesweeper"),
             ),
             (
-                "6. 2048",
+                "5. 2048",
                 lambda checked=False: self.arcade_requested.emit("game_2048"),
                 lambda checked=False: self.arcade_leaderboard_requested.emit("game_2048"),
             ),
