@@ -35,6 +35,7 @@ class OrdersWidget(QWidget):
         self.main_layout = None
         self.model = None
         self._last_polled_change_id = 0
+        self._last_polled_context_key = None
         self._fast_sync_timer = QTimer(self)
         self._fast_sync_timer.setSingleShot(True)
         self._fast_sync_timer.timeout.connect(self._run_fast_sync)
@@ -99,6 +100,7 @@ class OrdersWidget(QWidget):
 
     def _reset_change_cursor(self):
         self._last_polled_change_id = 0
+        self._last_polled_context_key = None
         self._last_poll_monotonic = 0.0
 
     def _reset_cached_state(self):
@@ -412,10 +414,11 @@ class OrdersWidget(QWidget):
         except Exception:
             logger.exception("[OrdersWidget] Failed to build context for handle_data_changes")
             return
+        context_key = context.cache_key()
         self._snapshot_stale = True
         if scoped_change_id > 0:
             self._last_polled_change_id = max(int(self._last_polled_change_id or 0), scoped_change_id)
-        context_key = context.cache_key()
+            self._last_polled_context_key = context_key
         if self._pending_change_context_key not in (None, context_key):
             self._reset_change_batch(stop_timer=True)
         self._pending_change_context_key = context_key
@@ -690,6 +693,15 @@ class OrdersWidget(QWidget):
             return False
         snapshot_change_id = int(snapshot.get("change_id") or 0)
         known_change_id = int(self._last_polled_change_id or 0)
+        if known_change_id > 0 and self._last_polled_context_key not in (None, current_context_key):
+            logger.info(
+                "[OrdersWidget] reset stale cursor after context drift previous_context=%s current_context=%s known_change_id=%s",
+                self._last_polled_context_key,
+                current_context_key,
+                known_change_id,
+            )
+            self._reset_change_cursor()
+            known_change_id = 0
         self._snapshot_stale = snapshot_change_id < known_change_id
         if self._snapshot_stale:
             coordinator = self._get_read_coordinator()
@@ -743,6 +755,8 @@ class OrdersWidget(QWidget):
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
         self._last_polled_change_id = max(known_change_id, snapshot_change_id)
+        if self._last_polled_change_id > 0:
+            self._last_polled_context_key = current_context_key
         self._apply_table_header_layout()
         self.check_drafts()
         if hasattr(self, "table_view"):

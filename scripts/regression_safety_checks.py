@@ -940,6 +940,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
     from PySide6.QtWidgets import QApplication
 
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.read_coordinator import ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     class DummyOrdersService(QObject):
@@ -952,11 +953,22 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
     app = QApplication.instance() or QApplication([])
     shift_date = datetime(2026, 4, 24, 12)
     service = DummyOrdersService()
+    service.read_coordinator = ReadCoordinator(service)
     widget = OrdersWidget(service=service, admission_id=1, shift_date=shift_date, defer_ui=True)
     try:
         widget._ensure_model_initialized()
         if widget.model is None:
             return False, "model was not initialized"
+        context = service.read_coordinator.make_orders_context(
+            source_db="live",
+            admission_id=1,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="full",
+        )
+        context_key = context.cache_key()
+        context_hash = context.hash()
 
         original_apply_snapshot = widget.model.apply_snapshot
         apply_count = 0
@@ -990,7 +1002,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             "has_any_orders": True,
             "change_id": 7,
             "version": 7,
-            "context_hash": "duplicate-snapshot",
+            "context_hash": context_hash,
             "load_trace_id": "orders-duplicate-000001",
             "source": "refresh",
         }
@@ -999,13 +1011,13 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             snapshot=snapshot,
             admission_id=1,
             shift_date=shift_date,
-            context_key=("live", 1, "2026-04-24T12:00:00", "doctor", "live", "full", "duplicate-snapshot"),
+            context_key=context_key,
         )
         second_ok = widget._apply_snapshot_data(
             snapshot=snapshot,
             admission_id=1,
             shift_date=shift_date,
-            context_key=("live", 1, "2026-04-24T12:00:00", "doctor", "live", "full", "duplicate-snapshot"),
+            context_key=context_key,
         )
         app.processEvents()
 
@@ -1015,6 +1027,54 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             return False, f"duplicate snapshot reset was not skipped, apply_count={apply_count}"
         if len(widget.model.orders) != 1:
             return False, f"unexpected model rows after duplicate skip: {len(widget.model.orders)}"
+
+        previous_context = service.read_coordinator.make_orders_context(
+            source_db="live",
+            admission_id=7,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="full",
+        )
+        current_context = service.read_coordinator.make_orders_context(
+            source_db="live",
+            admission_id=5,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="full",
+        )
+        widget.admission_id = 5
+        widget.shift_date = shift_date
+        widget._last_polled_change_id = 49793
+        widget._last_polled_context_key = previous_context.cache_key()
+        widget._last_applied_snapshot_signature = None
+        drift_snapshot = {
+            "admission_id": 5,
+            "shift_date": shift_date,
+            "only_committed": False,
+            "orders": [],
+            "admin_rows": [],
+            "patient_context": None,
+            "has_any_draft": False,
+            "has_any_administrations": False,
+            "has_any_orders": False,
+            "change_id": 49781,
+            "version": 49781,
+            "context_hash": current_context.hash(),
+            "load_trace_id": "orders-context-drift",
+            "source": "refresh",
+        }
+        drift_ok = widget._apply_snapshot_data(
+            snapshot=drift_snapshot,
+            admission_id=5,
+            shift_date=shift_date,
+            context_key=current_context.cache_key(),
+        )
+        if not drift_ok or widget._snapshot_stale:
+            return False, "context-drift cursor caused stale snapshot loop"
+        if int(widget._last_polled_change_id or 0) != 49781:
+            return False, f"context-drift cursor was not reset: {widget._last_polled_change_id}"
         return True, "ok"
     finally:
         widget.close()
@@ -1117,6 +1177,9 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     load_method = methods.get("load_patient_card")
     if load_method is None:
         return False, "load_patient_card not found"
+    load_source = ast.get_source_segment(source_text, load_method) or ""
+    if "ow.set_context" not in load_source:
+        return False, "load_patient_card must update OrdersWidget through set_context"
     request_snapshot_kw = [
         (arg, default)
         for arg, default in zip(load_method.args.kwonlyargs, load_method.args.kw_defaults)

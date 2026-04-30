@@ -822,9 +822,16 @@ class DoctorRemCardWidget(QWidget):
             
         if hasattr(self.layout_manager, 'orders_widget'):
             ow = self.layout_manager.orders_widget
-            ow.service = self.service
-            ow.admission_id = admission_id
-            ow.shift_date = date
+            if hasattr(ow, "set_context"):
+                ow.set_context(
+                    service=self.service,
+                    admission_id=admission_id,
+                    shift_date=date,
+                )
+            else:
+                ow.service = self.service
+                ow.admission_id = admission_id
+                ow.shift_date = date
             if not self._archive_read_only_mode:
                 ow.clear_drafts()
 
