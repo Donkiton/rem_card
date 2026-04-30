@@ -1589,7 +1589,7 @@ class DoctorRemCardWidget(QWidget):
         if reply == CustomMessageBox.Yes: ow.clear_drafts()
 
     def on_exit_clicked(self):
-        reply = CustomMessageBox.question(self, "Подтверждение", "Убегаешь как трус?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
+        reply = CustomMessageBox.question(self, "Подтверждение", "Выйти из программы?", CustomMessageBox.Yes | CustomMessageBox.No, CustomMessageBox.No)
         if reply == CustomMessageBox.Yes: self.window().close()
 
     def on_back_clicked(self):
