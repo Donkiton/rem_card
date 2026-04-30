@@ -189,22 +189,14 @@ class BarsAuthService:
                 self._diag("open_auth_window_reused_existing_page", url=page_url, title=title)
                 return BarsAuthCheckResult(False, self._last_message, url=page_url, title=title)
 
-            opened_page = self._open_bars_tab_via_devtools()
-            if opened_page:
-                self._diag("open_auth_window_reused_devtools", opened_page=opened_page)
-                self._last_message = "Окно БАРС открыто через уже доступный DevTools-порт"
-                return BarsAuthCheckResult(False, self._last_message)
             self._diag(
-                "open_auth_window_devtools_reuse_failed",
-                level="warning",
+                "open_auth_window_no_existing_bars_page",
                 debug_port=self.debug_port,
                 pages=self._summarize_pages(self._get_debug_pages(log_failures=False)),
             )
 
-        self.debug_port = self._resolve_debug_port(self.debug_port)
-
         try:
-            self._start_browser_process(background=False, event_prefix="open_auth_window")
+            self._start_auth_browser_process()
         except Exception as exc:
             message = f"Не удалось открыть Яндекс-Браузер: {exc}"
             self._last_message = message
@@ -751,6 +743,28 @@ class BarsAuthService:
             )
         args.append(self.bars_url)
         return args
+
+    def _build_auth_browser_args(self) -> list[str]:
+        return [self.browser_path, self.bars_url]
+
+    def _start_auth_browser_process(self) -> subprocess.Popen:
+        args = self._build_auth_browser_args()
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        self._process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        self._diag(
+            "open_auth_window_process_started",
+            pid=getattr(self._process, "pid", None),
+            launch_mode="plain_user_profile_for_crypto_plugin",
+            args=args,
+            debug_port=self.debug_port,
+        )
+        return self._process
 
     def _start_browser_process(self, background: bool, event_prefix: str) -> subprocess.Popen:
         if self._enable_devtools and self._running_yandex_pids() and not self._devtools_available(self.debug_port):
