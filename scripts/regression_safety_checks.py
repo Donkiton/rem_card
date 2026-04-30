@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -1146,6 +1147,118 @@ def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
+    from rem_card.Rao_jornal.database.multi_db_analytics import FALLBACK_DDL
+    from rem_card.Rao_jornal.ui.statistics_dialog import StatisticsDialog
+
+    class Manager:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def get_connection(self):
+            return self.conn
+
+    def init_db(conn):
+        for ddl in FALLBACK_DDL.values():
+            conn.execute(ddl)
+
+    def seed(conn):
+        conn.executemany(
+            "INSERT INTO admissions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 101, "2026-04-01 08:00:00", "2026-04-05 10:00:00", None, "переведен", 70, "л", "М", "СМП", "I21", "Инфаркт", 1),
+                (2, 102, "2026-04-02 11:00:00", None, "2026-04-03 05:00:00", "умер", 6, "месяцев", "Ж", "Приемное", "J96", "ДН", 2),
+                (3, 103, "2026-04-10 13:30:00", None, None, "в отделении", 45, "л", "М", "Перевод", "K35", "Аппендицит", 3),
+                (4, 101, "2026-04-15 09:00:00", "2026-04-18 09:00:00", None, "переведен", None, "л", "", "", "", "", 4),
+                (5, 104, "2026-03-30 10:00:00", "2026-04-02 10:00:00", None, "переведен", 80, "л", "М", "До периода", "Z00", "Вне периода", 5),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO operations VALUES (?, ?, ?, ?)",
+            [
+                (1, 1, "2026-04-02 12:00:00", "Операция A"),
+                (2, 2, "2026-04-02 13:00:00", "Операция B"),
+                (3, 99, "2026-04-02 14:00:00", "Вне admissions"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO transfusions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, 2, "2026-04-02 14:00:00", "Плазма", 300, "journal", None, None),
+                (2, 2, "2026-04-02 15:00:00", "Эритроциты", 250, "journal", None, None),
+                (3, 3, "2026-04-11 10:00:00", "Плазма", 200, "journal", None, None),
+                (4, 99, "2026-04-11 10:00:00", "Плазма", 999, "journal", None, None),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO ivl_episodes VALUES (?, ?, ?, ?)",
+            [
+                (1, 2, "2026-04-02 12:00:00", "2026-04-03 06:00:00"),
+                (2, 3, "2026-04-11 00:00:00", "2026-04-12 12:00:00"),
+                (3, 1, "2026-05-01 00:00:00", "2026-05-02 00:00:00"),
+            ],
+        )
+
+    def make_dialog(conn):
+        dialog = StatisticsDialog.__new__(StatisticsDialog)
+        dialog.db_manager = Manager(conn)
+        dialog._start_dt = StatisticsDialog._parse_datetime("2026-04-01")
+        dialog._end_dt = StatisticsDialog._parse_datetime("2026-04-30")
+        dialog.start_date_str = dialog._start_dt.strftime("%Y-%m-%d 00:00:00")
+        dialog.end_date_str = dialog._end_dt.strftime("%Y-%m-%d 23:59:59")
+        dialog.section_groups = {
+            "Основная деятельность": {
+                "s1": "1. Общая деятельность отделения",
+                "s2": "2. Использование коечного фонда",
+                "s3": "3. Демография",
+                "s4": "4. Поток пациентов",
+                "s5": "5. Диагностическая структура",
+                "s6": "6. Исходы лечения",
+                "s7": "7. Время до смерти",
+                "s8": "8. Летальность по группам",
+            },
+            "Интенсивная терапия и вмешательства": {
+                "s9": "9. ИВЛ",
+                "s10": "10. Операции",
+                "s11": "11. Переливания",
+                "s16": "16. Индексы интенсивности",
+                "s17": "17. Индексы нагрузки",
+                "s18": "18. Специальные показатели",
+                "s19": "19. Нагрузка персонала",
+                "sx": "➕ Дополнительные показатели",
+            },
+        }
+        return dialog
+
+    def make_conn(with_data: bool):
+        conn = sqlite3.connect(":memory:")
+        init_db(conn)
+        if with_data:
+            seed(conn)
+        return conn
+
+    def snapshot(with_data: bool):
+        dialog = make_dialog(make_conn(with_data))
+        stats = dialog._calculate_statistics()
+        selected = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s16", "s17", "s18", "s19", "sx"]
+        return {
+            "stats": stats,
+            "rows": {key: dialog._section_rows(key, stats) for key in selected},
+        }
+
+    result = {"filled": snapshot(True), "empty": snapshot(False)}
+    encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    expected_digest = "8926eca22b054d6c2a0d4d0212da6fc2eafbb0b7ee94b33afe1427dcc348795f"
+    if digest != expected_digest:
+        return False, f"statistics snapshot changed: {digest}"
+    if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
+        return False, f"unexpected filled core stats: {result['filled']['stats']}"
+    if result["empty"]["stats"]["N"] != 0 or result["empty"]["stats"]["bed_days"] != 0:
+        return False, f"unexpected empty stats: {result['empty']['stats']}"
+    return True, "ok"
+
+
 def _check_vitals_boundary_minutes(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -2055,6 +2168,7 @@ def main():
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
+        ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),

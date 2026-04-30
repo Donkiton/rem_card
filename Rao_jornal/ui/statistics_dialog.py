@@ -648,39 +648,48 @@ class StatisticsDialog(QDialog):
             "ivl_episodes": ivl_episodes,
         }
 
-    def _calculate_statistics(self):
-        context = self._fetch_context()
-        admissions = context["admissions"]
-        operations_adm_ids = context["operations_adm_ids"]
-        transfusions = context["transfusions"]
-        ivl_episodes = context["ivl_episodes"]
+    def _population_stats(self, admissions):
+        return {
+            "total_n": len(admissions),
+            "unique_patients": len({a["patient_id"] for a in admissions if a["patient_id"] is not None}),
+            "death_ids": {a["admission_id"] for a in admissions if a["is_death"] and a["admission_id"]},
+        }
 
-        total_n = len(admissions)
-        unique_patients = len({a["patient_id"] for a in admissions if a["patient_id"] is not None})
-        admission_ids = {a["admission_id"] for a in admissions if a["admission_id"]}
-        death_ids = {a["admission_id"] for a in admissions if a["is_death"] and a["admission_id"]}
-
+    def _los_stats(self, admissions, total_n):
         los_values = [a["los_days"] for a in admissions]
         bed_days = sum(los_values)
-        alos = self._safe_div(bed_days, total_n)
-        los_median = median(los_values) if los_values else None
-        los_min = min(los_values) if los_values else None
-        los_max = max(los_values) if los_values else None
-        long_stay_count = sum(1 for x in los_values if x > 7.0)
+        return {
+            "bed_days": bed_days,
+            "alos": self._safe_div(bed_days, total_n),
+            "los_median": median(los_values) if los_values else None,
+            "los_min": min(los_values) if los_values else None,
+            "los_max": max(los_values) if los_values else None,
+            "long_stay_count": sum(1 for x in los_values if x > 7.0),
+        }
 
+    def _age_stats(self, admissions):
         ages = [a["age_years"] for a in admissions if a["age_years"] is not None]
-        mean_age = self._safe_div(sum(ages), len(ages)) if ages else None
-        median_age = median(ages) if ages else None
+        return {
+            "mean_age": self._safe_div(sum(ages), len(ages)) if ages else None,
+            "median_age": median(ages) if ages else None,
+        }
 
-        deaths = len(death_ids)
+    def _death_timing_stats(self, admissions):
         death_times_hours = [a["death_time_hours"] for a in admissions if a["death_time_hours"] is not None]
-        mean_time_to_death_days = self._safe_div(sum(death_times_hours), len(death_times_hours)) / 24.0 if death_times_hours else None
-        median_time_to_death_days = (median(death_times_hours) / 24.0) if death_times_hours else None
-        early_deaths = sum(1 for h in death_times_hours if h < 24.0)
-        deaths_1_3_days = sum(1 for h in death_times_hours if 24.0 <= h < 72.0)
-        deaths_3_7_days = sum(1 for h in death_times_hours if 72.0 <= h < 168.0)
-        deaths_ge_7_days = sum(1 for h in death_times_hours if h >= 168.0)
+        return {
+            "mean_time_to_death_days": self._safe_div(sum(death_times_hours), len(death_times_hours)) / 24.0 if death_times_hours else None,
+            "median_time_to_death_days": (median(death_times_hours) / 24.0) if death_times_hours else None,
+            "early_deaths": sum(1 for h in death_times_hours if h < 24.0),
+            "deaths_1_3_days": sum(1 for h in death_times_hours if 24.0 <= h < 72.0),
+            "deaths_3_7_days": sum(1 for h in death_times_hours if 72.0 <= h < 168.0),
+            "deaths_ge_7_days": sum(1 for h in death_times_hours if h >= 168.0),
+        }
 
+    @staticmethod
+    def _inc_counter(counter, key):
+        counter[key] = counter.get(key, 0) + 1
+
+    def _distribution_stats(self, admissions):
         age_groups = {}
         age_groups_deaths = {}
         genders = {}
@@ -692,152 +701,233 @@ class StatisticsDialog(QDialog):
         outcomes = {}
 
         for admission in admissions:
-            age_groups[admission["age_group"]] = age_groups.get(admission["age_group"], 0) + 1
-            genders[admission["gender"]] = genders.get(admission["gender"], 0) + 1
-            sources[admission["source"]] = sources.get(admission["source"], 0) + 1
-            months[admission["month_label"]] = months.get(admission["month_label"], 0) + 1
-            weekdays[admission["weekday_name"]] = weekdays.get(admission["weekday_name"], 0) + 1
-            diagnoses[admission["diagnosis_key"]] = diagnoses.get(admission["diagnosis_key"], 0) + 1
-            mkb_classes[admission["mkb_class"]] = mkb_classes.get(admission["mkb_class"], 0) + 1
+            self._inc_counter(age_groups, admission["age_group"])
+            self._inc_counter(genders, admission["gender"])
+            self._inc_counter(sources, admission["source"])
+            self._inc_counter(months, admission["month_label"])
+            self._inc_counter(weekdays, admission["weekday_name"])
+            self._inc_counter(diagnoses, admission["diagnosis_key"])
+            self._inc_counter(mkb_classes, admission["mkb_class"])
             outcome_label = admission["outcome"].capitalize()
-            outcomes[outcome_label] = outcomes.get(outcome_label, 0) + 1
+            self._inc_counter(outcomes, outcome_label)
             if admission["is_death"]:
-                age_groups_deaths[admission["age_group"]] = age_groups_deaths.get(admission["age_group"], 0) + 1
+                self._inc_counter(age_groups_deaths, admission["age_group"])
 
-        operations_count = len(operations_adm_ids)
+        return {
+            "age_groups": age_groups,
+            "age_groups_deaths": age_groups_deaths,
+            "genders": genders,
+            "sources": sources,
+            "months": months,
+            "weekdays": weekdays,
+            "diagnoses": diagnoses,
+            "mkb_classes": mkb_classes,
+            "outcomes": outcomes,
+        }
+
+    def _operation_stats(self, operations_adm_ids, death_ids):
         surg_adm_ids = set(operations_adm_ids)
-        n_surg = len(surg_adm_ids)
-        deaths_surg = len(death_ids.intersection(surg_adm_ids))
+        return {
+            "operations_count": len(operations_adm_ids),
+            "surg_adm_ids": surg_adm_ids,
+            "n_surg": len(surg_adm_ids),
+            "deaths_surg": len(death_ids.intersection(surg_adm_ids)),
+        }
 
-        transfusion_units = len(transfusions)
+    def _transfusion_stats(self, transfusions, death_ids):
         transf_adm_ids = {t["admission_id"] for t in transfusions}
-        n_transf = len(transf_adm_ids)
-        volume_total = sum(t["volume_ml"] for t in transfusions)
         transf_by_type = {}
         for t in transfusions:
-            transf_by_type[t["type"]] = transf_by_type.get(t["type"], 0) + 1
-        deaths_transf = len(death_ids.intersection(transf_adm_ids))
+            self._inc_counter(transf_by_type, t["type"])
+        return {
+            "transfusion_units": len(transfusions),
+            "transf_adm_ids": transf_adm_ids,
+            "n_transf": len(transf_adm_ids),
+            "volume_total": sum(t["volume_ml"] for t in transfusions),
+            "transf_by_type": transf_by_type,
+            "deaths_transf": len(death_ids.intersection(transf_adm_ids)),
+        }
 
+    def _ivl_stats(self, ivl_episodes, death_ids):
         ivl_adm_ids = {e["admission_id"] for e in ivl_episodes}
-        n_ivl = len(ivl_adm_ids)
-        ivl_episodes_count = len(ivl_episodes)
         ivl_hours = sum(e["duration_hours"] for e in ivl_episodes)
-        ivl_days = ivl_hours / 24.0
-        deaths_ivl = len(death_ids.intersection(ivl_adm_ids))
+        return {
+            "ivl_adm_ids": ivl_adm_ids,
+            "n_ivl": len(ivl_adm_ids),
+            "ivl_episodes_count": len(ivl_episodes),
+            "ivl_days": ivl_hours / 24.0,
+            "deaths_ivl": len(death_ids.intersection(ivl_adm_ids)),
+        }
 
-        n_with_interventions = len(ivl_adm_ids.union(surg_adm_ids).union(transf_adm_ids))
-
+    def _period_bed_stats(self, bed_days, total_n):
         period_days = max(1, (self._end_dt.date() - self._start_dt.date()).days + 1)
+        beds = self._statistics_beds()
+        bed_fund = beds * period_days
+        return {
+            "period_days": period_days,
+            "beds": beds,
+            "bed_fund": bed_fund,
+            "occupancy": self._pct(bed_days, bed_fund),
+            "bed_utilization_days": self._safe_div(bed_days, beds),
+            "turnover": self._safe_div(total_n, beds),
+            "bti": self._safe_div((bed_fund - bed_days), total_n),
+        }
+
+    def _statistics_beds(self):
         try:
             from rem_card.Rao_jornal.config.settings import NUM_BEDS
 
-            beds = self._safe_int(NUM_BEDS, default=9)
+            return self._safe_int(NUM_BEDS, default=9)
         except Exception:
-            beds = 9
+            return 9
 
-        bed_fund = beds * period_days
-        occupancy = self._pct(bed_days, bed_fund)
-        bed_utilization_days = self._safe_div(bed_days, beds)
-        turnover = self._safe_div(total_n, beds)
-        bti = self._safe_div((bed_fund - bed_days), total_n)
+    def _admission_active_on_day(self, admission, day_start, day_end):
+        adm_start = admission["admission_dt"]
+        end_candidates = [self._end_dt]
+        if admission["transfer_dt"] is not None:
+            end_candidates.append(admission["transfer_dt"])
+        if admission["death_dt"] is not None:
+            end_candidates.append(admission["death_dt"])
+        adm_end = min(end_candidates)
+        return adm_start < day_end and adm_end > day_start
 
-        mortality_pct = self._pct(deaths, total_n)
-        mortality_per_1000_bed_days = self._safe_div(deaths, bed_days) * 1000.0
-
+    def _daily_load_stats(self, admissions, bed_days, period_days, beds):
         mean_patients = self._safe_div(bed_days, period_days)
-        utilization = self._safe_div(mean_patients, beds)
-
         daily_counts = []
         for day_idx in range(period_days):
             day_start = datetime.combine(self._start_dt.date(), datetime.min.time()) + timedelta(days=day_idx)
             day_end = day_start + timedelta(days=1)
             count = 0
             for admission in admissions:
-                adm_start = admission["admission_dt"]
-                end_candidates = [self._end_dt]
-                if admission["transfer_dt"] is not None:
-                    end_candidates.append(admission["transfer_dt"])
-                if admission["death_dt"] is not None:
-                    end_candidates.append(admission["death_dt"])
-                adm_end = min(end_candidates)
-                if adm_start < day_end and adm_end > day_start:
+                if self._admission_active_on_day(admission, day_start, day_end):
                     count += 1
             daily_counts.append(count)
 
         max_patients = max(daily_counts) if daily_counts else 0
         threshold = 4
         high_load_periods = sum(1 for c in daily_counts if c >= threshold)
-        load_time_pct = self._pct(high_load_periods, period_days)
+        return {
+            "mean_patients": mean_patients,
+            "utilization": self._safe_div(mean_patients, beds),
+            "max_patients": max_patients,
+            "load_threshold": threshold,
+            "load_time_pct": self._pct(high_load_periods, period_days),
+        }
 
-        intensity_index = self._safe_div((n_ivl + n_surg + n_transf), total_n)
-        severity_index = self._safe_div(early_deaths, deaths)
-        technology_index = self._pct(n_with_interventions, total_n)
-        resource_use_index = self._safe_div((ivl_days + operations_count + transfusion_units), bed_days)
-        throughput = self._safe_div(total_n, period_days)
-        load_coefficient = self._safe_div(max_patients, beds)
+    def _intensity_indexes(self, *, n_ivl, n_surg, n_transf, total_n, early_deaths, deaths, n_with_interventions, ivl_days, operations_count, transfusion_units, bed_days, period_days, max_patients, beds):
+        return {
+            "intensity_index": self._safe_div((n_ivl + n_surg + n_transf), total_n),
+            "severity_index": self._safe_div(early_deaths, deaths),
+            "technology_index": self._pct(n_with_interventions, total_n),
+            "resource_use_index": self._safe_div((ivl_days + operations_count + transfusion_units), bed_days),
+            "throughput": self._safe_div(total_n, period_days),
+            "load_coefficient": self._safe_div(max_patients, beds),
+        }
+
+    def _calculate_statistics(self):
+        context = self._fetch_context()
+        admissions = context["admissions"]
+        operations_adm_ids = context["operations_adm_ids"]
+        transfusions = context["transfusions"]
+        ivl_episodes = context["ivl_episodes"]
+
+        population = self._population_stats(admissions)
+        total_n = population["total_n"]
+        death_ids = population["death_ids"]
+        deaths = len(death_ids)
+
+        los = self._los_stats(admissions, total_n)
+        age = self._age_stats(admissions)
+        death_timing = self._death_timing_stats(admissions)
+        distributions = self._distribution_stats(admissions)
+        operations = self._operation_stats(operations_adm_ids, death_ids)
+        transfusion = self._transfusion_stats(transfusions, death_ids)
+        ivl = self._ivl_stats(ivl_episodes, death_ids)
+        bed_period = self._period_bed_stats(los["bed_days"], total_n)
+        load = self._daily_load_stats(admissions, los["bed_days"], bed_period["period_days"], bed_period["beds"])
+
+        n_with_interventions = len(
+            ivl["ivl_adm_ids"].union(operations["surg_adm_ids"]).union(transfusion["transf_adm_ids"])
+        )
+        indexes = self._intensity_indexes(
+            n_ivl=ivl["n_ivl"],
+            n_surg=operations["n_surg"],
+            n_transf=transfusion["n_transf"],
+            total_n=total_n,
+            early_deaths=death_timing["early_deaths"],
+            deaths=deaths,
+            n_with_interventions=n_with_interventions,
+            ivl_days=ivl["ivl_days"],
+            operations_count=operations["operations_count"],
+            transfusion_units=transfusion["transfusion_units"],
+            bed_days=los["bed_days"],
+            period_days=bed_period["period_days"],
+            max_patients=load["max_patients"],
+            beds=bed_period["beds"],
+        )
 
         return {
             "N": total_n,
-            "N_unique": unique_patients,
-            "bed_days": bed_days,
-            "alos": alos,
-            "los_median": los_median,
-            "los_min": los_min,
-            "los_max": los_max,
-            "beds": beds,
-            "period_days": period_days,
-            "bed_fund": bed_fund,
-            "occupancy": occupancy,
-            "bed_utilization_days": bed_utilization_days,
-            "turnover": turnover,
-            "bti": bti,
-            "mean_age": mean_age,
-            "median_age": median_age,
-            "age_groups": age_groups,
-            "genders": genders,
-            "months": months,
-            "weekdays": weekdays,
-            "sources": sources,
-            "diagnoses": diagnoses,
-            "mkb_classes": mkb_classes,
+            "N_unique": population["unique_patients"],
+            "bed_days": los["bed_days"],
+            "alos": los["alos"],
+            "los_median": los["los_median"],
+            "los_min": los["los_min"],
+            "los_max": los["los_max"],
+            "beds": bed_period["beds"],
+            "period_days": bed_period["period_days"],
+            "bed_fund": bed_period["bed_fund"],
+            "occupancy": bed_period["occupancy"],
+            "bed_utilization_days": bed_period["bed_utilization_days"],
+            "turnover": bed_period["turnover"],
+            "bti": bed_period["bti"],
+            "mean_age": age["mean_age"],
+            "median_age": age["median_age"],
+            "age_groups": distributions["age_groups"],
+            "genders": distributions["genders"],
+            "months": distributions["months"],
+            "weekdays": distributions["weekdays"],
+            "sources": distributions["sources"],
+            "diagnoses": distributions["diagnoses"],
+            "mkb_classes": distributions["mkb_classes"],
             "deaths": deaths,
-            "mortality_pct": mortality_pct,
-            "mortality_per_1000_bed_days": mortality_per_1000_bed_days,
-            "outcomes": outcomes,
-            "mean_time_to_death_days": mean_time_to_death_days,
-            "median_time_to_death_days": median_time_to_death_days,
-            "early_deaths": early_deaths,
-            "deaths_1_3_days": deaths_1_3_days,
-            "deaths_3_7_days": deaths_3_7_days,
-            "deaths_ge_7_days": deaths_ge_7_days,
-            "age_groups_deaths": age_groups_deaths,
-            "N_IVL": n_ivl,
-            "ivl_episodes_count": ivl_episodes_count,
-            "ivl_days": ivl_days,
-            "deaths_ivl": deaths_ivl,
-            "N_surg": n_surg,
-            "operations_count": operations_count,
-            "deaths_surg": deaths_surg,
-            "N_transf": n_transf,
-            "transfusion_units": transfusion_units,
-            "volume_total": volume_total,
-            "transf_by_type": transf_by_type,
-            "deaths_transf": deaths_transf,
-            "IVL_index": self._safe_div(n_ivl, total_n),
-            "Surgery_index": self._safe_div(n_surg, total_n),
-            "Transfusion_index": self._safe_div(n_transf, total_n),
-            "mean_patients": mean_patients,
-            "utilization": utilization,
-            "max_patients": max_patients,
-            "load_threshold": threshold,
-            "load_time_pct": load_time_pct,
-            "intensity_index": intensity_index,
-            "severity_index": severity_index,
-            "long_stay_pct": self._pct(long_stay_count, total_n),
-            "technology_index": technology_index,
-            "resource_use_index": resource_use_index,
-            "throughput": throughput,
-            "load_coefficient": load_coefficient,
+            "mortality_pct": self._pct(deaths, total_n),
+            "mortality_per_1000_bed_days": self._safe_div(deaths, los["bed_days"]) * 1000.0,
+            "outcomes": distributions["outcomes"],
+            "mean_time_to_death_days": death_timing["mean_time_to_death_days"],
+            "median_time_to_death_days": death_timing["median_time_to_death_days"],
+            "early_deaths": death_timing["early_deaths"],
+            "deaths_1_3_days": death_timing["deaths_1_3_days"],
+            "deaths_3_7_days": death_timing["deaths_3_7_days"],
+            "deaths_ge_7_days": death_timing["deaths_ge_7_days"],
+            "age_groups_deaths": distributions["age_groups_deaths"],
+            "N_IVL": ivl["n_ivl"],
+            "ivl_episodes_count": ivl["ivl_episodes_count"],
+            "ivl_days": ivl["ivl_days"],
+            "deaths_ivl": ivl["deaths_ivl"],
+            "N_surg": operations["n_surg"],
+            "operations_count": operations["operations_count"],
+            "deaths_surg": operations["deaths_surg"],
+            "N_transf": transfusion["n_transf"],
+            "transfusion_units": transfusion["transfusion_units"],
+            "volume_total": transfusion["volume_total"],
+            "transf_by_type": transfusion["transf_by_type"],
+            "deaths_transf": transfusion["deaths_transf"],
+            "IVL_index": self._safe_div(ivl["n_ivl"], total_n),
+            "Surgery_index": self._safe_div(operations["n_surg"], total_n),
+            "Transfusion_index": self._safe_div(transfusion["n_transf"], total_n),
+            "mean_patients": load["mean_patients"],
+            "utilization": load["utilization"],
+            "max_patients": load["max_patients"],
+            "load_threshold": load["load_threshold"],
+            "load_time_pct": load["load_time_pct"],
+            "intensity_index": indexes["intensity_index"],
+            "severity_index": indexes["severity_index"],
+            "long_stay_pct": self._pct(los["long_stay_count"], total_n),
+            "technology_index": indexes["technology_index"],
+            "resource_use_index": indexes["resource_use_index"],
+            "throughput": indexes["throughput"],
+            "load_coefficient": indexes["load_coefficient"],
         }
 
     def _section_rows(self, section_key: str, s: dict):

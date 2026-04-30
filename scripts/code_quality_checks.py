@@ -37,7 +37,6 @@ SKIP_DIR_NAMES = {
 # Existing F-ranked blocks. This list allows the current codebase to pass while
 # still blocking any newly introduced F-ranked function/class.
 ALLOWED_F_BLOCKS = {
-    ("Rao_jornal/ui/statistics_dialog.py", "StatisticsDialog._calculate_statistics"),
     ("services/bars_auth_service.py", "BarsAuthService.list_department_patients"),
     ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
     ("services/minigames/tamagotchi_service.py", "TamagotchiService.advance_state"),
