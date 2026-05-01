@@ -6,6 +6,12 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.3.4 - 2026-05-01
+
+- Remove restored order domain service artifact
+- Refactor patient bed management and analytics
+- Remove legacy Rao journal
+
 ## 1.3.3 - 2026-05-01
 
 - Упростить окно авторизации БАРС
