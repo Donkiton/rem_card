@@ -1,0 +1,214 @@
+import os
+from math import ceil
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
+
+from rem_card.services.patient_bed_management import PatientBedManagementService
+from rem_card.ui.patient_bed_management.bed_widget import BedWidget
+from rem_card.ui.patient_bed_management.patient_form import PatientForm
+from rem_card.ui.patient_bed_management.side_patient_card import SidePatientCard
+from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+
+NUM_BEDS = int(os.environ.get("REMCARD_NUM_BEDS", "12"))
+BED_GRID_COLUMNS = 3
+BED_CARD_HEIGHT = 190
+BED_GRID_SPACING = 15
+HEADER_HEIGHT = 80
+
+
+class PatientBedManagementWidget(QWidget):
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.patient_bed_service = PatientBedManagementService(db_manager)
+
+        self.bg_color = "#f2f3ee"
+        self.border_color = "#c9c9b4"
+        self.accent_color = "#8a8a68"
+        self.text_color = "#2d2d24"
+        self.header_bg = "#e6e8de"
+
+        self.bed_widgets = []
+        self._init_ui()
+        QTimer.singleShot(0, self.refresh_bed_statuses)
+
+    def _init_ui(self):
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 5, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.root_container = QWidget()
+        self.root_container.setObjectName("patient_bed_root")
+        self.root_container.setStyleSheet(
+            f"""
+            QWidget#patient_bed_root {{
+                background-color: {self.bg_color};
+                border: 2px solid {self.border_color};
+                border-radius: 10px;
+            }}
+            """
+        )
+        root_layout.addWidget(self.root_container)
+
+        main_layout = QVBoxLayout(self.root_container)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        main_layout.addStretch(1)
+
+        self.content_container = QWidget()
+        content_layout = QHBoxLayout(self.content_container)
+        content_layout.setContentsMargins(12, 12, 12, 12)
+        content_layout.setSpacing(15)
+        main_layout.addWidget(self.content_container, 0, Qt.AlignCenter)
+        main_layout.addStretch(1)
+
+        self.left_column = QWidget()
+        self.left_column.setFixedWidth(780)
+        left_layout = QVBoxLayout(self.left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(15)
+        content_layout.addWidget(self.left_column, 0, Qt.AlignTop)
+
+        header_card = QFrame()
+        header_card.setObjectName("patient_bed_header")
+        header_card.setFixedHeight(80)
+        header_card.setFixedWidth(250 * 3 + 15 * 2)
+        header_card.setStyleSheet(
+            f"""
+            QFrame#patient_bed_header {{
+                background: #fdfdfa;
+                border: 2px solid {self.border_color};
+                border-radius: 12px;
+            }}
+            """
+        )
+        header_layout = QVBoxLayout(header_card)
+        header_layout.setContentsMargins(15, 10, 15, 10)
+        header_layout.setSpacing(2)
+
+        title = QLabel("УПРАВЛЕНИЕ ПАЦИЕНТАМИ")
+        title.setStyleSheet(
+            f"color: {self.text_color}; font-size: 24px; font-weight: 800; "
+            "letter-spacing: 2px; background: transparent; border: none;"
+        )
+        title.setAlignment(Qt.AlignCenter)
+        subtitle = QLabel("ОАР №3 г. Амурск")
+        subtitle.setStyleSheet(
+            f"color: {self.accent_color}; font-size: 12px; font-weight: 600; "
+            "background: transparent; border: none;"
+        )
+        subtitle.setAlignment(Qt.AlignCenter)
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        left_layout.addWidget(header_card, 0, Qt.AlignLeft)
+
+        self.grid_container = QWidget()
+        self.grid_layout = QGridLayout(self.grid_container)
+        self.grid_layout.setSpacing(15)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.grid_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        left_layout.addWidget(self.grid_container)
+        left_layout.addStretch()
+
+        self.side_card = SidePatientCard()
+        self.side_card.setFixedHeight(self._side_card_height())
+        self.side_card.open_card_clicked.connect(self._open_patient_card_by_number)
+        content_layout.addWidget(self.side_card, 0, Qt.AlignTop)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 20))
+        shadow.setOffset(0, 4)
+        self.root_container.setGraphicsEffect(shadow)
+
+        self._init_bed_widgets()
+
+    @staticmethod
+    def _side_card_height() -> int:
+        bed_rows = max(1, ceil(NUM_BEDS / BED_GRID_COLUMNS))
+        grid_height = bed_rows * BED_CARD_HEIGHT + max(0, bed_rows - 1) * BED_GRID_SPACING
+        return HEADER_HEIGHT + BED_GRID_SPACING + grid_height
+
+    def _init_bed_widgets(self):
+        for bed_number in range(1, NUM_BEDS + 1):
+            bed_widget = BedWidget(bed_number, "FREE", None, self)
+            bed_widget.clicked.connect(self._on_bed_clicked)
+            index = bed_number - 1
+            self.grid_layout.addWidget(bed_widget, index // BED_GRID_COLUMNS, index % BED_GRID_COLUMNS)
+            self.bed_widgets.append(bed_widget)
+
+    def _on_bed_clicked(self, bed_number: int, current_admission_id: int):
+        patient, admission = None, None
+        if current_admission_id:
+            patient, admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
+        self.side_card.update_info(bed_number, patient, admission)
+
+    def _open_patient_card_by_number(self, bed_number: int):
+        patient, admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
+        dialog = PatientForm(self.patient_bed_service, bed_number, patient, admission, self)
+        if dialog.exec():
+            self.refresh_bed_statuses()
+            new_patient, new_admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
+            self.side_card.update_info(bed_number, new_patient, new_admission)
+
+    def move_patient(self, source_bed: int, target_bed: int):
+        source_bed_data = self.patient_bed_service.get_bed_by_number(source_bed)
+        target_bed_data = self.patient_bed_service.get_bed_by_number(target_bed)
+        if not source_bed_data or source_bed_data["status"] == "FREE":
+            return
+
+        message = f"Переместить пациента с койки {source_bed} на койку {target_bed}?"
+        if target_bed_data and target_bed_data["status"] != "FREE":
+            message = f"Койка {target_bed} занята. Поменять пациентов местами?"
+
+        reply = CustomMessageBox.question(
+            self,
+            "Перенос пациента",
+            message,
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+
+        try:
+            self.patient_bed_service.move_patient(source_bed, target_bed)
+            self.refresh_bed_statuses()
+            patient, admission = self.patient_bed_service.get_patient_with_current_admission(target_bed)
+            self.side_card.update_info(target_bed, patient, admission)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ошибка", str(exc))
+
+    def refresh_bed_statuses(self):
+        rows = self.patient_bed_service.get_beds_snapshot()
+        by_bed = {int(row["bed_number"]): row for row in rows}
+
+        for bed_widget in self.bed_widgets:
+            bed_data = by_bed.get(int(bed_widget.bed_number))
+            if not bed_data:
+                continue
+            admission_id = bed_data["current_admission_id"] if bed_data["current_admission_id"] is not None else 0
+            bed_widget.set_status(bed_data["status"], admission_id)
+            if bed_data["current_admission_id"]:
+                bed_widget.set_patient_info(
+                    str(bed_data["full_name"] or ""),
+                    str(bed_data["history_number"] or ""),
+                    str(bed_data["diagnosis_text"] or ""),
+                )
+            else:
+                bed_widget.set_patient_info("")
+
+        if self.bed_widgets:
+            selected = self.bed_widgets[0]
+            self._on_bed_clicked(selected.bed_number, selected.current_admission_id)

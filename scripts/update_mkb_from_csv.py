@@ -14,7 +14,7 @@ DEFAULT_CSV = (
     / "resources"
     / "1.2.643.5.1.13.13.11.1005_2.27.csv"
 )
-DEFAULT_MKB_DIR = Path(__file__).resolve().parents[1] / "Rao_jornal" / "mkb"
+DEFAULT_MKB_DIR = Path(__file__).resolve().parents[1] / "data" / "mkb"
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class MkbRow:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Rebuild Rao_jornal/mkb data from the official MKB-10 CSV."
+        description="Rebuild data/mkb read-only reference data from the official MKB-10 CSV."
     )
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     parser.add_argument("--mkb-dir", type=Path, default=DEFAULT_MKB_DIR)

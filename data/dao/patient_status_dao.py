@@ -1,6 +1,6 @@
 import json
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 from ..dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from rem_card.app.logger import logger
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
@@ -322,10 +322,13 @@ class PatientStatusDAO:
             FROM patient_status_events
             WHERE admission_id = ?
               AND (
-                  updated_at > ?
-                  OR (updated_at = ? AND id > ?)
+                  COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') > ?
+                  OR (
+                      COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') = ?
+                      AND id > ?
+                  )
               )
-            ORDER BY updated_at ASC, id ASC
+            ORDER BY COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') ASC, id ASC
         """
         rows = self.db.fetch_all_remcard(query, (admission_id, last_sync_ts, last_sync_ts, last_sync_id))
         

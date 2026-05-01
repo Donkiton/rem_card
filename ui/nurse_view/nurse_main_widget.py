@@ -10,6 +10,7 @@ from rem_card.ui.shared.async_call import AsyncCallThread
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
+PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
 CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
@@ -62,6 +63,7 @@ class NurseMainWidget(QWidget):
         self._snapshot_pending = None
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        self._is_closing = False
         self.diet_intake_widget = None
         
         self.init_ui()
@@ -110,7 +112,7 @@ class NurseMainWidget(QWidget):
             self.sector8_panel.btn_add_patient.setToolTip("")
 
     def _force_beds_refresh_after_journal_exit(self):
-        """Локально обновляет список коек сразу после выхода из режима журнала."""
+        """Локально обновляет список коек сразу после выхода из управления пациентами."""
         data_service = self._get_data_service()
         if data_service:
             try:
@@ -148,7 +150,7 @@ class NurseMainWidget(QWidget):
         admin_idx = stack.indexOf(getattr(layout, "admin_view", None)) if hasattr(layout, "admin_view") else -1
 
         if current_idx == journal_idx and journal_idx != -1:
-            return "journal"
+            return PATIENT_BED_MANAGEMENT_MODE
         if current_idx == beds_idx and beds_idx != -1:
             return "beds"
         if current_idx == card_idx and card_idx != -1:
@@ -171,7 +173,7 @@ class NurseMainWidget(QWidget):
             holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
             self._set_add_patient_button_hint(f"Добавление пациента уже открыто.\n{holder}")
         elif is_beds_mode:
-            self._set_add_patient_button_hint("Открыть журнал для добавления пациента")
+            self._set_add_patient_button_hint("Открыть управление пациентами")
         else:
             self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
 
@@ -180,9 +182,9 @@ class NurseMainWidget(QWidget):
         if resolved_mode:
             self._selection_mode = resolved_mode
 
-        # Fail-safe: если уже вышли из журнала, lock должен быть снят
+        # Fail-safe: если уже вышли из управления пациентами, lock должен быть снят
         # даже если сигнал смены режима по какой-то причине не пришел.
-        if self._selection_mode != "journal" and self._add_patient_lock_held:
+        if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE and self._add_patient_lock_held:
             self._release_add_patient_lock()
 
         locked_by_other = False
@@ -544,7 +546,6 @@ class NurseMainWidget(QWidget):
                 return
 
         has_orders_changes = bool(changed_entities.intersection(orders_entities))
-        non_orders_changes = set(changed_entities) - orders_entities
         if (payload.get("forced") or has_orders_changes) and hasattr(self.layout_manager, 'orders_widget'):
             try:
                 self.layout_manager.orders_widget.handle_data_changes(
@@ -688,9 +689,6 @@ class NurseMainWidget(QWidget):
             return
 
         try:
-            from ..shared.journal_integration import warmup_journal_services_async
-
-            warmup_journal_services_async()
             if not JOURNAL_WIDGET_PREWARM_ENABLED:
                 self._journal_prewarm_done = True
                 return
@@ -698,9 +696,9 @@ class NurseMainWidget(QWidget):
             if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "prewarm_journal_widget"):
                 self.layout_manager.prewarm_journal_widget()
                 self._journal_prewarm_done = True
-                logger.debug("Nurse journal widget prewarm completed")
+                logger.debug("Nurse patient-bed management widget prewarm completed")
         except Exception as exc:
-            logger.warning("Nurse journal prewarm failed: %s", exc)
+            logger.warning("Nurse patient-bed management prewarm failed: %s", exc)
         finally:
             if not self._journal_prewarm_done:
                 self._journal_prewarm_started = False
@@ -1072,7 +1070,6 @@ class NurseMainWidget(QWidget):
         is_card_mode = current_idx == 0 and bool(getattr(self.layout_manager, "current_admission_id", None))
 
         if is_card_mode:
-            adm_id = self.layout_manager.current_admission_id
             try:
                 self._request_card_snapshot(ensure_initial_status=True, force_emit=True)
                 if hasattr(self.layout_manager, 'orders_widget') and self.layout_manager.orders_widget:
@@ -1147,14 +1144,14 @@ class NurseMainWidget(QWidget):
             self._refresh_add_patient_button_lock_state()
             return
         try:
-            self.layout_manager.set_patient_selection_mode("journal")
+            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
         except Exception:
             self._release_add_patient_lock()
             raise
 
     def _on_selection_mode_changed(self, mode: str):
         self._selection_mode = str(mode or "")
-        if self._selection_mode != "journal":
+        if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()
         self._refresh_add_patient_button_lock_state()
 
@@ -1179,11 +1176,15 @@ class NurseMainWidget(QWidget):
             self._release_add_patient_lock()
             self.back_to_roles()
 
-    def closeEvent(self, event):
+    def shutdown(self):
+        self._is_closing = True
         if hasattr(self, "_add_patient_lock_watch_timer"):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
         self._release_add_patient_lock()
+
+    def closeEvent(self, event):
+        self.shutdown()
         super().closeEvent(event)
 
     def _update_balance_calculations(self):

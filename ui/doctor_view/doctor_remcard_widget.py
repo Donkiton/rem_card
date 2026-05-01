@@ -12,6 +12,7 @@ from rem_card.services.archive_readonly_service import create_archive_readonly_s
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
+PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
 CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
@@ -138,7 +139,7 @@ class DoctorRemCardWidget(QWidget):
             button.setToolTip("")
 
     def _force_beds_refresh_after_journal_exit(self):
-        """Локально обновляет список коек сразу после выхода из режима журнала."""
+        """Локально обновляет список коек сразу после выхода из управления пациентами."""
         data_service = self._get_data_service()
         if data_service:
             try:
@@ -192,7 +193,7 @@ class DoctorRemCardWidget(QWidget):
         admin_idx = safe_index_of("admin_view")
 
         if current_idx == journal_idx and journal_idx != -1:
-            return "journal"
+            return PATIENT_BED_MANAGEMENT_MODE
         if current_idx == beds_idx and beds_idx != -1:
             return "beds"
         if current_idx == card_idx and card_idx != -1:
@@ -220,7 +221,7 @@ class DoctorRemCardWidget(QWidget):
             holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
             self._set_add_patient_button_hint(f"Добавление пациента уже открыто.\n{holder}")
         elif is_beds_mode:
-            self._set_add_patient_button_hint("Открыть журнал для добавления пациента")
+            self._set_add_patient_button_hint("Открыть управление пациентами")
         else:
             self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
 
@@ -232,9 +233,9 @@ class DoctorRemCardWidget(QWidget):
             if resolved_mode:
                 self._selection_mode = resolved_mode
 
-            # Fail-safe: если уже вышли из журнала, lock должен быть снят
+            # Fail-safe: если уже вышли из управления пациентами, lock должен быть снят
             # даже если сигнал смены режима по какой-то причине не пришел.
-            if self._selection_mode != "journal" and self._add_patient_lock_held:
+            if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE and self._add_patient_lock_held:
                 self._release_add_patient_lock()
 
             locked_by_other = False
@@ -578,7 +579,6 @@ class DoctorRemCardWidget(QWidget):
             if not payload.get("forced") and set(changed_entities).issubset(diet_entities):
                 return
         has_orders_changes = bool(changed_entities.intersection(orders_entities))
-        non_orders_changes = set(changed_entities) - orders_entities
         if (payload.get("forced") or has_orders_changes) and hasattr(self.layout_manager, 'orders_widget'):
             try:
                 self.layout_manager.orders_widget.handle_data_changes(
@@ -947,10 +947,6 @@ class DoctorRemCardWidget(QWidget):
             self._apply_archive_read_only_state()
             return
 
-        # ИСХОД (Переведен или Умер)
-        status_value = getattr(status, "status", status)
-        is_outcome = bool(status_value and getattr(status_value, "is_outcome", lambda: False)())
-        
         # Сектор 1б (Ввод витальных функций) теперь доступен ВСЕГДА
         if hasattr(self, 'vitals_input'):
             self.vitals_input.setEnabled(True)
@@ -1113,7 +1109,7 @@ class DoctorRemCardWidget(QWidget):
 
     def _on_selection_mode_changed(self, mode: str):
         self._selection_mode = str(mode or "")
-        if self._selection_mode != "journal":
+        if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()
         self._refresh_add_patient_button_lock_state()
 
@@ -1174,9 +1170,6 @@ class DoctorRemCardWidget(QWidget):
             return
 
         try:
-            from ..shared.journal_integration import warmup_journal_services_async
-
-            warmup_journal_services_async()
             if not JOURNAL_WIDGET_PREWARM_ENABLED:
                 self._journal_prewarm_done = True
                 return
@@ -1184,9 +1177,9 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "prewarm_journal_widget"):
                 self.layout_manager.prewarm_journal_widget()
                 self._journal_prewarm_done = True
-                logger.debug("Doctor journal widget prewarm completed")
+                logger.debug("Doctor patient-bed management widget prewarm completed")
         except Exception as exc:
-            logger.warning("Doctor journal prewarm failed: %s", exc)
+            logger.warning("Doctor patient-bed management prewarm failed: %s", exc)
         finally:
             if not self._journal_prewarm_done:
                 self._journal_prewarm_started = False
@@ -1652,7 +1645,7 @@ class DoctorRemCardWidget(QWidget):
             return
 
         try:
-            self.layout_manager.set_patient_selection_mode("journal")
+            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
             self.layout_manager.bottom_row.hide()
         except Exception:
             self._release_add_patient_lock()
@@ -1914,9 +1907,10 @@ class DoctorRemCardWidget(QWidget):
         self._ensure_card_widgets_initialized()
         self._request_card_snapshot(show_empty_message=show_empty_message)
 
-    def closeEvent(self, event):
+    def shutdown(self):
         self._is_closing = True
-        self._balance_update_timer.stop()
+        if hasattr(self, "_balance_update_timer"):
+            self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
@@ -1924,5 +1918,8 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
             self.layout_manager.orders_widget.clear_drafts()
         self._close_archive_readonly_manager()
+
+    def closeEvent(self, event):
+        self.shutdown()
         if event is not None: super().closeEvent(event)
 

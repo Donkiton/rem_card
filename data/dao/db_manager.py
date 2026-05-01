@@ -38,6 +38,7 @@ from rem_card.app.sqlite_shared import (
     backup_connection,
     configure_connection,
     find_latest_backup,
+    list_backup_candidates,
     restore_from_best_available_source,
     run_integrity_check,
     run_quick_check,
@@ -46,6 +47,7 @@ from rem_card.app.unified_db_schema import ensure_unified_schema
 
 
 GLOBAL_CHANGELOG_ENTITIES = ("patients", "admissions", "beds", "operations", "diet_templates")
+RUNTIME_BACKUP_PREFIXES = ("startup_", "periodic_", "backup_", "shutdown_")
 MAX_RUNTIME_BACKUPS = max(5, int(os.environ.get("REMCARD_MAX_RUNTIME_BACKUPS", "6")))
 RUNTIME_BACKUP_MAX_TOTAL_BYTES = max(
     128 * 1024 * 1024,
@@ -991,20 +993,10 @@ class DatabaseManager:
         self._create_named_backup(prefix="periodic", source=source)
 
     def _rotate_backups(self):
-        if not os.path.isdir(BACKUPS_RC_DIR):
+        files = self._list_runtime_backups()
+        if not files:
             return
 
-        files = [
-            os.path.join(BACKUPS_RC_DIR, name)
-            for name in os.listdir(BACKUPS_RC_DIR)
-            if name.endswith(".db")
-            and (
-                name.startswith("startup_")
-                or name.startswith("periodic_")
-                or name.startswith("backup_")
-                or name.startswith("shutdown_")
-            )
-        ]
         files.sort(key=os.path.getmtime, reverse=True)
 
         now_ts = time.time()
@@ -1017,28 +1009,18 @@ class DatabaseManager:
             if age_sec < retention_sec:
                 continue
             try:
-                os.remove(old_file)
+                self._remove_backup_with_meta(old_file)
                 files.remove(old_file)
             except Exception as exc:
                 logger.warning("Failed to remove old backup %s: %s", old_file, exc)
 
         for old_file in files[MAX_RUNTIME_BACKUPS:]:
             try:
-                os.remove(old_file)
+                self._remove_backup_with_meta(old_file)
             except Exception as exc:
                 logger.warning("Failed to remove old backup %s: %s", old_file, exc)
 
-        files = [
-            os.path.join(BACKUPS_RC_DIR, name)
-            for name in os.listdir(BACKUPS_RC_DIR)
-            if name.endswith(".db")
-            and (
-                name.startswith("startup_")
-                or name.startswith("periodic_")
-                or name.startswith("backup_")
-                or name.startswith("shutdown_")
-            )
-        ]
+        files = self._list_runtime_backups()
         files.sort(key=os.path.getmtime, reverse=True)
 
         total_size = sum(os.path.getsize(path) for path in files)
@@ -1050,24 +1032,33 @@ class DatabaseManager:
                 break
             try:
                 size = os.path.getsize(old_file)
-                os.remove(old_file)
+                self._remove_backup_with_meta(old_file)
                 total_size -= size
             except Exception as exc:
                 logger.warning("Failed to remove old backup %s: %s", old_file, exc)
 
     @staticmethod
     def _find_latest_runtime_backup_by_prefix(prefix: str) -> Optional[str]:
-        if not os.path.isdir(BACKUPS_RC_DIR):
-            return None
-        candidates = [
-            os.path.join(BACKUPS_RC_DIR, name)
-            for name in os.listdir(BACKUPS_RC_DIR)
-            if name.endswith(".db") and name.startswith(prefix)
-        ]
+        candidates = list_backup_candidates(BACKUPS_RC_DIR, prefix=prefix)
         if not candidates:
             return None
         candidates.sort(key=os.path.getmtime, reverse=True)
         return candidates[0]
+
+    @staticmethod
+    def _list_runtime_backups() -> list[str]:
+        return [
+            path
+            for path in list_backup_candidates(BACKUPS_RC_DIR)
+            if os.path.basename(path).startswith(RUNTIME_BACKUP_PREFIXES)
+        ]
+
+    @staticmethod
+    def _remove_backup_with_meta(db_path: str):
+        os.remove(db_path)
+        meta_path = f"{db_path}.meta.json"
+        if os.path.exists(meta_path):
+            os.remove(meta_path)
 
     @contextmanager
     def remcard_transaction(self, source: str = "remcard_tx"):

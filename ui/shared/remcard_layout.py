@@ -475,9 +475,12 @@ class RemCardLayoutManager(QWidget):
         if self.journal_widget is not None:
             return self.journal_widget
 
-        from .journal_integration import create_embedded_journal_widget
+        if not self.remcard_service:
+            return None
+        from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
 
-        self.journal_widget = create_embedded_journal_widget(parent=self.journal_view)
+        db_manager = self.remcard_service.orders_dao.db
+        self.journal_widget = PatientBedManagementWidget(db_manager, parent=self.journal_view)
         self._journal_layout.addWidget(self.journal_widget)
         return self.journal_widget
 
@@ -502,7 +505,7 @@ class RemCardLayoutManager(QWidget):
             self._archive_last_change_id = max(self._archive_last_change_id, 0)
 
     def set_patient_selection_mode(self, mode):
-        """Переключает режимы: 'card', 'beds', 'archive', 'admin', 'journal'."""
+        """Переключает режимы: 'card', 'beds', 'archive', 'admin', 'patient_bed_management'."""
         if not hasattr(self, 'selection_stack'): return
         
         if mode == "beds":
@@ -549,8 +552,9 @@ class RemCardLayoutManager(QWidget):
             self.sector_1b.setEnabled(False)
             self.current_mode = "admin"
             self.selection_mode_changed.emit("admin")
-        elif mode == "journal":
-            self._ensure_journal_widget()
+        elif mode in ("patient_bed_management", "journal"):
+            if self._ensure_journal_widget() is None:
+                return
             self.selection_stack.setCurrentIndex(4)
 
             if hasattr(self, 'l_layout'):
@@ -564,8 +568,8 @@ class RemCardLayoutManager(QWidget):
             if hasattr(self.journal_widget, "refresh_bed_statuses"):
                 QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
 
-            self.current_mode = "journal"
-            self.selection_mode_changed.emit("journal")
+            self.current_mode = "patient_bed_management"
+            self.selection_mode_changed.emit("patient_bed_management")
         else: # card
             # Безмерцательное переключение в карту:
             # первый вход выполняем полностью "под капотом", включая отложенный fix,

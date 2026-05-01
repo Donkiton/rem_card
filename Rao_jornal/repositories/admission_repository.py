@@ -1,4 +1,3 @@
-import sqlite3
 from typing import Optional, List
 from rem_card.Rao_jornal.domain.admission import Admission
 from rem_card.Rao_jornal.domain.transfusion import Transfusion
@@ -110,7 +109,13 @@ class AdmissionRepository:
             )
 
     # Operations
-    def add_operation(self, operation: Operation):
+    def add_operation(self, operation: Operation, cursor=None):
+        if cursor is not None:
+            cursor.execute(
+                "INSERT INTO operations (admission_id, operation_number, description, operation_datetime) VALUES (?, ?, ?, ?)",
+                (operation.admission_id, operation.operation_number, operation.description, operation.operation_datetime)
+            )
+            return
         with self.db_manager.write_transaction(source="journal_add_operation") as cursor:
             cursor.execute(
                 "INSERT INTO operations (admission_id, operation_number, description, operation_datetime) VALUES (?, ?, ?, ?)",
@@ -124,12 +129,21 @@ class AdmissionRepository:
         rows = cursor.fetchall()
         return [Operation(**row) for row in rows]
 
-    def delete_operations_by_admission(self, admission_id: int):
+    def delete_operations_by_admission(self, admission_id: int, cursor=None):
+        if cursor is not None:
+            cursor.execute("DELETE FROM operations WHERE admission_id = ?", (admission_id,))
+            return
         with self.db_manager.write_transaction(source="journal_delete_operations") as cursor:
             cursor.execute("DELETE FROM operations WHERE admission_id = ?", (admission_id,))
 
     # IVL Episodes
-    def add_ivl_episode(self, episode):
+    def add_ivl_episode(self, episode, cursor=None):
+        if cursor is not None:
+            cursor.execute(
+                "INSERT INTO ivl_episodes (admission_id, episode_number, start_time, end_time, type) VALUES (?, ?, ?, ?, ?)",
+                (episode.admission_id, episode.episode_number, episode.start_time, episode.end_time, episode.type)
+            )
+            return
         with self.db_manager.write_transaction(source="journal_add_ivl") as cursor:
             cursor.execute(
                 "INSERT INTO ivl_episodes (admission_id, episode_number, start_time, end_time, type) VALUES (?, ?, ?, ?, ?)",
@@ -144,7 +158,10 @@ class AdmissionRepository:
         rows = cursor.fetchall()
         return [IVLEpisode(**row) for row in rows]
 
-    def delete_ivl_episodes_by_admission(self, admission_id: int):
+    def delete_ivl_episodes_by_admission(self, admission_id: int, cursor=None):
+        if cursor is not None:
+            cursor.execute("DELETE FROM ivl_episodes WHERE admission_id = ?", (admission_id,))
+            return
         with self.db_manager.write_transaction(source="journal_delete_ivl") as cursor:
             cursor.execute("DELETE FROM ivl_episodes WHERE admission_id = ?", (admission_id,))
 

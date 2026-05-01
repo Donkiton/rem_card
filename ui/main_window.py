@@ -1,7 +1,5 @@
-from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QWidget, QFrame, QMessageBox
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox
 from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer
-from PySide6.QtGui import QCursor
-from typing import TYPE_CHECKING
 
 from .shared.navigation_widgets import WelcomeWidget
 from .shared.custom_title_bar import CustomTitleBar
@@ -15,15 +13,9 @@ import socket
 import time
 
 from rem_card.app.logger import logger
-from rem_card.app.paths import get_role_lock_path
+from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.app.version import APP_DISPLAY_TITLE
-
-if TYPE_CHECKING:
-    from .doctor_view.doctor_main_widget import DoctorMainWidget
-    from .nurse_view.nurse_main_widget import NurseMainWidget
-    from .admin_view.admin_main_widget import AdminMainWidget
-
 
 def _get_desktop_path():
     return os.path.join(os.environ["USERPROFILE"], "Desktop")
@@ -55,24 +47,15 @@ def _find_our_shortcut():
 
             if target == exe_path:
                 return path
-        except:
+        except Exception:
             continue
 
     return None
 
 
 def _get_icon_path(name):
-    base = os.path.dirname(sys.executable)
-
-    path1 = os.path.join(base, "rem_card", "Rao_jornal", "assets", "icons", name)
-    path2 = os.path.join(base, "_internal", "rem_card", "Rao_jornal", "assets", "icons", name)
-
-    if os.path.exists(path1):
-        return path1
-    if os.path.exists(path2):
-        return path2
-
-    return None
+    path = os.path.join(get_icon_dir(), name)
+    return path if os.path.exists(path) else None
 
 
 def _apply_role_icon(role):
@@ -586,10 +569,16 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._is_closing = True
         try:
-            if hasattr(self, 'doctor_main') and hasattr(self.doctor_main, 'stop_auto_refresh'):
-                self.doctor_main.stop_auto_refresh()
-            if hasattr(self, 'nurse_main') and hasattr(self.nurse_main, 'stop_auto_refresh'):
-                self.nurse_main.stop_auto_refresh()
+            if hasattr(self, 'doctor_main'):
+                if hasattr(self.doctor_main, 'shutdown'):
+                    self.doctor_main.shutdown()
+                elif hasattr(self.doctor_main, 'stop_auto_refresh'):
+                    self.doctor_main.stop_auto_refresh()
+            if hasattr(self, 'nurse_main'):
+                if hasattr(self.nurse_main, 'shutdown'):
+                    self.nurse_main.shutdown()
+                elif hasattr(self.nurse_main, 'stop_auto_refresh'):
+                    self.nurse_main.stop_auto_refresh()
 
             if hasattr(self, 'doctor_main') and hasattr(self.doctor_main, 'remcard_widget'):
                 rw = self.doctor_main.remcard_widget
@@ -630,13 +619,6 @@ class MainWindow(QMainWindow):
                         self.container.db_manager.close()
                     except Exception as exc:
                         logger.warning("DB manager close failed in MainWindow.closeEvent: %s", exc)
-
-            try:
-                from .shared.journal_integration import close_journal_services
-
-                close_journal_services()
-            except Exception as exc:
-                logger.warning("Journal services shutdown failed in MainWindow.closeEvent: %s", exc)
 
         except Exception as e:
             print(f"Error during closeEvent: {e}")

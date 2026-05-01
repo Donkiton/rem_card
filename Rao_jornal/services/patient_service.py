@@ -73,11 +73,11 @@ class PatientService:
         return self.admission_repo.get_operations_by_admission(admission_id)
 
     def update_operations(self, admission_id: int, operations: List[Operation]):
-        # Simple sync: delete and re-insert
-        self.admission_repo.delete_operations_by_admission(admission_id)
-        for op in operations:
-            op.admission_id = admission_id
-            self.add_operation(op)
+        with self.db_manager.write_transaction(source="journal_update_operations") as cursor:
+            self.admission_repo.delete_operations_by_admission(admission_id, cursor=cursor)
+            for op in operations:
+                op.admission_id = admission_id
+                self.admission_repo.add_operation(op, cursor=cursor)
 
     # Transfusions
     def add_transfusion(self, transfusion: Transfusion):
@@ -102,11 +102,12 @@ class PatientService:
         return self.admission_repo.get_ivl_episodes_by_admission(admission_id)
 
     def update_ivl_episodes(self, admission_id: int, episodes: List[IVLEpisode]):
-        self.admission_repo.delete_ivl_episodes_by_admission(admission_id)
-        for i, ep in enumerate(episodes):
-            ep.admission_id = admission_id
-            ep.episode_number = i + 1
-            self.admission_repo.add_ivl_episode(ep)
+        with self.db_manager.write_transaction(source="journal_update_ivl_episodes") as cursor:
+            self.admission_repo.delete_ivl_episodes_by_admission(admission_id, cursor=cursor)
+            for i, ep in enumerate(episodes):
+                ep.admission_id = admission_id
+                ep.episode_number = i + 1
+                self.admission_repo.add_ivl_episode(ep, cursor=cursor)
 
     def release_bed(self, bed_number: int):
         self.db_manager.update_bed_status(bed_number, "FREE", None)

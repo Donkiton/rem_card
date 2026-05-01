@@ -101,7 +101,7 @@ class DataService(QObject):
         if self._monitor and self._monitor.isRunning():
             self._monitor.stop()
             self._monitor.wait(1500)
-        self._queue.shutdown()
+        self._queue.shutdown(timeout=5.0)
 
     def request_immediate_refresh(self, *, force_emit: bool = False):
         if self._monitor:

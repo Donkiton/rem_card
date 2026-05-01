@@ -67,7 +67,11 @@ a = Analysis(
 		# при запуске приложения недостающие файлы копируются наружу рядом с exe.
 		*_dictionary_json_datas(),
 
-		# журнал — только нужное
+		# активные ресурсы управления пациентами и МКБ
+		_data_dir('data/mkb'),
+		_data_dir('data/patient_assets'),
+
+		# legacy Rao_jornal остается в сборке до финального rg/compileall/smoke/build removal pass
 		_data_dir('Rao_jornal/database'),
 		_data_dir('Rao_jornal/assets'),
 		_data_dir('Rao_jornal/fonts'),

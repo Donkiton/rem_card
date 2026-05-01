@@ -228,14 +228,17 @@ class OrdersDAO:
             FROM orders
             WHERE admission_id = ?
               AND (
-                  updated_at > ?
-                  OR (updated_at = ? AND id > ?)
+                  COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') > ?
+                  OR (
+                      COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') = ?
+                      AND id > ?
+                  )
               )
         """
         params = [admission_id, last_sync_ts, last_sync_ts, last_sync_id]
         if only_committed:
             query += " AND is_committed = 1 "
-        query += " ORDER BY updated_at ASC, id ASC"
+        query += " ORDER BY COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') ASC, id ASC"
         rows = self.db.fetch_all_remcard(query, tuple(params))
         
         orders = []

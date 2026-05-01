@@ -57,6 +57,11 @@ class DoctorMainWidget(QWidget):
                 pass
         self._monitor_connected = False
 
+    def shutdown(self):
+        self.stop_auto_refresh()
+        if hasattr(self, "remcard_widget") and hasattr(self.remcard_widget, "shutdown"):
+            self.remcard_widget.shutdown()
+
     def _get_data_service(self):
         return getattr(self.remcard_service, "data_service", None)
 

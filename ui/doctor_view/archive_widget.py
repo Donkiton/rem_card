@@ -1,11 +1,10 @@
 import os
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
-                             QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit, QMessageBox)
+                             QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit)
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtCore import Qt, QDate, Signal, QTimer
-from datetime import datetime
 from math import ceil
 
 class ArchiveWidget(QWidget):
@@ -337,11 +336,12 @@ class ArchiveWidget(QWidget):
                 CustomMessageBox.information(self, "Инфо", "Нет данных в выбранном архивном интервале.")
                 return
 
-            from ..shared.journal_integration import open_journal_report_dialog
+            from ..shared.analytics_integration import open_analytics_report_dialog
 
             start_dt, end_dt = self._get_archive_period_bounds()
-            open_journal_report_dialog(
+            open_analytics_report_dialog(
                 self,
+                remcard_service=self.remcard_service,
                 start_dt=start_dt,
                 end_dt=end_dt,
                 show_graph_button=False,
@@ -366,11 +366,12 @@ class ArchiveWidget(QWidget):
                 CustomMessageBox.information(self, "Инфо", "Нет данных в выбранном архивном интервале.")
                 return
 
-            from ..shared.journal_integration import open_journal_graphs_dialog
+            from ..shared.analytics_integration import open_analytics_graphs_dialog
 
             start_dt, end_dt = self._get_archive_period_bounds()
-            open_journal_graphs_dialog(
+            open_analytics_graphs_dialog(
                 self,
+                remcard_service=self.remcard_service,
                 start_dt=start_dt,
                 end_dt=end_dt,
                 db_paths=db_paths,

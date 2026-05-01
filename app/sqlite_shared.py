@@ -632,7 +632,7 @@ class FileWriteLock:
                     return
                 except FileNotFoundError:
                     return
-                except PermissionError as exc:
+                except PermissionError:
                     if attempt >= 9:
                         raise
                     time.sleep(0.03)
@@ -753,10 +753,13 @@ class QueuedWriteTask:
 
 
 class LocalWriteQueue:
+    _SHUTDOWN_TASK_DESCRIPTION = "__shutdown__"
+
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
         self._queue: queue.Queue[QueuedWriteTask] = queue.Queue()
-        self._stop = threading.Event()
+        self._accepting = True
+        self._accepting_lock = threading.Lock()
         self._thread = threading.Thread(target=self._worker, name="SQLiteLocalWriteQueue", daemon=True)
         self._thread.start()
 
@@ -769,56 +772,76 @@ class LocalWriteQueue:
         retryable: bool = True,
         retries_left: int = 10,
     ):
-        self._queue.put(
-            QueuedWriteTask(
-                func=func,
-                description=description,
-                on_success=on_success,
-                on_error=on_error,
-                retryable=retryable,
-                retries_left=retries_left,
+        with self._accepting_lock:
+            if not self._accepting:
+                exc = RuntimeError("SQLite write queue is shutting down")
+                if on_error:
+                    on_error(exc)
+                    return
+                raise exc
+
+            self._queue.put(
+                QueuedWriteTask(
+                    func=func,
+                    description=description,
+                    on_success=on_success,
+                    on_error=on_error,
+                    retryable=retryable,
+                    retries_left=retries_left,
+                )
             )
-        )
 
     def shutdown(self, timeout: float = 1.0):
-        self._stop.set()
+        with self._accepting_lock:
+            if not self._accepting:
+                return
+            self._accepting = False
+
         self._queue.put(
             QueuedWriteTask(
                 func=lambda: None,
-                description="shutdown",
+                description=self._SHUTDOWN_TASK_DESCRIPTION,
                 retryable=False,
             )
         )
         self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            self.logger.warning(
+                "SQLite write queue did not drain within %.1fs; pending writes may still be running.",
+                timeout,
+            )
 
     def _worker(self):
-        while not self._stop.is_set():
+        while True:
             task = self._queue.get()
-            if self._stop.is_set():
-                return
+            try:
+                if task.description == self._SHUTDOWN_TASK_DESCRIPTION:
+                    return
 
-            while not self._stop.is_set():
-                try:
-                    result = task.func()
-                    if task.on_success:
-                        task.on_success(result)
-                    break
-                except sqlite3.OperationalError as exc:
-                    if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
-                        task.retries_left -= 1
-                        time.sleep(random.uniform(0.10, 0.30))
-                        continue
-                    if task.on_error:
-                        task.on_error(exc)
-                    else:
-                        self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
-                    break
-                except Exception as exc:
-                    if task.on_error:
-                        task.on_error(exc)
-                    else:
-                        self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
-                    break
+                while True:
+                    try:
+                        result = task.func()
+                        if task.on_success:
+                            task.on_success(result)
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if task.retryable and task.retries_left > 0 and self._is_retryable_operational_error(exc):
+                            task.retries_left -= 1
+                            time.sleep(random.uniform(0.10, 0.30))
+                            continue
+                        if task.on_error:
+                            task.on_error(exc)
+                        else:
+                            self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
+                        break
+                    except Exception as exc:
+                        if task.on_error:
+                            task.on_error(exc)
+                        else:
+                            self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
+                        break
+            finally:
+                self._queue.task_done()
 
     @staticmethod
     def _is_retryable_operational_error(exc: Exception) -> bool:

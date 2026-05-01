@@ -38,6 +38,7 @@ from rem_card.app.sqlite_shared import (
     backup_connection,
     configure_connection,
     find_latest_backup,
+    list_backup_candidates,
     restore_database,
     restore_from_best_available_source,
     run_integrity_check,
@@ -71,6 +72,7 @@ JOURNAL_RUNTIME_BACKUP_RETENTION_DAYS = max(
     3,
     int(os.environ.get("REMCARD_RUNTIME_BACKUP_RETENTION_DAYS", "21")),
 )
+JOURNAL_RUNTIME_BACKUP_PREFIXES = ("backup_", "startup_", "periodic_", "shutdown_")
 JOURNAL_RUNTIME_BACKUP_MAX_TOTAL_BYTES = max(
     128 * 1024 * 1024,
     int(float(os.environ.get("REMCARD_RUNTIME_BACKUP_MAX_TOTAL_GB", "0.75")) * 1024 * 1024 * 1024),
@@ -957,20 +959,10 @@ class DBManager:
             return False, err_msg
 
     def _rotate_backups(self):
-        if not os.path.isdir(BACKUP_DIR):
+        files = self._list_runtime_backups()
+        if not files:
             return
 
-        files = [
-            os.path.join(BACKUP_DIR, f)
-            for f in os.listdir(BACKUP_DIR)
-            if f.endswith(".db")
-            and (
-                f.startswith("backup_")
-                or f.startswith("startup_")
-                or f.startswith("periodic_")
-                or f.startswith("shutdown_")
-            )
-        ]
         files.sort(key=os.path.getmtime, reverse=True)
 
         now_ts = time.time()
@@ -983,28 +975,18 @@ class DBManager:
             if age_sec < retention_sec:
                 continue
             try:
-                os.remove(old_file)
+                self._remove_backup_with_meta(old_file)
                 files.remove(old_file)
             except Exception as exc:
                 self.logger.error("Error removing old backup %s: %s", old_file, exc)
 
         for old_file in files[MAX_BACKUPS:]:
             try:
-                os.remove(old_file)
+                self._remove_backup_with_meta(old_file)
             except Exception as exc:
                 self.logger.error("Error removing old backup %s: %s", old_file, exc)
 
-        files = [
-            os.path.join(BACKUP_DIR, f)
-            for f in os.listdir(BACKUP_DIR)
-            if f.endswith(".db")
-            and (
-                f.startswith("backup_")
-                or f.startswith("startup_")
-                or f.startswith("periodic_")
-                or f.startswith("shutdown_")
-            )
-        ]
+        files = self._list_runtime_backups()
         files.sort(key=os.path.getmtime, reverse=True)
         total_size = sum(os.path.getsize(path) for path in files)
         if total_size <= JOURNAL_RUNTIME_BACKUP_MAX_TOTAL_BYTES:
@@ -1015,10 +997,25 @@ class DBManager:
                 break
             try:
                 size = os.path.getsize(old_file)
-                os.remove(old_file)
+                self._remove_backup_with_meta(old_file)
                 total_size -= size
             except Exception as exc:
                 self.logger.error("Error removing old backup %s: %s", old_file, exc)
+
+    @staticmethod
+    def _list_runtime_backups() -> list[str]:
+        return [
+            path
+            for path in list_backup_candidates(BACKUP_DIR)
+            if os.path.basename(path).startswith(JOURNAL_RUNTIME_BACKUP_PREFIXES)
+        ]
+
+    @staticmethod
+    def _remove_backup_with_meta(db_path: str):
+        os.remove(db_path)
+        meta_path = f"{db_path}.meta.json"
+        if os.path.exists(meta_path):
+            os.remove(meta_path)
 
     def get_active_admissions(self) -> list:
         rows = self._fetch_all(

@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta
 from PySide6.QtCore import QObject, Signal
 from rem_card.app.logger import logger
+from ..data.dao.sync_cursor import is_cursor_newer, normalize_sync_cursor
 from ..data.dto.remcard_dto import (
     PatientDTO,
     VitalDTO,
@@ -530,8 +531,11 @@ class RemCardService(QObject):
     def get_patient(self, admission_id: int) -> Optional[PatientDTO]:
         return self._patients.get_patient(admission_id)
 
-    def delete_patient(self, admission_id: int):
-        self._patients.delete_patient(admission_id)
+    def delete_patient(self, patient_id: int):
+        self._patients.delete_patient(patient_id)
+
+    def delete_admission(self, admission_id: int):
+        self._patients.delete_admission(admission_id)
 
     def sync_patients(self):
         self._patients.sync_patients()
@@ -944,22 +948,22 @@ class RemCardService(QObject):
         # Р”РѕР±Р°РІР»СЏРµРј С‚Р°Р±Р»РёС†Сѓ administrations СЏРІРЅРѕ С‡РµСЂРµР· JOIN РґР»СЏ РЅР°РґРµР¶РЅРѕСЃС‚Рё.
         query = """
             SELECT MAX(ts) FROM (
-                SELECT MAX(updated_at) as ts FROM vitals WHERE admission_id = ?
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM vitals WHERE admission_id = ?
                 UNION ALL
-                SELECT MAX(updated_at) as ts FROM fluids WHERE admission_id = ?
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM fluids WHERE admission_id = ?
                 UNION ALL
-                SELECT MAX(updated_at) as ts FROM orders WHERE admission_id = ?
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM orders WHERE admission_id = ?
                 UNION ALL
-                SELECT MAX(a.updated_at) as ts 
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', a.updated_at)) as ts
                 FROM administrations a
                 JOIN orders o ON a.order_id = o.id
                 WHERE o.admission_id = ?
                 UNION ALL
-                SELECT MAX(updated_at) as ts FROM patient_status_events WHERE admission_id = ?
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM patient_status_events WHERE admission_id = ?
                 UNION ALL
-                SELECT MAX(updated_at) as ts FROM diet_plan WHERE admission_id = ?
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM diet_plan WHERE admission_id = ?
                 UNION ALL
-                SELECT MAX(updated_at) as ts FROM oral_intake_events WHERE admission_id = ?
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM oral_intake_events WHERE admission_id = ?
             )
         """
         res = self.orders_dao.db.fetch_one_remcard(
@@ -975,13 +979,13 @@ class RemCardService(QObject):
             ),
         )
         
-        new_sync = res[0] if res and res[0] else last_sync_time
-        
-        # РЎС‚СЂРѕРєРѕРІРѕРµ СЃСЂР°РІРЅРµРЅРёРµ ISO РґР°С‚ РєРѕСЂСЂРµРєС‚РЅРѕ СЂР°Р±РѕС‚Р°РµС‚ РІ SQLite Рё Python
-        if new_sync > last_sync_time:
-            return True, new_sync
-            
-        return False, last_sync_time
+        last_sync_ts, last_sync_id = normalize_sync_cursor(last_sync_time)
+        new_sync_ts, _ = normalize_sync_cursor(res[0] if res and res[0] else last_sync_ts)
+
+        if is_cursor_newer(new_sync_ts, 0, last_sync_ts, last_sync_id):
+            return True, new_sync_ts
+
+        return False, last_sync_ts
 
     def delete_all_patient_data(self, admission_id: int):
         self._vitals.vitals_dao.delete_all_for_admission(admission_id)

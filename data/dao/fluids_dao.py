@@ -67,10 +67,13 @@ class FluidsDAO:
             FROM fluids
             WHERE admission_id = ?
               AND (
-                  updated_at > ?
-                  OR (updated_at = ? AND id > ?)
+                  COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') > ?
+                  OR (
+                      COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') = ?
+                      AND id > ?
+                  )
               )
-            ORDER BY updated_at ASC, id ASC
+            ORDER BY COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') ASC, id ASC
         """
         rows = self.db.fetch_all_remcard(query, (admission_id, last_sync_ts, last_sync_ts, last_sync_id))
         

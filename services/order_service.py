@@ -216,10 +216,18 @@ class OrderService:
         updated_after_id = 0
         if updated_after is not None:
             updated_after_ts, updated_after_id = normalize_sync_cursor(updated_after)
-            query += " AND (COALESCE(a.updated_at, '') > ? OR (COALESCE(a.updated_at, '') = ? AND a.id > ?))"
+            query += """
+            AND (
+                COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', a.updated_at), '') > ?
+                OR (
+                    COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', a.updated_at), '') = ?
+                    AND a.id > ?
+                )
+            )
+            """
 
         if updated_after is not None:
-            query += " ORDER BY COALESCE(a.updated_at, '') ASC, a.id ASC"
+            query += " ORDER BY COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', a.updated_at), '') ASC, a.id ASC"
         else:
             query += " ORDER BY a.planned_time ASC, a.id ASC"
 

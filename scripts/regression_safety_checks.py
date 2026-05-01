@@ -29,6 +29,8 @@ def _make_temp_root() -> str:
 def _prepare_import_environment(temp_root: str):
     # Isolate LOCALAPPDATA so tests do not touch real user cache.
     os.environ["LOCALAPPDATA"] = os.path.join(temp_root, "localappdata")
+    os.environ["REMCARD_BAZA_DIR"] = os.path.join(temp_root, "Baza_rao3_jurnal")
+    os.environ["REMCARD_LOCAL_LOGS_DIR"] = os.path.join(temp_root, "logs")
     os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "1"
     os.environ["REMCARD_LOCAL_SYNC_INTERVAL_SEC"] = "999"
     os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
@@ -57,6 +59,98 @@ def _check_lock_read_unavailable_not_stale(temp_root: str) -> tuple[bool, str]:
     finally:
         lock2.release()
         lock1.release()
+
+
+def _check_role_lock_read_unavailable_blocks_acquire(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.role_session_lock import RoleSessionLock, _ROLE_LOCK_READ_UNAVAILABLE
+
+    lock_path = os.path.join(temp_root, "role.lock")
+    lock1 = RoleSessionLock(lock_path, role="doctor", owner_id="owner_1", stale_timeout_sec=60.0)
+    if not lock1.acquire():
+        return False, "owner_1 failed to acquire initial role lock"
+
+    lock2 = RoleSessionLock(lock_path, role="doctor", owner_id="owner_2", stale_timeout_sec=60.0)
+    lock2._read_payload = lambda: _ROLE_LOCK_READ_UNAVAILABLE  # type: ignore[method-assign]
+    acquired_2 = lock2.acquire()
+
+    try:
+        if acquired_2:
+            return False, "owner_2 should not acquire role lock when payload is unreadable"
+        if not os.path.exists(lock_path):
+            return False, "role lock file unexpectedly removed on unreadable payload"
+        if "недоступен" not in lock2.describe_holder():
+            return False, "role lock holder description did not report unreadable lock"
+        return True, "ok"
+    finally:
+        lock2.release()
+        lock1.release()
+
+
+def _check_local_write_queue_shutdown_drains(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.sqlite_shared import LocalWriteQueue
+
+    queue = LocalWriteQueue()
+    completed: list[int] = []
+    lock = threading.Lock()
+
+    for idx in range(8):
+        def task(value=idx):
+            time.sleep(0.01)
+            with lock:
+                completed.append(value)
+
+        queue.submit(task, description=f"queue_drain_{idx}")
+
+    queue.shutdown(timeout=2.0)
+
+    if sorted(completed) != list(range(8)):
+        return False, f"queued writes were not drained before shutdown: {completed}"
+
+    try:
+        queue.submit(lambda: None, description="after_shutdown")
+    except RuntimeError:
+        return True, "ok"
+    return False, "queue accepted a write after shutdown"
+
+
+def _check_sync_cursor_normalizes_timestamp_formats(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.data.dao.sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
+
+    ts, row_id = normalize_sync_cursor({"updated_at": "2026-05-01T08:00:00", "id": 7})
+    if (ts, row_id) != ("2026-05-01 08:00:00.000", 7):
+        return False, f"unexpected normalized cursor: {(ts, row_id)}"
+    if not is_cursor_newer("2026-05-01 09:00:00.000", 1, "2026-05-01T08:00:00", 999):
+        return False, "space-separated newer timestamp did not beat T-separated older timestamp"
+    cursor = make_sync_cursor("2026-05-01T08:00:00.123", 3)
+    if cursor != {"updated_at": "2026-05-01 08:00:00.123", "id": 3}:
+        return False, f"make_sync_cursor did not canonicalize timestamp: {cursor}"
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE items(id INTEGER PRIMARY KEY, updated_at TEXT)")
+        conn.execute("INSERT INTO items(id, updated_at) VALUES (1, '2026-05-01T08:00:00')")
+        conn.execute("INSERT INTO items(id, updated_at) VALUES (2, '2026-05-01 09:00:00.000')")
+        last_sync_ts, last_sync_id = normalize_sync_cursor({"updated_at": "2026-05-01T08:00:00", "id": 1})
+        rows = conn.execute(
+            """
+            SELECT id FROM items
+            WHERE COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') > ?
+               OR (
+                   COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') = ?
+                   AND id > ?
+               )
+            ORDER BY COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at), '') ASC, id ASC
+            """,
+            (last_sync_ts, last_sync_ts, last_sync_id),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if [row[0] for row in rows] != [2]:
+        return False, f"SQLite normalized timestamp query returned unexpected rows: {rows}"
+    return True, "ok"
 
 
 def _check_transaction_isolation(temp_root: str) -> tuple[bool, str]:
@@ -464,6 +558,66 @@ def _check_backup_count_limit_enforcement(temp_root: str) -> tuple[bool, str]:
     oldest_name = "backup_000.db"
     if os.path.exists(os.path.join(backup_dir, oldest_name)):
         return False, f"oldest backup was not removed: {oldest_name}"
+
+    return True, "ok"
+
+
+def _check_runtime_backup_rotation_scans_valid_dir(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.paths import BACKUPS_RC_DIR, BACKUPS_VALID_DIR
+    from rem_card.data.dao import db_manager as rem_db_manager
+    from rem_card.Rao_jornal.database import db_manager as journal_db_manager
+
+    valid_root = os.path.normcase(os.path.abspath(BACKUPS_VALID_DIR))
+    isolated_baza_dir = os.environ.get("REMCARD_BAZA_DIR") or temp_root
+    isolated_root = os.path.normcase(os.path.abspath(isolated_baza_dir))
+    if not valid_root.startswith(isolated_root):
+        return False, f"backup test path is not isolated: {BACKUPS_VALID_DIR}"
+
+    def prepare_files(prefix: str, count: int):
+        shutil.rmtree(BACKUPS_RC_DIR, ignore_errors=True)
+        os.makedirs(BACKUPS_VALID_DIR, exist_ok=True)
+        now = time.time()
+        for idx in range(count):
+            path = os.path.join(BACKUPS_VALID_DIR, f"{prefix}_{idx:03d}.db")
+            with open(path, "wb") as fh:
+                fh.write(b"sqlite-mock")
+            with open(f"{path}.meta.json", "w", encoding="utf-8") as fh:
+                json.dump({"idx": idx}, fh)
+            ts = now - float(count - idx)
+            os.utime(path, (ts, ts))
+            os.utime(f"{path}.meta.json", (ts, ts))
+
+    rem_limit = int(rem_db_manager.MAX_RUNTIME_BACKUPS)
+    prepare_files("shutdown_remcard_regression", rem_limit + 2)
+    rem_instance = rem_db_manager.DatabaseManager.__new__(rem_db_manager.DatabaseManager)
+    rem_db_manager.DatabaseManager._rotate_backups(rem_instance)
+    rem_remaining = sorted(
+        name for name in os.listdir(BACKUPS_VALID_DIR) if name.endswith(".db")
+    )
+    if len(rem_remaining) > rem_limit:
+        return False, f"remcard runtime backup cap not enforced in valid dir: {len(rem_remaining)} > {rem_limit}"
+    if os.path.exists(os.path.join(BACKUPS_VALID_DIR, "shutdown_remcard_regression_000.db")):
+        return False, "oldest remcard runtime backup was not removed from valid dir"
+    if os.path.exists(os.path.join(BACKUPS_VALID_DIR, "shutdown_remcard_regression_000.db.meta.json")):
+        return False, "oldest remcard runtime backup metadata was not removed"
+    if not os.path.exists(os.path.join(BACKUPS_VALID_DIR, f"shutdown_remcard_regression_{rem_limit + 1:03d}.db")):
+        return False, "newest remcard runtime backup was removed unexpectedly"
+
+    journal_limit = int(journal_db_manager.MAX_BACKUPS)
+    prepare_files("periodic_journal_regression", journal_limit + 2)
+    journal_instance = journal_db_manager.DBManager.__new__(journal_db_manager.DBManager)
+    journal_db_manager.DBManager._rotate_backups(journal_instance)
+    journal_remaining = sorted(
+        name for name in os.listdir(BACKUPS_VALID_DIR) if name.endswith(".db")
+    )
+    if len(journal_remaining) > journal_limit:
+        return False, f"journal runtime backup cap not enforced in valid dir: {len(journal_remaining)} > {journal_limit}"
+    if os.path.exists(os.path.join(BACKUPS_VALID_DIR, "periodic_journal_regression_000.db")):
+        return False, "oldest journal runtime backup was not removed from valid dir"
+    if os.path.exists(os.path.join(BACKUPS_VALID_DIR, "periodic_journal_regression_000.db.meta.json")):
+        return False, "oldest journal runtime backup metadata was not removed"
+    if not os.path.exists(os.path.join(BACKUPS_VALID_DIR, f"periodic_journal_regression_{journal_limit + 1:03d}.db")):
+        return False, "newest journal runtime backup was removed unexpectedly"
 
     return True, "ok"
 
@@ -1148,8 +1302,8 @@ def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
 
 
 def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
-    from rem_card.Rao_jornal.database.multi_db_analytics import FALLBACK_DDL
-    from rem_card.Rao_jornal.ui.statistics_dialog import StatisticsDialog
+    from rem_card.services.analytics.multi_db_analytics import FALLBACK_DDL
+    from rem_card.ui.analytics.statistics_dialog import StatisticsDialog
 
     class Manager:
         def __init__(self, conn):
@@ -2156,6 +2310,9 @@ def main():
 
     checks = [
         ("lock_read_unavailable_not_stale", _check_lock_read_unavailable_not_stale),
+        ("role_lock_read_unavailable_blocks_acquire", _check_role_lock_read_unavailable_blocks_acquire),
+        ("local_write_queue_shutdown_drains", _check_local_write_queue_shutdown_drains),
+        ("sync_cursor_normalizes_timestamp_formats", _check_sync_cursor_normalizes_timestamp_formats),
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
@@ -2164,6 +2321,7 @@ def main():
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
+        ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),

@@ -9,6 +9,9 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+_ROLE_LOCK_READ_UNAVAILABLE = object()
+
+
 class RoleSessionLock:
     """
     Сетевой lock роли (doctor/nurse/add_patient) на общей папке.
@@ -33,7 +36,7 @@ class RoleSessionLock:
         self.logger = logger or logging.getLogger(__name__)
 
         self._token: Optional[dict[str, Any]] = None
-        self._last_holder: Optional[dict[str, Any]] = None
+        self._last_holder: Any = None
         self._stop_evt = threading.Event()
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._mutex = threading.Lock()
@@ -48,7 +51,7 @@ class RoleSessionLock:
             "nonce": uuid.uuid4().hex,
         }
 
-    def _read_payload(self) -> Optional[dict[str, Any]]:
+    def _read_payload(self):
         try:
             with open(self.lock_path, "r", encoding="utf-8") as fh:
                 return json.load(fh)
@@ -56,7 +59,7 @@ class RoleSessionLock:
             return None
         except Exception as exc:
             self.logger.warning("Failed to read role lock %s: %s", self.lock_path, exc)
-            return None
+            return _ROLE_LOCK_READ_UNAVAILABLE
 
     @staticmethod
     def _host_aliases() -> set[str]:
@@ -122,6 +125,8 @@ class RoleSessionLock:
             return None
 
     def _is_stale(self, payload: Optional[dict[str, Any]]) -> bool:
+        if payload is _ROLE_LOCK_READ_UNAVAILABLE:
+            return False
         if not payload:
             return True
 
@@ -172,6 +177,8 @@ class RoleSessionLock:
         """
         holder = self._read_payload()
         self._last_holder = holder
+        if holder is _ROLE_LOCK_READ_UNAVAILABLE:
+            return True
         if not holder:
             return False
 
@@ -233,6 +240,8 @@ class RoleSessionLock:
             return
 
         current = self._read_payload()
+        if current is _ROLE_LOCK_READ_UNAVAILABLE:
+            return
         if current and current.get("nonce") != token.get("nonce"):
             return
 
@@ -245,6 +254,8 @@ class RoleSessionLock:
 
     def describe_holder(self) -> str:
         holder = self._last_holder or self._read_payload()
+        if holder is _ROLE_LOCK_READ_UNAVAILABLE:
+            return "lock-файл временно недоступен для чтения"
         if not holder:
             return "неизвестный владелец"
 
@@ -276,6 +287,8 @@ class RoleSessionLock:
                 return
 
             current = self._read_payload()
+            if current is _ROLE_LOCK_READ_UNAVAILABLE:
+                return
             if not current:
                 return
             if current.get("nonce") != token.get("nonce"):

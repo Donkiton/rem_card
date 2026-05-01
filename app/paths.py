@@ -105,6 +105,12 @@ def get_icon_dir() -> str:
     else:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "icon"))
 
+def get_mkb_dir() -> str:
+    return os.path.join(get_resources_dir(), "rem_card", "data", "mkb")
+
+def get_patient_assets_dir() -> str:
+    return os.path.join(get_resources_dir(), "rem_card", "data", "patient_assets")
+
 def get_user_dict_dir() -> str:
     return get_seed_dir()
 
@@ -140,6 +146,9 @@ DB_CYCLE_ARCHIVE_DIR = os.path.join(ARCHIV_DIR, "db_cycle_archive")
 
 SEED_DIR = get_seed_dir()
 USER_DICT_DIR = get_user_dict_dir()
+MKB_DIR = get_mkb_dir()
+MKB_DB_PATH = os.path.join(MKB_DIR, "mkb10.db")
+PATIENT_ASSETS_DIR = get_patient_assets_dir()
 
 # Пути к базам данных и координации записи
 JOURNAL_DB_PATH = os.path.join(ARCHIV_DIR, "rao_journal.db")
