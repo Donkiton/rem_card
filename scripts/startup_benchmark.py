@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """
-Startup benchmark for RemCard and Journal entry paths.
+Startup benchmark for RemCard and patient-bed management entry paths.
 
 Usage:
   set PYTHONPATH=C:\Project
   python C:\Project\rem_card\scripts\startup_benchmark.py --mode remcard
-  python C:\Project\rem_card\scripts\startup_benchmark.py --mode journal
+  python C:\Project\rem_card\scripts\startup_benchmark.py --mode patient-bed-management
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def _benchmark_remcard(role: str) -> dict:
     return result
 
 
-def _benchmark_journal() -> dict:
+def _benchmark_patient_bed_management() -> dict:
     import sys
     from PySide6.QtWidgets import QApplication
 
@@ -103,39 +103,42 @@ def _benchmark_journal() -> dict:
     _ = app
 
     steps: List[StepResult] = []
-    db = None
+    container = None
     window = None
 
     t = _now()
-    from rem_card.Rao_jornal.ui.main_window import MainWindow
-    steps.append(StepResult("import_journal_main_window", _ms(t)))
+    from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
+    steps.append(StepResult("import_patient_bed_management_widget", _ms(t)))
 
     t = _now()
-    from rem_card.Rao_jornal.database.db_manager import DBManager
-    from rem_card.Rao_jornal.services.patient_service import PatientService
-    steps.append(StepResult("import_journal_services", _ms(t)))
+    from rem_card.app.bootstrap import bootstrap
+    steps.append(StepResult("import_bootstrap", _ms(t)))
 
     t = _now()
-    db = DBManager()
-    patient_service = PatientService(db)
-    steps.append(StepResult("init_journal_db_and_service", _ms(t)))
+    container = bootstrap()
+    steps.append(StepResult("bootstrap", _ms(t)))
 
     t = _now()
-    window = MainWindow(db, patient_service)
-    steps.append(StepResult("construct_journal_main_window", _ms(t)))
+    db_manager = container.remcard_service.orders_dao.db
+    window = PatientBedManagementWidget(db_manager)
+    steps.append(StepResult("construct_patient_bed_management_widget", _ms(t)))
 
     total = round(sum(step.ms for step in steps), 2)
     result = {
-        "mode": "journal",
+        "mode": "patient-bed-management",
         "steps": [asdict(step) for step in steps],
         "total_ms": total,
     }
 
     if window is not None:
         window.deleteLater()
-    if db is not None:
+    if container is not None:
         try:
-            db.close_connection()
+            container.data_service.shutdown()
+        except Exception:
+            pass
+        try:
+            container.db_manager.close()
         except Exception:
             pass
 
@@ -143,15 +146,15 @@ def _benchmark_journal() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Startup benchmark for RemCard/Journal")
-    parser.add_argument("--mode", choices=["remcard", "journal"], required=True)
+    parser = argparse.ArgumentParser(description="Startup benchmark for RemCard/patient-bed management")
+    parser.add_argument("--mode", choices=["remcard", "patient-bed-management"], required=True)
     parser.add_argument("--role", choices=["doctor", "nurse"], default="doctor", help="Role for remcard mode")
     args = parser.parse_args()
 
     if args.mode == "remcard":
         result = _benchmark_remcard(args.role)
     else:
-        result = _benchmark_journal()
+        result = _benchmark_patient_bed_management()
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

@@ -565,7 +565,6 @@ def _check_backup_count_limit_enforcement(temp_root: str) -> tuple[bool, str]:
 def _check_runtime_backup_rotation_scans_valid_dir(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.paths import BACKUPS_RC_DIR, BACKUPS_VALID_DIR
     from rem_card.data.dao import db_manager as rem_db_manager
-    from rem_card.Rao_jornal.database import db_manager as journal_db_manager
 
     valid_root = os.path.normcase(os.path.abspath(BACKUPS_VALID_DIR))
     isolated_baza_dir = os.environ.get("REMCARD_BAZA_DIR") or temp_root
@@ -602,22 +601,6 @@ def _check_runtime_backup_rotation_scans_valid_dir(temp_root: str) -> tuple[bool
         return False, "oldest remcard runtime backup metadata was not removed"
     if not os.path.exists(os.path.join(BACKUPS_VALID_DIR, f"shutdown_remcard_regression_{rem_limit + 1:03d}.db")):
         return False, "newest remcard runtime backup was removed unexpectedly"
-
-    journal_limit = int(journal_db_manager.MAX_BACKUPS)
-    prepare_files("periodic_journal_regression", journal_limit + 2)
-    journal_instance = journal_db_manager.DBManager.__new__(journal_db_manager.DBManager)
-    journal_db_manager.DBManager._rotate_backups(journal_instance)
-    journal_remaining = sorted(
-        name for name in os.listdir(BACKUPS_VALID_DIR) if name.endswith(".db")
-    )
-    if len(journal_remaining) > journal_limit:
-        return False, f"journal runtime backup cap not enforced in valid dir: {len(journal_remaining)} > {journal_limit}"
-    if os.path.exists(os.path.join(BACKUPS_VALID_DIR, "periodic_journal_regression_000.db")):
-        return False, "oldest journal runtime backup was not removed from valid dir"
-    if os.path.exists(os.path.join(BACKUPS_VALID_DIR, "periodic_journal_regression_000.db.meta.json")):
-        return False, "oldest journal runtime backup metadata was not removed"
-    if not os.path.exists(os.path.join(BACKUPS_VALID_DIR, f"periodic_journal_regression_{journal_limit + 1:03d}.db")):
-        return False, "newest journal runtime backup was removed unexpectedly"
 
     return True, "ok"
 

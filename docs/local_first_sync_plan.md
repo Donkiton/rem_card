@@ -15,9 +15,8 @@
 - Added local read replica service (`app/local_replica_sync.py`):
   - central -> local sync via SQLite backup API.
   - periodic sync (default every 5s) + fast sync trigger.
-- Enabled local-first reads in both DB managers:
+- Enabled local-first reads in the unified DB manager:
   - `data/dao/db_manager.py`
-  - `Rao_jornal/database/db_manager.py`
 - Kept critical consistency points on central DB:
   - write path remains central.
   - change-log cursor reads remain central for synchronization correctness.
