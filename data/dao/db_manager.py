@@ -1144,9 +1144,11 @@ class DatabaseManager:
         return self._fetch_one_central(query, params)
 
     def fetch_all_journal(self, query, params=()):
+        """Compatibility alias for legacy journal callers."""
         return self.fetch_all_remcard(query, params)
 
     def fetch_one_journal(self, query, params=()):
+        """Compatibility alias for legacy journal callers."""
         return self.fetch_one_remcard(query, params)
 
     def get_data_version(self) -> int:

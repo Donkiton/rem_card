@@ -60,9 +60,11 @@ class ArchiveReadOnlyDatabaseManager:
         return cursor.fetchone()
 
     def fetch_all_journal(self, query: str, params: Sequence = ()):
+        """Compatibility alias for legacy journal callers."""
         return self.fetch_all_remcard(query, params)
 
     def fetch_one_journal(self, query: str, params: Sequence = ()):
+        """Compatibility alias for legacy journal callers."""
         return self.fetch_one_remcard(query, params)
 
     def get_data_version(self) -> int:

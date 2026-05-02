@@ -17,11 +17,9 @@ class PatientDAO:
         self.status_dao = PatientStatusDAO(db_manager)
 
     def sync_from_journal(self):
-        """
-        В новой архитектуре Журнал и Ремкарта работают с одной и той же БД.
-        Поэтому синхронизация больше не копирует данные между файлами.
-        """
+        """Compatibility no-op after journal -> remcard migration."""
         logger.debug("PatientDAO.sync_from_journal skipped: unified DB mode is active.")
+        return None
 
     def get_active_patients(self) -> List[PatientDTO]:
         query = """
