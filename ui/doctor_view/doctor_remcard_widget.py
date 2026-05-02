@@ -364,9 +364,9 @@ class DoctorRemCardWidget(QWidget):
                 )
             else:
                 logger.warning(
-                    "DoctorRemCardWidget: ReadCoordinator unavailable, using legacy build_card_snapshot for patient open"
+                    "DoctorRemCardWidget: ReadCoordinator unavailable, using build_full_card_snapshot for patient open"
                 )
-                snapshot = self.service.build_card_snapshot(
+                snapshot = self.service.build_full_card_snapshot(
                     request["admission_id"],
                     request["shift_date"],
                     include_change_cursor=True,
@@ -375,7 +375,7 @@ class DoctorRemCardWidget(QWidget):
                     ensure_initial_status=request["ensure_initial_status"],
                 )
         else:
-            snapshot = self.service.build_card_snapshot(
+            snapshot = self.service.build_full_card_snapshot(
                 request["admission_id"],
                 request["shift_date"],
                 include_change_cursor=True,

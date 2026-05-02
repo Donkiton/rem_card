@@ -318,7 +318,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
-    def build_card_snapshot(
+    def build_full_card_snapshot(
         self,
         admission_id: int,
         date: datetime,
@@ -328,7 +328,7 @@ class RemCardService(QObject):
         balance_only_committed: bool = False,
         ensure_initial_status: bool = False,
     ) -> Dict[str, Any]:
-        """Legacy wrapper. New patient-open flow should use build_vitals_snapshot()."""
+        """Build a full card snapshot from vitals plus optional balance data."""
         snapshot = self.build_vitals_snapshot(
             admission_id,
             date,
@@ -357,6 +357,26 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
 
         return snapshot
+
+    def build_card_snapshot(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        include_change_cursor: bool = False,
+        include_balance: bool = True,
+        balance_only_committed: bool = False,
+        ensure_initial_status: bool = False,
+    ) -> Dict[str, Any]:
+        """Compatibility wrapper. Prefer build_full_card_snapshot()."""
+        return self.build_full_card_snapshot(
+            admission_id,
+            date,
+            include_change_cursor=include_change_cursor,
+            include_balance=include_balance,
+            balance_only_committed=balance_only_committed,
+            ensure_initial_status=ensure_initial_status,
+        )
 
     def build_orders_snapshot(
         self,

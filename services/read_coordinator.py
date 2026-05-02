@@ -464,7 +464,7 @@ class ReadCoordinator:
                 context_hash,
                 trace_id,
             )
-            snapshot = self.remcard_service.build_card_snapshot(
+            snapshot = self.remcard_service.build_full_card_snapshot(
                 context.admission_id,
                 context.shift_date,
                 include_change_cursor=True,
