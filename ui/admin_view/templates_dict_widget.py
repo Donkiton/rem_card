@@ -5,9 +5,9 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QSplitter,
     QTableWidget, QTableWidgetItem, QHeaderView, QComboBox,
     QDoubleSpinBox, QSpinBox, QFormLayout, QGroupBox, QDialog, QCheckBox, QFrame,
-    QApplication
+    QApplication, QAbstractItemView
 )
-from PySide6.QtCore import Qt, Signal, QEvent, QPoint
+from PySide6.QtCore import Qt, Signal, QEvent, QPoint, QTimer
 from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 
@@ -278,7 +278,7 @@ class TemplateDrugSearchWidget(QWidget):
         super().focusOutEvent(event)
         
     def hide_list(self):
-        if not self.list_widget.isHidden():
+        if hasattr(self, "list_widget") and not self.list_widget.isHidden():
             self.list_widget.hide()
         
     def setup_ui(self):
@@ -310,7 +310,6 @@ class TemplateDrugSearchWidget(QWidget):
         self.input_field.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        from PySide6.QtCore import QEvent, QTimer
         if obj is self.input_field and event.type() == QEvent.FocusOut:
             QTimer.singleShot(100, self.hide_list)
         return super().eventFilter(obj, event)
@@ -339,7 +338,7 @@ class TemplateDrugSearchWidget(QWidget):
         else:
             self.list_widget.hide()
 
-    def on_item_clicked(self):
+    def on_item_clicked(self, *_args):
         idx = self.list_widget.currentRow()
         if 0 <= idx < len(self.matches):
             key, _ = self.matches[idx]
@@ -354,8 +353,18 @@ class TemplateDrugSearchWidget(QWidget):
             self.finish_selection(key)
 
     def finish_selection(self, key):
-        self.input_field.clear()
+        self.input_field.blockSignals(True)
+        try:
+            self.input_field.clear()
+        finally:
+            self.input_field.blockSignals(False)
         self.list_widget.hide()
+        self.matches = []
+        QTimer.singleShot(0, lambda selected_key=key: self._emit_drug_selected(selected_key))
+
+    def _emit_drug_selected(self, key):
+        if hasattr(self, "list_widget"):
+            self.list_widget.clear()
         self.drug_selected.emit(key)
 
 
@@ -363,6 +372,7 @@ class TemplatesDictWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_drugs = []
+        self._loading_templates = False
         self._row_drag_state = None
         self._row_drag_ghost = None
         self._row_drag_indicator = None
@@ -409,18 +419,30 @@ class TemplatesDictWidget(QWidget):
         left_layout.setSpacing(5)
         
         self.list_widget = QListWidget()
+        self.list_widget.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_widget.setDragDropMode(QAbstractItemView.InternalMove)
+        self.list_widget.setDefaultDropAction(Qt.MoveAction)
+        self.list_widget.setDropIndicatorShown(True)
         self.list_widget.itemSelectionChanged.connect(self.on_template_selected)
+        self.list_widget.itemSelectionChanged.connect(self._update_template_order_buttons)
+        self.list_widget.model().rowsMoved.connect(self._on_template_rows_moved)
         left_layout.addWidget(self.list_widget)
         
         btn_list_layout = QHBoxLayout()
         self.btn_new_tpl = QPushButton("Новый")
         self.btn_del_tpl = QPushButton("Удалить")
-        for b in [self.btn_new_tpl, self.btn_del_tpl]:
+        self.btn_tpl_up = QPushButton("↑")
+        self.btn_tpl_down = QPushButton("↓")
+        for b in [self.btn_new_tpl, self.btn_del_tpl, self.btn_tpl_up, self.btn_tpl_down]:
             b.setObjectName("DialogOkBtn")
             b.setFixedHeight(35)
             btn_list_layout.addWidget(b)
+        self.btn_tpl_up.setFixedWidth(45)
+        self.btn_tpl_down.setFixedWidth(45)
         self.btn_new_tpl.clicked.connect(self.create_new)
         self.btn_del_tpl.clicked.connect(self.delete_selected)
+        self.btn_tpl_up.clicked.connect(self.move_selected_template_up)
+        self.btn_tpl_down.clicked.connect(self.move_selected_template_down)
         left_layout.addLayout(btn_list_layout)
         
         # --- ПРАВАЯ ПАНЕЛЬ: Редактор ---
@@ -500,14 +522,79 @@ class TemplatesDictWidget(QWidget):
         splitter.setSizes([200, 800])
         layout.addWidget(splitter)
         self._update_reorder_buttons()
+        self._update_template_order_buttons()
 
-    def load_data(self):
-        self.list_widget.clear()
-        for key, data in sorted(engine.templates.items(), key=lambda x: x[1].get('name', x[0])):
-            item = QListWidgetItem(data.get("name", key))
-            item.setData(Qt.UserRole, key)
-            self.list_widget.addItem(item)
+    def load_data(self, selected_key=None):
+        self._loading_templates = True
+        try:
+            self.list_widget.clear()
+            for key, data in engine.ordered_templates_items():
+                item = QListWidgetItem(data.get("name", key))
+                item.setData(Qt.UserRole, key)
+                self.list_widget.addItem(item)
+        finally:
+            self._loading_templates = False
+        if selected_key and self._select_template_by_key(selected_key):
+            return
         self.clear_editor()
+        self._update_template_order_buttons()
+
+    def _template_keys_in_list(self):
+        return [
+            self.list_widget.item(row).data(Qt.UserRole)
+            for row in range(self.list_widget.count())
+            if self.list_widget.item(row).data(Qt.UserRole)
+        ]
+
+    def _persist_template_order(self):
+        if self._loading_templates:
+            return
+        engine.save_template_order(self._template_keys_in_list())
+
+    def _select_template_by_key(self, key):
+        for row in range(self.list_widget.count()):
+            if self.list_widget.item(row).data(Qt.UserRole) == key:
+                self.list_widget.setCurrentRow(row)
+                return True
+        return False
+
+    def _update_template_order_buttons(self):
+        row = self.list_widget.currentRow() if hasattr(self, "list_widget") else -1
+        count = self.list_widget.count() if hasattr(self, "list_widget") else 0
+        can_move = 0 <= row < count
+        if hasattr(self, "btn_tpl_up"):
+            self.btn_tpl_up.setEnabled(can_move and row > 0)
+        if hasattr(self, "btn_tpl_down"):
+            self.btn_tpl_down.setEnabled(can_move and row < count - 1)
+        if hasattr(self, "btn_del_tpl"):
+            self.btn_del_tpl.setEnabled(can_move)
+
+    def _on_template_rows_moved(self, *_args):
+        self._persist_template_order()
+        self._update_template_order_buttons()
+
+    def _move_template_row(self, source_row: int, target_row: int):
+        count = self.list_widget.count()
+        if source_row < 0 or source_row >= count:
+            return
+        target_row = max(0, min(int(target_row), count - 1))
+        if source_row == target_row:
+            return
+        item = self.list_widget.takeItem(source_row)
+        self.list_widget.insertItem(target_row, item)
+        self.list_widget.setCurrentRow(target_row)
+        self._persist_template_order()
+        self._update_template_order_buttons()
+
+    def move_selected_template_up(self):
+        row = self.list_widget.currentRow()
+        if row > 0:
+            self._move_template_row(row, row - 1)
+
+    def move_selected_template_down(self):
+        row = self.list_widget.currentRow()
+        if 0 <= row < self.list_widget.count() - 1:
+            self._move_template_row(row, row + 1)
 
     def clear_editor(self):
         self.key_input.clear()
@@ -518,6 +605,7 @@ class TemplatesDictWidget(QWidget):
         self.refresh_table()
 
     def refresh_table(self, selected_row=None):
+        self._cleanup_drug_row_drag()
         self.table.setRowCount(0)
         for row, item in enumerate(self.current_drugs):
             self.table.insertRow(row)
@@ -704,6 +792,12 @@ class TemplatesDictWidget(QWidget):
             self._row_drag_indicator.hide()
         self._row_drag_state = None
 
+    def hideEvent(self, event):
+        self._cleanup_drug_row_drag()
+        if hasattr(self, "search_widget"):
+            self.search_widget.hide_list()
+        super().hideEvent(event)
+
     def _move_drug_row(self, source_row: int, target_row: int) -> bool:
         if source_row < 0 or source_row >= len(self.current_drugs):
             return False
@@ -881,18 +975,20 @@ class TemplatesDictWidget(QWidget):
             "drugs": self.current_drugs
         }
         engine.save_custom_template(key, data)
+        order = self._template_keys_in_list()
+        if key not in order:
+            order.append(key)
+        engine.save_template_order(order)
         CustomMessageBox.information(self, "Успех", f"Протокол '{name}' сохранен.")
         
-        self.load_data()
-        for i in range(self.list_widget.count()):
-            if self.list_widget.item(i).data(Qt.UserRole) == key:
-                self.list_widget.setCurrentRow(i)
-                break
+        self.load_data(selected_key=key)
 
     def delete_selected(self):
         item = self.list_widget.currentItem()
         if not item: return
         key = item.data(Qt.UserRole)
         if CustomMessageBox.question(self, 'Удаление', f"Удалить шаблон '{key}'?") == CustomMessageBox.Yes:
+            order = [existing_key for existing_key in self._template_keys_in_list() if existing_key != key]
             engine.delete_custom_template(key)
+            engine.save_template_order(order)
             self.load_data()

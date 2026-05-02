@@ -72,6 +72,15 @@
           "dose": 100.0,
           "unit": "mg",
           "freq": 1
+        },
+        {
+          "drug": "Atorvastatin",
+          "form_key": "tablet",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "per_os",
+          "duration_min": 0,
+          "freq": 1
         }
       ]
     },
@@ -174,6 +183,28 @@
       "template_type": "simple",
       "drugs": [
         {
+          "drug": "ceftriaxone",
+          "form_key": "lyophilisate",
+          "dose": 1.0,
+          "unit": "g",
+          "admin_type": "infusion",
+          "duration_min": 30,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 250
+          }
+        },
+        {
+          "drug": "Acidiaminocaproici",
+          "form_key": "solution_iv",
+          "dose": 100.0,
+          "unit": "ml",
+          "admin_type": "infusion",
+          "duration_min": 30,
+          "freq": 1
+        },
+        {
           "drug": "Tranexam",
           "form_key": "solution_iv",
           "dose": 1000.0,
@@ -185,6 +216,198 @@
             "base": "nacl_09",
             "volume": 250
           }
+        },
+        {
+          "drug": "omeprazole",
+          "form_key": "lyophilisate",
+          "dose": 40.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 15
+          }
+        },
+        {
+          "drug": "omeprazole",
+          "form_key": "lyophilisate",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "furosemide",
+          "form_key": "solution_iv",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 5,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "polarka",
+          "is_multicomp": true,
+          "raw_text": "S. KCl 4% - 20 ml + S. MgSO4 25% - 10 ml + S. Insulini - 4 IU [DIL:S. Glucose 5% - 250 мл] [KEY:polarka] [ROUTE:В/в капельно] [DUR:120]",
+          "admin_type": "infusion",
+          "duration_min": 120,
+          "dose": 0,
+          "unit": ""
+        }
+      ]
+    },
+    "ketoacidoz": {
+      "name": "Кетоацидоз",
+      "template_type": "simple",
+      "drugs": [
+        {
+          "drug": "glucozka5",
+          "form_key": "solution_iv",
+          "dose": 500.0,
+          "unit": "ml",
+          "admin_type": "infusion",
+          "duration_min": 60,
+          "freq": 1
+        },
+        {
+          "drug": "insulin",
+          "form_key": "solution_iv",
+          "dose": 20.0,
+          "unit": "IU",
+          "admin_type": "dozator",
+          "duration_min": -1,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 20
+          }
+        },
+        {
+          "drug": "fizrastvor",
+          "form_key": "solution_iv",
+          "dose": 500.0,
+          "unit": "ml",
+          "admin_type": "infusion",
+          "duration_min": 60,
+          "freq": 1
+        },
+        {
+          "drug": "omeprazole",
+          "form_key": "lyophilisate",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "furosemide",
+          "form_key": "solution_iv",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "polarka",
+          "is_multicomp": true,
+          "raw_text": "S. KCl 4% - 20 ml + S. MgSO4 25% - 10 ml + S. Insulini - 8 IU [DIL:S. Glucose 5% - 500 мл] [KEY:polarka] [ROUTE:В/в капельно] [DUR:180]",
+          "admin_type": "infusion",
+          "duration_min": 180,
+          "dose": 0,
+          "unit": ""
+        }
+      ]
+    },
+    "posleoper": {
+      "name": "После операций",
+      "template_type": "simple",
+      "drugs": [
+        {
+          "drug": "ceftriaxone",
+          "form_key": "lyophilisate",
+          "dose": 1.0,
+          "unit": "g",
+          "admin_type": "infusion",
+          "duration_min": 30,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 250
+          }
+        },
+        {
+          "drug": "omeprazole",
+          "form_key": "lyophilisate",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "furosemide",
+          "form_key": "solution_iv",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "fizrastvor",
+          "form_key": "solution_iv",
+          "dose": 250.0,
+          "unit": "ml",
+          "admin_type": "infusion",
+          "duration_min": 30,
+          "freq": 1
+        },
+        {
+          "drug": "polarka",
+          "is_multicomp": true,
+          "raw_text": "S. KCl 4% - 20 ml + S. MgSO4 25% - 10 ml + S. Insulini - 4 IU [DIL:S. Glucose 5% - 250 мл] [KEY:polarka] [ROUTE:В/в капельно] [DUR:120]",
+          "admin_type": "infusion",
+          "duration_min": 120,
+          "dose": 0,
+          "unit": ""
+        },
+        {
+          "drug": "promedol",
+          "form_key": "solution_iv",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 5,
+          "freq": 1
         }
       ]
     }
@@ -430,6 +653,12 @@
     },
     "Mukolitiks": {
       "name_ru": "Муколитики",
+      "priority_level": 3,
+      "offset_min": 0,
+      "color": "#bdc3c7"
+    },
+    "Statins": {
+      "name_ru": "Статины",
       "priority_level": 3,
       "offset_min": 0,
       "color": "#bdc3c7"
@@ -701,9 +930,9 @@
         "омез"
       ],
       "star_alias": "омез*",
-      "admin_type": "infusion",
+      "admin_type": "bolus",
       "uses_line": true,
-      "duration_min": 15,
+      "duration_min": 0,
       "default_dose": 20.0,
       "forms": [
         40.0
@@ -1332,7 +1561,7 @@
       "star_alias": "фур*",
       "admin_type": "bolus",
       "uses_line": false,
-      "duration_min": 5,
+      "duration_min": 0,
       "default_dose": 20.0,
       "forms": [
         2.0
@@ -1340,7 +1569,7 @@
       "unit": "mg",
       "form_unit": "ml",
       "form_key": "solution_iv",
-      "concentration_mg_ml": 10,
+      "concentration_mg_ml": 10.0,
       "default_dilution": {
         "base": "nacl_09",
         "volume": 10
@@ -2390,6 +2619,48 @@
       "concentration_mg_ml": 0,
       "default_dilution": null,
       "group": "Mukolitiks"
+    },
+    "Atorvastatin": {
+      "latin": "Atorvastatini",
+      "aliases": [
+        "аторвастатин",
+        "тулип",
+        "аторис"
+      ],
+      "star_alias": "атор*",
+      "admin_type": "per_os",
+      "uses_line": false,
+      "duration_min": 0,
+      "default_dose": 20.0,
+      "forms": [
+        20.0
+      ],
+      "unit": "mg",
+      "form_unit": "mg",
+      "form_key": "tablet",
+      "concentration_mg_ml": 0,
+      "default_dilution": null,
+      "group": "Statins"
+    },
+    "Acidiaminocaproici": {
+      "latin": "Acidi aminocaproici",
+      "aliases": [
+        "аминокапронка"
+      ],
+      "star_alias": "амин*",
+      "admin_type": "infusion",
+      "uses_line": false,
+      "duration_min": 30,
+      "default_dose": 100.0,
+      "forms": [
+        5.0
+      ],
+      "unit": "ml",
+      "form_unit": "g",
+      "form_key": "solution_iv",
+      "concentration_mg_ml": 50.0,
+      "default_dilution": null,
+      "group": "Gemostasis"
     }
   },
   "admin_types": {
@@ -2447,5 +2718,12 @@
       "latin_abbr": "",
       "can_dilute": false
     }
-  }
+  },
+  "template_order": [
+    "posleoper",
+    "stroke_ischemic",
+    "ketoacidoz",
+    "K92.2",
+    "heart attack"
+  ]
 }

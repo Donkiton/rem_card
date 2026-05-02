@@ -7,6 +7,9 @@ from typing import Dict, Any, Tuple, List, Optional
 from datetime import datetime, timedelta
 from rem_card.app.paths import SEED_DIR, USER_DICT_DIR
 
+TEMPLATE_ORDER_KEY = "template_order"
+
+
 class PrescriptionEngine:
     _DATASETS = (
         ("drugs", "drugs"),
@@ -86,9 +89,29 @@ class PrescriptionEngine:
                         data.pop(k, None)
                     else:
                         data[k] = v
+            if attr_name == "templates":
+                data = self._ordered_templates(data, overrides_data.get(TEMPLATE_ORDER_KEY))
             loaded[attr_name] = data
 
         return loaded
+
+    def _ordered_templates(self, templates: Dict[str, Any], order_keys: Any = None) -> Dict[str, Any]:
+        if isinstance(order_keys, list):
+            ordered = {}
+            seen = set()
+            for key in order_keys:
+                if key in templates and key not in seen:
+                    ordered[key] = templates[key]
+                    seen.add(key)
+            for key, data in templates.items():
+                if key not in seen:
+                    ordered[key] = data
+            return ordered
+
+        return dict(sorted(templates.items(), key=lambda x: x[1].get("name", x[0])))
+
+    def ordered_templates_items(self) -> List[Tuple[str, Dict[str, Any]]]:
+        return list(self.templates.items())
 
     def _load_merged(self, name: str) -> Dict[str, Any]:
         """Загружает seed файл и обновляет его данными из user_overrides.json (upsert + delete)"""
@@ -173,6 +196,28 @@ class PrescriptionEngine:
         with self._lock:
             self._delete_override_locked(dict_name, key)
             self._reload_locked(force=True)
+
+    def save_template_order(self, order_keys: List[str]):
+        """Сохраняет пользовательский порядок клинических протоколов."""
+        with self._lock:
+            valid_order = []
+            seen = set()
+            for key in order_keys:
+                if key in self.templates and key not in seen:
+                    valid_order.append(key)
+                    seen.add(key)
+            for key in self.templates:
+                if key not in seen:
+                    valid_order.append(key)
+                    seen.add(key)
+
+            overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
+            os.makedirs(USER_DICT_DIR, exist_ok=True)
+            overrides_data = self._load_json_dict(overrides_path)
+            overrides_data[TEMPLATE_ORDER_KEY] = valid_order
+            self._write_json_atomic(overrides_path, overrides_data)
+            self.templates = self._ordered_templates(self.templates, valid_order)
+            self._last_loaded_signature = None
 
     # --- CRUD operations for Admin Panel ---
     

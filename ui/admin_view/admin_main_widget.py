@@ -214,3 +214,10 @@ class AdminMainWidget(QWidget):
 
     def show_menu(self):
         self.stack.setCurrentWidget(self.menu_widget)
+
+    def go_back(self) -> bool:
+        """Возвращает на предыдущий экран настроек, если он есть."""
+        if self.stack.currentWidget() is self.menu_widget:
+            return False
+        self.show_menu()
+        return True

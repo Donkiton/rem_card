@@ -34,7 +34,7 @@ class TemplateSelectionDialog(BaseStyledDialog):
         layout.addWidget(QLabel("Выберите шаблон для загрузки:"))
         
         self.template_combo = QComboBox()
-        for k, v in sorted(engine.templates.items(), key=lambda x: x[1].get("name", x[0])):
+        for k, v in engine.ordered_templates_items():
             self.template_combo.addItem(v.get("name", k), k)
         
         layout.addWidget(self.template_combo)

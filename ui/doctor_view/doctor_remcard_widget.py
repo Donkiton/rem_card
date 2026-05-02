@@ -1597,6 +1597,14 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self.layout_manager, "journal_view"):
             journal_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.journal_view)
         was_journal_mode = (current_idx == journal_idx and journal_idx != -1)
+        admin_idx = -1
+        if hasattr(self.layout_manager, "admin_view"):
+            admin_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.admin_view)
+
+        if current_idx == admin_idx and admin_idx != -1:
+            admin_widget = getattr(self.layout_manager, "admin_widget", None)
+            if admin_widget is not None and hasattr(admin_widget, "go_back") and admin_widget.go_back():
+                return
 
         if current_idx == 0:
             if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
