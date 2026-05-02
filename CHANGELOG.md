@@ -6,6 +6,14 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.4.0 - 2026-05-02
+
+- Deduplicate nurse order UI wrappers
+- Deduplicate doctor component wrappers
+- Add explicit full card snapshot API
+- Clarify journal compatibility aliases
+- Remove empty legacy package markers
+
 ## 1.3.5 - 2026-05-02
 
 - Настроить навигацию и порядок шаблонов

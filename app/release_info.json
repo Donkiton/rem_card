@@ -1,8 +1,12 @@
 {
   "schema_version": 1,
-  "version": "1.3.5",
+  "version": "1.4.0",
   "date": "2026-05-02",
   "changes": [
-    "Настроить навигацию и порядок шаблонов"
+    "Deduplicate nurse order UI wrappers",
+    "Deduplicate doctor component wrappers",
+    "Add explicit full card snapshot API",
+    "Clarify journal compatibility aliases",
+    "Remove empty legacy package markers"
   ]
 }
