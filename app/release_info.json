@@ -1,12 +1,9 @@
 {
   "schema_version": 1,
-  "version": "1.4.0",
+  "version": "1.4.1",
   "date": "2026-05-02",
   "changes": [
-    "Deduplicate nurse order UI wrappers",
-    "Deduplicate doctor component wrappers",
-    "Add explicit full card snapshot API",
-    "Clarify journal compatibility aliases",
-    "Remove empty legacy package markers"
+    "Remove legacy patient weight context",
+    "Remove legacy jornal launcher alias"
   ]
 }

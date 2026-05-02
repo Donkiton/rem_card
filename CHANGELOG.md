@@ -6,6 +6,11 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.4.1 - 2026-05-02
+
+- Remove legacy patient weight context
+- Remove legacy jornal launcher alias
+
 ## 1.4.0 - 2026-05-02
 
 - Deduplicate nurse order UI wrappers
