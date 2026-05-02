@@ -14,7 +14,6 @@ from ..data.dto.remcard_dto import (
     OralIntakeEventDTO,
     OrderDTO,
     OrderStatus,
-    PatientContext,
     VentilationCaseDTO,
     VentilationEventDTO,
 )
@@ -44,7 +43,6 @@ def orders_snapshot_caller(source: str, *, context_hash: Optional[str] = None):
 
 class RemCardService(QObject):
     """Р¤Р°СЃР°Рґ, РѕР±СЉРµРґРёРЅСЏСЋС‰РёР№ РІСЃРµ РїРѕРґСЃРµСЂРІРёСЃС‹ РґР»СЏ СѓРґРѕР±СЃС‚РІР° РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РІ UI."""
-    patient_context_changed = Signal(int) # admission_id
 
     @property
     def status_service(self):
@@ -427,7 +425,6 @@ class RemCardService(QObject):
             "only_committed": bool(only_committed),
             "orders": visible_orders,
             "admin_rows": admin_rows,
-            "patient_context": self.get_patient_context(admission_id),
             "has_any_draft": self._orders.has_drafts(admission_id, shift_date=shift_date),
             "has_any_administrations": any(
                 str(row.get("status") or "") not in ("deleted", "cancelled")
@@ -560,16 +557,12 @@ class RemCardService(QObject):
     def sync_patients(self):
         self._patients.sync_patients()
 
-    def get_patient_context(self, admission_id: int) -> PatientContext:
-        return self._patients.get_patient_context(admission_id)
-
     # --- Vital Service Methods ---
     def get_vital_settings_cached(self, admission_id: int, date: datetime) -> Dict[str, Any]:
         return self._vitals.get_vital_settings_cached(admission_id, date)
 
     def save_vital_settings(self, admission_id: int, date: datetime, settings: Dict[str, Any]):
         self._vitals.save_vital_settings(admission_id, date, settings)
-        self.patient_context_changed.emit(admission_id)
 
     def get_vitals(self, admission_id: int, date: datetime) -> List[VitalDTO]:
         return self._vitals.get_vitals(admission_id, date)
@@ -579,7 +572,6 @@ class RemCardService(QObject):
 
     def add_vital(self, dto: VitalDTO, shift_date: Optional[datetime] = None, force: bool = False):
         self._vitals.add_vital(dto, shift_date, force)
-        self.patient_context_changed.emit(dto.admission_id)
 
     def get_latest_vital(self, admission_id: int) -> Optional[VitalDTO]:
         return self._vitals.get_latest_vital(admission_id)
@@ -598,7 +590,6 @@ class RemCardService(QObject):
 
     def delete_last_vital(self, admission_id: int, date: datetime):
         self._vitals.delete_last_vital(admission_id, date)
-        self.patient_context_changed.emit(admission_id)
 
     def get_all_card_dates(self, admission_id: int) -> List[datetime]:
         """

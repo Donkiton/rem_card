@@ -1575,7 +1575,6 @@ def _check_orders_force_refresh_accepts_unchanged_version(temp_root: str) -> tup
                 "only_committed": bool(only_committed),
                 "orders": [],
                 "admin_rows": [],
-                "patient_context": None,
                 "has_any_draft": False,
                 "has_any_administrations": False,
                 "has_any_orders": False,
@@ -1617,15 +1616,13 @@ def _check_doctor_orders_late_model_binding(temp_root: str) -> tuple[bool, str]:
 
     from datetime import datetime, timedelta
 
-    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtCore import QObject
     from PySide6.QtWidgets import QApplication
 
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     class DummyOrdersService(QObject):
-        patient_context_changed = Signal(int)
-
         def get_day_period(self, shift_date):
             start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
             return start, start + timedelta(hours=24)
@@ -1679,7 +1676,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
 
     from datetime import datetime, timedelta
 
-    from PySide6.QtCore import QObject, Signal
+    from PySide6.QtCore import QObject
     from PySide6.QtWidgets import QApplication
 
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
@@ -1687,8 +1684,6 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     class DummyOrdersService(QObject):
-        patient_context_changed = Signal(int)
-
         def get_day_period(self, shift_date):
             start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
             return start, start + timedelta(hours=24)
@@ -1739,7 +1734,6 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
                 )
             ],
             "admin_rows": [],
-            "patient_context": None,
             "has_any_draft": False,
             "has_any_administrations": False,
             "has_any_orders": True,
@@ -1798,7 +1792,6 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             "only_committed": False,
             "orders": [],
             "admin_rows": [],
-            "patient_context": None,
             "has_any_draft": False,
             "has_any_administrations": False,
             "has_any_orders": False,
@@ -2125,7 +2118,7 @@ def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tu
     return True, "ok"
 
 
-def _check_chart_clears_on_patient_context_change(temp_root: str) -> tuple[bool, str]:
+def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
 
@@ -2322,7 +2315,7 @@ def main():
         ),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
-        ("chart_clears_on_patient_context_change", _check_chart_clears_on_patient_context_change),
+        ("chart_clears_on_card_context_change", _check_chart_clears_on_card_context_change),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),

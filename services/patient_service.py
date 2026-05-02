@@ -2,7 +2,7 @@ import os
 import time
 import threading
 from typing import List, Optional
-from ..data.dto.remcard_dto import PatientDTO, PatientContext
+from ..data.dto.remcard_dto import PatientDTO
 from ..data.dao.patient_dao import PatientDAO
 from rem_card.app.logger import logger
 
@@ -77,12 +77,3 @@ class PatientService:
     def delete_patient(self, patient_id: int):
         with self.dao.db.remcard_transaction():
             self.dao.delete_patient(patient_id)
-
-    def get_patient_context(self, admission_id: int) -> PatientContext:
-        """Собирает контекст пациента (вес, креатинин и т.д.) для расчетов"""
-        # TODO: Интегрировать реальное хранение веса
-        return PatientContext(
-            admission_id=admission_id,
-            weight=80.0,
-            allergies=[]
-        )

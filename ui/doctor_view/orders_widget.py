@@ -66,7 +66,6 @@ class OrdersWidget(QWidget):
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
         self._legacy_direct_snapshot_warned = False
-        self._patient_context_signal_bound = False
         self._load_yesterday_worker = None
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
         self._pending_change_context_key = None
@@ -344,9 +343,6 @@ class OrdersWidget(QWidget):
     def _ensure_model_initialized(self):
         if self.model is None:
             self.model = OrdersModel(self.service, self.admission_id, self.shift_date)
-            if not self._patient_context_signal_bound:
-                self.service.patient_context_changed.connect(self.on_patient_data_changed)
-                self._patient_context_signal_bound = True
         self._bind_model_to_table()
 
     def _bind_model_to_table(self):
@@ -1495,10 +1491,6 @@ class OrdersWidget(QWidget):
                 priority="HIGH",
                 invalidate_reason=None,
             )
-
-    def on_patient_data_changed(self, admission_id):
-        if admission_id == self.admission_id:
-            self.request_refresh(force=True)
 
     def on_prescription_input(self, text):
         if self._is_read_only(): return

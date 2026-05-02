@@ -241,22 +241,6 @@ class OrderDTO:
     administrations: List[AdministrationDTO] = field(default_factory=list)
 
 @dataclass
-class PatientContext:
-    admission_id: int
-    weight: Optional[float] = None
-    creatinine: Optional[float] = None
-    allergies: List[str] = field(default_factory=list)
-    last_updated: datetime = field(default_factory=datetime.now)
-
-    def calculate_dose(self, dose_per_kg: float) -> Optional[float]:
-        if self.weight:
-            # Для малых доз (мкг) округляем до 1 знака, для больших (мг) до целого
-            val = dose_per_kg * self.weight
-            return round(val, 1) if val < 10 else round(val)
-        return None
-
-
-@dataclass
 class VentilationCaseDTO:
     id: Optional[int] = None
     admission_id: int = 0

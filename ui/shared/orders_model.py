@@ -17,7 +17,6 @@ class OrdersModel(QAbstractTableModel):
         self.only_committed = only_committed
         self.orders: List[OrderDTO] = []
         self.admin_map: Dict[Tuple[int, str], AdministrationDTO] = {} # (order_id, time_iso) -> admin
-        self.patient_context = None
         self.last_sync_cursor = make_sync_cursor(EPOCH_SYNC_TS, 0)
         self.last_sync_ts = self.last_sync_cursor["updated_at"]  # backward compatibility marker
         self.has_any_draft = False
@@ -163,7 +162,6 @@ class OrdersModel(QAbstractTableModel):
         self.shift_date = shift_date
         self.orders = []
         self.admin_map = {}
-        self.patient_context = None
         self.has_any_draft = False
         self.last_sync_cursor = make_sync_cursor(EPOCH_SYNC_TS, 0)
         self.last_sync_ts = self.last_sync_cursor["updated_at"]
@@ -181,7 +179,6 @@ class OrdersModel(QAbstractTableModel):
             self._renumber_local_sort_order()
             admin_rows = list(snapshot.get("admin_rows") or [])
             self.admin_map = self._build_admin_map(admin_rows)
-            self.patient_context = snapshot.get("patient_context")
             self.has_any_draft = bool(snapshot.get("has_any_draft", False))
             sync_cursor = self._compute_sync_cursor(admin_rows)
             self.last_sync_cursor = sync_cursor
@@ -249,8 +246,6 @@ class OrdersModel(QAbstractTableModel):
         if bool(snapshot.get("only_committed", self.only_committed)) != bool(self.only_committed):
             return False
 
-        patient_context = snapshot.get("patient_context")
-        patient_context_changed = patient_context != self.patient_context
         admin_rows = list(snapshot.get("admin_rows") or [])
         new_admin_map = self._build_admin_map(admin_rows)
         changed_keys = {
@@ -260,15 +255,12 @@ class OrdersModel(QAbstractTableModel):
         }
 
         self.admin_map = new_admin_map
-        self.patient_context = patient_context
         self.has_any_draft = bool(snapshot.get("has_any_draft", False))
         sync_cursor = self._compute_sync_cursor(admin_rows)
         self.last_sync_cursor = sync_cursor
         self.last_sync_ts = sync_cursor["updated_at"]
 
         self._emit_admin_cell_changes(changed_keys)
-        if patient_context_changed and self.rowCount() > 0:
-            self.dataChanged.emit(self.index(0, 0), self.index(self.rowCount() - 1, 0), [Qt.DisplayRole])
         return True
 
     def refresh_admin_marks_only(self) -> bool:
@@ -434,14 +426,7 @@ class OrdersModel(QAbstractTableModel):
         else:
             self.last_sync_cursor = make_sync_cursor(EPOCH_SYNC_TS, 0)
             self.last_sync_ts = self.last_sync_cursor["updated_at"]
-            
-        self.patient_context = self.service.get_patient_context(self.admission_id)
         self.endResetModel()
-
-    def update_weight(self, new_weight):
-        self.patient_context.weight = new_weight
-        # Уведомляем таблицу, что данные в первой колонке (где расчет доз) изменились
-        self.dataChanged.emit(self.index(0, 0), self.index(len(self.orders)-1, 0), [Qt.DisplayRole])
 
     def move_order_row(self, source_row: int, target_row: int, *, mark_draft: bool = True) -> bool:
         if source_row < 0 or source_row >= len(self.orders):

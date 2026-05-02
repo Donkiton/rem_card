@@ -129,17 +129,8 @@ class OrdersDelegate(QStyledItemDelegate):
         if dose_str == "0":
             dose_str = ""
 
-        model_ctx = getattr(model, 'patient_context', None)
-        if (
-            getattr(order, 'is_per_kg', False)
-            and model_ctx
-            and hasattr(model_ctx, 'weight')
-            and model_ctx.weight
-            and dose_val > 0
-        ):
-            calc_dose = model_ctx.calculate_dose(dose_val)
-            if calc_dose is not None:
-                dose_str = f"{dose_val:g} {dose_unit}/kg ({calc_dose:g} {dose_unit})"
+        if getattr(order, 'is_per_kg', False) and dose_str:
+            dose_str = f"{dose_str}/кг"
 
         return {
             "line1": f"{prefix}{latin} {dose_str}".strip(),
