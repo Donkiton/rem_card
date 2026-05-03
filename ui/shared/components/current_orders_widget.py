@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from collections import OrderedDict
 import time
 from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Signal
 from .nurse_order_card import NurseOrderCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.app.logger import logger
@@ -16,6 +16,9 @@ CURRENT_ORDERS_CACHE_LIMIT = 10
 
 class CurrentNurseOrdersWidget(QWidget):
     """Менеджер назначений в 1а. Сектор 5 теперь принадлежит питанию."""
+    localBalanceChanged = Signal()
+    balanceRefreshRequested = Signal()
+
     def __init__(self, service, sector_1a, sector_5, parent=None):
         super().__init__(parent)
         self.service = service 
@@ -357,10 +360,14 @@ class CurrentNurseOrdersWidget(QWidget):
         if pending:
             pending["started_mono"] = time.monotonic()
         self.refresh_data()
+        self.localBalanceChanged.emit()
+        self.balanceRefreshRequested.emit()
 
     def _on_mark_write_error(self, admin_id: int, exc: Exception):
         self._pending_marks.pop(int(admin_id), None)
         self.refresh_data()
+        self.localBalanceChanged.emit()
+        self.balanceRefreshRequested.emit()
         CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения: {exc}")
 
     def _enqueue_write(self, description: str, operation, *, on_success=None, on_error=None):
@@ -391,6 +398,7 @@ class CurrentNurseOrdersWidget(QWidget):
 
         self._set_pending_mark(admin_id, mark)
         self._render_from_cache()
+        self.localBalanceChanged.emit()
         self._enqueue_write(
             f"nurse_order_panel_mark:{admin_id}",
             operation,

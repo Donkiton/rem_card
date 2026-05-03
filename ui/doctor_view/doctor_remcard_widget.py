@@ -9,6 +9,10 @@ from rem_card.app.logger import logger
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.services.archive_readonly_service import create_archive_readonly_service
+from rem_card.ui.shared.orders_balance_adapter import (
+    apply_current_order_mark_overrides,
+    build_balance_orders_from_orders_widget,
+)
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
@@ -71,6 +75,7 @@ class DoctorRemCardWidget(QWidget):
         self._balance_calculator_cls = None
         self._archive_signals_bound = False
         self._admin_signals_bound = False
+        self._nurse_orders_balance_signals_bound = False
         self.report_controller = None
         self._card_ui_prewarm_started = False
         self._card_ui_prewarm_done = False
@@ -776,6 +781,49 @@ class DoctorRemCardWidget(QWidget):
         try:
             self._ensure_card_widgets_initialized()
             self._bind_balance_widgets_if_ready()
+            if not self.admission_id:
+                return
+            snapshot = None
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "load_balance_snapshot"):
+                snapshot = coordinator.load_balance_snapshot(
+                    self.admission_id,
+                    self._current_date,
+                    role="doctor",
+                    mode="archive" if self._archive_read_only_mode else "live",
+                    source_db=self._archive_source_db_path if self._archive_read_only_mode else "live",
+                    balance_only_committed=False,
+                    force_refresh=True,
+                )
+            elif hasattr(self.service, "build_balance_snapshot"):
+                snapshot = self.service.build_balance_snapshot(
+                    self.admission_id,
+                    self._current_date,
+                    include_change_cursor=True,
+                    balance_only_committed=False,
+                )
+
+            if snapshot:
+                cached_snapshot = dict(self._card_snapshot_cache or {})
+                for key in ("effective_bounds", "fluids", "balance_runtime", "balance_calc", "change_id", "version"):
+                    if key in snapshot:
+                        cached_snapshot[key] = snapshot.get(key)
+                self._card_snapshot_cache = cached_snapshot
+                if snapshot.get("balance_runtime") is not None:
+                    self._balance_runtime_cache = snapshot.get("balance_runtime")
+                if (
+                    hasattr(self, "balance_controller")
+                    and snapshot.get("effective_bounds")
+                    and snapshot.get("fluids") is not None
+                ):
+                    self.balance_controller.apply_loaded_data(
+                        snapshot.get("fluids") or [],
+                        snapshot.get("effective_bounds"),
+                    )
+                else:
+                    self.update_balance_data()
+                return
+
             if hasattr(self, "balance_controller"):
                 self.balance_controller.refresh()
             else:
@@ -919,6 +967,10 @@ class DoctorRemCardWidget(QWidget):
                 self._payload_force_sources(payload),
                 sorted(changed_entities),
             )
+            if sync_actions.get("balance_refresh"):
+                self._refresh_balance_from_db()
+            else:
+                self.update_balance_data()
             return
 
         if self._handle_diet_sync(
@@ -974,6 +1026,18 @@ class DoctorRemCardWidget(QWidget):
         if not self.admission_id:
             return
         self._balance_update_timer.start(self._balance_update_delay_ms)
+
+    def _bind_nurse_orders_balance_signals(self):
+        if self._nurse_orders_balance_signals_bound:
+            return
+        mgr = getattr(getattr(self, "layout_manager", None), "nurse_orders_manager", None)
+        if mgr is None:
+            return
+        if hasattr(mgr, "localBalanceChanged"):
+            mgr.localBalanceChanged.connect(self.update_balance_data)
+        if hasattr(mgr, "balanceRefreshRequested"):
+            mgr.balanceRefreshRequested.connect(self._refresh_balance_from_db)
+        self._nurse_orders_balance_signals_bound = True
 
     def _flush_scheduled_balance_update(self):
         if not self.admission_id:
@@ -1250,6 +1314,7 @@ class DoctorRemCardWidget(QWidget):
         elif hasattr(self.layout_manager, "nurse_orders_manager"):
             nurse_orders_mgr = self.layout_manager.nurse_orders_manager
         if nurse_orders_mgr:
+            self._bind_nurse_orders_balance_signals()
             QTimer.singleShot(0, lambda mgr=nurse_orders_mgr, aid=admission_id, d=date: mgr.set_context(aid, d))
         
         # Запуск фонового обновления
@@ -1424,6 +1489,8 @@ class DoctorRemCardWidget(QWidget):
             ow.draftStatusChanged.connect(self._schedule_balance_update)
             ow.administrationStatusChanged.connect(self._schedule_balance_update)
             ow.ordersPresenceChanged.connect(self._schedule_balance_update)
+            if hasattr(ow, "localBalanceChanged"):
+                ow.localBalanceChanged.connect(self._schedule_balance_update)
             self.controls.btn_save.clicked.connect(ow.finalize_card)
             self.controls.btn_clean_sheet.clicked.connect(self.on_clean_sheet_clicked)
             self.controls.btn_clear.clicked.connect(self.on_clear_orders_clicked)
@@ -1523,6 +1590,7 @@ class DoctorRemCardWidget(QWidget):
         try:
             if hasattr(self.layout_manager, 'ensure_nurse_orders_manager'):
                 self.layout_manager.ensure_nurse_orders_manager()
+                self._bind_nurse_orders_balance_signals()
             self._card_ui_prewarm_done = True
             logger.debug("Doctor card UI prewarm completed")
         except Exception as exc:
@@ -1807,6 +1875,7 @@ class DoctorRemCardWidget(QWidget):
 
             self.current_date = selected_date
             if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:
+                self._bind_nurse_orders_balance_signals()
                 self.layout_manager.nurse_orders_manager.set_context(target_id, self._current_date)
             self.force_reload_all()
             self._update_yesterday_button_state()
@@ -1892,13 +1961,28 @@ class DoctorRemCardWidget(QWidget):
         runtime = self._balance_runtime_cache or {}
         if not runtime:
             return
+        local_orders = build_balance_orders_from_orders_widget(
+            getattr(self.layout_manager, "orders_widget", None),
+            self.admission_id,
+            self._current_date,
+            tab_active=self._is_orders_tab_active(),
+        )
+        orders = local_orders if local_orders is not None else (runtime.get("orders") or [])
+        panel_orders = apply_current_order_mark_overrides(
+            orders,
+            getattr(self.layout_manager, "nurse_orders_manager", None),
+            self.admission_id,
+            self._current_date,
+        )
+        if panel_orders is not None:
+            orders = panel_orders
 
         now = datetime.now()
         start = runtime.get("start_dt")
         end = runtime.get("end_dt")
         calc_time = now if start and end and start <= now < end else end
         calc_res = self._balance_calculator_cls.calculate(
-            orders=runtime.get("orders") or [],
+            orders=orders,
             current_time=calc_time,
             end_of_card=end,
             transfer_time=runtime.get("transfer_time"),

@@ -1932,6 +1932,93 @@ def _check_patient_status_error_refreshes_checked_state(temp_root: str) -> tuple
         widget.close()
 
 
+def _assert_stale_snapshot_preserves_cell_delete_draft(doctor_widget, doctor_model, index, shift, doctor_order):
+    from PySide6.QtCore import Qt
+
+    stale_snapshot = {
+        "admission_id": 1,
+        "shift_date": shift,
+        "only_committed": False,
+        "orders": [doctor_order],
+        "admin_rows": [
+            {
+                "id": 10,
+                "order_id": 1,
+                "big_chain_id": None,
+                "cell_role": "single",
+                "planned_time": doctor_model.time_slots[0].isoformat(),
+                "actual_time": None,
+                "performer_id": None,
+                "status": "planned",
+                "is_committed": 1,
+                "comment": "",
+                "volume_ml": 0.0,
+                "updated_at": "2026-05-03 08:00:00.000",
+                "last_modified_by": "doctor",
+            }
+        ],
+        "has_any_draft": False,
+        "has_any_administrations": True,
+        "has_any_orders": True,
+        "change_id": 1,
+        "source": "refresh",
+        "load_trace_id": "regression-stale-no-draft",
+    }
+    if not doctor_widget._apply_snapshot_data(snapshot=stale_snapshot, admission_id=1, shift_date=shift):
+        return False, "doctor committed cell delete stale snapshot was rejected instead of guarded"
+    guarded_admin = doctor_model.data(index, Qt.UserRole)
+    if guarded_admin is None or guarded_admin.status != "deleted" or not doctor_widget.has_drafts():
+        return False, "stale no-draft snapshot cleared committed cell delete draft state"
+    return True, "ok"
+
+
+def _assert_committed_long_infusion_delete_marks_draft(doctor_widget, doctor_model, long_index, long_order):
+    from rem_card.data.dto.remcard_dto import AdministrationDTO
+
+    long_chain_id = "long-committed-chain"
+    committed_chain = []
+    for offset, role in enumerate(("start", "body", "end")):
+        slot = doctor_model.time_slots[offset]
+        admin_row = AdministrationDTO(
+            id=30 + offset,
+            order_id=3,
+            planned_time=slot,
+            status="planned",
+            cell_role=role,
+            big_chain_id=long_chain_id,
+            is_committed=1,
+            comment="",
+        )
+        doctor_model.admin_map[(3, slot.isoformat())] = admin_row
+        committed_chain.append(admin_row)
+
+    doctor_model.has_any_draft = False
+    doctor_widget._cached_has_drafts = False
+    committed_long_delete = doctor_widget._apply_optimistic_cell(
+        long_index,
+        long_order,
+        committed_chain[0],
+        doctor_model.time_slots[0],
+        "orders_left_click",
+    )
+    deleted_roles = [
+        getattr(doctor_model.admin_map.get((3, doctor_model.time_slots[offset].isoformat())), "status", None)
+        for offset in range(3)
+    ]
+    if deleted_roles != ["deleted", "deleted", "deleted"]:
+        return False, f"committed long infusion delete did not tombstone all cells: {deleted_roles}"
+    if not doctor_widget.has_drafts():
+        return False, "committed long infusion delete did not activate save draft state"
+
+    doctor_widget._restore_admin_cells(committed_long_delete)
+    if any(
+        getattr(doctor_model.admin_map.get((3, doctor_model.time_slots[offset].isoformat())), "status", None) != "planned"
+        for offset in range(3)
+    ):
+        return False, "committed long infusion tombstones were not restored on error"
+    return True, "ok"
+
+
 def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -2026,6 +2113,15 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
             return False, f"doctor committed cell delete did not create draft tombstone: {deleted_admin}"
         if not doctor_widget.has_drafts():
             return False, "doctor committed cell delete did not activate save draft state"
+        ok, details = _assert_stale_snapshot_preserves_cell_delete_draft(
+            doctor_widget,
+            doctor_model,
+            index,
+            shift,
+            doctor_order,
+        )
+        if not ok:
+            return False, details
         doctor_widget._restore_admin_cells(committed_delete)
         if doctor_model.data(index, Qt.UserRole) != committed_admin:
             return False, "doctor committed cell tombstone was not restored on error"
@@ -2055,6 +2151,14 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_widget._restore_admin_cells(long_previous)
         if any(key[0] == 3 for key in doctor_model.admin_map):
             return False, "long infusion optimistic state was not restored on error"
+        ok, details = _assert_committed_long_infusion_delete_marks_draft(
+            doctor_widget,
+            doctor_model,
+            long_index,
+            long_order,
+        )
+        if not ok:
+            return False, details
         doctor_model.orders.pop()
 
         nurse_model = OrdersModel(service, admission_id=1, shift_date=shift)
@@ -5036,6 +5140,17 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
         return False, f"orders should not require full card snapshot: {orders}"
     if not orders["orders_refresh"] or orders["vitals_snapshot_required"]:
         return False, f"orders classification mismatch: {orders}"
+    if not orders["balance_refresh"]:
+        return False, f"orders should refresh balance sectors: {orders}"
+
+    administrations = actions({
+        "changed_entities": ["administrations"],
+        "changes": [{"entity_name": "administrations", "admission_id": 1}],
+    })
+    if administrations["full_refresh_required"] or administrations["card_snapshot_required"]:
+        return False, f"administrations should not require full card snapshot: {administrations}"
+    if not (administrations["orders_refresh"] and administrations["balance_refresh"]):
+        return False, f"administrations should refresh orders and balance: {administrations}"
 
     vitals = actions({
         "changed_entities": ["vitals"],
@@ -5083,6 +5198,18 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
     })
     if local_force["full_refresh_required"] or local_force["card_snapshot_required"]:
         return False, f"local orders force should not require full refresh: {local_force}"
+    if not local_force["balance_refresh"]:
+        return False, f"local orders force should refresh balance: {local_force}"
+
+    nurse_panel_force = actions({
+        "forced": True,
+        "force_source": "nurse_order_panel_mark:5",
+        "changed_entities": ["administrations"],
+    })
+    if nurse_panel_force["full_refresh_required"] or nurse_panel_force["card_snapshot_required"]:
+        return False, f"nurse panel mark should not require full refresh: {nurse_panel_force}"
+    if not (nurse_panel_force["orders_refresh"] and nurse_panel_force["balance_refresh"]):
+        return False, f"nurse panel mark should refresh orders and balance: {nurse_panel_force}"
 
     gap = actions({
         "gap_detected": True,
@@ -5095,6 +5222,177 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
     empty_forced = actions({"forced": True, "force_source": "unknown_source"})
     if not (empty_forced["full_refresh_required"] and empty_forced["card_snapshot_required"]):
         return False, f"unknown forced refresh must be conservative: {empty_forced}"
+
+    return True, "ok"
+
+
+def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime, timedelta
+
+    from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
+    from rem_card.services.balance_calculator import BalanceCalculator
+    from rem_card.ui.shared.orders_balance_adapter import (
+        apply_current_order_mark_overrides,
+        build_balance_orders_from_orders_widget,
+    )
+
+    shift_start = datetime(2026, 5, 3, 8, 0)
+
+    class FakeService:
+        def get_day_period(self, value):
+            _ = value
+            return shift_start, shift_start + timedelta(days=1)
+
+    class FakeModel:
+        def __init__(self, *, pending_mark: bool):
+            self.service = FakeService()
+            self.admission_id = 7
+            self.shift_date = shift_start
+            self.orders = [
+                OrderDTO(
+                    id=11,
+                    admission_id=7,
+                    latin="NaCl",
+                    type=OrderType.INFUSION_INTERMITTENT,
+                    status=OrderStatus.ACTIVE,
+                    volume_total=100.0,
+                    duration_min=60,
+                    is_committed=1,
+                )
+            ]
+            admin = AdministrationDTO(
+                id=21,
+                order_id=11,
+                planned_time=shift_start + timedelta(hours=1),
+                status="planned",
+                is_committed=1,
+                comment="",
+                volume_ml=100.0,
+            )
+            if pending_mark:
+                setattr(admin, "_pending_mark", "nurse_executed")
+            self.admin_map = {(11, admin.planned_time.isoformat()): admin}
+
+    class FakeWidget:
+        def __init__(self, pending: int = 0, has_drafts: bool = False, pending_mark: bool = False):
+            self.model = FakeModel(pending_mark=pending_mark)
+            self._pending_admin_write_count = pending
+            self._has_drafts = has_drafts
+
+        def has_drafts(self):
+            return self._has_drafts
+
+    inactive_widget = FakeWidget()
+    if build_balance_orders_from_orders_widget(inactive_widget, 7, shift_start) is not None:
+        return False, "inactive orders widget without local state should not override balance runtime"
+
+    active_widget = FakeWidget()
+    active_widget.model.admin_map[(11, (shift_start + timedelta(hours=1)).isoformat())].comment = "nurse_not_executed"
+    active_orders = build_balance_orders_from_orders_widget(active_widget, 7, shift_start, tab_active=True)
+    if not active_orders:
+        return False, "active orders tab should use visible local model for balance"
+    active_admins = getattr(active_orders[0], "administrations", None) or []
+    if active_admins[0].comment != "nurse_not_executed":
+        return False, "active orders tab lost committed nurse mark from local model"
+
+    widget = FakeWidget(pending=1, pending_mark=True)
+    balance_orders = build_balance_orders_from_orders_widget(widget, 7, shift_start)
+    if not balance_orders or balance_orders[0] is widget.model.orders[0]:
+        return False, "local balance adapter did not return copied orders"
+    admins = getattr(balance_orders[0], "administrations", None) or []
+    if len(admins) != 1:
+        return False, f"local balance adapter did not attach administrations: {admins}"
+    if admins[0].comment != "nurse_executed" or admins[0].actual_time is None:
+        return False, "pending nurse mark was not applied to local balance administration"
+
+    setattr(widget.model.orders[0], "_pending_delete", True)
+    deleted_orders = build_balance_orders_from_orders_widget(widget, 7, shift_start)
+    if deleted_orders != []:
+        return False, f"pending deleted order should be excluded from local balance: {deleted_orders}"
+
+    if build_balance_orders_from_orders_widget(widget, 8, shift_start) is not None:
+        return False, "different admission should not use local orders"
+
+    runtime_orders = []
+    for order_id, admin_id, hour in ((101, 201, 1), (102, 202, 2)):
+        order = OrderDTO(
+            id=order_id,
+            admission_id=7,
+            drug_key="manual_balance_test",
+            latin="Manual balance test",
+            type=OrderType.INFUSION_INTERMITTENT,
+            status=OrderStatus.ACTIVE,
+            dose_value=0,
+            dose_unit="ml",
+            duration_min=0,
+            is_committed=1,
+            comment="S. NaCl - 250 ml",
+        )
+        order.administrations = [
+            AdministrationDTO(
+                id=admin_id,
+                order_id=order_id,
+                planned_time=shift_start + timedelta(hours=hour),
+                status="planned",
+                is_committed=1,
+                comment="",
+            )
+        ]
+        runtime_orders.append(order)
+
+    class FakeCurrentOrders:
+        def __init__(self, mark: str):
+            self.service = FakeService()
+            self.admission_id = 7
+            self.shift_date = shift_start
+            self._pending_marks = {
+                201: {
+                    "mark": mark,
+                    "actual_time": (shift_start + timedelta(hours=1)).isoformat(),
+                    "started_mono": 0.0,
+                }
+            }
+
+        def _get_pending_mark(self, admin_id: int):
+            return self._pending_marks.get(int(admin_id))
+
+    patched_not_done = apply_current_order_mark_overrides(
+        runtime_orders,
+        FakeCurrentOrders("nurse_not_executed"),
+        7,
+        shift_start,
+    )
+    if patched_not_done is None or patched_not_done[0].administrations[0].comment != "nurse_not_executed":
+        return False, "sector 1a pending not-done mark was not applied to balance orders"
+    if runtime_orders[0].administrations[0].comment:
+        return False, "sector 1a balance override mutated runtime orders"
+    base_calc = BalanceCalculator.calculate(runtime_orders, shift_start + timedelta(hours=3), shift_start + timedelta(days=1))
+    not_done_calc = BalanceCalculator.calculate(patched_not_done, shift_start + timedelta(hours=3), shift_start + timedelta(days=1))
+    if base_calc["daily"]["total"] != 500 or not_done_calc["daily"]["total"] != 250:
+        return False, f"sector 1a not-done daily balance mismatch: base={base_calc} not_done={not_done_calc}"
+
+    patched_done = apply_current_order_mark_overrides(
+        runtime_orders,
+        FakeCurrentOrders("nurse_executed"),
+        7,
+        shift_start,
+    )
+    done_calc = BalanceCalculator.calculate(patched_done, shift_start + timedelta(hours=3), shift_start + timedelta(days=1))
+    if done_calc["current"]["total"] != 250 or done_calc["daily"]["total"] != 500:
+        return False, f"sector 1a executed balance mismatch: {done_calc}"
+
+    patched_cancel = apply_current_order_mark_overrides(
+        patched_not_done,
+        FakeCurrentOrders(""),
+        7,
+        shift_start,
+    )
+    if patched_cancel is None or patched_cancel[0].administrations[0].comment:
+        return False, "sector 1a pending cancel mark did not clear balance order mark"
+    cancel_calc = BalanceCalculator.calculate(patched_cancel, shift_start + timedelta(hours=3), shift_start + timedelta(days=1))
+    if cancel_calc["daily"]["total"] != 500 or cancel_calc["current"]["total"] != 0:
+        return False, f"sector 1a cancel balance mismatch: {cancel_calc}"
 
     return True, "ok"
 
@@ -5214,6 +5512,7 @@ def main():
         ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
         ("lazy_section_snapshot_caches", _check_lazy_section_snapshot_caches),
         ("sync_coordinator_classifies_targeted_refresh", _check_sync_coordinator_classifies_targeted_refresh),
+        ("orders_balance_adapter_uses_local_state", _check_orders_balance_adapter_uses_local_state),
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
 

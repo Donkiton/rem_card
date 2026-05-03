@@ -44,6 +44,7 @@ class NurseOrdersWidget(QWidget):
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
     orderMarked = Signal()
+    localBalanceChanged = Signal()
     _LOCAL_SILENT_FORCE_PREFIXES = ("nurse_order_mark:",)
     _ORDERS_CHANGE_ENTITIES = {"orders", "administrations"}
 
@@ -1183,6 +1184,7 @@ class NurseOrdersWidget(QWidget):
         self.check_drafts()
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
+        self.localBalanceChanged.emit()
 
     def _apply_optimistic_nurse_mark(self, index, admin, mark: str):
         if not self.model or not index.isValid() or admin is None:
@@ -1218,6 +1220,7 @@ class NurseOrdersWidget(QWidget):
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
+        self.localBalanceChanged.emit()
 
     def _apply_committed_nurse_mark(self, index, admin, mark: str):
         if not self.model or not index.isValid() or admin is None:
@@ -1234,6 +1237,7 @@ class NurseOrdersWidget(QWidget):
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
+        self.localBalanceChanged.emit()
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent

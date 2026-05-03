@@ -13,8 +13,8 @@ class SyncCoordinator:
     }
 
     ENTITY_SCOPES = {
-        "orders": {"orders"},
-        "administrations": {"orders", "administrations"},
+        "orders": {"orders", "balance"},
+        "administrations": {"orders", "administrations", "balance"},
         "vitals": {"vitals"},
         "vital_settings": {"vitals"},
         "fluids": {"balance"},
@@ -34,8 +34,9 @@ class SyncCoordinator:
     }
 
     SOURCE_PREFIX_SCOPES = {
-        "orders_": {"orders"},
-        "nurse_order_mark:": {"orders", "administrations"},
+        "orders_": {"orders", "balance"},
+        "nurse_order_mark:": {"orders", "administrations", "balance"},
+        "nurse_order_panel_mark:": {"orders", "administrations", "balance"},
         "fluid": {"balance"},
         "balance": {"balance"},
         "diet": {"diet"},

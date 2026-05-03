@@ -2,7 +2,7 @@ import os
 import re
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
 from PySide6.QtCore import Qt, QRect, QPoint
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPixmap, QPolygon
+from PySide6.QtGui import QPainter, QColor, QPen, QPixmap, QPolygon
 from datetime import datetime, timedelta
 from ...data.dto.remcard_dto import OrderType, OrderStatus
 from ...services.order_domain_service import (
@@ -281,8 +281,6 @@ class OrdersDelegate(QStyledItemDelegate):
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignCenter, "Отм")
-        if pending:
-            self._draw_pending_corner(painter, rect)
 
     def _paint_planned_admin(self, painter: QPainter, rect: QRect, admin, *, pending: bool = False):
         painter.save()
@@ -298,9 +296,6 @@ class OrdersDelegate(QStyledItemDelegate):
 
         if cell_role in ("start", "body", "end"):
             self._draw_chain(painter, rect, cell_role, mark, pending=pending)
-
-        if pending:
-            self._draw_pending_corner(painter, rect)
 
         painter.restore()
 
@@ -349,15 +344,6 @@ class OrdersDelegate(QStyledItemDelegate):
         x = rect.left() + (rect.width() - pixmap.width()) // 2
         y = rect.top() + (rect.height() - pixmap.height()) // 2
         painter.drawPixmap(x, y, pixmap)
-
-    def _draw_pending_corner(self, painter: QPainter, rect: QRect):
-        painter.save()
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(95, 106, 117)))
-        radius = 2
-        dot_rect = QRect(rect.right() - 6, rect.top() + 3, radius * 2, radius * 2)
-        painter.drawEllipse(dot_rect)
-        painter.restore()
 
     def _draw_now_marker(self, painter: QPainter, rect: QRect, hour_dt, now: datetime):
         if now >= hour_dt and now < (hour_dt + timedelta(hours=1)):

@@ -24,6 +24,7 @@ class OrdersWidget(QWidget):
     draftStatusChanged = Signal(bool)
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
+    localBalanceChanged = Signal()
     _LOCAL_SILENT_FORCE_PREFIXES = (
         "orders_add_input:",
         "orders_left_click:",
@@ -78,6 +79,7 @@ class OrdersWidget(QWidget):
         self._admin_only_snapshot_until = 0.0
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
+        self._local_cell_draft_guard = False
         self._legacy_direct_snapshot_warned = False
         self._load_yesterday_worker = None
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
@@ -123,6 +125,32 @@ class OrdersWidget(QWidget):
         self._cached_has_administrations = False
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
+        self._clear_local_cell_draft_guard()
+
+    def _clear_local_cell_draft_guard(self):
+        self._local_cell_draft_guard = False
+
+    def _mark_local_cell_draft_guard(self):
+        if self.has_drafts():
+            self._local_cell_draft_guard = True
+            self._admin_only_snapshot_until = max(
+                self._admin_only_snapshot_until,
+                time.monotonic() + self._admin_only_snapshot_window_sec,
+            )
+
+    def _should_preserve_local_cell_draft(self, snapshot) -> bool:
+        if not self._local_cell_draft_guard:
+            return False
+        if bool(snapshot.get("has_any_draft", False)):
+            self._clear_local_cell_draft_guard()
+            return False
+        if not self.has_drafts():
+            self._clear_local_cell_draft_guard()
+            return False
+        if time.monotonic() >= self._admin_only_snapshot_until:
+            self._clear_local_cell_draft_guard()
+            return False
+        return True
 
     def _is_read_only(self) -> bool:
         """
@@ -268,6 +296,7 @@ class OrdersWidget(QWidget):
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
         self.check_drafts()
+        self.localBalanceChanged.emit()
 
     def _clear_local_order_row_pending_delete(self, order_id):
         if self.model is None:
@@ -285,6 +314,7 @@ class OrdersWidget(QWidget):
                 if hasattr(self, "table_view"):
                     self.table_view.viewport().update()
                 self.check_drafts()
+                self.localBalanceChanged.emit()
                 return
 
     def _mark_pending_structure_sync(self, change_id: int):
@@ -847,6 +877,20 @@ class OrdersWidget(QWidget):
             )
             return False
 
+        if self._should_preserve_local_cell_draft(snapshot):
+            logger.info(
+                "[OrdersClick] snapshot_skip_local_cell_draft_guard role=doctor admission_id=%s source=%s trace_id=%s current_has_drafts=%s snapshot_has_drafts=%s",
+                admission_id,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+                int(self.has_drafts()),
+                int(bool(snapshot.get("has_any_draft", False))),
+            )
+            self._queue_forced_reload_after_stale_snapshot(
+                reason="local_cell_draft_guard",
+            )
+            return True
+
         snapshot_signature = self._snapshot_apply_signature(snapshot, context_key)
         if (
             snapshot_signature is not None
@@ -898,6 +942,7 @@ class OrdersWidget(QWidget):
         self.check_drafts()
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
+        self.localBalanceChanged.emit()
         self._clear_soft_update_state()
         record_orders_sync_event(
             "applied",
@@ -935,6 +980,17 @@ class OrdersWidget(QWidget):
                 snapshot.get("source"),
                 snapshot.get("load_trace_id"),
                 snapshot.get("change_id"),
+            )
+            return True
+        if self._should_preserve_local_cell_draft(snapshot):
+            logger.info(
+                "[OrdersClick] snapshot_admin_only_skip_local_cell_draft_guard role=doctor admission_id=%s source=%s trace_id=%s",
+                admission_id,
+                snapshot.get("source"),
+                snapshot.get("load_trace_id"),
+            )
+            self._queue_forced_reload_after_stale_snapshot(
+                reason="local_cell_draft_guard_admin_only",
             )
             return True
         if (
@@ -1244,6 +1300,7 @@ class OrdersWidget(QWidget):
         self.check_drafts()
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
+        self.localBalanceChanged.emit()
 
     def _restore_admin_cells(self, previous_by_key: dict):
         if self.model is None or not previous_by_key:
@@ -1530,6 +1587,7 @@ class OrdersWidget(QWidget):
 
         if changed_keys:
             self._emit_admin_cell_changes(changed_keys)
+            self._mark_local_cell_draft_guard()
             logger.info(
                 "[OrdersClick] local_cell_update role=doctor admission_id=%s op=%s order_id=%s changed_cells=%s",
                 self.admission_id,
@@ -1692,6 +1750,8 @@ class OrdersWidget(QWidget):
                 return
             from rem_card.app.logger import logger
             logger.info(f"Карта назначений для ID {target_admission_id} успешно сохранена")
+            self._clear_local_cell_draft_guard()
+            self._admin_only_snapshot_until = 0.0
             self._clear_pending_reorder()
             self._refresh_model()
 
@@ -1715,6 +1775,8 @@ class OrdersWidget(QWidget):
         def after_success():
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
+            self._clear_local_cell_draft_guard()
+            self._admin_only_snapshot_until = 0.0
             self._clear_pending_reorder()
             self._refresh_model()
 
@@ -1908,6 +1970,7 @@ class OrdersWidget(QWidget):
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
         self._schedule_fast_sync()
+        self.localBalanceChanged.emit()
 
     def on_prescription_input(self, text):
         if self._is_read_only(): return
