@@ -6,6 +6,10 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.4.2 - 2026-05-03
+
+- Fix orders sheet refresh after local writes
+
 ## 1.4.1 - 2026-05-02
 
 - Remove legacy patient weight context
