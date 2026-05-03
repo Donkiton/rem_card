@@ -2844,7 +2844,7 @@ def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
 
 def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.analytics.multi_db_analytics import FALLBACK_DDL
-    from rem_card.ui.analytics.statistics_dialog import StatisticsDialog
+    from rem_card.services.analytics.detailed_statistics_service import DetailedStatisticsReportBuilder
 
     class Manager:
         def __init__(self, conn):
@@ -2894,36 +2894,8 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
             ],
         )
 
-    def make_dialog(conn):
-        dialog = StatisticsDialog.__new__(StatisticsDialog)
-        dialog.db_manager = Manager(conn)
-        dialog._start_dt = StatisticsDialog._parse_datetime("2026-04-01")
-        dialog._end_dt = StatisticsDialog._parse_datetime("2026-04-30")
-        dialog.start_date_str = dialog._start_dt.strftime("%Y-%m-%d 00:00:00")
-        dialog.end_date_str = dialog._end_dt.strftime("%Y-%m-%d 23:59:59")
-        dialog.section_groups = {
-            "Основная деятельность": {
-                "s1": "1. Общая деятельность отделения",
-                "s2": "2. Использование коечного фонда",
-                "s3": "3. Демография",
-                "s4": "4. Поток пациентов",
-                "s5": "5. Диагностическая структура",
-                "s6": "6. Исходы лечения",
-                "s7": "7. Время до смерти",
-                "s8": "8. Летальность по группам",
-            },
-            "Интенсивная терапия и вмешательства": {
-                "s9": "9. ИВЛ",
-                "s10": "10. Операции",
-                "s11": "11. Переливания",
-                "s16": "16. Индексы интенсивности",
-                "s17": "17. Индексы нагрузки",
-                "s18": "18. Специальные показатели",
-                "s19": "19. Нагрузка персонала",
-                "sx": "➕ Дополнительные показатели",
-            },
-        }
-        return dialog
+    def make_builder(conn):
+        return DetailedStatisticsReportBuilder(Manager(conn), "2026-04-01", "2026-04-30")
 
     def make_conn(with_data: bool):
         conn = sqlite3.connect(":memory:")
@@ -2933,12 +2905,12 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
         return conn
 
     def snapshot(with_data: bool):
-        dialog = make_dialog(make_conn(with_data))
-        stats = dialog._calculate_statistics()
+        builder = make_builder(make_conn(with_data))
+        stats = builder._calculate_statistics()
         selected = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s16", "s17", "s18", "s19", "sx"]
         return {
             "stats": stats,
-            "rows": {key: dialog._section_rows(key, stats) for key in selected},
+            "rows": {key: builder._section_rows(key, stats) for key in selected},
         }
 
     result = {"filled": snapshot(True), "empty": snapshot(False)}
@@ -3904,13 +3876,21 @@ def _check_analytics_runs_outside_ui_callbacks(temp_root: str) -> tuple[bool, st
     _ = temp_root
     graphs_source = (PROJECT_ROOT / "ui" / "analytics" / "graphs_dialog.py").read_text(encoding="utf-8")
     report_source = (PROJECT_ROOT / "ui" / "analytics" / "report_dialog.py").read_text(encoding="utf-8")
+    detailed_report_source = (PROJECT_ROOT / "ui" / "analytics" / "statistics_dialog.py").read_text(encoding="utf-8")
     worker_source = (PROJECT_ROOT / "ui" / "shared" / "analytics_worker.py").read_text(encoding="utf-8")
     pdf_worker_source = (PROJECT_ROOT / "ui" / "shared" / "html_pdf_worker.py").read_text(encoding="utf-8")
     graph_service_source = (PROJECT_ROOT / "services" / "analytics" / "graphs_service.py").read_text(encoding="utf-8")
     statistics_service_source = (PROJECT_ROOT / "services" / "analytics" / "statistics_service.py").read_text(encoding="utf-8")
+    detailed_statistics_service_source = (
+        PROJECT_ROOT / "services" / "analytics" / "detailed_statistics_service.py"
+    ).read_text(encoding="utf-8")
 
     forbidden_ui_tokens = ("cursor.execute", "pd.read_sql", "matplotlib", "QPdfWriter", "QTextDocument", "generate_g")
-    for label, source in (("graphs_dialog", graphs_source), ("report_dialog", report_source)):
+    for label, source in (
+        ("graphs_dialog", graphs_source),
+        ("report_dialog", report_source),
+        ("statistics_dialog", detailed_report_source),
+    ):
         for token in forbidden_ui_tokens:
             if token in source:
                 return False, f"{label} still contains heavy analytics token: {token}"
@@ -3919,7 +3899,11 @@ def _check_analytics_runs_outside_ui_callbacks(temp_root: str) -> tuple[bool, st
         return False, "AnalyticsWorker does not own callable execution"
     if "class HtmlPdfWorker(QThread)" not in pdf_worker_source or "QPdfWriter" not in pdf_worker_source:
         return False, "HtmlPdfWorker does not own HTML PDF generation"
-    for label, source in (("graphs dialog", graphs_source), ("report dialog", report_source)):
+    for label, source in (
+        ("graphs dialog", graphs_source),
+        ("report dialog", report_source),
+        ("statistics dialog", detailed_report_source),
+    ):
         if "def reject(self):" not in source or "def closeEvent(self, event):" not in source:
             return False, f"{label} must cancel/ignore worker callbacks on reject and closeEvent"
         if "self._closing = True" not in source:
@@ -3928,6 +3912,11 @@ def _check_analytics_runs_outside_ui_callbacks(temp_root: str) -> tuple[bool, st
         return False, "graphs service does not own graph generation"
     if "build_statistical_report_html" not in statistics_service_source or "cursor.execute" not in statistics_service_source:
         return False, "statistics service does not own SQL report generation"
+    if (
+        "build_detailed_statistics_report_html" not in detailed_statistics_service_source
+        or "cursor.execute" not in detailed_statistics_service_source
+    ):
+        return False, "detailed statistics service does not own detailed SQL report generation"
     return True, "ok"
 
 
