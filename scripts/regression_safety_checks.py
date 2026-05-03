@@ -51,6 +51,37 @@ def _prepare_import_environment(temp_root: str):
     os.environ["REMCARD_LOCAL_CACHE_MAX_FILES"] = "200"
 
 
+def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import runtime_paths
+
+    saved_env = os.environ.get(runtime_paths.DEV_BAZA_DIR_ENV)
+    original_get_project_root = runtime_paths.get_project_root
+    try:
+        os.environ.pop(runtime_paths.DEV_BAZA_DIR_ENV, None)
+        project_root = os.path.join(temp_root, "project_root")
+        expected = os.path.join(project_root, runtime_paths.BAZA_DIR_NAME)
+        legacy = os.path.join(project_root, "rework_baza")
+        os.makedirs(expected, exist_ok=True)
+        os.makedirs(legacy, exist_ok=True)
+        runtime_paths.get_project_root = lambda: project_root
+
+        resolved = runtime_paths.get_dev_baza_dir()
+        if os.path.abspath(resolved) != os.path.abspath(expected):
+            return False, f"dev baza dir should use project Baza_rao3_jurnal, got: {resolved}"
+
+        override = os.path.join(temp_root, "explicit_dev_override")
+        os.environ[runtime_paths.DEV_BAZA_DIR_ENV] = override
+        if os.path.abspath(runtime_paths.get_dev_baza_dir()) != os.path.abspath(override):
+            return False, "explicit REMCARD_DEV_BAZA_DIR override was not honored"
+        return True, "ok"
+    finally:
+        runtime_paths.get_project_root = original_get_project_root
+        if saved_env is None:
+            os.environ.pop(runtime_paths.DEV_BAZA_DIR_ENV, None)
+        else:
+            os.environ[runtime_paths.DEV_BAZA_DIR_ENV] = saved_env
+
+
 def _check_arbitrary_baza_dir_name_allowed(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.runtime_paths import (
         create_baza_structure_and_db,
@@ -5120,6 +5151,7 @@ def main():
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
+        ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
         ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),

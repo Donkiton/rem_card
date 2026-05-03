@@ -8,7 +8,6 @@ from typing import Optional
 
 
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
-DEV_BAZA_DIR_NAME = "rework_baza"
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
@@ -70,10 +69,6 @@ def get_dev_baza_dir() -> str:
     override = os.environ.get(DEV_BAZA_DIR_ENV)
     if override:
         return _normalize_baza_dir(override)
-
-    test_baza_dir = os.path.join(get_project_root(), DEV_BAZA_DIR_NAME)
-    if os.path.isdir(test_baza_dir):
-        return test_baza_dir
 
     return os.path.join(get_project_root(), BAZA_DIR_NAME)
 
