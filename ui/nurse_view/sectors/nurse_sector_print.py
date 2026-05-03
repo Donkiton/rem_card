@@ -256,7 +256,7 @@ class NurseSectorPrint(BaseSectorWidget):
         
         for b in [self.btn_gen, self.btn_open, self.btn_full]: btn_layout.addWidget(b)
         body_layout.addStretch(); body_layout.addLayout(btn_layout)
-        layout.addWidget(lbl); layout.addWidget(body); self.set_content(main_frame); self.last_pdf = None
+        layout.addWidget(lbl); layout.addWidget(body); self.set_content(main_frame); self.last_pdf = None; self.pdf_worker = None
 
     def load_settings(self):
         c = self.config.load(); self.cb_vitals.setChecked(c["vitals"]); self.cb_balance.setChecked(c["balance"]); self.cb_prescriptions.setChecked(c["prescriptions"]); self.cb_events.setChecked(c["events"])
@@ -303,9 +303,7 @@ class NurseSectorPrint(BaseSectorWidget):
             path = pathlib.Path(REPORT_DIR)
             path.mkdir(parents=True, exist_ok=True)
             f_path = path / f"NURSE_{d['patient_name'].replace(' ','_')}_{d['start_dt'].strftime('%Y-%m-%d')}.pdf"
-            from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
-            ReportBuilder.build_pdf(d, self.config.load(), f_path)
-            self.last_pdf = f_path; self.status_label.setText("Готово!"); self.btn_open.setEnabled(True)
+            self._start_pdf_worker(d, self.config.load(), f_path, open_after=False, ready_text="Готово!")
         except Exception as e: self.on_err(str(e))
 
     def on_full(self, res):
@@ -315,10 +313,31 @@ class NurseSectorPrint(BaseSectorWidget):
             path = pathlib.Path(REPORT_DIR)
             path.mkdir(parents=True, exist_ok=True)
             f_path = path / f"FULL_NURSE_{res[0]['patient_name'].replace(' ','_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-            from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
-            ReportBuilder.build_pdf(res, self.config.load(), f_path)
-            self.last_pdf = f_path; self.status_label.setText("Готов!"); self.open_pdf()
+            self._start_pdf_worker(res, self.config.load(), f_path, open_after=True, ready_text="Готов!")
         except Exception as e: self.on_err(str(e))
+
+    def _start_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path, *, open_after: bool, ready_text: str):
+        if self.pdf_worker is not None and self.pdf_worker.isRunning():
+            CustomMessageBox.information(self, "Инфо", "PDF уже формируется.")
+            return
+        from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
+
+        self.status_label.setText("Сборка PDF...")
+        self.pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
+        self.pdf_worker.completed.connect(lambda path: self._on_pdf_ready(path, open_after=open_after, ready_text=ready_text))
+        self.pdf_worker.error.connect(self.on_err)
+        self.pdf_worker.finished.connect(self._clear_pdf_worker)
+        self.pdf_worker.start()
+
+    def _on_pdf_ready(self, pdf_path, *, open_after: bool, ready_text: str):
+        self.last_pdf = pathlib.Path(pdf_path)
+        self.status_label.setText(ready_text)
+        self.btn_open.setEnabled(True)
+        if open_after:
+            self.open_pdf()
+
+    def _clear_pdf_worker(self):
+        self.pdf_worker = None
 
     def open_pdf(self):
         if self.last_pdf and self.last_pdf.exists(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_pdf)))

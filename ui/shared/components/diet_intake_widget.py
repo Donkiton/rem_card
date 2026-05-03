@@ -63,6 +63,7 @@ class DietIntakeWidget(QWidget):
         self._external_sector_header = False
         self._sync_prn_pending = False
         self._destroyed = False
+        self._write_pending = False
         self._fact_undo_stack = []
         self._sync_prn_timer = QTimer(self)
         self._sync_prn_timer.setSingleShot(True)
@@ -272,6 +273,7 @@ class DietIntakeWidget(QWidget):
     def set_service(self, service):
         self.service = service
         self._fact_undo_stack = []
+        self._write_pending = False
         self.refresh_data()
 
     def set_read_only(self, read_only: bool):
@@ -423,8 +425,8 @@ class DietIntakeWidget(QWidget):
         self._clear_rows()
         is_doctor = self.role == "doctor"
         is_nurse = self.role == "nurse"
-        can_edit_plan = is_doctor and not self.read_only
-        can_edit_fact = is_nurse and not self.read_only
+        can_edit_plan = is_doctor and not self.read_only and not self._write_pending
+        can_edit_fact = is_nurse and not self.read_only and not self._write_pending
 
         self.template_frame.setVisible(is_doctor or is_nurse)
         self.template_combo.setEnabled(can_edit_plan)
@@ -475,7 +477,9 @@ class DietIntakeWidget(QWidget):
             row_idx = self._add_event_row(row_idx, event, can_edit_fact)
 
         if row_idx == 1:
-            if is_doctor:
+            if self._write_pending:
+                text = "Сохранение..."
+            elif is_doctor:
                 text = "Выберите питание или добавьте время."
             elif show_prn_input:
                 text = "План не задан. Внесите питье по потребности ниже."
@@ -652,7 +656,7 @@ class DietIntakeWidget(QWidget):
         return field
 
     def _add_empty_plan_row(self):
-        if not self.service or not self.shift_date or self.read_only:
+        if not self.service or not self.shift_date or self.read_only or self._write_pending:
             return
         next_time = self.service.next_full_hour(datetime.now().strftime("%H:%M"), self.shift_date)
         row_idx = self.rows_layout.rowCount()
@@ -660,7 +664,7 @@ class DietIntakeWidget(QWidget):
         self.empty_label.setText("")
 
     def _on_template_selected(self, index: int):
-        if self._suppress_template_change or self.role != "doctor" or self.read_only:
+        if self._suppress_template_change or self.role != "doctor" or self.read_only or self._write_pending:
             return
         template_id = self.template_combo.itemData(index)
         if not template_id:
@@ -677,6 +681,8 @@ class DietIntakeWidget(QWidget):
         self._render()
 
     def _save_current(self):
+        if self._write_pending:
+            return
         if self.role == "doctor":
             self._save_plan()
         elif self.role == "nurse":
@@ -703,14 +709,19 @@ class DietIntakeWidget(QWidget):
         diet_text = self._draft_diet_text
         if diet_text is None:
             diet_text = getattr(self._plan, "diet_text", "") if self._plan else ""
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+        service = self.service
+        template_id = self._current_template_id()
+        items = [dict(item) for item in items]
 
         def op():
-            return self.service.upsert_diet_plan(
-                self.admission_id,
-                self.shift_date,
+            return service.upsert_diet_plan(
+                admission_id,
+                shift_date,
                 diet_text,
                 items,
-                template_id=self._current_template_id(),
+                template_id=template_id,
                 expected_version=expected_version,
             )
 
@@ -750,22 +761,29 @@ class DietIntakeWidget(QWidget):
         if not changes:
             self.refresh_data()
             return
+        changes = [dict(change) for change in changes]
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+        service = self.service
 
         def op():
+            if hasattr(service, "apply_oral_intake_changes"):
+                return service.apply_oral_intake_changes(admission_id, changes)
             result = None
             for change in changes:
-                result = self.service.upsert_oral_intake_event(
-                    self.admission_id,
+                result = service.upsert_oral_intake_event(
+                    admission_id,
                     change["event_dt"],
                     change["amount"],
                     expected_version=change["expected_version"],
                 )
-            self._push_fact_undo(changes)
             return result
 
-        self._enqueue_write("oral_intake_save", op)
+        self._enqueue_write("oral_intake_save", op, on_success=lambda _result: self._push_fact_undo(changes))
 
     def _secondary_action(self):
+        if self._write_pending:
+            return
         if self.role == "nurse":
             self._undo_last_fact()
         else:
@@ -780,10 +798,15 @@ class DietIntakeWidget(QWidget):
             return
         if not self._fact_undo_stack:
             return
-        undo_batch = self._fact_undo_stack[-1]
+        undo_batch = [dict(change) for change in self._fact_undo_stack[-1]]
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+        service = self.service
 
         def op():
-            current_events = self.service.get_oral_intake_events(self.admission_id, self.shift_date)
+            if hasattr(service, "undo_oral_intake_changes"):
+                return service.undo_oral_intake_changes(admission_id, shift_date, undo_batch)
+            current_events = service.get_oral_intake_events(admission_id, shift_date)
             result = None
             for change in reversed(undo_batch):
                 current_event = self._event_for_time_in(current_events, change["event_dt"])
@@ -791,22 +814,25 @@ class DietIntakeWidget(QWidget):
                 if change["before_amount"] is None:
                     if current_event is None:
                         continue
-                    result = self.service.delete_oral_intake_event(
-                        self.admission_id,
+                    result = service.delete_oral_intake_event(
+                        admission_id,
                         change["event_dt"],
                         expected_version=expected_version,
                     )
                 else:
-                    result = self.service.upsert_oral_intake_event(
-                        self.admission_id,
+                    result = service.upsert_oral_intake_event(
+                        admission_id,
                         change["event_dt"],
                         change["before_amount"],
                         expected_version=expected_version,
                     )
-            self._fact_undo_stack.pop()
             return result
 
-        self._enqueue_write("oral_intake_undo_last", op)
+        def on_success(_result):
+            if self._fact_undo_stack and self._fact_undo_stack[-1] == undo_batch:
+                self._fact_undo_stack.pop()
+
+        self._enqueue_write("oral_intake_undo_last", op, on_success=on_success)
 
     def _add_fact_change(self, changes_by_key: dict, event_dt: datetime, amount: Optional[float], event):
         key = self._event_key(event_dt)
@@ -845,22 +871,95 @@ class DietIntakeWidget(QWidget):
         if len(self._fact_undo_stack) > 20:
             self._fact_undo_stack = self._fact_undo_stack[-20:]
 
-    def _enqueue_write(self, description: str, operation):
-        try:
-            operation()
+    def _enqueue_write(self, description: str, operation, *, on_success=None):
+        if not self.service:
+            return
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+        self._begin_write_pending()
+
+        def handle_success(result):
+            if not self._is_current_context(admission_id, shift_date):
+                self._finish_write_pending()
+                return
+            if on_success:
+                on_success(result)
+            self._finish_write_pending()
             self._on_write_success()
+
+        def handle_error(exc):
+            logger.warning(
+                "DietIntakeWidget queued write failed for %s: %s",
+                description,
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            self._finish_write_pending()
+            if self._is_current_context(admission_id, shift_date):
+                self.refresh_data(force=True)
+            self._show_error(exc, refresh=False)
+
+        if hasattr(self.service, "enqueue_write"):
+            try:
+                self.service.enqueue_write(
+                    description,
+                    operation,
+                    on_success=handle_success,
+                    on_error=handle_error,
+                )
+            except Exception as exc:
+                handle_error(exc)
+            return
+        try:
+            result = operation()
         except Exception as exc:
-            self._show_error(exc)
+            handle_error(exc)
+            return
+        handle_success(result)
+
+    def _begin_write_pending(self):
+        self._write_pending = True
+        self._set_write_controls_enabled(False)
+        self.empty_label.setText("Сохранение...")
+
+    def _finish_write_pending(self):
+        self._write_pending = False
+        self._set_write_controls_enabled(True)
+
+    def _set_write_controls_enabled(self, enabled: bool):
+        is_doctor = self.role == "doctor"
+        is_nurse = self.role == "nurse"
+        can_edit_plan = enabled and is_doctor and not self.read_only
+        can_edit_fact = enabled and is_nurse and not self.read_only
+        self.template_combo.setEnabled(can_edit_plan)
+        self.btn_add_plan_time.setEnabled(can_edit_plan)
+        self.btn_save.setEnabled(can_edit_plan or can_edit_fact)
+        if is_nurse:
+            self.btn_cancel.setEnabled(can_edit_fact and bool(self._fact_undo_stack))
+        else:
+            self.btn_cancel.setEnabled(can_edit_plan)
+        for time_widget, amount_widget in self._plan_row_widgets:
+            time_widget.setReadOnly(not can_edit_plan)
+            amount_widget.setReadOnly(not can_edit_plan)
+        for record in self._fact_fields:
+            field = record.get("field")
+            if field is not None:
+                field.setReadOnly(not can_edit_fact)
+        self.prn_time.setReadOnly(not can_edit_fact)
+        self.prn_amount.setReadOnly(not can_edit_fact)
 
     def _on_write_success(self):
         self._reset_draft()
-        self.refresh_data()
+        self.refresh_data(force=True)
         self.data_changed.emit()
 
-    def _show_error(self, exc: Exception):
-        if not isinstance(exc, ValueError):
+    def _show_error(self, exc: Exception, *, refresh: bool = True):
+        if refresh and not isinstance(exc, ValueError):
             self.refresh_data()
         CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения питания: {exc}")
+
+    def _is_current_context(self, admission_id, shift_date) -> bool:
+        return self.admission_id == admission_id and self.shift_date == shift_date
 
     def _reset_draft(self):
         self._draft_template_id = None

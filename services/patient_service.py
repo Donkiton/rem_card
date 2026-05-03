@@ -1,19 +1,45 @@
 import os
 import time
 import threading
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 from ..data.dto.remcard_dto import PatientDTO
 from ..data.dao.patient_dao import PatientDAO
 from rem_card.app.logger import logger
 
 class PatientService:
-    def __init__(self, dao: PatientDAO):
+    def __init__(self, dao: PatientDAO, data_service=None):
         self.dao = dao
+        self.data_service = data_service
         self.outcome_release_delay_minutes = max(0, int(os.environ.get("REMCARD_OUTCOME_RELEASE_DELAY_MIN", "30")))
         self._outcome_release_check_interval_sec = max(5.0, float(os.environ.get("REMCARD_OUTCOME_RELEASE_CHECK_SEC", "15")))
         self._last_outcome_release_check_mono = 0.0
         self._outcome_release_guard = threading.Lock()
         self._outcome_release_worker_active = False
+
+    def enqueue_write(
+        self,
+        description: str,
+        operation: Callable[[], Any],
+        on_success=None,
+        on_error=None,
+    ):
+        if self.data_service:
+            self.data_service.enqueue_write(
+                description=description,
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+        try:
+            result = operation()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+                return
+            raise
+        if on_success:
+            on_success(result)
 
     def sync_patients(self):
         self.dao.sync_from_journal()

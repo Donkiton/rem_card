@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 @dataclass
@@ -31,8 +31,28 @@ class AdmissionRecord:
 
 
 class PatientBedManagementService:
-    def __init__(self, db_manager):
+    def __init__(self, db_manager, data_service=None):
         self.db = db_manager
+        self.data_service = data_service
+
+    def enqueue_write(self, description: str, operation: Callable[[], Any], on_success=None, on_error=None):
+        if self.data_service:
+            self.data_service.enqueue_write(
+                description=description,
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+        try:
+            result = operation()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+                return
+            raise
+        if on_success:
+            on_success(result)
 
     def get_beds_snapshot(self):
         return self.db.fetch_all_remcard(

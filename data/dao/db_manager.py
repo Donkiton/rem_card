@@ -21,16 +21,24 @@ from rem_card.app.db_availability import (
 )
 from rem_card.app.logger import logger
 from rem_card.app.local_replica_sync import LocalReplicaSync
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import (
+    BAZA_DIR,
     BACKUPS_RC_DIR,
     BACKUPS_VALID_DIR,
-    CORRUPTED_DB_DIR,
+    CLIENT_POLICY_PATH,
     DB_LOCK_PATH,
     DB_ROTATION_LOCK_PATH,
     INVALID_BACKUPS_DIR,
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
     LOCAL_REMCARD_REPLICA_PATH,
+)
+from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+from rem_card.app.startup_db_guard import (
+    is_confirmed_db_corruption_reason,
+    is_retryable_db_availability_reason,
+    recover_shared_db_with_locks,
 )
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
@@ -39,11 +47,9 @@ from rem_card.app.sqlite_shared import (
     configure_connection,
     find_latest_backup,
     list_backup_candidates,
-    restore_from_best_available_source,
     run_integrity_check,
     run_quick_check,
 )
-from rem_card.app.unified_db_schema import ensure_unified_schema
 
 
 GLOBAL_CHANGELOG_ENTITIES = ("patients", "admissions", "beds", "operations", "diet_templates")
@@ -379,28 +385,39 @@ class DatabaseManager:
             )
             return
 
-        ok, result = run_quick_check(self._remcard_conn)
+        try:
+            ok, result = run_quick_check(self._remcard_conn)
+        except Exception as exc:
+            result = str(exc)
+            if is_database_unavailable_error(exc) or is_retryable_db_availability_reason(result):
+                raise RuntimeError(f"Database quick_check could not run because DB is unavailable: {result}") from exc
+            if not is_confirmed_db_corruption_reason(result):
+                raise
+            ok = False
+
         if ok:
             logger.info("SQLite quick_check passed for %s", self.db_path)
             self._write_startup_quickcheck_ts()
             return
 
+        if not is_confirmed_db_corruption_reason(result):
+            raise RuntimeError(f"Database quick_check failed without confirmed corruption: {result}")
+
         logger.error("SQLite quick_check failed for %s: %s", self.db_path, result)
         self._close_connections_for_restore()
-        try:
-            restored_from, quarantined_path = restore_from_best_available_source(
-                db_path=self.db_path,
-                backup_dir=BACKUPS_RC_DIR,
-                preferred_sources=[LOCAL_REMCARD_REPLICA_PATH],
-                logger=logger,
-                quarantine_dir=CORRUPTED_DB_DIR,
-                failure_reason=f"startup quick_check failed: {result}",
+        recovery_result = recover_shared_db_with_locks(
+            baza_dir=BAZA_DIR,
+            db_path=self.db_path,
+            role=None,
+            failure_reason=f"startup quick_check failed: {result}",
+        )
+        if not recovery_result.ok:
+            raise RuntimeError(
+                f"Database quick_check failed and safe recovery was not completed: {recovery_result.technical_reason or result}"
             )
-            logger.warning("Auto-recovery selected source: %s", restored_from)
-            if quarantined_path:
-                logger.warning("Corrupted primary DB moved to quarantine: %s", quarantined_path)
-        except Exception as exc:
-            raise RuntimeError(f"Database quick_check failed and no healthy recovery source was found: {result}") from exc
+        logger.warning("Auto-recovery selected source: %s", recovery_result.restored_from)
+        if recovery_result.quarantine_path:
+            logger.warning("Corrupted primary DB moved to quarantine: %s", recovery_result.quarantine_path)
 
         self._init_connections()
 
@@ -418,8 +435,18 @@ class DatabaseManager:
         self._journal_conn = None
 
     def _init_unified_schema(self):
-        with self.remcard_transaction(source="schema_init"):
-            ensure_unified_schema(self._remcard_conn, logger=logger)
+        ensure_unified_schema_with_migration_backup(
+            self._remcard_conn,
+            db_path=self.db_path,
+            backup_dir=BACKUPS_VALID_DIR,
+            invalid_dir=INVALID_BACKUPS_DIR,
+            policy_path=CLIENT_POLICY_PATH,
+            role=None,
+            baza_dir=BAZA_DIR,
+            logger=logger,
+            controller=self.write_controller,
+            source="schema_init",
+        )
 
     def _ensure_cycle_meta_initialized(self):
         try:
@@ -1123,25 +1150,63 @@ class DatabaseManager:
 
     def fetch_all_remcard(self, query, params=()):
         logger.debug("SQL RemCard FetchAll: %s | Params: %s", query, params)
-        if self._in_current_thread_remcard_transaction():
-            return self._fetch_all_central(query, params, use_write_connection=True)
-        if self._should_read_from_local():
-            try:
-                return self._local_replica.fetch_all(query, params)
-            except Exception as exc:
-                logger.debug("Local replica fetch_all failed, fallback to central: %s", exc)
-        return self._fetch_all_central(query, params)
+        started = time.perf_counter()
+        source = "central"
+        status = "error"
+        try:
+            if self._in_current_thread_remcard_transaction():
+                rows = self._fetch_all_central(query, params, use_write_connection=True)
+                status = "ok"
+                return rows
+            if self._should_read_from_local():
+                try:
+                    rows = self._local_replica.fetch_all(query, params)
+                    source = "local_replica"
+                    status = "ok"
+                    return rows
+                except Exception as exc:
+                    logger.debug("Local replica fetch_all failed, fallback to central: %s", exc)
+            rows = self._fetch_all_central(query, params)
+            status = "ok"
+            return rows
+        finally:
+            record_metric(
+                "read_duration_ms",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                operation="fetch_all",
+                source=source,
+                status=status,
+            )
 
     def fetch_one_remcard(self, query, params=()):
         logger.debug("SQL RemCard FetchOne: %s | Params: %s", query, params)
-        if self._in_current_thread_remcard_transaction():
-            return self._fetch_one_central(query, params, use_write_connection=True)
-        if self._should_read_from_local():
-            try:
-                return self._local_replica.fetch_one(query, params)
-            except Exception as exc:
-                logger.debug("Local replica fetch_one failed, fallback to central: %s", exc)
-        return self._fetch_one_central(query, params)
+        started = time.perf_counter()
+        source = "central"
+        status = "error"
+        try:
+            if self._in_current_thread_remcard_transaction():
+                row = self._fetch_one_central(query, params, use_write_connection=True)
+                status = "ok"
+                return row
+            if self._should_read_from_local():
+                try:
+                    row = self._local_replica.fetch_one(query, params)
+                    source = "local_replica"
+                    status = "ok"
+                    return row
+                except Exception as exc:
+                    logger.debug("Local replica fetch_one failed, fallback to central: %s", exc)
+            row = self._fetch_one_central(query, params)
+            status = "ok"
+            return row
+        finally:
+            record_metric(
+                "read_duration_ms",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                operation="fetch_one",
+                source=source,
+                status=status,
+            )
 
     def fetch_all_journal(self, query, params=()):
         """Compatibility alias for legacy journal callers."""
@@ -1211,6 +1276,13 @@ class DatabaseManager:
                 self._prefer_central_reads_until = time.time() + LOCAL_READ_AFTER_WRITE_GRACE_SEC
             if (time.time() - self._local_replica.last_sync_ok_ts) >= self._local_sync_interval_sec:
                 self._local_replica.trigger_fast_sync()
+        record_metric(
+            "latest_change_id",
+            current,
+            admission_id=admission_id,
+            include_global=include_global,
+            source="central" if used_central else "fallback",
+        )
         return current
 
     def fetch_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):

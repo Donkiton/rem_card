@@ -184,6 +184,21 @@ class OrdersWidget(QWidget):
             if order and order.id is not None and order.status != OrderStatus.DELETED
         ]
 
+    def _visible_order_revision_map(self, order_ids=None):
+        if not self.model:
+            return {}
+        allowed = {int(item) for item in order_ids if item is not None} if order_ids is not None else None
+        revisions = {}
+        for order in self.model.orders:
+            order_id = getattr(order, "id", None)
+            if order_id is None:
+                continue
+            order_id = int(order_id)
+            if allowed is not None and order_id not in allowed:
+                continue
+            revisions[order_id] = int(getattr(order, "revision", 0) or 0)
+        return revisions
+
     def _clear_pending_reorder(self):
         self._pending_reorder_order_ids = []
 
@@ -198,6 +213,7 @@ class OrdersWidget(QWidget):
         if not self._pending_reorder_order_ids or not self.admission_id or not self.shift_date:
             return
         ordered_order_ids = list(self._pending_reorder_order_ids)
+        expected_revisions = self._visible_order_revision_map(ordered_order_ids)
         if not hasattr(self.service, "save_order_draft_sort"):
             return
         self._enqueue_write(
@@ -206,6 +222,7 @@ class OrdersWidget(QWidget):
                 self.admission_id,
                 self.shift_date,
                 ids,
+                expected_revisions=expected_revisions,
             ),
             on_success=lambda: self._schedule_state_sync(),
             on_error=lambda _exc: self.request_refresh(force=True),
@@ -227,30 +244,37 @@ class OrdersWidget(QWidget):
         if not self.model or row < 0 or row >= len(self.model.orders):
             return
 
-        order_id = getattr(order, "id", None)
-        self.model.beginResetModel()
-        try:
-            self.model.orders.pop(row)
-            if order_id is not None:
-                self.model.admin_map = {
-                    key: admin
-                    for key, admin in self.model.admin_map.items()
-                    if key[0] != order_id
-                }
-            self.model._renumber_local_sort_order()
-            if was_committed:
-                self.model.has_any_draft = True
-                self._cached_has_drafts = True
-            elif hasattr(self.model, "_recompute_draft_flag"):
-                self.model._recompute_draft_flag()
-                self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
-            self._cached_has_orders = any(
-                item and item.status != OrderStatus.DELETED
-                for item in self.model.orders
-            )
-        finally:
-            self.model.endResetModel()
+        setattr(self.model.orders[row], "_pending_delete", True)
+        if was_committed:
+            self.model.has_any_draft = True
+            self._cached_has_drafts = True
+        elif hasattr(self.model, "_recompute_draft_flag"):
+            self.model._recompute_draft_flag()
+            self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
+        idx_left = self.model.index(row, 0)
+        idx_right = self.model.index(row, max(0, self.model.columnCount() - 1))
+        self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
         self.check_drafts()
+
+    def _clear_local_order_row_pending_delete(self, order_id):
+        if self.model is None:
+            return
+        for row, item in enumerate(self.model.orders):
+            if getattr(item, "id", None) == order_id:
+                if hasattr(item, "_pending_delete"):
+                    delattr(item, "_pending_delete")
+                if hasattr(self.model, "_recompute_draft_flag"):
+                    self.model._recompute_draft_flag()
+                    self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
+                idx_left = self.model.index(row, 0)
+                idx_right = self.model.index(row, max(0, self.model.columnCount() - 1))
+                self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
+                if hasattr(self, "table_view"):
+                    self.table_view.viewport().update()
+                self.check_drafts()
+                return
 
     def _mark_pending_structure_sync(self, change_id: int):
         try:
@@ -1223,6 +1247,32 @@ class OrdersWidget(QWidget):
             changed_keys.append(key)
         self._emit_admin_cell_changes(changed_keys)
 
+    def _apply_pending_cell(
+        self,
+        index,
+        order: OrderDTO,
+        admin: AdministrationDTO,
+        planned_time: datetime,
+        op_prefix: str,
+    ) -> dict:
+        if not self.model or not index.isValid():
+            return {}
+        key = (getattr(order, "id", None), planned_time.isoformat())
+        if key[0] is None:
+            return {}
+        had_previous = key in self.model.admin_map
+        previous_admin = copy(self.model.admin_map[key]) if had_previous else None
+        pending_admin = copy(previous_admin) if previous_admin is not None else self._new_optimistic_admin(
+            order,
+            planned_time,
+            role="single",
+            previous_admin=admin,
+        )
+        setattr(pending_admin, "_pending_cell_action", op_prefix)
+        self.model.admin_map[key] = pending_admin
+        self._emit_admin_cell_changes([key])
+        return {key: (had_previous, previous_admin)}
+
     @staticmethod
     def _is_long_order(order: OrderDTO) -> bool:
         try:
@@ -1479,22 +1529,23 @@ class OrdersWidget(QWidget):
     ):
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
-        previous_by_key = self._apply_optimistic_cell(
+        self._perf_mark_click(perf_click_id, "optimistic_skip", extra="pending_commit")
+        previous_by_key = self._apply_pending_cell(
             index,
             order,
             admin,
             planned_time,
             op_prefix,
-            perf_click_id=perf_click_id,
         )
 
         def on_success():
             self._finish_admin_write()
-            self._schedule_fast_sync()
+            self._refresh_model()
 
         def on_error(exc):
             self._finish_admin_write()
             self._restore_admin_cells(previous_by_key)
+            self.request_refresh(force=True)
 
         self._enqueue_write(
             description,
@@ -1590,6 +1641,7 @@ class OrdersWidget(QWidget):
     def finalize_card(self):
         if not self.admission_id or self._is_read_only(): return
         ordered_order_ids = list(self._pending_reorder_order_ids or [])
+        expected_revisions = self._visible_order_revision_map()
 
         def after_success():
             from rem_card.app.logger import logger
@@ -1603,12 +1655,14 @@ class OrdersWidget(QWidget):
                 self.admission_id,
                 shift_date=self.shift_date,
                 ordered_order_ids=ids,
+                expected_revisions=expected_revisions,
             ),
             on_success=after_success,
         )
 
     def clear_drafts(self):
         if not self.admission_id or self._is_read_only(): return
+        expected_revisions = self._visible_order_revision_map()
 
         def after_success():
             self._clear_pending_reorder()
@@ -1616,7 +1670,11 @@ class OrdersWidget(QWidget):
 
         self._enqueue_write(
             f"orders_clear_drafts:{self.admission_id}",
-            operation=lambda: self.service.clear_order_drafts(self.admission_id, self.shift_date),
+            operation=lambda: self.service.clear_order_drafts(
+                self.admission_id,
+                self.shift_date,
+                expected_revisions=expected_revisions,
+            ),
             on_success=after_success,
         )
 
@@ -1974,13 +2032,23 @@ class OrdersWidget(QWidget):
                         return True
                     order = self.model.orders[row]
                     was_committed = self._is_committed_value(getattr(order, "is_committed", 0))
+                    order_id = order.id
+                    expected_revision = getattr(order, "revision", None)
                     self._mark_local_order_row_deleted(row, order, was_committed=was_committed)
 
+                    def on_delete_error(exc, oid=order_id):
+                        self._clear_local_order_row_pending_delete(oid)
+                        self._on_cell_write_failed(exc)
+
                     self._enqueue_write(
-                        f"orders_soft_delete_row:{order.id}",
-                        operation=lambda: self.service.soft_delete_order_row(order.id, was_committed),
+                        f"orders_soft_delete_row:{order_id}",
+                        operation=lambda oid=order_id, rev=expected_revision: self.service.soft_delete_order_row(
+                            oid,
+                            was_committed,
+                            expected_revision=rev,
+                        ),
                         on_success=self._refresh_model,
-                        on_error=self._on_cell_write_failed,
+                        on_error=on_delete_error,
                     )
                     return True
                 if index.column() > 0:
@@ -2087,6 +2155,7 @@ class OrdersWidget(QWidget):
 
     def clear_all_orders(self):
         if not self.admission_id or self._is_read_only(): return
+        expected_revisions = self._visible_order_revision_map()
 
         def after_success():
             self._clear_pending_reorder()
@@ -2094,7 +2163,11 @@ class OrdersWidget(QWidget):
 
         self._enqueue_write(
             f"orders_clear_all:{self.admission_id}",
-            operation=lambda: self.service.clear_order_list(self.admission_id, self.shift_date),
+            operation=lambda: self.service.clear_order_list(
+                self.admission_id,
+                self.shift_date,
+                expected_revisions=expected_revisions,
+            ),
             on_success=after_success,
         )
 
@@ -2116,10 +2189,12 @@ class OrdersWidget(QWidget):
                 )
 
             replace_existing = False
+            expected_revisions = {}
             if self.has_orders() or self.has_drafts():
                 reply = self._show_question("Лист назначений не пуст. Вы уверены, что хотите заменить текущий лист назначения?\nВсе текущие назначения будут переведены в черновики на удаление.")
                 if reply != CustomMessageBox.Yes: return
                 replace_existing = True
+                expected_revisions = self._visible_order_revision_map()
                 
             def operation():
                 now = datetime.now()
@@ -2134,7 +2209,11 @@ class OrdersWidget(QWidget):
                 )
 
                 if replace_existing:
-                    self.service.clear_order_list(self.admission_id, self.shift_date)
+                    self.service.clear_order_list(
+                        self.admission_id,
+                        self.shift_date,
+                        expected_revisions=expected_revisions,
+                    )
                 self.service.add_orders_batch(orders_to_add)
 
             def after_success():
@@ -2204,6 +2283,7 @@ class OrdersWidget(QWidget):
             if self._show_question(f"Найдены назначения за {found_date.strftime('%d.%m.%Y')}. Загрузить?") == CustomMessageBox.No:
                 return
 
+        expected_revisions = self._visible_order_revision_map()
         self._enqueue_write(
             f"orders_load_yesterday:{self.admission_id}",
             operation=lambda: self.service.replace_orders_from_date(
@@ -2211,6 +2291,7 @@ class OrdersWidget(QWidget):
                 target_shift_date=self.shift_date,
                 source_shift_date=found_date,
                 source_orders=yesterday_orders,
+                expected_revisions=expected_revisions,
             ),
             on_success=lambda: (self._clear_pending_reorder(), self._refresh_model()),
         )

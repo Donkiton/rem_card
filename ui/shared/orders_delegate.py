@@ -132,12 +132,16 @@ class OrdersDelegate(QStyledItemDelegate):
         if getattr(order, 'is_per_kg', False) and dose_str:
             dose_str = f"{dose_str}/кг"
 
+        line2 = self._parse_order_comment(
+            getattr(order, 'comment', "") or "",
+            getattr(order, 'duration_min', 0),
+        )
+        if getattr(order, "_pending_delete", False):
+            line2 = f"Удаление... {line2}".strip()
+
         return {
             "line1": f"{prefix}{latin} {dose_str}".strip(),
-            "line2": self._parse_order_comment(
-                getattr(order, 'comment', "") or "",
-                getattr(order, 'duration_min', 0),
-            ),
+            "line2": line2,
             "show_savecard": bool(
                 getattr(order, 'is_finalized', False)
                 and not getattr(model, 'has_any_draft', False)
@@ -211,7 +215,9 @@ class OrdersDelegate(QStyledItemDelegate):
             return
 
         painter.save()
-        if option.features & QStyleOptionViewItem.Alternate:
+        if getattr(order, "_pending_delete", False):
+            painter.fillRect(option.rect, QColor(255, 245, 232))
+        elif option.features & QStyleOptionViewItem.Alternate:
             painter.fillRect(option.rect, QColor(BG_ALT_ROW))
         else:
             painter.fillRect(option.rect, Qt.white)
@@ -274,6 +280,15 @@ class OrdersDelegate(QStyledItemDelegate):
 
     def _paint_planned_admin(self, painter: QPainter, rect: QRect, admin):
         painter.save()
+        if getattr(admin, "_pending_cell_action", None) or hasattr(admin, "_pending_mark"):
+            painter.setPen(QPen(QColor(127, 140, 141), 1))
+            font = painter.font()
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(rect, Qt.AlignCenter, "...")
+            painter.restore()
+            return
+
         painter.setPen(Qt.black)
         font = painter.font()
         font.setBold(True)

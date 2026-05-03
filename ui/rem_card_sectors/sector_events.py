@@ -34,6 +34,8 @@ class SectorEvents(BaseSectorWidget):
         self._is_editing_time = False # Флаг для блокировки автообновления при редактировании
         self._post_status_refresh_pending = False
         self._post_status_emit_pending = False
+        self._current_status = None
+        self._status_write_pending = False
         self._snapshot_cache = OrderedDict()
 
         self.label.hide()
@@ -195,6 +197,20 @@ class SectorEvents(BaseSectorWidget):
         """)
         btn.clicked.connect(lambda: self.on_status_btn_clicked(status))
         return btn
+
+    def _status_buttons(self):
+        return [self.btn_active, self.btn_out, self.btn_or, self.btn_trans, self.btn_dead]
+
+    def _restore_status_button_state(self):
+        self.btn_active.setChecked(self._current_status == PatientStatus.ACTIVE)
+        self.btn_out.setChecked(self._current_status == PatientStatus.OUT)
+        self.btn_or.setChecked(self._current_status == PatientStatus.OR)
+        self.btn_trans.setChecked(self._current_status == PatientStatus.TRANSFERRED)
+        self.btn_dead.setChecked(self._current_status == PatientStatus.DEAD)
+
+    def _set_status_write_pending(self, pending: bool):
+        self._status_write_pending = bool(pending)
+        self.content_area.setEnabled(not self._status_write_pending)
 
     def set_patient(self, admission_id, status_service):
         context_changed = admission_id != self.admission_id or status_service is not self.status_service
@@ -619,20 +635,21 @@ class SectorEvents(BaseSectorWidget):
         QTimer.singleShot(delay_ms, apply_refresh)
 
     def _update_buttons_state(self, current_status, is_archive=False):
-        self.btn_active.setChecked(current_status == PatientStatus.ACTIVE)
-        self.btn_out.setChecked(current_status == PatientStatus.OUT)
-        self.btn_or.setChecked(current_status == PatientStatus.OR)
-        self.btn_trans.setChecked(current_status == PatientStatus.TRANSFERRED)
-        self.btn_dead.setChecked(current_status == PatientStatus.DEAD)
+        self._current_status = current_status
+        self._restore_status_button_state()
         
         is_final = current_status in (PatientStatus.TRANSFERRED, PatientStatus.DEAD)
         can_edit = not is_final and not is_archive
         
-        for btn in [self.btn_active, self.btn_out, self.btn_or, self.btn_trans, self.btn_dead]:
-            btn.setEnabled(can_edit)
+        for btn in self._status_buttons():
+            btn.setEnabled(can_edit and not self._status_write_pending)
 
     def on_status_btn_clicked(self, status):
         if not self.admission_id or not self.status_service: return
+        if self._status_write_pending:
+            self._restore_status_button_state()
+            return
+        self._restore_status_button_state()
         
         r_text = self.edit_reason_text.text()
 
@@ -641,19 +658,20 @@ class SectorEvents(BaseSectorWidget):
             return
 
         if hasattr(self.status_service, "enqueue_change_status"):
-            self.content_area.setEnabled(False)
+            self._set_status_write_pending(True)
 
             def on_success(result):
-                self.content_area.setEnabled(True)
+                self._set_status_write_pending(False)
                 if result:
                     self.edit_reason_text.clear()
                     self._schedule_post_status_refresh()
                 else:
-                    self._schedule_post_status_refresh(emit_status_changed=False)
+                    self.refresh(force=True)
                     CustomMessageBox.warning(self, "Ошибка", "Не удалось изменить статус пациента.")
 
             def on_error(exc):
-                self.content_area.setEnabled(True)
+                self._set_status_write_pending(False)
+                self.refresh(force=True)
                 CustomMessageBox.warning(self, "Ошибка", f"Ошибка смены статуса: {exc}")
 
             self.status_service.enqueue_change_status(
@@ -671,6 +689,8 @@ class SectorEvents(BaseSectorWidget):
             self.edit_reason_text.clear()
             self.refresh()
             self.status_changed.emit()
+        else:
+            self.refresh(force=True)
 
     def _handle_structured_outcome(self, status, base_comment: str):
         context = {}
@@ -700,12 +720,12 @@ class SectorEvents(BaseSectorWidget):
         admission_details = payload.get("admission_details") or {}
 
         def on_success(result):
-            self.content_area.setEnabled(True)
+            self._set_status_write_pending(False)
             if result:
                 self.edit_reason_text.clear()
                 self._schedule_post_status_refresh()
             else:
-                self._schedule_post_status_refresh(emit_status_changed=False)
+                self.refresh(force=True)
                 CustomMessageBox.warning(
                     self,
                     "Ошибка",
@@ -713,11 +733,11 @@ class SectorEvents(BaseSectorWidget):
                 )
 
         def on_error(exc):
-            self.content_area.setEnabled(True)
+            self._set_status_write_pending(False)
             self.refresh(force=True)
             CustomMessageBox.warning(self, "Ошибка", f"Ошибка фиксации исхода: {exc}")
 
-        self.content_area.setEnabled(False)
+        self._set_status_write_pending(True)
         if hasattr(self.status_service, "enqueue_change_status_with_outcome_details"):
             self.status_service.enqueue_change_status_with_outcome_details(
                 self.admission_id,
@@ -818,18 +838,20 @@ class SectorEvents(BaseSectorWidget):
         
         if reply == CustomMessageBox.Yes:
             if hasattr(self.status_service, "enqueue_rollback_last_status"):
-                self.content_area.setEnabled(False)
+                self._set_status_write_pending(True)
 
                 def on_success(result):
-                    self.content_area.setEnabled(True)
+                    self._set_status_write_pending(False)
                     if result:
                         self.refresh(force=True)
                         self.status_changed.emit()
                     else:
+                        self.refresh(force=True)
                         CustomMessageBox.warning(self, "Ошибка", "Не удалось отменить перемещение (возможно, это начальный статус).")
 
                 def on_error(exc):
-                    self.content_area.setEnabled(True)
+                    self._set_status_write_pending(False)
+                    self.refresh(force=True)
                     CustomMessageBox.warning(self, "Ошибка", f"Ошибка отката статуса: {exc}")
 
                 self.status_service.enqueue_rollback_last_status(

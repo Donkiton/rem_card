@@ -46,7 +46,7 @@ class Container:
             data_service=self.data_service,
             ventilation_dao=self.ventilation_dao,
         )
-        self.patient_service = PatientService(self.patient_dao)
+        self.patient_service = PatientService(self.patient_dao, data_service=self.data_service)
         self.remcard_service = RemCardService(
             self.vitals_dao,
             self.fluids_dao,

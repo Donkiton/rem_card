@@ -1,7 +1,7 @@
 import json
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Optional, Sequence
+from typing import List, Mapping, Optional, Sequence
 
 from rem_card.data.dao.sync_cursor import normalize_sync_cursor
 from rem_card.data.dto.remcard_dto import OrderStatus
@@ -10,6 +10,13 @@ from rem_card.services.shift_service import ShiftService
 
 from ..data.dto.remcard_dto import OrderDTO
 from ..data.dao.orders_dao import OrdersDAO
+
+
+ORDER_CONFLICT_MESSAGE = "Данные изменены другим рабочим местом. Обновите карточку."
+
+
+class OrderConflictError(RuntimeError):
+    pass
 
 
 class OrderService:
@@ -32,6 +39,45 @@ class OrderService:
         if getattr(dto, "sort_order", 0):
             return
         dto.sort_order = self.dao.get_next_sort_order(dto.admission_id, getattr(dto, "created_at", None))
+
+    def _raise_order_conflict(self, order_id=None):
+        raise OrderConflictError(ORDER_CONFLICT_MESSAGE)
+
+    def _normalize_expected_revisions(self, expected_revisions) -> dict[int, int]:
+        if not expected_revisions:
+            return {}
+        result: dict[int, int] = {}
+        if isinstance(expected_revisions, Mapping):
+            items = expected_revisions.items()
+        else:
+            items = expected_revisions
+        for raw_order_id, raw_revision in items:
+            if raw_order_id is None or raw_revision is None:
+                continue
+            try:
+                result[int(raw_order_id)] = int(raw_revision)
+            except Exception:
+                continue
+        return result
+
+    def _assert_order_revisions(self, cursor, expected_revisions):
+        expected = self._normalize_expected_revisions(expected_revisions)
+        if not expected:
+            return
+        placeholders = ",".join("?" for _ in expected)
+        cursor.execute(
+            f"SELECT id, COALESCE(revision, 0) AS revision FROM orders WHERE id IN ({placeholders})",
+            tuple(expected.keys()),
+        )
+        current = {int(row["id"]): int(row["revision"] or 0) for row in cursor.fetchall()}
+        for order_id, revision in expected.items():
+            if current.get(order_id) != revision:
+                self._raise_order_conflict(order_id)
+
+    def _assert_order_revision(self, cursor, order_id: int, expected_revision: Optional[int]):
+        if expected_revision is None:
+            return
+        self._assert_order_revisions(cursor, {int(order_id): int(expected_revision)})
 
     def add_order(self, dto: OrderDTO):
         with self.dao.db.remcard_transaction():
@@ -60,9 +106,24 @@ class OrderService:
                     next_sort_order_by_context[context_key] += 1
                 self.dao.add_order(dto)
 
-    def update_order_status(self, order_id: int, status: str):
-        with self.dao.db.remcard_transaction():
-            self.dao.update_status(order_id, status)
+    def update_order_status(self, order_id: int, status: str, expected_revision: Optional[int] = None):
+        if expected_revision is None:
+            with self.dao.db.remcard_transaction():
+                self.dao.update_status(order_id, status)
+            return
+        with self.dao.db.remcard_transaction() as cursor:
+            self._assert_order_revision(cursor, order_id, expected_revision)
+            cursor.execute(
+                """
+                UPDATE orders
+                SET status = ?,
+                    last_modified_by = 'doctor',
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE id = ?
+                """,
+                (status, order_id),
+            )
 
     def has_drafts(self, admission_id: int, shift_date: Optional[datetime] = None) -> bool:
         if shift_date is None:
@@ -267,6 +328,7 @@ class OrderService:
                 f"""
                 UPDATE orders
                 SET {target_column} = ?,
+                    revision = COALESCE(revision, 0) + 1,
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE id = ?
                   AND admission_id = ?
@@ -313,8 +375,10 @@ class OrderService:
         admission_id: int,
         shift_date: datetime,
         ordered_order_ids: Sequence[int],
+        expected_revisions=None,
     ):
         with self.dao.db.remcard_transaction() as cursor:
+            self._assert_order_revisions(cursor, expected_revisions)
             self._apply_order_sort_order(
                 cursor,
                 admission_id=admission_id,
@@ -329,9 +393,11 @@ class OrderService:
         *,
         shift_date: Optional[datetime] = None,
         ordered_order_ids: Optional[Sequence[int]] = None,
+        expected_revisions=None,
     ):
         with self.dao.db.remcard_transaction() as cursor:
             start, end = self._resolve_shift_bounds(cursor, admission_id, shift_date)
+            self._assert_order_revisions(cursor, expected_revisions)
             self._apply_order_sort_order(
                 cursor,
                 admission_id=admission_id,
@@ -344,6 +410,7 @@ class OrderService:
                 UPDATE orders
                 SET sort_order = draft_sort_order,
                     draft_sort_order = NULL,
+                    revision = COALESCE(revision, 0) + 1,
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE admission_id = ?
                   AND draft_sort_order IS NOT NULL
@@ -362,7 +429,10 @@ class OrderService:
             )
             cursor.execute(
                 """
-                UPDATE orders SET is_committed = 1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                UPDATE orders
+                SET is_committed = 1,
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE is_committed = 0
                   AND admission_id = ?
                   AND datetime >= ? AND datetime < ?
@@ -371,13 +441,15 @@ class OrderService:
             )
             self._domain_service.sync_transfusions_for_admission(cursor, admission_id)
 
-    def clear_drafts(self, admission_id: int, shift_date: Optional[datetime]):
+    def clear_drafts(self, admission_id: int, shift_date: Optional[datetime], expected_revisions=None):
         with self.dao.db.remcard_transaction() as cursor:
             start, end = self._resolve_shift_bounds(cursor, admission_id, shift_date)
+            self._assert_order_revisions(cursor, expected_revisions)
             cursor.execute(
                 """
                 UPDATE orders
                 SET draft_sort_order = NULL,
+                    revision = COALESCE(revision, 0) + 1,
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE admission_id = ?
                   AND draft_sort_order IS NOT NULL
@@ -396,7 +468,11 @@ class OrderService:
             )
             cursor.execute(
                 """
-                UPDATE orders SET status = 'active', is_committed = 1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                UPDATE orders
+                SET status = 'active',
+                    is_committed = 1,
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE is_committed = 0
                   AND status = 'deleted'
                   AND admission_id = ?
@@ -414,8 +490,9 @@ class OrderService:
                 (admission_id, start.isoformat(), end.isoformat()),
             )
 
-    def soft_delete_order_row(self, order_id: int, is_committed: bool):
+    def soft_delete_order_row(self, order_id: int, is_committed: bool, expected_revision: Optional[int] = None):
         with self.dao.db.remcard_transaction() as cursor:
+            self._assert_order_revision(cursor, order_id, expected_revision)
             if not is_committed:
                 cursor.execute("DELETE FROM administrations WHERE order_id = ?", (order_id,))
                 cursor.execute("DELETE FROM orders WHERE id = ?", (order_id,))
@@ -426,7 +503,14 @@ class OrderService:
                 (order_id,),
             )
             cursor.execute(
-                "UPDATE orders SET status = 'deleted', is_committed = 0, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE id = ?",
+                """
+                UPDATE orders
+                SET status = 'deleted',
+                    is_committed = 0,
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE id = ?
+                """,
                 (order_id,),
             )
             query_find = """
@@ -500,8 +584,9 @@ class OrderService:
                     row["big_chain_id"],
                 )
 
-    def clear_all_orders(self, admission_id: int, shift_date: datetime):
+    def clear_all_orders(self, admission_id: int, shift_date: datetime, expected_revisions=None):
         with self.dao.db.remcard_transaction() as cursor:
+            self._assert_order_revisions(cursor, expected_revisions)
             orders = self.get_orders(admission_id, shift_date)
             active_orders = [o for o in orders if o.status != OrderStatus.DELETED]
             for order in active_orders:
@@ -512,7 +597,10 @@ class OrderService:
                     cursor.execute(
                         """
                         UPDATE orders
-                        SET status = 'deleted', is_committed = 0, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                        SET status = 'deleted',
+                            is_committed = 0,
+                            revision = COALESCE(revision, 0) + 1,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                         WHERE id = ?
                         """,
                         (order.id,),
@@ -552,9 +640,11 @@ class OrderService:
         target_shift_date: datetime,
         source_shift_date: datetime,
         source_orders: List[OrderDTO],
+        expected_revisions=None,
     ):
         current_start, current_end = self._shifts.get_day_period(target_shift_date)
         with self.dao.db.remcard_transaction() as cursor:
+            self._assert_order_revisions(cursor, expected_revisions)
             current_orders = self.get_orders(admission_id, target_shift_date)
             for order in current_orders:
                 if order.status == OrderStatus.DELETED:
@@ -567,7 +657,10 @@ class OrderService:
                     cursor.execute(
                         """
                         UPDATE orders
-                        SET status = 'deleted', is_committed = 0, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                        SET status = 'deleted',
+                            is_committed = 0,
+                            revision = COALESCE(revision, 0) + 1,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                         WHERE id = ?
                         """,
                         (order.id,),

@@ -21,10 +21,21 @@ import multiprocessing as mp
 import queue
 import random
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+try:
+    from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+    bootstrap_local_rem_card()
+except Exception:
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def _import_runtime():

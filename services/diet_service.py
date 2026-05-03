@@ -495,6 +495,42 @@ class OralIntakeService:
         start, end = self.vital_service.get_effective_bounds(int(admission_id), shift_date)
         return self.dao.get_events(int(admission_id), start, end)
 
+    def apply_changes(self, admission_id: int, changes: list[dict]) -> Optional[OralIntakeEventDTO]:
+        result = None
+        with self.dao.db.remcard_transaction(source="oral_intake_batch") as cur:
+            for change in changes or []:
+                event_dt = normalize_minute(change["event_dt"])
+                amount_ml = change.get("amount")
+                expected_version = change.get("expected_version")
+                result = self._apply_change_in_transaction(
+                    cur,
+                    admission_id=int(admission_id),
+                    event_dt=event_dt,
+                    amount_ml=amount_ml,
+                    expected_version=expected_version,
+                )
+        return result
+
+    def undo_changes(self, admission_id: int, shift_date: datetime, undo_batch: list[dict]):
+        current_events = self.get_events(int(admission_id), shift_date)
+        changes = []
+        for change in reversed(undo_batch or []):
+            event_dt = normalize_minute(change["event_dt"])
+            current_event = self._event_for_time_in(current_events, event_dt)
+            expected_version = getattr(current_event, "version", None)
+            if change.get("before_amount") is None and current_event is None:
+                continue
+            changes.append(
+                {
+                    "event_dt": event_dt,
+                    "amount": change.get("before_amount"),
+                    "expected_version": expected_version,
+                }
+            )
+        if not changes:
+            return None
+        return self.apply_changes(int(admission_id), changes)
+
     def upsert_event(
         self,
         admission_id: int,
@@ -546,6 +582,62 @@ class OralIntakeService:
             if current is None:
                 return None
             raise
+        return None
+
+    def _apply_change_in_transaction(
+        self,
+        cursor,
+        *,
+        admission_id: int,
+        event_dt: datetime,
+        amount_ml: Optional[float],
+        expected_version: Optional[int],
+    ) -> Optional[OralIntakeEventDTO]:
+        event_dt = self.normalize_event_time(event_dt)
+        is_ok, msg = self.vital_service.validate_timestamp(
+            int(admission_id),
+            event_dt,
+            self.shift_start_for_event(event_dt),
+        )
+        if not is_ok:
+            raise ValueError(msg)
+
+        if amount_ml is None or float(amount_ml) <= 0:
+            try:
+                self.dao.delete_event(
+                    int(admission_id),
+                    event_dt,
+                    expected_version=expected_version,
+                    cursor=cursor,
+                )
+            except OptimisticLockError:
+                current = self.dao.get_event_at(int(admission_id), event_dt, cursor=cursor)
+                if current is None:
+                    return None
+                raise
+            return None
+
+        dto = OralIntakeEventDTO(
+            admission_id=int(admission_id),
+            shift_start=self.shift_start_for_event(event_dt),
+            event_time=event_dt,
+            amount_ml=float(amount_ml),
+            last_modified_by="nurse",
+        )
+        try:
+            return self.dao.upsert_event(dto, expected_version=expected_version, cursor=cursor)
+        except OptimisticLockError:
+            current = self.dao.get_event_at(int(admission_id), event_dt, cursor=cursor)
+            if current and abs(float(current.amount_ml) - float(amount_ml)) < 0.001:
+                return current
+            raise
+
+    @staticmethod
+    def _event_for_time_in(events, event_dt: datetime):
+        key = _dt_to_db(normalize_minute(event_dt))
+        for event in events or []:
+            if _dt_to_db(event.event_time) == key:
+                return event
         return None
 
     def get_totals(self, admission_id: int, shift_date: datetime, current_time: Optional[datetime] = None) -> dict:

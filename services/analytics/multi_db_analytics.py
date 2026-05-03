@@ -83,6 +83,16 @@ class AnalyticsConnectionManager:
             self._conn = None
 
 
+def create_readonly_analytics_manager(db_path: str) -> AnalyticsConnectionManager:
+    abs_path = os.path.abspath(str(db_path or ""))
+    if not os.path.isfile(abs_path):
+        raise ValueError(f"Analytics DB path is unavailable: {db_path}")
+    uri = f"file:{abs_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=10.0)
+    configure_connection(conn, readonly=True)
+    return AnalyticsConnectionManager(conn, db_path=abs_path)
+
+
 def create_multi_db_analytics_manager(
     db_paths: Sequence[str],
     *,

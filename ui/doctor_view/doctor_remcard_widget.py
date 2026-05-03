@@ -83,6 +83,7 @@ class DoctorRemCardWidget(QWidget):
         self._snapshot_worker = None
         self._snapshot_pending = None
         self._create_card_after_snapshot = False
+        self._create_card_write_pending = False
         self._monitor_connected = False
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
@@ -771,21 +772,123 @@ class DoctorRemCardWidget(QWidget):
                 f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
             )
 
-    def _on_data_changes(self, payload: dict):
+    def _refresh_balance_from_db(self) -> None:
+        try:
+            self._ensure_card_widgets_initialized()
+            self._bind_balance_widgets_if_ready()
+            if hasattr(self, "balance_controller"):
+                self.balance_controller.refresh()
+            else:
+                self.update_balance_data()
+        except Exception:
+            logger.exception("Doctor balance partial refresh failed")
+
+    def _refresh_status_from_db(self) -> None:
+        try:
+            if hasattr(self.layout_manager, "set_current_status_dto"):
+                self.layout_manager.set_current_status_dto(None)
+            if hasattr(self.layout_manager, "refresh_current_status"):
+                self.layout_manager.refresh_current_status()
+            events_sector = getattr(self.layout_manager, "sector_events", None)
+            if events_sector is not None and hasattr(events_sector, "refresh"):
+                events_sector.refresh(force=True)
+        except Exception:
+            logger.exception("Doctor status partial refresh failed")
+
+    def _refresh_ivl_from_db(self) -> None:
+        try:
+            sector_ivl = getattr(self.layout_manager, "sector_ivl", None)
+            if sector_ivl is not None and hasattr(sector_ivl, "refresh"):
+                sector_ivl.refresh()
+        except Exception:
+            logger.exception("Doctor IVL partial refresh failed")
+
+    @staticmethod
+    def _changed_entities_from_payload(payload: dict) -> set[str]:
         changed_entities = {
             str(entity)
             for entity in (payload.get("changed_entities") or [])
             if entity is not None
         }
-        if not changed_entities:
-            changed_entities = {
-                str(change.get("entity_name") or "")
-                for change in (payload.get("changes") or [])
-                if change.get("entity_name")
-            }
+        if changed_entities:
+            return changed_entities
+        return {
+            str(change.get("entity_name") or "")
+            for change in (payload.get("changes") or [])
+            if change.get("entity_name")
+        }
+
+    def _handle_diet_sync(
+        self,
+        payload: dict,
+        changed_entities: set[str],
+        *,
+        full_refresh_required: bool,
+        diet_refresh: bool,
+    ) -> bool:
+        diet_widget = getattr(self, "diet_intake_widget", None)
+        if diet_widget is None:
+            return False
+        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
+        has_diet_changes = bool(changed_entities.intersection(diet_entities))
+        if full_refresh_required or diet_refresh:
+            diet_widget.handle_data_changes(payload)
+            return False
+        if not has_diet_changes:
+            return False
+        diet_widget.handle_data_changes(payload)
+        if "oral_intake_events" in changed_entities:
+            self.update_balance_data()
+        return set(changed_entities).issubset(diet_entities)
+
+    def _refresh_orders_from_payload(
+        self,
+        payload: dict,
+        *,
+        full_refresh_required: bool,
+        has_orders_changes: bool,
+        orders_refresh: bool,
+    ) -> None:
+        should_refresh = full_refresh_required or has_orders_changes or orders_refresh
+        if not should_refresh:
+            return
+        if hasattr(self.layout_manager, 'orders_widget'):
+            try:
+                self.layout_manager.orders_widget.handle_data_changes(
+                    payload,
+                    tab_active=self._is_orders_tab_active(),
+                )
+            except Exception:
+                logger.exception("Orders delta refresh failed")
+        if hasattr(self.layout_manager, "nurse_orders_manager"):
+            try:
+                mgr = self.layout_manager.nurse_orders_manager
+                if mgr and hasattr(mgr, "handle_data_changes"):
+                    mgr.handle_data_changes(payload)
+            except Exception:
+                logger.exception("Current nurse orders refresh failed")
+
+    def _apply_partial_sync_actions(self, sync_actions: dict, *, full_refresh_required: bool) -> None:
+        if full_refresh_required:
+            return
+        if sync_actions.get("balance_refresh"):
+            self._refresh_balance_from_db()
+        if sync_actions.get("status_refresh"):
+            self._refresh_status_from_db()
+        if sync_actions.get("ivl_refresh"):
+            self._refresh_ivl_from_db()
+
+    def _on_data_changes(self, payload: dict):
+        sync_actions = payload.get("sync_actions") or {}
+        full_refresh_required = bool(sync_actions.get("full_refresh_required"))
+        card_snapshot_required = bool(sync_actions.get("card_snapshot_required"))
+        vitals_snapshot_required = bool(sync_actions.get("vitals_snapshot_required"))
+        changed_entities = self._changed_entities_from_payload(payload)
         self._invalidate_vitals_cache_from_payload(payload, changed_entities)
         orders_entities = {"orders", "administrations"}
-        if self._selection_mode == "archive" and (payload.get("forced") or changed_entities.intersection({"patients", "admissions"})):
+        if self._selection_mode == "archive" and (
+            full_refresh_required or changed_entities.intersection({"patients", "admissions"})
+        ):
             try:
                 if hasattr(self.layout_manager, "_refresh_archive_if_needed"):
                     self.layout_manager._refresh_archive_if_needed(force=True)
@@ -801,7 +904,6 @@ class DoctorRemCardWidget(QWidget):
             and self.layout_manager.selection_stack.currentIndex() != 0
         ):
             return
-        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
         if self._is_local_orders_force_payload(payload, changed_entities):
             if hasattr(self.layout_manager, 'orders_widget'):
                 try:
@@ -819,32 +921,25 @@ class DoctorRemCardWidget(QWidget):
             )
             return
 
-        has_diet_changes = bool(changed_entities.intersection(diet_entities))
-        if payload.get("forced") and getattr(self, "diet_intake_widget", None):
-            self.diet_intake_widget.handle_data_changes(payload)
-        if has_diet_changes and getattr(self, "diet_intake_widget", None):
-            self.diet_intake_widget.handle_data_changes(payload)
-            if "oral_intake_events" in changed_entities:
-                self.update_balance_data()
-            if not payload.get("forced") and set(changed_entities).issubset(diet_entities):
-                return
+        if self._handle_diet_sync(
+            payload,
+            changed_entities,
+            full_refresh_required=full_refresh_required,
+            diet_refresh=bool(sync_actions.get("diet_refresh")),
+        ):
+            return
         has_orders_changes = bool(changed_entities.intersection(orders_entities))
-        if (payload.get("forced") or has_orders_changes) and hasattr(self.layout_manager, 'orders_widget'):
-            try:
-                self.layout_manager.orders_widget.handle_data_changes(
-                    payload,
-                    tab_active=self._is_orders_tab_active(),
-                )
-            except Exception:
-                logger.exception("Orders delta refresh failed")
-        if (payload.get("forced") or has_orders_changes) and hasattr(self.layout_manager, "nurse_orders_manager"):
-            try:
-                mgr = self.layout_manager.nurse_orders_manager
-                if mgr and hasattr(mgr, "handle_data_changes"):
-                    mgr.handle_data_changes(payload)
-            except Exception:
-                logger.exception("Current nurse orders refresh failed")
-        self._request_card_snapshot(show_empty_message=False)
+        self._refresh_orders_from_payload(
+            payload,
+            full_refresh_required=full_refresh_required,
+            has_orders_changes=has_orders_changes,
+            orders_refresh=bool(sync_actions.get("orders_refresh")),
+        )
+        self._apply_partial_sync_actions(sync_actions, full_refresh_required=full_refresh_required)
+        if full_refresh_required or card_snapshot_required:
+            self._request_card_snapshot(show_empty_message=False)
+        elif vitals_snapshot_required:
+            self._request_card_snapshot(show_empty_message=False, load_scope="patient_open_vitals")
 
     def start_polling(self):
         """Подписывает карту на сервисный monitor и оставляет только чистый UI-таймер баланса."""
@@ -901,7 +996,7 @@ class DoctorRemCardWidget(QWidget):
             self.chart.service = service
             self.chart.status_service = getattr(service, "status_service", None)
         if hasattr(self, "balance_controller") and self.balance_controller:
-            self.balance_controller.service = service._fluids
+            self.balance_controller.service = service.fluid_service
         if getattr(self, "diet_intake_widget", None):
             self.diet_intake_widget.set_service(service)
 
@@ -1477,7 +1572,7 @@ class DoctorRemCardWidget(QWidget):
         self.vitals_input.data_changed.connect(self.refresh_data)
         self.layout_manager.sector_1b.set_content(self.vitals_input)
 
-        self.balance_controller = BalanceController(self.service._fluids, self.admission_id, self._current_date)
+        self.balance_controller = BalanceController(self.service.fluid_service, self.admission_id, self._current_date)
         self._bind_balance_widgets_if_ready()
 
         self._card_widgets_initialized = True
@@ -1549,6 +1644,8 @@ class DoctorRemCardWidget(QWidget):
         if self._archive_read_only_mode:
             self._show_read_only_hint()
             return
+        if self._create_card_write_pending:
+            return
         if self._snapshot_worker and self._snapshot_worker.isRunning():
             if not self._create_card_after_snapshot:
                 logger.info(
@@ -1558,17 +1655,10 @@ class DoctorRemCardWidget(QWidget):
             self._create_card_after_snapshot = True
             self._snapshot_pending = None
             return
-        if self.admission_id and self.service.status_service:
-            now = datetime.now()
-            start, _ = self.service.get_day_period(now)
-            patient = self.service.get_patient(self.admission_id)
-            adm_dt = patient.admission_datetime if patient else None
-            self.service.status_service.ensure_initial_status(self.admission_id, start, adm_dt)
-            self.layout_manager.refresh_current_status()
-
         now = datetime.now()
         start, _ = self.service.get_day_period(now)
         patient = self.service.get_patient(self.admission_id)
+        adm_dt = patient.admission_datetime if patient else None
         vital_time = start
         if patient and patient.admission_datetime and start < patient.admission_datetime:
             vital_time = patient.admission_datetime
@@ -1576,18 +1666,65 @@ class DoctorRemCardWidget(QWidget):
         from rem_card.data.dto.remcard_dto import VitalDTO
         dto = VitalDTO(id=None, admission_id=self.admission_id, timestamp=vital_time,
                        sys=None, dia=None, pulse=None, temp=None, spo2=None, rr=None, cvp=None)
-        
-        try:
-            self.service.add_vital(dto, shift_date=now, force=True)
+        admission_id = self.admission_id
+        service = self.service
+
+        def operation():
+            if admission_id and service.status_service:
+                service.status_service.ensure_initial_status(admission_id, start, adm_dt)
+            service.add_vital(dto, shift_date=now, force=True)
+            return True
+
+        def on_success(_result):
+            self._finish_create_card_pending()
+            if self.admission_id != admission_id:
+                return
+            if self.service.status_service:
+                self.layout_manager.refresh_current_status()
             if hasattr(self, 'vitals_input'):
                 self.vitals_input.update_undo_button_state()
                 self.vitals_input.data_changed.emit()
-        except Exception as e:
-            from ...app.logger import logger
-            logger.error(f"Error creating empty vital for card: {e}", exc_info=True)
-            
-        self.update_patient_info()
-        CustomMessageBox.information(self, "Создание карты", "Карта успешно создана. Вы можете приступить к её заполнению.")
+            self.update_patient_info()
+            CustomMessageBox.information(self, "Создание карты", "Карта успешно создана. Вы можете приступить к её заполнению.")
+
+        def on_error(exc):
+            self._finish_create_card_pending()
+            logger.error(f"Error creating empty vital for card: {exc}", exc_info=(type(exc), exc, exc.__traceback__))
+            try:
+                self.force_reload_all()
+            except Exception:
+                logger.warning("Failed to refresh after create-card error", exc_info=True)
+            CustomMessageBox.warning(self, "Создание карты", f"Не удалось создать карту: {exc}")
+
+        self._begin_create_card_pending()
+        try:
+            if hasattr(service, "enqueue_write"):
+                service.enqueue_write(
+                    f"doctor_create_empty_card:{admission_id}",
+                    operation,
+                    on_success=on_success,
+                    on_error=on_error,
+                )
+                return
+            result = operation()
+        except Exception as exc:
+            on_error(exc)
+            return
+        on_success(result)
+
+    def _begin_create_card_pending(self):
+        self._create_card_write_pending = True
+        self._set_create_card_controls_enabled(False)
+
+    def _finish_create_card_pending(self):
+        self._create_card_write_pending = False
+        self._set_create_card_controls_enabled(True)
+
+    def _set_create_card_controls_enabled(self, enabled: bool):
+        sector = getattr(getattr(self, "layout_manager", None), "sector_4v", None)
+        button = getattr(sector, "btn_new_card", None)
+        if button is not None:
+            button.setEnabled(enabled)
 
     def on_yest_card_clicked(self):
         from datetime import timedelta

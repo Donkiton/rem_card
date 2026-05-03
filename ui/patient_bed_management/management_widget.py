@@ -28,10 +28,11 @@ HEADER_HEIGHT = 80
 
 
 class PatientBedManagementWidget(QWidget):
-    def __init__(self, db_manager, parent=None):
+    def __init__(self, db_manager, data_service=None, parent=None):
         super().__init__(parent)
         self.db_manager = db_manager
-        self.patient_bed_service = PatientBedManagementService(db_manager)
+        self.patient_bed_service = PatientBedManagementService(db_manager, data_service=data_service)
+        self._move_pending = False
 
         self.bg_color = "#f2f3ee"
         self.border_color = "#c9c9b4"
@@ -163,6 +164,8 @@ class PatientBedManagementWidget(QWidget):
             self.side_card.update_info(bed_number, new_patient, new_admission)
 
     def move_patient(self, source_bed: int, target_bed: int):
+        if self._move_pending:
+            return
         source_bed_data = self.patient_bed_service.get_bed_by_number(source_bed)
         target_bed_data = self.patient_bed_service.get_bed_by_number(target_bed)
         if not source_bed_data or source_bed_data["status"] == "FREE":
@@ -182,13 +185,44 @@ class PatientBedManagementWidget(QWidget):
         if reply != CustomMessageBox.Yes:
             return
 
-        try:
-            self.patient_bed_service.move_patient(source_bed, target_bed)
+        def operation():
+            return self.patient_bed_service.move_patient(source_bed, target_bed)
+
+        def on_success(_result):
+            self._finish_move_pending()
+            if not _result:
+                self.refresh_bed_statuses()
+                CustomMessageBox.warning(self, "Ошибка", "Перенос не выполнен: исходная койка уже изменилась.")
+                return
             self.refresh_bed_statuses()
             patient, admission = self.patient_bed_service.get_patient_with_current_admission(target_bed)
             self.side_card.update_info(target_bed, patient, admission)
-        except Exception as exc:
+
+        def on_error(exc):
+            self._finish_move_pending()
+            self.refresh_bed_statuses()
             CustomMessageBox.warning(self, "Ошибка", str(exc))
+
+        self._begin_move_pending()
+        try:
+            self.patient_bed_service.enqueue_write(
+                f"patient_bed_move:{source_bed}:{target_bed}",
+                operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+        except Exception as exc:
+            on_error(exc)
+
+    def _begin_move_pending(self):
+        self._move_pending = True
+        for bed_widget in self.bed_widgets:
+            bed_widget.setEnabled(False)
+
+    def _finish_move_pending(self):
+        self._move_pending = False
+        for bed_widget in self.bed_widgets:
+            bed_widget.setEnabled(True)
 
     def refresh_bed_statuses(self):
         rows = self.patient_bed_service.get_beds_snapshot()

@@ -24,9 +24,19 @@ import traceback
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QObject
 from PySide6.QtWidgets import QApplication
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+try:
+    from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+    bootstrap_local_rem_card()
+except Exception:
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
 
 from rem_card.app.bootstrap import bootstrap
 from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType

@@ -26,6 +26,7 @@ from typing import Any, Callable
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_REPORT_DIR = SCRIPT_DIR / "bench_results" / "sanity_runs"
 
 
@@ -81,7 +82,7 @@ def _run_check(
     try:
         proc = subprocess.run(
             command,
-            cwd=str(SCRIPT_DIR.parent.parent),
+            cwd=str(PROJECT_ROOT),
             capture_output=True,
             text=True,
             timeout=timeout_sec,
@@ -147,6 +148,20 @@ def _validate_quality(exit_code: int, payload: dict[str, Any] | None) -> tuple[b
     return True, f"Quality OK: passed={passed}/{total}"
 
 
+def _validate_architecture(exit_code: int, payload: dict[str, Any] | None) -> tuple[bool, str]:
+    if exit_code != 0:
+        return False, f"Process exit code {exit_code}"
+    if not payload:
+        return False, "Missing JSON payload"
+    status = str(payload.get("status") or "")
+    failed = int(payload.get("checks_failed", 0) or 0)
+    passed = int(payload.get("checks_passed", 0) or 0)
+    total = int(payload.get("checks_total", 0) or 0)
+    if status != "passed" or failed:
+        return False, f"Architecture checks failed: passed={passed}, failed={failed}, total={total}"
+    return True, f"Architecture OK: passed={passed}/{total}"
+
+
 def _validate_stress(expected_ops: int) -> Callable[[int, dict[str, Any] | None], tuple[bool, str]]:
     def _inner(exit_code: int, payload: dict[str, Any] | None) -> tuple[bool, str]:
         if exit_code != 0:
@@ -201,6 +216,20 @@ def _validate_click_benchmark(expected_clicks: int) -> Callable[[int, dict[str, 
     return _inner
 
 
+def _validate_network_acceptance(exit_code: int, payload: dict[str, Any] | None) -> tuple[bool, str]:
+    if exit_code != 0:
+        return False, f"Process exit code {exit_code}"
+    if not payload:
+        return False, "Missing JSON payload"
+    status = str(payload.get("status") or "")
+    failed = int(payload.get("checks_failed", 0) or 0)
+    passed = int(payload.get("checks_passed", 0) or 0)
+    total = int(payload.get("checks_total", 0) or 0)
+    if status != "passed" or failed:
+        return False, f"Network acceptance failed: passed={passed}, failed={failed}, total={total}"
+    return True, f"Network acceptance OK: passed={passed}/{total}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fail-fast sanity stress runner with JSON report")
     parser.add_argument("--report-dir", default=str(DEFAULT_REPORT_DIR), help="Directory where JSON report is written")
@@ -217,7 +246,7 @@ def main() -> int:
     report_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = str(SCRIPT_DIR.parent.parent)
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
 
     checks_plan = [
@@ -228,44 +257,31 @@ def main() -> int:
             "validate": _validate_quality,
         },
         {
+            "name": "architecture_safety_check",
+            "command": [args.python, str(SCRIPT_DIR / "architecture_safety_check.py")],
+            "timeout": float(args.quality_timeout_s),
+            "validate": _validate_architecture,
+        },
+        {
             "name": "regression_safety_checks",
             "command": [args.python, str(SCRIPT_DIR / "regression_safety_checks.py")],
             "timeout": float(args.regression_timeout_s),
             "validate": _validate_regression,
         },
         {
-            "name": "multi_client_stress",
+            "name": "network_acceptance_runner",
             "command": [
                 args.python,
-                str(SCRIPT_DIR / "multi_client_stress.py"),
+                str(SCRIPT_DIR / "network_acceptance_runner.py"),
                 "--operations",
                 str(max(1, int(args.stress_operations))),
-                "--writer-interval-ms",
-                "80",
-                "--reader-poll-ms",
-                "100",
-                "--sync-timeout-s",
-                "5",
-                "--max-runtime-s",
-                str(max(20.0, float(args.stress_timeout_s) - 20.0)),
-            ],
-            "timeout": float(args.stress_timeout_s),
-            "validate": _validate_stress(max(1, int(args.stress_operations))),
-        },
-        {
-            "name": "orders_click_latency_benchmark",
-            "command": [
-                args.python,
-                str(SCRIPT_DIR / "orders_click_latency_benchmark.py"),
-                "--clicks",
+                "--benchmark-clicks",
                 str(max(1, int(args.benchmark_clicks))),
-                "--max-runtime-s",
-                "60",
-                "--hard-timeout-s",
-                str(max(60.0, float(args.benchmark_timeout_s))),
+                "--timeout-s",
+                str(max(float(args.stress_timeout_s), float(args.benchmark_timeout_s))),
             ],
-            "timeout": max(70.0, float(args.benchmark_timeout_s) + 10.0),
-            "validate": _validate_click_benchmark(max(1, int(args.benchmark_clicks))),
+            "timeout": max(float(args.stress_timeout_s), float(args.benchmark_timeout_s)) + 80.0,
+            "validate": _validate_network_acceptance,
         },
     ]
 

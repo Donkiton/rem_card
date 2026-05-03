@@ -587,6 +587,7 @@ class SectorPrint(BaseSectorWidget):
         layout.addWidget(body_widget)
         self.set_content(main_frame)
         self.last_generated_pdf = None
+        self.pdf_worker = None
 
     def set_context(self, remcard_service, admission_id, date):
         self.remcard_service, self.admission_id, self.card_date = remcard_service, admission_id, date
@@ -654,11 +655,7 @@ class SectorPrint(BaseSectorWidget):
             report_dir.mkdir(parents=True, exist_ok=True)
             p_name = data['patient_name'].replace(' ', '_').replace('/', '_')
             pdf_path = report_dir / f"{p_name}_{data['start_dt'].strftime('%Y-%m-%d')}_day{data['icu_day']}.pdf"
-            from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
-            ReportBuilder.build_pdf(data, self.config.load(), pdf_path)
-            self.last_generated_pdf = pdf_path
-            self.status_label.setText("Готово!")
-            self.btn_open.setEnabled(True)
+            self._start_pdf_worker(data, self.config.load(), pdf_path, open_after=False, ready_text="Готово!")
         except Exception as e: self.on_error(str(e))
 
     def on_full_data_collected(self, results):
@@ -669,12 +666,31 @@ class SectorPrint(BaseSectorWidget):
             report_dir.mkdir(parents=True, exist_ok=True)
             p_name = results[0]['patient_name'].replace(' ', '_').replace('/', '_')
             pdf_path = report_dir / f"FULL_{p_name}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
-            from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
-            ReportBuilder.build_pdf(results, self.config.load(), pdf_path)
-            self.last_generated_pdf = pdf_path
-            self.status_label.setText("Общий отчет готов!")
-            self.open_pdf()
+            self._start_pdf_worker(results, self.config.load(), pdf_path, open_after=True, ready_text="Общий отчет готов!")
         except Exception as e: self.on_error(str(e))
+
+    def _start_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path, *, open_after: bool, ready_text: str):
+        if self.pdf_worker is not None and self.pdf_worker.isRunning():
+            CustomMessageBox.information(self, "Инфо", "PDF уже формируется.")
+            return
+        from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
+
+        self.status_label.setText("Сборка PDF...")
+        self.pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
+        self.pdf_worker.completed.connect(lambda path: self._on_pdf_ready(path, open_after=open_after, ready_text=ready_text))
+        self.pdf_worker.error.connect(self.on_error)
+        self.pdf_worker.finished.connect(self._clear_pdf_worker)
+        self.pdf_worker.start()
+
+    def _on_pdf_ready(self, pdf_path, *, open_after: bool, ready_text: str):
+        self.last_generated_pdf = pathlib.Path(pdf_path)
+        self.status_label.setText(ready_text)
+        self.btn_open.setEnabled(True)
+        if open_after:
+            self.open_pdf()
+
+    def _clear_pdf_worker(self):
+        self.pdf_worker = None
 
     def open_pdf(self):
         if self.last_generated_pdf and self.last_generated_pdf.exists():

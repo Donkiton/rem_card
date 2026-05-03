@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject, Signal, Qt, Slot
 from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import LocalWriteQueue
 from rem_card.services.data_update_monitor import DataUpdateMonitor
+from rem_card.services.sync_coordinator import SyncCoordinator
 
 
 class DataService(QObject):
@@ -19,7 +20,8 @@ class DataService(QObject):
         self.db = db_manager
         self._queue = LocalWriteQueue(logger=logger)
         self._monitor = DataUpdateMonitor(self)
-        self._monitor.changes_detected.connect(self.changes_detected.emit, Qt.QueuedConnection)
+        self._sync_coordinator = SyncCoordinator()
+        self._monitor.changes_detected.connect(self._emit_coordinated_changes, Qt.QueuedConnection)
         self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
         self._error_callback_requested.connect(self._dispatch_error_callback, Qt.QueuedConnection)
         self._monitor.start()
@@ -106,3 +108,7 @@ class DataService(QObject):
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
         if self._monitor:
             self._monitor.request_refresh(force_emit=force_emit, source=source)
+
+    @Slot(dict)
+    def _emit_coordinated_changes(self, payload: dict):
+        self.changes_detected.emit(self._sync_coordinator.classify(payload or {}))

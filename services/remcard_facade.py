@@ -55,6 +55,10 @@ class RemCardService(QObject):
         if vitals_service is not None:
             vitals_service.status_service = value
 
+    @property
+    def fluid_service(self):
+        return self._fluids
+
     def __init__(self, vitals_dao, fluids_dao, orders_dao, ventilation_dao, patient_dao, status_service=None, data_service=None):
         super().__init__()
         # Р”Р»СЏ РѕР±СЂР°С‚РЅРѕР№ СЃРѕРІРјРµСЃС‚РёРјРѕСЃС‚Рё (СѓСЃС‚Р°СЂРµРІС€РµРµ, РїР»Р°РЅРёСЂСѓРµС‚СЃСЏ Рє СѓРґР°Р»РµРЅРёСЋ РїРѕСЃР»Рµ СЂРµС„Р°РєС‚РѕСЂРёРЅРіР° UI)
@@ -69,7 +73,7 @@ class RemCardService(QObject):
         # РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ СЃРїРµС†РёР°Р»РёР·РёСЂРѕРІР°РЅРЅС‹С… СЃРµСЂРІРёСЃРѕРІ
         self._patients = PatientService(patient_dao)
         self._vitals = VitalService(vitals_dao, patient_dao, status_service)
-        self._fluids = FluidService(fluids_dao, self._vitals)
+        self._fluids = FluidService(fluids_dao, self._vitals, data_service=data_service)
         self._orders = OrderService(orders_dao)
         self._ventilation = VentilationService(ventilation_dao, data_service=data_service) if ventilation_dao else None
         self._shifts = ShiftService()
@@ -244,7 +248,12 @@ class RemCardService(QObject):
             }
         return snapshot
 
-    def build_beds_snapshot(self, reference_dt: Optional[datetime] = None) -> Dict[str, Any]:
+    def build_beds_snapshot(
+        self,
+        reference_dt: Optional[datetime] = None,
+        *,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
         now = reference_dt or datetime.now()
         yesterday = now - timedelta(days=1)
         active_patients = self.get_active_patients()
@@ -254,12 +263,15 @@ class RemCardService(QObject):
             if getattr(patient, "id", None) is not None
         ]
         runtime_snapshot = self.get_beds_runtime_snapshot(ordered_ids, now, yesterday) if ordered_ids else {}
-        return {
+        snapshot = {
             "patients": active_patients,
             "now": now,
             "yesterday": yesterday,
             "runtime_snapshot": runtime_snapshot,
         }
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id=None, include_global=True)
+        return snapshot
 
     def get_current_status(self, admission_id: int):
         if not self.status_service:
@@ -321,6 +333,130 @@ class RemCardService(QObject):
             "card_exists": card_exists,
             "yest_exists": self.has_card(admission_id, yest_date),
             "has_vitals": bool(vitals),
+        }
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id)
+        return snapshot
+
+    def build_patient_header_snapshot(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        start_dt, end_dt = self.get_day_period(date)
+        patient = self.get_patient(admission_id)
+        current_status = self.get_current_status(admission_id)
+        yest_date = date - timedelta(days=1)
+        snapshot: Dict[str, Any] = {
+            "admission_id": admission_id,
+            "shift_date": date,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "patient": patient,
+            "status": current_status,
+            "latest_values": self.get_latest_vital_values(admission_id),
+            "settings": self.get_vital_settings_cached(admission_id, date),
+            "card_exists": self.has_card(admission_id, date),
+            "yest_exists": self.has_card(admission_id, yest_date),
+        }
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id)
+        return snapshot
+
+    def build_status_snapshot(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        start_dt, end_dt = self._vitals.get_chart_window_bounds(date)
+        snapshot: Dict[str, Any] = {
+            "admission_id": admission_id,
+            "shift_date": date,
+            "status": self.get_current_status(admission_id),
+            "active_intervals": (
+                self.status_service.get_active_intervals(admission_id, start_dt, end_dt)
+                if self.status_service and hasattr(self.status_service, "get_active_intervals")
+                else []
+            ),
+        }
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id)
+        return snapshot
+
+    def build_balance_snapshot(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        include_change_cursor: bool = False,
+        balance_only_committed: bool = False,
+    ) -> Dict[str, Any]:
+        start_dt, end_dt = self.get_day_period(date)
+        patient = self.get_patient(admission_id)
+        current_status = self.get_current_status(admission_id)
+        snapshot = self._build_balance_snapshot(
+            admission_id=admission_id,
+            shift_date=date,
+            patient=patient,
+            current_status=current_status,
+            only_committed=balance_only_committed,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        snapshot.update(
+            {
+                "admission_id": admission_id,
+                "shift_date": date,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "patient": patient,
+                "status": current_status,
+            }
+        )
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id)
+        return snapshot
+
+    def build_diet_snapshot(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {
+            "admission_id": admission_id,
+            "shift_date": date,
+            "plan": self.get_diet_plan(admission_id, date),
+            "events": self.get_oral_intake_events(admission_id, date),
+            "totals": self.get_oral_intake_totals(admission_id, date),
+        }
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id)
+        return snapshot
+
+    def build_ivl_snapshot(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        summary = self.get_ventilation_summary(admission_id)
+        snapshot: Dict[str, Any] = {
+            "admission_id": admission_id,
+            "shift_date": date,
+            "summary": summary,
+            "timeline": self.get_ventilation_timeline(admission_id),
+            "latest_case": (
+                self.get_latest_ventilation_case(admission_id)
+                if not summary.get("active_case")
+                else None
+            ),
         }
         if include_change_cursor:
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
@@ -769,6 +905,12 @@ class RemCardService(QObject):
             expected_version=expected_version,
         )
 
+    def apply_oral_intake_changes(self, admission_id: int, changes: list[dict]):
+        return self._oral_intake.apply_changes(admission_id, changes)
+
+    def undo_oral_intake_changes(self, admission_id: int, shift_date: datetime, undo_batch: list[dict]):
+        return self._oral_intake.undo_changes(admission_id, shift_date, undo_batch)
+
     def get_oral_intake_totals(self, admission_id: int, shift_date: datetime, current_time: Optional[datetime] = None) -> dict:
         return self._oral_intake.get_totals(admission_id, shift_date, current_time=current_time)
 
@@ -785,8 +927,8 @@ class RemCardService(QObject):
     def add_orders_batch(self, orders: List[OrderDTO]):
         self._orders.add_orders_batch(orders)
 
-    def update_order_status(self, order_id: int, status: str):
-        self._orders.update_order_status(order_id, status)
+    def update_order_status(self, order_id: int, status: str, expected_revision: Optional[int] = None):
+        self._orders.update_order_status(order_id, status, expected_revision=expected_revision)
 
     def has_order_drafts(self, admission_id: int, shift_date: Optional[datetime] = None) -> bool:
         return self._orders.has_drafts(admission_id, shift_date=shift_date)
@@ -794,27 +936,40 @@ class RemCardService(QObject):
     def has_order_administrations(self, admission_id: int, shift_date: datetime, only_committed: bool = False) -> bool:
         return self._orders.has_administrations(admission_id, shift_date, only_committed=only_committed)
 
-    def finalize_order_card(self, admission_id: int, *, shift_date: Optional[datetime] = None, ordered_order_ids=None):
+    def finalize_order_card(
+        self,
+        admission_id: int,
+        *,
+        shift_date: Optional[datetime] = None,
+        ordered_order_ids=None,
+        expected_revisions=None,
+    ):
         self._orders.finalize_card(
             admission_id,
             shift_date=shift_date,
             ordered_order_ids=ordered_order_ids,
+            expected_revisions=expected_revisions,
         )
 
-    def save_order_draft_sort(self, admission_id: int, shift_date: datetime, ordered_order_ids):
-        self._orders.save_draft_order_sort(admission_id, shift_date, ordered_order_ids)
+    def save_order_draft_sort(self, admission_id: int, shift_date: datetime, ordered_order_ids, expected_revisions=None):
+        self._orders.save_draft_order_sort(
+            admission_id,
+            shift_date,
+            ordered_order_ids,
+            expected_revisions=expected_revisions,
+        )
 
-    def clear_order_drafts(self, admission_id: int, shift_date: datetime):
-        self._orders.clear_drafts(admission_id, shift_date)
+    def clear_order_drafts(self, admission_id: int, shift_date: datetime, expected_revisions=None):
+        self._orders.clear_drafts(admission_id, shift_date, expected_revisions=expected_revisions)
 
-    def soft_delete_order_row(self, order_id: int, is_committed: bool):
-        self._orders.soft_delete_order_row(order_id, is_committed)
+    def soft_delete_order_row(self, order_id: int, is_committed: bool, expected_revision: Optional[int] = None):
+        self._orders.soft_delete_order_row(order_id, is_committed, expected_revision=expected_revision)
 
     def clear_order_times(self, admission_id: int, shift_date: datetime):
         self._orders.clear_all_times(admission_id, shift_date)
 
-    def clear_order_list(self, admission_id: int, shift_date: datetime):
-        self._orders.clear_all_orders(admission_id, shift_date)
+    def clear_order_list(self, admission_id: int, shift_date: datetime, expected_revisions=None):
+        self._orders.clear_all_orders(admission_id, shift_date, expected_revisions=expected_revisions)
 
     def find_recent_orders_source(self, admission_id: int, shift_date: datetime, max_days_back: int = 3):
         return self._orders.find_recent_orders_source(admission_id, shift_date, max_days_back=max_days_back)
@@ -825,12 +980,14 @@ class RemCardService(QObject):
         target_shift_date: datetime,
         source_shift_date: datetime,
         source_orders: List[OrderDTO],
+        expected_revisions=None,
     ):
         self._orders.replace_with_orders_from_date(
             admission_id=admission_id,
             target_shift_date=target_shift_date,
             source_shift_date=source_shift_date,
             source_orders=source_orders,
+            expected_revisions=expected_revisions,
         )
 
     def get_latest_administrations(

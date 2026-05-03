@@ -1,4 +1,5 @@
 import heapq
+import json
 import os
 import threading
 import time
@@ -360,6 +361,8 @@ class ReadCoordinator:
         self._patient_cache_index: dict[int, OrderedDict[str, None]] = {}
         self._patient_card_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._patient_card_cache_index: dict[int, OrderedDict[str, None]] = {}
+        self._patient_scope_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
+        self._patient_scope_cache_index: dict[int, OrderedDict[str, None]] = {}
 
         self._orders_tab_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._orders_cache_index: dict[int, OrderedDict[str, None]] = {}
@@ -602,6 +605,237 @@ class ReadCoordinator:
             context.role,
             context.mode,
             frozen_snapshot.get("version"),
+            context_hash,
+            trace_id,
+            elapsed_ms,
+        )
+        return frozen_snapshot
+
+    def load_balance_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        balance_only_committed: bool = False,
+        force_refresh: bool = True,
+    ):
+        return self._load_patient_scope_snapshot(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="balance",
+            variant="balance_committed" if balance_only_committed else "balance_full",
+            force_refresh=force_refresh,
+            build_snapshot=lambda context: self.remcard_service.build_balance_snapshot(
+                context.admission_id,
+                context.shift_date,
+                include_change_cursor=True,
+                balance_only_committed=balance_only_committed,
+            ),
+        )
+
+    def load_diet_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        return self._load_patient_scope_snapshot(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="diet",
+            force_refresh=force_refresh,
+            build_snapshot=lambda context: self.remcard_service.build_diet_snapshot(
+                context.admission_id,
+                context.shift_date,
+                include_change_cursor=True,
+            ),
+        )
+
+    def load_patient_header_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        return self._load_patient_scope_snapshot(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="patient_header",
+            force_refresh=force_refresh,
+            build_snapshot=lambda context: self.remcard_service.build_patient_header_snapshot(
+                context.admission_id,
+                context.shift_date,
+                include_change_cursor=True,
+            ),
+        )
+
+    def load_status_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        return self._load_patient_scope_snapshot(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="status",
+            force_refresh=force_refresh,
+            build_snapshot=lambda context: self.remcard_service.build_status_snapshot(
+                context.admission_id,
+                context.shift_date,
+                include_change_cursor=True,
+            ),
+        )
+
+    def load_ivl_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        return self._load_patient_scope_snapshot(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="ivl",
+            force_refresh=force_refresh,
+            build_snapshot=lambda context: self.remcard_service.build_ivl_snapshot(
+                context.admission_id,
+                context.shift_date,
+                include_change_cursor=True,
+            ),
+        )
+
+    def load_beds_snapshot(
+        self,
+        reference_dt: Optional[datetime] = None,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        reference_dt = reference_dt or datetime.now()
+        return self._load_patient_scope_snapshot(
+            admission_id=0,
+            shift_date=reference_dt,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="beds",
+            force_refresh=force_refresh,
+            build_snapshot=lambda _context: self.remcard_service.build_beds_snapshot(
+                reference_dt=reference_dt,
+                include_change_cursor=True,
+            ),
+        )
+
+    def _load_patient_scope_snapshot(
+        self,
+        *,
+        admission_id: int,
+        shift_date: datetime,
+        role: str,
+        scope: str,
+        build_snapshot,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        variant: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        context = self.make_patient_snapshot_context(
+            source_db=source_db or "live",
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            variant=variant or scope,
+        )
+        cache_key = context.cache_key()
+        context_hash = context.hash()
+        trace_id = self._next_trace_id(scope, context_hash)
+        started = time.perf_counter()
+
+        if context.mode == "live" and not force_refresh:
+            cached = self.get_current_cached_patient_scope(cache_key)
+            if cached is not None:
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                logger.info(
+                    "[ReadCoordinator] partial_scope cache_hit=1 scope=%s admission_id=%s role=%s mode=%s version=%s context_hash=%s trace_id=%s elapsed_ms=%.2f",
+                    scope,
+                    context.admission_id,
+                    context.role,
+                    context.mode,
+                    cached.get("version"),
+                    context_hash,
+                    cached.get("load_trace_id") or trace_id,
+                    elapsed_ms,
+                )
+                return cached
+
+        snapshot = build_snapshot(context)
+        frozen_snapshot = self._finalize_snapshot(
+            snapshot=snapshot,
+            scope=scope,
+            tab_name=scope,
+            cache_key=cache_key,
+            context_hash=context_hash,
+            role=context.role,
+            mode=context.mode,
+            source_db=context.source_db,
+            variant=context.variant,
+            load_strategy=f"{scope}_snapshot",
+            load_trace_id=trace_id,
+            source="partial_refresh",
+            stale=False,
+            invalidate_reason=None,
+        )
+
+        if context.mode == "live":
+            self._store_patient_scope(context, frozen_snapshot)
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            "[ReadCoordinator] partial_scope loaded scope=%s admission_id=%s role=%s mode=%s cache_hit=0 version=%s content_hash=%s context_hash=%s trace_id=%s elapsed_ms=%.2f",
+            scope,
+            context.admission_id,
+            context.role,
+            context.mode,
+            frozen_snapshot.get("version"),
+            frozen_snapshot.get("content_hash"),
             context_hash,
             trace_id,
             elapsed_ms,
@@ -1024,6 +1258,65 @@ class ReadCoordinator:
         )
         return None
 
+    def get_cached_patient_scope(self, cache_key):
+        snapshot = self._patient_scope_cache.get(cache_key)
+        if snapshot is None:
+            persisted = persistent_snapshot_cache.load_snapshot("patient_scope", cache_key)
+            if persisted is None:
+                return None
+            snapshot = MappingProxyType(dict(persisted or {}))
+            self._store_patient_scope_by_key(cache_key, snapshot, persist=False)
+            logger.info(
+                "[ReadCoordinator] patient_scope persistent_cache_hit=1 admission_id=%s scope=%s version=%s",
+                cache_key[1] if len(cache_key) > 1 else "unknown",
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return snapshot
+        self._patient_scope_cache.move_to_end(cache_key)
+        return snapshot
+
+    def get_current_cached_patient_scope(self, cache_key):
+        snapshot = self.get_cached_patient_scope(cache_key)
+        if snapshot is None:
+            return None
+
+        try:
+            admission_id = int(cache_key[1])
+            cached_version = int(snapshot.get("version") or 0)
+            current_version = int(
+                self.remcard_service.get_latest_change_id(
+                    admission_id=(admission_id if admission_id > 0 else None),
+                    include_global=True,
+                )
+                or 0
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ReadCoordinator] patient_scope cache_version_check_failed key=%s error=%s",
+                cache_key,
+                exc,
+            )
+            return None
+
+        if current_version <= cached_version:
+            logger.info(
+                "[ReadCoordinator] patient_scope cache_current=1 admission_id=%s scope=%s version=%s",
+                admission_id,
+                snapshot.get("scope"),
+                cached_version,
+            )
+            return snapshot
+
+        logger.info(
+            "[ReadCoordinator] patient_scope cache_stale=1 admission_id=%s scope=%s cached_version=%s current_version=%s action=preserve_for_swr",
+            admission_id,
+            snapshot.get("scope"),
+            cached_version,
+            current_version,
+        )
+        return None
+
     def invalidate_patient_vitals(
         self,
         *,
@@ -1215,6 +1508,25 @@ class ReadCoordinator:
             self._drop_cache_index_by_key(self._patient_card_cache_index, evicted_key)
             logger.info("[ReadCoordinator] evicted patient_card cache key=%s", evicted_key)
 
+    def _store_patient_scope(self, context: PatientSnapshotContext, snapshot) -> None:
+        self._store_patient_scope_by_key(context.cache_key(), snapshot, persist=True)
+
+    def _store_patient_scope_by_key(self, cache_key, snapshot, *, persist: bool) -> None:
+        self._patient_scope_cache[cache_key] = snapshot
+        self._patient_scope_cache.move_to_end(cache_key)
+        self._track_patient_cache_key(self._patient_scope_cache_index, cache_key)
+        if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
+            persistent_snapshot_cache.store_snapshot(
+                "patient_scope",
+                cache_key,
+                dict(snapshot or {}),
+                expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
+            )
+        while len(self._patient_scope_cache) > self.max_cached_patients * self.max_tabs_per_patient:
+            evicted_key, _ = self._patient_scope_cache.popitem(last=False)
+            self._drop_cache_index_by_key(self._patient_scope_cache_index, evicted_key)
+            logger.info("[ReadCoordinator] evicted patient_scope cache key=%s", evicted_key)
+
     def _store_orders_tab(self, context: OrdersContext, snapshot) -> None:
         cache_key = context.cache_key()
         self._orders_tab_cache[cache_key] = snapshot
@@ -1231,6 +1543,73 @@ class ReadCoordinator:
                 evicted_key,
                 str(evicted_key[-1]),
             )
+
+    @classmethod
+    def _snapshot_content_hash(cls, payload: Dict[str, Any]) -> str:
+        stable_payload = cls._stable_snapshot_value(payload)
+        encoded = json.dumps(stable_payload, sort_keys=True, ensure_ascii=False, default=str)
+        return sha1(encoded.encode("utf-8", errors="replace")).hexdigest()
+
+    @classmethod
+    def _stable_snapshot_value(cls, value):
+        if isinstance(value, MappingProxyType):
+            return cls._stable_snapshot_value(dict(value))
+        if isinstance(value, dict):
+            return {
+                str(key): cls._stable_snapshot_value(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [cls._stable_snapshot_value(item) for item in value]
+        if isinstance(value, datetime):
+            return value.isoformat(timespec="microseconds")
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if hasattr(value, "__dict__"):
+            return {
+                "__class__": value.__class__.__name__,
+                **{
+                    str(key): cls._stable_snapshot_value(item)
+                    for key, item in sorted(vars(value).items(), key=lambda pair: str(pair[0]))
+                    if not str(key).startswith("_")
+                },
+            }
+        return repr(value)
+
+    def _normalize_snapshot_payload(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(snapshot or {})
+        tuple_fields = (
+            "vitals",
+            "vitals_extended",
+            "fluids",
+            "chart_active_intervals",
+            "orders",
+            "patients",
+            "events",
+            "timeline",
+            "active_intervals",
+        )
+        dict_fields = (
+            "latest_values",
+            "settings",
+            "runtime_snapshot",
+            "totals",
+            "summary",
+            "balance_runtime",
+            "balance_calc",
+        )
+        for field in tuple_fields:
+            if field in payload:
+                payload[field] = tuple(payload.get(field) or ())
+        for field in dict_fields:
+            if payload.get(field):
+                payload[field] = dict(payload.get(field) or {})
+        if payload.get("effective_bounds"):
+            payload["effective_bounds"] = tuple(payload.get("effective_bounds"))
+        if "admin_rows" in payload:
+            payload["admin_rows"] = tuple(dict(row) for row in (payload.get("admin_rows") or ()))
+            payload["orders_admin_cursor"] = self._compute_admin_sync_cursor(payload.get("admin_rows") or ())
+        return payload
 
     def _finalize_snapshot(
         self,
@@ -1250,32 +1629,18 @@ class ReadCoordinator:
         stale: bool,
         invalidate_reason: Optional[str],
     ):
-        payload = dict(snapshot or {})
-        if "vitals" in payload:
-            payload["vitals"] = tuple(payload.get("vitals") or ())
-        if "vitals_extended" in payload:
-            payload["vitals_extended"] = tuple(payload.get("vitals_extended") or ())
-        if "fluids" in payload:
-            payload["fluids"] = tuple(payload.get("fluids") or ())
-        if "latest_values" in payload:
-            payload["latest_values"] = dict(payload.get("latest_values") or {})
-        if "settings" in payload:
-            payload["settings"] = dict(payload.get("settings") or {})
-        if payload.get("effective_bounds"):
-            payload["effective_bounds"] = tuple(payload.get("effective_bounds"))
-        if "chart_active_intervals" in payload:
-            payload["chart_active_intervals"] = tuple(payload.get("chart_active_intervals") or ())
-        if "orders" in payload:
-            payload["orders"] = tuple(payload.get("orders") or ())
-        if "admin_rows" in payload:
-            payload["admin_rows"] = tuple(dict(row) for row in (payload.get("admin_rows") or ()))
-            payload["orders_admin_cursor"] = self._compute_admin_sync_cursor(payload.get("admin_rows") or ())
-        if payload.get("balance_runtime"):
-            payload["balance_runtime"] = dict(payload.get("balance_runtime") or {})
-        if payload.get("balance_calc"):
-            payload["balance_calc"] = dict(payload.get("balance_calc") or {})
+        payload = self._normalize_snapshot_payload(snapshot)
         version = int(payload.get("change_id") or 0)
+        content_hash = self._snapshot_content_hash(payload)
         payload["version"] = version
+        payload["last_change_id"] = version
+        payload["content_hash"] = content_hash
+        payload["dedup_signature"] = (
+            int(payload.get("admission_id") or 0),
+            scope,
+            version,
+            content_hash,
+        )
         payload["timestamp"] = datetime.now().isoformat(timespec="milliseconds")
         payload["scope"] = scope
         payload["tab_name"] = tab_name
@@ -1324,6 +1689,8 @@ class ReadCoordinator:
             target_cache = self._patient_vitals_cache
         elif index_store is self._patient_card_cache_index:
             target_cache = self._patient_card_cache
+        elif index_store is self._patient_scope_cache_index:
+            target_cache = self._patient_scope_cache
         else:
             target_cache = self._orders_tab_cache
         for cache_key in list(target_cache.keys()):

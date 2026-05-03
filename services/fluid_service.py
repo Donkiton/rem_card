@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 from datetime import datetime, timedelta
 from ..data.dto.remcard_dto import FluidDTO
 from ..data.dao.fluids_dao import FluidsDAO
@@ -10,13 +10,39 @@ BALANCE_OUTCOME_GRACE = timedelta(hours=1)
 
 
 class FluidService:
-    def __init__(self, fluids_dao: FluidsDAO, vital_service: VitalService):
+    def __init__(self, fluids_dao: FluidsDAO, vital_service: VitalService, data_service=None):
         self.fluids_dao = fluids_dao
         self.vital_service = vital_service
+        self.data_service = data_service
 
     def get_fluids(self, admission_id: int, date: datetime) -> List[FluidDTO]:
         start, end = self.get_balance_bounds(admission_id, date)
         return self.fluids_dao.get_fluids(admission_id, start, end)
+
+    def enqueue_write(
+        self,
+        description: str,
+        operation: Callable[[], Any],
+        on_success: Optional[Callable[[Any], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+    ):
+        if self.data_service:
+            self.data_service.enqueue_write(
+                description=description,
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+        try:
+            result = operation()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+                return
+            raise
+        if on_success:
+            on_success(result)
 
     def get_balance_bounds(self, admission_id: int, date: datetime) -> Tuple[datetime, datetime]:
         """

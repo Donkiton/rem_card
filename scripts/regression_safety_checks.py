@@ -16,10 +16,22 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+    bootstrap_local_rem_card()
+except Exception:
+    pass
 
 
 def _make_temp_root() -> str:
@@ -471,6 +483,1380 @@ def _create_sqlite_file(path: str):
         conn.commit()
     finally:
         conn.close()
+
+
+def _connect_network_db(path: str):
+    from rem_card.app.sqlite_shared import configure_connection
+
+    conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=5.0)
+    configure_connection(conn, profile="network")
+    return conn
+
+
+def _schema_guard_paths(temp_root: str) -> dict[str, str]:
+    return {
+        "backup_dir": os.path.join(temp_root, "backups", "valid"),
+        "invalid_dir": os.path.join(temp_root, "backup_health", "invalid_backups"),
+        "policy_path": os.path.join(temp_root, "Baza_rao3_jurnal", "config", "client_policy.json"),
+        "lock_path": os.path.join(temp_root, "Baza_rao3_jurnal", "archiv", "db.lock"),
+        "baza_dir": os.path.join(temp_root, "Baza_rao3_jurnal"),
+    }
+
+
+def _seed_legacy_patients_table(conn):
+    conn.execute(
+        """
+        CREATE TABLE patients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("INSERT INTO patients(full_name) VALUES ('Legacy Patient')")
+
+
+def _check_schema_migration_backup_fastpath_policy(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+    from rem_card.app.sqlite_shared import SQLiteWriteController, validate_sqlite_file
+    from rem_card.app.unified_db_schema import SCHEMA_MIN_MIGRATION_VERSION
+    from rem_card.app.version import APP_VERSION
+
+    db_path = os.path.join(temp_root, "legacy_schema.db")
+    paths = _schema_guard_paths(temp_root)
+    conn = _connect_network_db(db_path)
+    try:
+        _seed_legacy_patients_table(conn)
+        controller = SQLiteWriteController(db_path=db_path, lock_path=paths["lock_path"], owner_id="schema_regression")
+        result = ensure_unified_schema_with_migration_backup(
+            conn,
+            db_path=db_path,
+            backup_dir=paths["backup_dir"],
+            invalid_dir=paths["invalid_dir"],
+            policy_path=paths["policy_path"],
+            baza_dir=paths["baza_dir"],
+            controller=controller,
+            source="regression_schema_migration",
+        )
+        if not result.migrated or not result.backup_path:
+            return False, f"migration did not report validated backup: {result}"
+        ok, reason = validate_sqlite_file(result.backup_path)
+        if not ok:
+            return False, f"pre-migration backup is invalid: {reason}"
+
+        backup_conn = sqlite3.connect(result.backup_path)
+        try:
+            backup_columns = {row[1] for row in backup_conn.execute("PRAGMA table_info(patients)").fetchall()}
+        finally:
+            backup_conn.close()
+        if "admission_uid" in backup_columns:
+            return False, "backup was created after ALTER TABLE patients.admission_uid"
+
+        main_columns = {row[1] for row in conn.execute("PRAGMA table_info(patients)").fetchall()}
+        if "admission_uid" not in main_columns:
+            return False, "migration did not add patients.admission_uid"
+
+        row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
+        if not row or int(row[0] or 0) < SCHEMA_MIN_MIGRATION_VERSION:
+            return False, f"schema_migrations did not reach {SCHEMA_MIN_MIGRATION_VERSION}: {row}"
+
+        with open(paths["policy_path"], "r", encoding="utf-8") as fh:
+            policy = json.load(fh)
+        if str(policy.get("min_client_version")) != APP_VERSION:
+            return False, f"client policy min version not raised to APP_VERSION: {policy}"
+
+        import rem_card.app.schema_migration_guard as guard
+
+        original_backup = guard.backup_connection
+        guard.backup_connection = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("fastpath called backup"))
+        try:
+            second = ensure_unified_schema_with_migration_backup(
+                conn,
+                db_path=db_path,
+                backup_dir=paths["backup_dir"],
+                invalid_dir=paths["invalid_dir"],
+                policy_path=paths["policy_path"],
+                baza_dir=paths["baza_dir"],
+                controller=controller,
+                source="regression_schema_fastpath",
+            )
+        finally:
+            guard.backup_connection = original_backup
+        if second.migrated:
+            return False, "fastpath-ready schema was migrated again"
+        return True, "ok"
+    finally:
+        conn.close()
+
+
+def _check_schema_migration_invalid_backup_blocks_ddl(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.schema_migration_guard as guard
+
+    from rem_card.app.sqlite_shared import SQLiteWriteController
+
+    db_path = os.path.join(temp_root, "invalid_backup_blocks.db")
+    paths = _schema_guard_paths(temp_root)
+    conn = _connect_network_db(db_path)
+    original_backup = guard.backup_connection
+    try:
+        _seed_legacy_patients_table(conn)
+        controller = SQLiteWriteController(db_path=db_path, lock_path=paths["lock_path"], owner_id="invalid_backup")
+
+        def fail_backup(*args, **kwargs):
+            raise sqlite3.DatabaseError("backup validation failed: regression")
+
+        guard.backup_connection = fail_backup
+        try:
+            guard.ensure_unified_schema_with_migration_backup(
+                conn,
+                db_path=db_path,
+                backup_dir=paths["backup_dir"],
+                invalid_dir=paths["invalid_dir"],
+                policy_path=paths["policy_path"],
+                baza_dir=paths["baza_dir"],
+                controller=controller,
+                source="regression_invalid_backup",
+            )
+        except sqlite3.DatabaseError:
+            pass
+        else:
+            return False, "migration continued after invalid backup"
+
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(patients)").fetchall()}
+        if "admission_uid" in columns:
+            return False, "DDL ran despite failed pre-migration backup"
+        return True, "ok"
+    finally:
+        guard.backup_connection = original_backup
+        conn.close()
+
+
+def _check_schema_migration_failure_rolls_back(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.schema_migration_guard as guard
+
+    from rem_card.app.sqlite_shared import SQLiteWriteController
+
+    db_path = os.path.join(temp_root, "migration_failure.db")
+    paths = _schema_guard_paths(temp_root)
+    conn = _connect_network_db(db_path)
+    original_ensure = guard.ensure_unified_schema
+    try:
+        _seed_legacy_patients_table(conn)
+        controller = SQLiteWriteController(db_path=db_path, lock_path=paths["lock_path"], owner_id="migration_failure")
+
+        def broken_migration(target_conn, logger=None):
+            target_conn.execute("CREATE TABLE should_rollback(id INTEGER PRIMARY KEY)")
+            raise RuntimeError("forced migration failure")
+
+        guard.ensure_unified_schema = broken_migration
+        try:
+            guard.ensure_unified_schema_with_migration_backup(
+                conn,
+                db_path=db_path,
+                backup_dir=paths["backup_dir"],
+                invalid_dir=paths["invalid_dir"],
+                policy_path=paths["policy_path"],
+                baza_dir=paths["baza_dir"],
+                controller=controller,
+                source="regression_failed_migration",
+            )
+        except RuntimeError as exc:
+            if "forced migration failure" not in str(exc):
+                return False, f"unexpected migration failure: {exc}"
+        else:
+            return False, "broken migration unexpectedly succeeded"
+
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='should_rollback'"
+        ).fetchone()
+        if row:
+            return False, "DDL from failed migration was not rolled back"
+        backups = [name for name in os.listdir(paths["backup_dir"]) if name.endswith(".db")]
+        if not backups:
+            return False, "failed migration did not create pre-migration backup"
+        return True, "ok"
+    finally:
+        guard.ensure_unified_schema = original_ensure
+        conn.close()
+
+
+def _check_schema_migration_parallel_start(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+    from rem_card.app.sqlite_shared import SQLiteWriteController
+
+    db_path = os.path.join(temp_root, "parallel_schema.db")
+    paths = _schema_guard_paths(temp_root)
+    errors: list[str] = []
+    results: list[bool] = []
+    lock = threading.Lock()
+
+    seed_conn = _connect_network_db(db_path)
+    try:
+        _seed_legacy_patients_table(seed_conn)
+    finally:
+        seed_conn.close()
+
+    def worker(owner_id: str):
+        conn = _connect_network_db(db_path)
+        try:
+            controller = SQLiteWriteController(db_path=db_path, lock_path=paths["lock_path"], owner_id=owner_id)
+            result = ensure_unified_schema_with_migration_backup(
+                conn,
+                db_path=db_path,
+                backup_dir=paths["backup_dir"],
+                invalid_dir=paths["invalid_dir"],
+                policy_path=paths["policy_path"],
+                baza_dir=paths["baza_dir"],
+                controller=controller,
+                source="regression_parallel_schema",
+            )
+            with lock:
+                results.append(bool(result.migrated))
+        except Exception as exc:
+            with lock:
+                errors.append(str(exc))
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker, args=(f"parallel_{idx}",), daemon=True) for idx in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20.0)
+    if any(thread.is_alive() for thread in threads):
+        return False, "parallel schema migration threads did not finish"
+    if errors:
+        return False, f"parallel migration errors: {errors}"
+    if sorted(results) != [False, True]:
+        return False, f"expected exactly one migration and one fastpath skip, got {results}"
+    return True, "ok"
+
+
+def _check_old_client_blocked_by_policy(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _schema_guard_paths(temp_root)
+    os.makedirs(os.path.dirname(paths["policy_path"]), exist_ok=True)
+    guard.update_client_policy_min_version(
+        paths["policy_path"],
+        "9.9.9",
+        baza_dir=paths["baza_dir"],
+        reason="regression_new_schema",
+    )
+
+    original_app_version = guard.APP_VERSION
+    original_required = guard.REQUIRED_CLIENT_POLICY_VERSION
+    try:
+        guard.APP_VERSION = "1.0.0"
+        guard.REQUIRED_CLIENT_POLICY_VERSION = "1.0.0"
+        try:
+            guard._load_or_create_client_policy(paths["baza_dir"], role="doctor")
+        except guard.StartupPolicyError:
+            return True, "ok"
+        return False, "old client was not blocked by min_client_version"
+    finally:
+        guard.APP_VERSION = original_app_version
+        guard.REQUIRED_CLIENT_POLICY_VERSION = original_required
+
+
+def _prepare_recovery_baza(temp_root: str) -> dict[str, str]:
+    baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal")
+    paths = {
+        "baza_dir": baza_dir,
+        "db_path": os.path.join(baza_dir, "archiv", "rao_journal.db"),
+        "backup_dir": os.path.join(baza_dir, "backups", "valid"),
+        "locks_dir": os.path.join(baza_dir, "locks"),
+        "session_locks_dir": os.path.join(baza_dir, "session_locks"),
+        "db_lock": os.path.join(baza_dir, "archiv", "db.lock"),
+        "recovery_lock": os.path.join(baza_dir, "locks", "recovery.lock"),
+    }
+    for path in (
+        os.path.dirname(paths["db_path"]),
+        paths["backup_dir"],
+        paths["locks_dir"],
+        paths["session_locks_dir"],
+        os.path.join(baza_dir, "backup_health", "invalid_backups"),
+        os.path.join(baza_dir, "quarantine", "shared_db"),
+        os.path.join(baza_dir, "logs"),
+    ):
+        os.makedirs(path, exist_ok=True)
+    return paths
+
+
+def _write_corrupt_file(path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(b"not a sqlite database")
+
+
+def _write_lock_payload(path: str, *, source: str, role: str | None = None):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "timestamp": time.time(),
+        "pid": 999999,
+        "host": "other-host",
+        "role": role,
+        "source": source,
+        "user_id": "regression_other",
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+
+def _check_recovery_blocks_active_second_client(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.startup_db_guard import recover_shared_db_with_locks
+    from rem_card.app.sqlite_shared import validate_sqlite_file
+
+    paths = _prepare_recovery_baza(temp_root)
+    healthy_backup = os.path.join(paths["backup_dir"], "healthy.db")
+    _create_sqlite_file(healthy_backup)
+    _write_corrupt_file(paths["db_path"])
+    _write_lock_payload(os.path.join(paths["session_locks_dir"], "doctor.lock"), source="role", role="doctor")
+
+    result = recover_shared_db_with_locks(
+        baza_dir=paths["baza_dir"],
+        db_path=paths["db_path"],
+        role="nurse",
+        failure_reason="quick_check failed: database disk image is malformed",
+    )
+    if result.ok:
+        return False, "recovery succeeded despite active second client lock"
+    ok, _reason = validate_sqlite_file(paths["db_path"])
+    if ok:
+        return False, "corrupt primary DB was replaced while second client was active"
+    return True, "ok"
+
+
+def _check_recovery_db_lock_busy_blocks_restore(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+    _write_corrupt_file(paths["db_path"])
+    _write_lock_payload(paths["db_lock"], source="db_write")
+
+    original_wait = guard.DB_LOCK_WAIT_SEC
+    try:
+        guard.DB_LOCK_WAIT_SEC = 0.1
+        result = guard.recover_shared_db_with_locks(
+            baza_dir=paths["baza_dir"],
+            db_path=paths["db_path"],
+            role="doctor",
+            failure_reason="quick_check failed: malformed",
+        )
+    finally:
+        guard.DB_LOCK_WAIT_SEC = original_wait
+    if result.ok:
+        return False, "recovery succeeded while db.lock was busy"
+    return True, "ok"
+
+
+def _check_recovery_lock_busy_blocks_restore(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+    _write_corrupt_file(paths["db_path"])
+    _write_lock_payload(paths["recovery_lock"], source="recovery")
+
+    original_wait = guard.RECOVERY_LOCK_WAIT_SEC
+    try:
+        guard.RECOVERY_LOCK_WAIT_SEC = 0.1
+        result = guard.recover_shared_db_with_locks(
+            baza_dir=paths["baza_dir"],
+            db_path=paths["db_path"],
+            role="doctor",
+            failure_reason="quick_check failed: malformed",
+        )
+    finally:
+        guard.RECOVERY_LOCK_WAIT_SEC = original_wait
+    if result.ok:
+        return False, "recovery succeeded while recovery.lock was busy"
+    return True, "ok"
+
+
+def _check_dbmanager_locked_quickcheck_does_not_restore(temp_root: str) -> tuple[bool, str]:
+    import rem_card.data.dao.db_manager as dbm
+
+    manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+    manager.db_path = os.path.join(temp_root, "locked_not_corrupt.db")
+    manager._remcard_conn = object()
+    manager._should_run_startup_quickcheck = lambda: (True, None)
+    manager._write_startup_quickcheck_ts = lambda *args, **kwargs: None
+    manager._close_connections_for_restore = lambda: None
+    manager._init_connections = lambda: None
+
+    original_quick = dbm.run_quick_check
+    original_recover = dbm.recover_shared_db_with_locks
+    dbm.run_quick_check = lambda conn: (False, "database is locked")
+    dbm.recover_shared_db_with_locks = lambda **kwargs: (_ for _ in ()).throw(AssertionError("restore called"))
+    try:
+        try:
+            manager._verify_quick_integrity_or_restore()
+        except RuntimeError as exc:
+            if "confirmed corruption" not in str(exc):
+                return False, f"unexpected locked-db error: {exc}"
+            return True, "ok"
+        return False, "locked quick_check did not fail"
+    finally:
+        dbm.run_quick_check = original_quick
+        dbm.recover_shared_db_with_locks = original_recover
+
+
+def _check_recovery_selects_next_valid_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import validate_sqlite_file
+    from rem_card.app.startup_db_guard import recover_shared_db_with_locks
+
+    paths = _prepare_recovery_baza(temp_root)
+    good_backup = os.path.join(paths["backup_dir"], "backup_older_good.db")
+    bad_backup = os.path.join(paths["backup_dir"], "backup_latest_bad.db")
+    _create_sqlite_file(good_backup)
+    _write_corrupt_file(bad_backup)
+    now = time.time()
+    os.utime(good_backup, (now - 10, now - 10))
+    os.utime(bad_backup, (now, now))
+    _write_corrupt_file(paths["db_path"])
+
+    result = recover_shared_db_with_locks(
+        baza_dir=paths["baza_dir"],
+        db_path=paths["db_path"],
+        role="doctor",
+        failure_reason="quick_check failed: database disk image is malformed",
+    )
+    if not result.ok:
+        return False, f"recovery failed despite next valid backup: {result.technical_reason}"
+    if os.path.normcase(os.path.abspath(result.restored_from)) != os.path.normcase(os.path.abspath(good_backup)):
+        return False, f"wrong backup selected: {result.restored_from}"
+    ok, reason = validate_sqlite_file(paths["db_path"])
+    if not ok:
+        return False, f"restored DB is invalid: {reason}"
+    if os.path.exists(bad_backup):
+        return False, "corrupt latest backup was not quarantined"
+    return True, "ok"
+
+
+def _check_local_metrics_written_locally(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.local_metrics import record_metric
+    from rem_card.app.runtime_paths import get_local_logs_dir
+
+    _ = temp_root
+    record_metric("regression_metric_probe", 1, component="regression")
+    metrics_dir = get_local_logs_dir()
+    files = [
+        os.path.join(metrics_dir, name)
+        for name in os.listdir(metrics_dir)
+        if name.startswith("metrics_") and name.endswith(".jsonl")
+    ]
+    if not files:
+        return False, "local metrics file was not created"
+    newest = max(files, key=os.path.getmtime)
+    with open(newest, "r", encoding="utf-8") as fh:
+        content = fh.read()
+    if "regression_metric_probe" not in content:
+        return False, "metric probe was not written to local metrics log"
+    baza_dir = os.environ.get("REMCARD_BAZA_DIR") or ""
+    if baza_dir and os.path.normcase(os.path.abspath(newest)).startswith(os.path.normcase(os.path.abspath(baza_dir))):
+        return False, f"metrics file was written inside shared baza dir: {newest}"
+    return True, "ok"
+
+
+def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors import sector_ivl
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeIvlService:
+        def __init__(self):
+            self.enqueue_called = False
+            self.summary_reads = 0
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            if on_error:
+                on_error(RuntimeError("forced ivl write failure"))
+
+        def get_ventilation_summary(self, admission_id):
+            self.summary_reads += 1
+            return {"active_case": None, "total_duration_seconds": 0}
+
+        def get_ventilation_timeline(self, admission_id):
+            return []
+
+        def get_latest_ventilation_case(self, admission_id):
+            return None
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            return self.summary_reads
+
+        def get_patient(self, admission_id):
+            return SimpleNamespace(admission_datetime=datetime(2026, 5, 3, 8, 0))
+
+    warnings: list[str] = []
+    original_warning = sector_ivl.CustomMessageBox.warning
+    sector_ivl.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    widget = sector_ivl.SectorIvl()
+    service = FakeIvlService()
+    try:
+        widget.set_runtime_context(service, 1)
+        widget._enqueue_ivl_write(
+            "regression_ivl_error",
+            lambda: None,
+            pending_text="Случай: сохранение...",
+            error_title="Ошибка ИВЛ",
+        )
+        app.processEvents()
+        if not service.enqueue_called:
+            return False, "SectorIvl did not use enqueue_write"
+        if widget._ivl_write_pending:
+            return False, "SectorIvl kept pending state after write error"
+        if not warnings or "forced ivl write failure" not in warnings[-1]:
+            return False, f"SectorIvl did not show write error warning: {warnings}"
+        if service.summary_reads < 2:
+            return False, "SectorIvl did not refresh from DB/service after write error"
+        return True, "ok"
+    finally:
+        sector_ivl.CustomMessageBox.warning = original_warning
+        widget.close()
+
+
+def _check_balance_controller_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.shared.components import balance_controller as balance_module
+    from rem_card.ui.shared.components.balance_controller import BalanceController
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeButton:
+        def __init__(self):
+            self.enabled = True
+
+        def setEnabled(self, enabled):
+            self.enabled = bool(enabled)
+
+        def isEnabled(self):
+            return self.enabled
+
+    class FakeLabel:
+        def __init__(self):
+            self.text = ""
+
+        def setText(self, text):
+            self.text = text
+
+    class FakePanel:
+        def __init__(self):
+            self.edit_input = FakeButton()
+            self.btn_save = FakeButton()
+            self.btn_delete = FakeButton()
+            self.btn_undo = FakeButton()
+            self.status_lbl = FakeLabel()
+
+        def set_selection(self, label_text, current_val=None, keep_focus=True):
+            self.last_selection = (label_text, current_val, keep_focus)
+
+        def set_undo_active(self, active):
+            self.btn_undo.setEnabled(active)
+
+    class FakeGrid:
+        def __init__(self):
+            self.enabled = True
+            self.rows_map = ["urine", "drain_output", "ng_output", "stool", "other_output"]
+            self.row_labels = ["Диурез", "Дренажи", "ЖКТ (зонд)", "Рвота", "Другое"]
+
+        def setEnabled(self, enabled):
+            self.enabled = bool(enabled)
+
+        def update_data(self, hourly_data):
+            self.hourly_data = hourly_data
+
+        def currentRow(self):
+            return 0
+
+        def currentColumn(self):
+            return 0
+
+        def get_selected_info(self):
+            return "urine", 8, 0
+
+    class FakeVitalService:
+        def get_effective_bounds(self, admission_id, shift_date):
+            return shift_date - timedelta(hours=1), shift_date + timedelta(hours=23)
+
+    class FakeFluidService:
+        def __init__(self):
+            self.vital_service = FakeVitalService()
+            self.enqueue_called = False
+            self.refresh_reads = 0
+            self.on_error = None
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            self.description = description
+            self.operation = operation
+            self.on_error = on_error
+
+        def upsert_hourly_output(self, **kwargs):
+            raise AssertionError("queued write operation should not run in UI thread")
+
+        def get_fluids(self, admission_id, shift_date):
+            self.refresh_reads += 1
+            return []
+
+    critical_messages: list[str] = []
+    original_critical = balance_module.CustomMessageBox.critical
+    balance_module.CustomMessageBox.critical = lambda parent, title, message: critical_messages.append(f"{title}: {message}")
+    try:
+        shift_date = datetime(2026, 5, 3, 8, 0)
+        service = FakeFluidService()
+        controller = BalanceController(service, admission_id=1, shift_date=shift_date)
+        controller.grid = FakeGrid()
+        controller.panel_2d = FakePanel()
+        controller._effective_bounds_cache = (shift_date - timedelta(hours=1), shift_date + timedelta(hours=23))
+
+        controller._process_update("urine", 8, 100, is_sum=False)
+        app.processEvents()
+        if not service.enqueue_called:
+            return False, "BalanceController did not use enqueue_write"
+        if not controller._write_pending:
+            return False, "BalanceController did not enter pending state"
+        if controller.grid.enabled or controller.panel_2d.btn_save.enabled:
+            return False, "BalanceController did not disable write UI while pending"
+        if not service.on_error:
+            return False, "BalanceController did not register error callback"
+
+        service.on_error(RuntimeError("forced balance write failure"))
+        app.processEvents()
+        if controller._write_pending:
+            return False, "BalanceController kept pending state after write error"
+        if not controller.grid.enabled:
+            return False, "BalanceController did not re-enable UI after write error"
+        if controller._undo_stack:
+            return False, f"BalanceController added undo state after failed write: {controller._undo_stack}"
+        if service.refresh_reads < 1:
+            return False, "BalanceController did not refresh from DB/service after write error"
+        if not critical_messages or "forced balance write failure" not in critical_messages[-1]:
+            return False, f"BalanceController did not show write error: {critical_messages}"
+        return True, "ok"
+    finally:
+        balance_module.CustomMessageBox.critical = original_critical
+
+
+def _check_diet_intake_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.shared.components import diet_intake_widget as diet_module
+    from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeDietService:
+        def __init__(self):
+            self.enqueue_called = False
+            self.on_error = None
+            self.refresh_reads = 0
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            self.description = description
+            self.operation = operation
+            self.on_error = on_error
+
+        def list_diet_templates(self):
+            self.refresh_reads += 1
+            return []
+
+        def get_diet_plan(self, admission_id, shift_date):
+            return None
+
+        def get_oral_intake_events(self, admission_id, shift_date):
+            return []
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            return self.refresh_reads
+
+        def current_shift_time(self, shift_date):
+            return "08:00"
+
+    warnings: list[str] = []
+    original_warning = diet_module.CustomMessageBox.warning
+    diet_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    try:
+        service = FakeDietService()
+        widget = DietIntakeWidget(service=service, role="nurse")
+        widget.admission_id = 1
+        widget.shift_date = datetime(2026, 5, 3, 8, 0)
+        widget.btn_save.setEnabled(True)
+        widget.btn_cancel.setEnabled(True)
+
+        widget._enqueue_write("regression_diet_error", lambda: None)
+        app.processEvents()
+        if not service.enqueue_called:
+            return False, "DietIntakeWidget did not use enqueue_write"
+        if not widget._write_pending:
+            return False, "DietIntakeWidget did not enter pending state"
+        if widget.btn_save.isEnabled():
+            return False, "DietIntakeWidget did not disable save while pending"
+        if not service.on_error:
+            return False, "DietIntakeWidget did not register error callback"
+
+        service.on_error(RuntimeError("forced diet write failure"))
+        app.processEvents()
+        if widget._write_pending:
+            return False, "DietIntakeWidget kept pending state after write error"
+        if not widget.btn_save.isEnabled():
+            return False, "DietIntakeWidget did not re-enable save after write error"
+        if service.refresh_reads < 1:
+            return False, "DietIntakeWidget did not refresh from service after write error"
+        if not warnings or "forced diet write failure" not in warnings[-1]:
+            return False, f"DietIntakeWidget did not show write error: {warnings}"
+        return True, "ok"
+    finally:
+        diet_module.CustomMessageBox.warning = original_warning
+        try:
+            widget.close()
+        except Exception:
+            pass
+
+
+def _check_oral_intake_batch_rolls_back(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.diet_dao import OralIntakeDAO
+    from rem_card.data.dao.exceptions import OptimisticLockError
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.services.diet_service import OralIntakeService
+    from rem_card.services.vital_service import VitalService
+
+    db_path = os.path.join(temp_root, "oral_intake_batch.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        admission_dt = datetime(2026, 4, 24, 8, 0, 0)
+        existing_dt = datetime(2026, 4, 24, 10, 0, 0)
+        new_dt = datetime(2026, 4, 24, 9, 0, 0)
+        with manager.remcard_transaction(source="regression_seed_oral_batch") as cursor:
+            cursor.execute(
+                """
+                INSERT INTO patients (full_name, last_name, first_name, middle_name)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("Петров Петр", "Петров", "Петр", None),
+            )
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions (
+                    patient_id,
+                    bed_number,
+                    history_number,
+                    admission_datetime,
+                    is_active
+                )
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (patient_id, 1, "REG-DIET-001", admission_dt.isoformat()),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO oral_intake_events (
+                    admission_id, shift_start, event_time, amount_ml, version, last_modified_by, updated_at
+                )
+                VALUES (?, ?, ?, 50, 1, 'nurse', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                """,
+                (
+                    admission_id,
+                    admission_dt.strftime("%Y-%m-%d %H:%M"),
+                    existing_dt.strftime("%Y-%m-%d %H:%M"),
+                ),
+            )
+
+        vital_service = VitalService(vitals_dao=None, patient_dao=PatientDAO(manager), status_service=None)
+        oral_service = OralIntakeService(OralIntakeDAO(manager), vital_service)
+
+        try:
+            oral_service.apply_changes(
+                admission_id,
+                [
+                    {"event_dt": new_dt, "amount": 100, "expected_version": None},
+                    {"event_dt": existing_dt, "amount": 250, "expected_version": 999},
+                ],
+            )
+        except OptimisticLockError:
+            pass
+        else:
+            return False, "batch did not raise optimistic lock conflict"
+
+        inserted = oral_service.dao.get_event_at(admission_id, new_dt)
+        if inserted is not None:
+            return False, "first batch change was committed despite later failure"
+        existing = oral_service.dao.get_event_at(admission_id, existing_dt)
+        if existing is None or int(existing.amount_ml) != 50 or int(existing.version) != 1:
+            return False, f"existing oral event changed despite rollback: {existing}"
+        return True, "ok"
+    finally:
+        manager.close()
+
+
+def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.patient_bed_management import patient_form as patient_form_module
+    from rem_card.ui.patient_bed_management.patient_form import PatientForm
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakePatientBedService:
+        def __init__(self):
+            self.enqueue_called = False
+            self.on_error = None
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            self.description = description
+            self.operation = operation
+            self.on_error = on_error
+
+    class FakeGeneralTab:
+        def get_data(self):
+            return {
+                "history_number": "REG-PAT-001",
+                "full_name": "Иванов Иван",
+                "admission_datetime": datetime(2026, 5, 3, 8, 0),
+                "age_value": 40,
+                "months": None,
+                "age_unit": "лет",
+                "gender": "М",
+                "department_profile": "ОАР",
+                "source_department": "Приемное",
+            }
+
+    class FakeDiagnosisTab:
+        def get_data(self):
+            return {"diagnosis_code": "A00", "diagnosis_text": "Тестовый диагноз"}
+
+    warnings: list[str] = []
+    original_warning = patient_form_module.CustomMessageBox.warning
+    patient_form_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    form = None
+    try:
+        service = FakePatientBedService()
+        form = PatientForm(service, 1)
+        form.general_tab = FakeGeneralTab()
+        form.diagnosis_tab = FakeDiagnosisTab()
+        form._save_data()
+        app.processEvents()
+        if not service.enqueue_called:
+            return False, "PatientForm did not use enqueue_write"
+        if not form._write_pending:
+            return False, "PatientForm did not enter pending state"
+        if form.save_button.isEnabled() or form.save_button.text() != "СОХРАНЕНИЕ...":
+            return False, "PatientForm did not show pending save state"
+        if not service.on_error:
+            return False, "PatientForm did not register error callback"
+        service.on_error(RuntimeError("forced patient form failure"))
+        app.processEvents()
+        if form._write_pending:
+            return False, "PatientForm kept pending state after error"
+        if not form.save_button.isEnabled() or form.save_button.text() != "СОХРАНИТЬ КАРТОЧКУ":
+            return False, "PatientForm did not restore save button after error"
+        if not warnings or "forced patient form failure" not in warnings[-1]:
+            return False, f"PatientForm did not show write error: {warnings}"
+        return True, "ok"
+    finally:
+        patient_form_module.CustomMessageBox.warning = original_warning
+        if form is not None:
+            form.close()
+
+
+def _check_patient_bed_move_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.patient_bed_management import management_widget as management_module
+    from rem_card.ui.patient_bed_management.management_widget import NUM_BEDS, PatientBedManagementWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakePatientBedService:
+        def __init__(self):
+            self.enqueue_called = False
+            self.on_error = None
+            self.refresh_reads = 0
+
+        def get_bed_by_number(self, bed_number):
+            if int(bed_number) == 1:
+                return {"bed_number": 1, "status": "OCCUPIED", "current_admission_id": 10}
+            return {"bed_number": int(bed_number), "status": "FREE", "current_admission_id": None}
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            self.description = description
+            self.operation = operation
+            self.on_error = on_error
+
+        def get_beds_snapshot(self):
+            self.refresh_reads += 1
+            return [
+                {
+                    "bed_number": idx,
+                    "status": "FREE",
+                    "current_admission_id": None,
+                    "full_name": "",
+                    "history_number": "",
+                    "diagnosis_text": "",
+                }
+                for idx in range(1, NUM_BEDS + 1)
+            ]
+
+        def get_patient_with_current_admission(self, bed_number):
+            return None, None
+
+    warnings: list[str] = []
+    original_question = management_module.CustomMessageBox.question
+    original_warning = management_module.CustomMessageBox.warning
+    management_module.CustomMessageBox.question = lambda *args, **kwargs: management_module.CustomMessageBox.Yes
+    management_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    widget = None
+    try:
+        widget = PatientBedManagementWidget(db_manager=object())
+        service = FakePatientBedService()
+        widget.patient_bed_service = service
+        widget.move_patient(1, 2)
+        app.processEvents()
+        if not service.enqueue_called:
+            return False, "PatientBedManagementWidget did not use enqueue_write"
+        if not widget._move_pending:
+            return False, "PatientBedManagementWidget did not enter move pending state"
+        if any(bed.isEnabled() for bed in widget.bed_widgets):
+            return False, "PatientBedManagementWidget did not disable bed widgets while pending"
+        if not service.on_error:
+            return False, "PatientBedManagementWidget did not register error callback"
+        service.on_error(RuntimeError("forced bed move failure"))
+        app.processEvents()
+        if widget._move_pending:
+            return False, "PatientBedManagementWidget kept pending state after error"
+        if not all(bed.isEnabled() for bed in widget.bed_widgets):
+            return False, "PatientBedManagementWidget did not re-enable bed widgets after error"
+        if service.refresh_reads < 1:
+            return False, "PatientBedManagementWidget did not refresh beds after error"
+        if not warnings or "forced bed move failure" not in warnings[-1]:
+            return False, f"PatientBedManagementWidget did not show move error: {warnings}"
+        return True, "ok"
+    finally:
+        management_module.CustomMessageBox.question = original_question
+        management_module.CustomMessageBox.warning = original_warning
+        if widget is not None:
+            widget.close()
+
+
+def _check_archive_delete_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.doctor_view import archive_widget as archive_module
+    from rem_card.ui.doctor_view.archive_widget import ArchiveWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeArchivePatient(SimpleNamespace):
+        def get_display_name(self):
+            return self.full_name
+
+    class FakeWriteService:
+        def __init__(self, result=None):
+            self.result = result
+            self.enqueue_called = False
+            self.on_error = None
+            self.on_success = None
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            self.description = description
+            self.operation = operation
+            self.on_success = on_success
+            self.on_error = on_error
+
+        def get_archived_patients(self):
+            return []
+
+        def delete_admission(self, admission_id):
+            return self.result
+
+        def delete_last_card(self, admission_id):
+            return self.result
+
+    warnings: list[str] = []
+    original_question = archive_module.CustomMessageBox.question
+    original_warning = archive_module.CustomMessageBox.warning
+    archive_module.CustomMessageBox.question = lambda *args, **kwargs: archive_module.CustomMessageBox.Yes
+    archive_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    widget = None
+    try:
+        patient_service = FakeWriteService()
+        remcard_service = FakeWriteService(result=(True, None, "ok"))
+        widget = ArchiveWidget(patient_service, remcard_service=remcard_service)
+        load_calls = []
+        widget.load_data = lambda: load_calls.append(True)
+        patient = FakeArchivePatient(
+            id=1,
+            full_name="Иванов Иван",
+            history_number="REG-ARCH-001",
+            diagnosis_text="Тест",
+            admission_datetime=datetime(2026, 5, 3, 8, 0),
+            transfer_datetime=datetime(2026, 5, 4, 8, 0),
+            is_external_archive=False,
+            source_db_path=None,
+            source_admission_id=None,
+        )
+        widget.all_archived_patients = [patient]
+        widget.filter_data()
+        widget.table.selectRow(0)
+
+        widget.on_delete_clicked()
+        app.processEvents()
+        if not patient_service.enqueue_called:
+            return False, "ArchiveWidget delete-all did not use enqueue_write"
+        if not widget._delete_pending or widget.table.isEnabled():
+            return False, "ArchiveWidget did not enter pending state for delete-all"
+        if not patient_service.on_error:
+            return False, "ArchiveWidget did not register delete-all error callback"
+        patient_service.on_error(RuntimeError("forced archive delete failure"))
+        app.processEvents()
+        if widget._delete_pending or not widget.table.isEnabled():
+            return False, "ArchiveWidget did not restore UI after delete-all error"
+        if not load_calls:
+            return False, "ArchiveWidget did not refresh after delete-all error"
+        if not warnings or "forced archive delete failure" not in warnings[-1]:
+            return False, f"ArchiveWidget did not show delete-all error: {warnings}"
+
+        warnings.clear()
+        load_calls.clear()
+        widget.table.selectRow(0)
+        widget.on_delete_last_clicked()
+        app.processEvents()
+        if not remcard_service.enqueue_called:
+            return False, "ArchiveWidget delete-last did not use enqueue_write"
+        if not widget._delete_pending or widget.table.isEnabled():
+            return False, "ArchiveWidget did not enter pending state for delete-last"
+        if not remcard_service.on_error:
+            return False, "ArchiveWidget did not register delete-last error callback"
+        remcard_service.on_error(RuntimeError("forced archive last-card failure"))
+        app.processEvents()
+        if widget._delete_pending or not widget.table.isEnabled():
+            return False, "ArchiveWidget did not restore UI after delete-last error"
+        if not load_calls:
+            return False, "ArchiveWidget did not refresh after delete-last error"
+        if not warnings or "forced archive last-card failure" not in warnings[-1]:
+            return False, f"ArchiveWidget did not show delete-last error: {warnings}"
+        return True, "ok"
+    finally:
+        archive_module.CustomMessageBox.question = original_question
+        archive_module.CustomMessageBox.warning = original_warning
+        if widget is not None:
+            widget.close()
+
+
+def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+    from types import MethodType, SimpleNamespace
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.doctor_view import doctor_remcard_widget as doctor_module
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeButton:
+        def __init__(self):
+            self.enabled = True
+
+        def setEnabled(self, enabled):
+            self.enabled = bool(enabled)
+
+    class FakeStatusService:
+        def __init__(self):
+            self.ensure_calls = 0
+
+        def ensure_initial_status(self, admission_id, start, admission_datetime):
+            self.ensure_calls += 1
+
+    class FakeService:
+        def __init__(self):
+            self.status_service = FakeStatusService()
+            self.enqueue_called = False
+            self.operation = None
+            self.on_error = None
+
+        def get_day_period(self, now):
+            start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+            return start, start + timedelta(days=1)
+
+        def get_patient(self, admission_id):
+            return SimpleNamespace(admission_datetime=datetime(2026, 5, 3, 8, 0))
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.enqueue_called = True
+            self.description = description
+            self.operation = operation
+            self.on_error = on_error
+
+        def add_vital(self, dto, shift_date=None, force=False):
+            raise AssertionError("queued create-card write should not run in UI thread")
+
+    class FakeLayoutManager:
+        def __init__(self):
+            self.sector_4v = SimpleNamespace(btn_new_card=FakeButton())
+            self.status_refreshes = 0
+
+        def refresh_current_status(self):
+            self.status_refreshes += 1
+
+    warnings: list[str] = []
+    original_warning = doctor_module.CustomMessageBox.warning
+    original_information = doctor_module.CustomMessageBox.information
+    doctor_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    doctor_module.CustomMessageBox.information = lambda *args, **kwargs: None
+    try:
+        service = FakeService()
+        layout_manager = FakeLayoutManager()
+        widget = SimpleNamespace(
+            _archive_read_only_mode=False,
+            _create_card_write_pending=False,
+            _snapshot_worker=None,
+            _create_card_after_snapshot=False,
+            _snapshot_pending=None,
+            admission_id=1,
+            service=service,
+            layout_manager=layout_manager,
+            refresh_calls=0,
+        )
+        widget._begin_create_card_pending = MethodType(DoctorRemCardWidget._begin_create_card_pending, widget)
+        widget._finish_create_card_pending = MethodType(DoctorRemCardWidget._finish_create_card_pending, widget)
+        widget._set_create_card_controls_enabled = MethodType(
+            DoctorRemCardWidget._set_create_card_controls_enabled,
+            widget,
+        )
+        widget.force_reload_all = lambda: setattr(widget, "refresh_calls", widget.refresh_calls + 1)
+        widget.update_patient_info = lambda: None
+        widget._show_read_only_hint = lambda: None
+
+        DoctorRemCardWidget.on_create_card_clicked(widget)
+        app.processEvents()
+        if not service.enqueue_called:
+            return False, "DoctorRemCardWidget did not use enqueue_write for create-card"
+        if not widget._create_card_write_pending:
+            return False, "DoctorRemCardWidget did not enter create-card pending state"
+        if layout_manager.sector_4v.btn_new_card.enabled:
+            return False, "DoctorRemCardWidget did not disable create-card button while pending"
+        if service.status_service.ensure_calls:
+            return False, "create-card write operation ran before queued worker callback"
+        if not service.on_error:
+            return False, "DoctorRemCardWidget did not register create-card error callback"
+
+        service.on_error(RuntimeError("forced create-card failure"))
+        app.processEvents()
+        if widget._create_card_write_pending:
+            return False, "DoctorRemCardWidget kept create-card pending state after error"
+        if not layout_manager.sector_4v.btn_new_card.enabled:
+            return False, "DoctorRemCardWidget did not re-enable create-card button after error"
+        if widget.refresh_calls != 1:
+            return False, "DoctorRemCardWidget did not refresh after create-card error"
+        if not warnings or "forced create-card failure" not in warnings[-1]:
+            return False, f"DoctorRemCardWidget did not show create-card error: {warnings}"
+        return True, "ok"
+    finally:
+        doctor_module.CustomMessageBox.warning = original_warning
+        doctor_module.CustomMessageBox.information = original_information
+
+
+def _check_patient_status_error_refreshes_checked_state(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.ui.rem_card_sectors import sector_events as events_module
+    from rem_card.ui.rem_card_sectors.sector_events import SectorEvents
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeStatusService:
+        def __init__(self):
+            self.enqueue_called = False
+            self.on_error = None
+            self.reads = 0
+
+        def get_events(self, admission_id):
+            self.reads += 1
+            return [
+                PatientStatusEventDTO(
+                    id=1,
+                    admission_id=admission_id,
+                    status=PatientStatus.ACTIVE,
+                    start_time=datetime(2026, 5, 3, 8, 0),
+                    created_by="USER",
+                )
+            ]
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            return self.reads
+
+        def enqueue_change_status(
+            self,
+            admission_id,
+            new_status,
+            reason_type=None,
+            reason_text=None,
+            user_id=None,
+            on_success=None,
+            on_error=None,
+        ):
+            self.enqueue_called = True
+            self.on_error = on_error
+
+    warnings: list[str] = []
+    original_warning = events_module.CustomMessageBox.warning
+    events_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    widget = SectorEvents()
+    service = FakeStatusService()
+    try:
+        widget.set_patient(1, service)
+        app.processEvents()
+        if not widget.btn_active.isChecked() or widget.btn_out.isChecked():
+            return False, "initial status buttons did not reflect active DB status"
+
+        widget.btn_out.setChecked(True)
+        widget.on_status_btn_clicked(PatientStatus.OUT)
+        app.processEvents()
+        if not service.enqueue_called or not service.on_error:
+            return False, "SectorEvents did not enqueue status change"
+        if widget.btn_out.isChecked() or not widget.btn_active.isChecked():
+            return False, "SectorEvents showed final status before commit"
+        if widget.content_area.isEnabled():
+            return False, "SectorEvents did not enter pending disabled state"
+
+        service.on_error(RuntimeError("forced status failure"))
+        app.processEvents()
+        if not widget.content_area.isEnabled():
+            return False, "SectorEvents did not re-enable after status write error"
+        if not widget.btn_active.isChecked() or widget.btn_out.isChecked():
+            return False, "SectorEvents did not refresh/rollback checked state after error"
+        if service.reads < 2:
+            return False, "SectorEvents did not refresh from DB/service after status write error"
+        if not warnings or "forced status failure" not in warnings[-1]:
+            return False, f"SectorEvents did not show status write error: {warnings}"
+        return True, "ok"
+    finally:
+        events_module.CustomMessageBox.warning = original_warning
+        widget.close()
+
+
+def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+    from rem_card.ui.nurse_view.components.nurse_orders_widget import NurseOrdersWidget
+    from rem_card.ui.shared.orders_model import OrdersModel
+    from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeOrdersService:
+        def get_day_period(self, shift_date):
+            start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
+            return start, start + timedelta(days=1)
+
+    shift = datetime(2026, 5, 3, 8, 0)
+    service = FakeOrdersService()
+    doctor_widget = OrdersWidget(service=service, admission_id=1, shift_date=shift, defer_ui=True)
+    nurse_widget = NurseOrdersWidget(service=service, admission_id=1, shift_date=shift, defer_ui=True)
+    try:
+        doctor_model = OrdersModel(service, admission_id=1, shift_date=shift)
+        doctor_order = OrderDTO(id=1, admission_id=1, latin="Test", is_committed=1)
+        doctor_model.orders = [doctor_order]
+        doctor_widget.model = doctor_model
+        doctor_widget._mark_local_order_row_deleted(0, doctor_order, was_committed=True)
+        app.processEvents()
+        if len(doctor_model.orders) != 1:
+            return False, "doctor order row was removed before delete commit"
+        if not getattr(doctor_model.orders[0], "_pending_delete", False):
+            return False, "doctor order row was not marked as pending-delete"
+        doctor_widget._clear_local_order_row_pending_delete(1)
+        if getattr(doctor_model.orders[0], "_pending_delete", False):
+            return False, "doctor order row pending-delete marker was not cleared on error"
+
+        index = doctor_model.index(0, 1)
+        pending = doctor_widget._apply_pending_cell(index, doctor_order, None, doctor_model.time_slots[0], "orders_left_click")
+        admin = doctor_model.data(index, Qt.UserRole)
+        if not pending:
+            return False, "doctor order cell did not capture previous state"
+        if admin is None or not getattr(admin, "_pending_cell_action", None):
+            return False, "doctor order cell did not show pending state before commit"
+        doctor_widget._restore_admin_cells(pending)
+        if doctor_model.data(index, Qt.UserRole) is not None:
+            return False, "doctor order cell pending state was not restored on error"
+
+        nurse_model = OrdersModel(service, admission_id=1, shift_date=shift)
+        nurse_order = OrderDTO(id=2, admission_id=1, latin="Nurse")
+        nurse_model.orders = [nurse_order]
+        nurse_slot = nurse_model.time_slots[0]
+        nurse_admin = AdministrationDTO(
+            id=20,
+            order_id=2,
+            planned_time=nurse_slot,
+            status="planned",
+            cell_role="single",
+            comment="",
+        )
+        nurse_model.admin_map[(2, nurse_slot.isoformat())] = nurse_admin
+        nurse_widget.model = nurse_model
+        nurse_index = nurse_model.index(0, 1)
+
+        nurse_widget._apply_pending_nurse_mark(nurse_index, nurse_admin, NURSE_MARK_EXECUTED)
+        pending_admin = nurse_model.data(nurse_index, Qt.UserRole)
+        if getattr(pending_admin, "comment", ""):
+            return False, "nurse mark became final before commit"
+        if not hasattr(pending_admin, "_pending_mark"):
+            return False, "nurse mark did not enter pending state"
+
+        nurse_widget._apply_committed_nurse_mark(nurse_index, nurse_admin, NURSE_MARK_EXECUTED)
+        committed_admin = nurse_model.data(nurse_index, Qt.UserRole)
+        if getattr(committed_admin, "comment", "") != NURSE_MARK_EXECUTED:
+            return False, "nurse mark did not become final after success"
+        if hasattr(committed_admin, "_pending_mark"):
+            return False, "nurse pending marker remained after success"
+        return True, "ok"
+    finally:
+        doctor_widget.close()
+        nurse_widget.close()
 
 
 def _check_local_replica_tmp_cleanup(temp_root: str) -> tuple[bool, str]:
@@ -1899,6 +3285,194 @@ def _check_order_row_delete_without_times_marks_draft(temp_root: str) -> tuple[b
         manager.close()
 
 
+def _check_orders_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.order_service import ORDER_CONFLICT_MESSAGE, OrderConflictError
+    from rem_card.services.remcard_service import RemCardService
+
+    db_path = os.path.join(temp_root, "orders_optimistic_lock.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_patient") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Regression Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-LOCK", "2026-04-24T08:00:00"),
+            )
+            admission_id = int(cursor.lastrowid)
+
+        service = RemCardService(
+            VitalsDAO(manager),
+            FluidsDAO(manager),
+            OrdersDAO(manager),
+            VentilationDAO(manager),
+            PatientDAO(manager),
+        )
+        shift_date = datetime(2026, 4, 24, 12, 0, 0)
+
+        def new_order(name: str) -> OrderDTO:
+            return OrderDTO(
+                admission_id=admission_id,
+                drug_key=name.lower(),
+                latin=name,
+                type=OrderType.MEDICATION,
+                status=OrderStatus.ACTIVE,
+                dose_value=1.0,
+                dose_unit="mg",
+                is_per_kg=False,
+                frequency=1,
+                specific_times=[],
+                duration_min=0,
+                is_committed=0,
+                created_at=datetime(2026, 4, 24, 9, 0, 0),
+                comment="",
+                last_modified_by="doctor",
+            )
+
+        first = new_order("Lock One")
+        second = new_order("Lock Two")
+        service.add_order(first)
+        service.add_order(second)
+        if first.id is None or second.id is None:
+            return False, "order insert did not return ids"
+
+        initial = {order.id: order.revision for order in service.get_orders(admission_id, shift_date)}
+        if initial.get(first.id) != 0 or initial.get(second.id) != 0:
+            return False, f"unexpected initial revisions: {initial}"
+
+        service.update_order_status(first.id, "held", expected_revision=initial[first.id])
+        changed_first = next(order for order in service.get_orders(admission_id, shift_date) if order.id == first.id)
+        if int(changed_first.revision or 0) != 1:
+            return False, f"order revision did not increment after update: {changed_first.revision}"
+
+        try:
+            service.update_order_status(first.id, "active", expected_revision=initial[first.id])
+            return False, "stale order update did not raise conflict"
+        except OrderConflictError as exc:
+            if ORDER_CONFLICT_MESSAGE not in str(exc):
+                return False, f"unexpected conflict message: {exc}"
+
+        try:
+            service.save_order_draft_sort(admission_id, shift_date, [first.id, second.id], expected_revisions=initial)
+            return False, "stale order sort did not raise conflict"
+        except OrderConflictError:
+            pass
+
+        latest = {order.id: order.revision for order in service.get_orders(admission_id, shift_date)}
+        service.save_order_draft_sort(admission_id, shift_date, [second.id, first.id], expected_revisions=latest)
+        after_sort = {order.id: order.revision for order in service.get_orders(admission_id, shift_date)}
+        if int(after_sort.get(second.id, 0)) <= int(latest.get(second.id, 0)):
+            return False, "order sort did not increment revision"
+
+        try:
+            service.finalize_order_card(admission_id, shift_date=shift_date, expected_revisions=latest)
+            return False, "stale order finalize did not raise conflict"
+        except OrderConflictError:
+            pass
+
+        latest = {order.id: order.revision for order in service.get_orders(admission_id, shift_date)}
+        service.soft_delete_order_row(second.id, False, expected_revision=latest[second.id])
+        try:
+            service.soft_delete_order_row(first.id, False, expected_revision=initial[first.id])
+            return False, "stale order soft-delete did not raise conflict"
+        except OrderConflictError:
+            pass
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
+def _check_medical_audit_log_triggers(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.app.unified_db_schema import SCHEMA_MIN_MIGRATION_VERSION
+
+    db_path = os.path.join(temp_root, "medical_audit_log.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_medical_audit") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Audit Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-AUDIT-001", "2026-05-03 08:00:00"),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO orders(
+                    admission_id, datetime, text, drug_key, latin, type, status,
+                    is_committed, revision, last_modified_by, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, 'doctor', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                """,
+                (
+                    admission_id,
+                    "2026-05-03 08:00:00",
+                    "Audit Drug",
+                    "audit_drug",
+                    "Audit Drug",
+                    "medication",
+                    "active",
+                ),
+            )
+            order_id = int(cursor.lastrowid)
+            cursor.execute("UPDATE orders SET status = 'held' WHERE id = ?", (order_id,))
+
+        row = manager.fetch_one_remcard(
+            """
+            SELECT MAX(version) AS version
+            FROM schema_migrations
+            """
+        )
+        if not row or int(row["version"] or 0) < SCHEMA_MIN_MIGRATION_VERSION:
+            return False, "medical audit migration did not advance schema_migrations"
+
+        audit_rows = manager.fetch_all_remcard(
+            """
+            SELECT table_name, row_id, admission_id, action_type, changed_by, operation_id, before_json, after_json
+            FROM medical_audit_log
+            WHERE table_name = 'orders' AND row_id = ?
+            ORDER BY id
+            """,
+            (order_id,),
+        )
+        actions = [dict(row)["action_type"] for row in audit_rows]
+        if actions != ["insert", "update"]:
+            return False, f"unexpected order audit actions: {actions}"
+
+        update_row = dict(audit_rows[-1])
+        if update_row.get("changed_by") != "doctor":
+            return False, f"unexpected audit changed_by: {update_row.get('changed_by')}"
+        if not update_row.get("operation_id"):
+            return False, "medical audit operation_id is empty"
+        if int(update_row.get("admission_id") or 0) != admission_id:
+            return False, "medical audit admission_id mismatch"
+
+        before_payload = json.loads(update_row["before_json"])
+        after_payload = json.loads(update_row["after_json"])
+        if before_payload.get("status") != "active" or after_payload.get("status") != "held":
+            return False, f"medical audit before/after payload mismatch: {before_payload} -> {after_payload}"
+
+        quick = manager.fetch_one_remcard("PRAGMA quick_check")
+        if not quick or str(quick[0]).lower() != "ok":
+            return False, f"quick_check failed after audit trigger writes: {quick}"
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = Path(__file__).resolve().parents[1] / "ui" / "doctor_view" / "doctor_remcard_widget.py"
@@ -2072,6 +3646,56 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
         if "error.connect(self._on_full_report_error)" not in full_source:
             return False, f"{role}: full report error must connect to QObject slot"
 
+    return True, "ok"
+
+
+def _check_pdf_build_runs_in_worker(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    worker_source = (PROJECT_ROOT / "ui" / "shared" / "pdf_build_worker.py").read_text(encoding="utf-8")
+    if "class PdfBuildWorker(QThread)" not in worker_source or "ReportBuilder.build_pdf" not in worker_source:
+        return False, "PdfBuildWorker must own ReportBuilder.build_pdf"
+
+    checked_methods = {
+        "ui/shared/report_controller.py": [
+            "_on_daily_report_collected",
+            "_on_full_report_collected",
+        ],
+        "ui/doctor_view/components/beds_selection_widget.py": [
+            "_on_daily_report_collected",
+            "_on_full_report_collected",
+        ],
+        "ui/nurse_view/components/nurse_beds_selection_widget.py": [
+            "_on_daily_report_collected",
+            "_on_full_report_collected",
+        ],
+        "ui/rem_card_sectors/sector_print.py": [
+            "on_data_collected",
+            "on_full_data_collected",
+        ],
+        "ui/nurse_view/sectors/nurse_sector_print.py": [
+            "on_data",
+            "on_full",
+        ],
+    }
+    for relative_path, method_names in checked_methods.items():
+        source_path = PROJECT_ROOT / relative_path
+        source_text = source_path.read_text(encoding="utf-8")
+        if "PdfBuildWorker" not in source_text or "pdf_worker" not in source_text:
+            return False, f"{relative_path}: PdfBuildWorker is not retained by the widget"
+        tree = ast.parse(source_text)
+        methods = {
+            node.name: ast.get_source_segment(source_text, node) or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+        }
+        for method_name in method_names:
+            method_source = methods.get(method_name, "")
+            if not method_source:
+                return False, f"{relative_path}: {method_name} not found"
+            if "ReportBuilder.build_pdf" in method_source:
+                return False, f"{relative_path}: {method_name} still builds PDF in UI callback"
+            if "_start" not in method_source:
+                return False, f"{relative_path}: {method_name} does not delegate PDF build"
     return True, "ok"
 
 
@@ -2426,6 +4050,151 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_read_coordinator_partial_snapshots(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime
+
+    from rem_card.services.read_coordinator import ReadCoordinator
+
+    class FakeRemCardService:
+        def __init__(self):
+            self.versions = {}
+            self.calls = []
+            self.full_calls = 0
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            _ = include_global
+            return int(self.versions.get(int(admission_id or 0), 1))
+
+        def build_full_card_snapshot(self, *args, **kwargs):
+            _ = args, kwargs
+            self.full_calls += 1
+            raise AssertionError("partial snapshots must not call full card snapshot")
+
+        def _base(self, scope, admission_id, shift_date):
+            self.calls.append(scope)
+            return {
+                "admission_id": int(admission_id),
+                "shift_date": shift_date,
+                "change_id": int(self.versions.get(int(admission_id or 0), 1)),
+            }
+
+        def build_balance_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            snapshot = self._base("balance", admission_id, shift_date)
+            snapshot["fluids"] = [{"amount": 10}]
+            snapshot["balance_runtime"] = {"orders": [], "start_dt": shift_date, "end_dt": shift_date}
+            return snapshot
+
+        def build_diet_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            snapshot = self._base("diet", admission_id, shift_date)
+            snapshot["events"] = [{"amount_ml": 150}]
+            snapshot["totals"] = {"daily": 150}
+            return snapshot
+
+        def build_patient_header_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            snapshot = self._base("patient_header", admission_id, shift_date)
+            snapshot["patient"] = {"name": "test"}
+            snapshot["status"] = {"status": "active"}
+            return snapshot
+
+        def build_status_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            snapshot = self._base("status", admission_id, shift_date)
+            snapshot["status"] = {"status": "active"}
+            snapshot["active_intervals"] = []
+            return snapshot
+
+        def build_ivl_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            snapshot = self._base("ivl", admission_id, shift_date)
+            snapshot["summary"] = {"active_case": None}
+            snapshot["timeline"] = []
+            return snapshot
+
+        def build_beds_snapshot(self, reference_dt=None, **kwargs):
+            _ = kwargs
+            dt = reference_dt or datetime(2026, 5, 3, 8)
+            snapshot = self._base("beds", 0, dt)
+            snapshot["patients"] = [{"id": 1}]
+            snapshot["runtime_snapshot"] = {1: {"card_exists": True}}
+            return snapshot
+
+    service = FakeRemCardService()
+    coordinator = ReadCoordinator(service)
+    shift_date = datetime(2026, 5, 3, 9, 15)
+
+    balance = coordinator.load_balance_snapshot(1, shift_date, role="doctor", force_refresh=True)
+    if balance.get("scope") != "balance" or balance.get("tab_name") != "balance":
+        return False, f"balance snapshot scope mismatch: {balance}"
+    if balance.get("dedup_signature", (None,))[0:3] != (1, "balance", 1):
+        return False, f"balance dedup signature mismatch: {balance.get('dedup_signature')}"
+    if not balance.get("content_hash") or balance.get("dedup_signature")[3] != balance.get("content_hash"):
+        return False, "balance snapshot content_hash is not part of dedup signature"
+
+    same_balance = coordinator.load_balance_snapshot(1, shift_date, role="doctor", force_refresh=True)
+    if same_balance.get("dedup_signature") != balance.get("dedup_signature"):
+        return False, "same partial content produced different dedup signature"
+    if same_balance.get("load_trace_id") == balance.get("load_trace_id"):
+        return False, "trace ids should stay diagnostic, not dedup keys"
+
+    balance_context = coordinator.make_patient_snapshot_context(
+        source_db="live",
+        admission_id=1,
+        shift_date=shift_date,
+        role="doctor",
+        mode="live",
+        variant="balance_full",
+    )
+    if coordinator.get_current_cached_patient_scope(balance_context.cache_key()) is None:
+        return False, "fresh patient scope cache was not treated as current"
+    service.versions[1] = 2
+    if coordinator.get_current_cached_patient_scope(balance_context.cache_key()) is not None:
+        return False, "stale patient scope cache was treated as current"
+    if coordinator.get_cached_patient_scope(balance_context.cache_key()) is None:
+        return False, "stale patient scope cache was not preserved for SWR"
+    refreshed = coordinator.load_balance_snapshot(1, shift_date, role="doctor", force_refresh=False)
+    if int(refreshed.get("version") or 0) != 2:
+        return False, f"stale partial snapshot did not refresh to version 2: {refreshed.get('version')}"
+
+    coordinator.load_diet_snapshot(1, shift_date, role="doctor", force_refresh=True)
+    coordinator.load_patient_header_snapshot(1, shift_date, role="doctor", force_refresh=True)
+    coordinator.load_status_snapshot(1, shift_date, role="doctor", force_refresh=True)
+    coordinator.load_ivl_snapshot(1, shift_date, role="doctor", force_refresh=True)
+    beds = coordinator.load_beds_snapshot(shift_date, role="nurse", force_refresh=True)
+    required_calls = {"balance", "diet", "patient_header", "status", "ivl", "beds"}
+    if not required_calls.issubset(set(service.calls)):
+        return False, f"missing partial snapshot builders: calls={service.calls}"
+    if service.full_calls:
+        return False, f"partial snapshots called full snapshot {service.full_calls} times"
+    if beds.get("dedup_signature", (None,))[0:3] != (0, "beds", 1):
+        return False, f"beds dedup signature mismatch: {beds.get('dedup_signature')}"
+
+    source = (PROJECT_ROOT / "services" / "read_coordinator.py").read_text(encoding="utf-8")
+    if "id(snapshot)" in source:
+        return False, "snapshot identity must not be used for dedup"
+    if "dedup_signature" not in source or "content_hash" not in source:
+        return False, "read coordinator missing content-based dedup fields"
+
+    for widget_path in (
+        PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+        PROJECT_ROOT / "ui" / "nurse_view" / "nurse_main_widget.py",
+    ):
+        widget_source = widget_path.read_text(encoding="utf-8")
+        tree = ast.parse(widget_source)
+        apply_snapshot = ""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_apply_card_snapshot":
+                apply_snapshot = ast.get_source_segment(widget_source, node) or ""
+                break
+        if "context_key" not in apply_snapshot or "_current_snapshot_context_key" not in apply_snapshot:
+            return False, f"{widget_path.name}: snapshot stale guard does not use context key"
+
+    return True, "ok"
+
+
 def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime
@@ -2638,6 +4407,122 @@ def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
         ivl_widget.close()
 
 
+def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.services.sync_coordinator import SyncCoordinator
+
+    def actions(payload):
+        return SyncCoordinator.classify(payload)["sync_actions"]
+
+    orders = actions({
+        "changed_entities": ["orders"],
+        "changes": [{"entity_name": "orders", "admission_id": 1}],
+    })
+    if orders["full_refresh_required"] or orders["card_snapshot_required"]:
+        return False, f"orders should not require full card snapshot: {orders}"
+    if not orders["orders_refresh"] or orders["vitals_snapshot_required"]:
+        return False, f"orders classification mismatch: {orders}"
+
+    vitals = actions({
+        "changed_entities": ["vitals"],
+        "changes": [{"entity_name": "vitals", "admission_id": 1}],
+    })
+    if vitals["full_refresh_required"] or vitals["card_snapshot_required"]:
+        return False, f"vitals should be partial snapshot only: {vitals}"
+    if not vitals["vitals_snapshot_required"]:
+        return False, f"vitals snapshot was not requested: {vitals}"
+
+    fluids = actions({
+        "changed_entities": ["fluids"],
+        "changes": [{"entity_name": "fluids", "admission_id": 1}],
+    })
+    if fluids["full_refresh_required"] or fluids["card_snapshot_required"] or fluids["vitals_snapshot_required"]:
+        return False, f"fluids should stay balance-only: {fluids}"
+    if not fluids["balance_refresh"]:
+        return False, f"balance refresh was not requested: {fluids}"
+
+    diet = actions({
+        "changed_entities": ["diet_plan", "oral_intake_events"],
+        "changes": [
+            {"entity_name": "diet_plan", "admission_id": 1},
+            {"entity_name": "oral_intake_events", "admission_id": 1},
+        ],
+    })
+    if diet["full_refresh_required"] or diet["card_snapshot_required"]:
+        return False, f"diet/oral changes should not require full card snapshot: {diet}"
+    if not diet["diet_refresh"] or not diet["balance_refresh"]:
+        return False, f"diet/oral classification mismatch: {diet}"
+
+    status = actions({
+        "changed_entities": ["patient_status_events"],
+        "changes": [{"entity_name": "patient_status_events", "admission_id": 1}],
+    })
+    if status["full_refresh_required"] or status["card_snapshot_required"]:
+        return False, f"status should not require full card snapshot: {status}"
+    if not (status["status_refresh"] and status["vitals_snapshot_required"] and status["balance_refresh"]):
+        return False, f"status classification mismatch: {status}"
+
+    local_force = actions({
+        "forced": True,
+        "force_source": "orders_left_click:1",
+        "changed_entities": ["orders"],
+    })
+    if local_force["full_refresh_required"] or local_force["card_snapshot_required"]:
+        return False, f"local orders force should not require full refresh: {local_force}"
+
+    gap = actions({
+        "gap_detected": True,
+        "reason": "gap_detected",
+        "changed_entities": ["orders"],
+    })
+    if not (gap["full_refresh_required"] and gap["card_snapshot_required"]):
+        return False, f"gap must require full refresh: {gap}"
+
+    empty_forced = actions({"forced": True, "force_source": "unknown_source"})
+    if not (empty_forced["full_refresh_required"] and empty_forced["card_snapshot_required"]):
+        return False, f"unknown forced refresh must be conservative: {empty_forced}"
+
+    return True, "ok"
+
+
+def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    widget_paths = [
+        PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+        PROJECT_ROOT / "ui" / "nurse_view" / "nurse_main_widget.py",
+    ]
+    for path in widget_paths:
+        source_text = path.read_text(encoding="utf-8")
+        tree = ast.parse(source_text)
+        methods = {
+            node.name: ast.get_source_segment(source_text, node) or ""
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+        }
+        on_changes = methods.get("_on_data_changes", "")
+        if not on_changes:
+            return False, f"{path.name}: _on_data_changes not found"
+        if "sync_actions" not in on_changes or "vitals_snapshot_required" not in on_changes:
+            return False, f"{path.name}: SyncCoordinator actions are not used"
+        if "if card_snapshot_required:" in on_changes:
+            return False, f"{path.name}: card_snapshot_required must not be an unconditional full-card path"
+        if 'load_scope="patient_open_vitals"' not in on_changes:
+            return False, f"{path.name}: vitals changes must use partial vitals snapshot"
+        partial_actions = methods.get("_apply_partial_sync_actions", "")
+        if "_apply_partial_sync_actions(" not in on_changes or not partial_actions:
+            return False, f"{path.name}: partial sync action dispatcher missing"
+        for helper in (
+            "_refresh_balance_from_db",
+            "_refresh_status_from_db",
+            "_refresh_ivl_from_db",
+        ):
+            if helper not in methods:
+                return False, f"{path.name}: {helper} helper missing"
+            if f"{helper}()" not in partial_actions:
+                return False, f"{path.name}: {helper} is not called from partial sync dispatcher"
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -2650,6 +4535,27 @@ def main():
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
+        ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
+        ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),
+        ("schema_migration_failure_rolls_back", _check_schema_migration_failure_rolls_back),
+        ("schema_migration_parallel_start", _check_schema_migration_parallel_start),
+        ("old_client_blocked_by_policy", _check_old_client_blocked_by_policy),
+        ("recovery_blocks_active_second_client", _check_recovery_blocks_active_second_client),
+        ("recovery_db_lock_busy_blocks_restore", _check_recovery_db_lock_busy_blocks_restore),
+        ("recovery_lock_busy_blocks_restore", _check_recovery_lock_busy_blocks_restore),
+        ("dbmanager_locked_quickcheck_does_not_restore", _check_dbmanager_locked_quickcheck_does_not_restore),
+        ("recovery_selects_next_valid_backup", _check_recovery_selects_next_valid_backup),
+        ("local_metrics_written_locally", _check_local_metrics_written_locally),
+        ("sector_ivl_enqueue_error_refreshes", _check_sector_ivl_enqueue_error_refreshes),
+        ("balance_controller_enqueue_error_refreshes", _check_balance_controller_enqueue_error_refreshes),
+        ("diet_intake_enqueue_error_refreshes", _check_diet_intake_enqueue_error_refreshes),
+        ("oral_intake_batch_rolls_back", _check_oral_intake_batch_rolls_back),
+        ("patient_form_enqueue_error_keeps_dialog", _check_patient_form_enqueue_error_keeps_dialog),
+        ("patient_bed_move_enqueue_error_refreshes", _check_patient_bed_move_enqueue_error_refreshes),
+        ("archive_delete_enqueue_error_refreshes", _check_archive_delete_enqueue_error_refreshes),
+        ("doctor_create_card_enqueue_error_refreshes", _check_doctor_create_card_enqueue_error_refreshes),
+        ("patient_status_error_refreshes_checked_state", _check_patient_status_error_refreshes_checked_state),
+        ("orders_pending_states_before_commit", _check_orders_pending_states_before_commit),
         ("blood_plasma_key_ru_prescription_parse", _check_blood_plasma_key_ru_prescription_parse),
         ("order_input_real_examples", _check_order_input_real_examples),
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
@@ -2666,12 +4572,15 @@ def main():
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
+        ("orders_optimistic_lock_conflicts", _check_orders_optimistic_lock_conflicts),
+        ("medical_audit_log_triggers", _check_medical_audit_log_triggers),
         ("doctor_create_card_avoids_open_snapshot_race", _check_doctor_create_card_avoids_open_snapshot_race),
         (
             "orders_widgets_defer_snapshot_reload_thread_creation",
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
+        ("pdf_build_runs_in_worker", _check_pdf_build_runs_in_worker),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
         ("chart_clears_on_card_context_change", _check_chart_clears_on_card_context_change),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
@@ -2679,9 +4588,12 @@ def main():
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
+        ("read_coordinator_partial_snapshots", _check_read_coordinator_partial_snapshots),
         ("visible_section_cache_keys_use_shift_context", _check_visible_section_cache_keys_use_shift_context),
         ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
         ("lazy_section_snapshot_caches", _check_lazy_section_snapshot_caches),
+        ("sync_coordinator_classifies_targeted_refresh", _check_sync_coordinator_classifies_targeted_refresh),
+        ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
 
     result_items = []

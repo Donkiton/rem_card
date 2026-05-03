@@ -38,6 +38,8 @@ class BedsSelectionWidget(QWidget):
         self.remcard_service = remcard_service
         self.report_worker = None
         self.daily_worker = None
+        self.daily_pdf_worker = None
+        self.full_pdf_worker = None
         self._daily_report_config = None
         self._full_report_config = None
         self._rows_by_admission_id = {}
@@ -293,7 +295,6 @@ class BedsSelectionWidget(QWidget):
             if not data:
                 return
             from rem_card.app.paths import REPORT_DIR
-            from ...rem_card_sectors.s_print.builder import ReportBuilder
 
             cfg = self._daily_report_config or {}
             report_dir = pathlib.Path(REPORT_DIR)
@@ -302,14 +303,37 @@ class BedsSelectionWidget(QWidget):
             pdf_path = report_dir / f"{p_name_safe}_{data['start_dt'].strftime('%Y-%m-%d')}_day{data['icu_day']}.pdf"
 
             logger.info("[W1Report] daily PDF build role=doctor path=%s", pdf_path)
-            ReportBuilder.build_pdf(data, cfg, pdf_path)
-
-            if pdf_path.exists():
-                logger.info("[W1Report] daily PDF ready role=doctor size=%s path=%s", pdf_path.stat().st_size, pdf_path)
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+            self._start_daily_pdf_worker(data, cfg, pdf_path)
         except Exception as exc:
             logger.exception("[W1Report] daily PDF failed role=doctor")
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF отчета за сутки:\n{exc}")
+
+    def _start_daily_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path):
+        if self.daily_pdf_worker is not None and self.daily_pdf_worker.isRunning():
+            CustomMessageBox.information(self, "Инфо", "PDF отчета за сутки уже формируется.")
+            return
+        from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
+
+        self.daily_pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
+        self.daily_pdf_worker.completed.connect(self._on_daily_pdf_ready)
+        self.daily_pdf_worker.error.connect(self._on_daily_pdf_error)
+        self.daily_pdf_worker.finished.connect(self._clear_daily_pdf_worker)
+        self.daily_pdf_worker.start()
+
+    @Slot(object)
+    def _on_daily_pdf_ready(self, pdf_path):
+        pdf_path = pathlib.Path(pdf_path)
+        if pdf_path.exists():
+            logger.info("[W1Report] daily PDF ready role=doctor size=%s path=%s", pdf_path.stat().st_size, pdf_path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+
+    @Slot(str)
+    def _on_daily_pdf_error(self, msg):
+        CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF отчета за сутки:\n{msg}")
+
+    @Slot()
+    def _clear_daily_pdf_worker(self):
+        self.daily_pdf_worker = None
 
     @Slot(str)
     def _on_daily_report_error(self, msg):
@@ -350,7 +374,6 @@ class BedsSelectionWidget(QWidget):
             if not results:
                 return
             from rem_card.app.paths import REPORT_DIR
-            from ...rem_card_sectors.s_print.builder import ReportBuilder
 
             cfg = self._full_report_config or {}
             report_dir = pathlib.Path(REPORT_DIR)
@@ -359,14 +382,37 @@ class BedsSelectionWidget(QWidget):
             pdf_path = report_dir / f"FULL_W1_{p_name_safe}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
 
             logger.info("[W1Report] full PDF build role=doctor days=%s path=%s", len(results), pdf_path)
-            ReportBuilder.build_pdf(results, cfg, pdf_path)
-
-            if pdf_path.exists():
-                logger.info("[W1Report] full PDF ready role=doctor size=%s path=%s", pdf_path.stat().st_size, pdf_path)
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+            self._start_full_pdf_worker(results, cfg, pdf_path)
         except Exception as exc:
             logger.exception("[W1Report] full PDF failed role=doctor")
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF общего отчета:\n{exc}")
+
+    def _start_full_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path):
+        if self.full_pdf_worker is not None and self.full_pdf_worker.isRunning():
+            CustomMessageBox.information(self, "Инфо", "PDF общего отчета уже формируется.")
+            return
+        from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
+
+        self.full_pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
+        self.full_pdf_worker.completed.connect(self._on_full_pdf_ready)
+        self.full_pdf_worker.error.connect(self._on_full_pdf_error)
+        self.full_pdf_worker.finished.connect(self._clear_full_pdf_worker)
+        self.full_pdf_worker.start()
+
+    @Slot(object)
+    def _on_full_pdf_ready(self, pdf_path):
+        pdf_path = pathlib.Path(pdf_path)
+        if pdf_path.exists():
+            logger.info("[W1Report] full PDF ready role=doctor size=%s path=%s", pdf_path.stat().st_size, pdf_path)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+
+    @Slot(str)
+    def _on_full_pdf_error(self, msg):
+        CustomMessageBox.critical(self, "Ошибка", f"Не удалось сформировать PDF общего отчета:\n{msg}")
+
+    @Slot()
+    def _clear_full_pdf_worker(self):
+        self.full_pdf_worker = None
 
     @Slot(str)
     def _on_full_report_error(self, msg):

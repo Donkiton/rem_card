@@ -25,6 +25,7 @@ class BalanceController(QObject):
         # Кэш данных: hour (0-23) -> накопленные значения по показателям выведения.
         self.hourly_cache = self._build_empty_hourly_cache()
         self._effective_bounds_cache = None
+        self._write_pending = False
 
     @staticmethod
     def _build_empty_hourly_cache():
@@ -82,7 +83,7 @@ class BalanceController(QObject):
         self._effective_bounds_cache = effective_bounds
 
         if self.quick_input:
-            self.quick_input.set_quick_input_enabled(self.is_current_shift())
+            self.quick_input.set_quick_input_enabled(self.is_current_shift() and not self._write_pending)
 
         for f in fluids or []:
             hour = f.timestamp.hour
@@ -103,7 +104,7 @@ class BalanceController(QObject):
                 self.panel_2d.set_selection(label, val if val > 0 else None, keep_focus=False)
 
         if self.panel_2d:
-            self.panel_2d.set_undo_active(len(self._undo_stack) > 0)
+            self.panel_2d.set_undo_active(len(self._undo_stack) > 0 and not self._write_pending)
 
         if self.quick_input:
             cumulative_data = self.get_cumulative_data_to_now()
@@ -112,6 +113,8 @@ class BalanceController(QObject):
         self.data_updated.emit()
 
     def _on_cell_selected(self, row_idx, hour):
+        if self._write_pending:
+            return
         row_key = self.grid.rows_map[row_idx]
         val = self.hourly_cache[hour].get(row_key, 0)
         label = f"{self.grid.row_labels[row_idx]} ({hour:02d}:00)"
@@ -119,6 +122,8 @@ class BalanceController(QObject):
         self.panel_2d.set_selection(label, val if val > 0 else None, keep_focus=True)
 
     def _on_panel_save(self, new_val):
+        if self._write_pending:
+            return
         # ПРОВЕРКА ИСХОДА + 1 ЧАС
         current_sel = self.grid.selectedItems()
         if current_sel:
@@ -190,6 +195,8 @@ class BalanceController(QObject):
             return # Отмена
 
     def _on_panel_delete(self):
+        if self._write_pending:
+            return
         row_key, hour, old_val = self.grid.get_selected_info()
         if row_key is None: return
         
@@ -208,6 +215,8 @@ class BalanceController(QObject):
 
     def add_value(self, row_key: str, input_field):
         """Быстрое добавление значения из Sector2b_v (всегда в текущий час)."""
+        if self._write_pending:
+            return
         if not self.is_current_shift():
             return
             
@@ -243,23 +252,45 @@ class BalanceController(QObject):
         if current_hour_val > 0:
             msg_text = f"В часе {hour:02d}:00 уже есть значение {int(current_hour_val)} мл. Добавить {val} мл и суммировать?"
             if self._confirm(msg_text):
-                self._process_update(row_key, hour, val, is_sum=True)
-                input_field.clear()
+                self._process_update(
+                    row_key,
+                    hour,
+                    val,
+                    is_sum=True,
+                    on_success=lambda _result: input_field.clear(),
+                )
         else:
-            self._process_update(row_key, hour, val, is_sum=True)
-            input_field.clear()
+            self._process_update(
+                row_key,
+                hour,
+                val,
+                is_sum=True,
+                on_success=lambda _result: input_field.clear(),
+            )
 
-    def _process_update(self, row_key, hour, val, is_sum=False):
+    def _process_update(self, row_key, hour, val, is_sum=False, on_success=None):
         """Сохранение значения выведения по часу через сервисный слой."""
-        try:
-            result = self.service.upsert_hourly_output(
-                admission_id=self.admission_id,
-                shift_date=self.shift_date,
+        if self._write_pending:
+            return
+
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+        service = self.service
+
+        def operation():
+            return service.upsert_hourly_output(
+                admission_id=admission_id,
+                shift_date=shift_date,
                 hour=hour,
                 row_key=row_key,
                 value=val,
                 is_sum=is_sum,
             )
+
+        def handle_success(result):
+            if not self._is_current_context(admission_id, shift_date):
+                self._finish_pending("Сохранено")
+                return
             if result["action"] == "add":
                 self._undo_stack.append(("add", result["fluid_id"]))
                 logger.debug(f"[BalanceCtrl] Created new record {result['fluid_id']} for hour {hour}")
@@ -270,35 +301,146 @@ class BalanceController(QObject):
                     f"{result['old_value']}->{result['new_value']}"
                 )
 
+            if on_success:
+                on_success(result)
             self.refresh()
             if self.panel_2d:
                 self.panel_2d.set_undo_active(len(self._undo_stack) > 0)
-            
-        except Exception as e:
-            logger.error(f"[BalanceCtrl] Save failed: {e}", exc_info=True)
-            CustomMessageBox.critical(None, "Ошибка", f"Не удалось сохранить данные: {e}")
+            self._finish_pending("Сохранено")
+
+        def handle_error(exc):
+            logger.error(
+                f"[BalanceCtrl] Save failed: {exc}",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            if self._is_current_context(admission_id, shift_date):
+                self.refresh()
+            self._finish_pending("Ошибка сохранения")
+            CustomMessageBox.critical(None, "Ошибка", f"Не удалось сохранить данные: {exc}")
+
+        self._enqueue_write(
+            f"balance_upsert_output:{admission_id}:{row_key}:{hour}",
+            operation,
+            pending_text="Сохраняется...",
+            on_success=handle_success,
+            on_error=handle_error,
+        )
 
     def undo(self):
         if not self._undo_stack:
             logger.warning("[BalanceCtrl] Undo stack is empty")
             return
-            
-        action = self._undo_stack.pop()
-        try:
+        if self._write_pending:
+            return
+
+        action = self._undo_stack[-1]
+        admission_id = self.admission_id
+        shift_date = self.shift_date
+        service = self.service
+
+        def operation():
             if action[0] == 'add':
                 fluid_id = action[1]
-                self.service.delete_fluid_by_id(fluid_id)
-                logger.debug(f"[BalanceCtrl] Undo ADD: deleted record {fluid_id}")
+                service.delete_fluid_by_id(fluid_id)
+                return {"action": "add", "fluid_id": fluid_id}
             elif action[0] == 'update':
                 fluid_id, row_key, old_val = action[1], action[2], action[3]
-                self.service.restore_hourly_output(fluid_id, row_key, old_val)
-                logger.debug(f"[BalanceCtrl] Undo UPDATE: record {fluid_id}, {row_key} restored to {old_val}")
+                service.restore_hourly_output(fluid_id, row_key, old_val)
+                return {"action": "update", "fluid_id": fluid_id, "row_key": row_key, "old_value": old_val}
+            raise ValueError(f"Unknown balance undo action: {action[0]}")
 
+        def handle_success(result):
+            if not self._is_current_context(admission_id, shift_date):
+                self._finish_pending("Отменено")
+                return
+            if self._undo_stack and self._undo_stack[-1] == action:
+                self._undo_stack.pop()
+            if result["action"] == "add":
+                logger.debug(f"[BalanceCtrl] Undo ADD: deleted record {result['fluid_id']}")
+            else:
+                logger.debug(
+                    f"[BalanceCtrl] Undo UPDATE: record {result['fluid_id']}, "
+                    f"{result['row_key']} restored to {result['old_value']}"
+                )
             self.refresh()
             if self.panel_2d:
                 self.panel_2d.set_undo_active(len(self._undo_stack) > 0)
-        except Exception as e:
-            logger.error(f"[BalanceCtrl] Undo failed: {e}")
+            self._finish_pending("Отменено")
+
+        def handle_error(exc):
+            logger.error(
+                f"[BalanceCtrl] Undo failed: {exc}",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            if self._is_current_context(admission_id, shift_date):
+                self.refresh()
+            self._finish_pending("Ошибка отмены")
+            CustomMessageBox.critical(None, "Ошибка", f"Не удалось отменить последнее действие: {exc}")
+
+        self._enqueue_write(
+            f"balance_undo:{self.admission_id}",
+            operation,
+            pending_text="Отмена...",
+            on_success=handle_success,
+            on_error=handle_error,
+        )
+
+    def _enqueue_write(self, description: str, operation, *, pending_text: str, on_success=None, on_error=None):
+        self._begin_pending(pending_text)
+        if hasattr(self.service, "enqueue_write"):
+            try:
+                self.service.enqueue_write(
+                    description=description,
+                    operation=operation,
+                    on_success=on_success,
+                    on_error=on_error,
+                )
+            except Exception as exc:
+                if on_error:
+                    on_error(exc)
+                else:
+                    self._finish_pending("Ошибка")
+                    raise
+            return
+        try:
+            result = operation()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+            else:
+                self._finish_pending("Ошибка")
+                raise
+            return
+        if on_success:
+            on_success(result)
+
+    def _begin_pending(self, text: str):
+        self._write_pending = True
+        self._set_write_widgets_enabled(False)
+        if self.panel_2d:
+            self.panel_2d.status_lbl.setText(text)
+
+    def _finish_pending(self, text: str = ""):
+        self._write_pending = False
+        self._set_write_widgets_enabled(True)
+        if text and self.panel_2d:
+            self.panel_2d.status_lbl.setText(text)
+
+    def _set_write_widgets_enabled(self, enabled: bool):
+        if self.grid:
+            self.grid.setEnabled(enabled)
+        if self.panel_2d:
+            has_selection = bool(self.grid and self.grid.currentRow() >= 0 and self.grid.currentColumn() >= 0)
+            self.panel_2d.edit_input.setEnabled(enabled and has_selection)
+            self.panel_2d.btn_save.setEnabled(enabled and self.panel_2d.edit_input.isEnabled())
+            row_key, _hour, current_val = self.grid.get_selected_info() if self.grid else (None, None, 0)
+            self.panel_2d.btn_delete.setEnabled(enabled and row_key is not None and current_val > 0)
+            self.panel_2d.btn_undo.setEnabled(enabled and len(self._undo_stack) > 0)
+        if self.quick_input:
+            self.quick_input.set_quick_input_enabled(enabled and self.is_current_shift())
+
+    def _is_current_context(self, admission_id: int, shift_date: datetime) -> bool:
+        return self.admission_id == admission_id and self.shift_date == shift_date
 
     def _confirm(self, text):
         return CustomMessageBox.question(None, "Подтверждение", text) == CustomMessageBox.Yes

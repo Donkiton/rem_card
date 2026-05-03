@@ -1,9 +1,12 @@
 import threading
+import time
+from datetime import datetime
 from typing import Any, Optional
 
 from PySide6.QtCore import QThread, Signal
 
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 
 
 class DataUpdateMonitor(QThread):
@@ -171,7 +174,37 @@ class DataUpdateMonitor(QThread):
             "changed_entities": changed_entities,
             "admission_ids": admission_ids,
         }
+        record_metric("latest_change_id", int(current_change_id), component="DataUpdateMonitor")
+        if forced:
+            record_metric("forced_refresh_count", 1, reason=str(reason or ""), force_sources=list(force_sources or []))
+        if gap_detected or str(reason or "") in {"cursor_moved_backwards", "empty_change_rows"}:
+            record_metric("full_snapshot_count", 1, reason=str(reason or "gap_detected"))
+        lag_ms = self._change_log_lag_ms(changes)
+        if lag_ms is not None:
+            record_metric("change_log_lag_ms", lag_ms, last_change_id=int(current_change_id))
         self.changes_detected.emit(payload)
+
+    @staticmethod
+    def _change_log_lag_ms(changes: list[dict[str, Any]]) -> Optional[int]:
+        latest_ts = ""
+        for change in changes or []:
+            changed_at = str(change.get("changed_at") or "")
+            if changed_at > latest_ts:
+                latest_ts = changed_at
+        if not latest_ts:
+            return None
+        try:
+            normalized = latest_ts.replace("Z", "+00:00")
+            if "T" not in normalized and " " in normalized:
+                normalized = normalized.replace(" ", "T", 1)
+            changed_dt = datetime.fromisoformat(normalized)
+            if changed_dt.tzinfo is not None:
+                lag_sec = time.time() - changed_dt.timestamp()
+            else:
+                lag_sec = time.time() - changed_dt.replace(tzinfo=datetime.now().astimezone().tzinfo).timestamp()
+            return max(0, int(lag_sec * 1000.0))
+        except Exception:
+            return None
 
     @staticmethod
     def _normalize_row(row: Any) -> dict[str, Any]:

@@ -170,6 +170,14 @@ def _is_retryable_availability_error(reason: str) -> bool:
     return any(marker in text for marker in retryable_markers)
 
 
+def is_confirmed_db_corruption_reason(reason: str) -> bool:
+    return _is_confirmed_corruption(reason)
+
+
+def is_retryable_db_availability_reason(reason: str) -> bool:
+    return _is_retryable_availability_error(reason)
+
+
 def _availability_user_message(reason: str) -> str:
     text = str(reason or "").lower()
     if "locked" in text or "busy" in text:
@@ -275,6 +283,60 @@ def _load_or_create_client_policy(baza_dir: str, role: Optional[str]) -> dict[st
         details={"policy_path": policy_path, "min_client_version": min_version},
     )
     return policy
+
+
+def update_client_policy_min_version(
+    policy_path: str,
+    min_client_version: str,
+    *,
+    role: Optional[str] = None,
+    baza_dir: Optional[str] = None,
+    reason: str = "schema_migration",
+) -> bool:
+    os.makedirs(os.path.dirname(policy_path), exist_ok=True)
+    created = False
+    try:
+        with open(policy_path, "r", encoding="utf-8") as fh:
+            policy = json.load(fh)
+        if not isinstance(policy, dict):
+            policy = {}
+    except FileNotFoundError:
+        policy = _default_client_policy()
+        created = True
+
+    changed = created
+    if not policy.get("schema_version"):
+        policy["schema_version"] = 1
+        changed = True
+    if not policy.get("required_db_profile"):
+        policy["required_db_profile"] = NETWORK_SAFE_DB_PROFILE
+        changed = True
+    if "wal_allowed_on_shared_db" not in policy:
+        policy["wal_allowed_on_shared_db"] = False
+        changed = True
+
+    target = str(min_client_version or REQUIRED_CLIENT_POLICY_VERSION)
+    current = str(policy.get("min_client_version") or "")
+    if not current or _compare_client_versions(current, target) < 0:
+        policy["min_client_version"] = target
+        policy["min_client_version_updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        policy["min_client_version_reason"] = reason
+        changed = True
+
+    if changed:
+        with open(policy_path, "w", encoding="utf-8") as fh:
+            json.dump(policy, fh, ensure_ascii=False, indent=2)
+        write_audit_event(
+            "client_policy_min_version_updated",
+            baza_dir=baza_dir,
+            role=role,
+            details={
+                "policy_path": policy_path,
+                "min_client_version": policy.get("min_client_version"),
+                "reason": reason,
+            },
+        )
+    return changed
 
 
 def _acquire_lock_with_wait(
@@ -583,6 +645,111 @@ def _quarantine_existing_db_sidecars(db_path: str, baza_dir: str, role: Optional
     return _quarantine_current_db(db_path, baza_dir, role, context)
 
 
+def _read_lock_json(path: str):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        return payload if isinstance(payload, dict) else {}
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return {"unreadable": True}
+
+
+def _host_aliases() -> set[str]:
+    aliases: set[str] = set()
+    for value in (socket.gethostname(), socket.getfqdn(), os.environ.get("COMPUTERNAME"), os.environ.get("HOSTNAME")):
+        if not value:
+            continue
+        host = str(value).strip().lower()
+        if not host:
+            continue
+        aliases.add(host)
+        aliases.add(host.split(".")[0])
+    return aliases
+
+
+def _is_local_host_value(host_value: Any) -> bool:
+    if not host_value:
+        return False
+    host = str(host_value).strip().lower()
+    if not host:
+        return False
+    aliases = _host_aliases()
+    return host in aliases or host.split(".")[0] in aliases
+
+
+def _is_pid_alive_local(pid_value: Any) -> bool:
+    try:
+        pid = int(pid_value)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+    return True
+
+
+def _is_current_process_lock(payload: dict[str, Any]) -> bool:
+    try:
+        pid = int(payload.get("pid") or -1)
+    except Exception:
+        return False
+    return _is_local_host_value(payload.get("host")) and pid == os.getpid()
+
+
+def _role_lock_is_stale(path: str, payload: dict[str, Any], stale_timeout_sec: float) -> bool:
+    if payload.get("unreadable"):
+        return False
+    if _is_local_host_value(payload.get("host")) and not _is_pid_alive_local(payload.get("pid")):
+        return True
+    ts = payload.get("timestamp")
+    if isinstance(ts, (int, float)) and (time.time() - float(ts)) > stale_timeout_sec:
+        return True
+    try:
+        return (time.time() - os.path.getmtime(path)) > stale_timeout_sec
+    except Exception:
+        return False
+
+
+def _active_other_role_locks(baza_dir: str, *, stale_timeout_sec: float = 75.0) -> list[dict[str, Any]]:
+    lock_dir = os.path.join(baza_dir, "session_locks")
+    if not os.path.isdir(lock_dir):
+        return []
+
+    active: list[dict[str, Any]] = []
+    for name in os.listdir(lock_dir):
+        if not name.lower().endswith(".lock"):
+            continue
+        path = os.path.join(lock_dir, name)
+        payload = _read_lock_json(path)
+        if not payload:
+            continue
+        if _is_current_process_lock(payload):
+            continue
+        if _role_lock_is_stale(path, payload, stale_timeout_sec):
+            continue
+        active.append(
+            {
+                "path": path,
+                "role": payload.get("role") or os.path.splitext(name)[0],
+                "host": payload.get("host"),
+                "pid": payload.get("pid"),
+                "unreadable": bool(payload.get("unreadable")),
+            }
+        )
+    return active
+
+
 def _restore_from_source(source_path: str, db_path: str) -> str:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     temp_path = f"{db_path}.restore_tmp_{os.getpid()}_{_now_stamp()}"
@@ -661,6 +828,25 @@ def _recover_shared_db(
                 baza_dir=baza_dir,
             )
 
+        active_clients = _active_other_role_locks(baza_dir)
+        if active_clients:
+            write_audit_event(
+                "shared_db_auto_recovery_blocked",
+                baza_dir=baza_dir,
+                role=role,
+                details={
+                    "reason": "active_client",
+                    "active_clients": active_clients[:5],
+                    "initial_failure": failure_reason,
+                },
+            )
+            return StartupDbGuardResult(
+                ok=False,
+                user_message="Автовосстановление базы заблокировано: другое рабочее место активно. Закройте второй клиент или выполните ручное восстановление ответственным.",
+                technical_reason="active client lock present",
+                baza_dir=baza_dir,
+            )
+
         source_path, select_reason = _select_latest_valid_source(baza_dir, db_path, role)
         if not source_path:
             write_audit_event(
@@ -732,6 +918,50 @@ def _recover_shared_db(
         )
     finally:
         _release_lock(db_lock, db_heartbeat)
+
+
+def recover_shared_db_with_locks(
+    *,
+    baza_dir: str,
+    db_path: str,
+    role: Optional[str],
+    failure_reason: str,
+) -> StartupDbGuardResult:
+    recovery_lock = None
+    recovery_heartbeat = None
+    owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
+    recovery_lock_path = os.path.join(baza_dir, "locks", "recovery.lock")
+    try:
+        recovery_lock, recovery_heartbeat = _acquire_lock_with_wait(
+            recovery_lock_path,
+            stale_timeout_sec=RECOVERY_LOCK_STALE_SEC,
+            wait_sec=RECOVERY_LOCK_WAIT_SEC,
+            owner_id=owner_id,
+            source="recovery",
+            role=role,
+            baza_dir=baza_dir,
+        )
+        return _recover_shared_db(
+            baza_dir=baza_dir,
+            db_path=db_path,
+            role=role,
+            failure_reason=failure_reason,
+        )
+    except TimeoutError as exc:
+        write_audit_event(
+            "shared_db_auto_recovery_blocked",
+            baza_dir=baza_dir,
+            role=role,
+            details={"reason": "recovery_lock_busy", "lock_path": recovery_lock_path, "error": str(exc)},
+        )
+        return StartupDbGuardResult(
+            ok=False,
+            user_message="База сейчас восстанавливается другим клиентом. Повторите запуск через несколько минут.",
+            technical_reason=str(exc),
+            baza_dir=baza_dir,
+        )
+    finally:
+        _release_lock(recovery_lock, recovery_heartbeat)
 
 
 def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:

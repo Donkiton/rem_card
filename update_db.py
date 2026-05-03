@@ -1,8 +1,16 @@
 import sqlite3
 
-from rem_card.app.paths import DB_LOCK_PATH, JOURNAL_DB_PATH, ensure_directories
+from rem_card.app.paths import (
+    BAZA_DIR,
+    BACKUPS_VALID_DIR,
+    CLIENT_POLICY_PATH,
+    DB_LOCK_PATH,
+    INVALID_BACKUPS_DIR,
+    JOURNAL_DB_PATH,
+    ensure_directories,
+)
+from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 from rem_card.app.sqlite_shared import FileWriteLock, SQLiteWriteController, configure_connection, run_integrity_check
-from rem_card.app.unified_db_schema import ensure_unified_schema
 
 
 def update_db():
@@ -30,8 +38,16 @@ def update_db():
             lock_path=DB_LOCK_PATH,
             owner_id="update_db_script",
         )
-        with controller.transaction(conn, source="update_db_script"):
-            ensure_unified_schema(conn)
+        ensure_unified_schema_with_migration_backup(
+            conn,
+            db_path=JOURNAL_DB_PATH,
+            backup_dir=BACKUPS_VALID_DIR,
+            invalid_dir=INVALID_BACKUPS_DIR,
+            policy_path=CLIENT_POLICY_PATH,
+            baza_dir=BAZA_DIR,
+            controller=controller,
+            source="update_db_script",
+        )
 
         print("Unified schema migration successful")
     finally:

@@ -204,6 +204,7 @@ class OrdersDAO:
                 draft_sort_order=rd.get('draft_sort_order'),
                 is_finalized=bool(rd.get('is_finalized', 0)),
                 is_committed=rd.get('is_committed', 0),
+                revision=rd.get('revision', 0) or 0,
                 created_at=datetime.fromisoformat(rd['created_at']),
                 comment=rd['comment'],
                 last_modified_by=rd.get('last_modified_by'),
@@ -270,6 +271,7 @@ class OrdersDAO:
                     draft_sort_order=rd.get('draft_sort_order'),
                     is_finalized=bool(rd.get('is_finalized', 0)),
                     is_committed=rd.get('is_committed', 0),
+                    revision=rd.get('revision', 0) or 0,
                     created_at=datetime.fromisoformat(rd['created_at']),
                     comment=rd['comment'],
                     last_modified_by=rd.get('last_modified_by'),
@@ -298,7 +300,10 @@ class OrdersDAO:
         # Просто ставим status = 'deleted' и is_committed = 0
         self.db.execute_remcard("""
             UPDATE orders 
-            SET status = 'deleted', is_committed = 0, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            SET status = 'deleted',
+                is_committed = 0,
+                revision = COALESCE(revision, 0) + 1,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
             WHERE id = ?
         """, (order_id,))
         
@@ -322,7 +327,10 @@ class OrdersDAO:
         """Помечает все назначения и администрации смены как удаленные."""
         self.db.execute_remcard("""
             UPDATE orders 
-            SET status = 'deleted', is_committed = 0, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            SET status = 'deleted',
+                is_committed = 0,
+                revision = COALESCE(revision, 0) + 1,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
             WHERE admission_id = ?
               AND datetime >= ? AND datetime < ?
         """, (admission_id, start_iso, end_iso))
@@ -334,6 +342,7 @@ class OrdersDAO:
             UPDATE orders 
             SET status = ?,
                 last_modified_by = ?,
+                revision = COALESCE(revision, 0) + 1,
                 updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
             WHERE id = ?
         """

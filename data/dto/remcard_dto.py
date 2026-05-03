@@ -231,6 +231,7 @@ class OrderDTO:
     draft_sort_order: Optional[int] = None
     is_finalized: bool = False
     is_committed: int = 0
+    revision: int = 0
     created_at: datetime = field(default_factory=datetime.now)
     created_by: Optional[int] = None
     comment: str = ""

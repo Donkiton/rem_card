@@ -735,32 +735,133 @@ class NurseMainWidget(QWidget):
                 f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
             )
 
-    def _on_data_changes(self, payload: dict):
+    def _refresh_balance_from_db(self) -> None:
+        try:
+            self._ensure_card_widgets_initialized()
+            self._bind_balance_widgets_if_ready()
+            if hasattr(self, "balance_controller"):
+                self.balance_controller.refresh()
+            else:
+                self._update_balance_calculations()
+        except Exception:
+            logger.exception("Nurse balance partial refresh failed")
+
+    def _refresh_status_from_db(self) -> None:
+        try:
+            if hasattr(self.layout_manager, "set_current_status_dto"):
+                self.layout_manager.set_current_status_dto(None)
+            if hasattr(self.layout_manager, "refresh_current_status"):
+                self.layout_manager.refresh_current_status()
+            events_sector = getattr(self.layout_manager, "sector_events", None)
+            if events_sector is not None and hasattr(events_sector, "refresh"):
+                events_sector.refresh(force=True)
+        except Exception:
+            logger.exception("Nurse status partial refresh failed")
+
+    def _refresh_ivl_from_db(self) -> None:
+        try:
+            sector_ivl = getattr(self.layout_manager, "sector_ivl", None)
+            if sector_ivl is not None and hasattr(sector_ivl, "refresh"):
+                sector_ivl.refresh()
+        except Exception:
+            logger.exception("Nurse IVL partial refresh failed")
+
+    @staticmethod
+    def _changed_entities_from_payload(payload: dict) -> set[str]:
         changed_entities = {
             str(entity)
             for entity in (payload.get("changed_entities") or [])
             if entity is not None
         }
-        if not changed_entities:
-            changed_entities = {
-                str(change.get("entity_name") or "")
-                for change in (payload.get("changes") or [])
-                if change.get("entity_name")
-            }
+        if changed_entities:
+            return changed_entities
+        return {
+            str(change.get("entity_name") or "")
+            for change in (payload.get("changes") or [])
+            if change.get("entity_name")
+        }
+
+    def _handle_diet_sync(
+        self,
+        payload: dict,
+        changed_entities: set[str],
+        *,
+        full_refresh_required: bool,
+        diet_refresh: bool,
+    ) -> bool:
+        diet_widget = getattr(self, "diet_intake_widget", None)
+        if diet_widget is None:
+            return False
+        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
+        has_diet_changes = bool(changed_entities.intersection(diet_entities))
+        if full_refresh_required or diet_refresh:
+            diet_widget.handle_data_changes(payload)
+            return False
+        if not has_diet_changes:
+            return False
+        diet_widget.handle_data_changes(payload)
+        if "oral_intake_events" in changed_entities:
+            self._update_balance_calculations()
+        return set(changed_entities).issubset(diet_entities)
+
+    def _refresh_orders_from_payload(
+        self,
+        payload: dict,
+        *,
+        full_refresh_required: bool,
+        has_orders_changes: bool,
+        orders_refresh: bool,
+    ) -> None:
+        should_refresh = full_refresh_required or has_orders_changes or orders_refresh
+        if not should_refresh:
+            return
+        if hasattr(self.layout_manager, 'orders_widget'):
+            try:
+                self.layout_manager.orders_widget.handle_data_changes(
+                    payload,
+                    tab_active=self._is_orders_tab_active(),
+                )
+            except Exception:
+                logger.exception("Nurse orders delta refresh failed")
+        if hasattr(self.layout_manager, "nurse_orders_manager"):
+            try:
+                mgr = self.layout_manager.nurse_orders_manager
+                if mgr and hasattr(mgr, "handle_data_changes"):
+                    mgr.handle_data_changes(payload)
+            except Exception:
+                logger.exception("Current nurse orders refresh failed")
+
+    def _apply_partial_sync_actions(self, sync_actions: dict, *, full_refresh_required: bool) -> None:
+        if full_refresh_required:
+            return
+        if sync_actions.get("balance_refresh"):
+            self._refresh_balance_from_db()
+        if sync_actions.get("status_refresh"):
+            self._refresh_status_from_db()
+        if sync_actions.get("ivl_refresh"):
+            self._refresh_ivl_from_db()
+
+    def _on_data_changes(self, payload: dict):
+        sync_actions = payload.get("sync_actions") or {}
+        full_refresh_required = bool(sync_actions.get("full_refresh_required"))
+        card_snapshot_required = bool(sync_actions.get("card_snapshot_required"))
+        vitals_snapshot_required = bool(sync_actions.get("vitals_snapshot_required"))
+        changed_entities = self._changed_entities_from_payload(payload)
         self._invalidate_vitals_cache_from_payload(payload, changed_entities)
         orders_entities = {"orders", "administrations"}
-        if self._selection_mode == "beds" and (payload.get("forced") or changed_entities.intersection(W1_REFRESH_ENTITIES)):
+        if self._selection_mode == "beds" and (
+            full_refresh_required or changed_entities.intersection(W1_REFRESH_ENTITIES)
+        ):
             if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
                 self.layout_manager.beds_selection_widget.refresh()
         if self._selection_mode == "archive":
             archive_widget = getattr(self.layout_manager, "archive_widget", None)
-            if archive_widget and (payload.get("forced") or changed_entities.intersection({"patients", "admissions"})):
+            if archive_widget and (full_refresh_required or changed_entities.intersection({"patients", "admissions"})):
                 archive_widget.load_data()
 
         if self._selection_mode != "card" or not self._payload_is_relevant(payload):
             return
 
-        diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
         if self._is_local_orders_force_payload(payload, changed_entities):
             if hasattr(self.layout_manager, 'orders_widget'):
                 try:
@@ -778,33 +879,26 @@ class NurseMainWidget(QWidget):
             )
             return
 
-        has_diet_changes = bool(changed_entities.intersection(diet_entities))
-        if payload.get("forced") and getattr(self, "diet_intake_widget", None):
-            self.diet_intake_widget.handle_data_changes(payload)
-        if has_diet_changes and getattr(self, "diet_intake_widget", None):
-            self.diet_intake_widget.handle_data_changes(payload)
-            if "oral_intake_events" in changed_entities:
-                self._update_balance_calculations()
-            if not payload.get("forced") and set(changed_entities).issubset(diet_entities):
-                return
+        if self._handle_diet_sync(
+            payload,
+            changed_entities,
+            full_refresh_required=full_refresh_required,
+            diet_refresh=bool(sync_actions.get("diet_refresh")),
+        ):
+            return
 
         has_orders_changes = bool(changed_entities.intersection(orders_entities))
-        if (payload.get("forced") or has_orders_changes) and hasattr(self.layout_manager, 'orders_widget'):
-            try:
-                self.layout_manager.orders_widget.handle_data_changes(
-                    payload,
-                    tab_active=self._is_orders_tab_active(),
-                )
-            except Exception:
-                logger.exception("Nurse orders delta refresh failed")
-        if (payload.get("forced") or has_orders_changes) and hasattr(self.layout_manager, "nurse_orders_manager"):
-            try:
-                mgr = self.layout_manager.nurse_orders_manager
-                if mgr and hasattr(mgr, "handle_data_changes"):
-                    mgr.handle_data_changes(payload)
-            except Exception:
-                logger.exception("Current nurse orders refresh failed")
-        self._request_card_snapshot()
+        self._refresh_orders_from_payload(
+            payload,
+            full_refresh_required=full_refresh_required,
+            has_orders_changes=has_orders_changes,
+            orders_refresh=bool(sync_actions.get("orders_refresh")),
+        )
+        self._apply_partial_sync_actions(sync_actions, full_refresh_required=full_refresh_required)
+        if full_refresh_required or card_snapshot_required:
+            self._request_card_snapshot()
+        elif vitals_snapshot_required:
+            self._request_card_snapshot(load_scope="patient_open_vitals")
 
     def _is_orders_tab_active(self) -> bool:
         return (
@@ -964,7 +1058,7 @@ class NurseMainWidget(QWidget):
         self.vitals_input.data_changed.connect(self.refresh_data)
         self.layout_manager.sector_1b.set_content(self.vitals_input)
 
-        self.balance_controller = BalanceController(self.remcard_service._fluids, None, self._current_date)
+        self.balance_controller = BalanceController(self.remcard_service.fluid_service, None, self._current_date)
         self._bind_balance_widgets_if_ready()
 
     def _bind_balance_widgets_if_ready(self) -> bool:

@@ -215,10 +215,19 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
         conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None, timeout=5.0)
         try:
             from rem_card.app.sqlite_shared import configure_connection, run_quick_check
-            from rem_card.app.unified_db_schema import ensure_unified_schema
+            from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 
             configure_connection(conn, profile="network")
-            ensure_unified_schema(conn)
+            ensure_unified_schema_with_migration_backup(
+                conn,
+                db_path=db_path,
+                backup_dir=os.path.join(normalized, "backups", "valid"),
+                invalid_dir=os.path.join(normalized, "backup_health", "invalid_backups"),
+                policy_path=os.path.join(normalized, "config", "client_policy.json"),
+                baza_dir=normalized,
+                lock_path=os.path.join(normalized, "archiv", "db.lock"),
+                source="path_setup_schema_init",
+            )
             test_row = conn.execute("SELECT 1").fetchone()
             if not test_row or int(test_row[0]) != 1:
                 return False, "Тестовый запрос к БД не вернул ожидаемый результат."

@@ -36,6 +36,7 @@ class PatientForm(QDialog):
         self.patient = patient
         self.admission = admission
         self.is_new_admission = patient is None and admission is None
+        self._write_pending = False
 
         self._cursor = QCursor()
         self._resizing = False
@@ -184,30 +185,30 @@ class PatientForm(QDialog):
         buttons_layout = QHBoxLayout()
         buttons_layout.setContentsMargins(0, 10, 0, 0)
 
-        cancel_button = QPushButton("ОТМЕНИТЬ")
-        cancel_button.setCursor(Qt.PointingHandCursor)
-        cancel_button.setFixedHeight(45)
-        cancel_button.setStyleSheet(
+        self.cancel_button = QPushButton("ОТМЕНИТЬ")
+        self.cancel_button.setCursor(Qt.PointingHandCursor)
+        self.cancel_button.setFixedHeight(45)
+        self.cancel_button.setStyleSheet(
             """
             QPushButton { background: #f5f3e9; border: 1px solid #dcdcc6; border-radius: 5px; color: #7e7e6d; font-weight: 700; font-size: 12px; }
             QPushButton:hover { background: #ebe8d5; color: #2d2d24; }
             """
         )
-        cancel_button.clicked.connect(self.reject)
+        self.cancel_button.clicked.connect(self.reject)
 
-        save_button = QPushButton("СОХРАНИТЬ КАРТОЧКУ")
-        save_button.setCursor(Qt.PointingHandCursor)
-        save_button.setFixedHeight(45)
-        save_button.setStyleSheet(
+        self.save_button = QPushButton("СОХРАНИТЬ КАРТОЧКУ")
+        self.save_button.setCursor(Qt.PointingHandCursor)
+        self.save_button.setFixedHeight(45)
+        self.save_button.setStyleSheet(
             """
             QPushButton { background: #5d5d3d; border: none; border-radius: 5px; color: white; font-weight: 800; font-size: 12px; }
             QPushButton:hover { background: #4a4a31; }
             """
         )
-        save_button.clicked.connect(self._save_data)
+        self.save_button.clicked.connect(self._save_data)
 
-        buttons_layout.addWidget(cancel_button, 1)
-        buttons_layout.addWidget(save_button, 2)
+        buttons_layout.addWidget(self.cancel_button, 1)
+        buttons_layout.addWidget(self.save_button, 2)
         self.main_layout.addLayout(buttons_layout)
 
     def _load_data(self):
@@ -228,6 +229,8 @@ class PatientForm(QDialog):
         return True
 
     def _save_data(self):
+        if self._write_pending:
+            return
         if not self._validate_input():
             return
         try:
@@ -250,17 +253,55 @@ class PatientForm(QDialog):
             }
 
             if self.is_new_admission:
-                self.patient_bed_service.create_patient_and_admission(patient_data, admission_data)
+                description = f"patient_bed_create_admission:{self.bed_number}"
+
+                def operation():
+                    return self.patient_bed_service.create_patient_and_admission(patient_data, admission_data)
             else:
-                self.patient_bed_service.update_patient_and_admission(
-                    int(self.patient.id),
-                    int(self.admission.id),
-                    patient_data,
-                    admission_data,
-                )
-            self.accept()
+                patient_id = int(self.patient.id)
+                admission_id = int(self.admission.id)
+                description = f"patient_bed_update_admission:{admission_id}"
+
+                def operation():
+                    return self.patient_bed_service.update_patient_and_admission(
+                        patient_id,
+                        admission_id,
+                        patient_data,
+                        admission_data,
+                    )
+
+            self._begin_write_pending()
+            self.patient_bed_service.enqueue_write(
+                description,
+                operation,
+                on_success=lambda _result: self._on_write_success(),
+                on_error=self._on_write_error,
+            )
         except Exception as exc:
+            self._finish_write_pending()
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
+
+    def _begin_write_pending(self):
+        self._write_pending = True
+        self.form_page.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.save_button.setEnabled(False)
+        self.save_button.setText("СОХРАНЕНИЕ...")
+
+    def _finish_write_pending(self):
+        self._write_pending = False
+        self.form_page.setEnabled(True)
+        self.cancel_button.setEnabled(True)
+        self.save_button.setEnabled(True)
+        self.save_button.setText("СОХРАНИТЬ КАРТОЧКУ")
+
+    def _on_write_success(self):
+        self._finish_write_pending()
+        self.accept()
+
+    def _on_write_error(self, exc):
+        self._finish_write_pending()
+        CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
 
     def reject(self):
         self.mkb_service.close_connection()

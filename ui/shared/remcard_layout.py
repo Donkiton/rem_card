@@ -480,7 +480,11 @@ class RemCardLayoutManager(QWidget):
         from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
 
         db_manager = self.remcard_service.orders_dao.db
-        self.journal_widget = PatientBedManagementWidget(db_manager, parent=self.journal_view)
+        self.journal_widget = PatientBedManagementWidget(
+            db_manager,
+            data_service=getattr(self.remcard_service, "data_service", None),
+            parent=self.journal_view,
+        )
         self._journal_layout.addWidget(self.journal_widget)
         return self.journal_widget
 

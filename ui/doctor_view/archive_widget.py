@@ -23,6 +23,7 @@ class ArchiveWidget(QWidget):
         self.total_pages = 1
         self._load_worker = None
         self._load_pending = False
+        self._delete_pending = False
         self.init_ui()
 
     def init_ui(self):
@@ -380,6 +381,8 @@ class ArchiveWidget(QWidget):
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось открыть окно графиков:\n{exc}")
 
     def on_delete_last_clicked(self):
+        if self._delete_pending:
+            return
         row = self.table.currentRow()
         if row >= 0:
             patient = self._patient_from_row(row)
@@ -393,20 +396,35 @@ class ArchiveWidget(QWidget):
                     f"Вы действительно хотите безвозвратно удалить последнюю сохраненную карту пациента {patient.get_display_name()}?"
                 )
                 if reply == CustomMessageBox.Yes:
-                    try:
-                        if hasattr(self, 'remcard_service') and self.remcard_service:
-                            ok, _last_date, msg = self.remcard_service.delete_last_card(patient.id)
-                            if not ok:
-                                CustomMessageBox.warning(self, "Внимание", msg)
-                                return
+                    if not hasattr(self, 'remcard_service') or not self.remcard_service:
+                        CustomMessageBox.warning(self, "Ошибка", "Сервис карт недоступен.")
+                        return
+                    patient_id = patient.id
+
+                    def operation():
+                        return self.remcard_service.delete_last_card(patient_id)
+
+                    def on_success(result):
+                        ok, _last_date, msg = result
+                        self._finish_delete_pending()
+                        if not ok:
                             self.load_data()
-                            self.delete_requested.emit(patient)
-                        else:
-                            CustomMessageBox.warning(self, "Ошибка", "Сервис карт недоступен.")
-                    except Exception as e:
-                        CustomMessageBox.warning(self, "Ошибка", f"Не удалось удалить карту: {e}")
+                            CustomMessageBox.warning(self, "Внимание", msg)
+                            return
+                        self.load_data()
+                        self.delete_requested.emit(patient)
+
+                    self._enqueue_delete_write(
+                        self.remcard_service,
+                        f"archive_delete_last_card:{patient_id}",
+                        operation,
+                        on_success=on_success,
+                        error_message="Не удалось удалить карту",
+                    )
 
     def on_delete_clicked(self):
+        if self._delete_pending:
+            return
         row = self.table.currentRow()
         if row >= 0:
             patient = self._patient_from_row(row)
@@ -420,13 +438,85 @@ class ArchiveWidget(QWidget):
                     f"Вы действительно хотите безвозвратно удалить все карты пациента {patient.get_display_name()}?"
                 )
                 if reply == CustomMessageBox.Yes:
-                    try:
-                        self.patient_service.delete_admission(patient.id)
+                    patient_id = patient.id
+
+                    def operation():
+                        return self.patient_service.delete_admission(patient_id)
+
+                    def on_success(_result):
+                        self._finish_delete_pending()
                         self.load_data()
-                        # Дополнительно эмитим, если где-то еще требуется обновление
-                        self.delete_requested.emit(patient) 
-                    except Exception as e:
-                        CustomMessageBox.warning(self, "Ошибка", f"Не удалось удалить записи: {e}")
+                        self.delete_requested.emit(patient)
+
+                    self._enqueue_delete_write(
+                        self.patient_service,
+                        f"archive_delete_admission:{patient_id}",
+                        operation,
+                        on_success=on_success,
+                        error_message="Не удалось удалить записи",
+                    )
+
+    def _enqueue_delete_write(self, service, description: str, operation, *, on_success, error_message: str):
+        def on_error(exc):
+            self._finish_delete_pending()
+            self.load_data()
+            CustomMessageBox.warning(self, "Ошибка", f"{error_message}: {exc}")
+
+        self._begin_delete_pending()
+        try:
+            if hasattr(service, "enqueue_write"):
+                service.enqueue_write(
+                    description,
+                    operation,
+                    on_success=on_success,
+                    on_error=on_error,
+                )
+                return
+            result = operation()
+        except Exception as exc:
+            on_error(exc)
+            return
+        on_success(result)
+
+    def _begin_delete_pending(self):
+        self._delete_pending = True
+        self._set_delete_controls_enabled(False)
+
+    def _finish_delete_pending(self):
+        self._delete_pending = False
+        self._set_delete_controls_enabled(True)
+
+    def _set_delete_controls_enabled(self, enabled: bool):
+        self.table.setEnabled(enabled)
+        for widget in (
+            self.btn_open,
+            self.btn_report_stats,
+            self.btn_graphs,
+            self.btn_delete_last,
+            self.btn_delete,
+            self.btn_prev_page,
+            self.btn_next_page,
+            self.btn_page_jump,
+            self.page_jump_input,
+            self.search_ib,
+            self.search_name,
+            self.search_diag,
+            self.date_from,
+            self.date_to,
+        ):
+            widget.setEnabled(enabled)
+        self._set_layout_widgets_enabled(self.page_buttons_layout, enabled)
+        if enabled:
+            patient = self._patient_from_row(self.table.currentRow()) if self.table.currentRow() >= 0 else None
+            self._apply_action_buttons_state(patient)
+            self._refresh_pagination_ui()
+
+    def _set_layout_widgets_enabled(self, layout, enabled: bool):
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            widget = item.widget()
+            if widget is not None:
+                widget.setEnabled(enabled)
 
     def _patient_key(self, patient) -> str:
         source_db = patient.source_db_path or "current"
@@ -519,6 +609,8 @@ class ArchiveWidget(QWidget):
         self.btn_prev_page.setEnabled(self.current_page > 1)
         self.btn_next_page.setEnabled(self.current_page < self.total_pages)
         self.page_info.setText(f"Страница {self.current_page} из {self.total_pages}")
+        if self._delete_pending:
+            self._set_delete_controls_enabled(False)
 
     def _jump_to_page_from_input(self):
         raw = self.page_jump_input.text().strip()

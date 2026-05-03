@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 7
-SCHEMA_MIN_MIGRATION_VERSION = 7
+SCHEMA_FASTPATH_REV = 9
+SCHEMA_MIN_MIGRATION_VERSION = 9
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
 _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
@@ -30,6 +30,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "administrations",
     "patient_status_events",
     "order_audit_log",
+    "medical_audit_log",
     "diet_templates",
     "diet_plan",
     "oral_intake_events",
@@ -70,6 +71,7 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
         "draft_sort_order",
         "is_finalized",
         "is_committed",
+        "revision",
         "comment",
         "last_modified_by",
         "updated_at",
@@ -108,6 +110,9 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_diet_plan_admission_shift",
     "idx_oral_intake_admission_event_time",
     "idx_oral_intake_admission_shift",
+    "idx_medical_audit_admission_changed",
+    "idx_medical_audit_table_row",
+    "idx_medical_audit_operation",
 )
 
 _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
@@ -143,9 +148,24 @@ _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
     "oral_intake_events",
 )
 
+_MEDICAL_AUDIT_TABLES: tuple[str, ...] = (
+    "orders",
+    "administrations",
+    "vitals",
+    "fluids",
+    "admissions",
+    "beds",
+    "patient_status_events",
+    "ivl_episodes",
+    "clinical_events",
+    "diet_plan",
+    "oral_intake_events",
+)
+
 _FASTPATH_REQUIRED_TRIGGERS: tuple[str, ...] = tuple(
     [f"trg_{table}_updated_at" for table in _UPDATED_AT_TRIGGER_TABLES]
     + [f"trg_{table}_version_{suffix}" for table in _CHANGE_TRIGGER_TABLES for suffix in ("ins", "upd", "del")]
+    + [f"trg_{table}_medical_audit_{suffix}" for table in _MEDICAL_AUDIT_TABLES for suffix in ("ins", "upd", "del")]
 )
 
 
@@ -248,6 +268,10 @@ def _is_fastpath_schema_ready(conn: sqlite3.Connection) -> bool:
         return True
 
     return False
+
+
+def is_unified_schema_ready(conn: sqlite3.Connection) -> bool:
+    return _is_fastpath_schema_ready(conn)
 
 
 def _get_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -386,6 +410,110 @@ def _create_change_triggers(
                 'delete',
                 {changed_by_expr_old},
                 {version_expr}
+            );
+        END;
+        """
+    )
+
+
+def _json_object_expr(alias: str, fields: tuple[str, ...]) -> str:
+    parts = []
+    for field in fields:
+        parts.append(f"'{field}'")
+        parts.append(f"{alias}.{field}")
+    return f"json_object({', '.join(parts)})"
+
+
+def _create_medical_audit_triggers(
+    conn: sqlite3.Connection,
+    table_name: str,
+    entity_id_expr_new: str,
+    entity_id_expr_old: str,
+    admission_id_expr_new: str,
+    admission_id_expr_old: str,
+    changed_by_expr_new: str,
+    changed_by_expr_old: str,
+    fields: tuple[str, ...],
+    *,
+    use_updated_at_gate: bool = False,
+):
+    trigger_insert = f"trg_{table_name}_medical_audit_ins"
+    trigger_update = f"trg_{table_name}_medical_audit_upd"
+    trigger_delete = f"trg_{table_name}_medical_audit_del"
+
+    _drop_trigger(conn, trigger_insert)
+    _drop_trigger(conn, trigger_update)
+    _drop_trigger(conn, trigger_delete)
+
+    payload_new = _json_object_expr("NEW", fields)
+    payload_old = _json_object_expr("OLD", fields)
+    update_when = ""
+    if use_updated_at_gate:
+        compared_fields = tuple(field for field in fields if field != "updated_at")
+        update_when = "WHEN " + " OR ".join(f"OLD.{field} IS NOT NEW.{field}" for field in compared_fields)
+
+    conn.execute(
+        f"""
+        CREATE TRIGGER {trigger_insert}
+        AFTER INSERT ON {table_name}
+        BEGIN
+            INSERT INTO medical_audit_log (
+                operation_id, table_name, row_id, admission_id, action_type, changed_by, before_json, after_json
+            )
+            VALUES (
+                LOWER(HEX(RANDOMBLOB(16))),
+                '{table_name}',
+                {entity_id_expr_new},
+                {admission_id_expr_new},
+                'insert',
+                {changed_by_expr_new},
+                NULL,
+                {payload_new}
+            );
+        END;
+        """
+    )
+
+    conn.execute(
+        f"""
+        CREATE TRIGGER {trigger_update}
+        AFTER UPDATE ON {table_name}
+        {update_when}
+        BEGIN
+            INSERT INTO medical_audit_log (
+                operation_id, table_name, row_id, admission_id, action_type, changed_by, before_json, after_json
+            )
+            VALUES (
+                LOWER(HEX(RANDOMBLOB(16))),
+                '{table_name}',
+                {entity_id_expr_new},
+                {admission_id_expr_new},
+                'update',
+                {changed_by_expr_new},
+                {payload_old},
+                {payload_new}
+            );
+        END;
+        """
+    )
+
+    conn.execute(
+        f"""
+        CREATE TRIGGER {trigger_delete}
+        AFTER DELETE ON {table_name}
+        BEGIN
+            INSERT INTO medical_audit_log (
+                operation_id, table_name, row_id, admission_id, action_type, changed_by, before_json, after_json
+            )
+            VALUES (
+                LOWER(HEX(RANDOMBLOB(16))),
+                '{table_name}',
+                {entity_id_expr_old},
+                {admission_id_expr_old},
+                'delete',
+                {changed_by_expr_old},
+                {payload_old},
+                NULL
             );
         END;
         """
@@ -706,6 +834,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             draft_sort_order INTEGER,
             is_finalized BOOLEAN DEFAULT 0,
             is_committed INTEGER DEFAULT 0,
+            revision INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             comment TEXT,
             last_modified_by TEXT,
@@ -771,6 +900,23 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             payload TEXT,
             is_undone BOOLEAN DEFAULT 0,
             FOREIGN KEY (admission_id) REFERENCES admissions(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS medical_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_id TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            row_id INTEGER,
+            admission_id INTEGER,
+            action_type TEXT NOT NULL,
+            changed_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            changed_by TEXT,
+            before_json TEXT,
+            after_json TEXT
         )
         """
     )
@@ -890,6 +1036,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "orders", "draft_sort_order", "INTEGER", logger)
     _ensure_column(conn, "orders", "is_finalized", "BOOLEAN DEFAULT 0", logger)
     _ensure_column(conn, "orders", "is_committed", "INTEGER DEFAULT 0", logger)
+    _ensure_column(conn, "orders", "revision", "INTEGER DEFAULT 0", logger)
     _ensure_column(conn, "orders", "comment", "TEXT", logger)
     _ensure_column(conn, "orders", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "orders", "updated_at", "TEXT", logger)
@@ -942,6 +1089,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("UPDATE orders SET type = COALESCE(type, 'medication') WHERE type IS NULL")
     conn.execute("UPDATE orders SET status = CASE WHEN status IS NULL OR status = '' OR status = 'pending' THEN 'active' ELSE status END")
     conn.execute("UPDATE orders SET specific_times = COALESCE(specific_times, '[]') WHERE specific_times IS NULL")
+    conn.execute("UPDATE orders SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
     conn.execute("UPDATE orders SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE vitals SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE fluids SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
@@ -1011,6 +1159,9 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_change_log_admission_id ON change_log(admission_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_change_log_entity ON change_log(entity_name, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_change_log_changed_at ON change_log(changed_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_admission_changed ON medical_audit_log(admission_id, changed_at, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_table_row ON medical_audit_log(table_name, row_id, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_operation ON medical_audit_log(operation_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_applied_ops_applied_at ON sync_applied_ops(applied_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_schema_migrations_applied_at ON schema_migrations(applied_at)")
 
@@ -1020,6 +1171,9 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 4, "diet templates, diet plans and oral intake events")
     _mark_schema_migration(conn, 5, "remcard blood/plasma administrations mirrored into transfusions")
     _mark_schema_migration(conn, 6, "structured outcome details for transfers and death records")
+    _mark_schema_migration(conn, 7, "shared-db safety fastpath contract")
+    _mark_schema_migration(conn, 8, "orders optimistic lock revision")
+    _mark_schema_migration(conn, 9, "medical audit log foundation")
 
     for table in (
         "vitals",
@@ -1225,4 +1379,135 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "'journal'",
         "'journal'",
     )
+
+    _create_medical_audit_triggers(
+        conn,
+        "orders",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, 'doctor')",
+        ("id", "admission_id", "latin", "drug_key", "status", "is_committed", "revision", "updated_at", "last_modified_by"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "administrations",
+        "NEW.id",
+        "OLD.id",
+        "(SELECT admission_id FROM orders WHERE id = NEW.order_id)",
+        "(SELECT admission_id FROM orders WHERE id = OLD.order_id)",
+        "COALESCE(NEW.last_modified_by, 'nurse')",
+        "COALESCE(OLD.last_modified_by, 'nurse')",
+        ("id", "order_id", "planned_time", "cell_role", "status", "is_committed", "version", "comment", "updated_at", "last_modified_by"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "vitals",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, 'doctor')",
+        ("id", "admission_id", "datetime", "sys", "dia", "pulse", "temp", "spo2", "rr", "cvp", "updated_at", "last_modified_by"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "fluids",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, 'doctor')",
+        ("id", "admission_id", "datetime", "iv_input", "oral_input", "food", "urine", "ng_output", "drain_output", "stool", "other_output", "updated_at", "last_modified_by"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "admissions",
+        "NEW.id",
+        "OLD.id",
+        "NEW.id",
+        "OLD.id",
+        "'journal'",
+        "'journal'",
+        ("id", "patient_id", "bed_number", "history_number", "admission_datetime", "outcome", "transfer_datetime", "death_datetime", "updated_at"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "beds",
+        "NEW.bed_number",
+        "OLD.bed_number",
+        "NEW.current_admission_id",
+        "OLD.current_admission_id",
+        "'journal'",
+        "'journal'",
+        ("bed_number", "status", "current_admission_id"),
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "patient_status_events",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, NEW.created_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, OLD.created_by, 'doctor')",
+        ("id", "admission_id", "status", "reason_text", "start_time", "end_time", "created_by", "last_modified_by", "updated_at"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "ivl_episodes",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "'doctor'",
+        "'doctor'",
+        ("id", "admission_id", "episode_number", "start_time", "end_time", "type", "start_type", "delivery_type", "is_active"),
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "clinical_events",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.author, 'doctor')",
+        "COALESCE(OLD.author, 'doctor')",
+        ("id", "admission_id", "timestamp", "event_type", "author", "mode", "parameters_json", "extubation_reason", "o2_flow"),
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "diet_plan",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'doctor')",
+        "COALESCE(OLD.last_modified_by, 'doctor')",
+        ("id", "admission_id", "shift_start", "template_id", "diet_text", "version", "updated_at", "last_modified_by"),
+        use_updated_at_gate=True,
+    )
+    _create_medical_audit_triggers(
+        conn,
+        "oral_intake_events",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.last_modified_by, 'nurse')",
+        "COALESCE(OLD.last_modified_by, 'nurse')",
+        ("id", "admission_id", "shift_start", "event_time", "amount_ml", "version", "updated_at", "last_modified_by"),
+        use_updated_at_gate=True,
+    )
+    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "schema contract satisfied")
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

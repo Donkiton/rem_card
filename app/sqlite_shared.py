@@ -10,9 +10,11 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
+
+from rem_card.app.local_metrics import record_metric
 
 NETWORK_SAFE_DB_PROFILE = "network_safe_v1"
 SQLITE_BUSY_TIMEOUT_MS = max(100, int(os.environ.get("REMCARD_SQLITE_BUSY_TIMEOUT_MS", "10000")))
@@ -129,18 +131,38 @@ def configure_connection(
 
 
 def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
-    row = conn.execute("PRAGMA integrity_check").fetchone()
-    if not row:
-        return False, "integrity_check returned no result"
-    result = row[0]
-    return result == "ok", str(result)
+    started = time.perf_counter()
+    ok = False
+    try:
+        row = conn.execute("PRAGMA integrity_check").fetchone()
+        if not row:
+            return False, "integrity_check returned no result"
+        result = row[0]
+        ok = result == "ok"
+        return ok, str(result)
+    finally:
+        record_metric(
+            "integrity_check_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            result="ok" if ok else "error",
+        )
 
 def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
-    row = conn.execute("PRAGMA quick_check").fetchone()
-    if not row:
-        return False, "quick_check returned no result"
-    result = row[0]
-    return result == "ok", str(result)
+    started = time.perf_counter()
+    ok = False
+    try:
+        row = conn.execute("PRAGMA quick_check").fetchone()
+        if not row:
+            return False, "quick_check returned no result"
+        result = row[0]
+        ok = result == "ok"
+        return ok, str(result)
+    finally:
+        record_metric(
+            "quick_check_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            result="ok" if ok else "error",
+        )
 
 
 def _move_invalid_backup(candidate_path: str, invalid_dir: Optional[str], reason: str) -> Optional[str]:
@@ -238,6 +260,8 @@ def backup_connection(
     lock_wait_sec: float = 60.0,
 ):
     logger = logger or logging.getLogger(__name__)
+    started = time.perf_counter()
+    backup_result = "error"
     lock = None
     if lock_path:
         lock = FileWriteLock(lock_path, stale_timeout_sec=10 * 60, logger=logger)
@@ -304,8 +328,17 @@ def backup_connection(
                 "meta_path": meta_path if validate else None,
             },
         )
+        backup_result = "ok"
         return backup_path
     finally:
+        record_metric(
+            "backup_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            result=backup_result,
+            source=source,
+            backup_path=backup_path,
+        )
+        record_metric("backup_result", backup_result, source=source, backup_path=backup_path)
         if lock:
             lock.release()
 
@@ -690,15 +723,28 @@ class SQLiteWriteController:
 
     @contextmanager
     def transaction(self, conn: sqlite3.Connection, source: str = "unknown"):
+        started = time.perf_counter()
+        status = "error"
         with self.connection_guard(conn):
             if conn.in_transaction:
                 cursor = conn.cursor()
-                yield cursor
-                return
+                try:
+                    yield cursor
+                    status = "ok"
+                    return
+                finally:
+                    record_metric(
+                        "write_duration_ms",
+                        round((time.perf_counter() - started) * 1000.0, 3),
+                        source=source,
+                        status=status,
+                        nested=True,
+                    )
 
             cursor = None
             lock_acquired = False
             last_exc = None
+            lock_wait_started = time.perf_counter()
             try:
                 for attempt in range(1, self.max_retries + 1):
                     if not self.lock.acquire(self.owner_id, source):
@@ -706,12 +752,20 @@ class SQLiteWriteController:
                         continue
 
                     lock_acquired = True
+                    record_metric(
+                        "db_lock_wait_ms",
+                        round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
+                        source=source,
+                        attempt=attempt,
+                    )
                     try:
                         conn.execute("BEGIN IMMEDIATE")
                         cursor = conn.cursor()
                         break
                     except sqlite3.OperationalError as exc:
                         last_exc = exc
+                        if self._is_retryable(exc):
+                            record_metric("sqlite_locked_count", 1, source=source, phase="begin_immediate")
                         if conn.in_transaction:
                             conn.execute("ROLLBACK")
                         self.lock.release()
@@ -728,11 +782,19 @@ class SQLiteWriteController:
 
                 yield cursor
                 conn.execute("COMMIT")
+                status = "ok"
             except Exception:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
                 raise
             finally:
+                record_metric(
+                    "write_duration_ms",
+                    round((time.perf_counter() - started) * 1000.0, 3),
+                    source=source,
+                    status=status,
+                    nested=False,
+                )
                 if lock_acquired:
                     self.lock.release()
 
@@ -750,6 +812,7 @@ class QueuedWriteTask:
     on_error: Optional[Callable[[Exception], None]] = None
     retryable: bool = True
     retries_left: int = 10
+    enqueued_at: float = field(default_factory=time.perf_counter)
 
 
 class LocalWriteQueue:
@@ -817,6 +880,11 @@ class LocalWriteQueue:
             try:
                 if task.description == self._SHUTDOWN_TASK_DESCRIPTION:
                     return
+                record_metric(
+                    "write_queue_wait_ms",
+                    round((time.perf_counter() - task.enqueued_at) * 1000.0, 3),
+                    description=task.description,
+                )
 
                 while True:
                     try:

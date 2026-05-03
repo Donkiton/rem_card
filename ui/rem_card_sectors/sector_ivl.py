@@ -59,6 +59,7 @@ class SectorIvl(BaseSectorWidget):
         self.admission_id: Optional[int] = None
         self.active_case_id: Optional[int] = None
         self._snapshot_cache = OrderedDict()
+        self._ivl_write_pending = False
 
         self._build_ui()
         self.refresh()
@@ -563,6 +564,11 @@ class SectorIvl(BaseSectorWidget):
         while len(self._snapshot_cache) > self.SNAPSHOT_CACHE_LIMIT:
             self._snapshot_cache.popitem(last=False)
 
+    def _invalidate_current_snapshot(self):
+        key = self._cache_key()
+        if key is not None:
+            self._snapshot_cache.pop(key, None)
+
     def _apply_snapshot(self, snapshot):
         summary = dict(snapshot.get("summary") or {})
         timeline = list(snapshot.get("timeline") or [])
@@ -638,6 +644,56 @@ class SectorIvl(BaseSectorWidget):
             self.event_time_edit.setEnabled(False)
             self.event_time_edit.setDateTime(self.start_dt_edit.dateTime())
         self._apply_event_time_constraints()
+        if self._ivl_write_pending:
+            self._set_ivl_write_controls_enabled(False)
+
+    def _set_ivl_write_controls_enabled(self, enabled: bool):
+        for widget in (
+            self.btn_create_case,
+            self.btn_replace_tube,
+            self.btn_undo,
+            self.btn_close_case,
+            self.btn_add_event,
+        ):
+            widget.setEnabled(bool(enabled))
+
+    def _begin_ivl_write_pending(self, status_text: str):
+        self._ivl_write_pending = True
+        self.lbl_case_status.setText(status_text)
+        self._set_ivl_write_controls_enabled(False)
+
+    def _finish_ivl_write_success(self, result, on_success=None):
+        self._ivl_write_pending = False
+        self._invalidate_current_snapshot()
+        try:
+            if on_success:
+                on_success(result)
+        finally:
+            self.refresh()
+
+    def _finish_ivl_write_error(self, exc: Exception, error_title: str):
+        self._ivl_write_pending = False
+        self._invalidate_current_snapshot()
+        self.refresh()
+        CustomMessageBox.warning(self, error_title, str(exc))
+
+    def _enqueue_ivl_write(self, description: str, operation, *, pending_text: str, error_title: str, on_success=None):
+        if self._ivl_write_pending:
+            return
+        self._begin_ivl_write_pending(pending_text)
+        if hasattr(self.remcard_service, "enqueue_write"):
+            self.remcard_service.enqueue_write(
+                description=description,
+                operation=operation,
+                on_success=lambda result: self._finish_ivl_write_success(result, on_success),
+                on_error=lambda exc: self._finish_ivl_write_error(exc, error_title),
+            )
+            return
+        try:
+            result = operation()
+            self._finish_ivl_write_success(result, on_success)
+        except Exception as exc:
+            self._finish_ivl_write_error(exc, error_title)
 
     def _resolve_runtime_context(self):
         runtime_service = self.remcard_service
@@ -846,22 +902,41 @@ class SectorIvl(BaseSectorWidget):
 
         try:
             start_indications = self.event_indications_edit.text().strip() or None
-            case = self.remcard_service.create_case(
-                self.admission_id,
-                start_time=self.start_dt_edit.dateTime().toPython(),
-                start_type=self.start_type_combo.currentData(),
-                delivery_type=self.delivery_type_combo.currentData(),
-                initial_mode=self.mode_combo.currentData(),
-                initial_parameters=self._collect_mode_parameters(),
+            service = self.remcard_service
+            admission_id = int(self.admission_id)
+            start_time = self.start_dt_edit.dateTime().toPython()
+            start_type = self.start_type_combo.currentData()
+            delivery_type = self.delivery_type_combo.currentData()
+            initial_mode = self.mode_combo.currentData()
+            initial_parameters = self._collect_mode_parameters()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ошибка открытия случая ИВЛ", str(exc))
+            return
+
+        def operation():
+            return service.create_case(
+                admission_id,
+                start_time=start_time,
+                start_type=start_type,
+                delivery_type=delivery_type,
+                initial_mode=initial_mode,
+                initial_parameters=initial_parameters,
                 initial_indications=start_indications,
                 author="Доктор",
             )
+
+        def on_success(case):
             self.active_case_id = case.id
             self.event_indications_edit.clear()
             self.event_time_edit.setDateTime(QDateTime.currentDateTime())
-            self.refresh()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Ошибка открытия случая ИВЛ", str(exc))
+
+        self._enqueue_ivl_write(
+            f"ivl_create_case:{admission_id}",
+            operation,
+            pending_text="Случай: открытие сохраняется...",
+            error_title="Ошибка открытия случая ИВЛ",
+            on_success=on_success,
+        )
 
     def _on_add_event_clicked(self):
         if not self.remcard_service or not self.active_case_id:
@@ -869,13 +944,21 @@ class SectorIvl(BaseSectorWidget):
             return
 
         try:
+            service = self.remcard_service
+            active_case_id = int(self.active_case_id)
+            event_time = self.event_time_edit.dateTime().toPython()
             event_type = self.event_type_combo.currentData()
             mode = self.mode_combo.currentData() if event_type == "MODE_CHANGE" else None
             parameters = self._collect_mode_parameters() if mode else {}
             indications = self.event_indications_edit.text().strip() or None
-            self.remcard_service.add_event(
-                self.active_case_id,
-                event_time=self.event_time_edit.dateTime().toPython(),
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ошибка добавления события ИВЛ", str(exc))
+            return
+
+        def operation():
+            return service.add_event(
+                active_case_id,
+                event_time=event_time,
                 event_type=event_type,
                 mode=mode,
                 parameters=parameters,
@@ -883,26 +966,37 @@ class SectorIvl(BaseSectorWidget):
                 o2_flow=None,
                 author="Доктор",
             )
-            self.refresh()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Ошибка добавления события ИВЛ", str(exc))
+
+        self._enqueue_ivl_write(
+            f"ivl_add_event:{active_case_id}:{event_type}",
+            operation,
+            pending_text="Случай: событие сохраняется...",
+            error_title="Ошибка добавления события ИВЛ",
+        )
 
     def _on_replace_tube_clicked(self):
         if not self.remcard_service or not self.active_case_id:
             CustomMessageBox.warning(self, "ИВЛ", "Нет активного случая ИВЛ.")
             return
 
-        try:
-            replacement_time = datetime.now()
-            self.event_time_edit.setDateTime(QDateTime(replacement_time))
-            self.remcard_service.replace_tube(
-                self.active_case_id,
+        replacement_time = datetime.now()
+        self.event_time_edit.setDateTime(QDateTime(replacement_time))
+        service = self.remcard_service
+        active_case_id = int(self.active_case_id)
+
+        def operation():
+            return service.replace_tube(
+                active_case_id,
                 replacement_time=replacement_time,
                 author="Доктор",
             )
-            self.refresh()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Ошибка замены трубки", str(exc))
+
+        self._enqueue_ivl_write(
+            f"ivl_replace_tube:{active_case_id}",
+            operation,
+            pending_text="Случай: замена трубки сохраняется...",
+            error_title="Ошибка замены трубки",
+        )
 
     def _on_close_case_clicked(self):
         if not self.remcard_service or not self.active_case_id:
@@ -920,19 +1014,30 @@ class SectorIvl(BaseSectorWidget):
             if answer != CustomMessageBox.Yes:
                 return
 
-        try:
-            self.remcard_service.close_case(
-                self.active_case_id,
-                end_time=self.event_time_edit.dateTime().toPython(),
+        service = self.remcard_service
+        active_case_id = int(self.active_case_id)
+        end_time = self.event_time_edit.dateTime().toPython()
+
+        def operation():
+            return service.close_case(
+                active_case_id,
+                end_time=end_time,
                 extubation_reason=extubation_reason,
                 o2_flow=o2_flow,
                 author="Доктор",
             )
+
+        def on_success(_event):
             self.extubation_reason_edit.clear()
             self.extubation_o2_flow_edit.clear()
-            self.refresh()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Ошибка закрытия случая ИВЛ", str(exc))
+
+        self._enqueue_ivl_write(
+            f"ivl_close_case:{active_case_id}",
+            operation,
+            pending_text="Случай: экстубация сохраняется...",
+            error_title="Ошибка закрытия случая ИВЛ",
+            on_success=on_success,
+        )
 
     def _on_undo_last_clicked(self):
         if not self.remcard_service or not self.admission_id:
@@ -948,14 +1053,23 @@ class SectorIvl(BaseSectorWidget):
             CustomMessageBox.warning(self, "ИВЛ", "Нет случая ИВЛ для отмены последнего действия.")
             return
 
-        try:
-            event = self.remcard_service.rollback_last_ventilation_action(case_id)
+        service = self.remcard_service
+
+        def operation():
+            return service.rollback_last_ventilation_action(case_id)
+
+        def on_success(event):
             event_code = getattr(event.event_type, "value", str(event.event_type))
             event_label = self.EVENT_LABELS.get(event_code, event_code)
             CustomMessageBox.information(self, "ИВЛ", f"Отменено последнее действие: {event_label}.")
-            self.refresh()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Ошибка отмены действия ИВЛ", str(exc))
+
+        self._enqueue_ivl_write(
+            f"ivl_rollback_last_action:{case_id}",
+            operation,
+            pending_text="Случай: отмена действия сохраняется...",
+            error_title="Ошибка отмены действия ИВЛ",
+            on_success=on_success,
+        )
 
     def _get_admission_datetime(self) -> Optional[datetime]:
         if not self.remcard_service or not self.admission_id:

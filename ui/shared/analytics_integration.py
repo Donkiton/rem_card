@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 from datetime import datetime, timedelta
 from typing import Callable
 
 from rem_card.app.logger import logger
-from rem_card.app.sqlite_shared import configure_connection
 
 
 class _AnalyticsConnectionAdapter:
-    def __init__(self, conn: sqlite3.Connection, *, db_path: str, owns_connection: bool):
+    def __init__(self, conn, *, db_path: str, owns_connection: bool):
         self._conn = conn
         self.db_path = db_path
         self._owns_connection = owns_connection
@@ -171,11 +169,10 @@ def _create_live_analytics_manager(base_db_manager) -> tuple[object, Callable[[]
 
     db_path = _get_db_path(base_db_manager)
     if db_path and os.path.isfile(db_path):
-        uri = f"file:{db_path}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=10.0)
-        configure_connection(conn, readonly=True)
-        adapter = _AnalyticsConnectionAdapter(conn, db_path=db_path, owns_connection=True)
-        return adapter, adapter.close_connection
+        from rem_card.services.analytics.multi_db_analytics import create_readonly_analytics_manager
+
+        manager = create_readonly_analytics_manager(db_path)
+        return manager, manager.close_connection
 
     conn = getattr(base_db_manager, "_remcard_conn", None)
     if conn is not None:

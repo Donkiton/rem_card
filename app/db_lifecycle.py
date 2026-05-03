@@ -6,8 +6,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 from rem_card.app.sqlite_shared import FileWriteLock, configure_connection
-from rem_card.app.unified_db_schema import ensure_unified_schema
 
 
 DB_CYCLE_META_KEY = "db_cycle_started_at"
@@ -178,8 +178,18 @@ def maybe_rotate_database_if_due(
                 timeout=5.0,
             )
             configure_connection(new_conn)
+            baza_dir = os.path.dirname(os.path.dirname(db_path))
+            ensure_unified_schema_with_migration_backup(
+                new_conn,
+                db_path=db_path,
+                backup_dir=os.path.join(baza_dir, "backups", "valid"),
+                invalid_dir=os.path.join(baza_dir, "backup_health", "invalid_backups"),
+                policy_path=os.path.join(baza_dir, "config", "client_policy.json"),
+                baza_dir=baza_dir,
+                logger=logger,
+                source="db_rotation_schema_init",
+            )
             with new_conn:
-                ensure_unified_schema(new_conn, logger=logger)
                 new_conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                     (DB_CYCLE_META_KEY, int(time.time())),

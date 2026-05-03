@@ -23,6 +23,8 @@ class RemCardReportController(QObject):
         self.parent = parent_widget
         self.daily_worker = None
         self.full_worker = None
+        self.daily_pdf_worker = None
+        self.full_pdf_worker = None
         self._daily_report_config = None
         self._daily_admission_id = None
         self._full_report_config = None
@@ -69,7 +71,6 @@ class RemCardReportController(QObject):
         try:
             if not data:
                 return
-            from ..rem_card_sectors.s_print.builder import ReportBuilder
 
             admission_id = self._daily_admission_id
             cfg = self._daily_report_config or {}
@@ -82,14 +83,7 @@ class RemCardReportController(QObject):
                 admission_id,
                 pdf_path,
             )
-            ReportBuilder.build_pdf(data, cfg, pdf_path)
-            logger.info(
-                "[ReportController] daily PDF ready admission_id=%s size=%s path=%s",
-                admission_id,
-                pdf_path.stat().st_size,
-                pdf_path,
-            )
-            self._open_pdf(pdf_path)
+            self._start_daily_pdf_worker(data, cfg, pdf_path)
         except Exception as exc:
             logger.exception(
                 "[ReportController] daily PDF failed admission_id=%s",
@@ -100,6 +94,41 @@ class RemCardReportController(QObject):
                 "Ошибка",
                 f"Не удалось сформировать PDF отчета за сутки:\n{exc}",
             )
+
+    def _start_daily_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path):
+        if self.daily_pdf_worker is not None and self.daily_pdf_worker.isRunning():
+            CustomMessageBox.information(self.parent, "Инфо", "PDF отчета за сутки уже формируется.")
+            return
+        from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
+
+        self.daily_pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
+        self.daily_pdf_worker.completed.connect(self._on_daily_pdf_ready)
+        self.daily_pdf_worker.error.connect(self._on_daily_pdf_error)
+        self.daily_pdf_worker.finished.connect(self._clear_daily_pdf_worker)
+        self.daily_pdf_worker.start()
+
+    @Slot(object)
+    def _on_daily_pdf_ready(self, pdf_path):
+        pdf_path = pathlib.Path(pdf_path)
+        logger.info(
+            "[ReportController] daily PDF ready admission_id=%s size=%s path=%s",
+            self._daily_admission_id,
+            pdf_path.stat().st_size if pdf_path.exists() else 0,
+            pdf_path,
+        )
+        self._open_pdf(pdf_path)
+
+    @Slot(str)
+    def _on_daily_pdf_error(self, msg):
+        CustomMessageBox.critical(
+            self.parent,
+            "Ошибка",
+            f"Не удалось сформировать PDF отчета за сутки:\n{msg}",
+        )
+
+    @Slot()
+    def _clear_daily_pdf_worker(self):
+        self.daily_pdf_worker = None
 
     @Slot(str)
     def _on_daily_report_error(self, msg):
@@ -152,7 +181,6 @@ class RemCardReportController(QObject):
         try:
             if not results:
                 return
-            from ..rem_card_sectors.s_print.builder import ReportBuilder
 
             admission_id = self._full_admission_id
             cfg = self._full_report_config or {}
@@ -166,14 +194,7 @@ class RemCardReportController(QObject):
                 len(results),
                 pdf_path,
             )
-            ReportBuilder.build_pdf(results, cfg, pdf_path)
-            logger.info(
-                "[ReportController] full PDF ready admission_id=%s size=%s path=%s",
-                admission_id,
-                pdf_path.stat().st_size,
-                pdf_path,
-            )
-            self._open_pdf(pdf_path)
+            self._start_full_pdf_worker(results, cfg, pdf_path)
         except Exception as exc:
             logger.exception(
                 "[ReportController] full PDF failed admission_id=%s",
@@ -184,6 +205,41 @@ class RemCardReportController(QObject):
                 "Ошибка",
                 f"Не удалось сформировать PDF общего отчета:\n{exc}",
             )
+
+    def _start_full_pdf_worker(self, data, cfg: dict, pdf_path: pathlib.Path):
+        if self.full_pdf_worker is not None and self.full_pdf_worker.isRunning():
+            CustomMessageBox.information(self.parent, "Инфо", "PDF общего отчета уже формируется.")
+            return
+        from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
+
+        self.full_pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
+        self.full_pdf_worker.completed.connect(self._on_full_pdf_ready)
+        self.full_pdf_worker.error.connect(self._on_full_pdf_error)
+        self.full_pdf_worker.finished.connect(self._clear_full_pdf_worker)
+        self.full_pdf_worker.start()
+
+    @Slot(object)
+    def _on_full_pdf_ready(self, pdf_path):
+        pdf_path = pathlib.Path(pdf_path)
+        logger.info(
+            "[ReportController] full PDF ready admission_id=%s size=%s path=%s",
+            self._full_admission_id,
+            pdf_path.stat().st_size if pdf_path.exists() else 0,
+            pdf_path,
+        )
+        self._open_pdf(pdf_path)
+
+    @Slot(str)
+    def _on_full_pdf_error(self, msg):
+        CustomMessageBox.critical(
+            self.parent,
+            "Ошибка",
+            f"Не удалось сформировать PDF общего отчета:\n{msg}",
+        )
+
+    @Slot()
+    def _clear_full_pdf_worker(self):
+        self.full_pdf_worker = None
 
     @Slot(str)
     def _on_full_report_error(self, msg):

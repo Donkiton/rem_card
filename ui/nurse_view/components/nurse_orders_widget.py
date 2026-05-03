@@ -1206,6 +1206,35 @@ class NurseOrdersWidget(QWidget):
         if hasattr(self, "table_view"):
             self.table_view.viewport().update()
 
+    def _apply_pending_nurse_mark(self, index, admin, mark: str):
+        if not self.model or not index.isValid() or admin is None:
+            return
+        key = self._admin_key_from_admin(admin)
+        if key is None:
+            return
+        pending_admin = copy(admin)
+        setattr(pending_admin, "_pending_mark", mark or "")
+        self.model.admin_map[key] = pending_admin
+        self.model.dataChanged.emit(index, index, [Qt.UserRole])
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+
+    def _apply_committed_nurse_mark(self, index, admin, mark: str):
+        if not self.model or not index.isValid() or admin is None:
+            return
+        key = self._admin_key_from_admin(admin)
+        if key is None:
+            return
+        committed_admin = copy(admin)
+        committed_admin.comment = mark or ""
+        committed_admin.actual_time = datetime.now() if mark else None
+        if hasattr(committed_admin, "_pending_mark"):
+            delattr(committed_admin, "_pending_mark")
+        self.model.admin_map[key] = committed_admin
+        self.model.dataChanged.emit(index, index, [Qt.UserRole])
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent
         if obj is self.table_view.viewport() and event.type() == QEvent.MouseButtonPress:
@@ -1277,10 +1306,11 @@ class NurseOrdersWidget(QWidget):
                             self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
                             key = self._admin_key_from_admin(admin)
                             previous_admin = copy(admin) if key is not None else None
-                            self._apply_optimistic_nurse_mark(index, admin, next_mark)
+                            self._apply_pending_nurse_mark(index, admin, next_mark)
                             self._begin_admin_write()
 
                             def on_success():
+                                self._apply_committed_nurse_mark(index, admin, next_mark)
                                 self._finish_admin_write()
                                 self._on_mark_updated()
 
