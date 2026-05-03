@@ -24,8 +24,7 @@ tmp/
 scripts/bench_results/
 *.log
 
-Rao_jornal/archiv/*.db
-Rao_jornal/archiv/*.sqlite*
+Rao_jornal/
 
 *.db-journal
 *.db-wal
