@@ -18,18 +18,22 @@ class DataUpdateMonitor(QThread):
         self._wake_evt = threading.Event()
         self._state_lock = threading.Lock()
         self._force_emit = False
+        self._force_sources: list[str] = []
         self._last_seen_id: Optional[int] = None
 
-    def request_refresh(self, *, force_emit: bool = False):
+    def request_refresh(self, *, force_emit: bool = False, source: str = ""):
         with self._state_lock:
             if force_emit:
                 self._force_emit = True
+                if source:
+                    self._force_sources.append(str(source))
         self._wake_evt.set()
 
     def reset(self):
         with self._state_lock:
             self._last_seen_id = None
             self._force_emit = False
+            self._force_sources = []
         self._wake_evt.set()
 
     def stop(self):
@@ -39,12 +43,15 @@ class DataUpdateMonitor(QThread):
     def run(self):
         while not self._stop_evt.is_set():
             force_emit = False
+            force_sources: list[str] = []
             with self._state_lock:
                 force_emit = self._force_emit
+                force_sources = list(self._force_sources)
                 self._force_emit = False
+                self._force_sources = []
 
             try:
-                self._poll_once(force_emit=force_emit)
+                self._poll_once(force_emit=force_emit, force_sources=force_sources)
             except Exception as exc:
                 logger.error("DataUpdateMonitor poll failed: %s", exc, exc_info=True)
                 self.monitor_error.emit(str(exc))
@@ -54,7 +61,7 @@ class DataUpdateMonitor(QThread):
             if self._wake_evt.wait(self._poll_interval_sec):
                 self._wake_evt.clear()
 
-    def _poll_once(self, *, force_emit: bool):
+    def _poll_once(self, *, force_emit: bool, force_sources: list[str]):
         current_change_id = int(self._data_service.get_latest_change_id())
         previous_change_id = self._last_seen_id
 
@@ -66,6 +73,7 @@ class DataUpdateMonitor(QThread):
                     previous_change_id=current_change_id,
                     changes=[],
                     forced=True,
+                    force_sources=force_sources,
                 )
             return
 
@@ -83,6 +91,7 @@ class DataUpdateMonitor(QThread):
                 forced=True,
                 gap_detected=True,
                 reason="cursor_moved_backwards",
+                force_sources=force_sources,
             )
             return
 
@@ -103,6 +112,7 @@ class DataUpdateMonitor(QThread):
                     forced=True,
                     gap_detected=True,
                     reason="empty_change_rows",
+                    force_sources=force_sources,
                 )
                 return
             self._emit_payload(
@@ -110,6 +120,7 @@ class DataUpdateMonitor(QThread):
                 previous_change_id=previous_change_id,
                 changes=changes,
                 forced=force_emit,
+                force_sources=force_sources,
             )
             return
 
@@ -119,6 +130,7 @@ class DataUpdateMonitor(QThread):
                 previous_change_id=previous_change_id,
                 changes=[],
                 forced=True,
+                force_sources=force_sources,
             )
 
     def _emit_payload(
@@ -128,6 +140,7 @@ class DataUpdateMonitor(QThread):
         previous_change_id: int,
         changes: list[dict[str, Any]],
         forced: bool,
+        force_sources: list[str] | None = None,
         gap_detected: bool = False,
         reason: str = "",
     ):
@@ -152,6 +165,8 @@ class DataUpdateMonitor(QThread):
             "forced": bool(forced),
             "gap_detected": bool(gap_detected),
             "reason": str(reason or ""),
+            "force_source": str((force_sources or [""])[-1] or ""),
+            "force_sources": list(force_sources or []),
             "changes": changes,
             "changed_entities": changed_entities,
             "admission_ids": admission_ids,

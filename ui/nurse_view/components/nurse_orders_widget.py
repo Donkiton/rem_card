@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QTableView,
+    QWidget, QVBoxLayout, QTableView,
     QHeaderView, QAbstractItemView, QFrame
 )
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -44,6 +44,8 @@ class NurseOrdersWidget(QWidget):
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
     orderMarked = Signal()
+    _LOCAL_SILENT_FORCE_PREFIXES = ("nurse_order_mark:",)
+    _ORDERS_CHANGE_ENTITIES = {"orders", "administrations"}
 
     def __init__(self, service=None, admission_id=None, shift_date=None, parent=None, defer_ui=False):
         super().__init__(parent)
@@ -60,6 +62,11 @@ class NurseOrdersWidget(QWidget):
         self._last_polled_context_key = None
         self._last_poll_monotonic = 0.0
         self._min_poll_interval_sec = max(0.1, float(os.getenv("REMCARD_ORDERS_POLL_MIN_INTERVAL_SEC", "0.8")))
+        self._silent_sync_delay_ms = max(250, int(os.getenv("REMCARD_ORDERS_SILENT_SYNC_DELAY_MS", "500")))
+        self._admin_only_snapshot_window_sec = max(
+            3.0,
+            float(os.getenv("REMCARD_ORDERS_ADMIN_ONLY_WINDOW_SEC", "15")),
+        )
         self._snapshot_worker = None
         self._snapshot_pending = False
         self._snapshot_force_pending = False
@@ -91,6 +98,9 @@ class NurseOrdersWidget(QWidget):
         self._soft_update_timer = QTimer(self)
         self._soft_update_timer.setSingleShot(True)
         self._soft_update_timer.timeout.connect(self._show_soft_update_if_needed)
+        self._silent_sync_timer = QTimer(self)
+        self._silent_sync_timer.setSingleShot(True)
+        self._silent_sync_timer.timeout.connect(self._run_silent_sync)
         if not self._defer_ui:
             self.setup_ui()
         
@@ -270,6 +280,14 @@ class NurseOrdersWidget(QWidget):
                 for change in (payload.get("changes") or [])
                 if change.get("entity_name")
             }
+        if self._is_local_silent_force_payload(payload, changed_entities):
+            logger.info(
+                "[NurseOrdersWidget] skip local forced orders refresh admission_id=%s sources=%s entities=%s",
+                self.admission_id,
+                self._payload_force_sources(payload),
+                sorted(changed_entities),
+            )
+            return
         if not payload.get("forced") and not changed_entities.intersection({"orders", "administrations"}):
             return
         if not payload.get("forced") and payload.get("changes") and not has_scoped_change:
@@ -297,6 +315,31 @@ class NurseOrdersWidget(QWidget):
             coordinator.invalidate_tab(context, reason="change_log_orders")
             self._pending_change_invalidated = True
         self._change_batch_timer.start(self._change_debounce_ms)
+
+    @staticmethod
+    def _payload_force_sources(payload: dict) -> list[str]:
+        sources: list[str] = []
+        raw_many = payload.get("force_sources") or []
+        if isinstance(raw_many, (list, tuple, set)):
+            sources.extend(str(item) for item in raw_many if item)
+        raw_one = payload.get("force_source")
+        if raw_one:
+            sources.append(str(raw_one))
+        return list(dict.fromkeys(sources))
+
+    def _is_local_silent_force_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not sources:
+            return False
+        if changed_entities and not set(changed_entities).issubset(self._ORDERS_CHANGE_ENTITIES):
+            return False
+        return any(
+            source.startswith(prefix)
+            for source in sources
+            for prefix in self._LOCAL_SILENT_FORCE_PREFIXES
+        )
 
     def _extract_scoped_orders_change_id(self, payload: dict) -> tuple[bool, int]:
         try:
@@ -860,34 +903,18 @@ class NurseOrdersWidget(QWidget):
             )
 
     def _should_show_soft_update(self, source: str) -> bool:
-        return bool(
-            source == "refresh"
-            and hasattr(self, "update_state_label")
-            and self.isVisible()
-        )
+        return False
 
     def _schedule_soft_update_state(self, *, source: str):
         self._soft_update_timer.stop()
-        if not self._should_show_soft_update(source):
-            self._clear_soft_update_state()
-            return
-        self._soft_update_timer.start(self._soft_update_delay_ms)
+        self._clear_soft_update_state()
 
     def _show_soft_update_if_needed(self):
-        if not self._snapshot_worker or not self._snapshot_worker.isRunning():
-            return
-        if not hasattr(self, "update_state_label"):
-            return
-        self._soft_update_message = "Данные обновляются..."
-        self.update_state_label.setVisible(True)
-        self.update_state_label.setText(self._soft_update_message)
+        return
 
     def _clear_soft_update_state(self):
         self._soft_update_timer.stop()
         self._soft_update_message = ""
-        if hasattr(self, "update_state_label"):
-            self.update_state_label.setText("")
-            self.update_state_label.setVisible(False)
 
     def _enqueue_write(self, description: str, operation, on_success=None, on_error=None, *, block_ui: bool = True):
         if not self.service:
@@ -925,9 +952,11 @@ class NurseOrdersWidget(QWidget):
                 round((time.perf_counter() - queued_at) * 1000.0, 1),
                 exc,
             )
-            self._show_warning(f"Ошибка сохранения: {exc}")
-            if on_error:
-                on_error(exc)
+            try:
+                if on_error:
+                    on_error(exc)
+            finally:
+                self._show_warning(f"Ошибка сохранения: {exc}")
 
         self.service.enqueue_write(
             description=description,
@@ -987,14 +1016,6 @@ class NurseOrdersWidget(QWidget):
         self.frame_layout.setContentsMargins(2, 2, 2, 2)
         self.frame_layout.setSpacing(5) 
         layout.addWidget(self.frame_container)
-
-        self.update_state_label = QLabel("")
-        self.update_state_label.setFixedHeight(18)
-        self.update_state_label.setVisible(False)
-        self.update_state_label.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 8.5pt; font-style: italic; padding-left: 6px; background: transparent;"
-        )
-        self.frame_layout.addWidget(self.update_state_label)
 
         self.table_clip_widget = QWidget()
         self.table_clip_layout = QVBoxLayout(self.table_clip_widget)
@@ -1114,6 +1135,55 @@ class NurseOrdersWidget(QWidget):
     def _finish_admin_write(self):
         self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
 
+    def _schedule_silent_sync(self):
+        self._silent_sync_timer.start(self._silent_sync_delay_ms)
+
+    def _run_silent_sync(self):
+        logger.info(
+            "[OrdersClick] silent_sync_start role=nurse admission_id=%s pending=%s",
+            self.admission_id,
+            self._pending_admin_write_count,
+        )
+        if self._pending_admin_write_count > 0:
+            self._schedule_silent_sync()
+            return
+        self._request_snapshot(
+            force=False,
+            source="local_silent_sync",
+            priority="LOW",
+            invalidate_reason=None,
+        )
+
+    @staticmethod
+    def _admin_key_from_admin(admin):
+        if admin is None:
+            return None
+        planned_time = getattr(admin, "planned_time", None)
+        if isinstance(planned_time, str):
+            try:
+                planned_time = datetime.fromisoformat(planned_time)
+            except Exception:
+                return None
+        if planned_time is None:
+            return None
+        order_id = getattr(admin, "order_id", None)
+        if order_id is None:
+            return None
+        return (order_id, planned_time.isoformat())
+
+    def _restore_admin_cell(self, index, key, previous_admin):
+        if self.model is None or key is None or not index.isValid():
+            return
+        if previous_admin is not None:
+            self.model.admin_map[key] = copy(previous_admin)
+        else:
+            self.model.admin_map.pop(key, None)
+        self._cached_has_administrations = self._model_has_administrations()
+        self.model.dataChanged.emit(index, index, [Qt.UserRole])
+        self.check_drafts()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+
     def _apply_optimistic_nurse_mark(self, index, admin, mark: str):
         if not self.model or not index.isValid() or admin is None:
             return
@@ -1204,7 +1274,9 @@ class NurseOrdersWidget(QWidget):
                                 next_mark,
                                 str(event.button()),
                             )
-                            self._admin_only_snapshot_until = time.monotonic() + 3.0
+                            self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
+                            key = self._admin_key_from_admin(admin)
+                            previous_admin = copy(admin) if key is not None else None
                             self._apply_optimistic_nurse_mark(index, admin, next_mark)
                             self._begin_admin_write()
 
@@ -1214,7 +1286,7 @@ class NurseOrdersWidget(QWidget):
 
                             def on_error(exc):
                                 self._finish_admin_write()
-                                self.request_refresh(force=True)
+                                self._restore_admin_cell(index, key, previous_admin)
 
                             self._enqueue_write(
                                 f"nurse_order_mark:{admin_id}:seq={click_seq}",
@@ -1248,14 +1320,11 @@ class NurseOrdersWidget(QWidget):
                     self.table_view.viewport().update()
 
     def _on_mark_updated(self):
-        logger.info("[OrdersClick] mark_updated_start role=nurse admission_id=%s", self.admission_id)
-        delta_changed = self.model.refresh_admin_marks_only() if self.model is not None else False
         logger.info(
-            "[OrdersClick] mark_updated_delta role=nurse admission_id=%s changed=%s",
+            "[OrdersClick] mark_updated_local role=nurse admission_id=%s",
             self.admission_id,
-            int(bool(delta_changed)),
         )
-        if self.model is not None and delta_changed:
+        if self.model is not None:
             self._cached_has_administrations = self._model_has_administrations()
             self.check_drafts()
             if hasattr(self, "table_view"):
@@ -1263,6 +1332,7 @@ class NurseOrdersWidget(QWidget):
         else:
             self.check_drafts()
         self.orderMarked.emit()
+        self._schedule_silent_sync()
 
     def _show_warning(self, text: str):
         CustomMessageBox.warning(self, "Предупреждение", text)

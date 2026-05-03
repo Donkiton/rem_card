@@ -17,6 +17,15 @@ CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STA
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
 JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
 JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
+LOCAL_ORDER_FORCE_PREFIXES = (
+    "orders_add_input:",
+    "orders_left_click:",
+    "orders_middle_click:",
+    "orders_right_click:",
+    "nurse_order_mark:",
+    "nurse_order_panel_mark:",
+)
+ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
 W1_REFRESH_ENTITIES = {
     "patients",
     "admissions",
@@ -510,6 +519,31 @@ class NurseMainWidget(QWidget):
             return True
         return False
 
+    @staticmethod
+    def _payload_force_sources(payload: dict) -> list[str]:
+        sources: list[str] = []
+        raw_many = payload.get("force_sources") or []
+        if isinstance(raw_many, (list, tuple, set)):
+            sources.extend(str(item) for item in raw_many if item)
+        raw_one = payload.get("force_source")
+        if raw_one:
+            sources.append(str(raw_one))
+        return list(dict.fromkeys(sources))
+
+    def _is_local_orders_force_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not sources:
+            return False
+        if changed_entities and not set(changed_entities).issubset(ORDER_CHANGE_ENTITIES):
+            return False
+        return any(
+            source.startswith(prefix)
+            for source in sources
+            for prefix in LOCAL_ORDER_FORCE_PREFIXES
+        )
+
     def _on_data_changes(self, payload: dict):
         changed_entities = {
             str(entity)
@@ -535,6 +569,23 @@ class NurseMainWidget(QWidget):
             return
 
         diet_entities = {"diet_templates", "diet_plan", "oral_intake_events"}
+        if self._is_local_orders_force_payload(payload, changed_entities):
+            if hasattr(self.layout_manager, 'orders_widget'):
+                try:
+                    self.layout_manager.orders_widget.handle_data_changes(
+                        payload,
+                        tab_active=self._is_orders_tab_active(),
+                    )
+                except Exception:
+                    logger.exception("Nurse orders local forced skip failed")
+            logger.info(
+                "[OrdersClick] skip local forced card snapshot role=nurse admission_id=%s sources=%s entities=%s",
+                getattr(self.layout_manager, "current_admission_id", None),
+                self._payload_force_sources(payload),
+                sorted(changed_entities),
+            )
+            return
+
         has_diet_changes = bool(changed_entities.intersection(diet_entities))
         if payload.get("forced") and getattr(self, "diet_intake_widget", None):
             self.diet_intake_widget.handle_data_changes(payload)

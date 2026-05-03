@@ -52,7 +52,7 @@ class DataService(QObject):
     def run_write(self, description: str, operation: Callable):
         result = self.db.run_write_operation(operation, source=description)
         self.write_finished.emit(description)
-        self.request_immediate_refresh(force_emit=True)
+        self.request_immediate_refresh(force_emit=True, source=description)
         return result
 
     def enqueue_write(
@@ -64,7 +64,7 @@ class DataService(QObject):
     ):
         def handle_success(result):
             self.write_finished.emit(description)
-            self.request_immediate_refresh(force_emit=True)
+            self.request_immediate_refresh(force_emit=True, source=description)
             self._success_callback_requested.emit(on_success, result)
 
         def handle_error(exc: Exception):
@@ -103,6 +103,6 @@ class DataService(QObject):
             self._monitor.wait(1500)
         self._queue.shutdown(timeout=5.0)
 
-    def request_immediate_refresh(self, *, force_emit: bool = False):
+    def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
         if self._monitor:
-            self._monitor.request_refresh(force_emit=force_emit)
+            self._monitor.request_refresh(force_emit=force_emit, source=source)

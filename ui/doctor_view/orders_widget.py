@@ -2,11 +2,12 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 import os
 import sqlite3
 import time
+from copy import copy
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, 
     QHeaderView, QAbstractItemView, QFrame, QPushButton, QSizePolicy, QApplication
 )
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QModelIndex, QPoint, Qt, QTimer, Signal
 from datetime import datetime, timedelta
 from .template_dialog import TemplateSelectionDialog
 from ..shared.orders_model import OrdersModel
@@ -23,6 +24,13 @@ class OrdersWidget(QWidget):
     draftStatusChanged = Signal(bool)
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
+    _LOCAL_SILENT_FORCE_PREFIXES = (
+        "orders_add_input:",
+        "orders_left_click:",
+        "orders_middle_click:",
+        "orders_right_click:",
+    )
+    _ORDERS_CHANGE_ENTITIES = {"orders", "administrations"}
 
     def __init__(self, service=None, admission_id=None, shift_date=None, parent=None, defer_ui=False):
         super().__init__(parent)
@@ -39,6 +47,11 @@ class OrdersWidget(QWidget):
         self._fast_sync_timer = QTimer(self)
         self._fast_sync_timer.setSingleShot(True)
         self._fast_sync_timer.timeout.connect(self._run_fast_sync)
+        self._silent_sync_delay_ms = max(250, int(os.getenv("REMCARD_ORDERS_SILENT_SYNC_DELAY_MS", "500")))
+        self._admin_only_snapshot_window_sec = max(
+            3.0,
+            float(os.getenv("REMCARD_ORDERS_ADMIN_ONLY_WINDOW_SEC", "15")),
+        )
         self._state_sync_timer = QTimer(self)
         self._state_sync_timer.setSingleShot(True)
         self._state_sync_timer.timeout.connect(self.check_drafts)
@@ -413,6 +426,14 @@ class OrdersWidget(QWidget):
                 for change in (payload.get("changes") or [])
                 if change.get("entity_name")
             }
+        if self._is_local_silent_force_payload(payload, changed_entities):
+            logger.info(
+                "[OrdersWidget] skip local forced orders refresh admission_id=%s sources=%s entities=%s",
+                self.admission_id,
+                self._payload_force_sources(payload),
+                sorted(changed_entities),
+            )
+            return
         if not payload.get("forced") and not changed_entities.intersection({"orders", "administrations"}):
             return
         if not payload.get("forced") and payload.get("changes") and not has_scoped_change:
@@ -440,6 +461,31 @@ class OrdersWidget(QWidget):
             coordinator.invalidate_tab(context, reason="change_log_orders")
             self._pending_change_invalidated = True
         self._change_batch_timer.start(self._change_debounce_ms)
+
+    @staticmethod
+    def _payload_force_sources(payload: dict) -> list[str]:
+        sources: list[str] = []
+        raw_many = payload.get("force_sources") or []
+        if isinstance(raw_many, (list, tuple, set)):
+            sources.extend(str(item) for item in raw_many if item)
+        raw_one = payload.get("force_source")
+        if raw_one:
+            sources.append(str(raw_one))
+        return list(dict.fromkeys(sources))
+
+    def _is_local_silent_force_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not sources:
+            return False
+        if changed_entities and not set(changed_entities).issubset(self._ORDERS_CHANGE_ENTITIES):
+            return False
+        return any(
+            source.startswith(prefix)
+            for source in sources
+            for prefix in self._LOCAL_SILENT_FORCE_PREFIXES
+        )
 
     def _extract_scoped_orders_change_id(self, payload: dict) -> tuple[bool, int]:
         try:
@@ -1009,34 +1055,18 @@ class OrdersWidget(QWidget):
             )
 
     def _should_show_soft_update(self, source: str) -> bool:
-        return bool(
-            source == "refresh"
-            and hasattr(self, "update_state_label")
-            and self.isVisible()
-        )
+        return False
 
     def _schedule_soft_update_state(self, *, source: str):
         self._soft_update_timer.stop()
-        if not self._should_show_soft_update(source):
-            self._clear_soft_update_state()
-            return
-        self._soft_update_timer.start(self._soft_update_delay_ms)
+        self._clear_soft_update_state()
 
     def _show_soft_update_if_needed(self):
-        if not self._snapshot_worker or not self._snapshot_worker.isRunning():
-            return
-        if not hasattr(self, "update_state_label"):
-            return
-        self._soft_update_message = "Данные обновляются..."
-        self.update_state_label.setVisible(True)
-        self.update_state_label.setText(self._soft_update_message)
+        return
 
     def _clear_soft_update_state(self):
         self._soft_update_timer.stop()
         self._soft_update_message = ""
-        if hasattr(self, "update_state_label"):
-            self.update_state_label.setText("")
-            self.update_state_label.setVisible(False)
 
     def _enqueue_write(
         self,
@@ -1085,11 +1115,13 @@ class OrdersWidget(QWidget):
                 round((time.perf_counter() - queued_at) * 1000.0, 1),
                 exc,
             )
-            if show_error:
-                self._show_warning(f"Ошибка сохранения: {exc}")
             self._perf_mark_click(perf_click_id, "write_error", extra=str(exc))
-            if on_error:
-                on_error(exc)
+            try:
+                if on_error:
+                    on_error(exc)
+            finally:
+                if show_error:
+                    self._show_warning(f"Ошибка сохранения: {exc}")
 
         self.service.enqueue_write(
             description=description,
@@ -1099,8 +1131,7 @@ class OrdersWidget(QWidget):
         )
 
     def _schedule_fast_sync(self):
-        if not self._fast_sync_timer.isActive():
-            self._fast_sync_timer.start(0)
+        self._fast_sync_timer.start(self._silent_sync_delay_ms)
 
     def _schedule_state_sync(self, delay_ms: int = 120):
         self._state_sync_timer.start(delay_ms)
@@ -1113,85 +1144,326 @@ class OrdersWidget(QWidget):
 
     def _run_fast_sync(self):
         """
-        После optimistic update делаем фоновый snapshot-refresh.
-        UI уже обновился мгновенно, а source-of-truth подтягивается вне GUI-потока.
+        После optimistic update делаем один отложенный тихий snapshot-refresh.
+        UI уже обновился локально, а source-of-truth подтягивается вне GUI-потока.
         """
         t0 = time.perf_counter() if self._perf_enabled else None
         try:
-            logger.info("[OrdersClick] fast_sync_start role=doctor admission_id=%s", self.admission_id)
-            delta_changed = self.model.refresh_admin_marks_only() if self.model is not None else False
             logger.info(
-                "[OrdersClick] fast_sync_delta role=doctor admission_id=%s changed=%s",
+                "[OrdersClick] silent_sync_start role=doctor admission_id=%s pending=%s",
                 self.admission_id,
-                int(bool(delta_changed)),
+                self._pending_admin_write_count,
             )
-            if self.model is not None and delta_changed:
-                self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
-                self._cached_has_administrations = self._model_has_administrations()
-                self.check_drafts()
-                if hasattr(self, "table_view"):
-                    self.table_view.viewport().update()
-            else:
-                self.check_drafts()
+            if self._pending_admin_write_count > 0:
+                self._schedule_fast_sync()
+                return
+            self._request_snapshot(
+                force=False,
+                source="local_silent_sync",
+                priority="LOW",
+                invalidate_reason=None,
+            )
             self._schedule_state_sync()
         except Exception:
-            logger.info("[OrdersClick] fast_sync_exception_fallback role=doctor admission_id=%s", self.admission_id)
-            self.request_refresh(force=True)
+            logger.info("[OrdersClick] silent_sync_exception role=doctor admission_id=%s", self.admission_id)
         finally:
             if self._perf_enabled and t0 is not None:
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                logger.debug(f"[OrdersPerf] fast_sync +{elapsed_ms:.1f}ms")
+                logger.debug(f"[OrdersPerf] silent_sync +{elapsed_ms:.1f}ms")
 
     def _on_cell_write_failed(self, _exc: Exception):
         # На ошибке возвращаемся к source-of-truth из БД.
         self.request_refresh(force=True)
 
-    def _apply_optimistic_single_cell(
+    def _emit_admin_cell_changes(self, changed_keys):
+        if self.model is None or not changed_keys:
+            return
+        changed_keys = list(dict.fromkeys(changed_keys))
+        if hasattr(self.model, "_recompute_draft_flag"):
+            self.model._recompute_draft_flag()
+        self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
+        self._cached_has_administrations = self._model_has_administrations()
+        if hasattr(self.model, "_emit_admin_cell_changes"):
+            self.model._emit_admin_cell_changes(changed_keys)
+        else:
+            for key in changed_keys:
+                row = next(
+                    (
+                        row_idx
+                        for row_idx, item in enumerate(getattr(self.model, "orders", []))
+                        if item and getattr(item, "id", None) == key[0]
+                    ),
+                    None,
+                )
+                col = next(
+                    (
+                        col_idx + 1
+                        for col_idx, slot in enumerate(getattr(self.model, "time_slots", []))
+                        if slot.isoformat() == key[1]
+                    ),
+                    None,
+                )
+                if row is not None and col is not None:
+                    idx = self.model.index(row, col)
+                    self.model.dataChanged.emit(idx, idx, [Qt.UserRole])
+        self.check_drafts()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+
+    def _restore_admin_cells(self, previous_by_key: dict):
+        if self.model is None or not previous_by_key:
+            return
+        changed_keys = []
+        for key, previous in previous_by_key.items():
+            had_previous, previous_admin = previous
+            if had_previous and previous_admin is not None:
+                self.model.admin_map[key] = copy(previous_admin)
+            else:
+                self.model.admin_map.pop(key, None)
+            changed_keys.append(key)
+        self._emit_admin_cell_changes(changed_keys)
+
+    @staticmethod
+    def _is_long_order(order: OrderDTO) -> bool:
+        try:
+            duration = int(getattr(order, "duration_min", 0) or 0)
+        except Exception:
+            return False
+        return duration == -1 or duration >= 61
+
+    def _chain_keys_for_admin(self, key, admin):
+        if self.model is None:
+            return []
+        chain_id = getattr(admin, "big_chain_id", None)
+        if not chain_id:
+            return [key] if key in self.model.admin_map else []
+        keys = [
+            item_key
+            for item_key, item_admin in self.model.admin_map.items()
+            if item_key[0] == key[0]
+            and getattr(item_admin, "big_chain_id", None) == chain_id
+            and str(getattr(item_admin, "status", "") or "") != "deleted"
+        ]
+        return sorted(keys, key=lambda item: item[1])
+
+    def _optimistic_chain_slots(self, order: OrderDTO, planned_time: datetime) -> list[datetime]:
+        if self.model is None:
+            return []
+        try:
+            duration = int(getattr(order, "duration_min", 0) or 0)
+        except Exception:
+            duration = 0
+        limit_time = planned_time.replace(hour=8, minute=0, second=0, microsecond=0)
+        if planned_time.hour >= 8:
+            limit_time += timedelta(days=1)
+        if duration == -1:
+            num_desired = int((limit_time - planned_time).total_seconds() / 3600)
+        else:
+            num_desired = (duration - 1) // 60 + 1
+        if num_desired <= 0:
+            return []
+
+        slot_by_iso = {slot.isoformat(): slot for slot in getattr(self.model, "time_slots", [])}
+        desired_slots = []
+        for offset in range(num_desired):
+            slot = planned_time + timedelta(hours=offset)
+            if slot >= limit_time:
+                break
+            model_slot = slot_by_iso.get(slot.isoformat())
+            if model_slot is not None:
+                desired_slots.append(model_slot)
+        return desired_slots
+
+    def _new_optimistic_admin(
+        self,
+        order: OrderDTO,
+        planned_time: datetime,
+        *,
+        role: str,
+        chain_id: str | None = None,
+        status: str = "planned",
+        previous_admin: AdministrationDTO | None = None,
+    ) -> AdministrationDTO:
+        return AdministrationDTO(
+            id=-1,
+            order_id=order.id,
+            big_chain_id=chain_id,
+            cell_role=role,
+            planned_time=planned_time,
+            status=status,
+            is_committed=0,
+            comment="",
+            volume_ml=float(getattr(previous_admin, "volume_ml", 0.0) or 0.0),
+        )
+
+    def _apply_optimistic_cell(
         self,
         index,
         order: OrderDTO,
         admin: AdministrationDTO,
         planned_time: datetime,
+        op_prefix: str,
         *,
         perf_click_id: int | None = None,
-    ):
+    ) -> dict:
         """
         Мгновенная визуальная реакция на клик:
-        - для одиночной ячейки (single) применяем локальный optimistic update;
-        - для цепей (start/body/end) ждем быстрый sync из БД, чтобы не рисовать
-          неверные промежуточные связи.
+        - одиночные назначения меняем точечно;
+        - длительные инфузии строим/режем локально теми же правилами, что и доменный сервис.
         """
         if not self.model or not index.isValid():
-            return
+            return {}
 
         key = (order.id, planned_time.isoformat())
-        changed = False
+        if key[0] is None:
+            self._perf_mark_click(perf_click_id, "optimistic_skip")
+            return {}
 
-        if admin is None or admin.status in ("deleted", "cancelled"):
-            self.model.admin_map[key] = AdministrationDTO(
-                id=-1,
-                order_id=order.id,
-                cell_role="single",
-                planned_time=planned_time,
-                status="planned",
-                is_committed=0,
-                comment="",
+        previous_by_key = {}
+        changed_keys = []
+
+        def remember(item_key):
+            if item_key not in previous_by_key:
+                had_previous = item_key in self.model.admin_map
+                previous_by_key[item_key] = (
+                    had_previous,
+                    copy(self.model.admin_map[item_key]) if had_previous else None,
+                )
+
+        def set_admin(item_key, next_admin):
+            if self.model.admin_map.get(item_key) == next_admin:
+                return
+            remember(item_key)
+            self.model.admin_map[item_key] = next_admin
+            changed_keys.append(item_key)
+
+        def remove_admin(item_key):
+            if item_key not in self.model.admin_map:
+                return
+            remember(item_key)
+            del self.model.admin_map[item_key]
+            changed_keys.append(item_key)
+
+        def add_planned_single():
+            set_admin(
+                key,
+                self._new_optimistic_admin(
+                    order,
+                    planned_time,
+                    role="single",
+                    previous_admin=admin,
+                ),
             )
-            changed = True
-        elif admin.status == "planned" and admin.cell_role == "single":
-            if key in self.model.admin_map:
-                del self.model.admin_map[key]
-                changed = True
 
-        if changed:
-            if hasattr(self.model, "_recompute_draft_flag"):
-                self.model._recompute_draft_flag()
-            self.model.dataChanged.emit(index, index, [Qt.UserRole])
-            if hasattr(self, 'table_view'):
-                self.table_view.viewport().update()
+        def add_planned_chain():
+            desired_slots = self._optimistic_chain_slots(order, planned_time)
+            available_slots = []
+            for pos, slot in enumerate(desired_slots):
+                item_key = (order.id, slot.isoformat())
+                existing = self.model.admin_map.get(item_key)
+                if existing and str(getattr(existing, "status", "") or "") != "deleted" and pos > 0:
+                    break
+                available_slots.append(slot)
+            if not available_slots:
+                return
+            chain_id = None
+            if len(available_slots) > 1:
+                chain_id = f"optimistic:{order.id}:{planned_time.isoformat()}"
+            for pos, slot in enumerate(available_slots):
+                role = "single" if len(available_slots) == 1 else ("start" if pos == 0 else ("end" if pos == len(available_slots) - 1 else "body"))
+                item_key = (order.id, slot.isoformat())
+                set_admin(
+                    item_key,
+                    self._new_optimistic_admin(
+                        order,
+                        slot,
+                        role=role,
+                        chain_id=chain_id,
+                        previous_admin=self.model.admin_map.get(item_key),
+                    ),
+                )
+
+        status = str(getattr(admin, "status", "") or "") if admin else ""
+        role = str(getattr(admin, "cell_role", "") or "") if admin else ""
+        is_long = self._is_long_order(order)
+
+        if op_prefix == "orders_right_click":
+            pass
+        elif op_prefix == "orders_middle_click":
+            if not admin:
+                pass
+            elif status == "planned":
+                chain_keys = self._chain_keys_for_admin(key, admin)
+                chain_id = getattr(admin, "big_chain_id", None)
+                if role == "start":
+                    cancelled_admin = copy(admin)
+                    cancelled_admin.status = "cancelled"
+                    cancelled_admin.cell_role = role
+                    set_admin(key, cancelled_admin)
+                    for item_key in chain_keys:
+                        if item_key != key:
+                            remove_admin(item_key)
+                elif role == "body":
+                    end_admin = copy(admin)
+                    end_admin.status = "planned"
+                    end_admin.cell_role = "end"
+                    set_admin(key, end_admin)
+                    for item_key in chain_keys:
+                        if item_key[1] > key[1]:
+                            remove_admin(item_key)
+                else:
+                    cancelled_admin = copy(admin)
+                    cancelled_admin.status = "cancelled"
+                    cancelled_admin.cell_role = "single"
+                    cancelled_admin.big_chain_id = chain_id
+                    set_admin(key, cancelled_admin)
+            elif status == "cancelled":
+                remove_admin(key)
+        else:
+            if not admin or status in ("deleted", "cancelled"):
+                if is_long:
+                    add_planned_chain()
+                else:
+                    add_planned_single()
+            elif status == "planned":
+                if is_long and role in ("start", "body", "end"):
+                    chain_keys = self._chain_keys_for_admin(key, admin)
+                    if role == "start":
+                        for item_key in chain_keys:
+                            remove_admin(item_key)
+                    elif role == "body":
+                        end_admin = copy(admin)
+                        end_admin.cell_role = "end"
+                        set_admin(key, end_admin)
+                        for item_key in chain_keys:
+                            if item_key[1] > key[1]:
+                                remove_admin(item_key)
+                    elif role == "end":
+                        remaining_keys = [item_key for item_key in chain_keys if item_key != key]
+                        remove_admin(key)
+                        prev_keys = [item_key for item_key in remaining_keys if item_key[1] < key[1]]
+                        if prev_keys:
+                            prev_key = max(prev_keys, key=lambda item: item[1])
+                            prev_admin = copy(self.model.admin_map.get(prev_key))
+                            if prev_admin is not None:
+                                prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
+                                set_admin(prev_key, prev_admin)
+                elif role == "single":
+                    remove_admin(key)
+
+        if changed_keys:
+            self._emit_admin_cell_changes(changed_keys)
+            logger.info(
+                "[OrdersClick] local_cell_update role=doctor admission_id=%s op=%s order_id=%s changed_cells=%s",
+                self.admission_id,
+                op_prefix,
+                getattr(order, "id", None),
+                len(set(changed_keys)),
+            )
             self._perf_mark_click(perf_click_id, "optimistic")
         else:
             self._perf_mark_click(perf_click_id, "optimistic_skip")
+        return previous_by_key
 
     def _enqueue_cell_write(
         self,
@@ -1202,10 +1474,19 @@ class OrdersWidget(QWidget):
         admin: AdministrationDTO,
         planned_time: datetime,
         *,
+        op_prefix: str,
         perf_click_id: int | None = None,
     ):
-        self._admin_only_snapshot_until = time.monotonic() + 3.0
+        self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
+        previous_by_key = self._apply_optimistic_cell(
+            index,
+            order,
+            admin,
+            planned_time,
+            op_prefix,
+            perf_click_id=perf_click_id,
+        )
 
         def on_success():
             self._finish_admin_write()
@@ -1213,15 +1494,8 @@ class OrdersWidget(QWidget):
 
         def on_error(exc):
             self._finish_admin_write()
-            self._on_cell_write_failed(exc)
+            self._restore_admin_cells(previous_by_key)
 
-        self._apply_optimistic_single_cell(
-            index,
-            order,
-            admin,
-            planned_time,
-            perf_click_id=perf_click_id,
-        )
         self._enqueue_write(
             description,
             operation=operation,
@@ -1414,14 +1688,6 @@ class OrdersWidget(QWidget):
         top_layout.addWidget(self.input_widget, 1)
         self.frame_layout.addWidget(self.top_container, 0)
 
-        self.update_state_label = QLabel("")
-        self.update_state_label.setFixedHeight(18)
-        self.update_state_label.setVisible(False)
-        self.update_state_label.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-size: 8.5pt; font-style: italic; padding-left: 6px; background: transparent;"
-        )
-        self.frame_layout.addWidget(self.update_state_label)
-
         # 2. Таблица
         self.table_clip_widget = QWidget()
         self.table_clip_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -1492,6 +1758,49 @@ class OrdersWidget(QWidget):
                 invalidate_reason=None,
             )
 
+    def _insert_local_order_after_add(self, order: OrderDTO):
+        if order is None or getattr(order, "id", None) is None:
+            logger.warning(
+                "[OrdersWidget] local order insert skipped: id unavailable admission_id=%s",
+                self.admission_id,
+            )
+            self._schedule_fast_sync()
+            return
+        self._ensure_model_initialized()
+        if self.model is None:
+            self._schedule_fast_sync()
+            return
+
+        order_id = int(order.id)
+        if any(existing and getattr(existing, "id", None) is not None and int(existing.id) == order_id for existing in self.model.orders):
+            self._schedule_fast_sync()
+            return
+
+        scroll_value = self._capture_table_scroll()
+        row = len(self.model.orders)
+        self.model.beginInsertRows(QModelIndex(), row, row)
+        try:
+            self.model.orders.append(copy(order))
+            self.model._renumber_local_sort_order()
+            if hasattr(self.model, "_recompute_draft_flag"):
+                self.model._recompute_draft_flag()
+        finally:
+            self.model.endInsertRows()
+
+        self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False)) or bool(self._pending_reorder_order_ids)
+        self._cached_has_orders = any(
+            item and item.status != OrderStatus.DELETED
+            for item in self.model.orders
+        )
+        self._cached_has_administrations = self._model_has_administrations()
+        self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
+        self._apply_table_header_layout()
+        self._restore_table_scroll(scroll_value)
+        self.check_drafts()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+        self._schedule_fast_sync()
+
     def on_prescription_input(self, text):
         if self._is_read_only(): return
         from .components.order_input_handler import OrderInputHandler
@@ -1505,7 +1814,7 @@ class OrdersWidget(QWidget):
         self._enqueue_write(
             f"orders_add_input:{self.admission_id}",
             operation=lambda: self.service.add_order(new_order),
-            on_success=self._refresh_model,
+            on_success=lambda: self._insert_local_order_after_add(new_order),
         )
         
     def update_now_marker(self):
@@ -1751,6 +2060,7 @@ class OrdersWidget(QWidget):
             order=order,
             admin=admin,
             planned_time=planned_time,
+            op_prefix=op_prefix,
             perf_click_id=perf_click_id,
         )
             
