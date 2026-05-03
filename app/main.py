@@ -6,7 +6,6 @@ import sys
 from typing import Optional
 
 from rem_card.app.runtime_paths import (
-    BAZA_DIR_NAME,
     DataPathConfigurationError,
     cleanup_old_local_logs,
     create_baza_structure_and_db,
@@ -210,7 +209,7 @@ def _run_path_setup():
     while True:
         selected = QFileDialog.getExistingDirectory(
             None,
-            f"Выберите папку {BAZA_DIR_NAME}",
+            "Выберите папку базы RemCard",
             os.path.expanduser("~"),
             QFileDialog.Option.ShowDirsOnly,
         )
@@ -230,7 +229,7 @@ def _run_path_setup():
 
         _show_custom_info(
             "Путь сохранен",
-            f"Путь к {BAZA_DIR_NAME} сохранен.\n\n{selected}\n\nФайл настроек:\n{config_path}",
+            f"Путь к папке базы сохранен.\n\n{selected}\n\nФайл настроек:\n{config_path}",
         )
         return 0
 
@@ -334,7 +333,7 @@ def main(forced_role: Optional[str] = None, path_setup: bool = False):
 def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     parser = argparse.ArgumentParser(description=APP_DISPLAY_TITLE)
     parser.add_argument("--role", choices=["doctor", "nurse"], help="Начальная роль пользователя")
-    parser.add_argument("--path-setup", action="store_true", help="Настроить путь к Baza_rao3_jurnal")
+    parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
     args, _unknown = parser.parse_known_args()
     if forced_role:
         args.role = forced_role

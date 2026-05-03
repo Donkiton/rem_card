@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -48,6 +49,89 @@ def _prepare_import_environment(temp_root: str):
     os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_CACHE_RETENTION_DAYS"] = "3"
     os.environ["REMCARD_LOCAL_CACHE_MAX_FILES"] = "200"
+
+
+def _check_arbitrary_baza_dir_name_allowed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.runtime_paths import (
+        create_baza_structure_and_db,
+        read_configured_baza_dir,
+        validate_baza_dir_for_runtime,
+        write_configured_baza_dir,
+    )
+    from rem_card.app.startup_db_guard import run_startup_db_guard
+
+    saved_env = {
+        key: os.environ.get(key)
+        for key in ("REMCARD_BAZA_DIR", "REMCARD_DATA_PATH_CONFIG")
+    }
+    arbitrary_dir = os.path.join(temp_root, "custom_db_folder")
+    config_path = os.path.join(temp_root, "runtime_config", "remcard_data_path.json")
+    try:
+        os.environ.pop("REMCARD_BAZA_DIR", None)
+        os.environ["REMCARD_DATA_PATH_CONFIG"] = config_path
+
+        ok, reason = create_baza_structure_and_db(arbitrary_dir)
+        if not ok:
+            return False, f"arbitrary folder create failed: {reason}"
+
+        stored_config_path = write_configured_baza_dir(arbitrary_dir)
+        if os.path.abspath(stored_config_path) != os.path.abspath(config_path):
+            return False, f"unexpected config path: {stored_config_path}"
+        if read_configured_baza_dir() != os.path.abspath(arbitrary_dir):
+            return False, "configured arbitrary folder was not read back"
+
+        valid, message = validate_baza_dir_for_runtime(arbitrary_dir)
+        if not valid:
+            return False, f"runtime validation rejected arbitrary folder: {message}"
+
+        os.environ["REMCARD_BAZA_DIR"] = arbitrary_dir
+        guard_result = run_startup_db_guard(role=None)
+        if not guard_result.ok:
+            return False, f"startup guard rejected arbitrary folder: {guard_result.user_message}"
+
+        env = os.environ.copy()
+        env.pop("REMCARD_BAZA_DIR", None)
+        env["REMCARD_DATA_PATH_CONFIG"] = config_path
+        env["PYTHONPATH"] = str(PROJECT_ROOT)
+        fake_exe_dir = os.path.join(temp_root, "compiled_probe", "Prog")
+        os.makedirs(fake_exe_dir, exist_ok=True)
+        env["REMCARD_FAKE_EXE_DIR"] = fake_exe_dir
+        script = r"""
+from _local_rem_card_bootstrap import bootstrap_local_rem_card
+bootstrap_local_rem_card()
+import os
+import sys
+sys.frozen = True
+sys.executable = os.path.join(os.environ["REMCARD_FAKE_EXE_DIR"], "RemCardDoctor.exe")
+from rem_card.app.runtime_paths import resolve_baza_dir
+from rem_card.app import paths
+print(resolve_baza_dir())
+print(paths.BAZA_DIR)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return False, f"compiled path probe failed: {result.stderr[-500:]}"
+        lines = [line.strip() for line in str(result.stdout or "").splitlines() if line.strip()]
+        expected = os.path.abspath(arbitrary_dir)
+        if lines[-2:] != [expected, expected]:
+            return False, f"compiled path probe mismatch: {lines[-2:]}"
+        return True, "ok"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _check_lock_read_unavailable_not_stale(temp_root: str) -> tuple[bool, str]:
@@ -1823,6 +1907,51 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_widget._restore_admin_cells(pending)
         if doctor_model.data(index, Qt.UserRole) is not None:
             return False, "doctor order cell pending state was not restored on error"
+
+        optimistic = doctor_widget._apply_optimistic_cell(
+            index,
+            doctor_order,
+            None,
+            doctor_model.time_slots[0],
+            "orders_left_click",
+        )
+        admin = doctor_model.data(index, Qt.UserRole)
+        if not optimistic:
+            return False, "doctor order cell did not capture optimistic previous state"
+        if admin is None or admin.status != "planned" or admin.cell_role != "single":
+            return False, "doctor order cell did not show final mark immediately"
+        if not getattr(admin, "_pending_cell_action", None):
+            return False, "doctor order optimistic mark did not keep pending marker"
+        doctor_widget._restore_admin_cells(optimistic)
+        if doctor_model.data(index, Qt.UserRole) is not None:
+            return False, "doctor order optimistic state was not restored on error"
+
+        long_order = OrderDTO(id=3, admission_id=1, latin="Long", is_committed=1, duration_min=180)
+        doctor_model.orders.append(long_order)
+        long_index = doctor_model.index(1, 1)
+        long_previous = doctor_widget._apply_optimistic_cell(
+            long_index,
+            long_order,
+            None,
+            doctor_model.time_slots[0],
+            "orders_left_click",
+        )
+        expected_roles = ["start", "body", "end"]
+        actual_roles = [
+            getattr(doctor_model.admin_map.get((3, doctor_model.time_slots[offset].isoformat())), "cell_role", None)
+            for offset in range(3)
+        ]
+        if actual_roles != expected_roles:
+            return False, f"long infusion optimistic roles mismatch: {actual_roles}"
+        if not all(
+            getattr(doctor_model.admin_map[(3, doctor_model.time_slots[offset].isoformat())], "_pending_cell_action", None)
+            for offset in range(3)
+        ):
+            return False, "long infusion optimistic cells did not keep pending markers"
+        doctor_widget._restore_admin_cells(long_previous)
+        if any(key[0] == 3 for key in doctor_model.admin_map):
+            return False, "long infusion optimistic state was not restored on error"
+        doctor_model.orders.pop()
 
         nurse_model = OrdersModel(service, admission_id=1, shift_date=shift)
         nurse_order = OrderDTO(id=2, admission_id=1, latin="Nurse")
@@ -4535,6 +4664,7 @@ def main():
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
+        ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
         ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),
         ("schema_migration_failure_rolls_back", _check_schema_migration_failure_rolls_back),

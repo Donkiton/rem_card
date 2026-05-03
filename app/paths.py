@@ -3,6 +3,7 @@ import shutil
 import sys
 
 from rem_card.app.runtime_paths import (
+    get_dev_baza_dir,
     get_executable_dir,
     get_local_logs_dir,
     get_project_root,
@@ -48,8 +49,8 @@ def get_base_dir() -> str:
     """
     Определяет корень данных.
 
-    В dev-режиме это C:\\Project. В compiled-режиме это выбранная
-    пользователем папка Baza_rao3_jurnal из Prog\\remcard_data_path.json.
+    В dev-режиме это корень проекта C:\\Project для ресурсов. В compiled-режиме
+    это выбранная пользователем папка базы из Prog\\remcard_data_path.json.
     """
     if is_compiled():
         return resolve_baza_dir()
@@ -118,8 +119,10 @@ NETWORK_ROOT = get_base_dir()
 _BAZA_DIR_OVERRIDE = os.environ.get("REMCARD_BAZA_DIR")
 if _BAZA_DIR_OVERRIDE:
     BAZA_DIR = os.path.abspath(os.path.normpath(_BAZA_DIR_OVERRIDE.strip().strip('"')))
-elif os.path.basename(NETWORK_ROOT) == "Baza_rao3_jurnal":
-    BAZA_DIR = NETWORK_ROOT
+elif is_compiled():
+    BAZA_DIR = resolve_baza_dir()
+elif not is_compiled():
+    BAZA_DIR = get_dev_baza_dir()
 else:
     BAZA_DIR = os.path.join(NETWORK_ROOT, "Baza_rao3_jurnal")
 

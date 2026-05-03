@@ -263,33 +263,30 @@ class OrdersDelegate(QStyledItemDelegate):
 
         painter.restore()
 
+    def _is_admin_pending(self, admin) -> bool:
+        return bool(getattr(admin, "_pending_cell_action", None) or hasattr(admin, "_pending_mark"))
+
     def _paint_admin(self, painter: QPainter, rect: QRect, admin):
+        pending = self._is_admin_pending(admin)
         if admin.status == "cancelled":
-            self._paint_cancelled_admin(painter, rect)
+            self._paint_cancelled_admin(painter, rect, pending=pending)
         elif admin.status == "planned":
-            self._paint_planned_admin(painter, rect, admin)
+            self._paint_planned_admin(painter, rect, admin, pending=pending)
         elif admin.status == "deleted":
             pass
 
-    def _paint_cancelled_admin(self, painter: QPainter, rect: QRect):
-        painter.setPen(Qt.black)
+    def _paint_cancelled_admin(self, painter: QPainter, rect: QRect, *, pending: bool = False):
+        painter.setPen(QColor(95, 106, 117) if pending else Qt.black)
         font = painter.font()
         font.setBold(True)
         painter.setFont(font)
         painter.drawText(rect, Qt.AlignCenter, "Отм")
+        if pending:
+            self._draw_pending_corner(painter, rect)
 
-    def _paint_planned_admin(self, painter: QPainter, rect: QRect, admin):
+    def _paint_planned_admin(self, painter: QPainter, rect: QRect, admin, *, pending: bool = False):
         painter.save()
-        if getattr(admin, "_pending_cell_action", None) or hasattr(admin, "_pending_mark"):
-            painter.setPen(QPen(QColor(127, 140, 141), 1))
-            font = painter.font()
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(rect, Qt.AlignCenter, "...")
-            painter.restore()
-            return
-
-        painter.setPen(Qt.black)
+        painter.setPen(QColor(95, 106, 117) if pending else Qt.black)
         font = painter.font()
         font.setBold(True)
         painter.setFont(font)
@@ -300,7 +297,10 @@ class OrdersDelegate(QStyledItemDelegate):
             self._draw_role_mark_or_x(painter, rect, cell_role, mark)
 
         if cell_role in ("start", "body", "end"):
-            self._draw_chain(painter, rect, cell_role, mark)
+            self._draw_chain(painter, rect, cell_role, mark, pending=pending)
+
+        if pending:
+            self._draw_pending_corner(painter, rect)
 
         painter.restore()
 
@@ -315,10 +315,10 @@ class OrdersDelegate(QStyledItemDelegate):
         else:
             painter.drawText(rect, Qt.AlignCenter, "X")
 
-    def _draw_chain(self, painter: QPainter, rect: QRect, cell_role: str, mark: str):
+    def _draw_chain(self, painter: QPainter, rect: QRect, cell_role: str, mark: str, *, pending: bool = False):
         line_y = int(rect.center().y())
         cx = int(rect.center().x())
-        painter.setPen(QPen(Qt.black, 1.5))
+        painter.setPen(QPen(QColor(95, 106, 117) if pending else Qt.black, 1.5))
 
         if cell_role == "start":
             painter.drawLine(cx + 10, line_y, rect.right(), line_y)
@@ -326,7 +326,7 @@ class OrdersDelegate(QStyledItemDelegate):
             painter.drawLine(rect.left(), line_y, rect.right(), line_y)
         elif cell_role == "end":
             painter.drawLine(rect.left(), line_y, cx - 10, line_y)
-            self._draw_chain_arrow(painter, cx, line_y)
+            self._draw_chain_arrow(painter, cx, line_y, pending=pending)
 
         if cell_role in ("body", "end"):
             base_icon_size = min(24, max(14, min(rect.width(), rect.height()) - 8))
@@ -335,8 +335,8 @@ class OrdersDelegate(QStyledItemDelegate):
             if body_mark_pixmap is not None:
                 self._draw_centered_pixmap(painter, rect, body_mark_pixmap)
 
-    def _draw_chain_arrow(self, painter: QPainter, cx: int, line_y: int):
-        painter.setBrush(Qt.black)
+    def _draw_chain_arrow(self, painter: QPainter, cx: int, line_y: int, *, pending: bool = False):
+        painter.setBrush(QColor(95, 106, 117) if pending else Qt.black)
         arrow_size = 5
         arrow = QPolygon([
             QPoint(cx - 10, line_y),
@@ -349,6 +349,15 @@ class OrdersDelegate(QStyledItemDelegate):
         x = rect.left() + (rect.width() - pixmap.width()) // 2
         y = rect.top() + (rect.height() - pixmap.height()) // 2
         painter.drawPixmap(x, y, pixmap)
+
+    def _draw_pending_corner(self, painter: QPainter, rect: QRect):
+        painter.save()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QBrush(QColor(95, 106, 117)))
+        radius = 2
+        dot_rect = QRect(rect.right() - 6, rect.top() + 3, radius * 2, radius * 2)
+        painter.drawEllipse(dot_rect)
+        painter.restore()
 
     def _draw_now_marker(self, painter: QPainter, rect: QRect, hour_dt, now: datetime):
         if now >= hour_dt and now < (hour_dt + timedelta(hours=1)):

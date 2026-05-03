@@ -166,7 +166,10 @@ print("===> Post-build: Moving files to target directory <===")
 build_root = os.path.dirname(globals().get('WARNFILE', os.path.join(PROJECT_ROOT, 'build', 'RemCard', 'warn-RemCard.txt')))
 dist_root = globals().get('DISTPATH', os.path.join(APP_ROOT, 'dist'))
 dist_dir = os.path.join(dist_root, 'Prog')
-target_dir = os.path.abspath(os.path.join(PROJECT_ROOT, 'Baza_rao3_jurnal', 'UPD'))
+target_dir = os.path.abspath(
+    os.environ.get('REMCARD_BUILD_TARGET_DIR')
+    or os.path.join(PROJECT_ROOT, 'Baza_rao3_jurnal', 'UPD')
+)
 
 
 def _read_release_info():

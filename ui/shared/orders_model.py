@@ -214,18 +214,39 @@ class OrdersModel(QAbstractTableModel):
             slot.isoformat(): col + 1
             for col, slot in enumerate(self.time_slots)
         }
-        emitted = set()
+        changed_cells = set()
         for order_id, planned_iso in changed_keys:
             row_idx = row_lookup.get(order_id)
             col_idx = col_lookup.get(planned_iso)
             if row_idx is None or col_idx is None:
                 continue
-            cell_key = (row_idx, col_idx)
-            if cell_key in emitted:
-                continue
-            emitted.add(cell_key)
-            cell_idx = self.index(row_idx, col_idx)
-            self.dataChanged.emit(cell_idx, cell_idx, [Qt.UserRole])
+            changed_cells.add((row_idx, col_idx))
+        if not changed_cells:
+            return
+
+        by_row = {}
+        for row_idx, col_idx in changed_cells:
+            by_row.setdefault(row_idx, []).append(col_idx)
+
+        for row_idx, columns in by_row.items():
+            sorted_cols = sorted(set(columns))
+            range_start = sorted_cols[0]
+            previous_col = sorted_cols[0]
+            for col_idx in sorted_cols[1:]:
+                if col_idx == previous_col + 1:
+                    previous_col = col_idx
+                    continue
+                self.dataChanged.emit(
+                    self.index(row_idx, range_start),
+                    self.index(row_idx, previous_col),
+                    [Qt.UserRole],
+                )
+                range_start = previous_col = col_idx
+            self.dataChanged.emit(
+                self.index(row_idx, range_start),
+                self.index(row_idx, previous_col),
+                [Qt.UserRole],
+            )
 
     def apply_admin_rows_snapshot(self, snapshot: Dict[str, object]) -> bool:
         """
@@ -353,14 +374,28 @@ class OrdersModel(QAbstractTableModel):
             # По возможности дергаем repaint только для реально измененных ячеек.
             # Это заметно снижает лаг на больших листах назначений.
             if changed_cells:
-                emitted = set()
-                for row_idx, col_idx in changed_cells:
-                    cell_key = (row_idx, col_idx)
-                    if cell_key in emitted:
-                        continue
-                    emitted.add(cell_key)
-                    cell_idx = self.index(row_idx, col_idx)
-                    self.dataChanged.emit(cell_idx, cell_idx, [Qt.UserRole])
+                by_row = {}
+                for row_idx, col_idx in set(changed_cells):
+                    by_row.setdefault(row_idx, []).append(col_idx)
+                for row_idx, columns in by_row.items():
+                    sorted_cols = sorted(set(columns))
+                    range_start = sorted_cols[0]
+                    previous_col = sorted_cols[0]
+                    for col_idx in sorted_cols[1:]:
+                        if col_idx == previous_col + 1:
+                            previous_col = col_idx
+                            continue
+                        self.dataChanged.emit(
+                            self.index(row_idx, range_start),
+                            self.index(row_idx, previous_col),
+                            [Qt.UserRole],
+                        )
+                        range_start = previous_col = col_idx
+                    self.dataChanged.emit(
+                        self.index(row_idx, range_start),
+                        self.index(row_idx, previous_col),
+                        [Qt.UserRole],
+                    )
             elif self.rowCount() > 0 and self.columnCount() > 1:
                 # Fallback для редких случаев, когда изменились данные вне видимой сетки.
                 top_left = self.index(0, 1)

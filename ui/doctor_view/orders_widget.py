@@ -1384,6 +1384,8 @@ class OrdersWidget(QWidget):
             if self.model.admin_map.get(item_key) == next_admin:
                 return
             remember(item_key)
+            if next_admin is not None:
+                setattr(next_admin, "_pending_cell_action", op_prefix)
             self.model.admin_map[item_key] = next_admin
             changed_keys.append(item_key)
 
@@ -1529,18 +1531,27 @@ class OrdersWidget(QWidget):
     ):
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
-        self._perf_mark_click(perf_click_id, "optimistic_skip", extra="pending_commit")
-        previous_by_key = self._apply_pending_cell(
+        previous_by_key = self._apply_optimistic_cell(
             index,
             order,
             admin,
             planned_time,
             op_prefix,
+            perf_click_id=perf_click_id,
         )
 
         def on_success():
             self._finish_admin_write()
-            self._refresh_model()
+            if self._pending_admin_write_count > 0:
+                self._schedule_fast_sync()
+                return
+            self._defer_snapshot_request(
+                force=True,
+                source="local_silent_sync",
+                priority="LOW",
+                invalidate_reason="orders_cell_write_success",
+            )
+            self._schedule_state_sync()
 
         def on_error(exc):
             self._finish_admin_write()

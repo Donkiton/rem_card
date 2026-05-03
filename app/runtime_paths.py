@@ -8,6 +8,8 @@ from typing import Optional
 
 
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
+DEV_BAZA_DIR_NAME = "rework_baza"
+DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
 
@@ -65,6 +67,14 @@ def get_data_path_config_path() -> str:
 
 
 def get_dev_baza_dir() -> str:
+    override = os.environ.get(DEV_BAZA_DIR_ENV)
+    if override:
+        return _normalize_baza_dir(override)
+
+    test_baza_dir = os.path.join(get_project_root(), DEV_BAZA_DIR_NAME)
+    if os.path.isdir(test_baza_dir):
+        return test_baza_dir
+
     return os.path.join(get_project_root(), BAZA_DIR_NAME)
 
 
@@ -94,8 +104,8 @@ def read_configured_baza_dir() -> Optional[str]:
 
 def write_configured_baza_dir(baza_dir: str) -> str:
     normalized = _normalize_baza_dir(baza_dir)
-    if not is_baza_dir_name(normalized):
-        raise DataPathConfigurationError(f"Выберите именно папку {BAZA_DIR_NAME}.")
+    if not normalized:
+        raise DataPathConfigurationError("Выберите папку базы данных.")
 
     config_path = get_data_path_config_path()
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
@@ -117,7 +127,7 @@ def resolve_baza_dir() -> str:
         configured = read_configured_baza_dir()
         if not configured:
             raise DataPathConfigurationError(
-                f"Путь к {BAZA_DIR_NAME} не задан. Запустите RemCardPathSetup.exe."
+                "Путь к папке базы не задан. Запустите RemCardPathSetup.exe."
             )
         return configured
 
@@ -199,8 +209,8 @@ def _probe_writable_dir(directory: str) -> tuple[bool, str]:
 
 def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
     normalized = _normalize_baza_dir(baza_dir)
-    if not is_baza_dir_name(normalized):
-        return False, f"Выберите именно папку {BAZA_DIR_NAME}."
+    if not normalized:
+        return False, "Выберите папку базы данных."
 
     try:
         os.makedirs(normalized, exist_ok=True)
@@ -237,7 +247,7 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
         finally:
             conn.close()
     except Exception as exc:
-        return False, f"Не удалось подготовить {BAZA_DIR_NAME}: {exc}"
+        return False, f"Не удалось подготовить папку базы: {exc}"
 
     return True, "ok"
 
@@ -248,8 +258,6 @@ def validate_baza_dir_for_runtime(baza_dir: Optional[str] = None) -> tuple[bool,
     except Exception as exc:
         return False, str(exc)
 
-    if not is_baza_dir_name(normalized):
-        return False, f"Сохраненный путь должен указывать именно на папку {BAZA_DIR_NAME}."
     if not os.path.isdir(normalized):
         return False, f"Папка недоступна: {normalized}"
 

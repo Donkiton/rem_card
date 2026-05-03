@@ -12,11 +12,9 @@ from typing import Any, Optional
 
 from rem_card.app.jsonl_audit_log import write_audit_event
 from rem_card.app.runtime_paths import (
-    BAZA_DIR_NAME,
     DataPathConfigurationError,
     get_journal_db_path,
     get_required_baza_paths,
-    is_baza_dir_name,
     resolve_baza_dir,
 )
 from rem_card.app.version import APP_VERSION
@@ -972,17 +970,10 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
     except Exception as exc:
         return StartupDbGuardResult(
             ok=False,
-            user_message=f"Путь к {BAZA_DIR_NAME} недоступен. Запустите RemCardPathSetup.exe.",
+            user_message="Путь к папке базы недоступен. Запустите RemCardPathSetup.exe.",
             technical_reason=str(exc),
         )
 
-    if not is_baza_dir_name(baza_dir):
-        return StartupDbGuardResult(
-            ok=False,
-            user_message=f"Сохраненный путь должен указывать именно на папку {BAZA_DIR_NAME}.",
-            technical_reason=f"invalid baza dir name: {baza_dir}",
-            baza_dir=baza_dir,
-        )
     if not os.path.isdir(baza_dir):
         return StartupDbGuardResult(
             ok=False,
