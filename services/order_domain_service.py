@@ -487,6 +487,7 @@ class OrderDomainService:
             SELECT id, version, status, is_committed
             FROM administrations
             WHERE order_id = ? AND planned_time = ?
+              AND is_committed = 1
             ORDER BY id DESC
             LIMIT 1
             """,

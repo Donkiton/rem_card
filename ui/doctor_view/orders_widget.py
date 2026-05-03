@@ -1396,6 +1396,7 @@ class OrdersWidget(QWidget):
                 return
             remember(item_key)
             if next_admin is not None:
+                next_admin.is_committed = 0
                 setattr(next_admin, "_pending_cell_action", op_prefix)
             self.model.admin_map[item_key] = next_admin
             changed_keys.append(item_key)
@@ -1404,7 +1405,20 @@ class OrdersWidget(QWidget):
             if item_key not in self.model.admin_map:
                 return
             remember(item_key)
-            del self.model.admin_map[item_key]
+            existing = self.model.admin_map.get(item_key)
+            existing_status = str(getattr(existing, "status", "") or "")
+            if existing is not None and existing_status == "planned" and self._is_committed_value(
+                getattr(existing, "is_committed", 0)
+            ):
+                tombstone = copy(existing)
+                tombstone.status = "deleted"
+                tombstone.is_committed = 0
+                tombstone.comment = ""
+                tombstone.actual_time = None
+                setattr(tombstone, "_pending_cell_action", op_prefix)
+                self.model.admin_map[item_key] = tombstone
+            else:
+                del self.model.admin_map[item_key]
             changed_keys.append(item_key)
 
         def add_planned_single():

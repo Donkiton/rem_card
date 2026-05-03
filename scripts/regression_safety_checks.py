@@ -1969,6 +1969,36 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         if doctor_model.data(index, Qt.UserRole) is not None:
             return False, "doctor order optimistic state was not restored on error"
 
+        committed_admin = AdministrationDTO(
+            id=10,
+            order_id=1,
+            planned_time=doctor_model.time_slots[0],
+            status="planned",
+            cell_role="single",
+            is_committed=1,
+            comment="",
+        )
+        doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
+        doctor_model.has_any_draft = False
+        doctor_widget._cached_has_drafts = False
+        committed_delete = doctor_widget._apply_optimistic_cell(
+            index,
+            doctor_order,
+            committed_admin,
+            doctor_model.time_slots[0],
+            "orders_left_click",
+        )
+        deleted_admin = doctor_model.data(index, Qt.UserRole)
+        if not committed_delete:
+            return False, "doctor committed cell delete did not capture previous state"
+        if deleted_admin is None or deleted_admin.status != "deleted" or int(deleted_admin.is_committed or 0) != 0:
+            return False, f"doctor committed cell delete did not create draft tombstone: {deleted_admin}"
+        if not doctor_widget.has_drafts():
+            return False, "doctor committed cell delete did not activate save draft state"
+        doctor_widget._restore_admin_cells(committed_delete)
+        if doctor_model.data(index, Qt.UserRole) != committed_admin:
+            return False, "doctor committed cell tombstone was not restored on error"
+
         long_order = OrderDTO(id=3, admission_id=1, latin="Long", is_committed=1, duration_min=180)
         doctor_model.orders.append(long_order)
         long_index = doctor_model.index(1, 1)
@@ -3437,6 +3467,7 @@ def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[boo
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
     from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
     from rem_card.services.read_coordinator import ReadCoordinator
     from rem_card.services.remcard_service import RemCardService
     from rem_card.ui.shared.orders_model import OrdersModel
@@ -3491,6 +3522,15 @@ def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[boo
         saved_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
         if saved_snapshot["has_any_draft"]:
             return False, "saved baseline unexpectedly has drafts"
+        baseline_rows = [
+            dict(row)
+            for row in saved_snapshot["admin_rows"]
+            if int(dict(row).get("order_id") or 0) == int(order.id)
+            and str(dict(row).get("planned_time") or "") == saved_slot.isoformat()
+        ]
+        if not baseline_rows:
+            return False, "saved baseline committed cell row is missing"
+        baseline_admin_id = int(baseline_rows[-1]["id"])
 
         service.apply_order_left_click(order, None, saved_slot)
         deleted_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
@@ -3510,6 +3550,15 @@ def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[boo
         deleted_admin = model.data(model.index(0, 3), Qt.UserRole)
         if deleted_admin is None or deleted_admin.status != "deleted" or not model.has_any_draft:
             return False, "OrdersModel dropped deleted draft tombstone"
+
+        try:
+            service.set_nurse_order_mark(baseline_admin_id, NURSE_MARK_EXECUTED)
+        except RuntimeError as exc:
+            return False, f"nurse mark was blocked by unsaved doctor cell draft: {exc}"
+        nurse_rows = service.get_nurse_orders_data(admission_id, shift_date)
+        nurse_row = next((dict(row) for row in nurse_rows if int(dict(row).get("id") or 0) == baseline_admin_id), None)
+        if nurse_row is None or nurse_row.get("comment") != NURSE_MARK_EXECUTED:
+            return False, f"nurse mark did not apply to committed baseline during doctor draft: {nurse_rows}"
 
         coordinator = ReadCoordinator(service)
         context = coordinator.make_orders_context(
