@@ -2359,10 +2359,19 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     if coordinator.get_cached_card(card_key(2)) is not None:
         return False, "oldest patient 2 cache survived after 11th context"
 
-    same_shift_first = datetime(2026, 5, 3, 13, 40, 10)
-    same_shift_second = datetime(2026, 5, 3, 13, 40, 55)
-    if card_key_at(1, same_shift_first) != card_key_at(1, same_shift_second):
-        return False, "same medical shift with different open seconds produced different card cache keys"
+    same_shift_times = [
+        datetime(2026, 5, 3, 8, 0, 0),
+        datetime(2026, 5, 3, 9, 15, 30),
+        datetime(2026, 5, 3, 13, 40, 10),
+        datetime(2026, 5, 3, 23, 59, 59),
+        datetime(2026, 5, 4, 2, 30, 0),
+        datetime(2026, 5, 4, 7, 59, 59),
+    ]
+    same_shift_keys = {card_key_at(1, dt) for dt in same_shift_times}
+    if len(same_shift_keys) != 1:
+        return False, f"same medical shift produced time-dependent card cache keys: {same_shift_keys}"
+    if card_key_at(1, datetime(2026, 5, 4, 8, 0, 0)) in same_shift_keys:
+        return False, "next medical shift reused previous card cache key"
 
     service.versions[1] = 2
     if coordinator.get_current_cached_card(card_key(1)) is not None:
@@ -2383,31 +2392,36 @@ def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple
     from rem_card.ui.shared.components.current_orders_widget import CurrentNurseOrdersWidget
     from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
 
-    first_open = datetime(2026, 5, 3, 13, 40, 10)
-    second_open = datetime(2026, 5, 3, 13, 40, 55)
+    same_shift_times = [
+        datetime(2026, 5, 3, 8, 0, 0),
+        datetime(2026, 5, 3, 9, 15, 30),
+        datetime(2026, 5, 3, 13, 40, 10),
+        datetime(2026, 5, 3, 23, 59, 59),
+        datetime(2026, 5, 4, 2, 30, 0),
+        datetime(2026, 5, 4, 7, 59, 59),
+    ]
     next_shift = datetime(2026, 5, 4, 8, 0, 0)
 
-    orders_key_1 = CurrentNurseOrdersWidget._cache_key_for(7, first_open)
-    orders_key_2 = CurrentNurseOrdersWidget._cache_key_for(7, second_open)
+    orders_keys = {CurrentNurseOrdersWidget._cache_key_for(7, dt) for dt in same_shift_times}
     orders_key_next = CurrentNurseOrdersWidget._cache_key_for(7, next_shift)
-    if orders_key_1 != orders_key_2:
-        return False, f"orders visible cache key still depends on open seconds: {orders_key_1} != {orders_key_2}"
-    if orders_key_1 == orders_key_next:
+    if len(orders_keys) != 1:
+        return False, f"orders visible cache key still depends on open time: {orders_keys}"
+    if orders_key_next in orders_keys:
         return False, "orders visible cache key does not separate different medical shifts"
 
     diet = DietIntakeWidget.__new__(DietIntakeWidget)
     diet.admission_id = 7
     diet.role = "doctor"
     diet.read_only = False
-    diet.shift_date = first_open
-    diet_key_1 = diet._cache_key()
-    diet.shift_date = second_open
-    diet_key_2 = diet._cache_key()
+    diet_keys = set()
+    for dt in same_shift_times:
+        diet.shift_date = dt
+        diet_keys.add(diet._cache_key())
     diet.shift_date = next_shift
     diet_key_next = diet._cache_key()
-    if diet_key_1 != diet_key_2:
-        return False, f"diet cache key still depends on open seconds: {diet_key_1} != {diet_key_2}"
-    if diet_key_1 == diet_key_next:
+    if len(diet_keys) != 1:
+        return False, f"diet cache key still depends on open time: {diet_keys}"
+    if diet_key_next in diet_keys:
         return False, "diet cache key does not separate different medical shifts"
 
     return True, "ok"
