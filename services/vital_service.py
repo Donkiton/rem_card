@@ -247,6 +247,19 @@ class VitalService:
     def get_effective_bounds(self, admission_id: int, shift_date: datetime) -> Tuple[datetime, datetime]:
         s_start, s_end = self.shift_service.get_day_period(shift_date)
         patient = self.patient_dao.get_patient_by_id(admission_id)
+        return self.get_effective_bounds_for_patient(patient, shift_date, default_bounds=(s_start, s_end))
+
+    def get_effective_bounds_for_patient(
+        self,
+        patient,
+        shift_date: datetime,
+        *,
+        default_bounds: Optional[Tuple[datetime, datetime]] = None,
+    ) -> Tuple[datetime, datetime]:
+        if default_bounds is None:
+            s_start, s_end = self.shift_service.get_day_period(shift_date)
+        else:
+            s_start, s_end = default_bounds
         if not patient:
             return s_start, s_end
 

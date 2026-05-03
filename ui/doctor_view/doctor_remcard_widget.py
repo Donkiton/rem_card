@@ -28,6 +28,18 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "nurse_order_panel_mark:",
 )
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
+VITALS_CACHE_CHANGE_ENTITIES = {
+    "patients",
+    "admissions",
+    "beds",
+    "operations",
+    "vitals",
+    "vital_settings",
+    "patient_status_events",
+    "fluids",
+    "diet_plan",
+    "oral_intake_events",
+}
 
 class DoctorRemCardWidget(QWidget):
     archive_requested = Signal()
@@ -281,6 +293,8 @@ class DoctorRemCardWidget(QWidget):
                 mode="live",
                 variant="vitals",
             )
+            if hasattr(coordinator, "get_current_cached_vitals"):
+                return coordinator.get_current_cached_vitals(context.cache_key())
             return coordinator.get_cached_vitals(context.cache_key())
         except Exception as exc:
             logger.debug("Doctor vitals cache lookup failed: %s", exc)
@@ -424,7 +438,7 @@ class DoctorRemCardWidget(QWidget):
                     mode="archive" if self._archive_read_only_mode else "live",
                     source_db=self._archive_source_db_path if self._archive_read_only_mode else "live",
                     ensure_initial_status=request["ensure_initial_status"],
-                    force_refresh=True,
+                    force_refresh=False,
                 )
             else:
                 logger.warning(
@@ -628,6 +642,40 @@ class DoctorRemCardWidget(QWidget):
             for prefix in LOCAL_ORDER_FORCE_PREFIXES
         )
 
+    def _invalidate_vitals_cache_from_payload(self, payload: dict, changed_entities: set[str]) -> None:
+        if self._archive_read_only_mode:
+            return
+        force_sources = self._payload_force_sources(payload)
+        has_relevant_entities = bool(changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES))
+        has_forced_source = bool(payload.get("forced") and force_sources)
+        if not (has_relevant_entities or has_forced_source):
+            return
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+            return
+
+        admission_ids = {
+            int(admission_id)
+            for admission_id in (payload.get("admission_ids") or [])
+            if admission_id is not None
+        }
+        for change in payload.get("changes") or []:
+            entity_name = str(change.get("entity_name") or "")
+            admission_id = change.get("admission_id")
+            if entity_name in VITALS_CACHE_CHANGE_ENTITIES and admission_id is not None:
+                admission_ids.add(int(admission_id))
+
+        if not admission_ids and (has_relevant_entities or has_forced_source):
+            current_admission_id = getattr(self, "admission_id", None)
+            if current_admission_id:
+                admission_ids.add(int(current_admission_id))
+
+        for admission_id in admission_ids:
+            coordinator.invalidate_patient_vitals_for_admission(
+                admission_id,
+                reason=f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
+            )
+
     def _on_data_changes(self, payload: dict):
         changed_entities = {
             str(entity)
@@ -640,6 +688,7 @@ class DoctorRemCardWidget(QWidget):
                 for change in (payload.get("changes") or [])
                 if change.get("entity_name")
             }
+        self._invalidate_vitals_cache_from_payload(payload, changed_entities)
         orders_entities = {"orders", "administrations"}
         if self._selection_mode == "archive" and (payload.get("forced") or changed_entities.intersection({"patients", "admissions"})):
             try:

@@ -26,6 +26,18 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "nurse_order_panel_mark:",
 )
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
+VITALS_CACHE_CHANGE_ENTITIES = {
+    "patients",
+    "admissions",
+    "beds",
+    "operations",
+    "vitals",
+    "vital_settings",
+    "patient_status_events",
+    "fluids",
+    "diet_plan",
+    "oral_intake_events",
+}
 W1_REFRESH_ENTITIES = {
     "patients",
     "admissions",
@@ -224,6 +236,8 @@ class NurseMainWidget(QWidget):
                 mode="live",
                 variant="vitals",
             )
+            if hasattr(coordinator, "get_current_cached_vitals"):
+                return coordinator.get_current_cached_vitals(context.cache_key())
             return coordinator.get_cached_vitals(context.cache_key())
         except Exception as exc:
             logger.debug("Nurse vitals cache lookup failed: %s", exc)
@@ -423,7 +437,7 @@ class NurseMainWidget(QWidget):
                     mode="live",
                     source_db="live",
                     ensure_initial_status=request["ensure_initial_status"],
-                    force_refresh=True,
+                    force_refresh=False,
                 )
             else:
                 logger.warning(
@@ -596,6 +610,38 @@ class NurseMainWidget(QWidget):
             for prefix in LOCAL_ORDER_FORCE_PREFIXES
         )
 
+    def _invalidate_vitals_cache_from_payload(self, payload: dict, changed_entities: set[str]) -> None:
+        force_sources = self._payload_force_sources(payload)
+        has_relevant_entities = bool(changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES))
+        has_forced_source = bool(payload.get("forced") and force_sources)
+        if not (has_relevant_entities or has_forced_source):
+            return
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+            return
+
+        admission_ids = {
+            int(admission_id)
+            for admission_id in (payload.get("admission_ids") or [])
+            if admission_id is not None
+        }
+        for change in payload.get("changes") or []:
+            entity_name = str(change.get("entity_name") or "")
+            admission_id = change.get("admission_id")
+            if entity_name in VITALS_CACHE_CHANGE_ENTITIES and admission_id is not None:
+                admission_ids.add(int(admission_id))
+
+        if not admission_ids and (has_relevant_entities or has_forced_source):
+            current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
+            if current_admission_id:
+                admission_ids.add(int(current_admission_id))
+
+        for admission_id in admission_ids:
+            coordinator.invalidate_patient_vitals_for_admission(
+                admission_id,
+                reason=f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
+            )
+
     def _on_data_changes(self, payload: dict):
         changed_entities = {
             str(entity)
@@ -608,6 +654,7 @@ class NurseMainWidget(QWidget):
                 for change in (payload.get("changes") or [])
                 if change.get("entity_name")
             }
+        self._invalidate_vitals_cache_from_payload(payload, changed_entities)
         orders_entities = {"orders", "administrations"}
         if self._selection_mode == "beds" and (payload.get("forced") or changed_entities.intersection(W1_REFRESH_ENTITIES)):
             if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:

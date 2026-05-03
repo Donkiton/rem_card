@@ -429,7 +429,7 @@ class ReadCoordinator:
         started = time.perf_counter()
 
         if context.mode == "live" and not force_refresh:
-            cached = self.get_cached_vitals(cache_key)
+            cached = self.get_current_cached_vitals(cache_key)
             if cached is not None:
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
                 logger.info(
@@ -835,6 +835,43 @@ class ReadCoordinator:
         self._patient_vitals_cache.move_to_end(cache_key)
         return snapshot
 
+    def get_current_cached_vitals(self, cache_key):
+        snapshot = self.get_cached_vitals(cache_key)
+        if snapshot is None:
+            return None
+
+        try:
+            admission_id = int(cache_key[1])
+            cached_version = int(snapshot.get("version") or 0)
+            current_version = int(
+                self.remcard_service.get_latest_change_id(admission_id=admission_id) or 0
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ReadCoordinator] patient_vitals cache_version_check_failed key=%s error=%s",
+                cache_key,
+                exc,
+            )
+            return None
+
+        if current_version <= cached_version:
+            logger.info(
+                "[ReadCoordinator] patient_vitals cache_current=1 admission_id=%s version=%s",
+                admission_id,
+                cached_version,
+            )
+            return snapshot
+
+        self._patient_vitals_cache.pop(cache_key, None)
+        self._drop_cache_index_by_key(self._patient_cache_index, cache_key)
+        logger.info(
+            "[ReadCoordinator] patient_vitals cache_stale=1 admission_id=%s cached_version=%s current_version=%s",
+            admission_id,
+            cached_version,
+            current_version,
+        )
+        return None
+
     def invalidate_patient_vitals(
         self,
         *,
@@ -861,6 +898,26 @@ class ReadCoordinator:
                 cache_key,
                 context.hash(),
             )
+
+    def invalidate_patient_vitals_for_admission(self, admission_id: int, *, reason: str = "") -> int:
+        if admission_id is None:
+            return 0
+        target_admission_id = int(admission_id)
+        removed = 0
+        for cache_key in list(self._patient_vitals_cache.keys()):
+            if int(cache_key[1]) != target_admission_id:
+                continue
+            self._patient_vitals_cache.pop(cache_key, None)
+            self._drop_cache_index_by_key(self._patient_cache_index, cache_key)
+            removed += 1
+        if removed:
+            logger.info(
+                "[ReadCoordinator] invalidated patient_vitals admission_id=%s entries=%s reason=%s",
+                target_admission_id,
+                removed,
+                reason or "unknown",
+            )
+        return removed
 
     def validate_reload_version(
         self,

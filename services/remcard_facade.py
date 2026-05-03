@@ -282,18 +282,28 @@ class RemCardService(QObject):
             self.status_service.ensure_initial_status(admission_id, start_dt, admission_dt)
 
         current_status = self.get_current_status(admission_id)
-        vitals = self.get_vitals(admission_id, date)
-        vitals_extended = self.get_vitals_extended(admission_id, date)
+        effective_bounds = self._vitals.get_effective_bounds_for_patient(
+            patient,
+            date,
+            default_bounds=(start_dt, end_dt),
+        )
+        chart_start_dt, chart_end_dt = self._vitals.get_chart_window_bounds(date)
+        vitals_extended = self.vitals_dao.get_vitals(admission_id, chart_start_dt, chart_end_dt)
+        effective_start, effective_end = effective_bounds
+        vitals = [
+            vital
+            for vital in vitals_extended
+            if effective_start <= vital.timestamp <= effective_end
+        ]
         latest_values = self.get_latest_vital_values(admission_id)
         settings = self.get_vital_settings_cached(admission_id, date)
-        effective_bounds = self.get_effective_bounds(admission_id, date)
-        chart_start_dt, chart_end_dt = self._vitals.get_chart_window_bounds(date)
         active_intervals = (
             self.status_service.get_active_intervals(admission_id, chart_start_dt, chart_end_dt)
             if self.status_service and hasattr(self.status_service, "get_active_intervals")
             else []
         )
         yest_date = date - timedelta(days=1)
+        card_exists = True if vitals else self.has_card(admission_id, date)
 
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
@@ -308,7 +318,7 @@ class RemCardService(QObject):
             "settings": settings,
             "effective_bounds": effective_bounds,
             "chart_active_intervals": active_intervals,
-            "card_exists": self.has_card(admission_id, date),
+            "card_exists": card_exists,
             "yest_exists": self.has_card(admission_id, yest_date),
             "has_vitals": bool(vitals),
         }
