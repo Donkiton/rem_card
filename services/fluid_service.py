@@ -2,6 +2,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from datetime import datetime, timedelta
 from ..data.dto.remcard_dto import FluidDTO
 from ..data.dao.fluids_dao import FluidsDAO
+from .concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
 from .vital_service import VitalService
 
 
@@ -86,7 +87,16 @@ class FluidService:
         with self.fluids_dao.db.remcard_transaction():
             self.fluids_dao.add_fluid(dto)
 
-    def upsert_hourly_output(self, admission_id: int, shift_date: datetime, hour: int, row_key: str, value: float, is_sum: bool = False):
+    def upsert_hourly_output(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        hour: int,
+        row_key: str,
+        value: float,
+        is_sum: bool = False,
+        expected_revision: Optional[int] = None,
+    ):
         """
         Сохраняет выведение по конкретному часу и показателю.
         Возвращает dict с metadata для undo.
@@ -107,7 +117,7 @@ class FluidService:
         with self.fluids_dao.db.remcard_transaction() as cursor:
             cursor.execute(
                 f"""
-                SELECT id, {row_key} AS current_value
+                SELECT id, {row_key} AS current_value, COALESCE(revision, 0) AS revision
                 FROM fluids
                 WHERE admission_id = ?
                   AND STRFTIME('%Y-%m-%d %H', datetime) = ?
@@ -118,6 +128,8 @@ class FluidService:
             )
             row = cursor.fetchone()
             if row:
+                old_revision = int(row["revision"] or 0)
+                assert_revision_matches(old_revision, expected_revision)
                 old_value = float(row["current_value"] or 0.0)
                 new_value = old_value + value if is_sum else value
                 cursor.execute(
@@ -125,16 +137,21 @@ class FluidService:
                     UPDATE fluids
                     SET {row_key} = ?,
                         last_modified_by = ?,
+                        revision = COALESCE(revision, 0) + 1,
                         updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                     WHERE id = ?
                     """,
                     (new_value, "balance", row["id"]),
                 )
+                if cursor.rowcount != 1:
+                    raise DataConflictError(DATA_CONFLICT_MESSAGE)
                 return {
                     "action": "update",
                     "fluid_id": row["id"],
                     "old_value": old_value,
                     "new_value": new_value,
+                    "old_revision": old_revision,
+                    "new_revision": old_revision + 1,
                 }
 
             dto = FluidDTO(
@@ -150,26 +167,44 @@ class FluidService:
                 "fluid_id": new_id,
                 "old_value": 0.0,
                 "new_value": value,
+                "old_revision": None,
+                "new_revision": 0,
             }
 
-    def restore_hourly_output(self, fluid_id: int, row_key: str, old_value: float):
+    def restore_hourly_output(
+        self,
+        fluid_id: int,
+        row_key: str,
+        old_value: float,
+        expected_revision: Optional[int] = None,
+    ):
         if row_key not in BALANCE_OUTPUT_FIELDS:
             raise ValueError(f"Unsupported fluid output field: {row_key}")
         with self.fluids_dao.db.remcard_transaction() as cursor:
+            cursor.execute("SELECT COALESCE(revision, 0) AS revision FROM fluids WHERE id = ?", (fluid_id,))
+            row = cursor.fetchone()
+            if not row:
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
+            old_revision = int(row["revision"] or 0)
+            assert_revision_matches(old_revision, expected_revision)
             cursor.execute(
                 f"""
                 UPDATE fluids
                 SET {row_key} = ?,
                     last_modified_by = ?,
+                    revision = COALESCE(revision, 0) + 1,
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE id = ?
                 """,
                 (float(old_value), "balance_undo", fluid_id),
             )
+            if cursor.rowcount != 1:
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
+            return old_revision + 1
 
-    def delete_fluid_by_id(self, fluid_id: int):
+    def delete_fluid_by_id(self, fluid_id: int, expected_revision: Optional[int] = None):
         with self.fluids_dao.db.remcard_transaction():
-            self.fluids_dao.delete_fluid(fluid_id)
+            self.fluids_dao.delete_fluid(fluid_id, expected_revision=expected_revision)
 
     def get_fluid_row_by_id(self, fluid_id: int):
         return self.fluids_dao.db.fetch_one_remcard("SELECT * FROM fluids WHERE id = ?", (fluid_id,))

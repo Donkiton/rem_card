@@ -1,3 +1,4 @@
+import inspect
 import os
 from collections import OrderedDict
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -659,6 +660,13 @@ class SectorEvents(BaseSectorWidget):
 
         if hasattr(self.status_service, "enqueue_change_status"):
             self._set_status_write_pending(True)
+            current_event = (
+                self.status_service.get_current_status(self.admission_id)
+                if hasattr(self.status_service, "get_current_status")
+                else None
+            )
+            expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
+            expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
 
             def on_success(result):
                 self._set_status_write_pending(False)
@@ -680,12 +688,34 @@ class SectorEvents(BaseSectorWidget):
                 reason_type=None,
                 reason_text=r_text,
                 user_id=self.user_id,
-                on_success=on_success,
-                on_error=on_error,
+                **self._supported_kwargs(
+                    self.status_service.enqueue_change_status,
+                    {
+                        "expected_active_event_id": expected_active_event_id,
+                        "expected_active_revision": expected_active_revision,
+                        "on_success": on_success,
+                        "on_error": on_error,
+                    },
+                ),
             )
             return
 
-        if self.status_service.change_status(self.admission_id, status, None, r_text, self.user_id):
+        current_event = (
+            self.status_service.get_current_status(self.admission_id)
+            if hasattr(self.status_service, "get_current_status")
+            else None
+        )
+        expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
+        expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
+        if self.status_service.change_status(
+            self.admission_id,
+            status,
+            None,
+            r_text,
+            self.user_id,
+            expected_active_event_id=expected_active_event_id,
+            expected_active_revision=expected_active_revision,
+        ):
             self.edit_reason_text.clear()
             self.refresh()
             self.status_changed.emit()
@@ -718,6 +748,14 @@ class SectorEvents(BaseSectorWidget):
         if reason_text is None:
             reason_text = base_comment
         admission_details = payload.get("admission_details") or {}
+        current_event = (
+            self.status_service.get_current_status(self.admission_id)
+            if hasattr(self.status_service, "get_current_status")
+            else None
+        )
+        expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
+        expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
+        expected_admission_revision = int(context.get("revision") or 0) if context else None
 
         def on_success(result):
             self._set_status_write_pending(False)
@@ -747,8 +785,16 @@ class SectorEvents(BaseSectorWidget):
                 reason_text=reason_text,
                 user_id=self.user_id,
                 admission_details=admission_details,
-                on_success=on_success,
-                on_error=on_error,
+                **self._supported_kwargs(
+                    self.status_service.enqueue_change_status_with_outcome_details,
+                    {
+                        "expected_active_event_id": expected_active_event_id,
+                        "expected_active_revision": expected_active_revision,
+                        "expected_admission_revision": expected_admission_revision,
+                        "on_success": on_success,
+                        "on_error": on_error,
+                    },
+                ),
             )
             return
 
@@ -762,9 +808,20 @@ class SectorEvents(BaseSectorWidget):
                     reason_text,
                     self.user_id,
                     admission_details,
+                    expected_active_event_id=expected_active_event_id,
+                    expected_active_revision=expected_active_revision,
+                    expected_admission_revision=expected_admission_revision,
                 )
             else:
-                result = self.status_service.change_status(self.admission_id, status, None, reason_text, self.user_id)
+                result = self.status_service.change_status(
+                    self.admission_id,
+                    status,
+                    None,
+                    reason_text,
+                    self.user_id,
+                    expected_active_event_id=expected_active_event_id,
+                    expected_active_revision=expected_active_revision,
+                )
             on_success(result)
         except Exception as exc:
             on_error(exc)
@@ -792,6 +849,7 @@ class SectorEvents(BaseSectorWidget):
 
         if hasattr(self.status_service, "enqueue_update_event_bounds"):
             self.content_area.setEnabled(False)
+            expected_revision = int(getattr(event_dto, "revision", 0) or 0)
 
             def on_success(result):
                 self.content_area.setEnabled(True)
@@ -813,12 +871,24 @@ class SectorEvents(BaseSectorWidget):
                 new_start,
                 new_end,
                 new_reason,
-                on_success=on_success,
-                on_error=on_error,
+                **self._supported_kwargs(
+                    self.status_service.enqueue_update_event_bounds,
+                    {
+                        "expected_revision": expected_revision,
+                        "on_success": on_success,
+                        "on_error": on_error,
+                    },
+                ),
             )
             return
 
-        if self.status_service.update_event_bounds(event_dto.id, new_start, new_end, new_reason):
+        if self.status_service.update_event_bounds(
+            event_dto.id,
+            new_start,
+            new_end,
+            new_reason,
+            expected_revision=int(getattr(event_dto, "revision", 0) or 0),
+        ):
             self._is_editing_time = False # Снимаем блокировку
             self.refresh(force=True)
             self.status_changed.emit()
@@ -839,6 +909,13 @@ class SectorEvents(BaseSectorWidget):
         if reply == CustomMessageBox.Yes:
             if hasattr(self.status_service, "enqueue_rollback_last_status"):
                 self._set_status_write_pending(True)
+                current_event = (
+                    self.status_service.get_current_status(self.admission_id)
+                    if hasattr(self.status_service, "get_current_status")
+                    else None
+                )
+                expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
+                expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
 
                 def on_success(result):
                     self._set_status_write_pending(False)
@@ -856,12 +933,30 @@ class SectorEvents(BaseSectorWidget):
 
                 self.status_service.enqueue_rollback_last_status(
                     self.admission_id,
-                    on_success=on_success,
-                    on_error=on_error,
+                    **self._supported_kwargs(
+                        self.status_service.enqueue_rollback_last_status,
+                        {
+                            "expected_active_event_id": expected_active_event_id,
+                            "expected_active_revision": expected_active_revision,
+                            "on_success": on_success,
+                            "on_error": on_error,
+                        },
+                    ),
                 )
                 return
 
-            if self.status_service.rollback_last_status(self.admission_id):
+            current_event = (
+                self.status_service.get_current_status(self.admission_id)
+                if hasattr(self.status_service, "get_current_status")
+                else None
+            )
+            expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
+            expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
+            if self.status_service.rollback_last_status(
+                self.admission_id,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+            ):
                 self.refresh()
                 self.status_changed.emit()
             else:
@@ -869,6 +964,17 @@ class SectorEvents(BaseSectorWidget):
 
     def _show_question(self, text):
         return CustomMessageBox.question(self, "Подтверждение", text)
+
+    @staticmethod
+    def _supported_kwargs(func, kwargs: dict):
+        clean = {key: value for key, value in kwargs.items() if value is not None}
+        try:
+            signature = inspect.signature(func)
+        except Exception:
+            return clean
+        if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+            return clean
+        return {key: value for key, value in clean.items() if key in signature.parameters}
 
     def set_content(self, widget):
         """Установка виджета в BaseSectorWidget"""

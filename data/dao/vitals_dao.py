@@ -3,6 +3,7 @@ from datetime import datetime
 
 from ..dto.remcard_dto import VitalDTO
 from rem_card.app.logger import logger
+from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
 
 
@@ -10,11 +11,11 @@ class VitalsDAO:
     def __init__(self, db_manager):
         self.db = db_manager
 
-    def add_vital(self, dto: VitalDTO):
+    def add_vital(self, dto: VitalDTO, expected_revision: Optional[int] = None):
         """Insert or update vitals row for the same minute (admission_id + minute)."""
         target_minute = dto.timestamp.strftime("%Y-%m-%d %H:%M")
         check_query = """
-            SELECT id FROM vitals
+            SELECT id, COALESCE(revision, 0) AS revision FROM vitals
             WHERE admission_id = ?
               AND STRFTIME('%Y-%m-%d %H:%M', datetime) = ?
         """
@@ -23,6 +24,8 @@ class VitalsDAO:
         last_modified_by = dto.last_modified_by if dto.last_modified_by else "doctor"
 
         if row:
+            old_revision = int(row["revision"] or 0)
+            assert_revision_matches(old_revision, expected_revision)
             logger.debug(
                 "Updating vitals for admission_id=%s at %s. Values: sys=%s, dia=%s, pulse=%s, temp=%s, spo2=%s, rr=%s, cvp=%s",
                 dto.admission_id,
@@ -44,10 +47,12 @@ class VitalsDAO:
                     spo2 = COALESCE(?, spo2),
                     rr = COALESCE(?, rr),
                     cvp = COALESCE(?, cvp),
-                    last_modified_by = ?, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                    last_modified_by = ?,
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE id = ?
             """
-            self.db.execute_remcard(
+            cursor = self.db.execute_remcard(
                 query,
                 (
                     dto.sys,
@@ -61,7 +66,13 @@ class VitalsDAO:
                     row["id"],
                 ),
             )
+            if cursor.rowcount != 1:
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
+            dto.id = row["id"]
+            dto.revision = old_revision + 1
         else:
+            if expected_revision is not None:
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
             logger.debug(
                 "Inserting new vitals for admission_id=%s at %s. Values: sys=%s, dia=%s, pulse=%s, temp=%s, spo2=%s, rr=%s, cvp=%s",
                 dto.admission_id,
@@ -78,7 +89,7 @@ class VitalsDAO:
                 INSERT INTO vitals (admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp, last_modified_by, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
             """
-            self.db.execute_remcard(
+            cursor = self.db.execute_remcard(
                 query,
                 (
                     dto.admission_id,
@@ -93,10 +104,12 @@ class VitalsDAO:
                     last_modified_by,
                 ),
             )
+            dto.id = cursor.lastrowid
+            dto.revision = 0
 
     def get_vitals(self, admission_id: int, start: datetime, end: datetime) -> List[VitalDTO]:
         query = """
-            SELECT id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp, last_modified_by, updated_at
+            SELECT id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp, last_modified_by, updated_at, COALESCE(revision, 0) AS revision
             FROM vitals
             WHERE admission_id = ? AND datetime >= ? AND datetime <= ?
             ORDER BY datetime ASC
@@ -116,6 +129,7 @@ class VitalsDAO:
                 cvp=r["cvp"],
                 last_modified_by=r["last_modified_by"],
                 updated_at=r["updated_at"],
+                revision=r["revision"],
             )
             for r in rows
         ]
@@ -162,6 +176,7 @@ class VitalsDAO:
                         cvp=rd["cvp"],
                         last_modified_by=rd["last_modified_by"],
                         updated_at=rd["updated_at"],
+                        revision=rd["revision"] if "revision" in rd.keys() else 0,
                     )
                 )
 
@@ -176,7 +191,7 @@ class VitalsDAO:
 
     def get_latest_vital(self, admission_id: int) -> Optional[VitalDTO]:
         query = """
-            SELECT id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp, last_modified_by, updated_at
+            SELECT id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp, last_modified_by, updated_at, COALESCE(revision, 0) AS revision
             FROM vitals
             WHERE admission_id = ?
               AND (sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR temp IS NOT NULL OR spo2 IS NOT NULL OR rr IS NOT NULL OR cvp IS NOT NULL)
@@ -200,6 +215,7 @@ class VitalsDAO:
             cvp=r["cvp"],
             last_modified_by=r["last_modified_by"],
             updated_at=r["updated_at"],
+            revision=r["revision"],
         )
 
     def get_all_vital_dates(self, admission_id: int) -> List[datetime]:
@@ -219,8 +235,15 @@ class VitalsDAO:
     def delete_all_for_admission(self, admission_id: int):
         self.db.execute_remcard("DELETE FROM vitals WHERE admission_id = ?", (admission_id,))
 
-    def delete_vital(self, vital_id: int):
-        self.db.execute_remcard("DELETE FROM vitals WHERE id = ?", (vital_id,))
+    def delete_vital(self, vital_id: int, expected_revision: Optional[int] = None):
+        query = "DELETE FROM vitals WHERE id = ?"
+        params = [vital_id]
+        if expected_revision is not None:
+            query += " AND COALESCE(revision, 0) = ?"
+            params.append(int(expected_revision))
+        cursor = self.db.execute_remcard(query, tuple(params))
+        if expected_revision is not None and cursor.rowcount != 1:
+            raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
     def get_vital_settings(self, admission_id: int, date: str) -> Optional[Dict[str, Any]]:
         query = """

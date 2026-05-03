@@ -260,6 +260,7 @@ class PatientForm(QDialog):
             else:
                 patient_id = int(self.patient.id)
                 admission_id = int(self.admission.id)
+                expected_admission_revision = int(getattr(self.admission, "revision", 0) or 0)
                 description = f"patient_bed_update_admission:{admission_id}"
 
                 def operation():
@@ -268,6 +269,7 @@ class PatientForm(QDialog):
                         admission_id,
                         patient_data,
                         admission_data,
+                        expected_admission_revision=expected_admission_revision,
                     )
 
             self._begin_write_pending()

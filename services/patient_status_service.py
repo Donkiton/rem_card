@@ -25,9 +25,19 @@ class PatientStatusService:
 
     def change_status(self, admission_id: int, new_status: PatientStatus, 
                       reason_type: Optional[str] = None, reason_text: Optional[str] = None, 
-                      user_id: Optional[str] = None) -> bool:
+                      user_id: Optional[str] = None,
+                      expected_active_event_id: Optional[int] = None,
+                      expected_active_revision: Optional[int] = None) -> bool:
         """РЎРјРµРЅР° СЃС‚Р°С‚СѓСЃР° РїР°С†РёРµРЅС‚Р°."""
-        ok = self.status_dao.change_status(admission_id, new_status, reason_type, reason_text, user_id)
+        ok = self.status_dao.change_status(
+            admission_id,
+            new_status,
+            reason_type,
+            reason_text,
+            user_id,
+            expected_active_event_id=expected_active_event_id,
+            expected_active_revision=expected_active_revision,
+        )
         if ok:
             self._sync_ventilation_for_admission(admission_id)
         return ok
@@ -41,6 +51,9 @@ class PatientStatusService:
         reason_text: Optional[str] = None,
         user_id: Optional[str] = None,
         admission_details: Optional[Dict[str, Any]] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
     ) -> bool:
         """Смена финального статуса вместе с записью структурированных деталей исхода."""
         ok = self.status_dao.change_status_with_outcome_details(
@@ -51,6 +64,9 @@ class PatientStatusService:
             reason_text,
             user_id,
             admission_details,
+            expected_active_event_id=expected_active_event_id,
+            expected_active_revision=expected_active_revision,
+            expected_admission_revision=expected_admission_revision,
         )
         if ok:
             self._sync_ventilation_for_admission(admission_id)
@@ -59,9 +75,18 @@ class PatientStatusService:
     def get_admission_outcome_context(self, admission_id: int) -> Dict[str, Any]:
         return self.status_dao.get_admission_outcome_context(admission_id)
 
-    def rollback_last_status(self, admission_id: int) -> bool:
+    def rollback_last_status(
+        self,
+        admission_id: int,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+    ) -> bool:
         """РћС‚РєР°С‚ РїРѕСЃР»РµРґРЅРµРіРѕ РёР·РјРµРЅРµРЅРёСЏ СЃС‚Р°С‚СѓСЃР°."""
-        ok = self.status_dao.rollback_last_status(admission_id)
+        ok = self.status_dao.rollback_last_status(
+            admission_id,
+            expected_active_event_id=expected_active_event_id,
+            expected_active_revision=expected_active_revision,
+        )
         if ok:
             self._sync_ventilation_for_admission(admission_id)
         return ok
@@ -227,10 +252,23 @@ class PatientStatusService:
                 filtered.append(ev)
         return filtered
 
-    def update_event_bounds(self, event_id: int, new_start: datetime, new_end: Optional[datetime], new_reason: Optional[str] = None) -> bool:
+    def update_event_bounds(
+        self,
+        event_id: int,
+        new_start: datetime,
+        new_end: Optional[datetime],
+        new_reason: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
         """РћР±РЅРѕРІР»РµРЅРёРµ РіСЂР°РЅРёС† СЃРѕР±С‹С‚РёСЏ С‡РµСЂРµР· DAO."""
         event = self.status_dao.get_event_by_id(event_id)
-        ok = self.status_dao.update_event_bounds(event_id, new_start, new_end, new_reason)
+        ok = self.status_dao.update_event_bounds(
+            event_id,
+            new_start,
+            new_end,
+            new_reason,
+            expected_revision=expected_revision,
+        )
         if ok and event:
             self._sync_ventilation_for_admission(event.admission_id)
         return ok
@@ -293,12 +331,22 @@ class PatientStatusService:
         reason_type: Optional[str] = None,
         reason_text: Optional[str] = None,
         user_id: Optional[str] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
         on_success: Optional[Callable[[bool], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
         self.enqueue_write(
             description=f"status_change:{admission_id}:{new_status.value}",
-            operation=lambda: self.change_status(admission_id, new_status, reason_type, reason_text, user_id),
+            operation=lambda: self.change_status(
+                admission_id,
+                new_status,
+                reason_type,
+                reason_text,
+                user_id,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+            ),
             on_success=on_success,
             on_error=on_error,
         )
@@ -312,6 +360,9 @@ class PatientStatusService:
         reason_text: Optional[str] = None,
         user_id: Optional[str] = None,
         admission_details: Optional[Dict[str, Any]] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
         on_success: Optional[Callable[[bool], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
@@ -325,6 +376,9 @@ class PatientStatusService:
                 reason_text,
                 user_id,
                 admission_details,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+                expected_admission_revision=expected_admission_revision,
             ),
             on_success=on_success,
             on_error=on_error,
@@ -333,12 +387,18 @@ class PatientStatusService:
     def enqueue_rollback_last_status(
         self,
         admission_id: int,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
         on_success: Optional[Callable[[bool], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
         self.enqueue_write(
             description=f"status_rollback:{admission_id}",
-            operation=lambda: self.rollback_last_status(admission_id),
+            operation=lambda: self.rollback_last_status(
+                admission_id,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+            ),
             on_success=on_success,
             on_error=on_error,
         )
@@ -349,12 +409,19 @@ class PatientStatusService:
         new_start: datetime,
         new_end: Optional[datetime],
         new_reason: Optional[str] = None,
+        expected_revision: Optional[int] = None,
         on_success: Optional[Callable[[bool], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
         self.enqueue_write(
             description=f"status_update_bounds:{event_id}",
-            operation=lambda: self.update_event_bounds(event_id, new_start, new_end, new_reason),
+            operation=lambda: self.update_event_bounds(
+                event_id,
+                new_start,
+                new_end,
+                new_reason,
+                expected_revision=expected_revision,
+            ),
             on_success=on_success,
             on_error=on_error,
         )

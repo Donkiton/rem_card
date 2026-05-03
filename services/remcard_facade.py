@@ -716,8 +716,14 @@ class RemCardService(QObject):
     def get_vitals_extended(self, admission_id: int, date: datetime) -> List[VitalDTO]:
         return self._vitals.get_vitals_extended(admission_id, date)
 
-    def add_vital(self, dto: VitalDTO, shift_date: Optional[datetime] = None, force: bool = False):
-        self._vitals.add_vital(dto, shift_date, force)
+    def add_vital(
+        self,
+        dto: VitalDTO,
+        shift_date: Optional[datetime] = None,
+        force: bool = False,
+        expected_revision: Optional[int] = None,
+    ):
+        self._vitals.add_vital(dto, shift_date, force, expected_revision=expected_revision)
 
     def get_latest_vital(self, admission_id: int) -> Optional[VitalDTO]:
         return self._vitals.get_latest_vital(admission_id)
@@ -734,8 +740,8 @@ class RemCardService(QObject):
     def clear_vitals(self, admission_id: int, date: datetime):
         self._vitals.clear_vitals(admission_id, date)
 
-    def delete_last_vital(self, admission_id: int, date: datetime):
-        self._vitals.delete_last_vital(admission_id, date)
+    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision: Optional[int] = None):
+        self._vitals.delete_last_vital(admission_id, date, expected_revision=expected_revision)
 
     def get_all_card_dates(self, admission_id: int) -> List[datetime]:
         """
@@ -1359,8 +1365,8 @@ class RemCardService(QObject):
     def get_ventilation_timeline(self, admission_id: int):
         return self._require_ventilation().get_admission_events(admission_id)
 
-    def rollback_last_ventilation_action(self, case_id: int) -> VentilationEventDTO:
-        return self._require_ventilation().rollback_last_action(case_id)
+    def rollback_last_ventilation_action(self, case_id: int, **kwargs) -> VentilationEventDTO:
+        return self._require_ventilation().rollback_last_action(case_id, **kwargs)
 
     def get_ventilation_summary(self, admission_id: int):
         return self._require_ventilation().get_active_case_summary(admission_id)

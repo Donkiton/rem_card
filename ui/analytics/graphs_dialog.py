@@ -1,24 +1,17 @@
 import os
 from datetime import datetime
-try:
-    import pandas as pd
-    import matplotlib.pyplot as plt
-    try:
-        import seaborn as sns
-    except ImportError:
-        sns = None
-except ImportError:
-    pd = None
-    plt = None
-    sns = None
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QGraphicsDropShadowEffect, QScrollArea, QCheckBox, QTextBrowser, QFrame)
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QColor
 
-from rem_card.ui.analytics.graphs_generators_1 import generate_g1_g5, generate_g6_g13, generate_g14_g18, generate_g19_g22
-from rem_card.ui.analytics.graphs_generators_2 import generate_g23_g30, generate_g31_g35, generate_g36_g40, generate_g41_g45
-from rem_card.ui.analytics.graphs_generators_3 import generate_g46_g50, generate_g51_g55, generate_g56_g60, generate_g61_g65
+from rem_card.services.analytics.graphs_service import (
+    DEFAULT_CHART_COLORS,
+    build_graphs_html,
+    wrap_graphs_pdf_html,
+)
+from rem_card.ui.shared.analytics_worker import AnalyticsWorker
+from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
 
 
 class GraphsDialog(QDialog):
@@ -42,33 +35,9 @@ class GraphsDialog(QDialog):
         self.border_color = "#d1d1bc"
         self.accent_color = "#8a8a68"
         self.text_color = "#2d2d24"
-
-        # Настраиваем стиль графиков: seaborn (если доступен) или fallback.
-        if plt:
-            if sns:
-                sns.set_theme(
-                    style="whitegrid",
-                    context="talk",
-                    font_scale=0.72,
-                    rc={
-                        "figure.facecolor": "#ffffff",
-                        "axes.facecolor": "#fcfcfa",
-                        "axes.edgecolor": "#d4d4c4",
-                        "grid.color": "#e6e6dc",
-                        "grid.linestyle": "-",
-                        "grid.linewidth": 0.8,
-                        "axes.titleweight": "bold",
-                        "axes.labelcolor": "#2d2d24",
-                        "xtick.color": "#3c3c34",
-                        "ytick.color": "#3c3c34",
-                    },
-                )
-                self.chart_colors = sns.color_palette("Set2", 10).as_hex()
-            else:
-                plt.style.use('ggplot')
-                self.chart_colors = ['#8a8a68', '#d97706', '#c0504d', '#5b9bd5', '#71a95a', '#705470', '#eeb211', '#4b5563', '#10b981', '#f43f5e']
-        else:
-            self.chart_colors = ['#8a8a68', '#d97706', '#c0504d', '#5b9bd5', '#71a95a', '#705470', '#eeb211', '#4b5563', '#10b981', '#f43f5e']
+        self.chart_colors = list(DEFAULT_CHART_COLORS)
+        self._graphs_worker = None
+        self._graphs_pdf_worker = None
 
         self._init_ui()
 
@@ -373,121 +342,86 @@ class GraphsDialog(QDialog):
                 self.checkboxes[key].setChecked(True)
 
     def _on_preview_clicked(self):
-        html = self._generate_graphs(save_pdf=False)
-        self.report_text.setHtml(html)
+        self._start_graphs_build(save_pdf=False)
 
     def _on_save_pdf_clicked(self):
-        html = self._generate_graphs(save_pdf=True)
-        if html:
-            self.report_text.setHtml(html)
+        self._start_graphs_build(save_pdf=True)
 
-    def _generate_graphs(self, save_pdf=False):
-        if not pd or not plt:
-            from rem_card.ui.shared.custom_message_box import CustomMessageBox
-            CustomMessageBox.information(self, "Ошибка", "Библиотеки pandas или matplotlib не установлены.")
-            return ""
+    def _start_graphs_build(self, save_pdf=False):
+        if self._graphs_worker is not None and self._graphs_worker.isRunning():
+            return
 
-        # Если ничего не выбрано
         selected = [k for k, cb in self.checkboxes.items() if cb.isChecked()]
         if not selected:
             from rem_card.ui.shared.custom_message_box import CustomMessageBox
             CustomMessageBox.information(self, "Внимание", "Выберите хотя бы один график для формирования.")
-            return ""
+            return
 
-        conn = self.db_manager.get_connection()
-        params = (self.start_date_str, self.end_date_str)
+        self._set_graphs_busy(True, "Формирование графиков...")
+        self._graphs_worker = AnalyticsWorker(
+            lambda: build_graphs_html(
+                self.db_manager,
+                self.start_date_str,
+                self.end_date_str,
+                selected,
+                self.chart_colors,
+            ),
+            parent=self,
+        )
+        self._graphs_worker.completed.connect(lambda result: self._on_graphs_ready(result, save_pdf))
+        self._graphs_worker.failed.connect(self._on_graphs_failed)
+        self._graphs_worker.finished.connect(self._clear_graphs_worker)
+        self._graphs_worker.start()
 
-        img_paths = []
-        html_content = f"<h2>Графический отчет ОАР №3</h2><p>Период: {self.start_date_str.split(' ')[0]} - {self.end_date_str.split(' ')[0]}</p>"
+    def _on_graphs_ready(self, result, save_pdf: bool):
+        html = getattr(result, "html", "")
+        self.report_text.setHtml(html)
+        if save_pdf:
+            self._start_graphs_pdf_worker(html)
+            return
+        self._set_graphs_busy(False)
 
-        try:
-            # Пре-загрузка данных для сложных расчетов
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, patient_id, admission_datetime, transfer_datetime, death_datetime, outcome, patient_age, patient_age_unit, patient_gender, source_department, diagnosis_code, diagnosis_text FROM admissions WHERE admission_datetime BETWEEN ? AND ?", params)
-            adms = [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
+    def _start_graphs_pdf_worker(self, html: str):
+        if self._graphs_pdf_worker is not None and self._graphs_pdf_worker.isRunning():
+            return
+        from rem_card.app.paths import REPORT_DIR
 
-            # Вызов функций генерации из модулей
-            # Модуль 1
-            html_content = generate_g1_g5(selected, conn, params, self.chart_colors, img_paths, html_content)
-            html_content = generate_g6_g13(selected, conn, params, self.chart_colors, img_paths, adms, self.start_date_str, self.end_date_str, html_content)
-            html_content = generate_g14_g18(selected, conn, params, self.chart_colors, img_paths, adms, self.start_date_str, self.end_date_str, html_content)
-            html_content = generate_g19_g22(selected, conn, params, self.chart_colors, img_paths, adms, html_content)
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        filename = f"graphs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        pdf_path = os.path.join(REPORT_DIR, filename)
+        self.report_text.setHtml(html)
+        self._graphs_pdf_worker = HtmlPdfWorker(wrap_graphs_pdf_html(html), pdf_path, parent=self)
+        self._graphs_pdf_worker.completed.connect(self._on_graphs_pdf_ready)
+        self._graphs_pdf_worker.failed.connect(self._on_graphs_pdf_failed)
+        self._graphs_pdf_worker.finished.connect(self._clear_graphs_pdf_worker)
+        self._graphs_pdf_worker.start()
 
-            # Модуль 2
-            html_content = generate_g23_g30(selected, conn, params, self.chart_colors, img_paths, html_content)
-            html_content = generate_g31_g35(selected, conn, params, self.chart_colors, img_paths, html_content)
-            html_content = generate_g36_g40(selected, conn, params, self.chart_colors, img_paths, adms, html_content)
-            html_content = generate_g41_g45(selected, conn, params, self.chart_colors, img_paths, html_content)
+    def _on_graphs_pdf_ready(self, pdf_path: str):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-            # Модуль 3
-            html_content = generate_g46_g50(selected, conn, params, self.chart_colors, img_paths, adms, html_content)
-            html_content = generate_g51_g55(selected, conn, params, self.chart_colors, img_paths, adms, self.start_date_str, self.end_date_str, html_content)
-            html_content = generate_g56_g60(selected, conn, params, self.chart_colors, img_paths, html_content)
-            html_content = generate_g61_g65(selected, conn, params, self.chart_colors, img_paths, html_content)
+        self._set_graphs_busy(False)
+        CustomMessageBox.information(self, "Успех", f"Графики успешно сохранены:\n{os.path.basename(pdf_path)}")
 
+    def _on_graphs_pdf_failed(self, message: str):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-            if save_pdf:
-                from rem_card.app.paths import REPORT_DIR
-                reports_dir = REPORT_DIR
-                if not os.path.exists(reports_dir):
-                    os.makedirs(reports_dir)
+        self._set_graphs_busy(False)
+        CustomMessageBox.information(self, "Ошибка", f"Ошибка при сохранении PDF:\n{message}")
 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"graphs_{timestamp}.pdf"
-                pdf_path = os.path.join(reports_dir, filename)
+    def _on_graphs_failed(self, message: str):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-                from PySide6.QtGui import QTextDocument, QPdfWriter, QPageLayout, QPageSize
-                from PySide6.QtCore import QMarginsF
+        self._set_graphs_busy(False)
+        CustomMessageBox.information(self, "Ошибка", f"Ошибка при формировании графиков:\n{message}")
 
-                styled_html = f"""
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <style>
-                        body {{
-                            font-family: 'Arial', sans-serif;
-                            color: #222222;
-                            background: #ffffff;
-                            margin: 0;
-                            padding: 16px 18px;
-                            text-align: center;
-                        }}
-                        h2 {{ color: #333333; margin-bottom: 4px; }}
-                        h3 {{ color: #50503f; margin-top: 26px; margin-bottom: 8px; font-size: 14px; }}
-                        div {{ page-break-inside: avoid; }}
-                        img {{
-                            max-width: 100%;
-                            height: auto;
-                            border: 1px solid #e3e3d7;
-                            border-radius: 4px;
-                            padding: 3px;
-                            background: #ffffff;
-                        }}
-                    </style>
-                </head>
-                <body>
-                    {html_content}
-                </body>
-                </html>
-                """
-                doc = QTextDocument()
-                doc.setHtml(styled_html)
+    def _set_graphs_busy(self, busy: bool, text: str = ""):
+        self.preview_btn.setEnabled(not busy)
+        self.save_pdf_btn.setEnabled(not busy)
+        if text:
+            self.report_text.setHtml(f"<p>{text}</p>")
 
-                writer = QPdfWriter(pdf_path)
-                writer.setPageLayout(QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(15, 15, 15, 15)))
+    def _clear_graphs_worker(self):
+        self._graphs_worker = None
 
-                if hasattr(doc, 'print_'): doc.print_(writer)
-                else: doc.print(writer)
-
-                from rem_card.ui.shared.custom_message_box import CustomMessageBox
-                CustomMessageBox.information(self, "Успех", f"Графики успешно сохранены:\n{filename}")
-                return html_content
-
-        except Exception as e:
-            from rem_card.ui.shared.custom_message_box import CustomMessageBox
-            CustomMessageBox.information(self, "Ошибка", f"Ошибка при формировании графиков:\n{str(e)}")
-            import traceback
-            traceback.print_exc()
-            return ""
-
-        return html_content
+    def _clear_graphs_pdf_worker(self):
+        self._graphs_pdf_worker = None

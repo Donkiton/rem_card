@@ -58,6 +58,9 @@ class SectorIvl(BaseSectorWidget):
         self.remcard_service = None
         self.admission_id: Optional[int] = None
         self.active_case_id: Optional[int] = None
+        self._active_case_revision: Optional[int] = None
+        self._latest_case_revision: Optional[int] = None
+        self._latest_event_revision_by_case: dict[int, int] = {}
         self._snapshot_cache = OrderedDict()
         self._ivl_write_pending = False
 
@@ -575,6 +578,13 @@ class SectorIvl(BaseSectorWidget):
         latest_case = snapshot.get("latest_case")
         active_case = summary.get("active_case")
         self.active_case_id = active_case.id if active_case else None
+        self._active_case_revision = int(getattr(active_case, "revision", 0) or 0) if active_case else None
+        self._latest_case_revision = int(getattr(latest_case, "revision", 0) or 0) if latest_case else self._active_case_revision
+        self._latest_event_revision_by_case = {}
+        for event in timeline:
+            case_id = getattr(event, "ivl_episode_id", None)
+            if case_id is not None:
+                self._latest_event_revision_by_case[int(case_id)] = int(getattr(event, "revision", 0) or 0)
 
         if active_case:
             self.lbl_case_status.setText(
@@ -946,6 +956,7 @@ class SectorIvl(BaseSectorWidget):
         try:
             service = self.remcard_service
             active_case_id = int(self.active_case_id)
+            expected_case_revision = self._active_case_revision
             event_time = self.event_time_edit.dateTime().toPython()
             event_type = self.event_type_combo.currentData()
             mode = self.mode_combo.currentData() if event_type == "MODE_CHANGE" else None
@@ -965,6 +976,7 @@ class SectorIvl(BaseSectorWidget):
                 extubation_reason=indications if event_type in ("MODE_CHANGE", "TRACHEOSTOMY") else None,
                 o2_flow=None,
                 author="Доктор",
+                expected_case_revision=expected_case_revision,
             )
 
         self._enqueue_ivl_write(
@@ -983,12 +995,14 @@ class SectorIvl(BaseSectorWidget):
         self.event_time_edit.setDateTime(QDateTime(replacement_time))
         service = self.remcard_service
         active_case_id = int(self.active_case_id)
+        expected_case_revision = self._active_case_revision
 
         def operation():
             return service.replace_tube(
                 active_case_id,
                 replacement_time=replacement_time,
                 author="Доктор",
+                expected_case_revision=expected_case_revision,
             )
 
         self._enqueue_ivl_write(
@@ -1016,6 +1030,7 @@ class SectorIvl(BaseSectorWidget):
 
         service = self.remcard_service
         active_case_id = int(self.active_case_id)
+        expected_case_revision = self._active_case_revision
         end_time = self.event_time_edit.dateTime().toPython()
 
         def operation():
@@ -1025,6 +1040,7 @@ class SectorIvl(BaseSectorWidget):
                 extubation_reason=extubation_reason,
                 o2_flow=o2_flow,
                 author="Доктор",
+                expected_case_revision=expected_case_revision,
             )
 
         def on_success(_event):
@@ -1045,18 +1061,32 @@ class SectorIvl(BaseSectorWidget):
             return
 
         case_id = self.active_case_id
+        expected_case_revision = self._active_case_revision
         if not case_id:
             latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
             case_id = latest_case.id if latest_case else None
+            expected_case_revision = int(getattr(latest_case, "revision", 0) or 0) if latest_case else None
 
         if not case_id:
             CustomMessageBox.warning(self, "ИВЛ", "Нет случая ИВЛ для отмены последнего действия.")
             return
 
         service = self.remcard_service
+        expected_last_event_revision = self._latest_event_revision_by_case.get(int(case_id))
+        if expected_last_event_revision is None:
+            try:
+                events = service.get_ventilation_events(case_id)
+                if events:
+                    expected_last_event_revision = int(getattr(events[-1], "revision", 0) or 0)
+            except Exception:
+                expected_last_event_revision = None
 
         def operation():
-            return service.rollback_last_ventilation_action(case_id)
+            return service.rollback_last_ventilation_action(
+                case_id,
+                expected_case_revision=expected_case_revision,
+                expected_last_event_revision=expected_last_event_revision,
+            )
 
         def on_success(event):
             event_code = getattr(event.event_type, "value", str(event.event_type))

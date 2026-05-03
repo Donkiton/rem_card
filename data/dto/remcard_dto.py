@@ -71,6 +71,7 @@ class PatientStatusEventDTO:
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    revision: int = 0
 
 @dataclass
 class PatientDTO:
@@ -129,6 +130,7 @@ class VitalDTO:
     cvp: Optional[int] = None
     last_modified_by: Optional[str] = None
     updated_at: Optional[str] = None
+    revision: int = 0
 
 @dataclass
 class FluidDTO:
@@ -145,6 +147,7 @@ class FluidDTO:
     other_output: float = 0
     last_modified_by: Optional[str] = None
     updated_at: Optional[str] = None
+    revision: int = 0
 
 @dataclass
 class DietTemplateDTO:
@@ -252,6 +255,7 @@ class VentilationCaseDTO:
     start_type: VentilationStartType = VentilationStartType.IN_DEPARTMENT
     delivery_type: VentilationDeliveryType = VentilationDeliveryType.UNKNOWN
     is_active: bool = True
+    revision: int = 0
 
 
 @dataclass
@@ -266,6 +270,7 @@ class VentilationEventDTO:
     extubation_reason: Optional[str] = None
     o2_flow: Optional[float] = None
     author: Optional[str] = None
+    revision: int = 0
 
 
 @dataclass

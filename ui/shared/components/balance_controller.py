@@ -24,6 +24,8 @@ class BalanceController(QObject):
         
         # Кэш данных: hour (0-23) -> накопленные значения по показателям выведения.
         self.hourly_cache = self._build_empty_hourly_cache()
+        self._hour_fluid_id_map = {}
+        self._hour_revision_map = {}
         self._effective_bounds_cache = None
         self._write_pending = False
 
@@ -80,6 +82,8 @@ class BalanceController(QObject):
 
     def apply_loaded_data(self, fluids, effective_bounds):
         self.hourly_cache = self._build_empty_hourly_cache()
+        self._hour_fluid_id_map = {}
+        self._hour_revision_map = {}
         self._effective_bounds_cache = effective_bounds
 
         if self.quick_input:
@@ -88,6 +92,9 @@ class BalanceController(QObject):
         for f in fluids or []:
             hour = f.timestamp.hour
             if hour in self.hourly_cache:
+                if hour not in self._hour_revision_map:
+                    self._hour_fluid_id_map[hour] = getattr(f, "id", None)
+                    self._hour_revision_map[hour] = int(getattr(f, "revision", 0) or 0)
                 cache = self.hourly_cache[hour]
                 cache["urine"] += int(f.urine)
                 cache["drain_output"] += int(f.drain_output)
@@ -276,6 +283,7 @@ class BalanceController(QObject):
         admission_id = self.admission_id
         shift_date = self.shift_date
         service = self.service
+        expected_revision = self._hour_revision_map.get(hour)
 
         def operation():
             return service.upsert_hourly_output(
@@ -285,6 +293,7 @@ class BalanceController(QObject):
                 row_key=row_key,
                 value=val,
                 is_sum=is_sum,
+                expected_revision=expected_revision,
             )
 
         def handle_success(result):
@@ -292,10 +301,10 @@ class BalanceController(QObject):
                 self._finish_pending("Сохранено")
                 return
             if result["action"] == "add":
-                self._undo_stack.append(("add", result["fluid_id"]))
+                self._undo_stack.append(("add", result["fluid_id"], result.get("new_revision")))
                 logger.debug(f"[BalanceCtrl] Created new record {result['fluid_id']} for hour {hour}")
             else:
-                self._undo_stack.append(("update", result["fluid_id"], row_key, result["old_value"]))
+                self._undo_stack.append(("update", result["fluid_id"], row_key, result["old_value"], result.get("new_revision")))
                 logger.debug(
                     f"[BalanceCtrl] Updated record {result['fluid_id']} for hour {hour}. {row_key}: "
                     f"{result['old_value']}->{result['new_value']}"
@@ -341,11 +350,13 @@ class BalanceController(QObject):
         def operation():
             if action[0] == 'add':
                 fluid_id = action[1]
-                service.delete_fluid_by_id(fluid_id)
+                expected_revision = action[2] if len(action) > 2 else None
+                service.delete_fluid_by_id(fluid_id, expected_revision=expected_revision)
                 return {"action": "add", "fluid_id": fluid_id}
             elif action[0] == 'update':
                 fluid_id, row_key, old_val = action[1], action[2], action[3]
-                service.restore_hourly_output(fluid_id, row_key, old_val)
+                expected_revision = action[4] if len(action) > 4 else None
+                service.restore_hourly_output(fluid_id, row_key, old_val, expected_revision=expected_revision)
                 return {"action": "update", "fluid_id": fluid_id, "row_key": row_key, "old_value": old_val}
             raise ValueError(f"Unknown balance undo action: {action[0]}")
 

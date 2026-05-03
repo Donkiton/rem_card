@@ -1,10 +1,12 @@
 import os
 from datetime import datetime
-from html import escape
 
-from PySide6.QtCore import QDate, QPoint, Qt, QMarginsF
-from PySide6.QtGui import QPageLayout, QPageSize, QPdfWriter, QTextDocument
+from PySide6.QtCore import QDate, QPoint, Qt
 from PySide6.QtWidgets import QDateEdit, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+
+from rem_card.services.analytics.statistics_service import build_statistical_report_html
+from rem_card.ui.shared.analytics_worker import AnalyticsWorker
+from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
 
 class ReportDialog(QDialog):
     def __init__(
@@ -20,6 +22,8 @@ class ReportDialog(QDialog):
         self._prefill_start_dt = start_dt
         self._prefill_end_dt = end_dt
         self._show_graph_button = bool(show_graph_button)
+        self._stats_worker = None
+        self._stats_pdf_worker = None
 
         self.setWindowTitle("Отчеты и статистика")
         self.resize(500, 400)
@@ -169,301 +173,57 @@ class ReportDialog(QDialog):
         dialog.exec()
 
     def _generate_pdf_report(self):
-        try:
-            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-            if self.start_date.date() > self.end_date.date():
-                CustomMessageBox.information(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
-                return
+        if self.start_date.date() > self.end_date.date():
+            CustomMessageBox.information(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
+            return
+        if getattr(self, "_stats_worker", None) is not None and self._stats_worker.isRunning():
+            return
 
-            start_dt = self.start_date.date().toString("yyyy-MM-dd 00:00:00")
-            end_dt = self.end_date.date().toString("yyyy-MM-dd 23:59:59")
-
-            html = self._build_statistical_report_html(start_dt, end_dt)
-            pdf_path = self._save_html_report_to_pdf(html)
-            filename = os.path.basename(pdf_path)
-            CustomMessageBox.information(self, "Успех", f"Статистический отчет успешно сохранен:\n{filename}")
-        except Exception as e:
-            from rem_card.ui.shared.custom_message_box import CustomMessageBox
-            CustomMessageBox.information(self, "Ошибка PDF", f"Не удалось сохранить PDF:\n{str(e)}")
-
-    def _build_statistical_report_html(self, start_dt: str, end_dt: str) -> str:
-        conn = self.db_manager.get_connection()
-        cursor = conn.cursor()
-        period_params = (start_dt, end_dt)
-
-        def _scalar(query: str, params: tuple = period_params):
-            cursor.execute(query, params)
-            row = cursor.fetchone()
-            if not row or row[0] is None:
-                return 0
-            return row[0]
-
-        total_admissions = int(
-            _scalar("SELECT COUNT(*) FROM admissions WHERE admission_datetime BETWEEN ? AND ?", period_params)
+        start_dt = self.start_date.date().toString("yyyy-MM-dd 00:00:00")
+        end_dt = self.end_date.date().toString("yyyy-MM-dd 23:59:59")
+        self._set_pdf_busy(True)
+        self._stats_worker = AnalyticsWorker(
+            lambda: build_statistical_report_html(self.db_manager, start_dt, end_dt),
+            parent=self,
         )
-        in_department = int(
-            _scalar(
-                """
-                SELECT COUNT(*)
-                FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
-                  AND (outcome IS NULL OR TRIM(outcome) = '')
-                """,
-                period_params,
-            )
-        )
-        transferred = int(
-            _scalar(
-                """
-                SELECT COUNT(*)
-                FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
-                  AND lower(TRIM(COALESCE(outcome, ''))) = 'переведен'
-                """,
-                period_params,
-            )
-        )
-        deaths = int(
-            _scalar(
-                """
-                SELECT COUNT(*)
-                FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
-                  AND lower(TRIM(COALESCE(outcome, ''))) = 'умер'
-                """,
-                period_params,
-            )
-        )
+        self._stats_worker.completed.connect(self._on_statistics_html_ready)
+        self._stats_worker.failed.connect(self._on_statistics_failed)
+        self._stats_worker.finished.connect(self._clear_statistics_worker)
+        self._stats_worker.start()
 
-        bed_days = float(
-            _scalar(
-                """
-                SELECT COALESCE(
-                    SUM(
-                        MAX(
-                            0,
-                            julianday(
-                                CASE
-                                    WHEN death_datetime IS NOT NULL AND death_datetime < ? THEN death_datetime
-                                    WHEN transfer_datetime IS NOT NULL AND transfer_datetime < ? THEN transfer_datetime
-                                    ELSE ?
-                                END
-                            ) - julianday(admission_datetime)
-                        )
-                    ),
-                    0
-                )
-                FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
-                """,
-                (end_dt, end_dt, end_dt, start_dt, end_dt),
-            )
-        )
-        avg_stay = float(
-            _scalar(
-                """
-                SELECT COALESCE(
-                    AVG(
-                        MAX(
-                            0,
-                            julianday(
-                                CASE
-                                    WHEN death_datetime IS NOT NULL AND death_datetime < ? THEN death_datetime
-                                    WHEN transfer_datetime IS NOT NULL AND transfer_datetime < ? THEN transfer_datetime
-                                    ELSE ?
-                                END
-                            ) - julianday(admission_datetime)
-                        )
-                    ),
-                    0
-                )
-                FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
-                """,
-                (end_dt, end_dt, end_dt, start_dt, end_dt),
-            )
-        )
-
-        operations_count = int(_scalar("SELECT COUNT(*) FROM operations WHERE operation_datetime BETWEEN ? AND ?", period_params))
-        cursor.execute(
-            "SELECT COUNT(*), COALESCE(SUM(volume_ml), 0) FROM transfusions WHERE datetime BETWEEN ? AND ?",
-            period_params,
-        )
-        transfusions_row = cursor.fetchone() or (0, 0)
-        transfusions_count = int(transfusions_row[0] or 0)
-        transfusions_volume_ml = int(transfusions_row[1] or 0)
-
-        cursor.execute(
-            """
-            SELECT
-                COUNT(*) AS ivl_count,
-                COALESCE(
-                    SUM(
-                        MAX(
-                            0,
-                            (julianday(CASE WHEN end_time IS NOT NULL AND end_time < ? THEN end_time ELSE ? END) - julianday(start_time)) * 24.0
-                        )
-                    ),
-                    0
-                ) AS ivl_hours
-            FROM ivl_episodes
-            WHERE start_time BETWEEN ? AND ?
-            """,
-            (end_dt, end_dt, start_dt, end_dt),
-        )
-        ivl_row = cursor.fetchone() or (0, 0)
-        ivl_count = int(ivl_row[0] or 0)
-        ivl_hours = float(ivl_row[1] or 0.0)
-
-        cursor.execute(
-            """
-            SELECT COALESCE(NULLIF(TRIM(patient_gender), ''), 'Не указано') AS gender, COUNT(*) AS count
-            FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
-            GROUP BY COALESCE(NULLIF(TRIM(patient_gender), ''), 'Не указано')
-            ORDER BY count DESC, gender
-            """,
-            period_params,
-        )
-        gender_rows = cursor.fetchall()
-
-        cursor.execute(
-            """
-            SELECT COALESCE(NULLIF(TRIM(source_department), ''), 'Не указано') AS source, COUNT(*) AS count
-            FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
-            GROUP BY COALESCE(NULLIF(TRIM(source_department), ''), 'Не указано')
-            ORDER BY count DESC, source
-            """,
-            period_params,
-        )
-        source_rows = cursor.fetchall()
-
-        cursor.execute(
-            """
-            SELECT
-                COALESCE(NULLIF(TRIM(diagnosis_code), ''), '—') AS code,
-                COALESCE(NULLIF(TRIM(diagnosis_text), ''), 'Без уточнения') AS diagnosis,
-                COUNT(*) AS count
-            FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
-            GROUP BY
-                COALESCE(NULLIF(TRIM(diagnosis_code), ''), '—'),
-                COALESCE(NULLIF(TRIM(diagnosis_text), ''), 'Без уточнения')
-            ORDER BY count DESC, code
-            LIMIT 12
-            """,
-            period_params,
-        )
-        diagnosis_rows = cursor.fetchall()
-
-        period_days = max(1, self.start_date.date().daysTo(self.end_date.date()) + 1)
-        NUM_BEDS = int(os.environ.get("REMCARD_NUM_BEDS", "12"))
-
-        bed_capacity_days = NUM_BEDS * period_days
-        occupancy = (bed_days / bed_capacity_days * 100.0) if bed_capacity_days else 0.0
-        mortality = (deaths / total_admissions * 100.0) if total_admissions else 0.0
-
-        def _distribution_rows(rows):
-            if not rows:
-                return "<tr><td colspan='2'>Нет данных</td></tr>"
-            return "".join(
-                f"<tr><td>{escape(str(r[0]))}</td><td class='num'>{int(r[1] or 0)}</td></tr>"
-                for r in rows
-            )
-
-        if diagnosis_rows:
-            diagnosis_html = "".join(
-                f"<tr><td>{escape(str(r[0]))}</td><td>{escape(str(r[1]))}</td><td class='num'>{int(r[2] or 0)}</td></tr>"
-                for r in diagnosis_rows
-            )
-        else:
-            diagnosis_html = "<tr><td colspan='3'>Нет данных</td></tr>"
-
-        start_label = self.start_date.date().toString("dd.MM.yyyy")
-        end_label = self.end_date.date().toString("dd.MM.yyyy")
-
-        return f"""
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <style>
-                body {{ font-family: 'Arial', sans-serif; color: #2d2d24; margin: 0; padding: 0; }}
-                .page {{ padding: 24px 28px; }}
-                h1 {{ margin: 0 0 6px 0; font-size: 20px; color: #4a4a3a; }}
-                h2 {{ margin: 18px 0 8px 0; font-size: 14px; color: #6b6b52; text-transform: uppercase; }}
-                .period {{ margin: 0 0 10px 0; color: #5d5d4a; }}
-                table {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; }}
-                th, td {{ border: 1px solid #d9d9c8; padding: 6px 8px; text-align: left; font-size: 12px; }}
-                th {{ background: #f0f0e0; color: #4a4a3a; font-weight: 700; }}
-                .num {{ text-align: right; }}
-                .footnote {{ margin-top: 12px; color: #6d6d58; font-size: 11px; }}
-            </style>
-        </head>
-        <body>
-            <div class="page">
-                <h1>Статистический отчет ОАР №3</h1>
-                <p class="period">Период: {start_label} - {end_label}</p>
-
-                <h2>Ключевые показатели</h2>
-                <table>
-                    <tr><th>Показатель</th><th class="num">Значение</th></tr>
-                    <tr><td>Поступило пациентов</td><td class="num">{total_admissions}</td></tr>
-                    <tr><td>Находятся в отделении</td><td class="num">{in_department}</td></tr>
-                    <tr><td>Переведено</td><td class="num">{transferred}</td></tr>
-                    <tr><td>Умерло</td><td class="num">{deaths}</td></tr>
-                    <tr><td>Летальность, %</td><td class="num">{mortality:.1f}</td></tr>
-                    <tr><td>Койко-дни</td><td class="num">{bed_days:.1f}</td></tr>
-                    <tr><td>Средняя длительность лечения, дней</td><td class="num">{avg_stay:.2f}</td></tr>
-                    <tr><td>Занятость коечного фонда, %</td><td class="num">{occupancy:.1f}</td></tr>
-                    <tr><td>Операций выполнено</td><td class="num">{operations_count}</td></tr>
-                    <tr><td>Трансфузий выполнено</td><td class="num">{transfusions_count}</td></tr>
-                    <tr><td>Перелито компонентов крови, мл</td><td class="num">{transfusions_volume_ml}</td></tr>
-                    <tr><td>Эпизодов ИВЛ</td><td class="num">{ivl_count}</td></tr>
-                    <tr><td>Суммарная длительность ИВЛ, часов</td><td class="num">{ivl_hours:.1f}</td></tr>
-                </table>
-
-                <h2>Распределение по полу</h2>
-                <table>
-                    <tr><th>Пол</th><th class="num">Количество</th></tr>
-                    {_distribution_rows(gender_rows)}
-                </table>
-
-                <h2>Источники поступления</h2>
-                <table>
-                    <tr><th>Источник</th><th class="num">Количество</th></tr>
-                    {_distribution_rows(source_rows)}
-                </table>
-
-                <h2>Топ диагнозов</h2>
-                <table>
-                    <tr><th>Код МКБ</th><th>Диагноз</th><th class="num">Случаев</th></tr>
-                    {diagnosis_html}
-                </table>
-
-                <p class="footnote">Отчет сформирован автоматически: {datetime.now().strftime("%d.%m.%Y %H:%M:%S")}</p>
-            </div>
-        </body>
-        </html>
-        """
-
-    def _save_html_report_to_pdf(self, html: str) -> str:
+    def _on_statistics_html_ready(self, html: str):
         from rem_card.app.paths import REPORT_DIR
 
         os.makedirs(REPORT_DIR, exist_ok=True)
         filename = f"statistics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(REPORT_DIR, filename)
+        self._stats_pdf_worker = HtmlPdfWorker(html, pdf_path, parent=self)
+        self._stats_pdf_worker.completed.connect(self._on_statistics_pdf_ready)
+        self._stats_pdf_worker.failed.connect(self._on_statistics_failed)
+        self._stats_pdf_worker.finished.connect(self._clear_statistics_pdf_worker)
+        self._stats_pdf_worker.start()
 
-        document = QTextDocument()
-        document.setHtml(html)
+    def _on_statistics_pdf_ready(self, pdf_path: str):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-        writer = QPdfWriter(pdf_path)
-        writer.setPageLayout(QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(15, 15, 15, 15)))
+        self._set_pdf_busy(False)
+        CustomMessageBox.information(self, "Успех", f"Статистический отчет успешно сохранен:\n{os.path.basename(pdf_path)}")
 
-        if hasattr(document, "print_"):
-            document.print_(writer)
-        else:
-            document.print(writer)
+    def _on_statistics_failed(self, message: str):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-        return pdf_path
+        self._set_pdf_busy(False)
+        CustomMessageBox.information(self, "Ошибка PDF", f"Не удалось сохранить PDF:\n{message}")
+
+    def _set_pdf_busy(self, busy: bool):
+        self.pdf_btn.setEnabled(not busy)
+        self.excel_btn.setEnabled(not busy and self._show_graph_button)
+        self.pdf_btn.setText("ФОРМИРУЕТСЯ..." if busy else "СОХРАНИТЬ ПОЛНЫЙ ОТЧЕТ (PDF)")
+
+    def _clear_statistics_worker(self):
+        self._stats_worker = None
+
+    def _clear_statistics_pdf_worker(self):
+        self._stats_pdf_worker = None

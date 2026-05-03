@@ -115,6 +115,18 @@ class VentilationService:
         )
 
         def operation(cursor):
+            cursor.execute(
+                """
+                SELECT 1
+                FROM ivl_episodes
+                WHERE admission_id = ?
+                  AND (is_active = 1 OR (is_active IS NULL AND end_time IS NULL))
+                LIMIT 1
+                """,
+                (admission_id,),
+            )
+            if cursor.fetchone():
+                raise ValueError("У пациента уже есть активный случай ИВЛ.")
             case_id = self.dao.insert_case(
                 cursor,
                 admission_id=admission_id,
@@ -176,6 +188,7 @@ class VentilationService:
         author: Optional[str] = "Доктор",
         tube_device_type: str = "ENDOTRACHEAL_TUBE",
         tube_location: Optional[str] = None,
+        expected_case_revision: Optional[int] = None,
     ) -> VentilationEventDTO:
         case = self.dao.get_case_by_id(case_id)
         if not case:
@@ -201,6 +214,7 @@ class VentilationService:
             raise ValueError("Нельзя добавлять события в закрытый случай ИВЛ.")
 
         def operation(cursor):
+            self.dao.assert_case_revision(cursor, case_id, expected_case_revision)
             event_id = self.dao.insert_event(
                 cursor,
                 admission_id=case.admission_id,
@@ -253,6 +267,8 @@ class VentilationService:
                     device_type=tube_device_type or "ENDOTRACHEAL_TUBE",
                     location=tube_location,
                 )
+            else:
+                self.dao.bump_case_revision(cursor, case_id)
 
             return event_id
 
@@ -271,6 +287,7 @@ class VentilationService:
         extubation_reason: Optional[str] = None,
         o2_flow: Optional[float] = None,
         author: Optional[str] = "Доктор",
+        expected_case_revision: Optional[int] = None,
     ) -> VentilationEventDTO:
         return self.add_event(
             case_id,
@@ -281,6 +298,7 @@ class VentilationService:
             extubation_reason=extubation_reason,
             o2_flow=o2_flow,
             author=author,
+            expected_case_revision=expected_case_revision,
         )
 
     def replace_tube(
@@ -291,6 +309,7 @@ class VentilationService:
         author: Optional[str] = "Доктор",
         new_device_type: str = "ENDOTRACHEAL_TUBE",
         location: Optional[str] = None,
+        expected_case_revision: Optional[int] = None,
     ) -> VentilationEventDTO:
         return self.add_event(
             case_id,
@@ -299,6 +318,7 @@ class VentilationService:
             author=author,
             tube_device_type=new_device_type,
             tube_location=location,
+            expected_case_revision=expected_case_revision,
         )
 
     def get_active_case(self, admission_id: int) -> Optional[VentilationCaseDTO]:
@@ -436,7 +456,13 @@ class VentilationService:
 
         self.rollback_last_action(latest_case.id)
 
-    def rollback_last_action(self, case_id: int) -> VentilationEventDTO:
+    def rollback_last_action(
+        self,
+        case_id: int,
+        *,
+        expected_case_revision: Optional[int] = None,
+        expected_last_event_revision: Optional[int] = None,
+    ) -> VentilationEventDTO:
         case = self.dao.get_case_by_id(case_id)
         if not case:
             raise ValueError("Случай ИВЛ не найден.")
@@ -448,6 +474,8 @@ class VentilationService:
             raise ValueError("Некорректная запись события ИВЛ: отсутствует идентификатор.")
 
         def operation(cursor):
+            self.dao.assert_case_revision(cursor, case_id, expected_case_revision)
+            self.dao.assert_event_revision(cursor, int(last_event.id), expected_last_event_revision)
             self.dao.delete_respiratory_support_by_event(cursor, int(last_event.id))
 
             if last_event.event_type == VentilationEventType.EXTUBATION:
@@ -467,6 +495,8 @@ class VentilationService:
             if remaining_events == 0:
                 self.dao.delete_case_tubes(cursor, case_id)
                 self.dao.delete_case(cursor, case_id)
+            elif last_event.event_type != VentilationEventType.EXTUBATION:
+                self.dao.bump_case_revision(cursor, case_id)
 
         self._run_write(f"vent_rollback_last_action:{case_id}", operation)
         return last_event

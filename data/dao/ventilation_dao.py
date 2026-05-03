@@ -11,6 +11,7 @@ from ..dto.remcard_dto import (
     VentilationStartType,
     VentilationTubeDTO,
 )
+from rem_card.services.concurrency import assert_revision_matches
 
 
 class VentilationDAO:
@@ -223,7 +224,9 @@ class VentilationDAO:
         cursor.execute(
             """
             UPDATE ivl_episodes
-            SET end_time = ?, is_active = 0
+            SET end_time = ?,
+                is_active = 0,
+                revision = COALESCE(revision, 0) + 1
             WHERE id = ?
             """,
             (end_time.isoformat(), case_id),
@@ -233,7 +236,9 @@ class VentilationDAO:
         cursor.execute(
             """
             UPDATE ivl_episodes
-            SET end_time = ?, is_active = 0
+            SET end_time = ?,
+                is_active = 0,
+                revision = COALESCE(revision, 0) + 1
             WHERE id = ?
             """,
             (end_time.isoformat(), case_id),
@@ -243,11 +248,37 @@ class VentilationDAO:
         cursor.execute(
             """
             UPDATE ivl_episodes
-            SET end_time = NULL, is_active = 1
+            SET end_time = NULL,
+                is_active = 1,
+                revision = COALESCE(revision, 0) + 1
             WHERE id = ?
             """,
             (case_id,),
         )
+
+    def bump_case_revision(self, cursor, case_id: int):
+        cursor.execute(
+            """
+            UPDATE ivl_episodes
+            SET revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (case_id,),
+        )
+
+    def assert_case_revision(self, cursor, case_id: int, expected_revision):
+        if expected_revision is None:
+            return
+        cursor.execute("SELECT COALESCE(revision, 0) AS revision FROM ivl_episodes WHERE id = ?", (case_id,))
+        row = cursor.fetchone()
+        assert_revision_matches(row["revision"] if row else None, expected_revision)
+
+    def assert_event_revision(self, cursor, event_id: int, expected_revision):
+        if expected_revision is None:
+            return
+        cursor.execute("SELECT COALESCE(revision, 0) AS revision FROM clinical_events WHERE id = ?", (event_id,))
+        row = cursor.fetchone()
+        assert_revision_matches(row["revision"] if row else None, expected_revision)
 
     def insert_event(
         self,
@@ -300,7 +331,8 @@ class VentilationDAO:
             UPDATE clinical_events
             SET timestamp = ?,
                 extubation_reason = ?,
-                author = ?
+                author = ?,
+                revision = COALESCE(revision, 0) + 1
             WHERE id = ?
               AND event_type = 'EXTUBATION'
             """,
@@ -507,6 +539,7 @@ class VentilationDAO:
             start_type=start_type,
             delivery_type=delivery_type,
             is_active=is_active,
+            revision=int(r.get("revision") or 0),
         )
 
     def _map_event(self, row) -> VentilationEventDTO:
@@ -533,6 +566,7 @@ class VentilationDAO:
             extubation_reason=r.get("extubation_reason"),
             o2_flow=r.get("o2_flow"),
             author=author,
+            revision=int(r.get("revision") or 0),
         )
 
     def _map_tube(self, row) -> VentilationTubeDTO:

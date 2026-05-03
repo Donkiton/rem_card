@@ -373,6 +373,10 @@ class VitalsWidget(QWidget):
         if not self.service: return
         if CustomMessageBox.question(self, "Подтверждение", "Вы уверены, что хотите отменить последнее внесение значений витальных функций?") != CustomMessageBox.Yes:
             return
+        try:
+            expected_revision = self._expected_revision_for_last_vital()
+        except Exception:
+            expected_revision = None
         self.undo_btn.setEnabled(False)
 
         def on_success(_):
@@ -388,7 +392,11 @@ class VitalsWidget(QWidget):
 
         self.service.enqueue_write(
             description=f"undo_last_vital:{self.admission_id}",
-            operation=lambda: self.service.delete_last_vital(self.admission_id, self.shift_date),
+            operation=lambda: self.service.delete_last_vital(
+                self.admission_id,
+                self.shift_date,
+                expected_revision=expected_revision,
+            ),
             on_success=on_success,
             on_error=on_error,
         )
@@ -461,6 +469,7 @@ class VitalsWidget(QWidget):
 
             dto = VitalDTO(id=None, admission_id=self.admission_id, timestamp=current_dt, sys=v_sys, dia=v_dia, pulse=v_pulse, temp=v_temp, spo2=v_spo2, rr=v_rr, cvp=v_cvp)
             has_real_data = any([v_sys, v_dia, v_pulse, v_temp, v_spo2, v_rr, v_cvp is not None])
+            expected_revision = self._expected_revision_for_minute(current_dt)
             self.save_btn.setEnabled(False)
 
             def on_success(_):
@@ -484,9 +493,30 @@ class VitalsWidget(QWidget):
 
             self.service.enqueue_write(
                 description=f"save_vital:{self.admission_id}",
-                operation=lambda: self.service.add_vital(dto, self.shift_date),
+                operation=lambda: self.service.add_vital(
+                    dto,
+                    self.shift_date,
+                    expected_revision=expected_revision,
+                ),
                 on_success=on_success,
                 on_error=on_error,
             )
         except ValueError as e:
             CustomMessageBox.warning(self, "Ошибка валидации", str(e))
+
+    def _expected_revision_for_minute(self, timestamp):
+        if not self.service or not self.admission_id:
+            return None
+        target = self._minute_floor(timestamp)
+        for vital in self.service.get_vitals(self.admission_id, self.shift_date):
+            if self._minute_floor(vital.timestamp) == target:
+                return int(getattr(vital, "revision", 0) or 0)
+        return None
+
+    def _expected_revision_for_last_vital(self):
+        if not self.service or not self.admission_id:
+            return None
+        vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+        if not vitals:
+            return None
+        return int(getattr(vitals[-1], "revision", 0) or 0)

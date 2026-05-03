@@ -170,6 +170,16 @@ class PatientBedManagementWidget(QWidget):
         target_bed_data = self.patient_bed_service.get_bed_by_number(target_bed)
         if not source_bed_data or source_bed_data["status"] == "FREE":
             return
+        _source_patient, source_admission = self.patient_bed_service.get_patient_with_current_admission(source_bed)
+        _target_patient, target_admission = (
+            self.patient_bed_service.get_patient_with_current_admission(target_bed)
+            if target_bed_data and target_bed_data["status"] != "FREE"
+            else (None, None)
+        )
+        expected_source_bed_revision = int(source_bed_data["revision"] if "revision" in source_bed_data.keys() else 0)
+        expected_target_bed_revision = int(target_bed_data["revision"] if target_bed_data and "revision" in target_bed_data.keys() else 0)
+        expected_source_admission_revision = int(getattr(source_admission, "revision", 0) or 0) if source_admission else None
+        expected_target_admission_revision = int(getattr(target_admission, "revision", 0) or 0) if target_admission else None
 
         message = f"Переместить пациента с койки {source_bed} на койку {target_bed}?"
         if target_bed_data and target_bed_data["status"] != "FREE":
@@ -186,7 +196,14 @@ class PatientBedManagementWidget(QWidget):
             return
 
         def operation():
-            return self.patient_bed_service.move_patient(source_bed, target_bed)
+            return self.patient_bed_service.move_patient(
+                source_bed,
+                target_bed,
+                expected_source_bed_revision=expected_source_bed_revision,
+                expected_target_bed_revision=expected_target_bed_revision,
+                expected_source_admission_revision=expected_source_admission_revision,
+                expected_target_admission_revision=expected_target_admission_revision,
+            )
 
         def on_success(_result):
             self._finish_move_pending()

@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 9
-SCHEMA_MIN_MIGRATION_VERSION = 9
+SCHEMA_FASTPATH_REV = 10
+SCHEMA_MIN_MIGRATION_VERSION = 10
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
 _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
@@ -47,14 +47,16 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
         "clinical_death_datetime",
         "cardiac_arrest_cause",
         "cardiac_arrest_measures_json",
+        "revision",
     },
-    "ivl_episodes": {"start_type", "delivery_type", "is_active"},
-    "clinical_events": {"ivl_episode_id", "mode", "parameters_json", "extubation_reason", "o2_flow"},
+    "beds": {"revision"},
+    "ivl_episodes": {"start_type", "delivery_type", "is_active", "revision"},
+    "clinical_events": {"ivl_episode_id", "mode", "parameters_json", "extubation_reason", "o2_flow", "revision"},
     "devices": {"ivl_episode_id", "replacement_time"},
     "respiratory_support": {"ivl_episode_id", "event_id", "parameters_json"},
-    "vitals": {"rr", "gcs", "cvp", "last_modified_by", "updated_at"},
+    "vitals": {"rr", "gcs", "cvp", "last_modified_by", "updated_at", "revision"},
     "vital_settings": {"rr", "cvp", "updated_at", "last_modified_by"},
-    "fluids": {"other_output", "last_modified_by", "updated_at"},
+    "fluids": {"other_output", "last_modified_by", "updated_at", "revision"},
     "orders": {
         "drug_key",
         "latin",
@@ -89,7 +91,7 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
         "last_modified_by",
         "updated_at",
     },
-    "patient_status_events": {"last_modified_by", "updated_at"},
+    "patient_status_events": {"last_modified_by", "updated_at", "revision"},
     "transfusions": {"source", "source_order_id", "source_admin_id"},
     "diet_templates": {"name", "diet_text", "schedule_json", "is_default", "created_at", "version", "last_modified_by", "updated_at"},
     "diet_plan": {"admission_id", "shift_start", "template_id", "diet_text", "schedule_json", "created_at", "version", "last_modified_by", "updated_at"},
@@ -569,6 +571,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             clinical_death_datetime DATETIME,
             cardiac_arrest_cause TEXT,
             cardiac_arrest_measures_json TEXT,
+            revision INTEGER DEFAULT 0,
             FOREIGN KEY (patient_id) REFERENCES patients(id)
         )
         """
@@ -580,6 +583,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             bed_number INTEGER PRIMARY KEY,
             status TEXT NOT NULL,
             current_admission_id INTEGER,
+            revision INTEGER DEFAULT 0,
             FOREIGN KEY (current_admission_id) REFERENCES admissions(id)
         )
         """
@@ -607,6 +611,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             start_time DATETIME NOT NULL,
             end_time DATETIME,
             type TEXT NOT NULL,
+            revision INTEGER DEFAULT 0,
             FOREIGN KEY (admission_id) REFERENCES admissions(id)
         )
         """
@@ -637,6 +642,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             event_type TEXT NOT NULL,
             author TEXT,
             data TEXT,
+            revision INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (admission_id) REFERENCES admissions(id)
         )
@@ -765,6 +771,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_modified_by TEXT,
             updated_at TEXT,
+            revision INTEGER DEFAULT 0,
             FOREIGN KEY (admission_id) REFERENCES admissions(id)
         )
         """
@@ -806,6 +813,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_modified_by TEXT,
             updated_at TEXT,
+            revision INTEGER DEFAULT 0,
             FOREIGN KEY (admission_id) REFERENCES admissions(id)
         )
         """
@@ -884,6 +892,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             created_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
             updated_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
             last_modified_by TEXT,
+            revision INTEGER DEFAULT 0,
             FOREIGN KEY (admission_id) REFERENCES admissions(id),
             CHECK (end_time IS NULL OR end_time >= start_time)
         )
@@ -988,16 +997,21 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "admissions", "clinical_death_datetime", "DATETIME", logger)
     _ensure_column(conn, "admissions", "cardiac_arrest_cause", "TEXT", logger)
     _ensure_column(conn, "admissions", "cardiac_arrest_measures_json", "TEXT", logger)
+    _ensure_column(conn, "admissions", "revision", "INTEGER DEFAULT 0", logger)
+
+    _ensure_column(conn, "beds", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "ivl_episodes", "start_type", "TEXT", logger)
     _ensure_column(conn, "ivl_episodes", "delivery_type", "TEXT", logger)
     _ensure_column(conn, "ivl_episodes", "is_active", "INTEGER DEFAULT 1", logger)
+    _ensure_column(conn, "ivl_episodes", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "clinical_events", "ivl_episode_id", "INTEGER", logger)
     _ensure_column(conn, "clinical_events", "mode", "TEXT", logger)
     _ensure_column(conn, "clinical_events", "parameters_json", "TEXT", logger)
     _ensure_column(conn, "clinical_events", "extubation_reason", "TEXT", logger)
     _ensure_column(conn, "clinical_events", "o2_flow", "REAL", logger)
+    _ensure_column(conn, "clinical_events", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "devices", "ivl_episode_id", "INTEGER", logger)
     _ensure_column(conn, "devices", "replacement_time", "DATETIME", logger)
@@ -1011,6 +1025,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "vitals", "cvp", "INTEGER", logger)
     _ensure_column(conn, "vitals", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "vitals", "updated_at", "TEXT", logger)
+    _ensure_column(conn, "vitals", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "vital_settings", "rr", "INTEGER DEFAULT 0", logger)
     _ensure_column(conn, "vital_settings", "cvp", "INTEGER DEFAULT 0", logger)
@@ -1020,6 +1035,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "fluids", "other_output", "REAL DEFAULT 0", logger)
     _ensure_column(conn, "fluids", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "fluids", "updated_at", "TEXT", logger)
+    _ensure_column(conn, "fluids", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "orders", "drug_key", "TEXT", logger)
     _ensure_column(conn, "orders", "latin", "TEXT", logger)
@@ -1084,12 +1100,20 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
 
     _ensure_column(conn, "patient_status_events", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "patient_status_events", "updated_at", "DATETIME", logger)
+    _ensure_column(conn, "patient_status_events", "revision", "INTEGER DEFAULT 0", logger)
 
     conn.execute("UPDATE orders SET latin = COALESCE(latin, text) WHERE latin IS NULL")
     conn.execute("UPDATE orders SET type = COALESCE(type, 'medication') WHERE type IS NULL")
     conn.execute("UPDATE orders SET status = CASE WHEN status IS NULL OR status = '' OR status = 'pending' THEN 'active' ELSE status END")
     conn.execute("UPDATE orders SET specific_times = COALESCE(specific_times, '[]') WHERE specific_times IS NULL")
     conn.execute("UPDATE orders SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE admissions SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE beds SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE ivl_episodes SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE clinical_events SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE vitals SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE fluids SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE patient_status_events SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
     conn.execute("UPDATE orders SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE vitals SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE fluids SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
@@ -1174,6 +1198,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 7, "shared-db safety fastpath contract")
     _mark_schema_migration(conn, 8, "orders optimistic lock revision")
     _mark_schema_migration(conn, 9, "medical audit log foundation")
+    _mark_schema_migration(conn, 10, "optimistic lock revisions for clinical domains")
 
     for table in (
         "vitals",
@@ -1413,7 +1438,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        ("id", "admission_id", "datetime", "sys", "dia", "pulse", "temp", "spo2", "rr", "cvp", "updated_at", "last_modified_by"),
+        ("id", "admission_id", "datetime", "sys", "dia", "pulse", "temp", "spo2", "rr", "cvp", "revision", "updated_at", "last_modified_by"),
         use_updated_at_gate=True,
     )
     _create_medical_audit_triggers(
@@ -1425,7 +1450,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, 'doctor')",
-        ("id", "admission_id", "datetime", "iv_input", "oral_input", "food", "urine", "ng_output", "drain_output", "stool", "other_output", "updated_at", "last_modified_by"),
+        ("id", "admission_id", "datetime", "iv_input", "oral_input", "food", "urine", "ng_output", "drain_output", "stool", "other_output", "revision", "updated_at", "last_modified_by"),
         use_updated_at_gate=True,
     )
     _create_medical_audit_triggers(
@@ -1437,7 +1462,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.id",
         "'journal'",
         "'journal'",
-        ("id", "patient_id", "bed_number", "history_number", "admission_datetime", "outcome", "transfer_datetime", "death_datetime", "updated_at"),
+        ("id", "patient_id", "bed_number", "history_number", "admission_datetime", "outcome", "transfer_datetime", "death_datetime", "revision", "updated_at"),
         use_updated_at_gate=True,
     )
     _create_medical_audit_triggers(
@@ -1449,7 +1474,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.current_admission_id",
         "'journal'",
         "'journal'",
-        ("bed_number", "status", "current_admission_id"),
+        ("bed_number", "status", "current_admission_id", "revision"),
     )
     _create_medical_audit_triggers(
         conn,
@@ -1460,7 +1485,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, NEW.created_by, 'doctor')",
         "COALESCE(OLD.last_modified_by, OLD.created_by, 'doctor')",
-        ("id", "admission_id", "status", "reason_text", "start_time", "end_time", "created_by", "last_modified_by", "updated_at"),
+        ("id", "admission_id", "status", "reason_text", "start_time", "end_time", "created_by", "last_modified_by", "revision", "updated_at"),
         use_updated_at_gate=True,
     )
     _create_medical_audit_triggers(
@@ -1472,7 +1497,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "'doctor'",
         "'doctor'",
-        ("id", "admission_id", "episode_number", "start_time", "end_time", "type", "start_type", "delivery_type", "is_active"),
+        ("id", "admission_id", "episode_number", "start_time", "end_time", "type", "start_type", "delivery_type", "is_active", "revision"),
     )
     _create_medical_audit_triggers(
         conn,
@@ -1483,7 +1508,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.author, 'doctor')",
         "COALESCE(OLD.author, 'doctor')",
-        ("id", "admission_id", "timestamp", "event_type", "author", "mode", "parameters_json", "extubation_reason", "o2_flow"),
+        ("id", "admission_id", "timestamp", "event_type", "author", "mode", "parameters_json", "extubation_reason", "o2_flow", "revision"),
     )
     _create_medical_audit_triggers(
         conn,

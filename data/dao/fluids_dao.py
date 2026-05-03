@@ -1,6 +1,7 @@
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 from ..dto.remcard_dto import FluidDTO
+from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
 
 class FluidsDAO:
@@ -22,23 +23,37 @@ class FluidsDAO:
         dto.id = res.lastrowid
         return dto.id
 
-    def update_fluid(self, dto: FluidDTO):
+    def update_fluid(self, dto: FluidDTO, expected_revision: Optional[int] = None):
+        last_modified_by = dto.last_modified_by if dto.last_modified_by else 'doctor'
         query = """
             UPDATE fluids SET 
                 iv_input=?, oral_input=?, food=?, urine=?, ng_output=?, 
                 drain_output=?, stool=?, other_output=?, last_modified_by=?, 
+                revision=COALESCE(revision, 0) + 1,
                 updated_at=STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
             WHERE id=?
         """
-        last_modified_by = dto.last_modified_by if dto.last_modified_by else 'doctor'
-        self.db.execute_remcard(query, (
-            dto.iv_input, dto.oral_input, dto.food, 
+        params = [
+            dto.iv_input, dto.oral_input, dto.food,
             dto.urine, dto.ng_output, dto.drain_output, dto.stool, dto.other_output,
-            last_modified_by, dto.id
-        ))
+            last_modified_by, dto.id,
+        ]
+        if expected_revision is not None:
+            query += " AND COALESCE(revision, 0) = ?"
+            params.append(int(expected_revision))
+        cursor = self.db.execute_remcard(query, tuple(params))
+        if expected_revision is not None and cursor.rowcount != 1:
+            raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
-    def delete_fluid(self, fluid_id: int):
-        self.db.execute_remcard("DELETE FROM fluids WHERE id=?", (fluid_id,))
+    def delete_fluid(self, fluid_id: int, expected_revision: Optional[int] = None):
+        query = "DELETE FROM fluids WHERE id=?"
+        params = [fluid_id]
+        if expected_revision is not None:
+            query += " AND COALESCE(revision, 0) = ?"
+            params.append(int(expected_revision))
+        cursor = self.db.execute_remcard(query, tuple(params))
+        if expected_revision is not None and cursor.rowcount != 1:
+            raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
     def get_fluids(self, admission_id: int, start: datetime, end: datetime) -> List[FluidDTO]:
         query = "SELECT * FROM fluids WHERE admission_id = ? AND datetime >= ? AND datetime < ? ORDER BY datetime ASC"
@@ -56,7 +71,8 @@ class FluidsDAO:
             stool=r['stool'],
             other_output=r['other_output'] if 'other_output' in r.keys() else 0.0,
             last_modified_by=r['last_modified_by'] if 'last_modified_by' in r.keys() else None,
-            updated_at=r['updated_at'] if 'updated_at' in r.keys() else None
+            updated_at=r['updated_at'] if 'updated_at' in r.keys() else None,
+            revision=r['revision'] if 'revision' in r.keys() else 0
         ) for r in rows]
 
     def fetch_updated_fluids(self, admission_id: int, last_sync_time):
@@ -100,7 +116,8 @@ class FluidsDAO:
                     stool=rd['stool'],
                     other_output=rd['other_output'] if 'other_output' in rd.keys() else 0.0,
                     last_modified_by=rd['last_modified_by'] if 'last_modified_by' in rd.keys() else None,
-                    updated_at=rd['updated_at'] if 'updated_at' in rd.keys() else None
+                    updated_at=rd['updated_at'] if 'updated_at' in rd.keys() else None,
+                    revision=rd['revision'] if 'revision' in rd.keys() else 0
                 ))
 
         if isinstance(last_sync_time, dict):

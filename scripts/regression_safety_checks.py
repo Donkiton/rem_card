@@ -3554,6 +3554,236 @@ def _check_orders_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
         manager.close()
 
 
+def _check_remaining_clinical_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.patient_status_dao import PatientStatusDAO
+    from rem_card.data.dao.ventilation_dao import VentilationDAO
+    from rem_card.data.dao.vitals_dao import VitalsDAO
+    from rem_card.data.dto.remcard_dto import PatientStatus, VentilationEventType, VentilationMode, VitalDTO
+    from rem_card.services.concurrency import DATA_CONFLICT_MESSAGE, DataConflictError
+    from rem_card.services.fluid_service import FluidService
+    from rem_card.services.patient_bed_management.service import PatientBedManagementService
+    from rem_card.services.patient_status_service import PatientStatusService
+    from rem_card.services.ventilation_service import VentilationService
+    from rem_card.services.vital_service import VitalService
+
+    saved_local_first = os.environ.get("REMCARD_LOCAL_FIRST_SYNC")
+    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
+    db_path = os.path.join(temp_root, "remaining_optimistic_lock.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_remaining_locks") as cursor:
+            cursor.execute("INSERT INTO beds(bed_number, status, current_admission_id) VALUES (1, 'FREE', NULL)")
+            cursor.execute("INSERT INTO beds(bed_number, status, current_admission_id) VALUES (2, 'FREE', NULL)")
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Clinical Lock Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-CLIN-LOCK", "2026-04-24T08:00:00"),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                UPDATE beds
+                SET status = 'OCCUPIED',
+                    current_admission_id = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE bed_number = 1
+                """,
+                (admission_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO patient_status_events(admission_id, status, start_time, created_by, created_at, updated_at)
+                VALUES (?, ?, ?, 'test', ?, ?)
+                """,
+                (admission_id, PatientStatus.ACTIVE.value, "2026-04-24T08:00:00", "2026-04-24T08:00:00", "2026-04-24T08:00:00"),
+            )
+
+        patient_dao = PatientDAO(manager)
+        vitals_dao = VitalsDAO(manager)
+        vital_service = VitalService(vitals_dao, patient_dao)
+        fluid_service = FluidService(FluidsDAO(manager), vital_service)
+        shift_date = datetime(2026, 4, 24, 12, 0, 0)
+
+        fluid_service.upsert_hourly_output(admission_id, shift_date, 10, "urine", 100)
+        fluid = fluid_service.get_fluids(admission_id, shift_date)[0]
+        fluid_service.upsert_hourly_output(admission_id, shift_date, 10, "urine", 120, expected_revision=fluid.revision)
+        try:
+            fluid_service.upsert_hourly_output(admission_id, shift_date, 10, "urine", 140, expected_revision=fluid.revision)
+            return False, "stale fluids update did not raise conflict"
+        except DataConflictError as exc:
+            if DATA_CONFLICT_MESSAGE not in str(exc):
+                return False, f"unexpected fluids conflict message: {exc}"
+
+        vital_time = datetime(2026, 4, 24, 10, 30, 0)
+        vital_service.add_vital(
+            VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time, sys=120, dia=70, pulse=80),
+            shift_date=shift_date,
+            force=True,
+        )
+        vital = vital_service.get_vitals(admission_id, shift_date)[0]
+        vital_service.add_vital(
+            VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time, sys=121),
+            shift_date=shift_date,
+            force=True,
+            expected_revision=vital.revision,
+        )
+        try:
+            vital_service.add_vital(
+                VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time, sys=122),
+                shift_date=shift_date,
+                force=True,
+                expected_revision=vital.revision,
+            )
+            return False, "stale vitals update did not raise conflict"
+        except DataConflictError:
+            pass
+
+        bed_service = PatientBedManagementService(manager)
+        patient, admission = bed_service.get_patient_with_current_admission(1)
+        if not patient or not admission:
+            return False, "seeded bed/admission was not visible"
+        bed_service.update_patient_and_admission(
+            patient.id,
+            admission.id,
+            {"full_name": "Clinical Lock Patient"},
+            {
+                "bed_number": 1,
+                "history_number": "REG-CLIN-LOCK-2",
+                "admission_datetime": admission.admission_datetime,
+            },
+            expected_admission_revision=admission.revision,
+        )
+        try:
+            bed_service.update_patient_and_admission(
+                patient.id,
+                admission.id,
+                {"full_name": "Clinical Lock Patient"},
+                {
+                    "bed_number": 1,
+                    "history_number": "REG-CLIN-LOCK-3",
+                    "admission_datetime": admission.admission_datetime,
+                },
+                expected_admission_revision=admission.revision,
+            )
+            return False, "stale admission update did not raise conflict"
+        except DataConflictError:
+            pass
+
+        source_bed = bed_service.get_bed_by_number(1)
+        target_bed = bed_service.get_bed_by_number(2)
+        _patient, latest_admission = bed_service.get_patient_with_current_admission(1)
+        bed_service.move_patient(
+            1,
+            2,
+            expected_source_bed_revision=int(source_bed["revision"] or 0),
+            expected_target_bed_revision=int(target_bed["revision"] or 0),
+            expected_source_admission_revision=latest_admission.revision,
+        )
+        try:
+            bed_service.move_patient(2, 1, expected_source_bed_revision=0)
+            return False, "stale bed move did not raise conflict"
+        except DataConflictError:
+            pass
+
+        status_service = PatientStatusService(PatientStatusDAO(manager))
+        current = status_service.get_current_status(admission_id)
+        status_service.change_status(
+            admission_id,
+            PatientStatus.OUT,
+            reason_text="test",
+            user_id="test",
+            expected_active_event_id=current.id,
+            expected_active_revision=current.revision,
+        )
+        try:
+            status_service.change_status(
+                admission_id,
+                PatientStatus.OR,
+                reason_text="stale",
+                user_id="test",
+                expected_active_event_id=current.id,
+                expected_active_revision=current.revision,
+            )
+            return False, "stale status change did not raise conflict"
+        except DataConflictError:
+            pass
+
+        vent_service = VentilationService(VentilationDAO(manager))
+        start_time = datetime(2026, 4, 24, 9, 0, 0)
+        case = vent_service.create_case(
+            admission_id,
+            start_time=start_time,
+            initial_mode=VentilationMode.CONTROLLED_VCV,
+            initial_parameters={"RR": 12, "TV": 500, "PEEP": 5, "FiO2": 50, "Flow": 40},
+        )
+        vent_service.add_event(
+            case.id,
+            event_time=start_time + timedelta(minutes=10),
+            event_type=VentilationEventType.MODE_CHANGE,
+            mode=VentilationMode.CONTROLLED_VCV,
+            parameters={"RR": 13, "TV": 500, "PEEP": 5, "FiO2": 50, "Flow": 40},
+            expected_case_revision=case.revision,
+        )
+        try:
+            vent_service.add_event(
+                case.id,
+                event_time=start_time + timedelta(minutes=20),
+                event_type=VentilationEventType.MODE_CHANGE,
+                mode=VentilationMode.CONTROLLED_VCV,
+                parameters={"RR": 14, "TV": 500, "PEEP": 5, "FiO2": 50, "Flow": 40},
+                expected_case_revision=case.revision,
+            )
+            return False, "stale ventilation event did not raise conflict"
+        except DataConflictError:
+            pass
+
+        quick = manager.fetch_one_remcard("PRAGMA quick_check")
+        if not quick or str(quick[0]).lower() != "ok":
+            return False, f"quick_check failed after optimistic lock checks: {quick}"
+        return True, "ok"
+    finally:
+        manager.close()
+        if saved_local_first is None:
+            os.environ.pop("REMCARD_LOCAL_FIRST_SYNC", None)
+        else:
+            os.environ["REMCARD_LOCAL_FIRST_SYNC"] = saved_local_first
+
+
+def _check_analytics_runs_outside_ui_callbacks(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    graphs_source = (PROJECT_ROOT / "ui" / "analytics" / "graphs_dialog.py").read_text(encoding="utf-8")
+    report_source = (PROJECT_ROOT / "ui" / "analytics" / "report_dialog.py").read_text(encoding="utf-8")
+    worker_source = (PROJECT_ROOT / "ui" / "shared" / "analytics_worker.py").read_text(encoding="utf-8")
+    pdf_worker_source = (PROJECT_ROOT / "ui" / "shared" / "html_pdf_worker.py").read_text(encoding="utf-8")
+    graph_service_source = (PROJECT_ROOT / "services" / "analytics" / "graphs_service.py").read_text(encoding="utf-8")
+    statistics_service_source = (PROJECT_ROOT / "services" / "analytics" / "statistics_service.py").read_text(encoding="utf-8")
+
+    forbidden_ui_tokens = ("cursor.execute", "pd.read_sql", "matplotlib", "QPdfWriter", "QTextDocument", "generate_g")
+    for label, source in (("graphs_dialog", graphs_source), ("report_dialog", report_source)):
+        for token in forbidden_ui_tokens:
+            if token in source:
+                return False, f"{label} still contains heavy analytics token: {token}"
+
+    if "class AnalyticsWorker(QThread)" not in worker_source or "self._operation()" not in worker_source:
+        return False, "AnalyticsWorker does not own callable execution"
+    if "class HtmlPdfWorker(QThread)" not in pdf_worker_source or "QPdfWriter" not in pdf_worker_source:
+        return False, "HtmlPdfWorker does not own HTML PDF generation"
+    if "build_graphs_html" not in graph_service_source or "generate_g1_g5" not in graph_service_source:
+        return False, "graphs service does not own graph generation"
+    if "build_statistical_report_html" not in statistics_service_source or "cursor.execute" not in statistics_service_source:
+        return False, "statistics service does not own SQL report generation"
+    return True, "ok"
+
+
 def _check_medical_audit_log_triggers(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.app.unified_db_schema import SCHEMA_MIN_MIGRATION_VERSION
@@ -4739,6 +4969,7 @@ def main():
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
         ("orders_optimistic_lock_conflicts", _check_orders_optimistic_lock_conflicts),
+        ("remaining_clinical_optimistic_lock_conflicts", _check_remaining_clinical_optimistic_lock_conflicts),
         ("medical_audit_log_triggers", _check_medical_audit_log_triggers),
         ("doctor_create_card_avoids_open_snapshot_race", _check_doctor_create_card_avoids_open_snapshot_race),
         (
@@ -4747,6 +4978,7 @@ def main():
         ),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
         ("pdf_build_runs_in_worker", _check_pdf_build_runs_in_worker),
+        ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
         ("chart_clears_on_card_context_change", _check_chart_clears_on_card_context_change),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),

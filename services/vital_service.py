@@ -100,25 +100,31 @@ class VitalService:
             end,
         )
 
-    def add_vital(self, dto: VitalDTO, shift_date: Optional[datetime] = None, force: bool = False):
+    def add_vital(
+        self,
+        dto: VitalDTO,
+        shift_date: Optional[datetime] = None,
+        force: bool = False,
+        expected_revision: Optional[int] = None,
+    ):
         is_ok, msg = self.validate_timestamp(dto.admission_id, dto.timestamp, shift_date, force)
         if not is_ok:
             raise ValueError(msg)
         with self.vitals_dao.db.remcard_transaction():
-            self.vitals_dao.add_vital(dto)
+            self.vitals_dao.add_vital(dto, expected_revision=expected_revision)
 
     def clear_vitals(self, admission_id: int, date: datetime):
         start, end = self.shift_service.get_day_period(date)
         with self.vitals_dao.db.remcard_transaction():
             self.vitals_dao.clear_vitals(admission_id, start, end)
 
-    def delete_last_vital(self, admission_id: int, date: datetime):
+    def delete_last_vital(self, admission_id: int, date: datetime, expected_revision: Optional[int] = None):
         start, end = self.get_effective_bounds(admission_id, date)
         vitals = self.vitals_dao.get_vitals(admission_id, start, end)
         if vitals:
             last_vital = vitals[-1]
             with self.vitals_dao.db.remcard_transaction():
-                self.vitals_dao.delete_vital(last_vital.id)
+                self.vitals_dao.delete_vital(last_vital.id, expected_revision=expected_revision)
 
     def get_latest_vital_datetime(self, admission_id: int) -> Optional[datetime]:
         return self.vitals_dao.get_latest_vital_datetime(admission_id)

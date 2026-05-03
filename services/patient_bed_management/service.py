@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from rem_card.services.concurrency import assert_revision_matches
+
 
 @dataclass
 class PatientRecord:
@@ -28,6 +30,7 @@ class AdmissionRecord:
     diagnosis_text: Optional[str] = None
     department_profile: Optional[str] = None
     source_department: Optional[str] = None
+    revision: int = 0
 
 
 class PatientBedManagementService:
@@ -63,7 +66,9 @@ class PatientBedManagementService:
                 b.current_admission_id,
                 p.full_name,
                 a.history_number,
-                a.diagnosis_text
+                a.diagnosis_text,
+                COALESCE(b.revision, 0) AS bed_revision,
+                COALESCE(a.revision, 0) AS admission_revision
             FROM beds b
             LEFT JOIN admissions a ON a.id = b.current_admission_id
             LEFT JOIN patients p ON p.id = a.patient_id
@@ -113,6 +118,7 @@ class PatientBedManagementService:
             diagnosis_text=data.get("diagnosis_text"),
             department_profile=data.get("department_profile"),
             source_department=data.get("source_department"),
+            revision=int(data.get("revision") or 0),
         )
         return patient, admission
 
@@ -159,7 +165,9 @@ class PatientBedManagementService:
             cursor.execute(
                 """
                 UPDATE beds
-                SET status = ?, current_admission_id = ?
+                SET status = ?,
+                    current_admission_id = ?,
+                    revision = COALESCE(revision, 0) + 1
                 WHERE bed_number = ?
                   AND status = 'FREE'
                   AND current_admission_id IS NULL
@@ -178,6 +186,7 @@ class PatientBedManagementService:
         admission_id: int,
         patient_data: dict[str, Any],
         admission_data: dict[str, Any],
+        expected_admission_revision: Optional[int] = None,
     ) -> bool:
         full_name = str(patient_data.get("full_name") or "").strip()
         if not full_name:
@@ -199,8 +208,10 @@ class PatientBedManagementService:
                     diagnosis_text = ?,
                     department_profile = ?,
                     source_department = ?,
-                    updated_at = ?
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
                 WHERE id = ?
+                  AND (? IS NULL OR COALESCE(revision, 0) = ?)
                 """,
                 (
                     int(admission_data["bed_number"]),
@@ -216,13 +227,28 @@ class PatientBedManagementService:
                     admission_data.get("source_department"),
                     self._now_text(),
                     int(admission_id),
+                    expected_admission_revision,
+                    expected_admission_revision,
                 ),
             )
+            if cursor.rowcount != 1:
+                from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE
+
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
             return True
 
         return bool(self.db.run_write_operation(operation, source="patient_bed_update_admission"))
 
-    def move_patient(self, source_bed: int, target_bed: int):
+    def move_patient(
+        self,
+        source_bed: int,
+        target_bed: int,
+        *,
+        expected_source_bed_revision: Optional[int] = None,
+        expected_target_bed_revision: Optional[int] = None,
+        expected_source_admission_revision: Optional[int] = None,
+        expected_target_admission_revision: Optional[int] = None,
+    ):
         source_bed = int(source_bed)
         target_bed = int(target_bed)
 
@@ -231,22 +257,68 @@ class PatientBedManagementService:
             target = cursor.execute("SELECT * FROM beds WHERE bed_number = ?", (target_bed,)).fetchone()
             if not source or source["status"] == "FREE" or source["current_admission_id"] is None:
                 return False
+            assert_revision_matches(source["revision"] if "revision" in source.keys() else 0, expected_source_bed_revision)
+            if target:
+                assert_revision_matches(target["revision"] if "revision" in target.keys() else 0, expected_target_bed_revision)
 
             source_admission_id = int(source["current_admission_id"])
+            source_admission = cursor.execute(
+                "SELECT COALESCE(revision, 0) AS revision FROM admissions WHERE id = ?",
+                (source_admission_id,),
+            ).fetchone()
+            assert_revision_matches(
+                source_admission["revision"] if source_admission else 0,
+                expected_source_admission_revision,
+            )
             if target and target["status"] != "FREE" and target["current_admission_id"] is not None:
                 target_admission_id = int(target["current_admission_id"])
+                target_admission = cursor.execute(
+                    "SELECT COALESCE(revision, 0) AS revision FROM admissions WHERE id = ?",
+                    (target_admission_id,),
+                ).fetchone()
+                assert_revision_matches(
+                    target_admission["revision"] if target_admission else 0,
+                    expected_target_admission_revision,
+                )
                 cursor.execute(
-                    "UPDATE beds SET current_admission_id = NULL, status = 'FREE' WHERE bed_number IN (?, ?)",
+                    """
+                    UPDATE beds
+                    SET current_admission_id = NULL,
+                        status = 'FREE',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE bed_number IN (?, ?)
+                    """,
                     (source_bed, target_bed),
                 )
-                cursor.execute("UPDATE admissions SET bed_number = ?, updated_at = ? WHERE id = ?", (target_bed, self._now_text(), source_admission_id))
-                cursor.execute("UPDATE admissions SET bed_number = ?, updated_at = ? WHERE id = ?", (source_bed, self._now_text(), target_admission_id))
-                cursor.execute("UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED' WHERE bed_number = ?", (source_admission_id, target_bed))
-                cursor.execute("UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED' WHERE bed_number = ?", (target_admission_id, source_bed))
+                cursor.execute(
+                    "UPDATE admissions SET bed_number = ?, updated_at = ?, revision = COALESCE(revision, 0) + 1 WHERE id = ?",
+                    (target_bed, self._now_text(), source_admission_id),
+                )
+                cursor.execute(
+                    "UPDATE admissions SET bed_number = ?, updated_at = ?, revision = COALESCE(revision, 0) + 1 WHERE id = ?",
+                    (source_bed, self._now_text(), target_admission_id),
+                )
+                cursor.execute(
+                    "UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED', revision = COALESCE(revision, 0) + 1 WHERE bed_number = ?",
+                    (source_admission_id, target_bed),
+                )
+                cursor.execute(
+                    "UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED', revision = COALESCE(revision, 0) + 1 WHERE bed_number = ?",
+                    (target_admission_id, source_bed),
+                )
             else:
-                cursor.execute("UPDATE beds SET current_admission_id = NULL, status = 'FREE' WHERE bed_number = ?", (source_bed,))
-                cursor.execute("UPDATE admissions SET bed_number = ?, updated_at = ? WHERE id = ?", (target_bed, self._now_text(), source_admission_id))
-                cursor.execute("UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED' WHERE bed_number = ?", (source_admission_id, target_bed))
+                cursor.execute(
+                    "UPDATE beds SET current_admission_id = NULL, status = 'FREE', revision = COALESCE(revision, 0) + 1 WHERE bed_number = ?",
+                    (source_bed,),
+                )
+                cursor.execute(
+                    "UPDATE admissions SET bed_number = ?, updated_at = ?, revision = COALESCE(revision, 0) + 1 WHERE id = ?",
+                    (target_bed, self._now_text(), source_admission_id),
+                )
+                cursor.execute(
+                    "UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED', revision = COALESCE(revision, 0) + 1 WHERE bed_number = ?",
+                    (source_admission_id, target_bed),
+                )
             return True
 
         return self.db.run_write_operation(operation, source="patient_bed_move_patient")

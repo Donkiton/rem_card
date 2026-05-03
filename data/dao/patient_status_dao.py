@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 from ..dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from rem_card.app.logger import logger
+from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
 
 class PatientStatusDAO:
@@ -45,7 +46,8 @@ class PatientStatusDAO:
                 clinical_death_datetime,
                 cardiac_arrest_cause,
                 cardiac_arrest_measures_json,
-                outcome
+                outcome,
+                COALESCE(revision, 0) AS revision
             FROM admissions
             WHERE id = ?
             """,
@@ -348,7 +350,9 @@ class PatientStatusDAO:
 
     def change_status(self, admission_id: int, new_status: PatientStatus, 
                       reason_type: Optional[str] = None, reason_text: Optional[str] = None, 
-                      user_id: Optional[str] = None) -> bool:
+                      user_id: Optional[str] = None,
+                      expected_active_event_id: Optional[int] = None,
+                      expected_active_revision: Optional[int] = None) -> bool:
         """
         Атомарно меняет статус пациента: закрывает текущий и открывает новый.
         Реализует концепцию полуоткрытых интервалов [start, end).
@@ -362,12 +366,15 @@ class PatientStatusDAO:
                 
                 # 2. Ищем текущее активное событие
                 cursor.execute(
-                    "SELECT id, status FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
+                    "SELECT id, status, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
                     (admission_id,)
                 )
                 current_active = cursor.fetchone()
                 
                 if current_active:
+                    if expected_active_event_id is not None and int(current_active["id"]) != int(expected_active_event_id):
+                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                    assert_revision_matches(current_active["revision"], expected_active_revision)
                     old_status = current_active['status']
                     if old_status == new_status.value:
                         logger.debug(f"[StatusDAO] Status for admission {admission_id} is already {old_status}. No change needed.")
@@ -375,9 +382,18 @@ class PatientStatusDAO:
                     
                     # Закрываем старое событие
                     cursor.execute(
-                        "UPDATE patient_status_events SET end_time = ?, updated_at = ? WHERE id = ?",
-                        (now_str, now_str, current_active['id'])
+                        """
+                        UPDATE patient_status_events
+                        SET end_time = ?,
+                            updated_at = ?,
+                            last_modified_by = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
+                        (now_str, now_str, user_id, current_active['id'])
                     )
+                    if cursor.rowcount != 1:
+                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
                     logger.info(f"[StatusDAO] Admission {admission_id}: status changed {old_status} -> {new_status.value} by {user_id}")
                 else:
                     logger.warning(f"[StatusDAO] Admission {admission_id} had no active status! Creating new {new_status.value}")
@@ -395,6 +411,8 @@ class PatientStatusDAO:
                 # При смене статуса на DEAD/TRANSFERRED мы НЕ трогаем is_active, 
                 # так как за список коек (W1) отвечает Журнал.
                 return True
+        except DataConflictError:
+            raise
         except Exception as e:
             logger.error(f"[StatusDAO] Error changing status for admission {admission_id}: {e}", exc_info=True)
             return False
@@ -408,13 +426,24 @@ class PatientStatusDAO:
         reason_text: Optional[str] = None,
         user_id: Optional[str] = None,
         admission_details: Optional[Dict[str, Any]] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
     ) -> bool:
         """
         Меняет статус на финальный исход и в той же транзакции записывает
         структурированные поля исхода в admissions.
         """
         if new_status not in (PatientStatus.TRANSFERRED, PatientStatus.DEAD):
-            return self.change_status(admission_id, new_status, reason_type, reason_text, user_id)
+            return self.change_status(
+                admission_id,
+                new_status,
+                reason_type,
+                reason_text,
+                user_id,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+            )
 
         details = dict(admission_details or {})
         event_dt = (event_time or datetime.now()).replace(second=0, microsecond=0)
@@ -451,12 +480,15 @@ class PatientStatusDAO:
         try:
             with self.db.remcard_transaction(source="status_outcome_details") as cursor:
                 cursor.execute(
-                    "SELECT id, status, start_time FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
+                    "SELECT id, status, start_time, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
                     (admission_id,),
                 )
                 current_active = cursor.fetchone()
 
                 if current_active:
+                    if expected_active_event_id is not None and int(current_active["id"]) != int(expected_active_event_id):
+                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                    assert_revision_matches(current_active["revision"], expected_active_revision)
                     old_status = current_active["status"]
                     if old_status == new_status.value:
                         logger.debug(
@@ -477,9 +509,18 @@ class PatientStatusDAO:
                         return False
 
                     cursor.execute(
-                        "UPDATE patient_status_events SET end_time = ?, updated_at = ?, last_modified_by = ? WHERE id = ?",
+                        """
+                        UPDATE patient_status_events
+                        SET end_time = ?,
+                            updated_at = ?,
+                            last_modified_by = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
                         (event_time_str, now_str, user_id, current_active["id"]),
                     )
+                    if cursor.rowcount != 1:
+                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
                     logger.info(
                         "[StatusDAO] Admission %s: status changed %s -> %s at %s by %s",
                         admission_id,
@@ -528,8 +569,10 @@ class PatientStatusDAO:
                             clinical_death_datetime = NULL,
                             cardiac_arrest_cause = NULL,
                             cardiac_arrest_measures_json = NULL,
-                            updated_at = ?
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
                         WHERE id = ?
+                          AND (? IS NULL OR COALESCE(revision, 0) = ?)
                         """,
                         (
                             "переведен",
@@ -539,6 +582,8 @@ class PatientStatusDAO:
                             transfer_lpu_other,
                             now_str,
                             admission_id,
+                            expected_admission_revision,
+                            expected_admission_revision,
                         ),
                     )
                 else:
@@ -554,8 +599,10 @@ class PatientStatusDAO:
                             clinical_death_datetime = ?,
                             cardiac_arrest_cause = ?,
                             cardiac_arrest_measures_json = ?,
-                            updated_at = ?
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
                         WHERE id = ?
+                          AND (? IS NULL OR COALESCE(revision, 0) = ?)
                         """,
                         (
                             "умер",
@@ -565,10 +612,16 @@ class PatientStatusDAO:
                             measures_json,
                             now_str,
                             admission_id,
+                            expected_admission_revision,
+                            expected_admission_revision,
                         ),
                     )
+                if expected_admission_revision is not None and cursor.rowcount != 1:
+                    raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
                 return True
+        except DataConflictError:
+            raise
         except Exception as e:
             logger.error(
                 "[StatusDAO] Error changing final status for admission %s: %s",
@@ -578,7 +631,12 @@ class PatientStatusDAO:
             )
             return False
 
-    def rollback_last_status(self, admission_id: int) -> bool:
+    def rollback_last_status(
+        self,
+        admission_id: int,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+    ) -> bool:
         """
         Откатывает последнее изменение статуса:
         удаляет текущее активное событие и открывает предыдущее.
@@ -587,12 +645,15 @@ class PatientStatusDAO:
             with self.db.remcard_transaction() as cursor:
                 # 1. Ищем текущее активное событие
                 cursor.execute(
-                    "SELECT id, status FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
+                    "SELECT id, status, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
                     (admission_id,)
                 )
                 current = cursor.fetchone()
                 if not current:
                     return False
+                if expected_active_event_id is not None and int(current["id"]) != int(expected_active_event_id):
+                    raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                assert_revision_matches(current["revision"], expected_active_revision)
                 current_status = current["status"]
 
                 # 2. Проверяем, сколько всего событий. Нельзя удалять единственное (начальное).
@@ -616,7 +677,13 @@ class PatientStatusDAO:
                 prev = cursor.fetchone()
                 if prev:
                     cursor.execute(
-                        "UPDATE patient_status_events SET end_time = NULL, updated_at = ? WHERE id = ?",
+                        """
+                        UPDATE patient_status_events
+                        SET end_time = NULL,
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
                         (datetime.now().isoformat(), prev['id'])
                     )
 
@@ -641,7 +708,8 @@ class PatientStatusDAO:
                                 clinical_death_datetime = NULL,
                                 cardiac_arrest_cause = NULL,
                                 cardiac_arrest_measures_json = NULL,
-                                updated_at = ?
+                                updated_at = ?,
+                                revision = COALESCE(revision, 0) + 1
                             WHERE id = ?
                             """,
                             (datetime.now().replace(microsecond=0).isoformat(), admission_id),
@@ -649,6 +717,8 @@ class PatientStatusDAO:
                     
                 # При откате статуса мы НЕ трогаем is_active госпитализации
                 return True
+        except DataConflictError:
+            raise
         except Exception as e:
             logger.error(f"[StatusDAO] Error rolling back status for admission {admission_id}: {e}")
             return False
@@ -722,7 +792,14 @@ class PatientStatusDAO:
         except Exception as e:
             logger.error(f"[StatusDAO] Error ensuring initial status for {admission_id}: {e}")
 
-    def update_event_bounds(self, event_id: int, new_start: datetime, new_end: Optional[datetime], new_reason: Optional[str] = None) -> bool:
+    def update_event_bounds(
+        self,
+        event_id: int,
+        new_start: datetime,
+        new_end: Optional[datetime],
+        new_reason: Optional[str] = None,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
         """
         Обновляет границы события (и опционально комментарий) и каскадно правит соседние.
         Реализует строгую логику линейности: обновление происходит по ИНДЕКСУ в отсортированном списке событий.
@@ -731,9 +808,10 @@ class PatientStatusDAO:
         try:
             with self.db.remcard_transaction() as cursor:
                 # 1. Получаем текущее событие
-                cursor.execute("SELECT admission_id FROM patient_status_events WHERE id = ?", (event_id,))
+                cursor.execute("SELECT admission_id, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE id = ?", (event_id,))
                 curr_adm = cursor.fetchone()
                 if not curr_adm: return False
+                assert_revision_matches(curr_adm["revision"], expected_revision)
                 admission_id = curr_adm['admission_id']
 
                 # 2. Получаем ВСЕ события пациента в хронологическом порядке (с нужными полями)
@@ -775,12 +853,27 @@ class PatientStatusDAO:
                 
                 if new_reason is not None:
                     cursor.execute(
-                        "UPDATE patient_status_events SET start_time = ?, end_time = ?, reason_text = ?, updated_at = ? WHERE id = ?",
+                        """
+                        UPDATE patient_status_events
+                        SET start_time = ?,
+                            end_time = ?,
+                            reason_text = ?,
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
                         (new_start.isoformat(), final_end, new_reason, now_str, event_id)
                     )
                 else:
                     cursor.execute(
-                        "UPDATE patient_status_events SET start_time = ?, end_time = ?, updated_at = ? WHERE id = ?",
+                        """
+                        UPDATE patient_status_events
+                        SET start_time = ?,
+                            end_time = ?,
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
                         (new_start.isoformat(), final_end, now_str, event_id)
                     )
 
@@ -788,7 +881,13 @@ class PatientStatusDAO:
                 if curr_idx > 0:
                     prev_id = all_events[curr_idx - 1]['id']
                     cursor.execute(
-                        "UPDATE patient_status_events SET end_time = ?, updated_at = ? WHERE id = ?",
+                        """
+                        UPDATE patient_status_events
+                        SET end_time = ?,
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
                         (new_start.isoformat(), now_str, prev_id)
                     )
 
@@ -796,12 +895,20 @@ class PatientStatusDAO:
                 if new_end and curr_idx < len(all_events) - 1:
                     next_id = all_events[curr_idx + 1]['id']
                     cursor.execute(
-                        "UPDATE patient_status_events SET start_time = ?, updated_at = ? WHERE id = ?",
+                        """
+                        UPDATE patient_status_events
+                        SET start_time = ?,
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
                         (new_end.isoformat(), now_str, next_id)
                     )
                 
                 logger.info(f"[StatusDAO] Event {event_id} bounds updated: {new_start} - {final_end}")
                 return True
+        except DataConflictError:
+            raise
         except Exception as e:
             logger.error(f"[StatusDAO] Error updating event bounds: {e}", exc_info=True)
             return False
@@ -829,5 +936,6 @@ class PatientStatusDAO:
             end_time=self._parse_sqlite_dt(r['end_time']),
             created_by=r['created_by'],
             created_at=self._parse_sqlite_dt(r['created_at']),
-            updated_at=self._parse_sqlite_dt(r['updated_at'])
+            updated_at=self._parse_sqlite_dt(r['updated_at']),
+            revision=int(r['revision'] if 'revision' in r.keys() and r['revision'] is not None else 0)
         )
