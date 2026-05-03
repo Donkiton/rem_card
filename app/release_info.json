@@ -3,8 +3,8 @@
   "version": "1.4.3",
   "date": "2026-05-03",
   "changes": [
-    "Удалить legacy-каталог Rao_jornal из проекта",
-    "Optimize cached vitals card reopen",
-    "Validate and invalidate vitals snapshot cache"
+    "Удален legacy-каталог Rao_jornal из проекта",
+    "Ускорено повторное открытие карты пациента за счет кеша графика витальных функций",
+    "Кеш графика витальных функций теперь проверяется на актуальность и сбрасывается при изменениях"
   ]
 }

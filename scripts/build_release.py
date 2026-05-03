@@ -19,6 +19,16 @@ from bump_version import (
 
 RELEASE_LEVELS = ("auto", *BUMP_LEVELS)
 VERSIONED_FILES = ("VERSION", "CHANGELOG.md", "app/release_info.json")
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+
+CHANGELOG_SUBJECT_TRANSLATIONS = {
+    "Optimize cached vitals card reopen": (
+        "Ускорено повторное открытие карты пациента за счет кеша графика витальных функций"
+    ),
+    "Validate and invalidate vitals snapshot cache": (
+        "Кеш графика витальных функций теперь проверяется на актуальность и сбрасывается при изменениях"
+    ),
+}
 
 
 def project_root() -> Path:
@@ -137,16 +147,49 @@ def detect_level(subjects: list[str]) -> str:
 def build_changelog_changes(subjects: list[str], manual_changes: list[str]) -> list[str]:
     changes: list[str] = []
     seen: set[str] = set()
-    for item in [*subjects, *manual_changes]:
-        text = str(item or "").strip().lstrip("-").strip()
-        if not text:
-            continue
-        key = text.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        changes.append(text)
+    for item in subjects:
+        add_changelog_change(changes, seen, translate_subject_for_changelog(item))
+    for item in manual_changes:
+        add_changelog_change(changes, seen, item)
     return changes
+
+
+def translate_subject_for_changelog(subject: str) -> str:
+    text = str(subject or "").strip()
+    return CHANGELOG_SUBJECT_TRANSLATIONS.get(text, text)
+
+
+def add_changelog_change(changes: list[str], seen: set[str], value: str) -> None:
+    text = str(value or "").strip().lstrip("-").strip()
+    if not text:
+        return
+    key = text.casefold()
+    if key in seen:
+        return
+    seen.add(key)
+    changes.append(text)
+
+
+def ensure_russian_changelog(changes: list[str]) -> None:
+    non_russian = []
+    for item in changes:
+        text = str(item or "").strip().lstrip("-").strip()
+        if text and not CYRILLIC_RE.search(text):
+            non_russian.append(text)
+
+    if not non_russian:
+        return
+
+    examples = "\n".join(f"  - {item}" for item in non_russian[:10])
+    hidden_count = len(non_russian) - 10
+    suffix = f"\n  ...и еще {hidden_count}" if hidden_count > 0 else ""
+    raise RuntimeError(
+        "Релизный changelog должен быть на русском языке. "
+        "Найдены пункты без кириллицы:\n"
+        f"{examples}{suffix}\n\n"
+        "Переименуйте рабочие коммиты на русском или добавьте точный перевод "
+        "в CHANGELOG_SUBJECT_TRANSLATIONS в scripts/build_release.py."
+    )
 
 
 def update_release_files(root: Path, level: str, changes: list[str], set_version: str | None = None) -> tuple[str, str]:
@@ -166,6 +209,7 @@ def update_release_files(root: Path, level: str, changes: list[str], set_version
 
 def sync_current_release_info(root: Path, version: str) -> None:
     date_text, changes = find_changelog_entry(root, version)
+    ensure_russian_changelog(changes)
     write_release_info(root, version, date_text, changes)
 
 
@@ -247,12 +291,12 @@ def main(argv: list[str] | None = None) -> int:
         if not args.skip_build:
             run_build(root)
         if args.no_commit:
-            print("Release files are not committed because --no-commit was used.")
+            print("Файлы релиза не закоммичены, потому что указан --no-commit.")
         elif has_staged_or_unstaged_release_file_changes(root):
             commit_release(root, current_version)
         if args.push:
             push_current_branch(root)
-        print("Release build completed.")
+        print("Релизная сборка завершена.")
         return 0
 
     if not changes and not args.allow_empty:
@@ -264,15 +308,16 @@ def main(argv: list[str] | None = None) -> int:
             run_build(root)
         if args.push:
             push_current_branch(root)
-        print("Release build completed.")
+        print("Релизная сборка завершена.")
         return 0
     if not changes:
         changes = ["Техническая пересборка без изменений в коде"]
+    ensure_russian_changelog(changes)
 
     level = detect_level(changes) if args.level == "auto" else args.level
     current, next_version = update_release_files(root, level, changes, set_version=args.set_version)
-    print(f"Version updated: {current} -> {next_version} ({level})")
-    print("Changelog:")
+    print(f"Версия обновлена: {current} -> {next_version} ({level})")
+    print("Журнал изменений:")
     for change in changes:
         print(f"  - {change}")
 
@@ -280,13 +325,13 @@ def main(argv: list[str] | None = None) -> int:
         run_build(root)
 
     if args.no_commit:
-        print("Release files are not committed because --no-commit was used.")
+        print("Файлы релиза не закоммичены, потому что указан --no-commit.")
     else:
         commit_release(root, next_version)
         if args.push:
             push_current_branch(root)
 
-    print("Release build completed.")
+    print("Релизная сборка завершена.")
     return 0
 
 
