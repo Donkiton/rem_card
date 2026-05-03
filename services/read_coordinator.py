@@ -923,7 +923,17 @@ class ReadCoordinator:
     def get_cached_vitals(self, cache_key):
         snapshot = self._patient_vitals_cache.get(cache_key)
         if snapshot is None:
-            return None
+            persisted = persistent_snapshot_cache.load_snapshot("patient_vitals", cache_key)
+            if persisted is None:
+                return None
+            snapshot = MappingProxyType(dict(persisted or {}))
+            self._store_patient_vitals_by_key(cache_key, snapshot, persist=False)
+            logger.info(
+                "[ReadCoordinator] patient_vitals persistent_cache_hit=1 admission_id=%s version=%s",
+                cache_key[1] if len(cache_key) > 1 else "unknown",
+                snapshot.get("version"),
+            )
+            return snapshot
         self._patient_vitals_cache.move_to_end(cache_key)
         return snapshot
 
@@ -1168,10 +1178,19 @@ class ReadCoordinator:
         return delta_snapshot
 
     def _store_patient_vitals(self, context: PatientSnapshotContext, snapshot) -> None:
-        cache_key = context.cache_key()
+        self._store_patient_vitals_by_key(context.cache_key(), snapshot, persist=True)
+
+    def _store_patient_vitals_by_key(self, cache_key, snapshot, *, persist: bool) -> None:
         self._patient_vitals_cache[cache_key] = snapshot
         self._patient_vitals_cache.move_to_end(cache_key)
-        self._track_patient_cache_entry(self._patient_cache_index, context)
+        self._track_patient_cache_key(self._patient_cache_index, cache_key)
+        if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
+            persistent_snapshot_cache.store_snapshot(
+                "patient_vitals",
+                cache_key,
+                dict(snapshot or {}),
+                expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
+            )
         while len(self._patient_vitals_cache) > self.max_cached_patients:
             evicted_key, _ = self._patient_vitals_cache.popitem(last=False)
             self._drop_cache_index_by_key(self._patient_cache_index, evicted_key)

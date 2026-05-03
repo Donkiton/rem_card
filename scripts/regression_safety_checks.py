@@ -2314,6 +2314,21 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
                 "change_id": int(self.versions.get(int(admission_id), 1)),
             }
 
+        def build_vitals_snapshot(self, admission_id, shift_date, **kwargs):
+            self.build_calls += 1
+            _ = kwargs
+            return {
+                "admission_id": int(admission_id),
+                "shift_date": shift_date,
+                "start_dt": shift_date,
+                "end_dt": shift_date,
+                "vitals": [{"pulse": int(admission_id)}],
+                "vitals_extended": [],
+                "latest_values": {"pulse": int(admission_id)},
+                "effective_bounds": (shift_date, shift_date),
+                "change_id": int(self.versions.get(int(admission_id), 1)),
+            }
+
     service = FakeRemCardService()
     coordinator = ReadCoordinator(service)
     shift_date = datetime(2026, 5, 3, 8, 0, 0)
@@ -2337,6 +2352,17 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
             role="doctor",
             mode="live",
             variant="card_full",
+        )
+        return context.cache_key()
+
+    def vitals_key(admission_id: int):
+        context = coordinator.make_patient_snapshot_context(
+            source_db="live",
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="vitals",
         )
         return context.cache_key()
 
@@ -2379,6 +2405,14 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
         return False, "patient card persistent cache was not restored after coordinator restart"
     if int(persisted_after_restart.get("admission_id") or 0) != 2:
         return False, f"unexpected restored admission_id: {persisted_after_restart.get('admission_id')}"
+
+    coordinator.load_patient_vitals_snapshot(3, shift_date, role="doctor", force_refresh=False)
+    restarted_vitals = ReadCoordinator(service)
+    persisted_vitals = restarted_vitals.get_cached_vitals(vitals_key(3))
+    if persisted_vitals is None:
+        return False, "patient vitals persistent cache was not restored after coordinator restart"
+    if persisted_vitals.get("latest_values", {}).get("pulse") != 3:
+        return False, f"unexpected restored vitals snapshot: {persisted_vitals}"
 
     service.versions[1] = 2
     if coordinator.get_current_cached_card(card_key(1)) is not None:
