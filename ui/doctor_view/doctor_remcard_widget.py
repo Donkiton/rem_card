@@ -12,6 +12,7 @@ from rem_card.services.archive_readonly_service import create_archive_readonly_s
 from rem_card.ui.shared.orders_balance_adapter import (
     apply_current_order_mark_overrides,
     build_balance_orders_from_orders_widget,
+    oral_totals_from_runtime,
 )
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
@@ -967,10 +968,7 @@ class DoctorRemCardWidget(QWidget):
                 self._payload_force_sources(payload),
                 sorted(changed_entities),
             )
-            if sync_actions.get("balance_refresh"):
-                self._refresh_balance_from_db()
-            else:
-                self.update_balance_data()
+            self._schedule_balance_update()
             return
 
         if self._handle_diet_sync(
@@ -1043,6 +1041,19 @@ class DoctorRemCardWidget(QWidget):
         if not self.admission_id:
             return
         self.update_balance_data()
+
+    def _local_oral_events_for_balance(self):
+        widget = getattr(self, "diet_intake_widget", None)
+        if widget is None:
+            return None
+        try:
+            if int(getattr(widget, "admission_id", 0) or 0) != int(self.admission_id or 0):
+                return None
+        except Exception:
+            return None
+        if getattr(widget, "shift_date", None) != self._current_date:
+            return None
+        return list(getattr(widget, "_events", []) or [])
 
     def _set_service_context(self, service):
         self.service = service
@@ -1991,19 +2002,11 @@ class DoctorRemCardWidget(QWidget):
         )
         
         cur, day = calc_res["current"], calc_res["daily"]
-        oral_cur = 0
-        oral_day = 0
-        if hasattr(self.service, "get_oral_intake_totals"):
-            try:
-                oral_totals = self.service.get_oral_intake_totals(
-                    self.admission_id,
-                    self._current_date,
-                    current_time=calc_time,
-                )
-                oral_cur = oral_totals.get("current", 0) or 0
-                oral_day = oral_totals.get("daily", 0) or 0
-            except Exception as exc:
-                logger.warning("Failed to load oral intake totals for balance: %s", exc)
+        oral_cur, oral_day = oral_totals_from_runtime(
+            runtime,
+            calc_time,
+            oral_events=self._local_oral_events_for_balance(),
+        )
         total_in_cur, total_in_day = cur["total"] + oral_cur, day["total"] + oral_day
         total_out_cur = 0
         total_out_day = 0

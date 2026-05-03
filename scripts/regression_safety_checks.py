@@ -5235,6 +5235,7 @@ def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool
     from rem_card.ui.shared.orders_balance_adapter import (
         apply_current_order_mark_overrides,
         build_balance_orders_from_orders_widget,
+        oral_totals_from_runtime,
     )
 
     shift_start = datetime(2026, 5, 3, 8, 0)
@@ -5394,6 +5395,30 @@ def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool
     if cancel_calc["daily"]["total"] != 500 or cancel_calc["current"]["total"] != 0:
         return False, f"sector 1a cancel balance mismatch: {cancel_calc}"
 
+    class FakeOralEvent:
+        def __init__(self, event_time, amount_ml):
+            self.event_time = event_time
+            self.amount_ml = amount_ml
+
+    oral_current, oral_daily = oral_totals_from_runtime(
+        {
+            "oral_events": [
+                FakeOralEvent(shift_start + timedelta(hours=1), 100),
+                FakeOralEvent(shift_start + timedelta(hours=5), 200),
+            ]
+        },
+        shift_start + timedelta(hours=2),
+    )
+    if (oral_current, oral_daily) != (100.0, 300.0):
+        return False, f"cached oral totals mismatch: {(oral_current, oral_daily)}"
+
+    fallback_current, fallback_daily = oral_totals_from_runtime(
+        {"oral_totals": {"current": 10, "daily": 20}},
+        shift_start + timedelta(hours=2),
+    )
+    if (fallback_current, fallback_daily) != (10.0, 20.0):
+        return False, f"fallback oral totals mismatch: {(fallback_current, fallback_daily)}"
+
     return True, "ok"
 
 
@@ -5420,6 +5445,15 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
             return False, f"{path.name}: card_snapshot_required must not be an unconditional full-card path"
         if 'load_scope="patient_open_vitals"' not in on_changes:
             return False, f"{path.name}: vitals changes must use partial vitals snapshot"
+        local_force_pos = on_changes.find("_is_local_orders_force_payload")
+        diet_pos = on_changes.find("_handle_diet_sync", local_force_pos)
+        if local_force_pos < 0 or diet_pos < 0:
+            return False, f"{path.name}: local orders force branch not found"
+        local_force_block = on_changes[local_force_pos:diet_pos]
+        if "_refresh_balance_from_db()" in local_force_block:
+            return False, f"{path.name}: local order force must not synchronously reload balance from DB"
+        if "_schedule_balance_update()" not in local_force_block:
+            return False, f"{path.name}: local order force must schedule local balance update"
         partial_actions = methods.get("_apply_partial_sync_actions", "")
         if "_apply_partial_sync_actions(" not in on_changes or not partial_actions:
             return False, f"{path.name}: partial sync action dispatcher missing"
@@ -5432,6 +5466,11 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
                 return False, f"{path.name}: {helper} helper missing"
             if f"{helper}()" not in partial_actions:
                 return False, f"{path.name}: {helper} is not called from partial sync dispatcher"
+        balance_method = methods.get("update_balance_data") or methods.get("_update_balance_calculations") or ""
+        if "get_oral_intake_totals" in balance_method:
+            return False, f"{path.name}: balance UI update must not synchronously read oral totals from DB"
+        if "oral_totals_from_runtime" not in balance_method:
+            return False, f"{path.name}: balance UI update must use cached oral runtime"
     return True, "ok"
 
 

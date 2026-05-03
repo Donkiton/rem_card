@@ -10,6 +10,7 @@ from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.orders_balance_adapter import (
     apply_current_order_mark_overrides,
     build_balance_orders_from_orders_widget,
+    oral_totals_from_runtime,
 )
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
@@ -102,6 +103,10 @@ class NurseMainWidget(QWidget):
         self.diet_intake_widget = None
         
         self.init_ui()
+        self._balance_update_delay_ms = 120
+        self._balance_update_timer = QTimer(self)
+        self._balance_update_timer.setSingleShot(True)
+        self._balance_update_timer.timeout.connect(self._flush_scheduled_balance_update)
         self._add_patient_lock_watch_timer = QTimer(self)
         self._add_patient_lock_watch_timer.timeout.connect(self._refresh_add_patient_button_lock_state)
         self._add_patient_lock_watch_timer.start(ADD_PATIENT_LOCK_POLL_INTERVAL_MS)
@@ -324,7 +329,7 @@ class NurseMainWidget(QWidget):
         from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
 
         self.diet_intake_widget = DietIntakeWidget(self.remcard_service, role="nurse", show_prn_input=False)
-        self.diet_intake_widget.data_changed.connect(self._update_balance_calculations)
+        self.diet_intake_widget.data_changed.connect(self._schedule_balance_update)
         self.layout_manager.sector_5.set_content(self.diet_intake_widget)
         return self.diet_intake_widget
 
@@ -348,7 +353,7 @@ class NurseMainWidget(QWidget):
         diet_widget = self._ensure_diet_widget()
         if diet_widget:
             diet_widget.refresh_data()
-        self._update_balance_calculations()
+        self._schedule_balance_update()
 
     def _current_snapshot_context_key(
         self,
@@ -927,10 +932,7 @@ class NurseMainWidget(QWidget):
                 self._payload_force_sources(payload),
                 sorted(changed_entities),
             )
-            if sync_actions.get("balance_refresh"):
-                self._refresh_balance_from_db()
-            else:
-                self._update_balance_calculations()
+            self._schedule_balance_update()
             return
 
         if self._handle_diet_sync(
@@ -1032,9 +1034,9 @@ class NurseMainWidget(QWidget):
         if orders_widget is None:
             return
         if hasattr(orders_widget, "orderMarked"):
-            orders_widget.orderMarked.connect(self._update_balance_calculations)
+            orders_widget.orderMarked.connect(self._schedule_balance_update)
         if hasattr(orders_widget, "localBalanceChanged"):
-            orders_widget.localBalanceChanged.connect(self._update_balance_calculations)
+            orders_widget.localBalanceChanged.connect(self._schedule_balance_update)
         self._orders_balance_signals_bound = True
 
     def _bind_nurse_orders_balance_signals(self):
@@ -1044,10 +1046,30 @@ class NurseMainWidget(QWidget):
         if mgr is None:
             return
         if hasattr(mgr, "localBalanceChanged"):
-            mgr.localBalanceChanged.connect(self._update_balance_calculations)
+            mgr.localBalanceChanged.connect(self._schedule_balance_update)
         if hasattr(mgr, "balanceRefreshRequested"):
             mgr.balanceRefreshRequested.connect(self._refresh_balance_from_db)
         self._nurse_orders_balance_signals_bound = True
+
+    def _schedule_balance_update(self, *_args):
+        self._balance_update_timer.start(self._balance_update_delay_ms)
+
+    def _flush_scheduled_balance_update(self):
+        self._update_balance_calculations()
+
+    def _local_oral_events_for_balance(self):
+        widget = getattr(self, "diet_intake_widget", None)
+        if widget is None:
+            return None
+        admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+        try:
+            if int(getattr(widget, "admission_id", 0) or 0) != int(admission_id or 0):
+                return None
+        except Exception:
+            return None
+        if getattr(widget, "shift_date", None) != self._current_date:
+            return None
+        return list(getattr(widget, "_events", []) or [])
 
     def _schedule_card_ui_prewarm(self):
         if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
@@ -1232,6 +1254,7 @@ class NurseMainWidget(QWidget):
     def load_patient_card(self, admission_id, date):
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
+        self._balance_update_timer.stop()
         self.layout_manager.current_admission_id = admission_id
         self.current_date = date
         self._card_snapshot_cache = None
@@ -1614,6 +1637,8 @@ class NurseMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        if hasattr(self, "_balance_update_timer"):
+            self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
@@ -1665,19 +1690,11 @@ class NurseMainWidget(QWidget):
         )
         
         cur, day = calc_res["current"], calc_res["daily"]
-        oral_cur = 0
-        oral_day = 0
-        if hasattr(self.remcard_service, "get_oral_intake_totals"):
-            try:
-                oral_totals = self.remcard_service.get_oral_intake_totals(
-                    adm_id,
-                    self._current_date,
-                    current_time=calc_time,
-                )
-                oral_cur = oral_totals.get("current", 0) or 0
-                oral_day = oral_totals.get("daily", 0) or 0
-            except Exception as exc:
-                logger.warning("Failed to load oral intake totals for nurse balance: %s", exc)
+        oral_cur, oral_day = oral_totals_from_runtime(
+            runtime,
+            calc_time,
+            oral_events=self._local_oral_events_for_balance(),
+        )
         total_in_cur, total_in_day = cur["total"] + oral_cur, day["total"] + oral_day
         total_out_cur = 0
         total_out_day = 0

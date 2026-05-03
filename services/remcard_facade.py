@@ -655,6 +655,27 @@ class RemCardService(QObject):
 
         now = datetime.now()
         calc_time = now if start_dt <= now < end_dt else end_dt
+        oral_events = []
+        oral_totals = {"current": 0.0, "daily": 0.0}
+        try:
+            loaded_oral_events = self.get_oral_intake_events(admission_id, shift_date)
+            oral_current = 0.0
+            oral_daily = 0.0
+            for event in loaded_oral_events:
+                amount = float(getattr(event, "amount_ml", 0.0) or 0.0)
+                event_time = getattr(event, "event_time", None)
+                oral_events.append(
+                    {
+                        "event_time": event_time.isoformat() if event_time is not None else None,
+                        "amount_ml": amount,
+                    }
+                )
+                oral_daily += amount
+                if event_time is not None and event_time <= calc_time:
+                    oral_current += amount
+            oral_totals = {"current": round(oral_current, 1), "daily": round(oral_daily, 1)}
+        except Exception as exc:
+            logger.warning("Failed to load oral intake runtime for balance snapshot: %s", exc)
         balance_calc = BalanceCalculator.calculate(
             orders=orders,
             current_time=calc_time,
@@ -674,6 +695,8 @@ class RemCardService(QObject):
                 "transfer_time": terminal_transfer_time,
                 "active_intervals": active_intervals,
                 "outcome_time": outcome_time,
+                "oral_events": oral_events,
+                "oral_totals": oral_totals,
             },
             "balance_calc": balance_calc,
         }

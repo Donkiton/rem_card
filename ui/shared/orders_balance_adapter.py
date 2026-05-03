@@ -81,6 +81,43 @@ def _parse_datetime(value):
         return None
 
 
+def _number(value) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _event_value(event, name: str):
+    if isinstance(event, dict):
+        return event.get(name)
+    return getattr(event, name, None)
+
+
+def oral_totals_from_runtime(runtime: dict | None, current_time, *, oral_events=None) -> tuple[float, float]:
+    """
+    Возвращает пероральный ввод из уже загруженных данных.
+    Важно: этот путь вызывается из GUI-потока при кликах по назначениям, поэтому
+    здесь нельзя делать синхронные чтения из сетевой БД.
+    """
+    runtime = runtime or {}
+    events = oral_events if oral_events is not None else runtime.get("oral_events")
+    if events is not None:
+        current_limit = _parse_datetime(current_time)
+        current = 0.0
+        daily = 0.0
+        for event in events or []:
+            amount = _number(_event_value(event, "amount_ml"))
+            event_time = _parse_datetime(_event_value(event, "event_time"))
+            daily += amount
+            if current_limit is not None and event_time is not None and event_time <= current_limit:
+                current += amount
+        return round(current, 1), round(daily, 1)
+
+    totals = runtime.get("oral_totals") or {}
+    return round(_number(totals.get("current")), 1), round(_number(totals.get("daily")), 1)
+
+
 def _current_orders_mark_overrides(current_orders_widget):
     if current_orders_widget is None:
         return None
