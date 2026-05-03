@@ -36,7 +36,7 @@ class CurrentNurseOrdersWidget(QWidget):
 
     def set_context(self, admission_id, shift_date):
         # Если пациент сменился, очищаем кэш виджетов
-        if self.admission_id != admission_id or self.shift_date != shift_date:
+        if self._cache_key_for(self.admission_id, self.shift_date) != self._cache_key_for(admission_id, shift_date):
             self._clear_all_cards()
             self._pending_marks.clear()
             self._all_data = []
@@ -49,12 +49,25 @@ class CurrentNurseOrdersWidget(QWidget):
         self.refresh_data()
 
     def _cache_key(self):
-        if not self.admission_id or not self.shift_date:
+        return self._cache_key_for(self.admission_id, self.shift_date)
+
+    @classmethod
+    def _cache_key_for(cls, admission_id, shift_date):
+        if not admission_id or not shift_date:
             return None
+        shift_date = cls._normalize_shift_date(shift_date)
         return (
-            int(self.admission_id),
-            self.shift_date.isoformat(timespec="seconds"),
+            int(admission_id),
+            shift_date.isoformat(timespec="seconds"),
         )
+
+    @staticmethod
+    def _normalize_shift_date(value: datetime) -> datetime:
+        normalized = value.replace(microsecond=0)
+        shift_start = normalized.replace(hour=8, minute=0, second=0, microsecond=0)
+        if normalized.hour < 8:
+            shift_start -= timedelta(days=1)
+        return shift_start
 
     def _current_change_id(self) -> int:
         if not self.service or not self.admission_id:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from PySide6.QtCore import QPoint, QSignalBlocker, Qt, QTimer, Signal
@@ -294,12 +294,21 @@ class DietIntakeWidget(QWidget):
     def _cache_key(self):
         if not self.admission_id or not self.shift_date:
             return None
+        shift_date = self._normalize_shift_date(self.shift_date)
         return (
             int(self.admission_id),
-            self.shift_date.isoformat(timespec="seconds"),
+            shift_date.isoformat(timespec="seconds"),
             str(self.role or ""),
             bool(self.read_only),
         )
+
+    @staticmethod
+    def _normalize_shift_date(value: datetime) -> datetime:
+        normalized = value.replace(microsecond=0)
+        shift_start = normalized.replace(hour=8, minute=0, second=0, microsecond=0)
+        if normalized.hour < 8:
+            shift_start -= timedelta(days=1)
+        return shift_start
 
     def _current_change_id(self) -> int:
         if not self.service or not self.admission_id:

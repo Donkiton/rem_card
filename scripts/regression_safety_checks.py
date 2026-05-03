@@ -2329,6 +2329,17 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
         )
         return context.cache_key()
 
+    def card_key_at(admission_id: int, dt: datetime):
+        context = coordinator.make_patient_snapshot_context(
+            source_db="live",
+            admission_id=admission_id,
+            shift_date=dt,
+            role="doctor",
+            mode="live",
+            variant="card_full",
+        )
+        return context.cache_key()
+
     for admission_id in range(1, 11):
         coordinator.load_patient_card_snapshot(
             admission_id,
@@ -2348,6 +2359,11 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     if coordinator.get_cached_card(card_key(2)) is not None:
         return False, "oldest patient 2 cache survived after 11th context"
 
+    same_shift_first = datetime(2026, 5, 3, 13, 40, 10)
+    same_shift_second = datetime(2026, 5, 3, 13, 40, 55)
+    if card_key_at(1, same_shift_first) != card_key_at(1, same_shift_second):
+        return False, "same medical shift with different open seconds produced different card cache keys"
+
     service.versions[1] = 2
     if coordinator.get_current_cached_card(card_key(1)) is not None:
         return False, "stale patient 1 card cache was treated as current"
@@ -2356,6 +2372,43 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     refreshed = coordinator.load_patient_card_snapshot(1, shift_date, role="doctor", force_refresh=False)
     if int(refreshed.get("version") or 0) != 2:
         return False, f"patient 1 card cache did not refresh to version 2: {refreshed.get('version')}"
+
+    return True, "ok"
+
+
+def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime
+
+    from rem_card.ui.shared.components.current_orders_widget import CurrentNurseOrdersWidget
+    from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
+
+    first_open = datetime(2026, 5, 3, 13, 40, 10)
+    second_open = datetime(2026, 5, 3, 13, 40, 55)
+    next_shift = datetime(2026, 5, 4, 8, 0, 0)
+
+    orders_key_1 = CurrentNurseOrdersWidget._cache_key_for(7, first_open)
+    orders_key_2 = CurrentNurseOrdersWidget._cache_key_for(7, second_open)
+    orders_key_next = CurrentNurseOrdersWidget._cache_key_for(7, next_shift)
+    if orders_key_1 != orders_key_2:
+        return False, f"orders visible cache key still depends on open seconds: {orders_key_1} != {orders_key_2}"
+    if orders_key_1 == orders_key_next:
+        return False, "orders visible cache key does not separate different medical shifts"
+
+    diet = DietIntakeWidget.__new__(DietIntakeWidget)
+    diet.admission_id = 7
+    diet.role = "doctor"
+    diet.read_only = False
+    diet.shift_date = first_open
+    diet_key_1 = diet._cache_key()
+    diet.shift_date = second_open
+    diet_key_2 = diet._cache_key()
+    diet.shift_date = next_shift
+    diet_key_next = diet._cache_key()
+    if diet_key_1 != diet_key_2:
+        return False, f"diet cache key still depends on open seconds: {diet_key_1} != {diet_key_2}"
+    if diet_key_1 == diet_key_next:
+        return False, "diet cache key does not separate different medical shifts"
 
     return True, "ok"
 
@@ -2543,6 +2596,7 @@ def main():
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
+        ("visible_section_cache_keys_use_shift_context", _check_visible_section_cache_keys_use_shift_context),
         ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
         ("lazy_section_snapshot_caches", _check_lazy_section_snapshot_caches),
     ]

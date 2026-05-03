@@ -4,7 +4,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha1
 from itertools import count
 from types import MappingProxyType
@@ -118,7 +118,13 @@ class OrdersContext(SnapshotContext):
 
 @dataclass(frozen=True)
 class PatientSnapshotContext(SnapshotContext):
-    pass
+    @staticmethod
+    def _normalize_shift_date(value: datetime) -> datetime:
+        normalized = SnapshotContext._normalize_shift_date(value)
+        shift_start = normalized.replace(hour=8, minute=0, second=0, microsecond=0)
+        if normalized.hour < 8:
+            shift_start -= timedelta(days=1)
+        return shift_start
 
 
 @dataclass
