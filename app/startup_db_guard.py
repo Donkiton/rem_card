@@ -189,6 +189,13 @@ def _availability_user_message(reason: str) -> str:
     return "Не удалось проверить базу данных. Работа временно недоступна. Сообщите ответственному."
 
 
+def _lock_timeout_user_message(reason: str) -> str:
+    text = str(reason or "").lower()
+    if "recovery lock" in text:
+        return "База сейчас восстанавливается другим клиентом. Повторите запуск через несколько минут."
+    return "База сейчас занята другим процессом. Повторите запуск через несколько минут."
+
+
 def _is_missing_db_file(reason: str) -> bool:
     text = str(reason or "").lower()
     return "database file does not exist" in text
@@ -954,7 +961,7 @@ def recover_shared_db_with_locks(
         )
         return StartupDbGuardResult(
             ok=False,
-            user_message="База сейчас восстанавливается другим клиентом. Повторите запуск через несколько минут.",
+            user_message=_lock_timeout_user_message(str(exc)),
             technical_reason=str(exc),
             baza_dir=baza_dir,
         )
@@ -1094,7 +1101,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
         )
         return StartupDbGuardResult(
             ok=False,
-            user_message="База сейчас восстанавливается другим клиентом. Повторите запуск через несколько минут.",
+            user_message=_lock_timeout_user_message(str(exc)),
             technical_reason=str(exc),
             baza_dir=baza_dir,
         )

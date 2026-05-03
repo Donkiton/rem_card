@@ -1,6 +1,6 @@
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -201,7 +201,8 @@ class DataUpdateMonitor(QThread):
             if changed_dt.tzinfo is not None:
                 lag_sec = time.time() - changed_dt.timestamp()
             else:
-                lag_sec = time.time() - changed_dt.replace(tzinfo=datetime.now().astimezone().tzinfo).timestamp()
+                # SQLite CURRENT_TIMESTAMP is UTC but stored without a timezone suffix.
+                lag_sec = time.time() - changed_dt.replace(tzinfo=timezone.utc).timestamp()
             return max(0, int(lag_sec * 1000.0))
         except Exception:
             return None

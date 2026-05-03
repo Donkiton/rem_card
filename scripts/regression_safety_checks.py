@@ -249,6 +249,40 @@ def _check_sync_cursor_normalizes_timestamp_formats(temp_root: str) -> tuple[boo
     return True, "ok"
 
 
+def _check_change_log_lag_uses_utc_for_sqlite_timestamp(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime, timezone
+
+    import rem_card.services.data_update_monitor as monitor_module
+    from rem_card.services.data_update_monitor import DataUpdateMonitor
+
+    original_time = monitor_module.time.time
+    try:
+        monitor_module.time.time = lambda: datetime(2026, 5, 3, 8, 0, 1, tzinfo=timezone.utc).timestamp()
+        lag_ms = DataUpdateMonitor._change_log_lag_ms(
+            [{"changed_at": "2026-05-03 08:00:00"}]
+        )
+    finally:
+        monitor_module.time.time = original_time
+
+    if lag_ms is None or not (900 <= lag_ms <= 1100):
+        return False, f"SQLite UTC timestamp lag was misread: {lag_ms}"
+    return True, "ok"
+
+
+def _check_startup_lock_timeout_messages(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.startup_db_guard import _lock_timeout_user_message
+
+    recovery = _lock_timeout_user_message("Could not acquire recovery lock: recovery.lock")
+    if "восстанавливается" not in recovery:
+        return False, f"unexpected recovery lock message: {recovery}"
+    db_busy = _lock_timeout_user_message("Could not acquire db_profile lock: archiv/db.lock")
+    if "занята" not in db_busy or "восстанавливается" in db_busy:
+        return False, f"unexpected db lock message: {db_busy}"
+    return True, "ok"
+
+
 def _check_transaction_isolation(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.sqlite_shared import SQLiteWriteController, configure_connection
 
@@ -4661,6 +4695,8 @@ def main():
         ("role_lock_read_unavailable_blocks_acquire", _check_role_lock_read_unavailable_blocks_acquire),
         ("local_write_queue_shutdown_drains", _check_local_write_queue_shutdown_drains),
         ("sync_cursor_normalizes_timestamp_formats", _check_sync_cursor_normalizes_timestamp_formats),
+        ("change_log_lag_uses_utc_for_sqlite_timestamp", _check_change_log_lag_uses_utc_for_sqlite_timestamp),
+        ("startup_lock_timeout_messages", _check_startup_lock_timeout_messages),
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
