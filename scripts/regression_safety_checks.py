@@ -681,6 +681,9 @@ def _check_schema_migration_backup_fastpath_policy(temp_root: str) -> tuple[bool
             policy = json.load(fh)
         if str(policy.get("min_client_version")) != APP_VERSION:
             return False, f"client policy min version not raised to APP_VERSION: {policy}"
+        policy["min_client_version"] = "1.5.2"
+        with open(paths["policy_path"], "w", encoding="utf-8") as fh:
+            json.dump(policy, fh, ensure_ascii=False, indent=2)
 
         import rem_card.app.schema_migration_guard as guard
 
@@ -701,6 +704,12 @@ def _check_schema_migration_backup_fastpath_policy(temp_root: str) -> tuple[bool
             guard.backup_connection = original_backup
         if second.migrated:
             return False, "fastpath-ready schema was migrated again"
+        if not second.policy_updated:
+            return False, "fastpath-ready schema did not repair stale min_client_version policy"
+        with open(paths["policy_path"], "r", encoding="utf-8") as fh:
+            repaired_policy = json.load(fh)
+        if str(repaired_policy.get("min_client_version")) != APP_VERSION:
+            return False, f"stale client policy was not repaired to APP_VERSION: {repaired_policy}"
         return True, "ok"
     finally:
         conn.close()
@@ -3448,6 +3457,139 @@ def _check_order_row_delete_without_times_marks_draft(temp_root: str) -> tuple[b
         manager.close()
 
 
+def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from PySide6.QtCore import Qt
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.read_coordinator import ReadCoordinator
+    from rem_card.services.remcard_service import RemCardService
+    from rem_card.ui.shared.orders_model import OrdersModel
+
+    db_path = os.path.join(temp_root, "orders_cell_delete_draft.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_patient") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Regression Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-CELL", "2026-04-24T08:00:00"),
+            )
+            admission_id = int(cursor.lastrowid)
+
+        service = RemCardService(
+            VitalsDAO(manager),
+            FluidsDAO(manager),
+            OrdersDAO(manager),
+            VentilationDAO(manager),
+            PatientDAO(manager),
+        )
+        shift_date = datetime(2026, 4, 24, 12, 0, 0)
+        order = OrderDTO(
+            admission_id=admission_id,
+            drug_key="regression_cell",
+            latin="Regression Cell",
+            type=OrderType.MEDICATION,
+            status=OrderStatus.ACTIVE,
+            dose_value=1.0,
+            dose_unit="mg",
+            is_per_kg=False,
+            frequency=1,
+            specific_times=[],
+            duration_min=0,
+            is_committed=0,
+            created_at=datetime(2026, 4, 24, 9, 0, 0),
+            comment="",
+            last_modified_by="doctor",
+        )
+        service.add_order(order)
+        service.finalize_order_card(admission_id, shift_date=shift_date)
+
+        saved_slot = datetime(2026, 4, 24, 10, 0, 0)
+        empty_slot = datetime(2026, 4, 24, 11, 0, 0)
+        service.apply_order_left_click(order, None, saved_slot)
+        service.finalize_order_card(admission_id, shift_date=shift_date)
+        saved_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
+        if saved_snapshot["has_any_draft"]:
+            return False, "saved baseline unexpectedly has drafts"
+
+        service.apply_order_left_click(order, None, saved_slot)
+        deleted_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
+        if not deleted_snapshot["has_any_draft"]:
+            return False, "deleted saved cell did not keep draft flag"
+        latest_deleted = [
+            dict(row)
+            for row in deleted_snapshot["admin_rows"]
+            if int(dict(row).get("order_id") or 0) == int(order.id)
+            and str(dict(row).get("planned_time") or "") == saved_slot.isoformat()
+        ][-1]
+        if latest_deleted.get("status") != "deleted" or int(latest_deleted.get("is_committed") or 0) != 0:
+            return False, f"saved-cell delete did not produce uncommitted tombstone: {latest_deleted}"
+
+        model = OrdersModel(service, admission_id=admission_id, shift_date=shift_date)
+        model.apply_snapshot(deleted_snapshot)
+        deleted_admin = model.data(model.index(0, 3), Qt.UserRole)
+        if deleted_admin is None or deleted_admin.status != "deleted" or not model.has_any_draft:
+            return False, "OrdersModel dropped deleted draft tombstone"
+
+        coordinator = ReadCoordinator(service)
+        context = coordinator.make_orders_context(
+            source_db="live",
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="full",
+        )
+        delta_snapshot = coordinator._change_log_applier.apply_orders_delta(
+            context=context,
+            base_snapshot=saved_snapshot,
+            latest_change_id=service.get_latest_change_id(admission_id),
+        )
+        if not delta_snapshot.get("has_any_draft"):
+            return False, "ReadCoordinator delta lost deleted draft flag"
+        if not any(str(dict(row).get("status") or "") == "deleted" for row in delta_snapshot.get("admin_rows") or []):
+            return False, "ReadCoordinator delta removed deleted tombstone row"
+
+        service.apply_order_left_click(order, None, saved_slot)
+        restored_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
+        if restored_snapshot["has_any_draft"]:
+            return False, "delete-then-restore saved cell left a no-op draft"
+
+        service.apply_order_left_click(order, None, empty_slot)
+        if not service.has_order_drafts(admission_id, shift_date):
+            return False, "new draft cell did not mark card dirty"
+        service.apply_order_left_click(order, None, empty_slot)
+        if service.has_order_drafts(admission_id, shift_date):
+            return False, "quick add-then-remove empty cell left a no-op draft"
+        empty_rows = [
+            dict(row)
+            for row in service.get_latest_administrations(
+                admission_id=admission_id,
+                shift_date=shift_date,
+                only_committed=False,
+                include_deleted=True,
+                include_cancelled=True,
+                include_deleted_orders=True,
+            )
+            if int(dict(row).get("order_id") or 0) == int(order.id)
+            and str(dict(row).get("planned_time") or "") == empty_slot.isoformat()
+        ]
+        if empty_rows:
+            return False, f"quick add-then-remove left effective rows: {empty_rows}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_orders_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -3777,6 +3919,11 @@ def _check_analytics_runs_outside_ui_callbacks(temp_root: str) -> tuple[bool, st
         return False, "AnalyticsWorker does not own callable execution"
     if "class HtmlPdfWorker(QThread)" not in pdf_worker_source or "QPdfWriter" not in pdf_worker_source:
         return False, "HtmlPdfWorker does not own HTML PDF generation"
+    for label, source in (("graphs dialog", graphs_source), ("report dialog", report_source)):
+        if "def reject(self):" not in source or "def closeEvent(self, event):" not in source:
+            return False, f"{label} must cancel/ignore worker callbacks on reject and closeEvent"
+        if "self._closing = True" not in source:
+            return False, f"{label} must ignore worker callbacks after close/reject"
     if "build_graphs_html" not in graph_service_source or "generate_g1_g5" not in graph_service_source:
         return False, "graphs service does not own graph generation"
     if "build_statistical_report_html" not in statistics_service_source or "cursor.execute" not in statistics_service_source:
@@ -4163,6 +4310,11 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
         load_source = ast.get_source_segment(source_text, load_method) or ""
         if "clear_for_context" not in load_source:
             return False, f"{role}: chart must be cleared immediately on patient card switch"
+        if role == "doctor":
+            match_pos = load_source.find("chart_matches_target = self._chart_matches_context")
+            assign_pos = load_source.find("self.chart.admission_id = admission_id")
+            if match_pos < 0 or assign_pos < 0 or match_pos > assign_pos:
+                return False, "doctor: chart context must be checked before assigning the new admission_id"
 
     return True, "ok"
 
@@ -4968,6 +5120,7 @@ def main():
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
+        ("orders_cell_delete_draft_and_noop_toggle", _check_orders_cell_delete_draft_and_noop_toggle),
         ("orders_optimistic_lock_conflicts", _check_orders_optimistic_lock_conflicts),
         ("remaining_clinical_optimistic_lock_conflicts", _check_remaining_clinical_optimistic_lock_conflicts),
         ("medical_audit_log_triggers", _check_medical_audit_log_triggers),

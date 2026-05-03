@@ -24,6 +24,7 @@ class ReportDialog(QDialog):
         self._show_graph_button = bool(show_graph_button)
         self._stats_worker = None
         self._stats_pdf_worker = None
+        self._closing = False
 
         self.setWindowTitle("Отчеты и статистика")
         self.resize(500, 400)
@@ -165,6 +166,8 @@ class ReportDialog(QDialog):
             self._drag_pos = event.globalPosition().toPoint()
 
     def _open_graphs_dialog(self):
+        if self._closing:
+            return
         start_dt = self.start_date.date().toString("yyyy-MM-dd 00:00:00")
         end_dt = self.end_date.date().toString("yyyy-MM-dd 23:59:59")
 
@@ -175,6 +178,8 @@ class ReportDialog(QDialog):
     def _generate_pdf_report(self):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
+        if self._closing:
+            return
         if self.start_date.date() > self.end_date.date():
             CustomMessageBox.information(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
             return
@@ -194,6 +199,8 @@ class ReportDialog(QDialog):
         self._stats_worker.start()
 
     def _on_statistics_html_ready(self, html: str):
+        if self._closing:
+            return
         from rem_card.app.paths import REPORT_DIR
 
         os.makedirs(REPORT_DIR, exist_ok=True)
@@ -206,12 +213,16 @@ class ReportDialog(QDialog):
         self._stats_pdf_worker.start()
 
     def _on_statistics_pdf_ready(self, pdf_path: str):
+        if self._closing:
+            return
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         self._set_pdf_busy(False)
         CustomMessageBox.information(self, "Успех", f"Статистический отчет успешно сохранен:\n{os.path.basename(pdf_path)}")
 
     def _on_statistics_failed(self, message: str):
+        if self._closing:
+            return
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         self._set_pdf_busy(False)
@@ -227,3 +238,20 @@ class ReportDialog(QDialog):
 
     def _clear_statistics_pdf_worker(self):
         self._stats_pdf_worker = None
+
+    def _cancel_workers(self):
+        self._closing = True
+        for worker in (self._stats_worker, self._stats_pdf_worker):
+            if worker is not None and hasattr(worker, "cancel"):
+                try:
+                    worker.cancel()
+                except Exception:
+                    pass
+
+    def reject(self):
+        self._cancel_workers()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._cancel_workers()
+        super().closeEvent(event)

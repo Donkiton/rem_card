@@ -210,16 +210,16 @@ def run_benchmark(clicks: int, max_runtime_sec: float = 90.0) -> dict:
             if ui_waited is not None and probe.first_change_ms is not None:
                 samples.ui.append(probe.first_change_ms)
 
-            db_waited = _wait_for(
-                lambda: (
-                    (row := container.db_manager.fetch_one_remcard(
-                        "SELECT id FROM administrations WHERE order_id = ? AND planned_time = ? ORDER BY id DESC LIMIT 1",
-                        (order_id, planned_iso),
-                    )) is not None and int(row["id"]) != prev_admin_id
-                ),
-                app,
-                timeout_sec=3.0,
-            )
+            def _cell_db_state_changed() -> bool:
+                row = container.db_manager.fetch_one_remcard(
+                    "SELECT id FROM administrations WHERE order_id = ? AND planned_time = ? ORDER BY id DESC LIMIT 1",
+                    (order_id, planned_iso),
+                )
+                if row is None:
+                    return prev_admin_id != 0
+                return int(row["id"]) != prev_admin_id
+
+            db_waited = _wait_for(_cell_db_state_changed, app, timeout_sec=3.0)
             if db_waited is not None:
                 samples.db.append(db_waited)
 

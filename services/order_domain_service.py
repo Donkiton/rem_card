@@ -125,6 +125,76 @@ class OrderDomainService:
             (order_id, planned_time.isoformat()),
         )
 
+    @staticmethod
+    def _is_uncommitted_admin(row) -> bool:
+        try:
+            return int(row["is_committed"] or 0) == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _admin_matches_committed_baseline(latest, committed) -> bool:
+        if latest is None or committed is None:
+            return False
+        latest_status = str(latest["status"] or "")
+        committed_status = str(committed["status"] or "")
+        if latest_status != committed_status:
+            return False
+        if str(latest["cell_role"] or "") != str(committed["cell_role"] or ""):
+            return False
+        try:
+            return float(latest["volume_ml"] or 0.0) == float(committed["volume_ml"] or 0.0)
+        except Exception:
+            return True
+
+    def _collapse_noop_cell_draft(self, cursor, order_id: int, planned_time: datetime) -> None:
+        """
+        Убирает черновую историю, если последний draft возвращает ячейку к
+        исходному committed-состоянию. Это закрывает быстрый сценарий
+        поставить -> убрать и убрать -> поставить без ложной активной кнопки
+        сохранения.
+        """
+        planned_key = planned_time.isoformat()
+        cursor.execute(
+            """
+            SELECT *
+            FROM administrations
+            WHERE order_id = ? AND planned_time = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (order_id, planned_key),
+        )
+        latest = cursor.fetchone()
+        if latest is None or not self._is_uncommitted_admin(latest):
+            return
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM administrations
+            WHERE order_id = ? AND planned_time = ? AND is_committed = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (order_id, planned_key),
+        )
+        committed = cursor.fetchone()
+
+        status = str(latest["status"] or "")
+        is_noop_without_baseline = committed is None and status in ("deleted", "cancelled")
+        is_noop_against_baseline = self._admin_matches_committed_baseline(latest, committed)
+        if not is_noop_without_baseline and not is_noop_against_baseline:
+            return
+
+        cursor.execute(
+            """
+            DELETE FROM administrations
+            WHERE order_id = ? AND planned_time = ? AND is_committed = 0
+            """,
+            (order_id, planned_key),
+        )
+
     def _get_last_admins_for_times(self, cursor, order_id: int, planned_times: List[datetime]) -> Dict[str, dict]:
         if not planned_times:
             return {}
@@ -183,6 +253,7 @@ class OrderDomainService:
             """,
             (order_id, effective_chain_id, cell_role, planned_time.isoformat(), status, volume),
         )
+        self._collapse_noop_cell_draft(cursor, order_id, planned_time)
 
     def handle_left_click(self, order: OrderDTO, admin: Optional[AdministrationDTO], planned_time: datetime):
         with self.db.remcard_transaction() as cursor:

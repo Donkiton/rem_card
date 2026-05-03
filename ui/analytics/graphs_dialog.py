@@ -38,6 +38,7 @@ class GraphsDialog(QDialog):
         self.chart_colors = list(DEFAULT_CHART_COLORS)
         self._graphs_worker = None
         self._graphs_pdf_worker = None
+        self._closing = False
 
         self._init_ui()
 
@@ -374,6 +375,8 @@ class GraphsDialog(QDialog):
         self._graphs_worker.start()
 
     def _on_graphs_ready(self, result, save_pdf: bool):
+        if self._closing:
+            return
         html = getattr(result, "html", "")
         self.report_text.setHtml(html)
         if save_pdf:
@@ -382,6 +385,8 @@ class GraphsDialog(QDialog):
         self._set_graphs_busy(False)
 
     def _start_graphs_pdf_worker(self, html: str):
+        if self._closing:
+            return
         if self._graphs_pdf_worker is not None and self._graphs_pdf_worker.isRunning():
             return
         from rem_card.app.paths import REPORT_DIR
@@ -397,18 +402,24 @@ class GraphsDialog(QDialog):
         self._graphs_pdf_worker.start()
 
     def _on_graphs_pdf_ready(self, pdf_path: str):
+        if self._closing:
+            return
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         self._set_graphs_busy(False)
         CustomMessageBox.information(self, "Успех", f"Графики успешно сохранены:\n{os.path.basename(pdf_path)}")
 
     def _on_graphs_pdf_failed(self, message: str):
+        if self._closing:
+            return
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         self._set_graphs_busy(False)
         CustomMessageBox.information(self, "Ошибка", f"Ошибка при сохранении PDF:\n{message}")
 
     def _on_graphs_failed(self, message: str):
+        if self._closing:
+            return
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         self._set_graphs_busy(False)
@@ -425,3 +436,20 @@ class GraphsDialog(QDialog):
 
     def _clear_graphs_pdf_worker(self):
         self._graphs_pdf_worker = None
+
+    def _cancel_workers(self):
+        self._closing = True
+        for worker in (self._graphs_worker, self._graphs_pdf_worker):
+            if worker is not None and hasattr(worker, "cancel"):
+                try:
+                    worker.cancel()
+                except Exception:
+                    pass
+
+    def reject(self):
+        self._cancel_workers()
+        super().reject()
+
+    def closeEvent(self, event):
+        self._cancel_workers()
+        super().closeEvent(event)

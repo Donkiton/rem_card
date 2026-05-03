@@ -10,8 +10,11 @@ from typing import Any, Iterator, Optional
 
 from rem_card.app.sqlite_shared import FileWriteLock, backup_connection
 from rem_card.app.startup_db_guard import update_client_policy_min_version
-from rem_card.app.unified_db_schema import ensure_unified_schema, is_unified_schema_ready
-from rem_card.app.version import APP_VERSION
+from rem_card.app.unified_db_schema import (
+    SCHEMA_REQUIRED_CLIENT_VERSION,
+    ensure_unified_schema,
+    is_unified_schema_ready,
+)
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,14 @@ def _ensure_after_lock(
     source: str,
 ) -> SchemaMigrationResult:
     if is_unified_schema_ready(conn):
-        return SchemaMigrationResult(migrated=False)
+        policy_updated = _update_policy(
+            policy_path,
+            min_client_version=min_client_version,
+            role=role,
+            baza_dir=baza_dir,
+            source=f"{source}_schema_policy_sync",
+        )
+        return SchemaMigrationResult(migrated=False, policy_updated=policy_updated)
 
     backup_path = _create_validated_backup(
         conn,
@@ -162,7 +172,7 @@ def ensure_unified_schema_with_migration_backup(
     backup_dir: str,
     invalid_dir: Optional[str] = None,
     policy_path: Optional[str] = None,
-    min_client_version: str = APP_VERSION,
+    min_client_version: str = SCHEMA_REQUIRED_CLIENT_VERSION,
     role: Optional[str] = None,
     baza_dir: Optional[str] = None,
     logger: Optional[logging.Logger] = None,

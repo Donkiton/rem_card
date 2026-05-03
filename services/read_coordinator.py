@@ -305,8 +305,7 @@ class ChangeLogApplier:
         for row in (base_snapshot or {}).get("admin_rows") or ():
             normalized = dict(row)
             key = self._admin_key(normalized)
-            if str(normalized.get("status") or "") != "deleted":
-                admin_map[key] = normalized
+            admin_map[key] = normalized
 
         changed = False
         for row in delta_rows:
@@ -315,12 +314,6 @@ class ChangeLogApplier:
             if order_id not in visible_order_ids:
                 raise ValueError(f"delta_unknown_order:{order_id}")
             key = self._admin_key(normalized)
-            status = str(normalized.get("status") or "")
-            if status == "deleted":
-                if key in admin_map:
-                    del admin_map[key]
-                    changed = True
-                continue
             if admin_map.get(key) != normalized:
                 admin_map[key] = normalized
                 changed = True

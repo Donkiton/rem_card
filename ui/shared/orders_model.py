@@ -114,9 +114,6 @@ class OrdersModel(QAbstractTableModel):
         result: Dict[Tuple[int, str], AdministrationDTO] = {}
         for r in rows:
             rd = dict(r)
-            if rd.get('status') == 'deleted':
-                continue
-
             key = self._row_to_admin_key(rd)
             result[key] = self._row_to_admin_dto(rd)
         return result
@@ -324,8 +321,9 @@ class OrdersModel(QAbstractTableModel):
                 for col, slot in enumerate(self.time_slots)
             }
 
-            # Мерджим изменения в существующий admin_map.
-            # ВАЖНО: для status='deleted' удаляем ключ, иначе "призрак" ячейки остается в UI.
+            # Мерджим изменения в существующий admin_map. Deleted-row tombstones
+            # остаются в модели: делегат их не рисует, но draft-флаг видит
+            # несохраненное удаление сохраненной ячейки.
             new_sync_cursor = dict(self.last_sync_cursor)
             for row in rows:
                 rd = dict(row)
@@ -335,17 +333,8 @@ class OrdersModel(QAbstractTableModel):
                     new_sync_cursor = make_sync_cursor(row_updated_at, row_id)
 
                 key = self._row_to_admin_key(rd)
-                status = rd.get('status')
                 row_idx = row_lookup.get(rd.get("order_id"))
                 col_idx = col_lookup.get(key[1])
-
-                if status == 'deleted':
-                    if key in self.admin_map:
-                        del self.admin_map[key]
-                        changed = True
-                        if row_idx is not None and col_idx is not None:
-                            changed_cells.append((row_idx, col_idx))
-                    continue
 
                 new_admin = self._row_to_admin_dto(rd)
                 old_admin = self.admin_map.get(key)

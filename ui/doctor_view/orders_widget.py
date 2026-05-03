@@ -199,6 +199,17 @@ class OrdersWidget(QWidget):
             revisions[order_id] = int(getattr(order, "revision", 0) or 0)
         return revisions
 
+    def _is_current_context(self, admission_id, shift_date) -> bool:
+        try:
+            same_admission = int(self.admission_id or 0) == int(admission_id or 0)
+        except Exception:
+            same_admission = self.admission_id == admission_id
+        return same_admission and self.shift_date == shift_date
+
+    def _refresh_model_if_current(self, admission_id, shift_date):
+        if self._is_current_context(admission_id, shift_date):
+            self._refresh_model()
+
     def _clear_pending_reorder(self):
         self._pending_reorder_order_ids = []
 
@@ -1529,6 +1540,8 @@ class OrdersWidget(QWidget):
         op_prefix: str,
         perf_click_id: int | None = None,
     ):
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
         previous_by_key = self._apply_optimistic_cell(
@@ -1542,6 +1555,8 @@ class OrdersWidget(QWidget):
 
         def on_success():
             self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
             if self._pending_admin_write_count > 0:
                 self._schedule_fast_sync()
                 return
@@ -1555,6 +1570,8 @@ class OrdersWidget(QWidget):
 
         def on_error(exc):
             self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
             self._restore_admin_cells(previous_by_key)
             self.request_refresh(force=True)
 
@@ -1651,20 +1668,24 @@ class OrdersWidget(QWidget):
 
     def finalize_card(self):
         if not self.admission_id or self._is_read_only(): return
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
         ordered_order_ids = list(self._pending_reorder_order_ids or [])
         expected_revisions = self._visible_order_revision_map()
 
         def after_success():
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
             from rem_card.app.logger import logger
-            logger.info(f"Карта назначений для ID {self.admission_id} успешно сохранена")
+            logger.info(f"Карта назначений для ID {target_admission_id} успешно сохранена")
             self._clear_pending_reorder()
             self._refresh_model()
 
         self._enqueue_write(
-            f"orders_finalize:{self.admission_id}",
+            f"orders_finalize:{target_admission_id}",
             operation=lambda ids=ordered_order_ids: self.service.finalize_order_card(
-                self.admission_id,
-                shift_date=self.shift_date,
+                target_admission_id,
+                shift_date=target_shift_date,
                 ordered_order_ids=ids,
                 expected_revisions=expected_revisions,
             ),
@@ -1673,17 +1694,21 @@ class OrdersWidget(QWidget):
 
     def clear_drafts(self):
         if not self.admission_id or self._is_read_only(): return
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
         expected_revisions = self._visible_order_revision_map()
 
         def after_success():
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
             self._clear_pending_reorder()
             self._refresh_model()
 
         self._enqueue_write(
-            f"orders_clear_drafts:{self.admission_id}",
+            f"orders_clear_drafts:{target_admission_id}",
             operation=lambda: self.service.clear_order_drafts(
-                self.admission_id,
-                self.shift_date,
+                target_admission_id,
+                target_shift_date,
                 expected_revisions=expected_revisions,
             ),
             on_success=after_success,
@@ -1874,6 +1899,8 @@ class OrdersWidget(QWidget):
         if self._is_read_only(): return
         from .components.order_input_handler import OrderInputHandler
 
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
         new_order = OrderInputHandler.parse_input_to_dto(text, self.admission_id)
         new_order.is_committed = 0
         now = datetime.now()
@@ -1881,9 +1908,13 @@ class OrdersWidget(QWidget):
         new_order.created_at = now if start <= now < end else start
 
         self._enqueue_write(
-            f"orders_add_input:{self.admission_id}",
+            f"orders_add_input:{target_admission_id}",
             operation=lambda: self.service.add_order(new_order),
-            on_success=lambda: self._insert_local_order_after_add(new_order),
+            on_success=lambda: (
+                self._insert_local_order_after_add(new_order)
+                if self._is_current_context(target_admission_id, target_shift_date)
+                else None
+            ),
         )
         
     def update_now_marker(self):
@@ -2051,6 +2082,8 @@ class OrdersWidget(QWidget):
                         self._clear_local_order_row_pending_delete(oid)
                         self._on_cell_write_failed(exc)
 
+                    target_admission_id = self.admission_id
+                    target_shift_date = self.shift_date
                     self._enqueue_write(
                         f"orders_soft_delete_row:{order_id}",
                         operation=lambda oid=order_id, rev=expected_revision: self.service.soft_delete_order_row(
@@ -2058,7 +2091,7 @@ class OrdersWidget(QWidget):
                             was_committed,
                             expected_revision=rev,
                         ),
-                        on_success=self._refresh_model,
+                        on_success=lambda aid=target_admission_id, sd=target_shift_date: self._refresh_model_if_current(aid, sd),
                         on_error=on_delete_error,
                     )
                     return True
@@ -2158,25 +2191,31 @@ class OrdersWidget(QWidget):
         
     def clear_all_times(self):
         if not self.admission_id or self._is_read_only(): return
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
         self._enqueue_write(
-            f"orders_clear_times:{self.admission_id}",
-            operation=lambda: self.service.clear_order_times(self.admission_id, self.shift_date),
-            on_success=self._refresh_model,
+            f"orders_clear_times:{target_admission_id}",
+            operation=lambda: self.service.clear_order_times(target_admission_id, target_shift_date),
+            on_success=lambda: self._refresh_model_if_current(target_admission_id, target_shift_date),
         )
 
     def clear_all_orders(self):
         if not self.admission_id or self._is_read_only(): return
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
         expected_revisions = self._visible_order_revision_map()
 
         def after_success():
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
             self._clear_pending_reorder()
             self._refresh_model()
 
         self._enqueue_write(
-            f"orders_clear_all:{self.admission_id}",
+            f"orders_clear_all:{target_admission_id}",
             operation=lambda: self.service.clear_order_list(
-                self.admission_id,
-                self.shift_date,
+                target_admission_id,
+                target_shift_date,
                 expected_revisions=expected_revisions,
             ),
             on_success=after_success,
@@ -2295,16 +2334,25 @@ class OrdersWidget(QWidget):
                 return
 
         expected_revisions = self._visible_order_revision_map()
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+
+        def after_success():
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._clear_pending_reorder()
+            self._refresh_model()
+
         self._enqueue_write(
-            f"orders_load_yesterday:{self.admission_id}",
+            f"orders_load_yesterday:{target_admission_id}",
             operation=lambda: self.service.replace_orders_from_date(
-                admission_id=self.admission_id,
-                target_shift_date=self.shift_date,
+                admission_id=target_admission_id,
+                target_shift_date=target_shift_date,
                 source_shift_date=found_date,
                 source_orders=yesterday_orders,
                 expected_revisions=expected_revisions,
             ),
-            on_success=lambda: (self._clear_pending_reorder(), self._refresh_model()),
+            on_success=after_success,
         )
 
     def _on_load_yesterday_failed(self, exc):

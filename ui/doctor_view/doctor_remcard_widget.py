@@ -1158,13 +1158,14 @@ class DoctorRemCardWidget(QWidget):
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
         if hasattr(self, 'chart'):
-            self.chart.admission_id = admission_id
+            chart_matches_target = self._chart_matches_context(admission_id, card_start_dt)
             if (
                 hasattr(self.chart, "clear_for_context")
-                and not cached_vitals_snapshot
-                and not self._chart_matches_context(admission_id, card_start_dt)
+                and not chart_matches_target
             ):
                 self.chart.clear_for_context(admission_id=admission_id, start_time=card_start_dt)
+            else:
+                self.chart.admission_id = admission_id
 
         if hasattr(self.layout_manager, "set_events_context"):
             self.layout_manager.set_events_context(
