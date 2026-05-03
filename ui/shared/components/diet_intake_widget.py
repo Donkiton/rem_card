@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.logger import logger
+from rem_card.services import persistent_snapshot_cache
 from rem_card.services.diet_service import schedule_items
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
@@ -331,7 +332,10 @@ class DietIntakeWidget(QWidget):
             return False
         snapshot = self._snapshot_cache.get(key)
         if snapshot is None:
-            return False
+            snapshot = persistent_snapshot_cache.load_snapshot("diet", key)
+            if snapshot is None:
+                return False
+            self._snapshot_cache[key] = snapshot
         self._snapshot_cache.move_to_end(key)
         self._templates = list(snapshot.get("templates") or [])
         self._templates_by_id = {int(t.id): t for t in self._templates if getattr(t, "id", None) is not None}
@@ -363,6 +367,12 @@ class DietIntakeWidget(QWidget):
             "plan": self._plan,
             "events": list(self._events or []),
         }
+        persistent_snapshot_cache.store_snapshot(
+            "diet",
+            key,
+            dict(self._snapshot_cache[key]),
+            expires_at=persistent_snapshot_cache.expiry_from_cache_key(key, shift_key_index=1),
+        )
         self._snapshot_cache.move_to_end(key)
         while len(self._snapshot_cache) > DIET_CACHE_LIMIT:
             self._snapshot_cache.popitem(last=False)

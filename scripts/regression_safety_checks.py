@@ -2356,8 +2356,8 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     coordinator.load_patient_card_snapshot(11, shift_date, role="doctor", force_refresh=False)
     if coordinator.get_cached_card(card_key(1)) is None:
         return False, "recently used patient 1 was evicted instead of oldest entry"
-    if coordinator.get_cached_card(card_key(2)) is not None:
-        return False, "oldest patient 2 cache survived after 11th context"
+    if card_key(2) in coordinator._patient_card_cache:
+        return False, "oldest patient 2 memory cache survived after 11th context"
 
     same_shift_times = [
         datetime(2026, 5, 3, 8, 0, 0),
@@ -2372,6 +2372,13 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
         return False, f"same medical shift produced time-dependent card cache keys: {same_shift_keys}"
     if card_key_at(1, datetime(2026, 5, 4, 8, 0, 0)) in same_shift_keys:
         return False, "next medical shift reused previous card cache key"
+
+    restarted_coordinator = ReadCoordinator(service)
+    persisted_after_restart = restarted_coordinator.get_cached_card(card_key(2))
+    if persisted_after_restart is None:
+        return False, "patient card persistent cache was not restored after coordinator restart"
+    if int(persisted_after_restart.get("admission_id") or 0) != 2:
+        return False, f"unexpected restored admission_id: {persisted_after_restart.get('admission_id')}"
 
     service.versions[1] = 2
     if coordinator.get_current_cached_card(card_key(1)) is not None:
@@ -2388,7 +2395,9 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
 def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime
+    from collections import OrderedDict
 
+    from rem_card.services import persistent_snapshot_cache
     from rem_card.ui.shared.components.current_orders_widget import CurrentNurseOrdersWidget
     from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
 
@@ -2423,6 +2432,32 @@ def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple
         return False, f"diet cache key still depends on open time: {diet_keys}"
     if diet_key_next in diet_keys:
         return False, "diet cache key does not separate different medical shifts"
+
+    class FakeService:
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            _ = admission_id, include_global
+            return 5
+
+    orders_widget = CurrentNurseOrdersWidget.__new__(CurrentNurseOrdersWidget)
+    orders_widget.service = FakeService()
+    orders_widget.admission_id = 7
+    orders_widget.shift_date = same_shift_times[0]
+    orders_widget._snapshot_cache = OrderedDict()
+    orders_widget._store_snapshot_cache([{"id": 1, "planned_time": "2026-05-03T09:00:00"}])
+    orders_persisted = persistent_snapshot_cache.load_snapshot("current_orders", orders_widget._cache_key())
+    if not orders_persisted or orders_persisted.get("data", [{}])[0].get("id") != 1:
+        return False, f"current orders persistent cache was not stored: {orders_persisted}"
+
+    diet.service = FakeService()
+    diet._snapshot_cache = OrderedDict()
+    diet._templates = []
+    diet._plan = None
+    diet._events = []
+    diet.shift_date = same_shift_times[0]
+    diet._store_snapshot_cache()
+    diet_persisted = persistent_snapshot_cache.load_snapshot("diet", diet._cache_key())
+    if diet_persisted is None or "events" not in diet_persisted:
+        return False, f"diet persistent cache was not stored: {diet_persisted}"
 
     return True, "ok"
 

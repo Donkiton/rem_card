@@ -6,6 +6,7 @@ from PySide6.QtCore import QTimer
 from .nurse_order_card import NurseOrderCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.app.logger import logger
+from rem_card.services import persistent_snapshot_cache
 
 PENDING_MARK_TTL_SEC = 8.0
 SECTOR_1A_BEFORE_MIN = 60
@@ -90,7 +91,10 @@ class CurrentNurseOrdersWidget(QWidget):
             return False
         snapshot = self._snapshot_cache.get(key)
         if snapshot is None:
-            return False
+            snapshot = persistent_snapshot_cache.load_snapshot("current_orders", key)
+            if snapshot is None:
+                return False
+            self._snapshot_cache[key] = snapshot
         self._snapshot_cache.move_to_end(key)
         self._all_data = self._apply_pending_marks(list(snapshot.get("data") or []))
         self._render_from_cache()
@@ -117,6 +121,12 @@ class CurrentNurseOrdersWidget(QWidget):
             "version": self._current_change_id(),
             "data": [dict(item) for item in (data_list or [])],
         }
+        persistent_snapshot_cache.store_snapshot(
+            "current_orders",
+            key,
+            dict(self._snapshot_cache[key]),
+            expires_at=persistent_snapshot_cache.expiry_from_cache_key(key, shift_key_index=1),
+        )
         self._snapshot_cache.move_to_end(key)
         while len(self._snapshot_cache) > CURRENT_ORDERS_CACHE_LIMIT:
             self._snapshot_cache.popitem(last=False)

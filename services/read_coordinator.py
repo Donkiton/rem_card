@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rem_card.app.logger import logger
 from rem_card.data.dao.sync_cursor import EPOCH_SYNC_TS, is_cursor_newer, make_sync_cursor
+from rem_card.services import persistent_snapshot_cache
 from rem_card.services.remcard_facade import orders_snapshot_caller
 
 
@@ -964,7 +965,17 @@ class ReadCoordinator:
     def get_cached_card(self, cache_key):
         snapshot = self._patient_card_cache.get(cache_key)
         if snapshot is None:
-            return None
+            persisted = persistent_snapshot_cache.load_snapshot("patient_card", cache_key)
+            if persisted is None:
+                return None
+            snapshot = MappingProxyType(dict(persisted or {}))
+            self._store_patient_card_by_key(cache_key, snapshot, persist=False)
+            logger.info(
+                "[ReadCoordinator] patient_card persistent_cache_hit=1 admission_id=%s version=%s",
+                cache_key[1] if len(cache_key) > 1 else "unknown",
+                snapshot.get("version"),
+            )
+            return snapshot
         self._patient_card_cache.move_to_end(cache_key)
         return snapshot
 
@@ -1167,10 +1178,19 @@ class ReadCoordinator:
             logger.info("[ReadCoordinator] evicted patient_vitals cache key=%s", evicted_key)
 
     def _store_patient_card(self, context: PatientSnapshotContext, snapshot) -> None:
-        cache_key = context.cache_key()
+        self._store_patient_card_by_key(context.cache_key(), snapshot, persist=True)
+
+    def _store_patient_card_by_key(self, cache_key, snapshot, *, persist: bool) -> None:
         self._patient_card_cache[cache_key] = snapshot
         self._patient_card_cache.move_to_end(cache_key)
-        self._track_patient_cache_entry(self._patient_card_cache_index, context)
+        self._track_patient_cache_key(self._patient_card_cache_index, cache_key)
+        if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
+            persistent_snapshot_cache.store_snapshot(
+                "patient_card",
+                cache_key,
+                dict(snapshot or {}),
+                expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
+            )
         while len(self._patient_card_cache) > self.max_cached_patients:
             evicted_key, _ = self._patient_card_cache.popitem(last=False)
             self._drop_cache_index_by_key(self._patient_card_cache_index, evicted_key)
@@ -1265,6 +1285,15 @@ class ReadCoordinator:
         while len(patient_tabs) > self.max_tabs_per_patient:
             old_hash, _ = patient_tabs.popitem(last=False)
             self._evict_context_hash(index_store, int(context.admission_id), old_hash)
+
+    def _track_patient_cache_key(self, index_store: dict[int, OrderedDict[str, None]], cache_key) -> None:
+        patient_tabs = index_store.setdefault(int(cache_key[1]), OrderedDict())
+        context_hash = str(cache_key[-1])
+        patient_tabs[context_hash] = None
+        patient_tabs.move_to_end(context_hash)
+        while len(patient_tabs) > self.max_tabs_per_patient:
+            old_hash, _ = patient_tabs.popitem(last=False)
+            self._evict_context_hash(index_store, int(cache_key[1]), old_hash)
 
     def _evict_context_hash(
         self,
