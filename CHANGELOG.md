@@ -6,6 +6,12 @@
 - `MINOR`: крупное обновление или заметная новая функция.
 - `MAJOR`: очень большое обновление или несовместимое изменение.
 
+## 1.4.3 - 2026-05-03
+
+- Удалить legacy-каталог Rao_jornal из проекта
+- Optimize cached vitals card reopen
+- Validate and invalidate vitals snapshot cache
+
 ## 1.4.2 - 2026-05-03
 
 - Fix orders sheet refresh after local writes
