@@ -266,6 +266,61 @@ class DoctorRemCardWidget(QWidget):
     def _get_read_coordinator(self):
         return getattr(self.service, "read_coordinator", None)
 
+    def _get_cached_patient_vitals_snapshot(self, admission_id, shift_date):
+        if self._archive_read_only_mode:
+            return None
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not admission_id or shift_date is None:
+            return None
+        try:
+            context = coordinator.make_patient_snapshot_context(
+                source_db="live",
+                admission_id=int(admission_id),
+                shift_date=shift_date,
+                role="doctor",
+                mode="live",
+                variant="vitals",
+            )
+            return coordinator.get_cached_vitals(context.cache_key())
+        except Exception as exc:
+            logger.debug("Doctor vitals cache lookup failed: %s", exc)
+            return None
+
+    def _apply_patient_open_cache(self, admission_id, shift_date, snapshot):
+        if not snapshot:
+            return False
+        request = {
+            "admission_id": int(admission_id),
+            "shift_date": shift_date,
+            "ensure_initial_status": False,
+            "show_empty_message": False,
+            "load_scope": "patient_open_vitals",
+            "context_key": self._current_snapshot_context_key(
+                admission_id=admission_id,
+                shift_date=shift_date,
+                load_scope="patient_open_vitals",
+            ),
+            "snapshot": snapshot,
+            "from_cache": True,
+        }
+        self._apply_card_snapshot(request)
+        logger.info(
+            "DoctorRemCardWidget applied cached vitals snapshot admission_id=%s version=%s",
+            admission_id,
+            snapshot.get("version"),
+        )
+        return True
+
+    def _chart_matches_context(self, admission_id, start_dt):
+        chart = getattr(self, "chart", None)
+        if chart is None:
+            return False
+        return (
+            int(getattr(chart, "admission_id", 0) or 0) == int(admission_id or 0)
+            and getattr(chart, "start_time", None) == start_dt
+            and bool(getattr(chart, "vitals_data", None))
+        )
+
     def _current_snapshot_context_key(
         self,
         *,
@@ -858,12 +913,17 @@ class DoctorRemCardWidget(QWidget):
             card_start_dt, card_end_dt = self.service.get_day_period(date)
         except Exception:
             card_start_dt, card_end_dt = date, None
+        cached_vitals_snapshot = self._get_cached_patient_vitals_snapshot(admission_id, date)
 
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
         if hasattr(self, 'chart'):
             self.chart.admission_id = admission_id
-            if hasattr(self.chart, "clear_for_context"):
+            if (
+                hasattr(self.chart, "clear_for_context")
+                and not cached_vitals_snapshot
+                and not self._chart_matches_context(admission_id, card_start_dt)
+            ):
                 self.chart.clear_for_context(admission_id=admission_id, start_time=card_start_dt)
 
         if hasattr(self.layout_manager, "set_events_context"):
@@ -898,6 +958,8 @@ class DoctorRemCardWidget(QWidget):
         self._last_change_id = 0
         self._apply_archive_read_only_state()
         self._reset_balance_view_state()
+        if cached_vitals_snapshot:
+            self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
         if request_snapshot:
             should_ensure_initial_status = (
                 not self._archive_read_only_mode

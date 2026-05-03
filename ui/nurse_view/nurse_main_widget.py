@@ -211,6 +211,58 @@ class NurseMainWidget(QWidget):
     def _get_read_coordinator(self):
         return getattr(self.remcard_service, "read_coordinator", None)
 
+    def _get_cached_patient_vitals_snapshot(self, admission_id, shift_date):
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not admission_id or shift_date is None:
+            return None
+        try:
+            context = coordinator.make_patient_snapshot_context(
+                source_db="live",
+                admission_id=int(admission_id),
+                shift_date=shift_date,
+                role="nurse",
+                mode="live",
+                variant="vitals",
+            )
+            return coordinator.get_cached_vitals(context.cache_key())
+        except Exception as exc:
+            logger.debug("Nurse vitals cache lookup failed: %s", exc)
+            return None
+
+    def _apply_patient_open_cache(self, admission_id, shift_date, snapshot):
+        if not snapshot:
+            return False
+        request = {
+            "admission_id": int(admission_id),
+            "shift_date": shift_date,
+            "ensure_initial_status": False,
+            "load_scope": "patient_open_vitals",
+            "context_key": self._current_snapshot_context_key(
+                admission_id=admission_id,
+                shift_date=shift_date,
+                load_scope="patient_open_vitals",
+            ),
+            "snapshot": snapshot,
+            "from_cache": True,
+        }
+        self._apply_card_snapshot(request)
+        logger.info(
+            "NurseMainWidget applied cached vitals snapshot admission_id=%s version=%s",
+            admission_id,
+            snapshot.get("version"),
+        )
+        return True
+
+    def _chart_matches_context(self, admission_id, start_dt):
+        chart = getattr(self, "chart", None)
+        if chart is None:
+            return False
+        return (
+            int(getattr(chart, "admission_id", 0) or 0) == int(admission_id or 0)
+            and getattr(chart, "start_time", None) == start_dt
+            and bool(getattr(chart, "vitals_data", None))
+        )
+
     def _ensure_diet_widget(self):
         if getattr(self, "diet_intake_widget", None) is not None:
             return self.diet_intake_widget
@@ -872,6 +924,7 @@ class NurseMainWidget(QWidget):
         
         # Рассчитываем мед. сутки для правильной инициализации
         start_dt, end_dt = self.remcard_service.get_day_period(date)
+        cached_vitals_snapshot = self._get_cached_patient_vitals_snapshot(admission_id, date)
         
         # Обновляем контекст сектора событий (без принудительного раннего создания вкладки).
         if hasattr(self.layout_manager, "set_events_context"):
@@ -884,7 +937,11 @@ class NurseMainWidget(QWidget):
             )
 
         self.chart.admission_id = admission_id
-        if hasattr(self.chart, "clear_for_context"):
+        if (
+            hasattr(self.chart, "clear_for_context")
+            and not cached_vitals_snapshot
+            and not self._chart_matches_context(admission_id, start_dt)
+        ):
             self.chart.clear_for_context(admission_id=admission_id, start_time=start_dt)
         self.vitals_input.admission_id = admission_id
         self.vitals_input.shift_date = date
@@ -925,6 +982,8 @@ class NurseMainWidget(QWidget):
 
         self._last_change_id = 0
         self._reset_balance_view_state()
+        if cached_vitals_snapshot:
+            self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
         self._request_card_snapshot(
             ensure_initial_status=True,
             load_scope="patient_open_vitals",
