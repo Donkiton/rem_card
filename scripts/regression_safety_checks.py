@@ -2280,6 +2280,228 @@ def _check_build_release_reuses_prepared_version(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime
+
+    from rem_card.services.read_coordinator import READ_CACHE_MAX_PATIENTS, ReadCoordinator
+
+    if READ_CACHE_MAX_PATIENTS != 10:
+        return False, f"expected default card cache size 10, got {READ_CACHE_MAX_PATIENTS}"
+
+    class FakeRemCardService:
+        def __init__(self):
+            self.build_calls = 0
+            self.versions = {}
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            _ = include_global
+            return int(self.versions.get(int(admission_id or 0), 1))
+
+        def build_full_card_snapshot(self, admission_id, shift_date, **kwargs):
+            self.build_calls += 1
+            _ = kwargs
+            return {
+                "admission_id": int(admission_id),
+                "shift_date": shift_date,
+                "start_dt": shift_date,
+                "end_dt": shift_date,
+                "vitals": [],
+                "vitals_extended": [],
+                "fluids": [],
+                "effective_bounds": (shift_date, shift_date),
+                "balance_runtime": {"orders": [], "start_dt": shift_date, "end_dt": shift_date},
+                "change_id": int(self.versions.get(int(admission_id), 1)),
+            }
+
+    service = FakeRemCardService()
+    coordinator = ReadCoordinator(service)
+    shift_date = datetime(2026, 5, 3, 8, 0, 0)
+
+    def card_key(admission_id: int):
+        context = coordinator.make_patient_snapshot_context(
+            source_db="live",
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="card_full",
+        )
+        return context.cache_key()
+
+    for admission_id in range(1, 11):
+        coordinator.load_patient_card_snapshot(
+            admission_id,
+            shift_date,
+            role="doctor",
+            force_refresh=False,
+        )
+
+    if len(coordinator._patient_card_cache) != 10:
+        return False, f"card cache should hold 10 entries, got {len(coordinator._patient_card_cache)}"
+    if coordinator.get_cached_card(card_key(1)) is None:
+        return False, "patient 1 card cache missing before LRU overflow"
+
+    coordinator.load_patient_card_snapshot(11, shift_date, role="doctor", force_refresh=False)
+    if coordinator.get_cached_card(card_key(1)) is None:
+        return False, "recently used patient 1 was evicted instead of oldest entry"
+    if coordinator.get_cached_card(card_key(2)) is not None:
+        return False, "oldest patient 2 cache survived after 11th context"
+
+    service.versions[1] = 2
+    if coordinator.get_current_cached_card(card_key(1)) is not None:
+        return False, "stale patient 1 card cache was treated as current"
+    if coordinator.get_cached_card(card_key(1)) is None:
+        return False, "stale patient 1 card cache was removed instead of preserved for SWR"
+    refreshed = coordinator.load_patient_card_snapshot(1, shift_date, role="doctor", force_refresh=False)
+    if int(refreshed.get("version") or 0) != 2:
+        return False, f"patient 1 card cache did not refresh to version 2: {refreshed.get('version')}"
+
+    return True, "ok"
+
+
+def _check_balance_loading_state_uses_placeholders(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors.balance.sector_2b_g import Sector2b_g
+    from rem_card.ui.rem_card_sectors.balance.sector_2b_v import Sector2b_v
+    from rem_card.ui.rem_card_sectors.sector_3a import Sector3a
+    from rem_card.ui.rem_card_sectors.sector_3b import Sector3b
+    from rem_card.ui.rem_card_sectors.sector_4a import Sector4a
+
+    app = QApplication.instance() or QApplication([])
+    _ = app
+
+    widgets = [Sector2b_g(), Sector2b_v(), Sector3a(), Sector3b(), Sector4a()]
+    try:
+        for widget in widgets:
+            if not hasattr(widget, "set_loading_state"):
+                return False, f"{widget.__class__.__name__} has no set_loading_state"
+            widget.set_loading_state()
+
+        checks = [
+            widgets[0].total_in_val.text(),
+            widgets[1].total_out_val.text(),
+            widgets[1].balance_val.text(),
+            widgets[2].total_in_val.text(),
+            widgets[3].total_out_val.text(),
+            widgets[4].balance_val.text(),
+        ]
+        bad = [text for text in checks if text.strip().startswith("0")]
+        if bad:
+            return False, f"loading state still shows zero-like values: {bad}"
+        if not all("—" in text for text in checks):
+            return False, f"loading state should use placeholders, got {checks}"
+        return True, "ok"
+    finally:
+        for widget in widgets:
+            widget.close()
+
+
+def _check_lazy_section_snapshot_caches(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from datetime import datetime, timedelta
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors.sector_events import SectorEvents
+    from rem_card.ui.rem_card_sectors.sector_ivl import SectorIvl
+
+    app = QApplication.instance() or QApplication([])
+    _ = app
+
+    class FakeStatusService:
+        def __init__(self):
+            self.version = {}
+            self.calls = []
+
+        def get_latest_change_id(self, admission_id=None, include_global=False):
+            _ = include_global
+            return int(self.version.get(int(admission_id or 0), 1))
+
+        def get_events_in_range(self, admission_id, shift_start, shift_end):
+            self.calls.append(("range", int(admission_id), shift_start.isoformat(), shift_end.isoformat()))
+            return []
+
+        def get_events(self, admission_id):
+            self.calls.append(("all", int(admission_id)))
+            return []
+
+    class FakeRemCardService:
+        def __init__(self):
+            self.version = {}
+            self.calls = []
+
+        def get_latest_change_id(self, admission_id=None, include_global=False):
+            _ = include_global
+            return int(self.version.get(int(admission_id or 0), 1))
+
+        def get_ventilation_summary(self, admission_id):
+            self.calls.append(("summary", int(admission_id)))
+            return {"active_case": None, "total_duration_seconds": 0.0}
+
+        def get_ventilation_timeline(self, admission_id):
+            self.calls.append(("timeline", int(admission_id)))
+            return []
+
+        def get_latest_ventilation_case(self, admission_id):
+            self.calls.append(("latest", int(admission_id)))
+            return None
+
+        def get_patient(self, admission_id):
+            _ = admission_id
+            return None
+
+    shift_start = datetime(2026, 5, 3, 8, 0)
+    shift_end = shift_start + timedelta(hours=12)
+
+    events_service = FakeStatusService()
+    events_widget = SectorEvents()
+    ivl_service = FakeRemCardService()
+    ivl_widget = SectorIvl()
+    try:
+        events_widget.role = "Врач"
+        events_widget.shift_start = shift_start
+        events_widget.shift_end = shift_end
+        events_widget.set_patient(1, events_service)
+        events_widget.set_patient(2, events_service)
+        events_widget.set_patient(1, events_service)
+        event_patient_calls = [call[1] for call in events_service.calls]
+        if event_patient_calls != [1, 2]:
+            return False, f"events hot-cache should avoid repeated DB load, calls={events_service.calls}"
+
+        for admission_id in range(3, 11):
+            events_widget.set_patient(admission_id, events_service)
+        events_widget.set_patient(1, events_service)
+        events_widget.set_patient(11, events_service)
+        event_keys = list(events_widget._snapshot_cache.keys())
+        if len(event_keys) != 10 or not any(key[0] == 1 for key in event_keys) or any(key[0] == 2 for key in event_keys):
+            return False, f"events LRU cache mismatch: {event_keys}"
+
+        ivl_widget.set_runtime_context(ivl_service, 1)
+        ivl_widget.set_runtime_context(ivl_service, 2)
+        ivl_widget.set_runtime_context(ivl_service, 1)
+        ivl_patient_calls = [call[1] for call in ivl_service.calls if call[0] == "summary"]
+        if ivl_patient_calls != [1, 2]:
+            return False, f"ivl hot-cache should avoid repeated DB load, calls={ivl_service.calls}"
+
+        for admission_id in range(3, 11):
+            ivl_widget.set_runtime_context(ivl_service, admission_id)
+        ivl_widget.set_runtime_context(ivl_service, 1)
+        ivl_widget.set_runtime_context(ivl_service, 11)
+        ivl_keys = list(ivl_widget._snapshot_cache.keys())
+        if len(ivl_keys) != 10 or (1, "ivl") not in ivl_keys or (2, "ivl") in ivl_keys:
+            return False, f"ivl LRU cache mismatch: {ivl_keys}"
+        return True, "ok"
+    finally:
+        events_widget.close()
+        ivl_widget.close()
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -2320,6 +2542,9 @@ def main():
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
+        ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
+        ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
+        ("lazy_section_snapshot_caches", _check_lazy_section_snapshot_caches),
     ]
 
     result_items = []

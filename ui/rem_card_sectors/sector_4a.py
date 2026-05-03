@@ -76,3 +76,7 @@ class Sector4a(BaseSectorWidget):
         # Убран пробел после : (в setText) и шрифт уменьшен до 14px
         self.balance_val.setText(f"{prefix_cur}{balance_cur}/{prefix_day}{balance_day} мл")
         self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {color_cur}; border: none; background: transparent;")
+
+    def set_loading_state(self):
+        self.balance_val.setText("—/— мл")
+        self.balance_val.setStyleSheet("font-weight: bold; font-size: 14px; color: #6c757d; border: none; background: transparent;")

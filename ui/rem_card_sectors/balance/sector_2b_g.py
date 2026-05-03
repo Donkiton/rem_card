@@ -336,3 +336,12 @@ class Sector2b_g(QWidget):
         
         # Итоговая сумма должна быть зеленой по ТЗ
         self.total_in_val.setStyleSheet("font-weight: bold; color: #28a745; font-size: 14px; border: none; background: transparent;")
+
+    def set_loading_state(self):
+        self.infusion_val.setText("—/— мл")
+        self.preparats_val.setText("—/— мл")
+        self.blood_val.setText("—/— мл")
+        self.plasma_val.setText("—/— мл")
+        self.oral_val.setText("—/— мл")
+        self.total_in_val.setText("—/— мл")
+        self.total_in_val.setStyleSheet(self.val_style)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from datetime import datetime
 from typing import Optional
 
@@ -24,6 +25,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
 DIET_ENTITIES = {"diet_templates", "diet_plan", "oral_intake_events"}
+DIET_CACHE_LIMIT = 10
 
 
 class NoWheelComboBox(QComboBox):
@@ -50,6 +52,7 @@ class DietIntakeWidget(QWidget):
         self._templates_by_id = {}
         self._plan = None
         self._events = []
+        self._snapshot_cache = OrderedDict()
         self._plan_row_widgets = []
         self._fact_fields = []
         self._draft_template_id: Optional[int] = None
@@ -281,7 +284,79 @@ class DietIntakeWidget(QWidget):
         self.shift_date = shift_date
         self._fact_undo_stack = []
         self._reset_draft()
+        cached_applied = self._apply_cached_snapshot_if_available()
+        if cached_applied and self._is_cached_snapshot_current():
+            return
+        if not cached_applied:
+            self._render_empty("Загрузка питания...")
         self.refresh_data()
+
+    def _cache_key(self):
+        if not self.admission_id or not self.shift_date:
+            return None
+        return (
+            int(self.admission_id),
+            self.shift_date.isoformat(timespec="seconds"),
+            str(self.role or ""),
+            bool(self.read_only),
+        )
+
+    def _current_change_id(self) -> int:
+        if not self.service or not self.admission_id:
+            return 0
+        if hasattr(self.service, "get_latest_change_id"):
+            try:
+                return int(self.service.get_latest_change_id(admission_id=self.admission_id, include_global=True) or 0)
+            except TypeError:
+                try:
+                    return int(self.service.get_latest_change_id(admission_id=self.admission_id) or 0)
+                except Exception as exc:
+                    logger.warning("DietIntakeWidget change_id lookup failed: %s", exc)
+            except Exception as exc:
+                logger.warning("DietIntakeWidget change_id lookup failed: %s", exc)
+        return 0
+
+    def _apply_cached_snapshot_if_available(self) -> bool:
+        key = self._cache_key()
+        if key is None:
+            return False
+        snapshot = self._snapshot_cache.get(key)
+        if snapshot is None:
+            return False
+        self._snapshot_cache.move_to_end(key)
+        self._templates = list(snapshot.get("templates") or [])
+        self._templates_by_id = {int(t.id): t for t in self._templates if getattr(t, "id", None) is not None}
+        self._plan = snapshot.get("plan")
+        self._events = list(snapshot.get("events") or [])
+        self._render()
+        return True
+
+    def _is_cached_snapshot_current(self) -> bool:
+        key = self._cache_key()
+        if key is None:
+            return False
+        snapshot = self._snapshot_cache.get(key)
+        if snapshot is None:
+            return False
+        try:
+            return self._current_change_id() <= int(snapshot.get("version") or 0)
+        except Exception as exc:
+            logger.warning("DietIntakeWidget cache version check failed: %s", exc)
+            return False
+
+    def _store_snapshot_cache(self):
+        key = self._cache_key()
+        if key is None:
+            return
+        self._snapshot_cache[key] = {
+            "version": self._current_change_id(),
+            "templates": list(self._templates or []),
+            "plan": self._plan,
+            "events": list(self._events or []),
+        }
+        self._snapshot_cache.move_to_end(key)
+        while len(self._snapshot_cache) > DIET_CACHE_LIMIT:
+            self._snapshot_cache.popitem(last=False)
 
     def handle_data_changes(self, payload: dict):
         changed = {
@@ -296,11 +371,13 @@ class DietIntakeWidget(QWidget):
                 if change.get("entity_name")
             }
         if payload.get("forced") or changed.intersection(DIET_ENTITIES):
-            self.refresh_data()
+            self.refresh_data(force=True)
 
-    def refresh_data(self):
+    def refresh_data(self, *, force: bool = False):
         if not self.service or not self.admission_id or not self.shift_date:
             self._render_empty("Нет пациента")
+            return
+        if not force and self._apply_cached_snapshot_if_available() and self._is_cached_snapshot_current():
             return
         try:
             self._templates = self.service.list_diet_templates()
@@ -311,6 +388,7 @@ class DietIntakeWidget(QWidget):
             logger.warning("DietIntakeWidget refresh failed: %s", exc, exc_info=True)
             self._render_empty("Не удалось загрузить питание")
             return
+        self._store_snapshot_cache()
         self._render()
 
     def _render_empty(self, text: str):

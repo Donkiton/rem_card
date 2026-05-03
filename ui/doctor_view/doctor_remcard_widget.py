@@ -40,6 +40,14 @@ VITALS_CACHE_CHANGE_ENTITIES = {
     "diet_plan",
     "oral_intake_events",
 }
+CARD_CACHE_CHANGE_ENTITIES = VITALS_CACHE_CHANGE_ENTITIES | ORDER_CHANGE_ENTITIES | {
+    "diet_templates",
+    "ivl_episodes",
+    "transfusions",
+    "clinical_events",
+    "devices",
+    "respiratory_support",
+}
 
 class DoctorRemCardWidget(QWidget):
     archive_requested = Signal()
@@ -293,26 +301,53 @@ class DoctorRemCardWidget(QWidget):
                 mode="live",
                 variant="vitals",
             )
+            if hasattr(coordinator, "get_cached_vitals"):
+                return coordinator.get_cached_vitals(context.cache_key())
             if hasattr(coordinator, "get_current_cached_vitals"):
                 return coordinator.get_current_cached_vitals(context.cache_key())
-            return coordinator.get_cached_vitals(context.cache_key())
         except Exception as exc:
             logger.debug("Doctor vitals cache lookup failed: %s", exc)
             return None
 
+    def _get_cached_patient_card_snapshot(self, admission_id, shift_date):
+        if self._archive_read_only_mode:
+            return None
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not admission_id or shift_date is None:
+            return None
+        try:
+            context = coordinator.make_patient_snapshot_context(
+                source_db="live",
+                admission_id=int(admission_id),
+                shift_date=shift_date,
+                role="doctor",
+                mode="live",
+                variant="card_full",
+            )
+            if hasattr(coordinator, "get_cached_card"):
+                return coordinator.get_cached_card(context.cache_key())
+        except Exception as exc:
+            logger.debug("Doctor card cache lookup failed: %s", exc)
+        return None
+
     def _apply_patient_open_cache(self, admission_id, shift_date, snapshot):
         if not snapshot:
             return False
+        load_scope = (
+            "patient_open_card"
+            if ("balance_runtime" in snapshot or "fluids" in snapshot)
+            else "patient_open_vitals"
+        )
         request = {
             "admission_id": int(admission_id),
             "shift_date": shift_date,
             "ensure_initial_status": False,
             "show_empty_message": False,
-            "load_scope": "patient_open_vitals",
+            "load_scope": load_scope,
             "context_key": self._current_snapshot_context_key(
                 admission_id=admission_id,
                 shift_date=shift_date,
-                load_scope="patient_open_vitals",
+                load_scope=load_scope,
             ),
             "snapshot": snapshot,
             "from_cache": True,
@@ -452,6 +487,28 @@ class DoctorRemCardWidget(QWidget):
                     balance_only_committed=False,
                     ensure_initial_status=request["ensure_initial_status"],
                 )
+        elif load_scope in {"patient_open_card", "full"}:
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "load_patient_card_snapshot"):
+                snapshot = coordinator.load_patient_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    role="doctor",
+                    mode="archive" if self._archive_read_only_mode else "live",
+                    source_db=self._archive_source_db_path if self._archive_read_only_mode else "live",
+                    ensure_initial_status=request["ensure_initial_status"],
+                    balance_only_committed=False,
+                    force_refresh=False,
+                )
+            else:
+                snapshot = self.service.build_full_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    include_change_cursor=True,
+                    include_balance=True,
+                    balance_only_committed=False,
+                    ensure_initial_status=request["ensure_initial_status"],
+                )
         else:
             snapshot = self.service.build_full_card_snapshot(
                 request["admission_id"],
@@ -483,6 +540,22 @@ class DoctorRemCardWidget(QWidget):
             return
 
         snapshot = dict(request.get("snapshot") or {})
+        previous_snapshot = self._card_snapshot_cache or {}
+        if (
+            previous_snapshot
+            and not request.get("from_cache")
+            and previous_snapshot.get("cache_key") == snapshot.get("cache_key")
+            and int(previous_snapshot.get("version") or 0) == int(snapshot.get("version") or 0)
+            and previous_snapshot.get("scope") == snapshot.get("scope")
+            and previous_snapshot.get("load_trace_id") == snapshot.get("load_trace_id")
+        ):
+            logger.info(
+                "DoctorRemCardWidget skipped unchanged cached snapshot admission_id=%s scope=%s version=%s",
+                request.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
         self._card_snapshot_cache = snapshot
         self._balance_runtime_cache = snapshot.get("balance_runtime")
         effective_bounds = snapshot.get("effective_bounds")
@@ -572,24 +645,43 @@ class DoctorRemCardWidget(QWidget):
             self.balance_controller.hourly_cache = self.balance_controller._build_empty_hourly_cache()
             self.balance_controller._effective_bounds_cache = None
             if getattr(self.balance_controller, "quick_input", None):
-                self.balance_controller.quick_input.update_quick_values({})
+                quick_input = self.balance_controller.quick_input
+                if hasattr(quick_input, "set_loading_state"):
+                    quick_input.set_loading_state()
+                else:
+                    quick_input.update_quick_values({})
 
         sector_2b_g = getattr(self.layout_manager, "sector_2b_g", None)
         if sector_2b_g is not None:
-            sector_2b_g.update_values()
+            if hasattr(sector_2b_g, "set_loading_state"):
+                sector_2b_g.set_loading_state()
+            else:
+                sector_2b_g.update_values()
         sector_2b_v = getattr(self.layout_manager, "sector_2b_v", None)
         if sector_2b_v is not None:
-            sector_2b_v.update_balance(0, 0, 0, 0)
-            sector_2b_v.update_quick_values({})
+            if hasattr(sector_2b_v, "set_loading_state"):
+                sector_2b_v.set_loading_state()
+            else:
+                sector_2b_v.update_balance(0, 0, 0, 0)
+                sector_2b_v.update_quick_values({})
         sector_3a = getattr(self.layout_manager, "sector_3a", None)
         if sector_3a is not None:
-            sector_3a.update_values(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            if hasattr(sector_3a, "set_loading_state"):
+                sector_3a.set_loading_state()
+            else:
+                sector_3a.update_values(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         sector_3b = getattr(self.layout_manager, "sector_3b", None)
         if sector_3b is not None:
-            sector_3b.update_values(0, {})
+            if hasattr(sector_3b, "set_loading_state"):
+                sector_3b.set_loading_state()
+            else:
+                sector_3b.update_values(0, {})
         sector_4a = getattr(self.layout_manager, "sector_4a", None)
         if sector_4a is not None:
-            sector_4a.update_balance(0, 0, 0, 0)
+            if hasattr(sector_4a, "set_loading_state"):
+                sector_4a.set_loading_state()
+            else:
+                sector_4a.update_balance(0, 0, 0, 0)
 
     def _payload_is_relevant(self, payload: dict) -> bool:
         if self._archive_read_only_mode or not self.admission_id:
@@ -646,12 +738,14 @@ class DoctorRemCardWidget(QWidget):
         if self._archive_read_only_mode:
             return
         force_sources = self._payload_force_sources(payload)
-        has_relevant_entities = bool(changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES))
+        vitals_entities = changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES)
+        card_entities = changed_entities.intersection(CARD_CACHE_CHANGE_ENTITIES)
+        has_relevant_entities = bool(vitals_entities or card_entities)
         has_forced_source = bool(payload.get("forced") and force_sources)
         if not (has_relevant_entities or has_forced_source):
             return
         coordinator = self._get_read_coordinator()
-        if coordinator is None or not hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+        if coordinator is None:
             return
 
         admission_ids = {
@@ -662,7 +756,7 @@ class DoctorRemCardWidget(QWidget):
         for change in payload.get("changes") or []:
             entity_name = str(change.get("entity_name") or "")
             admission_id = change.get("admission_id")
-            if entity_name in VITALS_CACHE_CHANGE_ENTITIES and admission_id is not None:
+            if entity_name in CARD_CACHE_CHANGE_ENTITIES and admission_id is not None:
                 admission_ids.add(int(admission_id))
 
         if not admission_ids and (has_relevant_entities or has_forced_source):
@@ -671,9 +765,10 @@ class DoctorRemCardWidget(QWidget):
                 admission_ids.add(int(current_admission_id))
 
         for admission_id in admission_ids:
-            coordinator.invalidate_patient_vitals_for_admission(
+            logger.info(
+                "DoctorRemCardWidget preserves patient snapshot cache for stale-while-revalidate admission_id=%s reason=%s",
                 admission_id,
-                reason=f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
+                f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
             )
 
     def _on_data_changes(self, payload: dict):
@@ -761,7 +856,7 @@ class DoctorRemCardWidget(QWidget):
             self.balance_timer.start(60000)
         data_service = self._get_data_service()
         if data_service:
-            data_service.request_immediate_refresh(force_emit=True)
+            data_service.request_immediate_refresh(force_emit=False, source="patient_open_polling")
 
     def stop_polling(self):
         self.balance_timer.stop()
@@ -962,7 +1057,8 @@ class DoctorRemCardWidget(QWidget):
             card_start_dt, card_end_dt = self.service.get_day_period(date)
         except Exception:
             card_start_dt, card_end_dt = date, None
-        cached_vitals_snapshot = self._get_cached_patient_vitals_snapshot(admission_id, date)
+        cached_card_snapshot = self._get_cached_patient_card_snapshot(admission_id, date)
+        cached_vitals_snapshot = cached_card_snapshot or self._get_cached_patient_vitals_snapshot(admission_id, date)
 
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
@@ -1006,7 +1102,8 @@ class DoctorRemCardWidget(QWidget):
 
         self._last_change_id = 0
         self._apply_archive_read_only_state()
-        self._reset_balance_view_state()
+        if not cached_card_snapshot:
+            self._reset_balance_view_state()
         if cached_vitals_snapshot:
             self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
         if request_snapshot:
@@ -1015,11 +1112,26 @@ class DoctorRemCardWidget(QWidget):
                 if ensure_initial_status is None
                 else bool(ensure_initial_status)
             )
-            self._request_card_snapshot(
-                ensure_initial_status=should_ensure_initial_status,
-                show_empty_message=False,
-                load_scope="patient_open_vitals",
-            )
+            if cached_vitals_snapshot:
+                self._request_card_snapshot(
+                    ensure_initial_status=should_ensure_initial_status,
+                    show_empty_message=False,
+                    load_scope="patient_open_card",
+                )
+            else:
+                self._request_card_snapshot(
+                    ensure_initial_status=should_ensure_initial_status,
+                    show_empty_message=False,
+                    load_scope="patient_open_vitals",
+                )
+                QTimer.singleShot(
+                    0,
+                    lambda: self._request_card_snapshot(
+                        ensure_initial_status=should_ensure_initial_status,
+                        show_empty_message=False,
+                        load_scope="patient_open_card",
+                    ),
+                )
         
         if hasattr(self, 'layout_manager'):
             self.layout_manager.set_active_tab("Витальные функции")

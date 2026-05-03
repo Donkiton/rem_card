@@ -38,6 +38,14 @@ VITALS_CACHE_CHANGE_ENTITIES = {
     "diet_plan",
     "oral_intake_events",
 }
+CARD_CACHE_CHANGE_ENTITIES = VITALS_CACHE_CHANGE_ENTITIES | ORDER_CHANGE_ENTITIES | {
+    "diet_templates",
+    "ivl_episodes",
+    "transfusions",
+    "clinical_events",
+    "devices",
+    "respiratory_support",
+}
 W1_REFRESH_ENTITIES = {
     "patients",
     "admissions",
@@ -236,25 +244,50 @@ class NurseMainWidget(QWidget):
                 mode="live",
                 variant="vitals",
             )
+            if hasattr(coordinator, "get_cached_vitals"):
+                return coordinator.get_cached_vitals(context.cache_key())
             if hasattr(coordinator, "get_current_cached_vitals"):
                 return coordinator.get_current_cached_vitals(context.cache_key())
-            return coordinator.get_cached_vitals(context.cache_key())
         except Exception as exc:
             logger.debug("Nurse vitals cache lookup failed: %s", exc)
             return None
 
+    def _get_cached_patient_card_snapshot(self, admission_id, shift_date):
+        coordinator = self._get_read_coordinator()
+        if coordinator is None or not admission_id or shift_date is None:
+            return None
+        try:
+            context = coordinator.make_patient_snapshot_context(
+                source_db="live",
+                admission_id=int(admission_id),
+                shift_date=shift_date,
+                role="nurse",
+                mode="live",
+                variant="card_committed",
+            )
+            if hasattr(coordinator, "get_cached_card"):
+                return coordinator.get_cached_card(context.cache_key())
+        except Exception as exc:
+            logger.debug("Nurse card cache lookup failed: %s", exc)
+        return None
+
     def _apply_patient_open_cache(self, admission_id, shift_date, snapshot):
         if not snapshot:
             return False
+        load_scope = (
+            "patient_open_card"
+            if ("balance_runtime" in snapshot or "fluids" in snapshot)
+            else "patient_open_vitals"
+        )
         request = {
             "admission_id": int(admission_id),
             "shift_date": shift_date,
             "ensure_initial_status": False,
-            "load_scope": "patient_open_vitals",
+            "load_scope": load_scope,
             "context_key": self._current_snapshot_context_key(
                 admission_id=admission_id,
                 shift_date=shift_date,
-                load_scope="patient_open_vitals",
+                load_scope=load_scope,
             ),
             "snapshot": snapshot,
             "from_cache": True,
@@ -451,6 +484,28 @@ class NurseMainWidget(QWidget):
                     balance_only_committed=True,
                     ensure_initial_status=request["ensure_initial_status"],
                 )
+        elif load_scope in {"patient_open_card", "full"}:
+            coordinator = self._get_read_coordinator()
+            if coordinator is not None and hasattr(coordinator, "load_patient_card_snapshot"):
+                snapshot = coordinator.load_patient_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    role="nurse",
+                    mode="live",
+                    source_db="live",
+                    ensure_initial_status=request["ensure_initial_status"],
+                    balance_only_committed=True,
+                    force_refresh=False,
+                )
+            else:
+                snapshot = self.remcard_service.build_full_card_snapshot(
+                    request["admission_id"],
+                    request["shift_date"],
+                    include_change_cursor=True,
+                    include_balance=True,
+                    balance_only_committed=True,
+                    ensure_initial_status=request["ensure_initial_status"],
+                )
         else:
             snapshot = self.remcard_service.build_full_card_snapshot(
                 request["admission_id"],
@@ -480,6 +535,22 @@ class NurseMainWidget(QWidget):
             return
 
         snapshot = dict(request.get("snapshot") or {})
+        previous_snapshot = self._card_snapshot_cache or {}
+        if (
+            previous_snapshot
+            and not request.get("from_cache")
+            and previous_snapshot.get("cache_key") == snapshot.get("cache_key")
+            and int(previous_snapshot.get("version") or 0) == int(snapshot.get("version") or 0)
+            and previous_snapshot.get("scope") == snapshot.get("scope")
+            and previous_snapshot.get("load_trace_id") == snapshot.get("load_trace_id")
+        ):
+            logger.info(
+                "NurseMainWidget skipped unchanged cached snapshot admission_id=%s scope=%s version=%s",
+                request.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
         self._card_snapshot_cache = snapshot
         self._balance_runtime_cache = snapshot.get("balance_runtime")
         effective_bounds = snapshot.get("effective_bounds")
@@ -540,24 +611,43 @@ class NurseMainWidget(QWidget):
             self.balance_controller.hourly_cache = self.balance_controller._build_empty_hourly_cache()
             self.balance_controller._effective_bounds_cache = None
             if getattr(self.balance_controller, "quick_input", None):
-                self.balance_controller.quick_input.update_quick_values({})
+                quick_input = self.balance_controller.quick_input
+                if hasattr(quick_input, "set_loading_state"):
+                    quick_input.set_loading_state()
+                else:
+                    quick_input.update_quick_values({})
 
         sector_2b_g = getattr(self.layout_manager, "sector_2b_g", None)
         if sector_2b_g is not None:
-            sector_2b_g.update_values()
+            if hasattr(sector_2b_g, "set_loading_state"):
+                sector_2b_g.set_loading_state()
+            else:
+                sector_2b_g.update_values()
         sector_2b_v = getattr(self.layout_manager, "sector_2b_v", None)
         if sector_2b_v is not None:
-            sector_2b_v.update_balance(0, 0, 0, 0)
-            sector_2b_v.update_quick_values({})
+            if hasattr(sector_2b_v, "set_loading_state"):
+                sector_2b_v.set_loading_state()
+            else:
+                sector_2b_v.update_balance(0, 0, 0, 0)
+                sector_2b_v.update_quick_values({})
         sector_3a = getattr(self.layout_manager, "sector_3a", None)
         if sector_3a is not None:
-            sector_3a.update_values(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            if hasattr(sector_3a, "set_loading_state"):
+                sector_3a.set_loading_state()
+            else:
+                sector_3a.update_values(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
         sector_3b = getattr(self.layout_manager, "sector_3b", None)
         if sector_3b is not None:
-            sector_3b.update_values(0, {})
+            if hasattr(sector_3b, "set_loading_state"):
+                sector_3b.set_loading_state()
+            else:
+                sector_3b.update_values(0, {})
         sector_4a = getattr(self.layout_manager, "sector_4a", None)
         if sector_4a is not None:
-            sector_4a.update_balance(0, 0, 0, 0)
+            if hasattr(sector_4a, "set_loading_state"):
+                sector_4a.set_loading_state()
+            else:
+                sector_4a.update_balance(0, 0, 0, 0)
 
     def _payload_is_relevant(self, payload: dict) -> bool:
         adm_id = getattr(self.layout_manager, "current_admission_id", None)
@@ -612,12 +702,14 @@ class NurseMainWidget(QWidget):
 
     def _invalidate_vitals_cache_from_payload(self, payload: dict, changed_entities: set[str]) -> None:
         force_sources = self._payload_force_sources(payload)
-        has_relevant_entities = bool(changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES))
+        vitals_entities = changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES)
+        card_entities = changed_entities.intersection(CARD_CACHE_CHANGE_ENTITIES)
+        has_relevant_entities = bool(vitals_entities or card_entities)
         has_forced_source = bool(payload.get("forced") and force_sources)
         if not (has_relevant_entities or has_forced_source):
             return
         coordinator = self._get_read_coordinator()
-        if coordinator is None or not hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+        if coordinator is None:
             return
 
         admission_ids = {
@@ -628,7 +720,7 @@ class NurseMainWidget(QWidget):
         for change in payload.get("changes") or []:
             entity_name = str(change.get("entity_name") or "")
             admission_id = change.get("admission_id")
-            if entity_name in VITALS_CACHE_CHANGE_ENTITIES and admission_id is not None:
+            if entity_name in CARD_CACHE_CHANGE_ENTITIES and admission_id is not None:
                 admission_ids.add(int(admission_id))
 
         if not admission_ids and (has_relevant_entities or has_forced_source):
@@ -637,9 +729,10 @@ class NurseMainWidget(QWidget):
                 admission_ids.add(int(current_admission_id))
 
         for admission_id in admission_ids:
-            coordinator.invalidate_patient_vitals_for_admission(
+            logger.info(
+                "NurseMainWidget preserves patient snapshot cache for stale-while-revalidate admission_id=%s reason=%s",
                 admission_id,
-                reason=f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
+                f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
             )
 
     def _on_data_changes(self, payload: dict):
@@ -971,7 +1064,8 @@ class NurseMainWidget(QWidget):
         
         # Рассчитываем мед. сутки для правильной инициализации
         start_dt, end_dt = self.remcard_service.get_day_period(date)
-        cached_vitals_snapshot = self._get_cached_patient_vitals_snapshot(admission_id, date)
+        cached_card_snapshot = self._get_cached_patient_card_snapshot(admission_id, date)
+        cached_vitals_snapshot = cached_card_snapshot or self._get_cached_patient_vitals_snapshot(admission_id, date)
         
         # Обновляем контекст сектора событий (без принудительного раннего создания вкладки).
         if hasattr(self.layout_manager, "set_events_context"):
@@ -1028,14 +1122,21 @@ class NurseMainWidget(QWidget):
             QTimer.singleShot(0, lambda mgr=nurse_orders_mgr, aid=admission_id, d=date: mgr.set_context(aid, d))
 
         self._last_change_id = 0
-        self._reset_balance_view_state()
+        if not cached_card_snapshot:
+            self._reset_balance_view_state()
         if cached_vitals_snapshot:
             self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
-        self._request_card_snapshot(
-            ensure_initial_status=True,
-            load_scope="patient_open_vitals",
-        )
-        self._schedule_balance_prefetch(admission_id, date)
+        if cached_vitals_snapshot:
+            self._request_card_snapshot(
+                ensure_initial_status=True,
+                load_scope="patient_open_card",
+            )
+        else:
+            self._request_card_snapshot(
+                ensure_initial_status=True,
+                load_scope="patient_open_vitals",
+            )
+            self._schedule_balance_prefetch(admission_id, date)
         if hasattr(self, 'layout_manager'):
             self.layout_manager.set_active_tab("Витальные функции")
             if hasattr(self.layout_manager, 'sector_2b'):

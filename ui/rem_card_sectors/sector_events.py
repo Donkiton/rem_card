@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from datetime import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
@@ -19,6 +20,7 @@ def _movement_comment_text(status, reason_text):
 
 class SectorEvents(BaseSectorWidget):
     status_changed = Signal()
+    SNAPSHOT_CACHE_LIMIT = 10
 
     def __init__(self, parent=None):
         super().__init__("События", parent)
@@ -32,6 +34,7 @@ class SectorEvents(BaseSectorWidget):
         self._is_editing_time = False # Флаг для блокировки автообновления при редактировании
         self._post_status_refresh_pending = False
         self._post_status_emit_pending = False
+        self._snapshot_cache = OrderedDict()
 
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
@@ -194,15 +197,21 @@ class SectorEvents(BaseSectorWidget):
         return btn
 
     def set_patient(self, admission_id, status_service):
+        context_changed = admission_id != self.admission_id or status_service is not self.status_service
         self.admission_id = admission_id
         self.status_service = status_service
+        if context_changed and not self._get_cached_snapshot():
+            self._set_loading_state()
         self.refresh()
 
     def set_shift_context(self, shift_date, shift_start, shift_end):
         """Устанавливает временные границы для фильтрации событий."""
+        context_changed = shift_start != self.shift_start or shift_end != self.shift_end
         self.shift_date = shift_date
         self.shift_start = shift_start
         self.shift_end = shift_end
+        if context_changed and not self._get_cached_snapshot():
+            self._set_loading_state()
         self.refresh()
 
     def _should_skip_refresh(self, force=False):
@@ -233,6 +242,95 @@ class SectorEvents(BaseSectorWidget):
         from rem_card.app.logger import logger
         logger.debug(f"[SectorEvents] Refreshing for {self.shift_start.strftime('%d.%m %H:%M')}. Found {len(events)} events. Archive: {is_archive}")
         return events, is_archive
+
+    def _cache_key(self):
+        if not self.admission_id:
+            return None
+        shift_start = self.shift_start.isoformat() if self.shift_start else None
+        shift_end = self.shift_end.isoformat() if self.shift_end else None
+        return (int(self.admission_id), shift_start, shift_end, str(self.role or ""))
+
+    def _current_change_id(self):
+        if not self.status_service or not self.admission_id:
+            return None
+        if hasattr(self.status_service, "get_latest_change_id"):
+            try:
+                return int(
+                    self.status_service.get_latest_change_id(
+                        admission_id=int(self.admission_id),
+                        include_global=False,
+                    )
+                    or 0
+                )
+            except TypeError:
+                try:
+                    return int(self.status_service.get_latest_change_id(admission_id=int(self.admission_id)) or 0)
+                except Exception:
+                    return None
+            except Exception:
+                return None
+        data_service = getattr(self.status_service, "data_service", None)
+        if data_service is not None and hasattr(data_service, "get_latest_change_id"):
+            try:
+                return int(
+                    data_service.get_latest_change_id(
+                        admission_id=int(self.admission_id),
+                        include_global=False,
+                    )
+                    or 0
+                )
+            except Exception:
+                return None
+        status_dao = getattr(self.status_service, "status_dao", None)
+        db = getattr(status_dao, "db", None)
+        if db is not None and hasattr(db, "get_latest_change_id"):
+            try:
+                return int(db.get_latest_change_id(admission_id=int(self.admission_id), include_global=False) or 0)
+            except Exception:
+                return None
+        return None
+
+    def _get_cached_snapshot(self):
+        key = self._cache_key()
+        if key is None:
+            return None
+        snapshot = self._snapshot_cache.get(key)
+        if snapshot is not None:
+            self._snapshot_cache.move_to_end(key)
+        return snapshot
+
+    def _is_cached_snapshot_current(self, snapshot):
+        cached_version = snapshot.get("version") if snapshot else None
+        if cached_version is None:
+            return False
+        current_version = self._current_change_id()
+        return current_version is not None and int(current_version) <= int(cached_version)
+
+    def _store_snapshot(self, events, is_archive):
+        key = self._cache_key()
+        if key is None:
+            return
+        self._snapshot_cache[key] = {
+            "key": key,
+            "version": self._current_change_id(),
+            "events": list(events or []),
+            "is_archive": bool(is_archive),
+        }
+        self._snapshot_cache.move_to_end(key)
+        while len(self._snapshot_cache) > self.SNAPSHOT_CACHE_LIMIT:
+            self._snapshot_cache.popitem(last=False)
+
+    def _set_history_placeholder(self, text):
+        self._clear_history_rows()
+        placeholder = QLabel(text)
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setStyleSheet("color: #7f8c8d; padding: 12px; border: none;")
+        self.history_list_layout.insertWidget(0, placeholder)
+
+    def _set_loading_state(self, text="Загрузка событий..."):
+        self._set_history_placeholder(text)
+        self._update_buttons_state(None, is_archive=True)
+        self.btn_rollback.setEnabled(False)
 
     def _clear_history_rows(self):
         while self.history_list_layout.count() > 1:
@@ -478,7 +576,21 @@ class SectorEvents(BaseSectorWidget):
         if self._should_skip_refresh(force):
             return
 
+        cached = self._get_cached_snapshot()
+        if cached and not force:
+            self._apply_snapshot(cached)
+            if self._is_cached_snapshot_current(cached):
+                return
+        elif not cached:
+            self._set_loading_state()
+
         events, is_archive = self._load_events_for_refresh()
+        self._store_snapshot(events, is_archive)
+        self._apply_snapshot({"events": events, "is_archive": is_archive})
+
+    def _apply_snapshot(self, snapshot):
+        events = list(snapshot.get("events") or [])
+        is_archive = bool(snapshot.get("is_archive"))
         self._clear_history_rows()
         current_ev = self._populate_history_rows(events, is_archive)
         self._update_refresh_controls(current_ev, events, is_archive)

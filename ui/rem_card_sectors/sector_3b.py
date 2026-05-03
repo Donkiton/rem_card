@@ -156,3 +156,11 @@ class Sector3b(BaseSectorWidget):
             self.zond_val.setText(str(int(hour_data.get('ng_output', 0))))
             self.rvota_val.setText(str(int(hour_data.get('stool', 0))))
             self.other_val.setText(str(int(hour_data.get('other_output', 0))))
+
+    def set_loading_state(self):
+        self.total_out_val.setText("— мл")
+        self.diurez_val.setText("—")
+        self.drenazh_val.setText("—")
+        self.zond_val.setText("—")
+        self.rvota_val.setText("—")
+        self.other_val.setText("—")

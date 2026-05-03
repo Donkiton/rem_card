@@ -213,6 +213,16 @@ class Sector2b_v(QWidget):
         self.rvota_x.setText(str(int(hour_data.get('stool', 0))))
         self.other_x.setText(str(int(hour_data.get('other_output', 0))))
 
+    def set_loading_state(self):
+        self.balance_val.setText("—/— мл")
+        self.balance_val.setStyleSheet("font-weight: bold; font-size: 16px; color: #6c757d;")
+        self.total_out_val.setText("— мл")
+        self.diurez_x.setText("—")
+        self.drenazh_x.setText("—")
+        self.zond_x.setText("—")
+        self.rvota_x.setText("—")
+        self.other_x.setText("—")
+
     def set_quick_input_enabled(self, enabled: bool):
         """Блокирует или разблокирует поля быстрого ввода (для архивных карт)."""
         bg_color = "white" if enabled else "#f0f0f0"

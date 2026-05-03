@@ -146,3 +146,11 @@ class Sector3a(BaseSectorWidget):
         self.blood_val.setText(f"{int(blood)}/{int(blood_daily)} мл")
         self.plasma_val.setText(f"{int(plasma)}/{int(plasma_daily)} мл")
         self.oral_val.setText(f"{int(oral)}/{int(oral_daily)} мл")
+
+    def set_loading_state(self):
+        self.total_in_val.setText("—/— мл")
+        self.infusion_val.setText("—/— мл")
+        self.preparats_val.setText("—/— мл")
+        self.blood_val.setText("—/— мл")
+        self.plasma_val.setText("—/— мл")
+        self.oral_val.setText("—/— мл")

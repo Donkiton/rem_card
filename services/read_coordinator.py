@@ -15,7 +15,7 @@ from rem_card.data.dao.sync_cursor import EPOCH_SYNC_TS, is_cursor_newer, make_s
 from rem_card.services.remcard_facade import orders_snapshot_caller
 
 
-READ_CACHE_MAX_PATIENTS = min(5, max(3, int(os.environ.get("REMCARD_READ_CACHE_PATIENTS", "5"))))
+READ_CACHE_MAX_PATIENTS = min(10, max(3, int(os.environ.get("REMCARD_READ_CACHE_PATIENTS", "10"))))
 READ_CACHE_MAX_TABS_PER_PATIENT = min(4, max(3, int(os.environ.get("REMCARD_READ_CACHE_TABS_PER_PATIENT", "4"))))
 READ_MAX_CONCURRENT_LOADS = min(3, max(1, int(os.environ.get("REMCARD_READ_MAX_CONCURRENT_LOADS", "2"))))
 READ_LOAD_TIMEOUT_SEC = max(10.0, float(os.environ.get("REMCARD_READ_LOAD_TIMEOUT_SEC", "15")))
@@ -351,6 +351,8 @@ class ReadCoordinator:
 
         self._patient_vitals_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._patient_cache_index: dict[int, OrderedDict[str, None]] = {}
+        self._patient_card_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
+        self._patient_card_cache_index: dict[int, OrderedDict[str, None]] = {}
 
         self._orders_tab_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._orders_cache_index: dict[int, OrderedDict[str, None]] = {}
@@ -509,6 +511,89 @@ class ReadCoordinator:
             context.mode,
             load_strategy,
             fallback_used,
+            frozen_snapshot.get("version"),
+            context_hash,
+            trace_id,
+            elapsed_ms,
+        )
+        return frozen_snapshot
+
+    def load_patient_card_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        ensure_initial_status: bool = False,
+        balance_only_committed: bool = False,
+        force_refresh: bool = True,
+    ):
+        context = self.make_patient_snapshot_context(
+            source_db=source_db or "live",
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            variant="card_committed" if balance_only_committed else "card_full",
+        )
+        cache_key = context.cache_key()
+        context_hash = context.hash()
+        trace_id = self._next_trace_id("patient_card", context_hash)
+        started = time.perf_counter()
+
+        if context.mode == "live" and not force_refresh:
+            cached = self.get_current_cached_card(cache_key)
+            if cached is not None:
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                logger.info(
+                    "[ReadCoordinator] patient_card cache_hit=1 admission_id=%s role=%s mode=%s version=%s context_hash=%s trace_id=%s elapsed_ms=%.2f",
+                    context.admission_id,
+                    context.role,
+                    context.mode,
+                    cached.get("version"),
+                    context_hash,
+                    cached.get("load_trace_id") or trace_id,
+                    elapsed_ms,
+                )
+                return cached
+
+        snapshot = self.remcard_service.build_full_card_snapshot(
+            context.admission_id,
+            context.shift_date,
+            include_change_cursor=True,
+            include_balance=True,
+            balance_only_committed=balance_only_committed,
+            ensure_initial_status=ensure_initial_status,
+        )
+
+        frozen_snapshot = self._finalize_snapshot(
+            snapshot=snapshot,
+            scope="patient_card",
+            tab_name="card",
+            cache_key=cache_key,
+            context_hash=context_hash,
+            role=context.role,
+            mode=context.mode,
+            source_db=context.source_db,
+            variant=context.variant,
+            load_strategy="patient_card",
+            load_trace_id=trace_id,
+            source="patient_open",
+            stale=False,
+            invalidate_reason=None,
+        )
+
+        if context.mode == "live":
+            self._store_patient_card(context, frozen_snapshot)
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            "[ReadCoordinator] patient_card loaded admission_id=%s role=%s mode=%s cache_hit=0 version=%s context_hash=%s trace_id=%s elapsed_ms=%.2f",
+            context.admission_id,
+            context.role,
+            context.mode,
             frozen_snapshot.get("version"),
             context_hash,
             trace_id,
@@ -862,10 +947,50 @@ class ReadCoordinator:
             )
             return snapshot
 
-        self._patient_vitals_cache.pop(cache_key, None)
-        self._drop_cache_index_by_key(self._patient_cache_index, cache_key)
         logger.info(
-            "[ReadCoordinator] patient_vitals cache_stale=1 admission_id=%s cached_version=%s current_version=%s",
+            "[ReadCoordinator] patient_vitals cache_stale=1 admission_id=%s cached_version=%s current_version=%s action=preserve_for_swr",
+            admission_id,
+            cached_version,
+            current_version,
+        )
+        return None
+
+    def get_cached_card(self, cache_key):
+        snapshot = self._patient_card_cache.get(cache_key)
+        if snapshot is None:
+            return None
+        self._patient_card_cache.move_to_end(cache_key)
+        return snapshot
+
+    def get_current_cached_card(self, cache_key):
+        snapshot = self.get_cached_card(cache_key)
+        if snapshot is None:
+            return None
+
+        try:
+            admission_id = int(cache_key[1])
+            cached_version = int(snapshot.get("version") or 0)
+            current_version = int(
+                self.remcard_service.get_latest_change_id(admission_id=admission_id) or 0
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ReadCoordinator] patient_card cache_version_check_failed key=%s error=%s",
+                cache_key,
+                exc,
+            )
+            return None
+
+        if current_version <= cached_version:
+            logger.info(
+                "[ReadCoordinator] patient_card cache_current=1 admission_id=%s version=%s",
+                admission_id,
+                cached_version,
+            )
+            return snapshot
+
+        logger.info(
+            "[ReadCoordinator] patient_card cache_stale=1 admission_id=%s cached_version=%s current_version=%s action=preserve_for_swr",
             admission_id,
             cached_version,
             current_version,
@@ -913,6 +1038,26 @@ class ReadCoordinator:
         if removed:
             logger.info(
                 "[ReadCoordinator] invalidated patient_vitals admission_id=%s entries=%s reason=%s",
+                target_admission_id,
+                removed,
+                reason or "unknown",
+            )
+        return removed
+
+    def invalidate_patient_card_for_admission(self, admission_id: int, *, reason: str = "") -> int:
+        if admission_id is None:
+            return 0
+        target_admission_id = int(admission_id)
+        removed = 0
+        for cache_key in list(self._patient_card_cache.keys()):
+            if int(cache_key[1]) != target_admission_id:
+                continue
+            self._patient_card_cache.pop(cache_key, None)
+            self._drop_cache_index_by_key(self._patient_card_cache_index, cache_key)
+            removed += 1
+        if removed:
+            logger.info(
+                "[ReadCoordinator] invalidated patient_card admission_id=%s entries=%s reason=%s",
                 target_admission_id,
                 removed,
                 reason or "unknown",
@@ -1015,6 +1160,16 @@ class ReadCoordinator:
             self._drop_cache_index_by_key(self._patient_cache_index, evicted_key)
             logger.info("[ReadCoordinator] evicted patient_vitals cache key=%s", evicted_key)
 
+    def _store_patient_card(self, context: PatientSnapshotContext, snapshot) -> None:
+        cache_key = context.cache_key()
+        self._patient_card_cache[cache_key] = snapshot
+        self._patient_card_cache.move_to_end(cache_key)
+        self._track_patient_cache_entry(self._patient_card_cache_index, context)
+        while len(self._patient_card_cache) > self.max_cached_patients:
+            evicted_key, _ = self._patient_card_cache.popitem(last=False)
+            self._drop_cache_index_by_key(self._patient_card_cache_index, evicted_key)
+            logger.info("[ReadCoordinator] evicted patient_card cache key=%s", evicted_key)
+
     def _store_orders_tab(self, context: OrdersContext, snapshot) -> None:
         cache_key = context.cache_key()
         self._orders_tab_cache[cache_key] = snapshot
@@ -1055,6 +1210,8 @@ class ReadCoordinator:
             payload["vitals"] = tuple(payload.get("vitals") or ())
         if "vitals_extended" in payload:
             payload["vitals_extended"] = tuple(payload.get("vitals_extended") or ())
+        if "fluids" in payload:
+            payload["fluids"] = tuple(payload.get("fluids") or ())
         if "latest_values" in payload:
             payload["latest_values"] = dict(payload.get("latest_values") or {})
         if "settings" in payload:
@@ -1070,6 +1227,8 @@ class ReadCoordinator:
             payload["orders_admin_cursor"] = self._compute_admin_sync_cursor(payload.get("admin_rows") or ())
         if payload.get("balance_runtime"):
             payload["balance_runtime"] = dict(payload.get("balance_runtime") or {})
+        if payload.get("balance_calc"):
+            payload["balance_calc"] = dict(payload.get("balance_calc") or {})
         version = int(payload.get("change_id") or 0)
         payload["version"] = version
         payload["timestamp"] = datetime.now().isoformat(timespec="milliseconds")
@@ -1107,7 +1266,12 @@ class ReadCoordinator:
         admission_id: int,
         context_hash: str,
     ) -> None:
-        target_cache = self._patient_vitals_cache if index_store is self._patient_cache_index else self._orders_tab_cache
+        if index_store is self._patient_cache_index:
+            target_cache = self._patient_vitals_cache
+        elif index_store is self._patient_card_cache_index:
+            target_cache = self._patient_card_cache
+        else:
+            target_cache = self._orders_tab_cache
         for cache_key in list(target_cache.keys()):
             if int(cache_key[1]) == int(admission_id) and str(cache_key[-1]) == str(context_hash):
                 target_cache.pop(cache_key, None)
@@ -1126,6 +1290,14 @@ class ReadCoordinator:
         patient_tabs.pop(context.hash(), None)
         if not patient_tabs:
             self._patient_cache_index.pop(int(context.admission_id), None)
+
+    def _drop_patient_card_cache_index(self, context: SnapshotContext) -> None:
+        patient_tabs = self._patient_card_cache_index.get(int(context.admission_id))
+        if not patient_tabs:
+            return
+        patient_tabs.pop(context.hash(), None)
+        if not patient_tabs:
+            self._patient_card_cache_index.pop(int(context.admission_id), None)
 
     def _drop_orders_cache_index(self, context: OrdersContext) -> None:
         patient_tabs = self._orders_cache_index.get(int(context.admission_id))

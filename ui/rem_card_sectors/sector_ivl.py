@@ -1,3 +1,4 @@
+from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -24,6 +25,8 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
 class SectorIvl(BaseSectorWidget):
+    SNAPSHOT_CACHE_LIMIT = 10
+
     EVENT_LABELS = {
         "START_VENT": "Старт ИВЛ",
         "MODE_CHANGE": "Смена режима",
@@ -55,6 +58,7 @@ class SectorIvl(BaseSectorWidget):
         self.remcard_service = None
         self.admission_id: Optional[int] = None
         self.active_case_id: Optional[int] = None
+        self._snapshot_cache = OrderedDict()
 
         self._build_ui()
         self.refresh()
@@ -447,10 +451,16 @@ class SectorIvl(BaseSectorWidget):
         self._on_event_type_changed()
 
     def set_runtime_context(self, remcard_service=None, admission_id: Optional[int] = None):
+        context_changed = (
+            (remcard_service is not None and remcard_service is not self.remcard_service)
+            or (admission_id is not None and admission_id != self.admission_id)
+        )
         if remcard_service is not None:
             self.remcard_service = remcard_service
         if admission_id is not None:
             self.admission_id = admission_id
+        if context_changed and not self._get_cached_snapshot():
+            self.set_loading_state()
         self.refresh()
 
     def showEvent(self, event):  # noqa: N802
@@ -461,21 +471,104 @@ class SectorIvl(BaseSectorWidget):
         self._resolve_runtime_context()
 
         if not self.remcard_service or not self.admission_id:
-            self.active_case_id = None
-            self.lbl_case_status.setText("Случай: пациент не выбран")
-            self.lbl_case_duration.setText("Длительность текущего случая: --")
-            self.lbl_total_duration.setText("Суммарное время ИВЛ: --")
-            self.lbl_tube_duration.setText("Длительность текущей трубки: --")
-            self.lbl_tube_alert.setText("Алерт трубки: --")
-            self._set_actions_enabled(False, has_case_history=False)
-            self.history_table.setRowCount(0)
+            self.set_loading_state("Случай: пациент не выбран")
             return
+
+        cached = self._get_cached_snapshot()
+        if cached:
+            self._apply_snapshot(cached)
+            if self._is_cached_snapshot_current(cached):
+                return
+        else:
+            self.set_loading_state()
 
         summary = self.remcard_service.get_ventilation_summary(self.admission_id)
         timeline = self.remcard_service.get_ventilation_timeline(self.admission_id)
+        latest_case = None
+        if not summary.get("active_case"):
+            latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
+
+        snapshot = self._make_snapshot(summary=summary, timeline=timeline, latest_case=latest_case)
+        self._store_snapshot(snapshot)
+        self._apply_snapshot(snapshot)
+
+    def set_loading_state(self, status_text: str = "Случай: загрузка..."):
+        self.active_case_id = None
+        self.lbl_case_status.setText(status_text)
+        self.lbl_case_duration.setText("Длительность текущего случая: --")
+        self.lbl_total_duration.setText("Суммарное время ИВЛ: --")
+        self.lbl_tube_duration.setText("Длительность текущей трубки: --")
+        self.lbl_tube_alert.setText("Алерт трубки: --")
+        self.lbl_tube_alert.setStyleSheet("border: none; color: #2f3c48;")
+        self._set_actions_enabled(False, has_case_history=False)
+        self.history_table.setRowCount(0)
+
+    def _cache_key(self):
+        if not self.admission_id:
+            return None
+        return (int(self.admission_id), "ivl")
+
+    def _current_change_id(self) -> Optional[int]:
+        if not self.remcard_service or not self.admission_id:
+            return None
+        if not hasattr(self.remcard_service, "get_latest_change_id"):
+            return None
+        try:
+            return int(
+                self.remcard_service.get_latest_change_id(
+                    admission_id=int(self.admission_id),
+                    include_global=False,
+                )
+                or 0
+            )
+        except TypeError:
+            try:
+                return int(self.remcard_service.get_latest_change_id(admission_id=int(self.admission_id)) or 0)
+            except Exception:
+                return None
+        except Exception:
+            return None
+
+    def _get_cached_snapshot(self):
+        key = self._cache_key()
+        if key is None:
+            return None
+        snapshot = self._snapshot_cache.get(key)
+        if snapshot is not None:
+            self._snapshot_cache.move_to_end(key)
+        return snapshot
+
+    def _is_cached_snapshot_current(self, snapshot) -> bool:
+        cached_version = snapshot.get("version") if snapshot else None
+        if cached_version is None:
+            return False
+        current_version = self._current_change_id()
+        return current_version is not None and int(current_version) <= int(cached_version)
+
+    def _make_snapshot(self, *, summary, timeline, latest_case):
+        return {
+            "key": self._cache_key(),
+            "version": self._current_change_id(),
+            "summary": dict(summary or {}),
+            "timeline": list(timeline or []),
+            "latest_case": latest_case,
+        }
+
+    def _store_snapshot(self, snapshot):
+        key = snapshot.get("key") if snapshot else None
+        if key is None:
+            return
+        self._snapshot_cache[key] = snapshot
+        self._snapshot_cache.move_to_end(key)
+        while len(self._snapshot_cache) > self.SNAPSHOT_CACHE_LIMIT:
+            self._snapshot_cache.popitem(last=False)
+
+    def _apply_snapshot(self, snapshot):
+        summary = dict(snapshot.get("summary") or {})
+        timeline = list(snapshot.get("timeline") or [])
+        latest_case = snapshot.get("latest_case")
         active_case = summary.get("active_case")
         self.active_case_id = active_case.id if active_case else None
-        history_case_id = self.active_case_id
 
         if active_case:
             self.lbl_case_status.setText(
@@ -493,10 +586,8 @@ class SectorIvl(BaseSectorWidget):
                 "border: none; color: #c0392b; font-weight: bold;" if alert else "border: none; color: #2f3c48;"
             )
             self._set_actions_enabled(True, has_case_history=bool(timeline))
-            self._reload_history()
+            self._reload_history(timeline)
         else:
-            latest_case = self.remcard_service.get_latest_ventilation_case(self.admission_id)
-            history_case_id = latest_case.id if latest_case else None
             if latest_case and latest_case.end_time:
                 self.lbl_case_status.setText(
                     f"Последний случай #{latest_case.episode_number}: закрыт {latest_case.end_time.strftime('%d.%m.%Y %H:%M')}"
@@ -509,7 +600,7 @@ class SectorIvl(BaseSectorWidget):
             self.lbl_tube_alert.setStyleSheet("border: none; color: #2f3c48;")
             self._set_actions_enabled(False, has_case_history=bool(timeline))
             if timeline:
-                self._reload_history()
+                self._reload_history(timeline)
             else:
                 self.history_table.setRowCount(0)
 
@@ -562,11 +653,13 @@ class SectorIvl(BaseSectorWidget):
         self.remcard_service = runtime_service
         self.admission_id = runtime_admission
 
-    def _reload_history(self):
+    def _reload_history(self, events=None):
         if not self.remcard_service or not self.admission_id:
             self.history_table.setRowCount(0)
             return
-        events = list(reversed(self.remcard_service.get_ventilation_timeline(self.admission_id)))
+        if events is None:
+            events = self.remcard_service.get_ventilation_timeline(self.admission_id)
+        events = list(reversed(events))
         self.history_table.setRowCount(len(events))
         for row_idx, event in enumerate(events):
             event_type = getattr(event.event_type, "value", str(event.event_type))

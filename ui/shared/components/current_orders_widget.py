@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from collections import OrderedDict
 import time
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import QTimer
@@ -10,6 +11,7 @@ PENDING_MARK_TTL_SEC = 8.0
 SECTOR_1A_BEFORE_MIN = 60
 SECTOR_1A_AFTER_MIN = 180
 TIME_TIMER_MAX_MS = 60 * 60 * 1000
+CURRENT_ORDERS_CACHE_LIMIT = 10
 
 class CurrentNurseOrdersWidget(QWidget):
     """Менеджер назначений в 1а. Сектор 5 теперь принадлежит питанию."""
@@ -25,6 +27,7 @@ class CurrentNurseOrdersWidget(QWidget):
         self._last_lock_warning_ts = 0.0
         self._pending_marks = {}
         self._all_data = []
+        self._snapshot_cache = OrderedDict()
         
         self._time_timer = QTimer(self)
         self._time_timer.setSingleShot(True)
@@ -37,10 +40,73 @@ class CurrentNurseOrdersWidget(QWidget):
             self._clear_all_cards()
             self._pending_marks.clear()
             self._all_data = []
-            
+
         self.admission_id = admission_id
         self.shift_date = shift_date
+        cached_applied = self._apply_cached_snapshot_if_available()
+        if cached_applied and self._is_cached_snapshot_current():
+            return
         self.refresh_data()
+
+    def _cache_key(self):
+        if not self.admission_id or not self.shift_date:
+            return None
+        return (
+            int(self.admission_id),
+            self.shift_date.isoformat(timespec="seconds"),
+        )
+
+    def _current_change_id(self) -> int:
+        if not self.service or not self.admission_id:
+            return 0
+        if hasattr(self.service, "get_latest_change_id"):
+            try:
+                return int(self.service.get_latest_change_id(admission_id=self.admission_id, include_global=False) or 0)
+            except TypeError:
+                try:
+                    return int(self.service.get_latest_change_id(admission_id=self.admission_id) or 0)
+                except Exception as exc:
+                    logger.warning("CurrentNurseOrdersWidget change_id lookup failed: %s", exc)
+            except Exception as exc:
+                logger.warning("CurrentNurseOrdersWidget change_id lookup failed: %s", exc)
+        return 0
+
+    def _apply_cached_snapshot_if_available(self) -> bool:
+        key = self._cache_key()
+        if key is None:
+            return False
+        snapshot = self._snapshot_cache.get(key)
+        if snapshot is None:
+            return False
+        self._snapshot_cache.move_to_end(key)
+        self._all_data = self._apply_pending_marks(list(snapshot.get("data") or []))
+        self._render_from_cache()
+        return True
+
+    def _is_cached_snapshot_current(self) -> bool:
+        key = self._cache_key()
+        if key is None:
+            return False
+        snapshot = self._snapshot_cache.get(key)
+        if snapshot is None:
+            return False
+        try:
+            return self._current_change_id() <= int(snapshot.get("version") or 0)
+        except Exception as exc:
+            logger.warning("CurrentNurseOrdersWidget cache version check failed: %s", exc)
+            return False
+
+    def _store_snapshot_cache(self, data_list):
+        key = self._cache_key()
+        if key is None:
+            return
+        self._snapshot_cache[key] = {
+            "version": self._current_change_id(),
+            "data": [dict(item) for item in (data_list or [])],
+        }
+        self._snapshot_cache.move_to_end(key)
+        while len(self._snapshot_cache) > CURRENT_ORDERS_CACHE_LIMIT:
+            self._snapshot_cache.popitem(last=False)
 
     def _clear_all_cards(self):
         if hasattr(self, "_time_timer"):
@@ -52,8 +118,11 @@ class CurrentNurseOrdersWidget(QWidget):
     def _clear_sector_5(self):
         return
 
-    def refresh_data(self):
+    def refresh_data(self, *, force: bool = False):
         if not self.admission_id or not self.shift_date:
+            return
+
+        if not force and self._apply_cached_snapshot_if_available() and self._is_cached_snapshot_current():
             return
             
         # Запрашиваем свежие данные
@@ -65,6 +134,7 @@ class CurrentNurseOrdersWidget(QWidget):
             else:
                 logger.error("CurrentNurseOrdersWidget refresh failed: %s", exc, exc_info=True)
             return
+        self._store_snapshot_cache(all_data)
         self._all_data = self._apply_pending_marks(all_data)
         self._render_from_cache()
 
@@ -94,11 +164,11 @@ class CurrentNurseOrdersWidget(QWidget):
                 continue
             admission_id = change.get("admission_id")
             if admission_id is None or int(admission_id) == int(self.admission_id):
-                self.refresh_data()
+                self.refresh_data(force=True)
                 return
 
         if payload.get("forced") or not changes:
-            self.refresh_data()
+            self.refresh_data(force=True)
 
     def _render_from_cache(self):
         now = datetime.now()
