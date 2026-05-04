@@ -15,6 +15,10 @@ PERSISTENT_SNAPSHOT_CACHE_MAX_FILES = max(
     20,
     int(os.environ.get("REMCARD_PERSISTENT_SNAPSHOT_CACHE_MAX_FILES", "300")),
 )
+PERSISTENT_SNAPSHOT_CACHE_MIN_TTL_HOURS = max(
+    1.0,
+    float(os.environ.get("REMCARD_PERSISTENT_SNAPSHOT_CACHE_MIN_TTL_HOURS", "24")),
+)
 PERSISTENT_SNAPSHOT_CACHE_DIR = Path(LOCAL_CACHE_DIR) / "patient_snapshots"
 
 
@@ -34,9 +38,11 @@ def _cache_path(namespace: str, cache_key: Any) -> Path:
 
 def _expiry_from_shift_key(shift_key: str) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(str(shift_key)) + timedelta(days=1)
+        shift_expiry = datetime.fromisoformat(str(shift_key)) + timedelta(days=1)
     except Exception:
         return None
+    min_expiry = datetime.now() + timedelta(hours=PERSISTENT_SNAPSHOT_CACHE_MIN_TTL_HOURS)
+    return max(shift_expiry, min_expiry)
 
 
 def expiry_from_cache_key(cache_key: Any, *, shift_key_index: int = 2) -> Optional[datetime]:

@@ -15,6 +15,7 @@ from rem_card.app.unified_db_schema import (
     ensure_unified_schema,
     is_unified_schema_ready,
 )
+from rem_card.app.version import APP_VERSION
 
 
 @dataclass(frozen=True)
@@ -172,7 +173,7 @@ def ensure_unified_schema_with_migration_backup(
     backup_dir: str,
     invalid_dir: Optional[str] = None,
     policy_path: Optional[str] = None,
-    min_client_version: str = SCHEMA_REQUIRED_CLIENT_VERSION,
+    min_client_version: Optional[str] = None,
     role: Optional[str] = None,
     baza_dir: Optional[str] = None,
     logger: Optional[logging.Logger] = None,
@@ -182,6 +183,7 @@ def ensure_unified_schema_with_migration_backup(
 ) -> SchemaMigrationResult:
     logger = logger or logging.getLogger(__name__)
     _ = db_path
+    effective_min_client_version = str(min_client_version or APP_VERSION or SCHEMA_REQUIRED_CLIENT_VERSION)
 
     if controller is not None:
         with controller.connection_guard(conn):
@@ -192,7 +194,7 @@ def ensure_unified_schema_with_migration_backup(
                     backup_dir=backup_dir,
                     invalid_dir=invalid_dir,
                     policy_path=policy_path,
-                    min_client_version=min_client_version,
+                    min_client_version=effective_min_client_version,
                     role=role,
                     baza_dir=baza_dir,
                     logger=logger,
@@ -210,7 +212,7 @@ def ensure_unified_schema_with_migration_backup(
             backup_dir=backup_dir,
             invalid_dir=invalid_dir,
             policy_path=policy_path,
-            min_client_version=min_client_version,
+            min_client_version=effective_min_client_version,
             role=role,
             baza_dir=baza_dir,
             logger=logger,
