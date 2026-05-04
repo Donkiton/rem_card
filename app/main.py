@@ -193,6 +193,74 @@ def _launch_exit_update_if_needed() -> bool:
         return False
 
 
+def _startup_block_requires_update(message: str, technical_reason: str = "") -> bool:
+    text = f"{message}\n{technical_reason}".lower()
+    markers = (
+        "обновите программу",
+        "версия программы устарела",
+        "требуется обнов",
+        "профиль доступа к базе не соответствует требованиям",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _find_startup_update_candidate():
+    if not is_compiled():
+        return None
+    try:
+        from rem_card.app.update_checker import find_best_update
+        from rem_card.app.update_launcher import is_update_in_progress
+
+        if is_update_in_progress():
+            _write_startup_local_log("startup update required, but update is already in progress")
+            return None
+
+        candidate = find_best_update()
+        if candidate:
+            _write_startup_local_log(
+                "startup update found: "
+                f"current={APP_VERSION}; target={candidate.version}; source={candidate.prog_dir}"
+            )
+        else:
+            _write_startup_local_log(
+                f"startup update required, but no update package found: current={APP_VERSION}"
+            )
+        return candidate
+    except Exception as exc:
+        _write_startup_local_log(f"startup update check failed: {exc}")
+        return None
+
+
+def _launch_startup_update(candidate, *, role: Optional[str], reason: str) -> bool:
+    if not candidate or not is_compiled():
+        return False
+    try:
+        from rem_card.app.update_launcher import launch_update
+
+        launched = launch_update(candidate, restart_exe=None, wait_for_parent=True)
+        _write_startup_local_log(
+            f"startup update launch {'ok' if launched else 'failed'}: "
+            f"role={role}; current={APP_VERSION}; target={candidate.version}; "
+            f"source={candidate.prog_dir}; reason={reason}"
+        )
+        if not launched:
+            _show_custom_warning(
+                "Обновление программы",
+                "Не удалось запустить обновление автоматически.\n\n"
+                "Закройте это окно и повторите запуск программы через минуту. "
+                "Если сообщение повторяется, сообщите ответственному.",
+            )
+        return launched
+    except Exception as exc:
+        _write_startup_local_log(f"startup update launch crashed: {exc}")
+        _show_custom_warning(
+            "Обновление программы",
+            "Не удалось запустить обновление автоматически.\n\n"
+            "Повторите запуск программы через минуту. Если сообщение повторяется, сообщите ответственному.",
+        )
+        return False
+
+
 def _run_path_setup():
     os.environ["REMCARD_PATH_SETUP_MODE"] = "1"
 
@@ -262,7 +330,19 @@ def _validate_compiled_role_startup(role: Optional[str]) -> bool:
     _write_startup_local_log(
         f"startup blocked for role={role}: {result.user_message}; technical={result.technical_reason}"
     )
-    _show_custom_warning("База данных недоступна", result.user_message)
+    update_candidate = None
+    if _startup_block_requires_update(result.user_message, result.technical_reason):
+        update_candidate = _find_startup_update_candidate()
+
+    if update_candidate:
+        message = (
+            f"{result.user_message}\n\n"
+            f"После нажатия \"Понятно\" будет запущено обновление до версии {update_candidate.version}."
+        )
+        _show_custom_warning("Требуется обновление", message)
+        _launch_startup_update(update_candidate, role=role, reason=result.technical_reason)
+    else:
+        _show_custom_warning("База данных недоступна", result.user_message)
     return False
 
 
