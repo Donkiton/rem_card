@@ -940,8 +940,6 @@ class OrdersWidget(QWidget):
             self._last_polled_context_key = current_context_key
         self._apply_table_header_layout()
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self.localBalanceChanged.emit()
         self._clear_soft_update_state()
         record_orders_sync_event(
@@ -1298,8 +1296,6 @@ class OrdersWidget(QWidget):
                     idx = self.model.index(row, col)
                     self.model.dataChanged.emit(idx, idx, [Qt.UserRole])
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self.localBalanceChanged.emit()
 
     def _restore_admin_cells(self, previous_by_key: dict):
@@ -1629,15 +1625,7 @@ class OrdersWidget(QWidget):
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
-            if self._pending_admin_write_count > 0:
-                self._schedule_fast_sync()
-                return
-            self._defer_snapshot_request(
-                force=True,
-                source="local_silent_sync",
-                priority="LOW",
-                invalidate_reason="orders_cell_write_success",
-            )
+            self._schedule_fast_sync()
             self._schedule_state_sync()
 
         def on_error(exc):

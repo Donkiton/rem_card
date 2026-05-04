@@ -4288,6 +4288,53 @@ def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) 
     return True, "ok"
 
 
+def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    source_path = root / "ui/doctor_view/orders_widget.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "OrdersWidget"]
+    if not class_defs:
+        return False, "doctor: OrdersWidget class not found"
+
+    methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+    for method_name in ("_enqueue_cell_write", "_emit_admin_cell_changes"):
+        if method_name not in methods:
+            return False, f"doctor: {method_name} not found"
+
+    enqueue_source = ast.get_source_segment(source_text, methods["_enqueue_cell_write"]) or ""
+    if "_defer_snapshot_request" in enqueue_source or "_request_snapshot" in enqueue_source:
+        return False, "doctor: cell write success must not start an immediate orders snapshot"
+    if "_schedule_fast_sync" not in enqueue_source:
+        return False, "doctor: cell write success must debounce the quiet orders sync"
+    if "_schedule_state_sync" not in enqueue_source:
+        return False, "doctor: cell write success must keep state buttons in sync"
+
+    emit_source = ast.get_source_segment(source_text, methods["_emit_admin_cell_changes"]) or ""
+    if ".viewport().update(" in emit_source or "viewport().update()" in emit_source:
+        return False, "doctor: local cell changes must not repaint the whole orders viewport"
+
+    delegate_path = root / "ui/shared/orders_delegate.py"
+    delegate_text = delegate_path.read_text(encoding="utf-8")
+    delegate_tree = ast.parse(delegate_text)
+    delegate_classes = [
+        node
+        for node in delegate_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "OrdersDelegate"
+    ]
+    if not delegate_classes:
+        return False, "shared: OrdersDelegate class not found"
+    delegate_methods = {node.name: node for node in delegate_classes[0].body if isinstance(node, ast.FunctionDef)}
+    if "_is_admin_pending" not in delegate_methods:
+        return False, "shared: OrdersDelegate._is_admin_pending not found"
+    pending_source = ast.get_source_segment(delegate_text, delegate_methods["_is_admin_pending"]) or ""
+    if "_pending_cell_action" in pending_source:
+        return False, "shared: ordinary planned X must not be drawn as pending"
+
+    return True, "ok"
+
+
 def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     cases = [
@@ -5536,6 +5583,7 @@ def main():
             "orders_widgets_defer_snapshot_reload_thread_creation",
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
+        ("orders_fast_click_path_stays_local", _check_orders_fast_click_path_stays_local),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
         ("pdf_build_runs_in_worker", _check_pdf_build_runs_in_worker),
         ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),

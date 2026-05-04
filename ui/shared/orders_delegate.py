@@ -264,7 +264,7 @@ class OrdersDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _is_admin_pending(self, admin) -> bool:
-        return bool(getattr(admin, "_pending_cell_action", None) or hasattr(admin, "_pending_mark"))
+        return bool(hasattr(admin, "_pending_mark"))
 
     def _paint_admin(self, painter: QPainter, rect: QRect, admin):
         pending = self._is_admin_pending(admin)
