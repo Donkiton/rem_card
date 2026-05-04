@@ -19,6 +19,7 @@ PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
 CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
+CHART_LAZY_INIT_DELAY_MS = max(0, int(os.environ.get("REMCARD_CHART_LAZY_INIT_DELAY_MS", "0")))
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
 JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
 JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
@@ -88,6 +89,7 @@ class NurseMainWidget(QWidget):
         self.report_controller = None
         self._card_ui_prewarm_started = False
         self._card_ui_prewarm_done = False
+        self._chart_init_pending = False
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
         self._selection_mode = "beds"
@@ -565,18 +567,14 @@ class NurseMainWidget(QWidget):
         self._card_snapshot_cache = snapshot
         self._balance_runtime_cache = snapshot.get("balance_runtime")
         effective_bounds = snapshot.get("effective_bounds")
-        chart_active_intervals = snapshot.get("chart_active_intervals")
 
         self._ensure_card_widgets_initialized()
         self._bind_balance_widgets_if_ready()
 
         if hasattr(self, "chart"):
-            runtime = snapshot.get("balance_runtime") or {}
-            self.chart.update_data(
-                snapshot.get("vitals_extended") or [],
-                snapshot.get("start_dt"),
-                active_intervals=chart_active_intervals or runtime.get("active_intervals"),
-            )
+            self._update_chart_from_snapshot(snapshot)
+        else:
+            self._schedule_chart_init()
 
         if hasattr(self, "vitals_input") and effective_bounds:
             self.vitals_input.admission_id = adm_id
@@ -1143,18 +1141,54 @@ class NurseMainWidget(QWidget):
             if not self._journal_prewarm_done:
                 self._journal_prewarm_started = False
 
-    def _ensure_card_widgets_initialized(self):
-        if hasattr(self, "chart") and hasattr(self, "vitals_input") and hasattr(self, "balance_controller"):
+    def _schedule_chart_init(self, delay_ms: int = CHART_LAZY_INIT_DELAY_MS):
+        if getattr(self, "chart", None) is not None or self._chart_init_pending:
             return
+        self._chart_init_pending = True
+        QTimer.singleShot(max(0, int(delay_ms or 0)), self._run_deferred_chart_init)
+
+    def _run_deferred_chart_init(self):
+        self._chart_init_pending = False
+        if self._is_closing:
+            return
+        try:
+            self._ensure_chart_initialized()
+        except Exception as exc:
+            logger.warning("Nurse chart lazy init failed: %s", exc, exc_info=True)
+
+    def _ensure_chart_initialized(self) -> bool:
+        if getattr(self, "chart", None) is not None:
+            return True
+        if not hasattr(self, "layout_manager") or not getattr(self.layout_manager, "sector_2v", None):
+            return False
 
         from ..shared.chart_widget import ChartWidget
-        from ..shared.vitals_widget import VitalsWidget
-        from ..shared.components.balance_controller import BalanceController
 
         self.chart = ChartWidget()
         self.chart.service = self.remcard_service
         self.chart.status_service = self.remcard_service.status_service
+        self.chart.admission_id = getattr(self.layout_manager, "current_admission_id", None)
         self.layout_manager.sector_2v.set_content(self.chart)
+        self._update_chart_from_snapshot(self._card_snapshot_cache or {})
+        return True
+
+    def _update_chart_from_snapshot(self, snapshot: dict) -> None:
+        if not snapshot or getattr(self, "chart", None) is None:
+            return
+        runtime = snapshot.get("balance_runtime") or {}
+        self.chart.update_data(
+            snapshot.get("vitals_extended") or [],
+            snapshot.get("start_dt"),
+            active_intervals=snapshot.get("chart_active_intervals") or runtime.get("active_intervals"),
+        )
+
+    def _ensure_card_widgets_initialized(self):
+        if hasattr(self, "vitals_input") and hasattr(self, "balance_controller"):
+            self._schedule_chart_init()
+            return
+
+        from ..shared.vitals_widget import VitalsWidget
+        from ..shared.components.balance_controller import BalanceController
 
         self.vitals_input = VitalsWidget(self.remcard_service, None, datetime.now())
         self.vitals_input.save_btn.clicked.connect(self.refresh_data)
@@ -1163,6 +1197,7 @@ class NurseMainWidget(QWidget):
 
         self.balance_controller = BalanceController(self.remcard_service.fluid_service, None, self._current_date)
         self._bind_balance_widgets_if_ready()
+        self._schedule_chart_init()
 
     def _bind_balance_widgets_if_ready(self) -> bool:
         if not hasattr(self, "balance_controller") or self.balance_controller is None:
@@ -1275,13 +1310,16 @@ class NurseMainWidget(QWidget):
                 shift_end=end_dt,
             )
 
-        self.chart.admission_id = admission_id
-        if (
-            hasattr(self.chart, "clear_for_context")
-            and not cached_vitals_snapshot
-            and not self._chart_matches_context(admission_id, start_dt)
-        ):
-            self.chart.clear_for_context(admission_id=admission_id, start_time=start_dt)
+        if hasattr(self, "chart"):
+            self.chart.admission_id = admission_id
+            if (
+                hasattr(self.chart, "clear_for_context")
+                and not cached_vitals_snapshot
+                and not self._chart_matches_context(admission_id, start_dt)
+            ):
+                self.chart.clear_for_context(admission_id=admission_id, start_time=start_dt)
+        else:
+            self._schedule_chart_init()
         self.vitals_input.admission_id = admission_id
         self.vitals_input.shift_date = date
         self.vitals_input.mark_dirty()
