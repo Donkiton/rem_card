@@ -436,8 +436,8 @@ class Sector4v(BaseSectorWidget):
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setStyleSheet("background: transparent; border: none;")
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        # Горизонтальный скролл появляется только если окно становится слишком узким
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Hide the horizontal bar during startup layout recalculation in W1 rows.
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
         # Чтобы scroll area не диктовала окну огромную ширину
         self.scroll_area.setMinimumWidth(100)
