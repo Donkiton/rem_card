@@ -65,6 +65,10 @@ class DataUpdateMonitor(QThread):
                 self._wake_evt.clear()
 
     def _poll_once(self, *, force_emit: bool, force_sources: list[str]):
+        run_maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
+        if callable(run_maintenance):
+            run_maintenance()
+
         current_change_id = int(self._data_service.get_latest_change_id())
         previous_change_id = self._last_seen_id
 

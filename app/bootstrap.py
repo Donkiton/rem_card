@@ -58,6 +58,7 @@ class Container:
         )
         # Прокидываем сервис статусов в основной фасад (RemCardService)
         self.remcard_service.status_service = self.patient_status_service
+        self.data_service.add_poll_maintenance_task(self.remcard_service.maybe_release_due_outcome_beds)
         self.read_coordinator = ReadCoordinator(self.remcard_service)
         self.remcard_service.read_coordinator = self.read_coordinator
         self.remcard_service.read_mode = "live"

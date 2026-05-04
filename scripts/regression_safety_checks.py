@@ -4752,6 +4752,59 @@ def _check_w1_outcome_timer_ticks_without_beds_refresh(temp_root: str) -> tuple[
         widget.close()
 
 
+def _check_w1_outcome_release_runs_from_change_monitor(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+
+    from rem_card.services.data_update_monitor import DataUpdateMonitor
+
+    class FakeDataService:
+        def __init__(self):
+            self.calls = []
+            self.current_change_id = 1
+
+        def run_poll_maintenance_tasks(self):
+            self.calls.append("maintenance")
+            self.current_change_id = 2
+
+        def get_latest_change_id(self):
+            self.calls.append("latest")
+            return self.current_change_id
+
+        def fetch_changes_since(self, last_change_id):
+            self.calls.append(("fetch", int(last_change_id)))
+            return [
+                {
+                    "id": 2,
+                    "entity_name": "beds",
+                    "entity_id": 1,
+                    "admission_id": 7,
+                    "action": "update",
+                    "changed_at": "2026-05-05 08:04:00.000",
+                    "changed_by": "journal",
+                    "version": 2,
+                }
+            ]
+
+    service = FakeDataService()
+    monitor = DataUpdateMonitor(service)
+    monitor._last_seen_id = 1
+    monitor._poll_once(force_emit=False, force_sources=[])
+    if service.calls[:2] != ["maintenance", "latest"]:
+        return False, f"maintenance must run before change cursor read, calls={service.calls}"
+    if ("fetch", 1) not in service.calls:
+        return False, f"change monitor did not fetch release changes after maintenance, calls={service.calls}"
+
+    root = Path(__file__).resolve().parents[1]
+    bootstrap_source = (root / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    if "add_poll_maintenance_task(self.remcard_service.maybe_release_due_outcome_beds)" not in bootstrap_source:
+        return False, "bootstrap must register outcome auto-release as a data monitor maintenance task"
+    facade_source = (root / "services" / "remcard_facade.py").read_text(encoding="utf-8")
+    if "PatientService(patient_dao, data_service=data_service)" not in facade_source:
+        return False, "RemCardService patient helper must receive DataService for coordinated releases"
+
+    return True, "ok"
+
+
 def _check_build_release_reuses_prepared_version(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
@@ -5694,6 +5747,7 @@ def main():
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
+        ("w1_outcome_release_runs_from_change_monitor", _check_w1_outcome_release_runs_from_change_monitor),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
         ("read_coordinator_partial_snapshots", _check_read_coordinator_partial_snapshots),

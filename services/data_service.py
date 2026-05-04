@@ -21,6 +21,7 @@ class DataService(QObject):
         self._queue = LocalWriteQueue(logger=logger)
         self._monitor = DataUpdateMonitor(self)
         self._sync_coordinator = SyncCoordinator()
+        self._poll_maintenance_tasks: list[Callable[[], Any]] = []
         self._monitor.changes_detected.connect(self._emit_coordinated_changes, Qt.QueuedConnection)
         self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
         self._error_callback_requested.connect(self._dispatch_error_callback, Qt.QueuedConnection)
@@ -50,6 +51,17 @@ class DataService(QObject):
             admission_id=admission_id,
             include_global=include_global,
         )
+
+    def add_poll_maintenance_task(self, task: Callable[[], Any]):
+        if task not in self._poll_maintenance_tasks:
+            self._poll_maintenance_tasks.append(task)
+
+    def run_poll_maintenance_tasks(self):
+        for task in list(self._poll_maintenance_tasks):
+            try:
+                task()
+            except Exception as exc:
+                logger.warning("DataService poll maintenance task failed: %s", exc, exc_info=True)
 
     def run_write(self, description: str, operation: Callable):
         result = self.db.run_write_operation(operation, source=description)

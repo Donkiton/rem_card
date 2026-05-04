@@ -71,7 +71,7 @@ class RemCardService(QObject):
         self.data_service = data_service
 
         # РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ СЃРїРµС†РёР°Р»РёР·РёСЂРѕРІР°РЅРЅС‹С… СЃРµСЂРІРёСЃРѕРІ
-        self._patients = PatientService(patient_dao)
+        self._patients = PatientService(patient_dao, data_service=data_service)
         self._vitals = VitalService(vitals_dao, patient_dao, status_service)
         self._fluids = FluidService(fluids_dao, self._vitals, data_service=data_service)
         self._orders = OrderService(orders_dao)
