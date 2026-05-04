@@ -1093,11 +1093,12 @@ def _check_recovery_selects_next_valid_backup(temp_root: str) -> tuple[bool, str
 
 
 def _check_local_metrics_written_locally(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.local_metrics import record_metric
+    from rem_card.app.local_metrics import flush_metrics, record_metric
     from rem_card.app.runtime_paths import get_local_logs_dir
 
     _ = temp_root
     record_metric("regression_metric_probe", 1, component="regression")
+    flush_metrics(timeout=1.0)
     metrics_dir = get_local_logs_dir()
     files = [
         os.path.join(metrics_dir, name)
@@ -1114,6 +1115,33 @@ def _check_local_metrics_written_locally(temp_root: str) -> tuple[bool, str]:
     baza_dir = os.environ.get("REMCARD_BAZA_DIR") or ""
     if baza_dir and os.path.normcase(os.path.abspath(newest)).startswith(os.path.normcase(os.path.abspath(baza_dir))):
         return False, f"metrics file was written inside shared baza dir: {newest}"
+    return True, "ok"
+
+
+def _check_local_metrics_are_buffered(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    source_path = root / "app/local_metrics.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    required = {"record_metric", "flush_metrics", "shutdown_metrics", "_metrics_worker", "_write_payloads"}
+    missing = sorted(required - set(functions))
+    if missing:
+        return False, f"local_metrics missing buffered helpers: {missing}"
+
+    record_source = ast.get_source_segment(source_text, functions["record_metric"]) or ""
+    if "put_nowait" not in record_source:
+        return False, "record_metric must enqueue without blocking the read path"
+    if "_write_payloads([payload])" not in record_source:
+        return False, "record_metric must keep a sync/forced-flush escape hatch"
+    if "open(" in record_source or "_metrics_path()" in record_source:
+        return False, "record_metric hot path must not open metrics files directly"
+    if "REMCARD_LOCAL_METRICS_SYNC" not in source_text:
+        return False, "local metrics sync fallback env flag is missing"
+    if "RemCardLocalMetricsWriter" not in source_text:
+        return False, "local metrics background writer thread is missing"
+
     return True, "ok"
 
 
@@ -4335,6 +4363,78 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+
+    doctor_path = root / "ui/doctor_view/doctor_remcard_widget.py"
+    doctor_text = doctor_path.read_text(encoding="utf-8")
+    doctor_tree = ast.parse(doctor_text)
+    doctor_classes = [
+        node
+        for node in doctor_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"
+    ]
+    if not doctor_classes:
+        return False, "DoctorRemCardWidget class not found"
+    doctor_methods = {node.name: node for node in doctor_classes[0].body if isinstance(node, ast.FunctionDef)}
+    readonly_method = doctor_methods.get("_apply_archive_read_only_state")
+    if readonly_method is None:
+        return False, "DoctorRemCardWidget._apply_archive_read_only_state not found"
+    readonly_source = ast.get_source_segment(doctor_text, readonly_method) or ""
+    if "_read_only_widget_signature" not in doctor_text or "apply_widget_state" not in readonly_source:
+        return False, "doctor read-only state must be idempotent for child widgets"
+    if "self.controls" not in readonly_source or "set_save_active" not in readonly_source:
+        return False, "doctor read-only guard must keep controls refresh outside the child-widget skip"
+
+    orders_path = root / "ui/doctor_view/orders_widget.py"
+    orders_text = orders_path.read_text(encoding="utf-8")
+    orders_tree = ast.parse(orders_text)
+    orders_classes = [
+        node
+        for node in orders_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "OrdersWidget"
+    ]
+    if not orders_classes:
+        return False, "OrdersWidget class not found"
+    orders_methods = {node.name: node for node in orders_classes[0].body if isinstance(node, ast.FunctionDef)}
+    guard_method = orders_methods.get("_known_current_context_without_drafts")
+    source_probe_method = orders_methods.get("_source_has_order_drafts")
+    clear_method = orders_methods.get("clear_drafts")
+    if guard_method is None or source_probe_method is None or clear_method is None:
+        return False, "orders clear-drafts guard methods are missing"
+    guard_source = ast.get_source_segment(orders_text, guard_method) or ""
+    source_probe_source = ast.get_source_segment(orders_text, source_probe_method) or ""
+    clear_source = ast.get_source_segment(orders_text, clear_method) or ""
+    if "self.model.admission_id != self.admission_id" not in guard_source:
+        return False, "clear-drafts guard must not skip when model context is different"
+    if "_last_applied_snapshot_signature" not in guard_source:
+        return False, "clear-drafts guard must require a known loaded snapshot/local model"
+    if "has_order_drafts" not in source_probe_source:
+        return False, "clear-drafts guard must use a cheap source draft probe when local state is unknown"
+    if "_known_current_context_without_drafts" not in clear_source:
+        return False, "clear_drafts must skip known no-op clears"
+    if "_source_has_order_drafts" not in clear_source:
+        return False, "clear_drafts must skip source-confirmed no-op clears"
+
+    diet_path = root / "ui/shared/components/diet_intake_widget.py"
+    diet_text = diet_path.read_text(encoding="utf-8")
+    diet_tree = ast.parse(diet_text)
+    diet_classes = [
+        node
+        for node in diet_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "DietIntakeWidget"
+    ]
+    if not diet_classes:
+        return False, "DietIntakeWidget class not found"
+    diet_methods = {node.name: node for node in diet_classes[0].body if isinstance(node, ast.FunctionDef)}
+    set_read_only = ast.get_source_segment(diet_text, diet_methods.get("set_read_only")) if diet_methods.get("set_read_only") else ""
+    if "self.read_only == bool(read_only)" not in (set_read_only or ""):
+        return False, "DietIntakeWidget.set_read_only must skip unchanged state"
+
+    return True, "ok"
+
+
 def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     cases = [
@@ -5548,6 +5648,7 @@ def main():
         ("dbmanager_locked_quickcheck_does_not_restore", _check_dbmanager_locked_quickcheck_does_not_restore),
         ("recovery_selects_next_valid_backup", _check_recovery_selects_next_valid_backup),
         ("local_metrics_written_locally", _check_local_metrics_written_locally),
+        ("local_metrics_are_buffered", _check_local_metrics_are_buffered),
         ("sector_ivl_enqueue_error_refreshes", _check_sector_ivl_enqueue_error_refreshes),
         ("balance_controller_enqueue_error_refreshes", _check_balance_controller_enqueue_error_refreshes),
         ("diet_intake_enqueue_error_refreshes", _check_diet_intake_enqueue_error_refreshes),
@@ -5584,6 +5685,7 @@ def main():
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
         ("orders_fast_click_path_stays_local", _check_orders_fast_click_path_stays_local),
+        ("performance_a_guards_present", _check_performance_a_guards_present),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
         ("pdf_build_runs_in_worker", _check_pdf_build_runs_in_worker),
         ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),

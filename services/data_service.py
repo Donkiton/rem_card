@@ -104,6 +104,12 @@ class DataService(QObject):
             self._monitor.stop()
             self._monitor.wait(1500)
         self._queue.shutdown(timeout=5.0)
+        try:
+            from rem_card.app.local_metrics import flush_metrics
+
+            flush_metrics(timeout=1.0)
+        except Exception:
+            pass
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
         if self._monitor:

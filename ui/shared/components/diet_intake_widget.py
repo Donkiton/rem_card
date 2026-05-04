@@ -277,6 +277,8 @@ class DietIntakeWidget(QWidget):
         self.refresh_data()
 
     def set_read_only(self, read_only: bool):
+        if self.read_only == bool(read_only):
+            return
         self.read_only = bool(read_only)
         self.refresh_data()
 

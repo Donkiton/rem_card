@@ -145,6 +145,7 @@ def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
             "integrity_check_duration_ms",
             round((time.perf_counter() - started) * 1000.0, 3),
             result="ok" if ok else "error",
+            force_flush=not ok,
         )
 
 def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
@@ -162,6 +163,7 @@ def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
             "quick_check_duration_ms",
             round((time.perf_counter() - started) * 1000.0, 3),
             result="ok" if ok else "error",
+            force_flush=not ok,
         )
 
 
@@ -337,8 +339,9 @@ def backup_connection(
             result=backup_result,
             source=source,
             backup_path=backup_path,
+            force_flush=True,
         )
-        record_metric("backup_result", backup_result, source=source, backup_path=backup_path)
+        record_metric("backup_result", backup_result, source=source, backup_path=backup_path, force_flush=True)
         if lock:
             lock.release()
 

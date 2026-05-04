@@ -93,6 +93,7 @@ class DoctorRemCardWidget(QWidget):
         self._monitor_connected = False
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        self._read_only_widget_signature = None
         self._is_closing = False
         self.diet_intake_widget = None
         self._add_patient_lock = self._build_add_patient_lock()
@@ -1137,27 +1138,41 @@ class DoctorRemCardWidget(QWidget):
 
     def _apply_archive_read_only_state(self):
         read_only = bool(self._archive_read_only_mode)
+        layout = getattr(self, "layout_manager", None)
+        ow = getattr(layout, "orders_widget", None) if layout is not None else None
+        events_sector = getattr(layout, "sector_events", None) if layout is not None else None
+        diet_widget = getattr(self, "diet_intake_widget", None)
+        widget_signature = (
+            int(self.admission_id or 0),
+            self._current_date.isoformat(timespec="seconds") if self._current_date else None,
+            "doctor",
+            read_only,
+            bool(self._archive_source_db_path),
+            id(getattr(self, "vitals_input", None)) if hasattr(self, "vitals_input") else None,
+            id(ow) if ow else None,
+            id(events_sector) if events_sector else None,
+            id(diet_widget) if diet_widget else None,
+        )
+        apply_widget_state = widget_signature != self._read_only_widget_signature
 
-        if hasattr(self, "vitals_input") and self.vitals_input:
+        if apply_widget_state and hasattr(self, "vitals_input") and self.vitals_input:
             if hasattr(self.vitals_input, "set_forced_read_only"):
                 self.vitals_input.set_forced_read_only(read_only)
             else:
                 self.vitals_input.setEnabled(not read_only)
 
-        if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "orders_widget"):
-            ow = self.layout_manager.orders_widget
-            if ow:
-                if hasattr(ow, "set_forced_read_only"):
-                    ow.set_forced_read_only(read_only)
-                else:
-                    ow.setEnabled(not read_only)
+        if apply_widget_state and ow:
+            if hasattr(ow, "set_forced_read_only"):
+                ow.set_forced_read_only(read_only)
+            else:
+                ow.setEnabled(not read_only)
 
-        if hasattr(self, "layout_manager"):
-            events_sector = getattr(self.layout_manager, "sector_events", None)
-            if events_sector:
-                events_sector.setEnabled(not read_only)
-        if getattr(self, "diet_intake_widget", None):
-            self.diet_intake_widget.set_read_only(read_only)
+        if apply_widget_state and events_sector:
+            events_sector.setEnabled(not read_only)
+        if apply_widget_state and diet_widget:
+            diet_widget.set_read_only(read_only)
+        if apply_widget_state:
+            self._read_only_widget_signature = widget_signature
 
         if hasattr(self, "controls") and self.controls:
             if read_only:
@@ -1169,7 +1184,6 @@ class DoctorRemCardWidget(QWidget):
                 self.controls.btn_templates.setEnabled(False)
                 self.controls.btn_pokaz.setEnabled(False)
             else:
-                ow = self.layout_manager.orders_widget if hasattr(self.layout_manager, "orders_widget") else None
                 has_drafts = ow.has_drafts() if ow else False
                 has_admins = ow.has_administrations() if ow else False
                 has_orders = ow.has_orders() if ow else False

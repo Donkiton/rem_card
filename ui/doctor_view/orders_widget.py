@@ -190,6 +190,33 @@ class OrdersWidget(QWidget):
             return bool(self._cached_has_orders)
         return False
 
+    def _known_current_context_without_drafts(self) -> bool:
+        if self.model is None:
+            return False
+        if self.model.admission_id != self.admission_id or self.model.shift_date != self.shift_date:
+            return False
+        if self.has_drafts():
+            return False
+        return bool(
+            self._last_applied_snapshot_signature is not None
+            or self._cached_has_orders
+            or self._cached_has_administrations
+            or getattr(self.model, "orders", None)
+            or getattr(self.model, "admin_map", None)
+        )
+
+    def _source_has_order_drafts(self) -> bool | None:
+        if not self.service or not self.admission_id:
+            return None
+        checker = getattr(self.service, "has_order_drafts", None)
+        if not callable(checker):
+            return None
+        try:
+            return bool(checker(self.admission_id, self.shift_date))
+        except Exception as exc:
+            logger.debug("OrdersWidget draft probe failed: %s", exc)
+            return None
+
     @staticmethod
     def _is_committed_value(value) -> bool:
         try:
@@ -1756,6 +1783,19 @@ class OrdersWidget(QWidget):
 
     def clear_drafts(self):
         if not self.admission_id or self._is_read_only(): return
+        if self._known_current_context_without_drafts():
+            logger.info(
+                "[OrdersClick] clear_drafts_skip_noop role=doctor admission_id=%s",
+                self.admission_id,
+            )
+            return
+        source_has_drafts = self._source_has_order_drafts()
+        if source_has_drafts is False:
+            logger.info(
+                "[OrdersClick] clear_drafts_skip_source_noop role=doctor admission_id=%s",
+                self.admission_id,
+            )
+            return
         target_admission_id = self.admission_id
         target_shift_date = self.shift_date
         expected_revisions = self._visible_order_revision_map()
