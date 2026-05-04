@@ -90,6 +90,7 @@ class NurseMainWidget(QWidget):
         self._card_ui_prewarm_started = False
         self._card_ui_prewarm_done = False
         self._chart_init_pending = False
+        self._last_applied_card_snapshot_signature = None
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
         self._selection_mode = "beds"
@@ -312,6 +313,28 @@ class NurseMainWidget(QWidget):
             snapshot.get("version"),
         )
         return True
+
+    @staticmethod
+    def _card_snapshot_apply_signature(snapshot: dict):
+        if not snapshot:
+            return None
+        content_hash = snapshot.get("content_hash")
+        cache_key = snapshot.get("cache_key")
+        if cache_key is not None and content_hash:
+            try:
+                version = int(snapshot.get("version") or snapshot.get("change_id") or 0)
+            except Exception:
+                version = 0
+            return (
+                cache_key,
+                str(snapshot.get("scope") or ""),
+                version,
+                str(content_hash),
+            )
+        dedup_signature = snapshot.get("dedup_signature")
+        if dedup_signature is not None:
+            return ("dedup", tuple(dedup_signature))
+        return None
 
     def _chart_matches_context(self, admission_id, start_dt):
         chart = getattr(self, "chart", None)
@@ -549,6 +572,24 @@ class NurseMainWidget(QWidget):
 
         snapshot = dict(request.get("snapshot") or {})
         previous_snapshot = self._card_snapshot_cache or {}
+        snapshot_signature = self._card_snapshot_apply_signature(snapshot)
+        if (
+            snapshot_signature is not None
+            and snapshot_signature == self._last_applied_card_snapshot_signature
+        ):
+            self._card_snapshot_cache = snapshot
+            self._balance_runtime_cache = snapshot.get("balance_runtime")
+            self._last_change_id = max(
+                int(self._last_change_id or 0),
+                int(snapshot.get("change_id") or 0),
+            )
+            logger.info(
+                "NurseMainWidget skipped unchanged card snapshot admission_id=%s scope=%s version=%s",
+                request.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
         if (
             previous_snapshot
             and not request.get("from_cache")
@@ -565,6 +606,7 @@ class NurseMainWidget(QWidget):
             )
             return
         self._card_snapshot_cache = snapshot
+        self._last_applied_card_snapshot_signature = snapshot_signature
         self._balance_runtime_cache = snapshot.get("balance_runtime")
         effective_bounds = snapshot.get("effective_bounds")
 
