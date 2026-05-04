@@ -18,6 +18,9 @@ class FluidService:
 
     def get_fluids(self, admission_id: int, date: datetime) -> List[FluidDTO]:
         start, end = self.get_balance_bounds(admission_id, date)
+        return self.get_fluids_in_bounds(admission_id, start, end)
+
+    def get_fluids_in_bounds(self, admission_id: int, start: datetime, end: datetime) -> List[FluidDTO]:
         return self.fluids_dao.get_fluids(admission_id, start, end)
 
     def enqueue_write(
@@ -56,23 +59,49 @@ class FluidService:
         """
         shift_start, shift_end = self.vital_service.shift_service.get_day_period(date)
         patient = self.vital_service.patient_dao.get_patient_by_id(admission_id)
-        start = max(shift_start, patient.admission_datetime) if patient and patient.admission_datetime else shift_start
-        end = shift_end
-
-        terminal_dt = None
+        status_event = None
         status_service = getattr(self.vital_service, "status_service", None)
         if status_service:
             try:
                 status_event = status_service.get_current_status(admission_id)
             except Exception:
                 status_event = None
-            status_value = getattr(status_event, "status", None)
-            if status_event and getattr(status_value, "is_outcome", lambda: False)():
-                terminal_dt = status_event.start_time
-            elif status_event:
-                terminal_dt = None
-            elif patient:
-                terminal_dt = getattr(patient, "transfer_datetime", None)
+        return self.get_balance_bounds_for_state(
+            admission_id,
+            date,
+            patient=patient,
+            current_status=status_event,
+            shift_bounds=(shift_start, shift_end),
+        )
+
+    def get_balance_bounds_for_state(
+        self,
+        admission_id: int,
+        date: datetime,
+        *,
+        patient=None,
+        current_status=None,
+        shift_bounds: Optional[Tuple[datetime, datetime]] = None,
+    ) -> Tuple[datetime, datetime]:
+        """
+        Та же формула границ баланса, но с уже загруженными patient/status.
+
+        Full snapshot строит vitals и balance вместе; повторное чтение patient/status
+        на сетевой БД заметно дороже самой арифметики границ.
+        """
+        if shift_bounds is None:
+            shift_start, shift_end = self.vital_service.shift_service.get_day_period(date)
+        else:
+            shift_start, shift_end = shift_bounds
+        start = max(shift_start, patient.admission_datetime) if patient and patient.admission_datetime else shift_start
+        end = shift_end
+
+        terminal_dt = None
+        status_value = getattr(current_status, "status", None)
+        if current_status and getattr(status_value, "is_outcome", lambda: False)():
+            terminal_dt = current_status.start_time
+        elif current_status:
+            terminal_dt = None
         elif patient:
             terminal_dt = getattr(patient, "transfer_datetime", None)
 

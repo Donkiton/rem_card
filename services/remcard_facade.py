@@ -92,56 +92,7 @@ class RemCardService(QObject):
         РљР°СЂС‚Р° СЃС‡РёС‚Р°РµС‚СЃСЏ СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµР№, РµСЃР»Рё РІ Р‘Р” РµСЃС‚СЊ С…РѕС‚СЊ РѕРґРЅР° Р·Р°РїРёСЃСЊ Р·Р° СЌС‚РѕС‚ РїРµСЂРёРѕРґ,
         РґР°Р¶Рµ РµСЃР»Рё РѕРЅР° РїРѕРјРµС‡РµРЅР° РєР°Рє 'deleted' (РЅРѕ СЏРІР»СЏРµС‚СЃСЏ СЃРѕС…СЂР°РЅРµРЅРЅРѕР№/СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµР№ РІ Р‘Р”).
         """
-        start, end = self.get_day_period(date)
-        
-        # РџСЂРѕРІРµСЂРєР° РІРёС‚Р°Р»СЊРЅС‹С… С„СѓРЅРєС†РёР№ (РѕРЅРё СѓРґР°Р»СЏСЋС‚СЃСЏ С„РёР·РёС‡РµСЃРєРё, С‚Р°Рє С‡С‚Рѕ len > 0 РґРѕСЃС‚Р°С‚РѕС‡РЅРѕ)
-        vitals = self.get_vitals(admission_id, date)
-        if len(vitals) > 0:
-            return True
-            
-        # РџСЂРѕРІРµСЂРєР° Р¶РёРґРєРѕСЃС‚РµР№ (С‚Р°РєР¶Рµ СѓРґР°Р»СЏСЋС‚СЃСЏ С„РёР·РёС‡РµСЃРєРё)
-        fluids = self.get_fluids(admission_id, date)
-        if len(fluids) > 0:
-            return True
-
-        diet_row = self.orders_dao.db.fetch_one_remcard(
-            """
-            SELECT EXISTS (
-                SELECT 1 FROM diet_plan
-                WHERE admission_id = ?
-                  AND shift_start >= ? AND shift_start < ?
-            )
-            OR EXISTS (
-                SELECT 1 FROM oral_intake_events
-                WHERE admission_id = ?
-                  AND event_time >= ? AND event_time < ?
-            )
-            """,
-            (
-                admission_id,
-                start.isoformat(timespec="minutes").replace("T", " "),
-                end.isoformat(timespec="minutes").replace("T", " "),
-                admission_id,
-                start.isoformat(timespec="minutes").replace("T", " "),
-                end.isoformat(timespec="minutes").replace("T", " "),
-            ),
-        )
-        if diet_row and bool(diet_row[0]):
-            return True
-            
-        # РџСЂРѕРІРµСЂРєР° РЅР°Р·РЅР°С‡РµРЅРёР№
-        # Р—РґРµСЃСЊ РєСЂРёС‚РёС‡РЅРѕ: РµСЃР»Рё РјС‹ СЃРґРµР»Р°Р»Рё РЎРљРњ (status='deleted', is_committed=0), 
-        # С‚Рѕ Р·Р°РїРёСЃСЊ РІСЃРµ РµС‰Рµ СЃСѓС‰РµСЃС‚РІСѓРµС‚ РІ Р‘Р” Рё РґРѕР»Р¶РЅР° СѓРґРµСЂР¶РёРІР°С‚СЊ СЃС‚Р°С‚СѓСЃ "РєР°СЂС‚Р° СЃСѓС‰РµСЃС‚РІСѓРµС‚".
-        # РСЃРїРѕР»СЊР·СѓРµРј РїСЂСЏРјРѕР№ Р·Р°РїСЂРѕСЃ Рє DAO РґР»СЏ РїСЂРѕРІРµСЂРєРё С„РёР·РёС‡РµСЃРєРѕРіРѕ РЅР°Р»РёС‡РёСЏ Р»СЋР±С‹С… Р·Р°РїРёСЃРµР№ Р·Р° РїРµСЂРёРѕРґ.
-        query = """
-            SELECT EXISTS (
-                SELECT 1 FROM orders 
-                WHERE admission_id = ? 
-                AND datetime >= ? AND datetime < ?
-            )
-        """
-        res = self.orders_dao.db.fetch_one_remcard(query, (admission_id, start.isoformat(), end.isoformat()))
-        return bool(res[0]) if res else False
+        return bool(self.has_cards_bulk([int(admission_id)], date).get(int(admission_id), False))
 
     def has_cards_bulk(self, admission_ids: Sequence[int], date: datetime) -> Dict[int, bool]:
         ids = [int(adm_id) for adm_id in admission_ids if adm_id is not None]
@@ -596,11 +547,22 @@ class RemCardService(QObject):
         from ..data.dto.remcard_dto import AdministrationDTO
         from .balance_calculator import BalanceCalculator
 
-        if hasattr(self._fluids, "get_balance_bounds"):
+        if hasattr(self._fluids, "get_balance_bounds_for_state"):
+            effective_start, effective_end = self._fluids.get_balance_bounds_for_state(
+                admission_id,
+                shift_date,
+                patient=patient,
+                current_status=current_status,
+                shift_bounds=(start_dt, end_dt),
+            )
+        elif hasattr(self._fluids, "get_balance_bounds"):
             effective_start, effective_end = self._fluids.get_balance_bounds(admission_id, shift_date)
         else:
             effective_start, effective_end = self.get_effective_bounds(admission_id, shift_date)
-        fluids = self.get_fluids(admission_id, shift_date)
+        if hasattr(self._fluids, "get_fluids_in_bounds"):
+            fluids = self._fluids.get_fluids_in_bounds(admission_id, effective_start, effective_end)
+        else:
+            fluids = self.get_fluids(admission_id, shift_date)
         orders = self.get_orders(admission_id, shift_date, only_committed=only_committed)
 
         admin_rows = self.get_latest_administrations(
