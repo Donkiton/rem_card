@@ -9,7 +9,7 @@ Scenario:
 
 Usage:
   set PYTHONPATH=C:\Project
-  python C:\Project\rem_card\scripts\multi_client_stress.py --operations 200
+  python %REMCARD_PROJECT_ROOT%\scripts\multi_client_stress.py --operations 200
 """
 
 from __future__ import annotations

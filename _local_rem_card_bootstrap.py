@@ -13,7 +13,7 @@ def bootstrap_local_rem_card() -> str:
     Bind the package name `rem_card` to this checkout.
 
     The BARS checkout lives in C:/Project/bars, while another checkout can live
-    in C:/Project/rem_card. Most project imports are absolute `rem_card.*`, so
+    in <project-root>. Most project imports are absolute `rem_card.*`, so
     running from the renamed folder needs an explicit local package alias.
     """
     if _is_frozen_app():

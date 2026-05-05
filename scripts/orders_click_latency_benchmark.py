@@ -8,7 +8,7 @@ Measures:
 
 Usage:
   set PYTHONPATH=C:\Project
-  python C:\Project\rem_card\scripts\orders_click_latency_benchmark.py --clicks 40
+  python %REMCARD_PROJECT_ROOT%\scripts\orders_click_latency_benchmark.py --clicks 40
 """
 
 from __future__ import annotations

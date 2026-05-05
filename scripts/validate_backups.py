@@ -4,9 +4,9 @@ Regular backup validation script for RemCard/Journal SQLite backups.
 
 Usage examples:
   set PYTHONPATH=C:\Project
-  python C:\Project\rem_card\scripts\validate_backups.py
-  python C:\Project\rem_card\scripts\validate_backups.py --move-invalid
-  python C:\Project\rem_card\scripts\validate_backups.py --max-files 20
+  python %REMCARD_PROJECT_ROOT%\scripts\validate_backups.py
+  python %REMCARD_PROJECT_ROOT%\scripts\validate_backups.py --move-invalid
+  python %REMCARD_PROJECT_ROOT%\scripts\validate_backups.py --max-files 20
 """
 
 from __future__ import annotations

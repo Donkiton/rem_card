@@ -4,8 +4,8 @@ Startup benchmark for RemCard and patient-bed management entry paths.
 
 Usage:
   set PYTHONPATH=C:\Project
-  python C:\Project\rem_card\scripts\startup_benchmark.py --mode remcard
-  python C:\Project\rem_card\scripts\startup_benchmark.py --mode patient-bed-management
+  python %REMCARD_PROJECT_ROOT%\scripts\startup_benchmark.py --mode remcard
+  python %REMCARD_PROJECT_ROOT%\scripts\startup_benchmark.py --mode patient-bed-management
 """
 
 from __future__ import annotations

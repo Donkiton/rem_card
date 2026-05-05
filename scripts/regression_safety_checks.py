@@ -4,7 +4,7 @@ Regression checks for SQLite safety, local replica hygiene and backup cleanup ga
 
 Usage:
   set PYTHONPATH=C:\Project
-  python C:\Project\rem_card\scripts\regression_safety_checks.py
+  python %REMCARD_PROJECT_ROOT%\scripts\regression_safety_checks.py
 """
 
 from __future__ import annotations

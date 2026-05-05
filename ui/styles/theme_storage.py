@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -21,6 +22,11 @@ from rem_card.ui.styles.theme_tokens import (
 
 STYLE_SETTINGS_ENV = "REMCARD_STYLE_SETTINGS_PATH"
 STYLE_SETTINGS_RELATIVE_PATH = os.path.join("settings", "color_scheme", "style_settings.json")
+logger = logging.getLogger(__name__)
+
+
+def _is_theme_storage_source_path(path: Path) -> bool:
+    return path.name == "theme_storage.py" and path.parent.name == "styles" and path.parent.parent.name == "ui"
 
 
 def _resolve_dev_settings_base_dir(start_path: Path | None = None) -> str:
@@ -28,10 +34,19 @@ def _resolve_dev_settings_base_dir(start_path: Path | None = None) -> str:
     for candidate in current.parents:
         if (candidate / "ui" / "styles").is_dir() and (candidate / "app").is_dir():
             return str(candidate)
-    try:
-        return str(current.parents[2])
-    except IndexError:
-        return os.getcwd()
+
+    if _is_theme_storage_source_path(current):
+        fallback_root = current.parents[2]
+        logger.warning(
+            "Не найден marker-root цветовой схемы по ui/styles + app; используется fallback от theme_storage.py: %s",
+            fallback_root,
+        )
+        return str(fallback_root)
+
+    raise RuntimeError(
+        "Не удалось определить dev-root для настроек цветовой схемы: "
+        "не найден marker-root с ui/styles и app."
+    )
 
 
 def get_style_settings_path() -> str:
@@ -40,10 +55,11 @@ def get_style_settings_path() -> str:
         return os.path.abspath(os.path.normpath(override))
     try:
         from rem_card.app.runtime_paths import is_compiled
-
-        base_dir = get_executable_dir() if is_compiled() else _resolve_dev_settings_base_dir()
+        compiled = is_compiled()
     except Exception:
-        base_dir = _resolve_dev_settings_base_dir()
+        logger.warning("Не удалось определить режим запуска для настроек цветовой схемы.", exc_info=True)
+        compiled = False
+    base_dir = get_executable_dir() if compiled else _resolve_dev_settings_base_dir()
     return os.path.join(base_dir, STYLE_SETTINGS_RELATIVE_PATH)
 
 
