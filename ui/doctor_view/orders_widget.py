@@ -1519,9 +1519,26 @@ class OrdersWidget(QWidget):
             for item_key, item_admin in self.model.admin_map.items()
             if item_key[0] == key[0]
             and getattr(item_admin, "big_chain_id", None) == chain_id
-            and str(getattr(item_admin, "status", "") or "") != "deleted"
+            and str(getattr(item_admin, "status", "") or "") == "planned"
         ]
-        return sorted(keys, key=lambda item: item[1])
+        keys = sorted(keys, key=lambda item: item[1])
+        if key not in keys:
+            return [key] if key in self.model.admin_map else []
+
+        center = keys.index(key)
+        left = center
+        while left > 0:
+            if datetime.fromisoformat(keys[left][1]) - datetime.fromisoformat(keys[left - 1][1]) != timedelta(hours=1):
+                break
+            left -= 1
+
+        right = center
+        while right + 1 < len(keys):
+            if datetime.fromisoformat(keys[right + 1][1]) - datetime.fromisoformat(keys[right][1]) != timedelta(hours=1):
+                break
+            right += 1
+
+        return keys[left:right + 1]
 
     def _optimistic_chain_slots(self, order: OrderDTO, planned_time: datetime) -> list[datetime]:
         if self.model is None:
@@ -1654,7 +1671,7 @@ class OrdersWidget(QWidget):
             for pos, slot in enumerate(desired_slots):
                 item_key = (order.id, slot.isoformat())
                 existing = self.model.admin_map.get(item_key)
-                if existing and str(getattr(existing, "status", "") or "") != "deleted" and pos > 0:
+                if existing and str(getattr(existing, "status", "") or "") == "planned" and pos > 0:
                     break
                 available_slots.append(slot)
             if not available_slots:
@@ -1704,6 +1721,19 @@ class OrdersWidget(QWidget):
                     for item_key in chain_keys:
                         if item_key[1] > key[1]:
                             remove_admin(item_key)
+                elif role == "end":
+                    cancelled_admin = copy(admin)
+                    cancelled_admin.status = "cancelled"
+                    cancelled_admin.cell_role = "single"
+                    cancelled_admin.big_chain_id = chain_id
+                    set_admin(key, cancelled_admin)
+                    remaining_keys = [item_key for item_key in chain_keys if item_key != key]
+                    if remaining_keys:
+                        prev_key = max(remaining_keys, key=lambda item: item[1])
+                        prev_admin = copy(self.model.admin_map.get(prev_key))
+                        if prev_admin is not None:
+                            prev_admin.cell_role = "single" if len(remaining_keys) == 1 else "end"
+                            set_admin(prev_key, prev_admin)
                 else:
                     cancelled_admin = copy(admin)
                     cancelled_admin.status = "cancelled"

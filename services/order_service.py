@@ -420,6 +420,18 @@ class OrderService:
             )
             cursor.execute(
                 """
+                SELECT id
+                FROM orders
+                WHERE admission_id = ?
+                  AND datetime >= ? AND datetime < ?
+                  AND (duration_min = -1 OR duration_min >= 61)
+                """,
+                (admission_id, start.isoformat(), end.isoformat()),
+            )
+            for row in cursor.fetchall():
+                self._domain_service.normalize_order_chain_roles(cursor, int(row["id"]))
+            cursor.execute(
+                """
                 UPDATE administrations SET is_committed = 1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE is_committed = 0
                   AND planned_time >= ? AND planned_time < ?

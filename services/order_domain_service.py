@@ -19,6 +19,7 @@ REMCARD_TRANSFUSION_SOURCE = "remcard_order"
 TRANSFUSION_DRUG_KEYS = {"blood", "plasma"}
 LEGACY_STATUS_SANITIZE_META_KEY = "legacy_admin_statuses_sanitized_v1"
 LEGACY_STATUS_SANITIZE_RETRY_SEC = 30.0
+_INHERIT_CHAIN_ID = object()
 
 
 class OrderDomainService:
@@ -142,10 +143,226 @@ class OrderDomainService:
             return False
         if str(latest["cell_role"] or "") != str(committed["cell_role"] or ""):
             return False
+        if str(latest["big_chain_id"] or "") != str(committed["big_chain_id"] or ""):
+            return False
+        if str(latest["comment"] or "") != str(committed["comment"] or ""):
+            return False
         try:
             return float(latest["volume_ml"] or 0.0) == float(committed["volume_ml"] or 0.0)
         except Exception:
             return True
+
+    @staticmethod
+    def _row_dt(row) -> datetime:
+        return datetime.fromisoformat(str(row["planned_time"]))
+
+    @staticmethod
+    def _is_planned_row(row) -> bool:
+        return str(row["status"] or "") == "planned"
+
+    def _fetch_planned_chain_segment(
+        self,
+        cursor,
+        order_id: int,
+        big_chain_id: Optional[str],
+        planned_time: datetime,
+    ) -> List[dict]:
+        if not big_chain_id:
+            return []
+        cursor.execute(
+            """
+            SELECT *
+            FROM administrations a
+            WHERE a.order_id = ?
+              AND a.big_chain_id = ?
+              AND a.status = 'planned'
+              AND a.id = (
+                  SELECT MAX(a2.id)
+                  FROM administrations a2
+                  WHERE a2.order_id = a.order_id
+                    AND a2.planned_time = a.planned_time
+              )
+            ORDER BY a.planned_time ASC
+            """,
+            (int(order_id), big_chain_id),
+        )
+        rows = [
+            self._cursor_row_to_dict(cursor, row)
+            for row in cursor.fetchall()
+        ]
+        rows = [row for row in rows if row and row.get("planned_time")]
+        planned_key = planned_time.isoformat()
+        center = next(
+            (idx for idx, row in enumerate(rows) if str(row["planned_time"]) == planned_key),
+            None,
+        )
+        if center is None:
+            return []
+
+        left = center
+        while left > 0:
+            current_dt = self._row_dt(rows[left])
+            previous_dt = self._row_dt(rows[left - 1])
+            if current_dt - previous_dt != timedelta(hours=1):
+                break
+            left -= 1
+
+        right = center
+        while right + 1 < len(rows):
+            current_dt = self._row_dt(rows[right])
+            next_dt = self._row_dt(rows[right + 1])
+            if next_dt - current_dt != timedelta(hours=1):
+                break
+            right += 1
+
+        return rows[left:right + 1]
+
+    def _retire_chain_tail(
+        self,
+        cursor,
+        segment: List[dict],
+        planned_time: datetime,
+    ) -> None:
+        planned_key = planned_time.isoformat()
+        for row in segment:
+            if str(row["planned_time"]) <= planned_key:
+                continue
+            self._insert_draft(
+                cursor,
+                row["order_id"],
+                datetime.fromisoformat(row["planned_time"]),
+                "deleted",
+                row["cell_role"],
+                row["big_chain_id"],
+                last_row=row,
+            )
+
+    def _retire_chain_except(
+        self,
+        cursor,
+        segment: List[dict],
+        planned_time: datetime,
+    ) -> None:
+        planned_key = planned_time.isoformat()
+        for row in segment:
+            if str(row["planned_time"]) == planned_key:
+                continue
+            self._insert_draft(
+                cursor,
+                row["order_id"],
+                datetime.fromisoformat(row["planned_time"]),
+                "deleted",
+                row["cell_role"],
+                row["big_chain_id"],
+                last_row=row,
+            )
+
+    def _promote_previous_chain_end(
+        self,
+        cursor,
+        segment: List[dict],
+        planned_time: datetime,
+    ) -> None:
+        previous_rows = [
+            row
+            for row in segment
+            if str(row["planned_time"]) < planned_time.isoformat()
+        ]
+        if not previous_rows:
+            return
+        prev_row = previous_rows[-1]
+        new_role = "single" if len(previous_rows) == 1 else "end"
+        self._insert_draft(
+            cursor,
+            prev_row["order_id"],
+            datetime.fromisoformat(prev_row["planned_time"]),
+            prev_row["status"],
+            new_role,
+            prev_row["big_chain_id"],
+            last_row=prev_row,
+        )
+
+    def normalize_order_chain_roles(self, cursor, order_id: int) -> None:
+        cursor.execute(
+            """
+            SELECT *
+            FROM administrations a
+            WHERE a.order_id = ?
+              AND a.status = 'planned'
+              AND a.cell_role IN ('start', 'body', 'end', 'single')
+              AND a.id = (
+                  SELECT MAX(a2.id)
+                  FROM administrations a2
+                  WHERE a2.order_id = a.order_id
+                    AND a2.planned_time = a.planned_time
+              )
+            ORDER BY COALESCE(a.big_chain_id, ''), a.planned_time ASC
+            """,
+            (int(order_id),),
+        )
+        rows = [
+            self._cursor_row_to_dict(cursor, row)
+            for row in cursor.fetchall()
+        ]
+        rows = [row for row in rows if row and row.get("planned_time")]
+        if not rows:
+            return
+
+        grouped: Dict[str, List[dict]] = {}
+        for row in rows:
+            chain_id = row.get("big_chain_id")
+            if chain_id:
+                group_key = f"chain:{chain_id}"
+            elif str(row.get("cell_role") or "") == "single":
+                group_key = f"single:{row['planned_time']}"
+            else:
+                group_key = "chain:"
+            grouped.setdefault(group_key, []).append(row)
+
+        for group_rows in grouped.values():
+            group_rows.sort(key=lambda row: str(row["planned_time"]))
+            segment: List[dict] = []
+            previous_dt: Optional[datetime] = None
+            for row in group_rows:
+                current_dt = self._row_dt(row)
+                if previous_dt is not None and current_dt - previous_dt != timedelta(hours=1):
+                    self._normalize_chain_segment(cursor, segment)
+                    segment = []
+                segment.append(row)
+                previous_dt = current_dt
+            self._normalize_chain_segment(cursor, segment)
+
+    def _normalize_chain_segment(self, cursor, segment: List[dict]) -> None:
+        if not segment:
+            return
+        expected_chain_id = None if len(segment) == 1 else (segment[0].get("big_chain_id") or str(uuid.uuid4()))
+        last_index = len(segment) - 1
+        for idx, row in enumerate(segment):
+            if len(segment) == 1:
+                expected_role = "single"
+            elif idx == 0:
+                expected_role = "start"
+            elif idx == last_index:
+                expected_role = "end"
+            else:
+                expected_role = "body"
+
+            if (
+                str(row.get("cell_role") or "") == expected_role
+                and str(row.get("big_chain_id") or "") == str(expected_chain_id or "")
+            ):
+                continue
+
+            self._insert_draft(
+                cursor,
+                row["order_id"],
+                datetime.fromisoformat(row["planned_time"]),
+                "planned",
+                expected_role,
+                expected_chain_id,
+                last_row=row,
+                comment=row.get("comment"),
+            )
 
     def _collapse_noop_cell_draft(self, cursor, order_id: int, planned_time: datetime) -> None:
         """
@@ -230,8 +447,9 @@ class OrderDomainService:
         planned_time: datetime,
         status: str,
         cell_role: str,
-        big_chain_id: Optional[str] = None,
+        big_chain_id=_INHERIT_CHAIN_ID,
         last_row: Optional[dict] = None,
+        comment: Optional[str] = None,
     ):
         """
         Для любых изменений в черновике всегда делаем INSERT.
@@ -242,16 +460,20 @@ class OrderDomainService:
         volume = last_row["volume_ml"] if last_row else 0.0
 
         # Если big_chain_id явно не передан, наследуем его у предыдущей версии ячейки.
-        effective_chain_id = big_chain_id if big_chain_id is not None else (last_row["big_chain_id"] if last_row else None)
+        effective_chain_id = (
+            last_row["big_chain_id"]
+            if big_chain_id is _INHERIT_CHAIN_ID and last_row
+            else (None if big_chain_id is _INHERIT_CHAIN_ID else big_chain_id)
+        )
 
         cursor.execute(
             """
             INSERT INTO administrations (
-                order_id, big_chain_id, cell_role, planned_time, status, is_committed, volume_ml, updated_at
+                order_id, big_chain_id, cell_role, planned_time, status, is_committed, comment, volume_ml, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 0, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
             """,
-            (order_id, effective_chain_id, cell_role, planned_time.isoformat(), status, volume),
+            (order_id, effective_chain_id, cell_role, planned_time.isoformat(), status, comment, volume),
         )
         self._collapse_noop_cell_draft(cursor, order_id, planned_time)
 
@@ -263,6 +485,7 @@ class OrderDomainService:
             if not last_row:
                 if is_long:
                     self._create_chain(cursor, order, planned_time)
+                    self.normalize_order_chain_roles(cursor, order.id)
                 else:
                     self._insert_draft(cursor, order.id, planned_time, "planned", "single", last_row=last_row)
                 return
@@ -273,67 +496,18 @@ class OrderDomainService:
 
             if status == "planned":
                 if is_long:
+                    segment = self._fetch_planned_chain_segment(cursor, order.id, big_chain_id, planned_time)
                     if role == "start":
-                        query_chain = """
-                            SELECT * FROM administrations a
-                            WHERE big_chain_id = ? AND COALESCE(status,'') != 'deleted'
-                            AND id = (SELECT MAX(id) FROM administrations a2 WHERE a2.order_id = a.order_id AND a2.planned_time = a.planned_time)
-                        """
-                        for row in self.db.fetch_all_remcard(query_chain, (big_chain_id,)):
-                            self._insert_draft(
-                                cursor,
-                                row["order_id"],
-                                datetime.fromisoformat(row["planned_time"]),
-                                "deleted",
-                                row["cell_role"],
-                                row["big_chain_id"],
-                                last_row=row,
-                            )
+                        self._retire_chain_except(cursor, segment, planned_time)
+                        self._insert_draft(cursor, order.id, planned_time, "deleted", role, big_chain_id, last_row=last_row)
                     elif role == "body":
                         self._insert_draft(cursor, order.id, planned_time, "planned", "end", big_chain_id, last_row=last_row)
-                        query_tail = """
-                            SELECT * FROM administrations a
-                            WHERE big_chain_id = ? AND planned_time > ? AND COALESCE(status,'') != 'deleted'
-                            AND id = (SELECT MAX(id) FROM administrations a2 WHERE a2.order_id = a.order_id AND a2.planned_time = a.planned_time)
-                        """
-                        for row in self.db.fetch_all_remcard(query_tail, (big_chain_id, planned_time.isoformat())):
-                            self._insert_draft(
-                                cursor,
-                                row["order_id"],
-                                datetime.fromisoformat(row["planned_time"]),
-                                "deleted",
-                                row["cell_role"],
-                                row["big_chain_id"],
-                                last_row=row,
-                            )
+                        self._retire_chain_tail(cursor, segment, planned_time)
                     elif role == "single":
                         self._insert_draft(cursor, order.id, planned_time, "deleted", "single", big_chain_id, last_row=last_row)
                     elif role == "end":
                         self._insert_draft(cursor, order.id, planned_time, "deleted", "single", big_chain_id, last_row=last_row)
-                        query_prev = """
-                            SELECT * FROM administrations a
-                            WHERE big_chain_id = ? AND planned_time < ? AND COALESCE(status,'') != 'deleted'
-                            AND id = (SELECT MAX(id) FROM administrations a2 WHERE a2.order_id = a.order_id AND a2.planned_time = a.planned_time)
-                            ORDER BY planned_time DESC LIMIT 1
-                        """
-                        prev_row = self.db.fetch_one_remcard(query_prev, (big_chain_id, planned_time.isoformat()))
-                        if prev_row:
-                            query_count = """
-                                SELECT COUNT(*) as cnt FROM administrations a
-                                WHERE big_chain_id = ? AND planned_time != ? AND COALESCE(status,'') != 'deleted'
-                                AND id = (SELECT MAX(id) FROM administrations a2 WHERE a2.order_id = a.order_id AND a2.planned_time = a.planned_time)
-                            """
-                            count_res = self.db.fetch_one_remcard(query_count, (big_chain_id, planned_time.isoformat()))
-                            new_role = "single" if (count_res and count_res["cnt"] == 1) else "end"
-                            self._insert_draft(
-                                cursor,
-                                prev_row["order_id"],
-                                datetime.fromisoformat(prev_row["planned_time"]),
-                                prev_row["status"],
-                                new_role,
-                                big_chain_id,
-                                last_row=prev_row,
-                            )
+                        self._promote_previous_chain_end(cursor, segment, planned_time)
                 else:
                     self._insert_draft(cursor, order.id, planned_time, "deleted", "single", last_row=last_row)
 
@@ -343,55 +517,38 @@ class OrderDomainService:
                 else:
                     self._insert_draft(cursor, order.id, planned_time, "planned", "single", last_row=last_row)
 
+            if is_long:
+                self.normalize_order_chain_roles(cursor, order.id)
+
     def handle_middle_click(self, order: OrderDTO, admin: Optional[AdministrationDTO], planned_time: datetime):
         with self.db.remcard_transaction() as cursor:
             last_row = self._get_last_admin(order.id, planned_time)
             if not last_row:
                 return
+            is_long = (order.duration_min is not None and order.duration_min >= 61) or order.duration_min == -1
 
             status = last_row["status"]
             role = last_row["cell_role"]
             big_chain_id = last_row["big_chain_id"]
 
             if status == "planned":
+                segment = self._fetch_planned_chain_segment(cursor, order.id, big_chain_id, planned_time)
                 if role == "start":
                     self._insert_draft(cursor, order.id, planned_time, "cancelled", role, big_chain_id, last_row=last_row)
-                    query_others = """
-                        SELECT * FROM administrations a
-                        WHERE big_chain_id = ? AND planned_time != ? AND COALESCE(status,'') != 'deleted'
-                        AND id = (SELECT MAX(id) FROM administrations a2 WHERE a2.order_id = a.order_id AND a2.planned_time = a.planned_time)
-                    """
-                    for row in self.db.fetch_all_remcard(query_others, (big_chain_id, planned_time.isoformat())):
-                        self._insert_draft(
-                            cursor,
-                            row["order_id"],
-                            datetime.fromisoformat(row["planned_time"]),
-                            "deleted",
-                            row["cell_role"],
-                            row["big_chain_id"],
-                            last_row=row,
-                        )
+                    self._retire_chain_except(cursor, segment, planned_time)
                 elif role == "body":
                     self._insert_draft(cursor, order.id, planned_time, "planned", "end", big_chain_id, last_row=last_row)
-                    query_tail = """
-                        SELECT * FROM administrations a
-                        WHERE big_chain_id = ? AND planned_time > ? AND COALESCE(status,'') != 'deleted'
-                        AND id = (SELECT MAX(id) FROM administrations a2 WHERE a2.order_id = a.order_id AND a2.planned_time = a.planned_time)
-                    """
-                    for row in self.db.fetch_all_remcard(query_tail, (big_chain_id, planned_time.isoformat())):
-                        self._insert_draft(
-                            cursor,
-                            row["order_id"],
-                            datetime.fromisoformat(row["planned_time"]),
-                            "deleted",
-                            row["cell_role"],
-                            row["big_chain_id"],
-                            last_row=row,
-                        )
+                    self._retire_chain_tail(cursor, segment, planned_time)
+                elif role == "end":
+                    self._insert_draft(cursor, order.id, planned_time, "cancelled", "single", big_chain_id, last_row=last_row)
+                    self._promote_previous_chain_end(cursor, segment, planned_time)
                 else:
                     self._insert_draft(cursor, order.id, planned_time, "cancelled", "single", last_row=last_row)
             elif status == "cancelled":
                 self._insert_draft(cursor, order.id, planned_time, "deleted", last_row["cell_role"], big_chain_id, last_row=last_row)
+
+            if is_long:
+                self.normalize_order_chain_roles(cursor, order.id)
 
     def handle_right_click(self, order: OrderDTO, admin: Optional[AdministrationDTO], planned_time: datetime):
         pass
@@ -891,7 +1048,7 @@ class OrderDomainService:
         available_slots = []
         for i, cell_time in enumerate(desired_slots):
             last_row = last_rows_by_time.get(cell_time.isoformat())
-            if last_row and str(last_row.get("status") or "") != "deleted" and i > 0:
+            if last_row and self._is_planned_row(last_row) and i > 0:
                 break
             available_slots.append(cell_time)
 
