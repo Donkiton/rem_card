@@ -4423,6 +4423,42 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
     return True, "ok"
 
 
+def _check_patient_open_cache_snapshot_bypasses_worker_request_id(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    cases = [
+        (
+            "doctor",
+            PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+            "DoctorRemCardWidget",
+        ),
+        (
+            "nurse",
+            PROJECT_ROOT / "ui" / "nurse_view" / "nurse_main_widget.py",
+            "NurseMainWidget",
+        ),
+    ]
+    for role, path, class_name in cases:
+        source_text = path.read_text(encoding="utf-8")
+        tree = ast.parse(source_text)
+        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        if not class_defs:
+            return False, f"{role}: {class_name} class not found"
+        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+        cache_method = methods.get("_apply_patient_open_cache")
+        apply_method = methods.get("_apply_card_snapshot")
+        if cache_method is None or apply_method is None:
+            return False, f"{role}: patient-open cache/apply methods not found"
+        cache_source = ast.get_source_segment(source_text, cache_method) or ""
+        apply_source = ast.get_source_segment(source_text, apply_method) or ""
+        if '"from_cache": True' not in cache_source:
+            return False, f"{role}: patient-open cache request must be marked from_cache"
+        if 'request_id is None and not request.get("from_cache")' not in apply_source:
+            return False, f"{role}: from_cache snapshots without worker request_id must pass request-id guard"
+        if "request_id is not None and request_id != self._snapshot_request_id" not in apply_source:
+            return False, f"{role}: worker snapshots must still reject stale request_id"
+    return True, "ok"
+
+
 def _check_patient_form_open_is_deferred_from_callback(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     path = PROJECT_ROOT / "ui" / "patient_bed_management" / "management_widget.py"
@@ -4564,6 +4600,16 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
         return False, "doctor read-only state must be idempotent for child widgets"
     if "self.controls" not in readonly_source or "set_save_active" not in readonly_source:
         return False, "doctor read-only guard must keep controls refresh outside the child-widget skip"
+    load_patient_card = doctor_methods.get("load_patient_card")
+    if load_patient_card is None:
+        return False, "DoctorRemCardWidget.load_patient_card not found"
+    load_patient_source = ast.get_source_segment(doctor_text, load_patient_card) or ""
+    if "orders_context_unchanged" not in load_patient_source:
+        return False, "doctor patient open must track unchanged orders context"
+    if "if not self._archive_read_only_mode:\n                ow.clear_drafts()" in load_patient_source:
+        return False, "doctor patient reopen must not clear drafts again for unchanged orders context"
+    if "if not self._archive_read_only_mode and not orders_context_unchanged:" not in load_patient_source:
+        return False, "doctor patient open clear_drafts must be guarded by orders_context_unchanged"
 
     orders_path = root / "ui/doctor_view/orders_widget.py"
     orders_text = orders_path.read_text(encoding="utf-8")
@@ -5916,6 +5962,7 @@ def main():
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
         ("targeted_async_workers_are_parentless_and_guarded", _check_targeted_async_workers_are_parentless_and_guarded),
+        ("patient_open_cache_snapshot_bypasses_worker_request_id", _check_patient_open_cache_snapshot_bypasses_worker_request_id),
         ("patient_form_open_is_deferred_from_callback", _check_patient_form_open_is_deferred_from_callback),
         ("shutdown_queue_db_ordering_guards", _check_shutdown_queue_db_ordering_guards),
         ("orders_fast_click_path_stays_local", _check_orders_fast_click_path_stays_local),

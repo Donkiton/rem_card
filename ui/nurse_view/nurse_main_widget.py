@@ -599,10 +599,17 @@ class NurseMainWidget(QWidget):
     def _apply_card_snapshot(self, request: dict):
         if self._is_closing:
             return
-        if request.get("request_id") != self._snapshot_request_id:
+        request_id = request.get("request_id")
+        if request_id is None and not request.get("from_cache"):
+            logger.info(
+                "NurseMainWidget discarded snapshot without request_id current_request_id=%s",
+                self._snapshot_request_id,
+            )
+            return
+        if request_id is not None and request_id != self._snapshot_request_id:
             logger.info(
                 "NurseMainWidget discarded stale snapshot request_id=%s current_request_id=%s",
-                request.get("request_id"),
+                request_id,
                 self._snapshot_request_id,
             )
             return
