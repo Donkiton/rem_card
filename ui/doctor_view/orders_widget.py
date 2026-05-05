@@ -81,6 +81,7 @@ class OrdersWidget(QWidget):
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
         self._local_cell_draft_guard = False
+        self._local_cell_draft_guard_signatures = {}
         self._legacy_direct_snapshot_warned = False
         self._load_yesterday_worker = None
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
@@ -194,19 +195,74 @@ class OrdersWidget(QWidget):
 
     def _clear_local_cell_draft_guard(self):
         self._local_cell_draft_guard = False
+        self._local_cell_draft_guard_signatures = {}
 
-    def _mark_local_cell_draft_guard(self):
+    def _mark_local_cell_draft_guard(self, changed_keys=None):
         if self.has_drafts():
             self._local_cell_draft_guard = True
+            if changed_keys and self.model is not None:
+                for key in changed_keys:
+                    self._local_cell_draft_guard_signatures[key] = self._admin_guard_signature(
+                        self.model.admin_map.get(key)
+                    )
             self._admin_only_snapshot_until = max(
                 self._admin_only_snapshot_until,
                 time.monotonic() + self._admin_only_snapshot_window_sec,
             )
 
+    @staticmethod
+    def _admin_guard_signature(admin):
+        if admin is None:
+            return None
+        return (
+            str(getattr(admin, "status", "") or ""),
+            str(getattr(admin, "cell_role", "") or ""),
+            int(getattr(admin, "is_committed", 0) or 0),
+        )
+
+    @staticmethod
+    def _admin_row_guard_signature(row):
+        if row is None:
+            return None
+        return (
+            str(row.get("status") or ""),
+            str(row.get("cell_role") or ""),
+            int(row.get("is_committed") or 0),
+        )
+
+    @staticmethod
+    def _admin_row_key(row):
+        try:
+            planned_time = datetime.fromisoformat(str(row.get("planned_time")))
+            planned_key = planned_time.isoformat()
+        except Exception:
+            planned_key = str(row.get("planned_time") or "")
+        try:
+            order_id = int(row.get("order_id"))
+        except Exception:
+            order_id = row.get("order_id")
+        return (order_id, planned_key)
+
+    def _snapshot_matches_local_cell_guard(self, snapshot) -> bool:
+        guard_signatures = dict(self._local_cell_draft_guard_signatures or {})
+        if not guard_signatures:
+            return bool(snapshot.get("has_any_draft", False))
+
+        snapshot_by_key = {}
+        for row in snapshot.get("admin_rows") or []:
+            if not isinstance(row, dict):
+                row = dict(row)
+            snapshot_by_key[self._admin_row_key(row)] = row
+
+        return all(
+            self._admin_row_guard_signature(snapshot_by_key.get(key)) == signature
+            for key, signature in guard_signatures.items()
+        )
+
     def _should_preserve_local_cell_draft(self, snapshot) -> bool:
         if not self._local_cell_draft_guard:
             return False
-        if bool(snapshot.get("has_any_draft", False)):
+        if self._snapshot_matches_local_cell_guard(snapshot):
             self._clear_local_cell_draft_guard()
             return False
         if not self.has_drafts():
@@ -1690,7 +1746,7 @@ class OrdersWidget(QWidget):
 
         if changed_keys:
             self._emit_admin_cell_changes(changed_keys)
-            self._mark_local_cell_draft_guard()
+            self._mark_local_cell_draft_guard(changed_keys)
             logger.info(
                 "[OrdersClick] local_cell_update role=doctor admission_id=%s op=%s order_id=%s changed_cells=%s",
                 self.admission_id,
@@ -2321,6 +2377,8 @@ class OrdersWidget(QWidget):
         if self._is_read_only():
             return
         if not index.isValid() or index.column() == 0 or not self.model:
+            return
+        if op_prefix == "orders_right_click":
             return
         row = index.row()
         col = index.column()
