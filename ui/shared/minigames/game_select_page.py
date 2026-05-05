@@ -3,6 +3,8 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QGridLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from rem_card.ui.styles.theme import TEXT_PRIMARY
+
 
 class GameSelectPage(QWidget):
     snake_requested = Signal()
@@ -51,7 +53,7 @@ class GameSelectPage(QWidget):
         ]
         for row, (title, load_handler, leaderboard_handler) in enumerate(games):
             name = QLabel(title)
-            name.setStyleSheet("font-weight: bold; color: #2c3e50;")
+            name.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY};")
             load_btn = QPushButton("Загрузить")
             leaders_btn = QPushButton("Лидеры")
             load_btn.clicked.connect(load_handler)

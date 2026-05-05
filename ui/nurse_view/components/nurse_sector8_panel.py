@@ -10,6 +10,7 @@ class NurseSector8Panel(QWidget):
     refresh_clicked = Signal()
     add_patient_clicked = Signal()
     bonus_clicked = Signal()
+    style_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -52,6 +53,15 @@ class NurseSector8Panel(QWidget):
         self.btn_bonus.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_bonus.clicked.connect(self.bonus_clicked.emit)
 
+        # Кнопка Цветовая схема
+        self.btn_style = QPushButton(" Цветовая схема")
+        style_icon = os.path.join(self.icon_dir, "color.svg")
+        self.btn_style.setIcon(QIcon(style_icon))
+        self.btn_style.setIconSize(QSize(18, 18))
+        self.btn_style.setMinimumHeight(32)
+        self.btn_style.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_style.clicked.connect(self.style_clicked.emit)
+
         # 2. Кнопка Назад
         self.btn_back = QPushButton(" Назад")
         back_icon = os.path.join(self.icon_dir, "back.png")
@@ -73,6 +83,7 @@ class NurseSector8Panel(QWidget):
         self.layout.addWidget(self.btn_refresh)
         self.layout.addWidget(self.btn_add_patient)
         self.layout.addWidget(self.btn_bonus)
+        self.layout.addWidget(self.btn_style)
         self.layout.addWidget(self.btn_back)
         self.layout.addWidget(self.btn_exit)
 

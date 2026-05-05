@@ -120,7 +120,7 @@ class NurseStatisticsDialog(QDialog):
         # Заголовок внутри отчета
         date_str = self.current_hour_dt.strftime("%d.%m.%Y")
         lbl_title = QLabel(f"Отчет по препаратам на {date_str}")
-        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #0056b3; margin-bottom: 5px;")
+        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #5c6770; margin-bottom: 5px;")
         content_wrapper.addWidget(lbl_title)
         
         self.scroll = QScrollArea()

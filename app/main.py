@@ -29,6 +29,22 @@ def _show_native_warning(title: str, message: str):
         print(f"{title}: {message}")
 
 
+def _apply_app_theme(app, role: Optional[str] = None):
+    try:
+        from rem_card.ui.styles.theme_manager import get_theme_manager
+
+        manager = get_theme_manager()
+        manager.load(role or "system")
+        manager.apply_to_app(app, role or "system")
+    except Exception:
+        try:
+            from rem_card.ui.styles.theme import GLOBAL_STYLE
+
+            app.setStyleSheet(GLOBAL_STYLE)
+        except Exception:
+            pass
+
+
 def _write_startup_local_log(message: str):
     try:
         log_dir = get_local_logs_dir()
@@ -48,12 +64,7 @@ def _show_custom_warning(title: str, message: str):
         from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance() or QApplication(sys.argv)
-        try:
-            from rem_card.ui.styles.theme import GLOBAL_STYLE
-
-            app.setStyleSheet(GLOBAL_STYLE)
-        except Exception:
-            pass
+        _apply_app_theme(app, "system")
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         CustomMessageBox.warning(None, title, message)
@@ -66,12 +77,7 @@ def _show_custom_info(title: str, message: str):
         from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance() or QApplication(sys.argv)
-        try:
-            from rem_card.ui.styles.theme import GLOBAL_STYLE
-
-            app.setStyleSheet(GLOBAL_STYLE)
-        except Exception:
-            pass
+        _apply_app_theme(app, "system")
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         CustomMessageBox.information(None, title, message)
@@ -267,12 +273,7 @@ def _run_path_setup():
     from PySide6.QtWidgets import QApplication, QFileDialog
 
     app = QApplication.instance() or QApplication(sys.argv)
-    try:
-        from rem_card.ui.styles.theme import GLOBAL_STYLE
-
-        app.setStyleSheet(GLOBAL_STYLE)
-    except Exception:
-        pass
+    _apply_app_theme(app, "system")
 
     while True:
         selected = QFileDialog.getExistingDirectory(
@@ -468,15 +469,16 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         splash.show()
         app.processEvents()
 
+        _apply_app_theme(app, args.role or "system")
+
         from rem_card.app.logger import log_exception, logger as _logger, init_crash_handler
         from rem_card.app.bootstrap import bootstrap
         from rem_card.ui.main_window import MainWindow
-        from rem_card.ui.styles.theme import GLOBAL_STYLE
 
         logger = _logger
         sys.excepthook = log_exception
         init_crash_handler()
-        app.setStyleSheet(GLOBAL_STYLE)
+        _apply_app_theme(app, args.role or "system")
 
         server = QLocalServer()
         server.listen(server_name)

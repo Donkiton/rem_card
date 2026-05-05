@@ -83,7 +83,7 @@ class Sector4(BaseSectorWidget):
         self.info_layout.setSpacing(20)
         
         self.lbl_history = QLabel("№ -")
-        self.lbl_history.setStyleSheet("font-weight: bold; background: transparent; color: #0056b3;")
+        self.lbl_history.setStyleSheet("font-weight: bold; background: transparent; color: #5c6770;")
         
         self.lbl_name = QLabel("-")
         self.lbl_name.setStyleSheet("font-weight: bold; font-size: 14px; background: transparent;")

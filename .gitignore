@@ -24,6 +24,11 @@ tmp/
 scripts/bench_results/
 *.log
 
+# Локальные настройки цветовой схемы рабочего места
+settings/color_scheme/style_settings.json
+settings/color_scheme/*.tmp
+settings/color_scheme/*.broken
+
 Rao_jornal/
 
 *.db-journal

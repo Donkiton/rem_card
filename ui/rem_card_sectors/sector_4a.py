@@ -34,7 +34,7 @@ class Sector4a(BaseSectorWidget):
         balance_lbl.setStyleSheet("font-weight: bold; font-size: 14px; color: #2c3e50; border: none; background: transparent;")
         
         self.balance_val = QLabel("0 мл")
-        self.balance_val.setStyleSheet("font-weight: bold; font-size: 14px; color: #007bff; border: none; background: transparent;")
+        self.balance_val.setStyleSheet("font-weight: bold; font-size: 14px; color: #6c757d; border: none; background: transparent;")
         
         balance_layout.addWidget(balance_lbl)
         balance_layout.addWidget(self.balance_val)
@@ -70,7 +70,7 @@ class Sector4a(BaseSectorWidget):
         prefix_cur = "+" if balance_cur > 0 else ""
         prefix_day = "+" if balance_day > 0 else ""
         
-        color_cur = "#007bff" if balance_cur >= 0 else "#e74c3c"
+        color_cur = "#6c757d" if balance_cur >= 0 else "#e74c3c"
         # Для суточного баланса тоже можно менять цвет, но обычно ориентируемся на текущий
         
         # Убран пробел после : (в setText) и шрифт уменьшен до 14px

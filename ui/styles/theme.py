@@ -1,117 +1,110 @@
 # --- ЦЕНТРАЛЬНАЯ ТЕМА ПРИЛОЖЕНИЯ РЕМКАРТА ---
-# Все цвета и стилистические параметры собраны здесь для удобства настройки через админку.
+# Файл остается публичным входом для старых импортов. Значения ниже строятся из
+# новой семантической темы, чтобы UI не зависел от случайных hex-цветов в виджетах.
+
+from rem_card.ui.styles.chart_styles import analytics_chart_colors
+from rem_card.ui.styles.theme_manager import get_theme_manager
+
+
+def get_current_tokens(role: str | None = None) -> dict:
+    return get_theme_manager().tokens_for_role(role)
+
+
+_TOKENS = get_theme_manager().current_tokens()
+
+
+def _t(key: str, default: str = "") -> str:
+    value = _TOKENS.get(key, default)
+    return str(value if value is not None else default)
+
 
 # --- ОБЩИЕ ЦВЕТА ФОНА ---
-BG_MAIN = "#f8f9fa"             # Основной фон окон и секторов
-BG_LIGHT = "#e9ecef"            # Светло-серый фон (заголовки, подложки)
-BG_CARD = "#ffffff"             # Чисто белый фон для карточек и полей ввода
-BG_ALT_ROW = "#fdfdfd"          # Цвет чередующихся строк в таблицах
+BG_MAIN = _t("surface.window", "#f8f9fa")
+BG_LIGHT = _t("surface.panel", "#e9ecef")
+BG_CARD = _t("surface.card", "#ffffff")
+BG_ALT_ROW = _t("table.row_alt_bg", "#fdfdfd")
 
 # --- ЦВЕТА ТЕКСТА ---
-TEXT_PRIMARY = "#2c3e50"        # Основной темный текст
-TEXT_SECONDARY = "#495057"      # Вторичный серый текст
-TEXT_MUTED = "#adb5bd"          # Приглушенный текст (disabled)
-TEXT_ON_DARK = "#ffffff"        # Белый текст для темных кнопок
+TEXT_PRIMARY = _t("text.primary", "#2c3e50")
+TEXT_SECONDARY = _t("text.secondary", "#495057")
+TEXT_MUTED = _t("text.muted", "#adb5bd")
+TEXT_ON_DARK = _t("text.inverse", "#ffffff")
 
 # --- СОСТОЯНИЯ И АКЦЕНТЫ ---
-COLOR_PRIMARY = "#6c757d"       # Основной серый цвет (активные элементы)
-COLOR_PRIMARY_DARK = "#5c6770"  # Темно-серый (ховер, заголовки)
-COLOR_SUCCESS = "#28a745"       # Зеленый (успех, сохранение, норма)
-COLOR_SUCCESS_DARK = "#218838"  # Темно-зеленый
-COLOR_DANGER = "#e74c3c"        # Красный (ошибки, удаление, тревога)
-COLOR_WARNING = "#f39c12"       # Оранжевый (предупреждения)
-COLOR_INFO = "#7f8c8d"          # Нейтральный инфо-акцент
-COLOR_SECONDARY = "#6c757d"     # Серый (кнопки "Назад", нейтральные действия)
+COLOR_PRIMARY = _t("surface.selected", "#6c757d")
+COLOR_PRIMARY_DARK = _t("sector.title_text", "#5c6770")
+COLOR_SUCCESS = _t("state.success", "#28a745")
+COLOR_SUCCESS_DARK = _t("state.success.hover", "#218838")
+COLOR_DANGER = _t("state.danger", "#e74c3c")
+COLOR_WARNING = _t("state.warning", "#f39c12")
+COLOR_INFO = _t("state.info", "#7f8c8d")
+COLOR_SECONDARY = _t("button.neutral.bg", "#6c757d")
 
 # --- ГРАНИЦЫ И РАМКИ ---
-BORDER_COLOR = "#bdc3c7"        # Основной цвет рамок секторов
-BORDER_LIGHT = "#dee2e6"        # Светлая граница (разделители)
-BORDER_WIDTH = "1.5px"          # Толщина основных рамок
-BORDER_RADIUS_LG = "15px"       # Большой радиус скругления (сектора)
-BORDER_RADIUS_MD = "8px"        # Средний радиус (кнопки, поля)
-BORDER_RADIUS_SM = "4px"        # Малый радиус
+BORDER_COLOR = _t("border.default", "#bdc3c7")
+BORDER_LIGHT = _t("border.subtle", "#dee2e6")
+BORDER_WIDTH = _t("border.width", "1.5px")
+BORDER_RADIUS_LG = _t("radius.lg", "15px")
+BORDER_RADIUS_MD = _t("radius.md", "8px")
+BORDER_RADIUS_SM = _t("radius.sm", "4px")
 
 # --- СПЕЦИФИЧЕСКИЕ ЦВЕТА ИНТЕРФЕЙСА ---
-COLOR_BED_FREE = "#28a745"      # Цвет свободной койки
-COLOR_BED_BUSY = "#dc3545"      # Цвет занятой койки
-COLOR_CHART_GRID = "#e0e0e0"    # Сетка графика
+COLOR_BED_FREE = _t("state.success", "#28a745")
+COLOR_BED_BUSY = _t("state.danger", "#dc3545")
+COLOR_CHART_GRID = _t("chart.grid", "#e0e0e0")
 
 # --- ЦВЕТА ЛЕГЕНДЫ И ГРАФИКОВ (Витальные функции) ---
-# АД (Артериальное давление)
-COLOR_VITAL_AD_LINE = "#e74c3c" 
-COLOR_VITAL_AD_BG = "#ffdada"
-# Пульс / ЧСС
-COLOR_VITAL_PULSE = "#0000ff"
-COLOR_VITAL_PULSE_BG = "#dadaff"
-# ЧДД (Дыхание)
-COLOR_VITAL_RESP = "#e67e22"
-COLOR_VITAL_RESP_BG = "#fff0da"
-# SpO2 (Насыщение)
-COLOR_VITAL_SPO2 = "#03a9f4"
-COLOR_VITAL_SPO2_BG = "#e1f5fe"
-# Температура
-COLOR_VITAL_TEMP = "#27ae60"
-COLOR_VITAL_TEMP_BG = "#dafada"
-# ЦВД
-COLOR_VITAL_CVP = "#ed5cf7"
-COLOR_VITAL_CVP_BG = "#f8c0fc"
+COLOR_VITAL_AD_LINE = _t("medical.vital.bp.line", "#e74c3c")
+COLOR_VITAL_AD_BG = _t("medical.vital.bp.bg", "#ffdada")
+COLOR_VITAL_PULSE = _t("medical.vital.pulse.line", "#0000ff")
+COLOR_VITAL_PULSE_BG = _t("medical.vital.pulse.bg", "#dadaff")
+COLOR_VITAL_RESP = _t("medical.vital.resp.line", "#e67e22")
+COLOR_VITAL_RESP_BG = _t("medical.vital.resp.bg", "#fff0da")
+COLOR_VITAL_SPO2 = _t("medical.vital.spo2.line", "#03a9f4")
+COLOR_VITAL_SPO2_BG = _t("medical.vital.spo2.bg", "#e1f5fe")
+COLOR_VITAL_TEMP = _t("medical.vital.temp.line", "#27ae60")
+COLOR_VITAL_TEMP_BG = _t("medical.vital.temp.bg", "#dafada")
+COLOR_VITAL_CVP = _t("medical.vital.cvp.line", "#ed5cf7")
+COLOR_VITAL_CVP_BG = _t("medical.vital.cvp.bg", "#f8c0fc")
 
 # --- ЦВЕТА ЯЧЕЕК НАЗНАЧЕНИЙ ---
-COLOR_CELL_CANCELLED = "#f08989" # Цвет отмененного назначения (Отм)
-COLOR_CELL_DRAFT = "#7cf7ca"     # Цвет добавленного черновика (X)
+COLOR_CELL_CANCELLED = "#f08989"
+COLOR_CELL_DRAFT = "#7cf7ca"
 
-# --- ЦВЕТА КНОПОК (Индивидуальные настройки из кода) ---
-COLOR_BTN_SAVE = "#2ecc71"       # Кнопка СОХРАНИТЬ (ярко-зеленый)
-COLOR_BTN_CLEAR = "#fab1a0"      # Кнопка ОЧИСТИТЬ (нежно-красный)
-COLOR_BTN_BACK = "#6c757d"       # Кнопка НАЗАД
-COLOR_BTN_TPL_GEN = "#6c757d"    # Кнопка Генерировать в шаблонах
-COLOR_BTN_TPL_APPLY = "#27ae60"  # Кнопка Утвердить в шаблонах
-COLOR_BTN_DICT_ORANGE = "#e67e22" # Оранжевые кнопки в справочниках
+# --- ЦВЕТА КНОПОК ---
+COLOR_BTN_SAVE = _t("button.success.bg", BG_LIGHT)
+COLOR_BTN_CLEAR = _t("button.danger.bg", "#fab1a0")
+COLOR_BTN_BACK = _t("button.neutral.bg", "#6c757d")
+COLOR_BTN_TPL_GEN = _t("button.neutral.bg", "#6c757d")
+COLOR_BTN_TPL_APPLY = _t("button.success.bg", "#27ae60")
+COLOR_BTN_DICT_ORANGE = _t("state.warning", "#e67e22")
 
-# --- КНОПКИ ВЕРХНЕЙ ПАНЕЛИ (СЕКТОР 8) ---
-# Кнопка НАЗАД (Сектор 8)
-COLOR_S8_BACK_BG = "#e9ecef"     # Цвет фона кнопки
-COLOR_S8_BACK_TEXT = "#000000"   # Цвет текста
+# --- КНОПКИ ВЕРХНЕЙ ПАНЕЛИ И ПАНЕЛИ УПРАВЛЕНИЯ ---
+COLOR_S8_BACK_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S8_BACK_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S8_PLACEHOLDER_BG = _t("surface.panel", "#e9ecef")
+COLOR_S8_PLACEHOLDER_TEXT = _t("text.muted", "#95a5a6")
+COLOR_S8_SETTINGS_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S8_SETTINGS_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S8_EXIT_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S8_EXIT_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S2_SAVE_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S2_SAVE_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S2_CLEAN_SHEET_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S2_CLEAN_SHEET_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S2_CLEAR_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S2_CLEAR_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S2_YESTERDAY_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S2_YESTERDAY_TEXT = _t("button.neutral.text", "#000000")
+COLOR_S2_ROLLBACK_BG = _t("button.neutral.bg", "#e9ecef")
+COLOR_S2_ROLLBACK_TEXT = _t("button.neutral.text", "#000000")
 
-# Кнопка ЗАГЛУШКА (Сектор 8)
-COLOR_S8_PLACEHOLDER_BG = "#e9ecef"   # Цвет фона кнопки
-COLOR_S8_PLACEHOLDER_TEXT = "#95a5a6" # Цвет текста (серый)
-
-# Кнопка НАСТРОЙКИ (Сектор 8)
-COLOR_S8_SETTINGS_BG = "#e9ecef"      # Цвет фона кнопки
-COLOR_S8_SETTINGS_TEXT = "#000000"    # Цвет текста (черный)
-
-# Кнопка ВЫХОД (Сектор 8)
-COLOR_S8_EXIT_BG = "#e9ecef"          # Цвет фона кнопки
-COLOR_S8_EXIT_TEXT = "#000000"        # Цвет текста (черный)
-
-# --- КНОПКИ ПАНЕЛИ УПРАВЛЕНИЯ (СЕКТОР 2а) ---
-# Кнопка СОХРАНИТЬ
-COLOR_S2_SAVE_BG = "#e9ecef"          # Цвет фона кнопки
-COLOR_S2_SAVE_TEXT = "#000000"        # Цвет текста (черный)
-
-# Кнопка ОЧИСТИТЬ ЛИСТ
-COLOR_S2_CLEAN_SHEET_BG = "#e9ecef"   # Цвет фона кнопки
-COLOR_S2_CLEAN_SHEET_TEXT = "#000000" # Цвет текста (черный)
-
-# Кнопка ОЧИСТИТЬ НАЗНАЧЕНИЯ
-COLOR_S2_CLEAR_BG = "#e9ecef"         # Цвет фона кнопки
-COLOR_S2_CLEAR_TEXT = "#000000"       # Цвет текста (черный)
-
-# Кнопка ВЧЕРАШНИЕ НАЗНАЧЕНИЯ
-COLOR_S2_YESTERDAY_BG = "#e9ecef"     # Цвет фона кнопки
-COLOR_S2_YESTERDAY_TEXT = "#000000"   # Цвет текста (черный)
-
-# Кнопка ОТМЕНИТЬ ИЗМЕНЕНИЯ
-COLOR_S2_ROLLBACK_BG = "#e9ecef"      # Цвет фона кнопки
-COLOR_S2_ROLLBACK_TEXT = "#000000"    # Цвет текста (черный)
-
-# --- КАСТОМНЫЕ ДИАЛОГОВЫЕ ОКНА (ПРЕДУПРЕЖДЕНИЯ, ОШИБКИ) ---
-CUSTOM_DIALOG_RADIUS = "5px"
-CUSTOM_DIALOG_BG = "#ffffff"
-CUSTOM_DIALOG_TITLE_BG = "#e9ecef" # BG_LIGHT
-CUSTOM_DIALOG_TITLE_TEXT = "#2c3e50"
-CUSTOM_DIALOG_BORDER = "#bdc3c7"
+# --- КАСТОМНЫЕ ДИАЛОГОВЫЕ ОКНА ---
+CUSTOM_DIALOG_RADIUS = _t("radius.dialog", "5px")
+CUSTOM_DIALOG_BG = _t("dialog.bg", "#ffffff")
+CUSTOM_DIALOG_TITLE_BG = _t("dialog.header_bg", "#e9ecef")
+CUSTOM_DIALOG_TITLE_TEXT = _t("dialog.header_text", "#2c3e50")
+CUSTOM_DIALOG_BORDER = _t("dialog.border", "#bdc3c7")
 
 # --- ОБЩИЕ QSS-ФРАГМЕНТЫ И СТИЛИ ЭКРАНОВ ---
 STYLE_TRANSPARENT_WIDGET = "background: transparent;"
@@ -352,18 +345,7 @@ STYLE_ANALYTICS_DATE_EDIT = f"""
         border: 1px solid {BORDER_COLOR};
     }}
 """
-ANALYTICS_CHART_COLORS = [
-    COLOR_PRIMARY,
-    COLOR_SUCCESS,
-    COLOR_DANGER,
-    COLOR_WARNING,
-    COLOR_INFO,
-    COLOR_SECONDARY,
-    "#9b59b6",
-    "#16a085",
-    "#34495e",
-    "#d35400",
-]
+ANALYTICS_CHART_COLORS = analytics_chart_colors(_TOKENS)
 
 # --- УПРАВЛЕНИЕ ПАЦИЕНТАМИ ---
 STYLE_PATIENT_BED_ROOT = f"""

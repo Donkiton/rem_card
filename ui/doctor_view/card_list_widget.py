@@ -38,7 +38,7 @@ class CardListWidget(QWidget):
                 border-bottom: 1px solid #f1f2f6; 
             }
             QListWidget::item:selected { 
-                background-color: #3498db; 
+                background-color: #6c757d;
                 color: white; 
             }
             QListWidget::item:hover:!selected {

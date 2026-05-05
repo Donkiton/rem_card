@@ -46,7 +46,7 @@ class BalanceGridWidget(QTableWidget):
             QTableWidget::item:selected {
                 background-color: #e3f2fd;
                 color: #000;
-                border: 2px solid #2196f3;
+                border: 2px solid #6c757d;
             }
             QHeaderView::section {
                 background-color: #f1f2f6;

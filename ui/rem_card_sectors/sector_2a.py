@@ -34,7 +34,7 @@ class Sector2a(BaseSectorWidget):
         self.info_layout.setContentsMargins(10, 0, 10, 0)
         
         self.lbl_title = QLabel("Реанимационная карта")
-        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #0056b3; background: transparent;")
+        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #5c6770; background: transparent;")
         
         self.lbl_period = QLabel("-")
         self.lbl_period.setStyleSheet("font-size: 14px; margin-left: 20px; background: transparent; color: #495057;")

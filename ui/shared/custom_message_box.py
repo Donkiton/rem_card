@@ -94,10 +94,10 @@ class CustomMessageBox(QDialog):
             fallback_color = "#e74c3c"
         elif self.msg_type == "information":
             fallback_text = "ℹ"
-            fallback_color = "#3498db"
+            fallback_color = "#6c757d"
         elif self.msg_type == "question":
             fallback_text = "❓"
-            fallback_color = "#007bff"
+            fallback_color = "#6c757d"
             
         if icon_path and os.path.exists(icon_path):
             pixmap = QPixmap(icon_path).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)

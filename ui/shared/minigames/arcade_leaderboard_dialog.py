@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QLabel, QPushButto
 from rem_card.services.minigames.minigame_score_store import ARCADE_GAME_LABELS
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.minigames.user_select_page import role_label
+from rem_card.ui.styles.theme import TEXT_SECONDARY
 
 
 class ArcadeLeaderboardDialog(BaseStyledDialog):
@@ -35,7 +36,7 @@ class ArcadeLeaderboardDialog(BaseStyledDialog):
 
         self.empty_label = QLabel("Результатов по этой игре пока нет.")
         self.empty_label.setAlignment(Qt.AlignCenter)
-        self.empty_label.setStyleSheet("color: #6c757d;")
+        self.empty_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
 
         refresh_btn = QPushButton("Обновить")
         refresh_btn.clicked.connect(self._load_rows)

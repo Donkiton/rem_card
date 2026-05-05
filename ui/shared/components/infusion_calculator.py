@@ -183,7 +183,7 @@ class InfusionCalculatorDialog(QDialog):
             QDoubleSpinBox {
                 padding: 4px; border: 1px solid #bdc3c7; border-radius: 4px; font-size: 14px;
             }
-            QDoubleSpinBox:focus { border: 1.5px solid #3498db; }
+            QDoubleSpinBox:focus { border: 1.5px solid #9aa3ab; }
         """)
         return spin
 

@@ -83,8 +83,8 @@ class NurseSector2b(BaseSectorWidget):
             }
             QPushButton:checked {
                 background-color: #f8f9fa;
-                color: #0056b3;
-                border: 2px solid #0056b3;
+                color: #5c6770;
+                border: 2px solid #5c6770;
             }
             QPushButton:disabled {
                 color: #a4b0be;

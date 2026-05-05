@@ -106,7 +106,7 @@ class SectorEvents(BaseSectorWidget):
                 color: #2c3e50;
             }
             QLineEdit:focus {
-                border: 1.5px solid #3498db;
+                border: 1.5px solid #9aa3ab;
             }
         """)
         reason_layout.addWidget(self.edit_reason_text)
@@ -480,8 +480,8 @@ class SectorEvents(BaseSectorWidget):
         layout.addWidget(l_end)
 
         btn_container, btn_lay = self._create_button_container()
-        style_saved_comm = "QPushButton { border-radius: 10px; background-color: #3498db; color: white; font-weight: bold; border: 1px solid #3498db; }"
-        style_changed_comm = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #3498db; color: white; }"
+        style_saved_comm = "QPushButton { border-radius: 10px; background-color: #6c757d; color: white; font-weight: bold; border: 1px solid #6c757d; }"
+        style_changed_comm = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #6c757d; color: white; }"
         btn_save_comm = self._create_round_save_button(style_saved_comm)
 
         change_handler_comm = self._create_change_handler(btn_save_comm, style_changed_comm)

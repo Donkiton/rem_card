@@ -1106,6 +1106,7 @@ class NurseMainWidget(QWidget):
         self.sector8_panel.refresh_clicked.connect(self.force_refresh_everywhere)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
+        self.sector8_panel.style_clicked.connect(self.on_style_clicked)
         
         self.layout_manager.sector_8.set_content(self.sector8_panel)
         self._ensure_diet_widget()
@@ -1718,6 +1719,12 @@ class NurseMainWidget(QWidget):
             dialog.exec()
         except Exception as exc:
             CustomMessageBox.warning(self, "Бонус", f"Не удалось открыть бонус:\n{exc}")
+
+    def on_style_clicked(self):
+        from rem_card.ui.styles.theme_settings_dialog import ThemeSettingsDialog
+
+        dialog = ThemeSettingsDialog(role="nurse", parent=self)
+        dialog.exec()
 
     def on_settings_clicked(self):
         self.layout_manager.set_patient_selection_mode("admin")

@@ -23,6 +23,7 @@ class AdminMainWidget(QWidget):
         self.admin_types_widget = None
         self.print_widget = None
         self.print_dialog = None
+        self.theme_dialog = None
 
         self.setup_ui()
 
@@ -55,6 +56,7 @@ class AdminMainWidget(QWidget):
         self.btn_templates = QPushButton("Клинические протоколы")
         self.btn_diet_templates = QPushButton("Шаблоны питания")
         self.btn_print = QPushButton("Печать / Отчеты")
+        self.btn_style = QPushButton("Цветовая схема")
 
         menu_buttons = [
             self.btn_drugs,
@@ -66,6 +68,8 @@ class AdminMainWidget(QWidget):
         ]
         if self.role != "nurse":
             menu_buttons.append(self.btn_diet_templates)
+        if self.role == "doctor":
+            menu_buttons.append(self.btn_style)
         menu_buttons.append(self.btn_print)
 
         for btn in menu_buttons:
@@ -95,6 +99,7 @@ class AdminMainWidget(QWidget):
         self.btn_templates.clicked.connect(self.open_templates)
         self.btn_diet_templates.clicked.connect(self.open_diet_templates)
         self.btn_print.clicked.connect(self.open_print)
+        self.btn_style.clicked.connect(self.open_style)
 
     def _show_page(self, widget):
         if widget is not None:
@@ -201,6 +206,12 @@ class AdminMainWidget(QWidget):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def open_style(self):
+        from rem_card.ui.styles.theme_settings_dialog import ThemeSettingsDialog
+
+        dialog = ThemeSettingsDialog(role="doctor", parent=self)
+        dialog.exec()
 
     def set_print_context(self, service, admission_id, date):
         self.service = service

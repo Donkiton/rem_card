@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rem_card.ui.styles.theme import TEXT_PRIMARY
+
 
 ROLE_LABELS = {
     "doctor": "Врач",
@@ -64,7 +66,7 @@ class UserSelectPage(QWidget):
         layout.setSpacing(12)
 
         title = QLabel("Регистрация пользователя")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50;")
+        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {TEXT_PRIMARY};")
 
         register_form = QFormLayout()
         register_form.setLabelAlignment(register_form.labelAlignment())
@@ -89,7 +91,7 @@ class UserSelectPage(QWidget):
         add_row.addWidget(self.add_btn)
 
         select_label = QLabel("или выберите из списка:")
-        select_label.setStyleSheet("font-weight: bold; color: #2c3e50;")
+        select_label.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY};")
 
         self.users_combo = QComboBox()
         self.users_combo.currentIndexChanged.connect(self._sync_load_button)

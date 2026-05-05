@@ -36,8 +36,8 @@ try:
     )
 except Exception:
     BG_LIGHT = "#e9ecef"
-    COLOR_PRIMARY = "#007bff"
-    COLOR_PRIMARY_DARK = "#0056b3"
+    COLOR_PRIMARY = "#6c757d"
+    COLOR_PRIMARY_DARK = "#5c6770"
     CUSTOM_DIALOG_BORDER = "#bdc3c7"
     CUSTOM_DIALOG_RADIUS = "5px"
     TEXT_PRIMARY = "#2c3e50"

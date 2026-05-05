@@ -89,7 +89,7 @@ class Sector2b_v(QWidget):
         balance_lbl = QLabel("Баланс:")
         balance_lbl.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50; border: none; background: transparent;")
         self.balance_val = QLabel("0 мл")
-        self.balance_val.setStyleSheet("font-weight: bold; font-size: 16px; color: #007bff; border: none; background: transparent;")
+        self.balance_val.setStyleSheet("font-weight: bold; font-size: 16px; color: #6c757d; border: none; background: transparent;")
         balance_layout.addWidget(balance_lbl)
         balance_layout.addStretch()
         balance_layout.addWidget(self.balance_val)
@@ -164,7 +164,7 @@ class Sector2b_v(QWidget):
                 border: 1px solid #ced4da; border-radius: 3px; 
                 padding: 1px 2px; background: white;
             }
-            QLineEdit:focus { border: 1px solid #80bdff; }
+            QLineEdit:focus { border: 1px solid #9aa3ab; }
         """)
         
         # 4. Разделитель
@@ -174,7 +174,7 @@ class Sector2b_v(QWidget):
         # 5. Значение X (из сетки)
         x_val_lbl = QLabel("0")
         x_val_lbl.setFixedWidth(40)
-        x_val_lbl.setStyleSheet("font-weight: 600; color: #007bff; font-size: 12px;")
+        x_val_lbl.setStyleSheet("font-weight: 600; color: #6c757d; font-size: 12px;")
         
         # 6. Единицы
         unit_lbl = QLabel("мл")
@@ -197,7 +197,7 @@ class Sector2b_v(QWidget):
         balance_day = int(round(total_in_daily - total_out_daily))
 
         prefix_cur = "+" if balance_cur > 0 else ""
-        color = "#007bff" if balance_cur >= 0 else "#e74c3c"
+        color = "#6c757d" if balance_cur >= 0 else "#e74c3c"
         
         self.balance_val.setText(f"{prefix_cur}{balance_cur}/{balance_day} мл")
         self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {color};")
@@ -232,7 +232,7 @@ class Sector2b_v(QWidget):
                 border: 1px solid #ced4da; border-radius: 3px; 
                 padding: 1px 2px; background: {bg_color};
             }}
-            QLineEdit:focus {{ border: 1px solid #80bdff; }}
+            QLineEdit:focus {{ border: 1px solid #9aa3ab; }}
         """
         for field in [self.diurez_val, self.drenazh_val, self.zond_val, self.rvota_val, self.other_val]:
             field.setReadOnly(not enabled)
