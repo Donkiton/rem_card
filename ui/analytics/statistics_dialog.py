@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -25,9 +25,26 @@ from rem_card.services.analytics.detailed_statistics_service import (
 )
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
 from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
+from rem_card.ui.styles.theme import (
+    STYLE_ANALYTICS_CHECKBOX,
+    STYLE_ANALYTICS_CHECKBOX_CONTAINER,
+    STYLE_ANALYTICS_CONTROL_FRAME,
+    STYLE_ANALYTICS_DIALOG_CONTAINER,
+    STYLE_ANALYTICS_GROUP_LABEL,
+    STYLE_ANALYTICS_OPTION_BUTTON,
+    STYLE_ANALYTICS_PERIOD,
+    STYLE_ANALYTICS_PREVIEW_BUTTON,
+    STYLE_ANALYTICS_PRIMARY_BUTTON,
+    STYLE_ANALYTICS_SCROLL_AREA,
+    STYLE_ANALYTICS_TEXT_BROWSER,
+    STYLE_ANALYTICS_TITLE,
+    STYLE_DIALOG_CLOSE_BUTTON,
+    STYLE_TRANSPARENT_WIDGET,
+)
 
 
-class StatisticsDialog(QDialog):
+class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
     def __init__(self, db_manager, start_date_str: str, end_date_str: str, parent=None):
         super().__init__(parent)
         self.db_manager = db_manager
@@ -41,19 +58,13 @@ class StatisticsDialog(QDialog):
         self.end_date_str = self._end_dt.strftime("%Y-%m-%d 23:59:59")
 
         self.setWindowTitle("Статистический отчет")
+        self.setMinimumSize(820, 560)
         self.resize(1180, 860)
 
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setMouseTracking(True)
-        self._drag_pos = QPoint()
-        self._margin = 10
-        self._resizing = False
-
-        self.bg_color = "#f5f2e9"
-        self.border_color = "#d1d1bc"
-        self.accent_color = "#8a8a68"
-        self.text_color = "#2d2d24"
+        self._init_saved_frameless_dialog("analytics/statistics_dialog_geometry", drag_area_height=86)
 
         self.section_groups = SECTION_GROUPS
         self.top_sections = TOP_SECTIONS
@@ -63,20 +74,13 @@ class StatisticsDialog(QDialog):
         self._closing = False
 
         self._init_ui()
+        self._restore_saved_geometry()
 
     def _init_ui(self):
         self.bg_container = QWidget(self)
         self.bg_container.setMouseTracking(True)
-        self.bg_container.setStyleSheet(
-            f"""
-            QWidget#bg_container {{
-                background-color: {self.bg_color};
-                border: 2px solid {self.border_color};
-                border-radius: 15px;
-            }}
-            """
-        )
         self.bg_container.setObjectName("bg_container")
+        self.bg_container.setStyleSheet(STYLE_ANALYTICS_DIALOG_CONTAINER)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)
@@ -98,7 +102,7 @@ class StatisticsDialog(QDialog):
     def _build_header(self):
         header = QWidget()
         header.setFixedHeight(60)
-        header.setStyleSheet("background: transparent;")
+        header.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
         h_layout = QHBoxLayout(header)
         h_layout.setContentsMargins(8, 0, 0, 0)
 
@@ -106,15 +110,13 @@ class StatisticsDialog(QDialog):
         title_block.setSpacing(2)
 
         title = QLabel("СТАТИСТИЧЕСКИЙ ОТЧЕТ")
-        title.setStyleSheet(
-            "color: #4a4a3a; font-size: 13px; font-weight: 800; letter-spacing: 1px; background: transparent;"
-        )
+        title.setStyleSheet(STYLE_ANALYTICS_TITLE)
         title_block.addWidget(title)
 
         period_label = QLabel(
             f"Период (из архива): {self._start_dt.strftime('%d.%m.%Y')} - {self._end_dt.strftime('%d.%m.%Y')}"
         )
-        period_label.setStyleSheet("color: #6f6f57; font-size: 11px; font-weight: 600;")
+        period_label.setStyleSheet(STYLE_ANALYTICS_PERIOD)
         title_block.addWidget(period_label)
 
         h_layout.addLayout(title_block)
@@ -123,12 +125,7 @@ class StatisticsDialog(QDialog):
         close_button = QPushButton("×")
         close_button.setFixedSize(30, 30)
         close_button.setCursor(Qt.PointingHandCursor)
-        close_button.setStyleSheet(
-            """
-            QPushButton { background: transparent; color: #7a7a6a; font-size: 22px; border: none; }
-            QPushButton:hover { background: #ef4444; color: white; border-radius: 5px; }
-            """
-        )
+        close_button.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
         close_button.clicked.connect(self.reject)
         h_layout.addWidget(close_button)
 
@@ -144,9 +141,7 @@ class StatisticsDialog(QDialog):
         left_layout.setSpacing(10)
 
         ctrl_frame = QFrame()
-        ctrl_frame.setStyleSheet(
-            f"QFrame {{ background: #fdfdfa; border: 1px solid {self.border_color}; border-radius: 8px; }}"
-        )
+        ctrl_frame.setStyleSheet(STYLE_ANALYTICS_CONTROL_FRAME)
         ctrl_layout = QVBoxLayout(ctrl_frame)
         ctrl_layout.setSpacing(5)
 
@@ -155,24 +150,9 @@ class StatisticsDialog(QDialog):
         self.btn_select_top = QPushButton("Ключевые показатели")
         ctrl_buttons = [self.btn_select_all, self.btn_deselect_all, self.btn_select_top]
 
-        btn_style = f"""
-            QPushButton {{
-                color: white;
-                background: {self.accent_color};
-                border: none;
-                border-radius: 4px;
-                font-weight: 600;
-                font-size: 12px;
-                text-align: center;
-                padding: 6px 10px;
-            }}
-            QPushButton:hover {{
-                background: #707054;
-            }}
-        """
         for button in ctrl_buttons:
             button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet(btn_style)
+            button.setStyleSheet(STYLE_ANALYTICS_OPTION_BUTTON)
             ctrl_layout.addWidget(button)
 
         self.btn_select_all.clicked.connect(self._select_all)
@@ -182,32 +162,22 @@ class StatisticsDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            f"""
-            QScrollArea {{ background: transparent; border: 1px solid {self.border_color}; border-radius: 8px; }}
-            QScrollBar:vertical {{ border: none; background: #fdfdfa; width: 10px; margin: 0px; }}
-            QScrollBar::handle:vertical {{ background: #c9c9b4; min-height: 20px; border-radius: 5px; }}
-            """
-        )
+        scroll.setStyleSheet(STYLE_ANALYTICS_SCROLL_AREA)
 
         cb_container = QWidget()
-        cb_container.setStyleSheet("background: #fdfdfa;")
+        cb_container.setStyleSheet(STYLE_ANALYTICS_CHECKBOX_CONTAINER)
         cb_layout = QVBoxLayout(cb_container)
         cb_layout.setSpacing(7)
 
         for group_name, items in self.section_groups.items():
             group_lbl = QLabel(group_name.upper())
-            group_lbl.setStyleSheet(
-                f"color: {self.accent_color}; font-weight: 800; font-size: 10px; margin-top: 10px; border-bottom: 1px solid {self.border_color};"
-            )
+            group_lbl.setStyleSheet(STYLE_ANALYTICS_GROUP_LABEL)
             cb_layout.addWidget(group_lbl)
 
             for key, caption in items.items():
                 cb = QCheckBox(caption)
                 cb.setChecked(False)
-                cb.setStyleSheet(
-                    f"QCheckBox {{ color: {self.text_color}; font-weight: 500; font-size: 11px; background: transparent; }}"
-                )
+                cb.setStyleSheet(STYLE_ANALYTICS_CHECKBOX)
                 cb_layout.addWidget(cb)
                 self.checkboxes[key] = cb
 
@@ -218,82 +188,22 @@ class StatisticsDialog(QDialog):
         self.preview_btn = QPushButton("ПРЕДПРОСМОТР ОТЧЕТА")
         self.preview_btn.setCursor(Qt.PointingHandCursor)
         self.preview_btn.setFixedHeight(40)
-        self.preview_btn.setStyleSheet(
-            f"""
-            QPushButton {{ background-color: #fdfdfa; color: {self.accent_color}; border: 2px solid {self.accent_color}; border-radius: 6px; font-weight: 800; font-size: 11px; }}
-            QPushButton:hover {{ background-color: #e8e4d5; }}
-            """
-        )
+        self.preview_btn.setStyleSheet(STYLE_ANALYTICS_PREVIEW_BUTTON)
         self.preview_btn.clicked.connect(self._on_preview_clicked)
         left_layout.addWidget(self.preview_btn)
 
         self.save_pdf_btn = QPushButton("СОХРАНИТЬ ОТЧЕТ В PDF")
         self.save_pdf_btn.setCursor(Qt.PointingHandCursor)
         self.save_pdf_btn.setFixedHeight(45)
-        self.save_pdf_btn.setStyleSheet(
-            f"""
-            QPushButton {{ background-color: {self.accent_color}; color: white; border: none; border-radius: 6px; font-weight: 800; font-size: 12px; }}
-            QPushButton:hover {{ background-color: #707054; }}
-            """
-        )
+        self.save_pdf_btn.setStyleSheet(STYLE_ANALYTICS_PRIMARY_BUTTON)
         self.save_pdf_btn.clicked.connect(self._on_save_pdf_clicked)
         left_layout.addWidget(self.save_pdf_btn)
 
         content.addWidget(left_widget, 1)
 
         self.report_text = QTextBrowser()
-        self.report_text.setStyleSheet(
-            f"""
-            QTextBrowser {{ background-color: #fdfdfa; border: 1px solid {self.border_color}; border-radius: 8px; padding: 10px; }}
-            """
-        )
+        self.report_text.setStyleSheet(STYLE_ANALYTICS_TEXT_BROWSER)
         content.addWidget(self.report_text, 2)
-
-    def _get_resize_edges(self, pos):
-        edges = Qt.Edge(0)
-        if pos.x() < self._margin:
-            edges |= Qt.LeftEdge
-        if pos.x() > self.width() - self._margin:
-            edges |= Qt.RightEdge
-        if pos.y() < self._margin:
-            edges |= Qt.TopEdge
-        if pos.y() > self.height() - self._margin:
-            edges |= Qt.BottomEdge
-        return edges
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            edges = self._get_resize_edges(event.pos())
-            if edges:
-                self._resizing = True
-                self.windowHandle().startSystemResize(edges)
-            elif self.childAt(event.pos()) in [self.bg_container, None]:
-                self._drag_pos = event.globalPosition().toPoint() - self.pos()
-                self._dragging = True
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        self._resizing = False
-        if event.button() == Qt.LeftButton:
-            self._dragging = False
-        super().mouseReleaseEvent(event)
-
-    def mouseMoveEvent(self, event):
-        edges = self._get_resize_edges(event.pos())
-        if edges == (Qt.LeftEdge | Qt.TopEdge) or edges == (Qt.RightEdge | Qt.BottomEdge):
-            self.setCursor(Qt.SizeFDiagCursor)
-        elif edges == (Qt.RightEdge | Qt.TopEdge) or edges == (Qt.LeftEdge | Qt.BottomEdge):
-            self.setCursor(Qt.SizeBDiagCursor)
-        elif edges & (Qt.LeftEdge | Qt.RightEdge):
-            self.setCursor(Qt.SizeHorCursor)
-        elif edges & (Qt.TopEdge | Qt.BottomEdge):
-            self.setCursor(Qt.SizeVerCursor)
-        else:
-            self.setCursor(Qt.ArrowCursor)
-
-        if event.buttons() & Qt.LeftButton and getattr(self, "_dragging", False) and not self._resizing:
-            self.move(event.globalPosition().toPoint() - self._drag_pos)
-        super().mouseMoveEvent(event)
 
     def _select_all(self):
         for cb in self.checkboxes.values():

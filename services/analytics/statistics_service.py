@@ -5,6 +5,13 @@ from datetime import datetime
 from html import escape
 
 from rem_card.services.analytics.graphs_service import _thread_local_manager
+from rem_card.ui.styles.theme import (
+    BG_LIGHT,
+    BORDER_LIGHT,
+    COLOR_PRIMARY_DARK,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
 
 def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str:
@@ -250,16 +257,16 @@ def _render_report(**data) -> str:
     <head>
         <meta charset="UTF-8">
         <style>
-            body {{ font-family: 'Arial', sans-serif; color: #2d2d24; margin: 0; padding: 0; }}
+            body {{ font-family: 'Arial', sans-serif; color: {TEXT_PRIMARY}; margin: 0; padding: 0; }}
             .page {{ padding: 24px 28px; }}
-            h1 {{ margin: 0 0 6px 0; font-size: 20px; color: #4a4a3a; }}
-            h2 {{ margin: 18px 0 8px 0; font-size: 14px; color: #6b6b52; text-transform: uppercase; }}
-            .period {{ margin: 0 0 10px 0; color: #5d5d4a; }}
+            h1 {{ margin: 0 0 6px 0; font-size: 20px; color: {TEXT_PRIMARY}; }}
+            h2 {{ margin: 18px 0 8px 0; font-size: 14px; color: {COLOR_PRIMARY_DARK}; text-transform: uppercase; }}
+            .period {{ margin: 0 0 10px 0; color: {TEXT_SECONDARY}; }}
             table {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; }}
-            th, td {{ border: 1px solid #d9d9c8; padding: 6px 8px; text-align: left; font-size: 12px; }}
-            th {{ background: #f0f0e0; color: #4a4a3a; font-weight: 700; }}
+            th, td {{ border: 1px solid {BORDER_LIGHT}; padding: 6px 8px; text-align: left; font-size: 12px; }}
+            th {{ background: {BG_LIGHT}; color: {TEXT_PRIMARY}; font-weight: 700; }}
             .num {{ text-align: right; }}
-            .footnote {{ margin-top: 12px; color: #6d6d58; font-size: 11px; }}
+            .footnote {{ margin-top: 12px; color: {TEXT_SECONDARY}; font-size: 11px; }}
         </style>
     </head>
     <body>

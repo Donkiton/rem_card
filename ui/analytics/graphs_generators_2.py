@@ -200,7 +200,7 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             if df['count'].sum() > 0:
                 plt.figure(figsize=(8, 8))
-                plt.pie(df['count'], labels=df['outcome'], autopct='%1.1f%%', colors=['#6366f1', '#f43f5e', '#8a8a68', '#10b981'])
+                plt.pie(df['count'], labels=df['outcome'], autopct='%1.1f%%', colors=chart_colors[:4])
                 plt.title("31. Исход лечения пациентов")
                 html_content += save_plot("31. Исход лечения пациентов", img_paths)
 
@@ -226,7 +226,7 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
                 plt.figure(figsize=(12, 6))
 
                 # Задаем цвета динамически в зависимости от колонок (исходов)
-                available_colors = ['#10b981', '#f43f5e', '#8a8a68', '#6366f1', '#d97706', '#c0504d']
+                available_colors = chart_colors
                 plot_colors = available_colors[:len(pivot_df.columns)]
 
                 pivot_df.plot(kind='bar', stacked=True, ax=plt.gca(), color=plot_colors)
@@ -250,7 +250,7 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
             df = df[df['bed_days'] >= 0]
             if not df.empty and df['bed_days'].sum() > 0:
                 plt.figure(figsize=(8, 8))
-                plt.pie(df['bed_days'], labels=df['outcome'], autopct='%1.1f%%', colors=['#6366f1', '#f43f5e', '#8a8a68', '#10b981'])
+                plt.pie(df['bed_days'], labels=df['outcome'], autopct='%1.1f%%', colors=chart_colors[:4])
             plt.title("33. Соотношение койко-дней по исходам")
             html_content += save_plot("33. Соотношение койко-дней по исходам", img_paths)
 
@@ -264,7 +264,7 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
         if not df.empty:
             df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
             plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['avg_duration'], color=['#6366f1', '#f43f5e', '#8a8a68', '#10b981'])
+            plt.bar(range(len(df)), df['avg_duration'], color=chart_colors[:4])
             plt.xticks(range(len(df)), df['outcome'])
             plt.title("34. Средняя длительность пребывания по исходам (дни)")
             plt.ylabel("Дни")
@@ -282,7 +282,7 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
             death_rate = (deaths / total_patients) * 100 if total_patients > 0 else 0
             html_content += (
                 "<div style='text-align: center;'><h3>35. Смертность</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: #ef4444;'>{death_rate:.1f}%</div>"
+                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[2]};'>{death_rate:.1f}%</div>"
                 f"<p>Умерло: {deaths} из {total_patients} пациентов</p></div><br>"
             )
         else:
@@ -362,7 +362,7 @@ def generate_g36_g40(selected, conn, params, chart_colors, img_paths, adms, html
             median_duration = sorted(durations)[len(durations) // 2]
             html_content += (
                 f"<div style='text-align: center;'><h3>38. Медианная длительность пребывания</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: #10b981;'>{median_duration} дней</div>"
+                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[1]};'>{median_duration} дней</div>"
                 f"<p>Используются продолжительности всех пациентов.</p></div><br>"
             )
         else:
@@ -378,7 +378,7 @@ def generate_g36_g40(selected, conn, params, chart_colors, img_paths, adms, html
         if not df.empty:
             df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
             plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['avg_duration'], color=['#f43f5e', '#10b981'])
+            plt.bar(range(len(df)), df['avg_duration'], color=[chart_colors[2], chart_colors[1]])
             plt.xticks(range(len(df)), df['outcome'])
             plt.title("39. Средняя длительность пребывания (Умершие vs Выписанные)")
             plt.ylabel("Дни")
@@ -401,7 +401,7 @@ def generate_g36_g40(selected, conn, params, chart_colors, img_paths, adms, html
                     pass
         if durations_d:
             plt.figure(figsize=(10, 5))
-            plt.hist(durations_d, bins=20, color='#f43f5e', edgecolor='white')
+            plt.hist(durations_d, bins=20, color=chart_colors[2], edgecolor='white')
             plt.title("40. Распределение длительности пребывания умерших (дни)")
             plt.xlabel("Длительность (дни)")
             plt.ylabel("Количество пациентов")
@@ -427,7 +427,7 @@ def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_conte
             lethality_rate = (deaths / total_patients) * 100
             html_content += (
                 f"<div style='text-align: center;'><h3>41. Общий коэффициент летальности</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: #ef4444;'>{lethality_rate:.1f}%</div>"
+                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[2]};'>{lethality_rate:.1f}%</div>"
                 f"<p>Умерло: {deaths} из {total_patients} пациентов</p></div><br>"
             )
         else:
@@ -444,7 +444,7 @@ def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_conte
         if not df.empty:
             df['lethality'] = (df['deaths'] / df['total']) * 100
             plt.figure(figsize=(10, 4))
-            plt.plot(df['month'], df['lethality'], marker='s', color='#ef4444')
+            plt.plot(df['month'], df['lethality'], marker='s', color=chart_colors[2])
             plt.title("42. Коэффициент летальности по месяцам (%)")
             plt.xlabel("Месяц")
             plt.ylabel("Летальность (%)")
@@ -480,7 +480,7 @@ def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_conte
         if not df.empty:
             df['lethality'] = (df['deaths'] / df['total']) * 100
             plt.figure(figsize=(10, 5))
-            plt.bar(range(len(df)), df['lethality'], color='#ef4444')
+            plt.bar(range(len(df)), df['lethality'], color=chart_colors[2])
             plt.xticks(range(len(df)), df['age_group'])
             plt.title("43. Коэффициент летальности по возрастным группам (%)")
             plt.ylabel("Летальность (%)")
@@ -501,7 +501,7 @@ def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_conte
             if df['lethality'].sum() > 0:
                 plt.figure(figsize=(6, 6))
                 plt.pie(df['lethality'], labels=[f"{row['patient_gender']}\n{row['lethality']:.1f}%" for index, row in df.iterrows()],
-                        autopct='', colors=['#5b9bd5', '#eeb211']) # autopct не нужен, т.к. значения уже в label
+                        autopct='', colors=[chart_colors[0], chart_colors[3]]) # autopct не нужен, т.к. значения уже в label
                 plt.title("44. Коэффициент летальности по полу (%)")
                 html_content += save_plot("44. Коэффициент летальности по полу", img_paths)
 
@@ -517,7 +517,7 @@ def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_conte
         if not df.empty:
             df['lethality'] = (df['deaths'] / df['total']) * 100
             plt.figure(figsize=(10, 5))
-            plt.bar(range(len(df)), df['lethality'], color='#ef4444')
+            plt.bar(range(len(df)), df['lethality'], color=chart_colors[2])
             plt.xticks(range(len(df)), df['diagnosis_code'], rotation=45, ha='right')
             plt.title("45. Коэффициент летальности по топ-5 диагнозам (%)")
             plt.ylabel("Летальность (%)")

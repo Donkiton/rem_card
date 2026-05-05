@@ -2,10 +2,7 @@ import os
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSize, Signal
-from rem_card.ui.styles.theme import (COLOR_S8_BACK_BG, COLOR_S8_BACK_TEXT, 
-                                     COLOR_S8_PLACEHOLDER_BG, COLOR_S8_PLACEHOLDER_TEXT,
-                                     COLOR_S8_SETTINGS_BG, COLOR_S8_SETTINGS_TEXT,
-                                     COLOR_S8_EXIT_BG, COLOR_S8_EXIT_TEXT)
+from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
 
 class Sector8Panel(QWidget):
     """Панель управления в Секторе 8 (Архив, Назад, Настройки, Выход)."""
@@ -32,37 +29,13 @@ class Sector8Panel(QWidget):
 
         self.layout.addStretch()
 
-        # Общий стиль для кнопок
-        button_style = """
-            QPushButton {
-                font-size: 13px; 
-                font-weight: bold; 
-                padding: 4px 12px; 
-                background-color: #ecf0f1; 
-                color: #2c3e50; 
-                border-radius: 5px; 
-                border: 1.5px solid #bdc3c7;
-            }
-            QPushButton:hover {
-                background-color: #dcdde1;
-            }
-            QPushButton:pressed {
-                background-color: #bdc3c7;
-            }
-            QPushButton:disabled {
-                background-color: #f1f2f6;
-                color: #a4b0be;
-                border: 1px solid #dcdde1;
-            }
-        """
-
         # 1. Кнопка Архив
         self.btn_archive = QPushButton(" Архив")
         archive_icon = os.path.join(self.icon_dir, "binder.png")
         self.btn_archive.setIcon(QIcon(archive_icon))
         self.btn_archive.setIconSize(QSize(18, 18))
         self.btn_archive.setMinimumHeight(32)
-        self.btn_archive.setStyleSheet(button_style)
+        self.btn_archive.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_archive.clicked.connect(self.archive_clicked.emit)
 
         # 1.1 Кнопка Обновить
@@ -71,7 +44,7 @@ class Sector8Panel(QWidget):
         self.btn_refresh.setIcon(QIcon(refresh_icon))
         self.btn_refresh.setIconSize(QSize(18, 18))
         self.btn_refresh.setMinimumHeight(32)
-        self.btn_refresh.setStyleSheet(button_style)
+        self.btn_refresh.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_refresh.clicked.connect(self.refresh_clicked.emit)
 
         # 1.2 Кнопка Добавить пациента (доступна только в режиме списка коек)
@@ -80,14 +53,14 @@ class Sector8Panel(QWidget):
         self.btn_add_patient.setIcon(QIcon(add_icon))
         self.btn_add_patient.setIconSize(QSize(18, 18))
         self.btn_add_patient.setMinimumHeight(32)
-        self.btn_add_patient.setStyleSheet(button_style)
+        self.btn_add_patient.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
 
         # 1.3 Кнопка БАРС с индикатором авторизации
         self.btn_bars = QPushButton(" БАРС")
         self.btn_bars.setIconSize(QSize(18, 18))
         self.btn_bars.setMinimumHeight(32)
-        self.btn_bars.setStyleSheet(button_style)
+        self.btn_bars.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_bars.clicked.connect(self.bars_clicked.emit)
         self.set_bars_auth_state(False)
 
@@ -97,7 +70,7 @@ class Sector8Panel(QWidget):
         self.btn_calc.setIcon(QIcon(calc_icon))
         self.btn_calc.setIconSize(QSize(18, 18))
         self.btn_calc.setMinimumHeight(32)
-        self.btn_calc.setStyleSheet(button_style)
+        self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_calc.clicked.connect(self.calc_clicked.emit)
 
         # Кнопка Бонус
@@ -106,7 +79,7 @@ class Sector8Panel(QWidget):
         self.btn_bonus.setIcon(QIcon(bonus_icon))
         self.btn_bonus.setIconSize(QSize(18, 18))
         self.btn_bonus.setMinimumHeight(32)
-        self.btn_bonus.setStyleSheet(button_style)
+        self.btn_bonus.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_bonus.clicked.connect(self.bonus_clicked.emit)
 
         # 2. Кнопка Назад
@@ -115,7 +88,7 @@ class Sector8Panel(QWidget):
         self.btn_back.setIcon(QIcon(back_icon))
         self.btn_back.setIconSize(QSize(18, 18))
         self.btn_back.setMinimumHeight(32)
-        self.btn_back.setStyleSheet(button_style)
+        self.btn_back.setStyleSheet(STYLE_SECTOR8_BUTTON)
 
         # 3. Кнопка Настройки
         self.btn_settings = QPushButton(" Настройки")
@@ -123,7 +96,7 @@ class Sector8Panel(QWidget):
         self.btn_settings.setIcon(QIcon(settings_icon))
         self.btn_settings.setIconSize(QSize(18, 18))
         self.btn_settings.setMinimumHeight(32)
-        self.btn_settings.setStyleSheet(button_style)
+        self.btn_settings.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_settings.clicked.connect(self.settings_clicked.emit)
 
         # 4. Кнопка Выход
@@ -132,7 +105,7 @@ class Sector8Panel(QWidget):
         self.btn_exit.setIcon(QIcon(exit_icon))
         self.btn_exit.setIconSize(QSize(18, 18))
         self.btn_exit.setMinimumHeight(32)
-        self.btn_exit.setStyleSheet(button_style)
+        self.btn_exit.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
 
         self.layout.addWidget(self.btn_archive)

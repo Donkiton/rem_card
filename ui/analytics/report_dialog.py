@@ -1,14 +1,25 @@
 import os
 from datetime import datetime
 
-from PySide6.QtCore import QDate, QPoint, Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import QDateEdit, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from rem_card.services.analytics.statistics_service import build_statistical_report_html
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
 from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
+from rem_card.ui.styles.theme import (
+    STYLE_ANALYTICS_DATE_EDIT,
+    STYLE_ANALYTICS_DATE_FRAME,
+    STYLE_ANALYTICS_DATE_LABEL,
+    STYLE_ANALYTICS_DIALOG_CONTAINER,
+    STYLE_ANALYTICS_PREVIEW_BUTTON,
+    STYLE_ANALYTICS_PRIMARY_BUTTON,
+    STYLE_ANALYTICS_TITLE,
+    STYLE_DIALOG_CLOSE_BUTTON,
+)
 
-class ReportDialog(QDialog):
+class ReportDialog(SavedFramelessDialogMixin, QDialog):
     def __init__(
         self,
         db_manager,
@@ -27,18 +38,16 @@ class ReportDialog(QDialog):
         self._closing = False
 
         self.setWindowTitle("Отчеты и статистика")
+        self.setMinimumSize(440, 340)
         self.resize(500, 400)
 
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-
-        self.bg_color = "#f5f2e9"
-        self.border_color = "#d1d1bc"
-        self.accent_color = "#8a8a68"
-
-        self._drag_pos = QPoint()
+        self.setMouseTracking(True)
+        self._init_saved_frameless_dialog("analytics/report_dialog_geometry", drag_area_height=78)
 
         self._init_ui()
+        self._restore_saved_geometry()
 
     @staticmethod
     def _parse_period_qdate(value: str | None) -> QDate | None:
@@ -65,13 +74,7 @@ class ReportDialog(QDialog):
 
         self.container = QWidget()
         self.container.setObjectName("container")
-        self.container.setStyleSheet(f"""
-            QWidget#container {{
-                background-color: {self.bg_color};
-                border: 2px solid {self.border_color};
-                border-radius: 15px;
-            }}
-        """)
+        self.container.setStyleSheet(STYLE_ANALYTICS_DIALOG_CONTAINER)
         self.container_layout = QVBoxLayout(self.container)
         self.container_layout.setContentsMargins(30, 20, 30, 30)
         self.container_layout.setSpacing(20)
@@ -81,24 +84,21 @@ class ReportDialog(QDialog):
         # Header
         header_layout = QHBoxLayout()
         title_label = QLabel("ОТЧЕТНЫЙ ПЕРИОД")
-        title_label.setStyleSheet("color: #4a4a3a; font-weight: 800; font-size: 13px; letter-spacing: 1px;")
+        title_label.setStyleSheet(STYLE_ANALYTICS_TITLE)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
 
         self.close_btn = QPushButton("×")
         self.close_btn.setFixedSize(30, 30)
         self.close_btn.setCursor(Qt.PointingHandCursor)
-        self.close_btn.setStyleSheet("""
-            QPushButton { background: transparent; color: #7a7a6a; font-size: 22px; border: none; }
-            QPushButton:hover { background: #ef4444; color: white; border-radius: 5px; }
-        """)
+        self.close_btn.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
         self.close_btn.clicked.connect(self.reject)
         header_layout.addWidget(self.close_btn)
         self.container_layout.addLayout(header_layout)
 
         # Date Selection
         dates_frame = QFrame()
-        dates_frame.setStyleSheet(f"background: #fdfdfa; border: 1px solid {self.border_color}; border-radius: 10px;")
+        dates_frame.setStyleSheet(STYLE_ANALYTICS_DATE_FRAME)
         dates_layout = QVBoxLayout(dates_frame)
         dates_layout.setContentsMargins(20, 20, 20, 20)
         dates_layout.setSpacing(15)
@@ -106,13 +106,13 @@ class ReportDialog(QDialog):
         # Start Date
         start_layout = QHBoxLayout()
         start_label = QLabel("Начало периода:")
-        start_label.setStyleSheet("border: none; font-weight: 600; color: #5d5d4a;")
+        start_label.setStyleSheet(STYLE_ANALYTICS_DATE_LABEL)
         self.start_date = QDateEdit()
         self.start_date.setCalendarPopup(True)
         self.start_date.setDate(
             self._parse_period_qdate(self._prefill_start_dt) or QDate.currentDate().addMonths(-1)
         )
-        self.start_date.setStyleSheet("padding: 5px; border: 1px solid #c9c9b4; border-radius: 4px;")
+        self.start_date.setStyleSheet(STYLE_ANALYTICS_DATE_EDIT)
         start_layout.addWidget(start_label)
         start_layout.addWidget(self.start_date)
         dates_layout.addLayout(start_layout)
@@ -120,13 +120,13 @@ class ReportDialog(QDialog):
         # End Date
         end_layout = QHBoxLayout()
         end_label = QLabel("Конец периода:")
-        end_label.setStyleSheet("border: none; font-weight: 600; color: #5d5d4a;")
+        end_label.setStyleSheet(STYLE_ANALYTICS_DATE_LABEL)
         self.end_date = QDateEdit()
         self.end_date.setCalendarPopup(True)
         self.end_date.setDate(
             self._parse_period_qdate(self._prefill_end_dt) or QDate.currentDate()
         )
-        self.end_date.setStyleSheet("padding: 5px; border: 1px solid #c9c9b4; border-radius: 4px;")
+        self.end_date.setStyleSheet(STYLE_ANALYTICS_DATE_EDIT)
         end_layout.addWidget(end_label)
         end_layout.addWidget(self.end_date)
         dates_layout.addLayout(end_layout)
@@ -137,10 +137,7 @@ class ReportDialog(QDialog):
         self.excel_btn = QPushButton("СФОРМИРОВАТЬ ГРАФИКИ")
         self.excel_btn.setFixedHeight(50)
         self.excel_btn.setCursor(Qt.PointingHandCursor)
-        self.excel_btn.setStyleSheet(f"""
-            QPushButton {{ background: {self.accent_color}; color: white; font-weight: 800; font-size: 12px; border-radius: 8px; }}
-            QPushButton:hover {{ background: #707054; }}
-        """)
+        self.excel_btn.setStyleSheet(STYLE_ANALYTICS_PRIMARY_BUTTON)
         self.excel_btn.clicked.connect(self._open_graphs_dialog)
         self.container_layout.addWidget(self.excel_btn)
         self.excel_btn.setVisible(self._show_graph_button)
@@ -148,22 +145,9 @@ class ReportDialog(QDialog):
         self.pdf_btn = QPushButton("СОХРАНИТЬ ПОЛНЫЙ ОТЧЕТ (PDF)")
         self.pdf_btn.setFixedHeight(50)
         self.pdf_btn.setCursor(Qt.PointingHandCursor)
-        self.pdf_btn.setStyleSheet(f"""
-            QPushButton {{ background: white; color: {self.accent_color}; border: 2px solid {self.accent_color}; font-weight: 800; font-size: 12px; border-radius: 8px; }}
-            QPushButton:hover {{ background: #f0f0e0; }}
-        """)
+        self.pdf_btn.setStyleSheet(STYLE_ANALYTICS_PREVIEW_BUTTON)
         self.pdf_btn.clicked.connect(self._generate_pdf_report)
         self.container_layout.addWidget(self.pdf_btn)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() & Qt.LeftButton:
-            delta = event.globalPosition().toPoint() - self._drag_pos
-            self.move(self.x() + delta.x(), self.y() + delta.y())
-            self._drag_pos = event.globalPosition().toPoint()
 
     def _open_graphs_dialog(self):
         if self._closing:

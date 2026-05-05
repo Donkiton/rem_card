@@ -18,6 +18,12 @@ from rem_card.ui.patient_bed_management.bed_widget import BedWidget
 from rem_card.ui.patient_bed_management.patient_form import PatientForm
 from rem_card.ui.patient_bed_management.side_patient_card import SidePatientCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.styles.theme import (
+    STYLE_PATIENT_BED_HEADER,
+    STYLE_PATIENT_BED_ROOT,
+    STYLE_PATIENT_BED_SUBTITLE,
+    STYLE_PATIENT_BED_TITLE,
+)
 
 
 NUM_BEDS = int(os.environ.get("REMCARD_NUM_BEDS", "12"))
@@ -36,12 +42,6 @@ class PatientBedManagementWidget(QWidget):
         self._is_closing = False
         self._opening_patient_form = False
 
-        self.bg_color = "#f2f3ee"
-        self.border_color = "#c9c9b4"
-        self.accent_color = "#8a8a68"
-        self.text_color = "#2d2d24"
-        self.header_bg = "#e6e8de"
-
         self.bed_widgets = []
         self._init_ui()
         QTimer.singleShot(0, self.refresh_bed_statuses)
@@ -53,15 +53,7 @@ class PatientBedManagementWidget(QWidget):
 
         self.root_container = QWidget()
         self.root_container.setObjectName("patient_bed_root")
-        self.root_container.setStyleSheet(
-            f"""
-            QWidget#patient_bed_root {{
-                background-color: {self.bg_color};
-                border: 2px solid {self.border_color};
-                border-radius: 10px;
-            }}
-            """
-        )
+        self.root_container.setStyleSheet(STYLE_PATIENT_BED_ROOT)
         root_layout.addWidget(self.root_container)
 
         main_layout = QVBoxLayout(self.root_container)
@@ -87,30 +79,16 @@ class PatientBedManagementWidget(QWidget):
         header_card.setObjectName("patient_bed_header")
         header_card.setFixedHeight(80)
         header_card.setFixedWidth(250 * 3 + 15 * 2)
-        header_card.setStyleSheet(
-            f"""
-            QFrame#patient_bed_header {{
-                background: #fdfdfa;
-                border: 2px solid {self.border_color};
-                border-radius: 12px;
-            }}
-            """
-        )
+        header_card.setStyleSheet(STYLE_PATIENT_BED_HEADER)
         header_layout = QVBoxLayout(header_card)
         header_layout.setContentsMargins(15, 10, 15, 10)
         header_layout.setSpacing(2)
 
         title = QLabel("УПРАВЛЕНИЕ ПАЦИЕНТАМИ")
-        title.setStyleSheet(
-            f"color: {self.text_color}; font-size: 24px; font-weight: 800; "
-            "letter-spacing: 2px; background: transparent; border: none;"
-        )
+        title.setStyleSheet(STYLE_PATIENT_BED_TITLE)
         title.setAlignment(Qt.AlignCenter)
         subtitle = QLabel("ОАР №3 г. Амурск")
-        subtitle.setStyleSheet(
-            f"color: {self.accent_color}; font-size: 12px; font-weight: 600; "
-            "background: transparent; border: none;"
-        )
+        subtitle.setStyleSheet(STYLE_PATIENT_BED_SUBTITLE)
         subtitle.setAlignment(Qt.AlignCenter)
         header_layout.addWidget(title)
         header_layout.addWidget(subtitle)

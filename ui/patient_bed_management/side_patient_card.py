@@ -2,6 +2,15 @@ import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QColor, QFontMetrics
+from rem_card.ui.styles.theme import (
+    STYLE_SIDE_PATIENT_ACTION_BUTTON,
+    STYLE_SIDE_PATIENT_CARD,
+    STYLE_SIDE_PATIENT_DIAGNOSIS,
+    STYLE_SIDE_PATIENT_NAME,
+    STYLE_SIDE_PATIENT_PHOTO,
+    STYLE_SIDE_PATIENT_STATUS_FREE,
+    get_side_patient_label_style,
+)
 
 
 class MultilineElidedLabel(QLabel):
@@ -88,23 +97,11 @@ class SidePatientCard(QFrame):
         self.setFixedWidth(450)
         self.setMinimumHeight(700)
 
-        # Оливковая цветовая гамма
-        self.bg_color = "#fdfdfa"
-        self.accent_color = "#8a8a68"
-        self.border_color = "#c9c9b4"
-
         self.current_bed_number = None
         self._init_ui()
 
     def _init_ui(self):
-        self.setStyleSheet(f"""
-            SidePatientCard {{
-                background-color: {self.bg_color};
-                border: 2px solid {self.border_color};
-                border-radius: 20px;
-            }}
-            QLabel {{ border: none; background: transparent; }}
-        """)
+        self.setStyleSheet(STYLE_SIDE_PATIENT_CARD)
 
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(30)
@@ -119,12 +116,7 @@ class SidePatientCard(QFrame):
         # 1. Фото пациента
         self.photo_label = QLabel()
         self.photo_label.setAlignment(Qt.AlignCenter)
-        self.photo_label.setStyleSheet(f"""
-            QLabel {{
-                border: 4px solid {self.accent_color};
-                background-color: transparent;
-            }}
-        """)
+        self.photo_label.setStyleSheet(STYLE_SIDE_PATIENT_PHOTO)
 
         photo_center_layout = QHBoxLayout()
         photo_center_layout.addStretch()
@@ -140,7 +132,7 @@ class SidePatientCard(QFrame):
 
         self.history_label = self._create_info_label("ИБ № —", is_title=True, font_size=18)
         self.name_label = MultilineElidedLabel("ФИО Пациента", max_lines=1, hide_tooltip_for={"ФИО Пациента"})
-        self.name_label.setStyleSheet("color: #2d2d24; font-weight: 800; font-size: 27px;")
+        self.name_label.setStyleSheet(STYLE_SIDE_PATIENT_NAME)
         self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         name_line_h = self.name_label.fontMetrics().height()
         self.name_label.setMinimumHeight(name_line_h + 16)
@@ -149,7 +141,7 @@ class SidePatientCard(QFrame):
         self.diagnosis_label.setWordWrap(True)
         self.diagnosis_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.diagnosis_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.diagnosis_label.setStyleSheet("color: #2d2d24; font-weight: 500; font-size: 18px;")
+        self.diagnosis_label.setStyleSheet(STYLE_SIDE_PATIENT_DIAGNOSIS)
         diagnosis_line_h = self.diagnosis_label.fontMetrics().lineSpacing()
         self.diagnosis_label.setMinimumHeight(diagnosis_line_h + 8)
         self.admission_label = self._create_info_label("Дата поступления: —", font_size=18)
@@ -171,25 +163,13 @@ class SidePatientCard(QFrame):
         self.action_btn = QPushButton("ОТКРЫТЬ КАРТОЧКУ")
         self.action_btn.setFixedHeight(65)
         self.action_btn.setCursor(Qt.PointingHandCursor)
-        self.action_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.accent_color};
-                color: white;
-                border: none;
-                border-radius: 12px;
-                font-weight: 800;
-                font-size: 18px;
-            }}
-            QPushButton:hover {{ background-color: #707054; }}
-        """)
+        self.action_btn.setStyleSheet(STYLE_SIDE_PATIENT_ACTION_BUTTON)
         self.action_btn.clicked.connect(self._on_action_clicked)
         self.main_layout.addWidget(self.action_btn)
 
     def _create_info_label(self, text, is_bold=False, font_size=14, is_title=False):
         lbl = QLabel(text)
-        color = "#8a8a68" if is_title else "#2d2d24"
-        weight = "800" if is_bold or is_title else "500"
-        lbl.setStyleSheet(f"color: {color}; font-weight: {weight}; font-size: {font_size}px;")
+        lbl.setStyleSheet(get_side_patient_label_style(font_size, is_title=is_title, is_bold=is_bold))
         lbl.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         return lbl
 
@@ -213,7 +193,7 @@ class SidePatientCard(QFrame):
             self.diagnosis_label.setToolTip("")
             self.admission_label.hide()
             self.status_text.setText("МЕСТО СВОБОДНО")
-            self.status_text.setStyleSheet("color: #8a8a68; font-weight: 800; font-size: 24px;")
+            self.status_text.setStyleSheet(STYLE_SIDE_PATIENT_STATUS_FREE)
             self.status_text.show()
             self.action_btn.setText("ЗАНЯТЬ КОЙКУ")
         else:

@@ -4,6 +4,15 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, Q
                              QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit)
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.styles.theme import (
+    STYLE_ARCHIVE_FRAME,
+    STYLE_ARCHIVE_PAGE_INFO,
+    STYLE_ARCHIVE_TABLE,
+    STYLE_ARCHIVE_TITLE,
+    STYLE_NEUTRAL_BUTTON,
+    STYLE_SMALL_NEUTRAL_BUTTON,
+    STYLE_TRANSPARENT_LABEL,
+)
 from PySide6.QtCore import Qt, QDate, Signal, QTimer
 from math import ceil
 
@@ -32,38 +41,13 @@ class ArchiveWidget(QWidget):
 
         self.frame = QFrame()
         self.frame.setObjectName("archiveMainFrame")
-        self.frame.setStyleSheet("""
-            QFrame#archiveMainFrame {
-                border: 1.5px solid #bdc3c7;
-                border-radius: 5px;
-                background-color: transparent;
-            }
-        """)
+        self.frame.setStyleSheet(STYLE_ARCHIVE_FRAME)
         layout = QVBoxLayout(self.frame)
         
         header_layout = QHBoxLayout()
         title = QLabel("Архив пациентов")
         title.setProperty("heading", "true")
-        title.setStyleSheet("border: none; background: transparent; font-weight: bold; font-size: 16px;")
-        
-        btn_style = """
-            QPushButton {
-                background-color: #e9ecef;
-                color: #2c3e50;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 20px;
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-            }
-            QPushButton:hover {
-                background-color: #d8dde2;
-            }
-            QPushButton:disabled {
-                background-color: #f8f9fa;
-                color: #adb5bd;
-            }
-        """
+        title.setStyleSheet(STYLE_ARCHIVE_TITLE)
         
         header_layout.addWidget(title, alignment=Qt.AlignCenter)
         layout.addLayout(header_layout)
@@ -96,11 +80,11 @@ class ArchiveWidget(QWidget):
         self.search_diag.textChanged.connect(self.filter_data)
         
         lbl_from = QLabel("С:")
-        lbl_from.setStyleSheet("border: none; background: transparent;")
+        lbl_from.setStyleSheet(STYLE_TRANSPARENT_LABEL)
         filter_layout.addWidget(lbl_from, 0, 0)
         filter_layout.addWidget(self.date_from, 0, 1)
         lbl_to = QLabel("По:")
-        lbl_to.setStyleSheet("border: none; background: transparent;")
+        lbl_to.setStyleSheet(STYLE_TRANSPARENT_LABEL)
         filter_layout.addWidget(lbl_to, 0, 2)
         filter_layout.addWidget(self.date_to, 0, 3)
         
@@ -116,7 +100,7 @@ class ArchiveWidget(QWidget):
         
         # Таблица архива
         self.table = QTableWidget()
-        self.table.setStyleSheet("background-color: white;")
+        self.table.setStyleSheet(STYLE_ARCHIVE_TABLE)
         self.table.setColumnCount(5)
         self.table.setHorizontalHeaderLabels(["ФИО", "ИБ №", "Диагноз", "Поступил", "Выписан"])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -131,32 +115,12 @@ class ArchiveWidget(QWidget):
         layout.addWidget(self.table)
 
         # Пагинация архива
-        paging_btn_style = """
-            QPushButton {
-                background-color: #f1f3f5;
-                color: #2c3e50;
-                font-size: 12px;
-                font-weight: bold;
-                padding: 4px 10px;
-                border: 1px solid #cfd4da;
-                border-radius: 4px;
-                min-width: 34px;
-            }
-            QPushButton:hover {
-                background-color: #e2e6ea;
-            }
-            QPushButton:disabled {
-                background-color: #f8f9fa;
-                color: #adb5bd;
-            }
-        """
-
         self.pagination_bar = QHBoxLayout()
         self.pagination_bar.setContentsMargins(0, 0, 0, 0)
         self.pagination_bar.setSpacing(6)
 
         self.btn_prev_page = QPushButton("◀")
-        self.btn_prev_page.setStyleSheet(paging_btn_style)
+        self.btn_prev_page.setStyleSheet(STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_prev_page.clicked.connect(lambda: self._set_page(self.current_page - 1))
         self.pagination_bar.addWidget(self.btn_prev_page)
 
@@ -166,12 +130,12 @@ class ArchiveWidget(QWidget):
         self.pagination_bar.addLayout(self.page_buttons_layout)
 
         self.btn_next_page = QPushButton("▶")
-        self.btn_next_page.setStyleSheet(paging_btn_style)
+        self.btn_next_page.setStyleSheet(STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_next_page.clicked.connect(lambda: self._set_page(self.current_page + 1))
         self.pagination_bar.addWidget(self.btn_next_page)
 
         self.page_info = QLabel("Страница 1 из 1")
-        self.page_info.setStyleSheet("border: none; color: #5c6770; font-weight: 600;")
+        self.page_info.setStyleSheet(STYLE_ARCHIVE_PAGE_INFO)
         self.pagination_bar.addWidget(self.page_info)
 
         self.pagination_bar.addStretch()
@@ -183,7 +147,7 @@ class ArchiveWidget(QWidget):
         self.pagination_bar.addWidget(self.page_jump_input)
 
         self.btn_page_jump = QPushButton("Перейти")
-        self.btn_page_jump.setStyleSheet(paging_btn_style)
+        self.btn_page_jump.setStyleSheet(STYLE_SMALL_NEUTRAL_BUTTON)
         self.btn_page_jump.clicked.connect(self._jump_to_page_from_input)
         self.pagination_bar.addWidget(self.btn_page_jump)
 
@@ -194,31 +158,31 @@ class ArchiveWidget(QWidget):
         buttons_layout.addStretch()
 
         self.btn_open = QPushButton(" Открыть карту")
-        self.btn_open.setStyleSheet(btn_style)
+        self.btn_open.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_open.setFixedHeight(35)
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self.on_open_clicked)
 
         self.btn_report_stats = QPushButton(" Статистика")
-        self.btn_report_stats.setStyleSheet(btn_style)
+        self.btn_report_stats.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_report_stats.setFixedHeight(35)
         self.btn_report_stats.setEnabled(False)
         self.btn_report_stats.clicked.connect(self.on_report_stats_clicked)
 
         self.btn_graphs = QPushButton(" Сформировать графики")
-        self.btn_graphs.setStyleSheet(btn_style)
+        self.btn_graphs.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_graphs.setFixedHeight(35)
         self.btn_graphs.setEnabled(True)
         self.btn_graphs.clicked.connect(self.on_graphs_clicked)
 
         self.btn_delete_last = QPushButton(" Удалить последнюю карту")
-        self.btn_delete_last.setStyleSheet(btn_style)
+        self.btn_delete_last.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_delete_last.setFixedHeight(35)
         self.btn_delete_last.setEnabled(False)
         self.btn_delete_last.clicked.connect(self.on_delete_last_clicked)
 
         self.btn_delete = QPushButton(" Удалить все карты")
-        self.btn_delete.setStyleSheet(btn_style)
+        self.btn_delete.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_delete.setFixedHeight(35)
         self.btn_delete.setEnabled(False)
         self.btn_delete.clicked.connect(self.on_delete_clicked)

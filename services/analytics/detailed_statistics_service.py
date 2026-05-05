@@ -7,6 +7,14 @@ from statistics import median
 from typing import Iterable
 
 from rem_card.services.analytics.graphs_service import _thread_local_manager
+from rem_card.ui.styles.theme import (
+    BG_CARD,
+    BG_LIGHT,
+    BORDER_COLOR,
+    COLOR_PRIMARY_DARK,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
 
 SECTION_GROUPS = {
@@ -886,29 +894,29 @@ class DetailedStatisticsReportBuilder:
                 <style>
                     html, body {{
                         font-family: 'Arial', sans-serif;
-                        color: #111111;
-                        background: #ffffff;
+                        color: {TEXT_PRIMARY};
+                        background: {BG_CARD};
                         margin: 0;
                         padding: 0;
                     }}
                     .page {{
-                        background: #ffffff;
+                        background: {BG_CARD};
                         padding: 18px 20px;
                     }}
                     h1 {{
                         margin: 0 0 6px 0;
                         font-size: 20px;
-                        color: #222222;
+                        color: {TEXT_PRIMARY};
                     }}
                     h2 {{
                         margin: 16px 0 7px 0;
                         font-size: 14px;
-                        color: #2c2c2c;
+                        color: {COLOR_PRIMARY_DARK};
                         text-transform: uppercase;
                     }}
                     .period {{
                         margin: 0 0 12px 0;
-                        color: #333333;
+                        color: {TEXT_SECONDARY};
                         font-weight: 600;
                     }}
                     table {{
@@ -917,15 +925,15 @@ class DetailedStatisticsReportBuilder:
                         margin-bottom: 12px;
                     }}
                     th, td {{
-                        border: 1px solid #7a7a7a;
+                        border: 1px solid {BORDER_COLOR};
                         padding: 6px 8px;
                         text-align: left;
                         font-size: 12px;
                         vertical-align: top;
-                        color: #111111;
+                        color: {TEXT_PRIMARY};
                     }}
                     th {{
-                        background: #efefef;
+                        background: {BG_LIGHT};
                         font-weight: 700;
                     }}
                     td.value, th.value {{
@@ -934,7 +942,7 @@ class DetailedStatisticsReportBuilder:
                     }}
                     .footnote {{
                         margin-top: 12px;
-                        color: #444444;
+                        color: {TEXT_SECONDARY};
                         font-size: 11px;
                     }}
                 </style>

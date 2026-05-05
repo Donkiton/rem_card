@@ -1,6 +1,19 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QFormLayout, QLineEdit, QLabel, QGroupBox, QHBoxLayout, QDateTimeEdit, QSizePolicy
 from PySide6.QtCore import QDateTime, Qt
 from rem_card.services.mkb import MKBService
+from rem_card.ui.styles.theme import (
+    STYLE_FORM_DATETIME_EDIT,
+    STYLE_PATIENT_DIAGNOSIS_TEXT_LABEL,
+    STYLE_PATIENT_FORM_INVALID_FIELD,
+    STYLE_PATIENT_FORM_MANUAL_FIELD,
+    STYLE_PATIENT_FORM_READONLY_FIELD,
+    STYLE_PATIENT_FORM_ROW_LABEL,
+    STYLE_PATIENT_FORM_VALID_FIELD,
+    STYLE_PATIENT_OPERATION_FIELD,
+    STYLE_PATIENT_OPERATION_LABEL,
+    STYLE_PATIENT_OPERATIONS_GROUP,
+    STYLE_TRANSPARENT_WIDGET,
+)
 
 class DiagnosisTabWidget(QWidget):
     def __init__(self, mkb_service: MKBService, parent=None, show_operations: bool = True):
@@ -41,7 +54,7 @@ class DiagnosisTabWidget(QWidget):
 
         self.diagnosis_text_label = QLabel("")
         self.diagnosis_text_label.setWordWrap(True)
-        self.diagnosis_text_label.setStyleSheet("color: #4a4a3f; font-weight: 500; background: transparent; font-family: 'IBM Plex Sans';")
+        self.diagnosis_text_label.setStyleSheet(STYLE_PATIENT_DIAGNOSIS_TEXT_LABEL)
         self.diagnosis_text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.diagnosis_text_label.setMinimumHeight(34)
         self.diagnosis_text_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -50,7 +63,7 @@ class DiagnosisTabWidget(QWidget):
         code_name_layout.addWidget(self.diagnosis_text_label, 1)
 
         code_label = QLabel("Код диагноза МКБ-10:")
-        code_label.setStyleSheet("background: transparent; color: #4a4a3f; font-size: 13px; font-weight: 600;")
+        code_label.setStyleSheet(STYLE_PATIENT_FORM_ROW_LABEL)
         code_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         code_label.setMinimumHeight(34)
         self.code_label = code_label
@@ -58,7 +71,7 @@ class DiagnosisTabWidget(QWidget):
         diag_form.addRow(code_label, code_name_layout)
 
         self.manual_entry_label = QLabel("Ручной ввод диагноза:")
-        self.manual_entry_label.setStyleSheet("background: transparent; color: #4a4a3f; font-size: 13px; font-weight: 600;")
+        self.manual_entry_label.setStyleSheet(STYLE_PATIENT_FORM_ROW_LABEL)
         self.manual_entry_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.manual_entry_label.setMinimumHeight(34)
 
@@ -67,7 +80,7 @@ class DiagnosisTabWidget(QWidget):
         self.diagnosis_text_input.setMinimumWidth(430)
         self.diagnosis_text_input.setFixedHeight(34)
         self.diagnosis_text_input.setEnabled(False)
-        self.diagnosis_text_input.setStyleSheet("background-color: #e2e8f0; color: #94a3b8;")
+        self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_READONLY_FIELD)
 
         diag_form.addRow(self.manual_entry_label, self.diagnosis_text_input)
 
@@ -75,35 +88,10 @@ class DiagnosisTabWidget(QWidget):
 
         if self.show_operations:
             self.operations_group = QGroupBox("Список операций")
-            self.operations_group.setStyleSheet("""
-                QGroupBox {
-                    border: 1px solid #c9c9b4;
-                    border-radius: 6px;
-                    margin-top: 18px;
-                    padding-top: 15px;
-                    font-weight: 800;
-                    color: #4a4a3a;
-                    background-color: #f0ede4;
-                    border-top-left-radius: 0px;
-                }
-                QGroupBox::title {
-                    subcontrol-origin: margin;
-                    subcontrol-position: top left;
-                    padding: 8px 20px;
-                    background: #f0ede4;
-                    border: 1px solid #c9c9b4;
-                    border-bottom: none;
-                    border-top-left-radius: 8px;
-                    border-top-right-radius: 8px;
-                    left: 0px;
-                    top: 0px;
-                    font-size: 12px;
-                    color: #2d2d24;
-                }
-            """)
+            self.operations_group.setStyleSheet(STYLE_PATIENT_OPERATIONS_GROUP)
 
             self.ops_container = QWidget()
-            self.ops_container.setStyleSheet("background: transparent;")
+            self.ops_container.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
             self.operations_list_layout = QVBoxLayout(self.ops_container)
             self.operations_list_layout.setSpacing(10)
             self.operations_list_layout.setContentsMargins(15, 15, 15, 15)
@@ -172,7 +160,7 @@ class DiagnosisTabWidget(QWidget):
         self.diagnosis_code_input.blockSignals(False)
 
         self.diagnosis_text_input.setEnabled(False)
-        self.diagnosis_text_input.setStyleSheet("background-color: #e2e8f0; color: #94a3b8;")
+        self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_READONLY_FIELD)
         self.diagnosis_code_input.setStyleSheet("")
         self.diagnosis_text_label.setText("")
 
@@ -185,60 +173,37 @@ class DiagnosisTabWidget(QWidget):
         diagnosis_name = self.mkb_service.get_diagnosis_by_code(code)
         if diagnosis_name:
             self.diagnosis_text_label.setText(diagnosis_name)
-            self.diagnosis_code_input.setStyleSheet("background-color: #e1ffdc; border: 1px solid #2ecc71;")
+            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
             self.diagnosis_text_input.setEnabled(False)
-            self.diagnosis_text_input.setStyleSheet("background-color: #e2e8f0; color: #94a3b8;")
+            self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_READONLY_FIELD)
         else:
             self.diagnosis_text_label.setText("Код не найден")
-            self.diagnosis_code_input.setStyleSheet("background-color: #ffdcde; border: 1px solid #e74c3c;")
+            self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
             self.diagnosis_text_input.setEnabled(True)
-            self.diagnosis_text_input.setStyleSheet("background-color: #fdfdfa; color: #2d2d24; border: 1px solid #c9c9b4;")
+            self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_MANUAL_FIELD)
 
     def _add_operation_row(self):
         num = len(self.op_widgets) + 1
         row_widget = QWidget()
-        row_widget.setStyleSheet("background: transparent;")
+        row_widget.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
         row_layout = QHBoxLayout(row_widget)
         row_layout.setSpacing(15)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setAlignment(Qt.AlignVCenter)
 
         label = QLabel(f"Операция {num}:")
-        label.setStyleSheet("background: transparent; font-weight: 600; color: #4a4a3f;")
+        label.setStyleSheet(STYLE_PATIENT_OPERATION_LABEL)
 
         edit = QLineEdit()
         edit.setPlaceholderText("Введите название операции")
-        edit.setStyleSheet("background-color: #fdfdfa; color: #2d2d24; border: 1px solid #c9c9b4;")
+        edit.setStyleSheet(STYLE_PATIENT_OPERATION_FIELD)
 
         dt_edit = QDateTimeEdit()
         dt_edit.setDateTime(QDateTime.currentDateTime())
         dt_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
         dt_edit.setCalendarPopup(True)
         dt_edit.setFixedWidth(250)
-        dt_edit.setStyleSheet("""
-            QDateTimeEdit { background-color: #fdfdfa; color: #2d2d24; border: 1px solid #c9c9b4; }
-            QDateTimeEdit::up-button { width: 0px; border: none; }
-            QDateTimeEdit::down-button { width: 0px; border: none; }
-            QDateTimeEdit::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 20px;
-                border-left-width: 1px;
-                border-left-color: #c9c9b4;
-                border-left-style: solid;
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
-            }
-            QDateTimeEdit::down-arrow {
-                image: none;
-            }
-            QCalendarWidget QWidget { background-color: white; color: #2d2d24; border-radius: 0px; }
-            QCalendarWidget QAbstractItemView:enabled { background-color: white; color: #2d2d24; selection-background-color: #8a8a68; selection-color: white; border-radius: 0px; }
-            QCalendarWidget QToolButton { color: #2d2d24; background-color: transparent; border: none; border-radius: 0px; }
-            QCalendarWidget QToolButton:hover { color: #000000; }
-            QCalendarWidget QToolButton#qt_calendar_monthbutton { margin-left: -6px; }
-            QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #f0ede4; border-bottom: 1px solid #c9c9b4; border-radius: 0px; }
-        """)
+        dt_edit.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
 
         row_layout.addWidget(label)
         row_layout.addWidget(edit, 1)
@@ -291,7 +256,7 @@ class DiagnosisTabWidget(QWidget):
                 if not diagnosis_from_code or diagnosis_from_code != admission.diagnosis_text:
                     self.diagnosis_text_input.setText(admission.diagnosis_text)
                     self.diagnosis_text_input.setEnabled(True)
-                    self.diagnosis_text_input.setStyleSheet("background-color: #fdfdfa; color: #2d2d24; border: 1px solid #c9c9b4;")
+                    self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_MANUAL_FIELD)
 
         if not self.show_operations:
             return

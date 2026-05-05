@@ -19,10 +19,12 @@ except ImportError:
     pd = None
     plt = None
 
+from rem_card.ui.styles.theme import BG_CARD
+
 
 def save_plot(title, img_paths, chart_colors=None):
     figure = plt.gcf()
-    figure.patch.set_facecolor("#ffffff")
+    figure.patch.set_facecolor(BG_CARD)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
@@ -36,7 +38,7 @@ def save_plot(title, img_paths, chart_colors=None):
         pass
     filename = f"graph_{uuid.uuid4().hex}.png"
     path = os.path.join(tempfile.gettempdir(), filename)
-    plt.savefig(path, dpi=180, bbox_inches='tight', facecolor="#ffffff")
+    plt.savefig(path, dpi=180, bbox_inches='tight', facecolor=BG_CARD)
     plt.close()
     img_paths.append(path)
     return f"<div style='text-align: center;'><h3>{title}</h3><img src='{path}' width='600'></div><br><br>"
@@ -231,7 +233,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
             intensity = total_bd / (9.0 * period_days) * 100
             html_content += (
                 f"<div style='text-align: center;'><h3>12. Индекс интенсивности использования коечного фонда</h3>"
-                f"<div style='font-size: 28px; font-weight: bold; color: #8a8a68;'>{intensity:.1f}%</div>"
+                f"<div style='font-size: 28px; font-weight: bold; color: {chart_colors[0]};'>{intensity:.1f}%</div>"
                 f"<p>Общий койко-день: {total_bd:.1f} из {9 * period_days} возможных</p></div><br>"
             )
 
@@ -343,7 +345,7 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
         plt.figure(figsize=(6, 6))
         plt.pie([high_load_days, normal_days],
                 labels=[f'Пиковая нагрузка\n{high_load_days} дн.', f'Нормальная\n{normal_days} дн.'],
-                autopct='%1.1f%%', colors=['#ef4444', '#8a8a68'])
+                autopct='%1.1f%%', colors=[chart_colors[2], chart_colors[1]])
         plt.title(f"17. Доля времени повышенной загрузки (≥4 пац.): {perc:.1f}%")
         html_content += save_plot("17. Доля времени повышенной загрузки", img_paths)
 
@@ -386,7 +388,7 @@ def generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html
         f = sum(1 for r in adms if r['patient_gender'] == 'Женский')
         if (m + f) > 0:
             plt.figure(figsize=(6, 6))
-            plt.pie([m, f], labels=["Мужчины", "Женщины"], autopct='%1.1f%%', colors=['#5b9bd5', '#eeb211'])
+            plt.pie([m, f], labels=["Мужчины", "Женщины"], autopct='%1.1f%%', colors=[chart_colors[0], chart_colors[3]])
             plt.title("20. Распределение пациентов по полу")
             html_content += save_plot("20. Распределение пациентов по полу", img_paths)
 
@@ -399,7 +401,7 @@ def generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html
                 ages_d.append(val)
         if ages_d:
             plt.figure(figsize=(8, 4))
-            plt.hist(ages_d, bins=10, color='#dc2626', edgecolor='white')
+            plt.hist(ages_d, bins=10, color=chart_colors[2], edgecolor='white')
             plt.title("21. Возрастная структура умерших")
             plt.xlabel("Возраст (лет)")
             html_content += save_plot("21. Возрастная структура умерших", img_paths)

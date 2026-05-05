@@ -1,6 +1,14 @@
 from PySide6.QtWidgets import QVBoxLayout, QLabel, QFrame, QGraphicsDropShadowEffect
 from PySide6.QtCore import Signal, Qt, QMimeData
 from PySide6.QtGui import QCursor, QColor, QDrag
+from rem_card.ui.styles.theme import (
+    STYLE_PATIENT_BED_HISTORY,
+    STYLE_PATIENT_BED_LABEL,
+    STYLE_PATIENT_BED_PATIENT,
+    STYLE_PATIENT_BED_STATUS_BUSY,
+    STYLE_PATIENT_BED_STATUS_FREE,
+    get_patient_bed_card_style,
+)
 
 class BedWidget(QFrame):
     clicked = Signal(int, int)
@@ -29,21 +37,21 @@ class BedWidget(QFrame):
 
         # 1. Номер койки (КОЙКА № *)
         self.bed_label = QLabel(f"КОЙКА № {self.bed_number}")
-        self.bed_label.setStyleSheet("color: #8a8a68; font-size: 12px; font-weight: 800; letter-spacing: 1px; background: transparent;")
+        self.bed_label.setStyleSheet(STYLE_PATIENT_BED_LABEL)
 
         # 2. Номер истории болезни (ИБ № *)
         self.history_label = QLabel()
-        self.history_label.setStyleSheet("color: #7a7a6a; font-size: 13px; font-weight: 600; background: transparent;")
+        self.history_label.setStyleSheet(STYLE_PATIENT_BED_HISTORY)
 
         # 3. ФИО пациента
         self.patient_label = QLabel("Свободно")
-        self.patient_label.setStyleSheet("color: #2d2d24; font-size: 16px; font-weight: 700; background: transparent;")
+        self.patient_label.setStyleSheet(STYLE_PATIENT_BED_PATIENT)
         self.patient_label.setWordWrap(True)
         self.patient_label.setMinimumHeight(50)
 
         # 4. Статус (Занято / Свободно)
         self.status_indicator = QLabel("● Свободно")
-        self.status_indicator.setStyleSheet("color: #8a8a68; font-size: 11px; font-weight: 700; background: transparent;")
+        self.status_indicator.setStyleSheet(STYLE_PATIENT_BED_STATUS_FREE)
 
         self.layout.addWidget(self.bed_label)
         self.layout.addWidget(self.history_label)
@@ -55,30 +63,20 @@ class BedWidget(QFrame):
 
     def _update_display(self):
         if self.status == "FREE":
-            bg = "#fdfdfa"
-            border = "#d1d1bc"
             self.status_indicator.setText("● СВОБОДНО")
-            self.status_indicator.setStyleSheet("color: #8a8a68; font-size: 11px; font-weight: 700; background: transparent;")
+            self.status_indicator.setStyleSheet(STYLE_PATIENT_BED_STATUS_FREE)
             self.patient_label.setText("") # Очищаем ФИО если свободно
             self.history_label.setText("") # Очищаем ИБ если свободно
             self.history_label.hide()
             self.patient_label.hide()
             self.status_indicator.setText("СВОБОДНО")
         else:
-            bg = "#ffffff"
-            border = "#8a8a68"
             self.history_label.show()
             self.patient_label.show()
             self.status_indicator.setText("ЗАНЯТО")
-            self.status_indicator.setStyleSheet("color: #c0504d; font-size: 11px; font-weight: 700; background: transparent;")
+            self.status_indicator.setStyleSheet(STYLE_PATIENT_BED_STATUS_BUSY)
 
-        self.setStyleSheet(f"""
-            BedWidget {{
-                background-color: {bg};
-                border: 1px solid {border};
-                border-radius: 12px;
-            }}
-        """)
+        self.setStyleSheet(get_patient_bed_card_style(self.status))
 
     def set_patient_info(self, full_name: str, history_number: str = "", diagnosis: str = ""):
         if self.status != "FREE":
@@ -89,7 +87,7 @@ class BedWidget(QFrame):
             self.history_label.setText("")
 
     def enterEvent(self, event):
-        self.setStyleSheet(self.styleSheet().replace("border: 1px", "border: 2px").replace("#d1d1bc", "#8a8a68"))
+        self.setStyleSheet(get_patient_bed_card_style(self.status, hovered=True))
         self.shadow.setBlurRadius(25)
         super().enterEvent(event)
 
@@ -128,7 +126,7 @@ class BedWidget(QFrame):
             source_bed = event.mimeData().text()
             if source_bed != str(self.bed_number):
                 event.acceptProposedAction()
-                self.setStyleSheet(self.styleSheet() + "border: 2px dashed #8a8a68; background-color: #f0ede4;")
+                self.setStyleSheet(get_patient_bed_card_style(self.status, drop_target=True))
 
     def dragLeaveEvent(self, event):
         self._update_display()

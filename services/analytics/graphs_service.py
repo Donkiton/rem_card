@@ -4,19 +4,18 @@ import os
 from dataclasses import dataclass
 from typing import Sequence
 
+from rem_card.ui.styles.theme import (
+    ANALYTICS_CHART_COLORS,
+    BG_ALT_ROW,
+    BG_CARD,
+    BORDER_COLOR,
+    BORDER_LIGHT,
+    COLOR_PRIMARY_DARK,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+)
 
-DEFAULT_CHART_COLORS = [
-    "#8a8a68",
-    "#d97706",
-    "#c0504d",
-    "#5b9bd5",
-    "#71a95a",
-    "#705470",
-    "#eeb211",
-    "#4b5563",
-    "#10b981",
-    "#f43f5e",
-]
+DEFAULT_CHART_COLORS = list(ANALYTICS_CHART_COLORS)
 
 
 @dataclass
@@ -108,22 +107,22 @@ def wrap_graphs_pdf_html(html_content: str) -> str:
         <style>
             body {{
                 font-family: 'Arial', sans-serif;
-                color: #222222;
-                background: #ffffff;
+                color: {TEXT_PRIMARY};
+                background: {BG_CARD};
                 margin: 0;
                 padding: 16px 18px;
                 text-align: center;
             }}
-            h2 {{ color: #333333; margin-bottom: 4px; }}
-            h3 {{ color: #50503f; margin-top: 26px; margin-bottom: 8px; font-size: 14px; }}
+            h2 {{ color: {TEXT_PRIMARY}; margin-bottom: 4px; }}
+            h3 {{ color: {COLOR_PRIMARY_DARK}; margin-top: 26px; margin-bottom: 8px; font-size: 14px; }}
             div {{ page-break-inside: avoid; }}
             img {{
                 max-width: 100%;
                 height: auto;
-                border: 1px solid #e3e3d7;
+                border: 1px solid {BORDER_LIGHT};
                 border-radius: 4px;
                 padding: 3px;
-                background: #ffffff;
+                background: {BG_CARD};
             }}
         </style>
     </head>
@@ -164,16 +163,16 @@ def _configure_plot_style(chart_colors: Sequence[str]):
             context="talk",
             font_scale=0.72,
             rc={
-                "figure.facecolor": "#ffffff",
-                "axes.facecolor": "#fcfcfa",
-                "axes.edgecolor": "#d4d4c4",
-                "grid.color": "#e6e6dc",
+                "figure.facecolor": BG_CARD,
+                "axes.facecolor": BG_ALT_ROW,
+                "axes.edgecolor": BORDER_COLOR,
+                "grid.color": BORDER_LIGHT,
                 "grid.linestyle": "-",
                 "grid.linewidth": 0.8,
                 "axes.titleweight": "bold",
-                "axes.labelcolor": "#2d2d24",
-                "xtick.color": "#3c3c34",
-                "ytick.color": "#3c3c34",
+                "axes.labelcolor": TEXT_PRIMARY,
+                "xtick.color": TEXT_SECONDARY,
+                "ytick.color": TEXT_SECONDARY,
             },
         )
     else:

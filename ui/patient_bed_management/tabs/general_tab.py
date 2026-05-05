@@ -3,6 +3,7 @@ from datetime import datetime
 from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QHBoxLayout, QComboBox, QSpinBox, QLabel, QDateTimeEdit
 from PySide6.QtCore import QRegularExpression, QDate, QDateTime, QTime, Qt
 from PySide6.QtGui import QRegularExpressionValidator
+from rem_card.ui.styles.theme import STYLE_FORM_DATETIME_EDIT
 
 class GeneralTabWidget(QWidget):
     def __init__(self, parent=None):
@@ -96,30 +97,7 @@ class GeneralTabWidget(QWidget):
         self.admission_datetime_input.setCalendarPopup(True)
         self.admission_datetime_input.setFixedHeight(34)
         self.admission_datetime_input.setFixedWidth(280)
-        self.admission_datetime_input.setStyleSheet("""
-            QDateTimeEdit { background-color: #fdfdfa; color: #2d2d24; border: 1px solid #c9c9b4; }
-            QDateTimeEdit::up-button { width: 0px; border: none; }
-            QDateTimeEdit::down-button { width: 0px; border: none; }
-            QDateTimeEdit::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 20px;
-                border-left-width: 1px;
-                border-left-color: #c9c9b4;
-                border-left-style: solid;
-                border-top-right-radius: 3px;
-                border-bottom-right-radius: 3px;
-            }
-            QDateTimeEdit::down-arrow {
-                image: none;
-            }
-            QCalendarWidget QWidget { background-color: white; color: #2d2d24; border-radius: 0px; }
-            QCalendarWidget QAbstractItemView:enabled { background-color: white; color: #2d2d24; selection-background-color: #8a8a68; selection-color: white; border-radius: 0px; }
-            QCalendarWidget QToolButton { color: #2d2d24; background-color: transparent; border: none; border-radius: 0px; }
-            QCalendarWidget QToolButton:hover { color: #000000; }
-            QCalendarWidget QToolButton#qt_calendar_monthbutton { margin-left: -6px; }
-            QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #f0ede4; border-bottom: 1px solid #c9c9b4; border-radius: 0px; }
-        """)
+        self.admission_datetime_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
         self._add_row("Дата и время поступления:", self.admission_datetime_input)
 
         self.source_department_input = QComboBox()

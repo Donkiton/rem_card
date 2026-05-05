@@ -86,7 +86,7 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
 
         html_content += (
             f"<div style='text-align: center;'><h3>48. Максимальная одномоментная интенсивность</h3>"
-            f"<div style='font-size: 32px; font-weight: bold; color: #10b981;'>{max_p} пациентов</div>"
+            f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[1]};'>{max_p} пациентов</div>"
             "<p>Максимальное количество пациентов, одновременно находившихся на лечении.</p></div><br>"
         )
 
@@ -100,7 +100,7 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
         if not df.empty:
             df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
             plt.figure(figsize=(8, 4))
-            plt.bar(range(len(df)), df['avg_duration'], color=['#f43f5e', '#10b981'])
+            plt.bar(range(len(df)), df['avg_duration'], color=[chart_colors[2], chart_colors[1]])
             plt.xticks(range(len(df)), df['outcome'])
             plt.title("49. Средняя длительность пребывания (Умершие vs Выписанные)")
             plt.ylabel("Дни")
@@ -194,7 +194,7 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
             avg_duration_short = sum(durations) / len(durations)
             html_content += (
                 f"<div style='text-align: center;'><h3>54. Средняя длительность пребывания (краткосрочные)</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: #6366f1;'>{avg_duration_short:.1f} дней</div>"
+                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[0]};'>{avg_duration_short:.1f} дней</div>"
                 f"<p>Пациенты, находившиеся на койке менее 3 дней.</p></div><br>"
             )
         else:
@@ -217,7 +217,7 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
             avg_duration_long = sum(durations) / len(durations)
             html_content += (
                 f"<div style='text-align: center;'><h3>55. Средняя длительность пребывания (долгосрочные)</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: #f43f5e;'>{avg_duration_long:.1f} дней</div>"
+                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[2]};'>{avg_duration_long:.1f} дней</div>"
                 f"<p>Пациенты, находившиеся на койке 14 дней и более.</p></div><br>"
             )
         else:
@@ -300,7 +300,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
             avg_duration = df['avg_duration'].iloc[0]
             html_content += (
                 f"<div style='text-align: center;'><h3>60. Средняя длительность пребывания пациентов после операций</h3>"
-                f"<div style='font-size: 32px; font-weight: bold; color: #8a8a68;'>{avg_duration:.1f} дней</div>"
+                f"<div style='font-size: 32px; font-weight: bold; color: {chart_colors[0]};'>{avg_duration:.1f} дней</div>"
                 f"<p>Учитываются только пациенты, которым проводились операции в указанный период.</p></div><br>"
             )
         else:
