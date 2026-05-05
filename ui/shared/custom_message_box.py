@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, QPoint, QSize, QEvent
 from PySide6.QtGui import QPixmap, QIcon
 
-from ..styles.theme import STYLE_CUSTOM_DIALOG, BG_LIGHT, TEXT_PRIMARY, CUSTOM_DIALOG_BORDER, CUSTOM_DIALOG_RADIUS
+from rem_card.ui.styles.shared_styles import apply_custom_dialog_style, apply_message_icon_style
 
 class CustomMessageBox(QDialog):
     # Экспортируем константы из QMessageBox для совместимости со старым кодом
@@ -31,7 +31,7 @@ class CustomMessageBox(QDialog):
         self.init_ui(title, message)
 
     def init_ui(self, title, message):
-        self.setStyleSheet(STYLE_CUSTOM_DIALOG)
+        apply_custom_dialog_style(self)
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -77,34 +77,28 @@ class CustomMessageBox(QDialog):
         
         icon_path = ""
         fallback_text = "⚠"
-        fallback_color = "#f39c12" # warning color
         
         base_dir = os.path.dirname(__file__)
         if self.msg_type == "custom" and self.icon_file:
             icon_path = os.path.join(base_dir, "..", "..", "icon", self.icon_file)
             fallback_text = "!"
-            fallback_color = "#f39c12"
         elif self.msg_type == "warning":
             icon_path = os.path.join(base_dir, "..", "..", "icon", "warning.png")
             fallback_text = "⚠"
-            fallback_color = "#f39c12"
         elif self.msg_type == "critical":
             icon_path = os.path.join(base_dir, "..", "..", "icon", "icon-cancelled.png")
             fallback_text = "❌"
-            fallback_color = "#e74c3c"
         elif self.msg_type == "information":
             fallback_text = "ℹ"
-            fallback_color = "#6c757d"
         elif self.msg_type == "question":
             fallback_text = "❓"
-            fallback_color = "#6c757d"
             
         if icon_path and os.path.exists(icon_path):
             pixmap = QPixmap(icon_path).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             icon_label.setPixmap(pixmap)
         else:
             icon_label.setText(fallback_text)
-            icon_label.setStyleSheet(f"font-size: 36px; color: {fallback_color}; background-color: transparent;")
+            apply_message_icon_style(icon_label, self.msg_type)
             
         msg_label = QLabel(message)
         msg_label.setObjectName("DialogMessageText")

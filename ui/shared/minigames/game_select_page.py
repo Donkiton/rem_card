@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QGridLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from rem_card.ui.styles.theme import TEXT_PRIMARY
+from rem_card.ui.styles.shared_styles import apply_minigame_label_style
 
 
 class GameSelectPage(QWidget):
@@ -53,7 +53,7 @@ class GameSelectPage(QWidget):
         ]
         for row, (title, load_handler, leaderboard_handler) in enumerate(games):
             name = QLabel(title)
-            name.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY};")
+            apply_minigame_label_style(name)
             load_btn = QPushButton("Загрузить")
             leaders_btn = QPushButton("Лидеры")
             load_btn.clicked.connect(load_handler)

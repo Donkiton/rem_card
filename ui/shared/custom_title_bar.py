@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QApplica
 from PySide6.QtCore import Qt, QPoint, Signal
 from PySide6.QtGui import QIcon, QPixmap
 from rem_card.app.version import APP_DISPLAY_TITLE
+from rem_card.ui.styles.shared_styles import apply_main_frame_window_style
 
 class CustomTitleBar(QFrame):
     """
@@ -37,7 +38,6 @@ class CustomTitleBar(QFrame):
         # Заголовок
         self.title_label = QLabel(APP_DISPLAY_TITLE)
         self.title_label.setObjectName("MainTitleText")
-        self.title_label.setStyleSheet("margin-left: 8px; font-weight: bold;")
         
         # Кнопки управления
         self.btn_minimize = QPushButton("–")
@@ -56,6 +56,7 @@ class CustomTitleBar(QFrame):
         self.btn_close.clicked.connect(self.on_close)
         
         layout.addWidget(self.icon_label)
+        layout.addSpacing(8)
         layout.addWidget(self.title_label)
         layout.addStretch()
         layout.addWidget(self.btn_minimize)
@@ -78,10 +79,8 @@ class CustomTitleBar(QFrame):
                     self.window_ptr.showNormal()
                 self.btn_maximize.setText("▢")
                 
-                # Вручную обновляем стили, так как WindowStateChange не триггерится
-                from rem_card.ui.styles.theme import BG_MAIN, CUSTOM_DIALOG_RADIUS
                 if hasattr(self.window_ptr, 'main_container'):
-                    self.window_ptr.main_container.setStyleSheet(f"QFrame#MainFrame {{ background-color: {BG_MAIN} !important; border: 1px solid #bdc3c7; border-radius: {CUSTOM_DIALOG_RADIUS}; }}")
+                    apply_main_frame_window_style(self.window_ptr.main_container, maximized=False)
                     
             else:
                 self.window_ptr.setProperty("normalGeometry", self.window_ptr.geometry())
@@ -92,10 +91,8 @@ class CustomTitleBar(QFrame):
                 self.window_ptr._is_custom_maximized = True
                 self.btn_maximize.setText("❐")
                 
-                # Вручную убираем скругления и рамки при максимизации
-                from rem_card.ui.styles.theme import BG_MAIN
                 if hasattr(self.window_ptr, 'main_container'):
-                    self.window_ptr.main_container.setStyleSheet(f"QFrame#MainFrame {{ background-color: {BG_MAIN} !important; border: none; border-radius: 0px; }}")
+                    apply_main_frame_window_style(self.window_ptr.main_container, maximized=True)
 
     def on_close(self):
         if self.window_ptr:

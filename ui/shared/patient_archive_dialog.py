@@ -5,6 +5,11 @@ from PySide6.QtCore import Qt, Signal, QSize, QTimer
 from datetime import datetime
 from .async_call import AsyncCallThread
 from .custom_title_bar import CustomTitleBar
+from rem_card.ui.styles.shared_styles import (
+    apply_patient_archive_frame_style,
+    apply_patient_archive_list_style,
+    apply_patient_archive_load_button_style,
+)
 
 class CardListWidget(QWidget):
     card_selected = Signal(object) # передает datetime
@@ -26,25 +31,7 @@ class CardListWidget(QWidget):
         layout.addWidget(self.title_lbl)
         
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("""
-            QListWidget { 
-                font-size: 16px; 
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                background-color: white;
-            }
-            QListWidget::item { 
-                padding: 12px; 
-                border-bottom: 1px solid #f1f2f6; 
-            }
-            QListWidget::item:selected { 
-                background-color: #6c757d;
-                color: white; 
-            }
-            QListWidget::item:hover:!selected {
-                background-color: #ecf0f1;
-            }
-        """)
+        apply_patient_archive_list_style(self.list_widget)
         self.list_widget.itemClicked.connect(self.on_item_clicked)
         layout.addWidget(self.list_widget)
 
@@ -125,13 +112,7 @@ class PatientArchiveDialog(QDialog):
         
         main_frame = QFrame(self)
         main_frame.setObjectName("MainFrame")
-        main_frame.setStyleSheet("""
-            #MainFrame {
-                background-color: #f8f9fa;
-                border-radius: 10px;
-                border: 1px solid #bdc3c7;
-            }
-        """)
+        apply_patient_archive_frame_style(main_frame)
         
         main_layout = QVBoxLayout(main_frame)
         main_layout.setContentsMargins(0, 0, 0, 20)
@@ -164,27 +145,7 @@ class PatientArchiveDialog(QDialog):
         self.btn_load.setFixedHeight(55)
         self.btn_load.setEnabled(False) # Изначально неактивна
         
-        # Стиль кнопки во всю ширину
-        self.btn_load.setStyleSheet("""
-            QPushButton {
-                font-size: 15px; 
-                font-weight: bold; 
-                background-color: #27ae60; 
-                color: white; 
-                border-radius: 10px; 
-                border: none;
-            }
-            QPushButton:hover {
-                background-color: #2ecc71;
-            }
-            QPushButton:pressed {
-                background-color: #1e8449;
-            }
-            QPushButton:disabled {
-                background-color: #bdc3c7;
-                color: #ecf0f1;
-            }
-        """)
+        apply_patient_archive_load_button_style(self.btn_load)
         
         self.btn_load.clicked.connect(self.accept)
         content_layout.addWidget(self.btn_load)

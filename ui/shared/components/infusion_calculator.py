@@ -5,8 +5,13 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt, QSignalBlocker, QPoint, QEvent
 from PySide6.QtGui import QPixmap
 
-# Импорт базовых стилей проекта (убедитесь, что пути соответствуют вашему проекту)
-from ...styles.theme import STYLE_CUSTOM_DIALOG
+from ...styles.shared_styles import (
+    apply_custom_dialog_style,
+    apply_infusion_concentration_style,
+    apply_infusion_result_style,
+    apply_infusion_spin_style,
+    apply_infusion_title_style,
+)
 
 class InfusionCalculatorDialog(QDialog):
     def __init__(self, parent=None):
@@ -30,7 +35,7 @@ class InfusionCalculatorDialog(QDialog):
         self.recalc()
 
     def init_ui(self):
-        self.setStyleSheet(STYLE_CUSTOM_DIALOG)
+        apply_custom_dialog_style(self)
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -59,7 +64,7 @@ class InfusionCalculatorDialog(QDialog):
         
         title_label = QLabel("Калькулятор скорости инфузии")
         title_label.setObjectName("DialogTitleText")
-        title_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        apply_infusion_title_style(title_label)
         
         close_btn = QPushButton("✕")
         close_btn.setObjectName("DialogCloseBtn")
@@ -99,19 +104,13 @@ class InfusionCalculatorDialog(QDialog):
         
         # Информация о концентрации
         self.lbl_concentration = QLabel("Концентрация: 0 мкг/мл")
-        self.lbl_concentration.setStyleSheet("font-weight: bold; color: #7f8c8d; font-size: 11px;")
+        apply_infusion_concentration_style(self.lbl_concentration)
         content_layout.addWidget(self.lbl_concentration)
         
         # КРУПНЫЙ БЛОК РЕЗУЛЬТАТА
         self.lbl_result = QLabel("-")
         self.lbl_result.setAlignment(Qt.AlignCenter)
-        self.lbl_result.setStyleSheet("""
-            QLabel {
-                font-weight: bold; font-size: 24px; color: #2c3e50; 
-                background-color: #f1f2f6; border-radius: 8px; 
-                padding: 15px; border: 1px solid #bdc3c7;
-            }
-        """)
+        apply_infusion_result_style(self.lbl_result)
         content_layout.addWidget(self.lbl_result)
 
         # 3. Переключатель режима и расчетные поля
@@ -179,12 +178,7 @@ class InfusionCalculatorDialog(QDialog):
         spin.setRange(min_val, max_val)
         spin.setSingleStep(step)
         spin.setDecimals(2 if step < 0.1 else 1)
-        spin.setStyleSheet("""
-            QDoubleSpinBox {
-                padding: 4px; border: 1px solid #bdc3c7; border-radius: 4px; font-size: 14px;
-            }
-            QDoubleSpinBox:focus { border: 1.5px solid #9aa3ab; }
-        """)
+        apply_infusion_spin_style(spin)
         return spin
 
     def _on_mode_toggled(self):
@@ -198,19 +192,16 @@ class InfusionCalculatorDialog(QDialog):
 
     def _update_mode_ui(self):
         """Блокировка/разблокировка полей в зависимости от режима."""
-        active_style = "background-color: white; color: black;"
-        readonly_style = "background-color: #f1f2f6; color: #7f8c8d;"
-        
         if self._mode == "dose_to_rate":
             self.spin_dose.setReadOnly(False)
-            self.spin_dose.setStyleSheet(active_style)
+            apply_infusion_spin_style(self.spin_dose)
             self.spin_rate.setReadOnly(True)
-            self.spin_rate.setStyleSheet(readonly_style)
+            apply_infusion_spin_style(self.spin_rate, "readonly")
         else:
             self.spin_dose.setReadOnly(True)
-            self.spin_dose.setStyleSheet(readonly_style)
+            apply_infusion_spin_style(self.spin_dose, "readonly")
             self.spin_rate.setReadOnly(False)
-            self.spin_rate.setStyleSheet(active_style)
+            apply_infusion_spin_style(self.spin_rate)
 
     def _on_mg_ml_weight_changed(self):
         """Обновление базовых параметров (раствор и вес)."""
@@ -227,9 +218,9 @@ class InfusionCalculatorDialog(QDialog):
 
     def _validate_input(self, widget, is_error):
         if is_error:
-            widget.setStyleSheet("border: 1.5px solid #e74c3c; background-color: #fdeaea;")
+            apply_infusion_spin_style(widget, "error")
         else:
-            widget.setStyleSheet("")
+            apply_infusion_spin_style(widget)
 
     def _on_dose_changed(self):
         if self._mode == "dose_to_rate":

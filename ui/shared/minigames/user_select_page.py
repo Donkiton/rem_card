@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rem_card.ui.styles.theme import TEXT_PRIMARY
+from rem_card.ui.styles.shared_styles import apply_minigame_label_style
 
 
 ROLE_LABELS = {
@@ -66,7 +66,7 @@ class UserSelectPage(QWidget):
         layout.setSpacing(12)
 
         title = QLabel("Регистрация пользователя")
-        title.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {TEXT_PRIMARY};")
+        apply_minigame_label_style(title, "title")
 
         register_form = QFormLayout()
         register_form.setLabelAlignment(register_form.labelAlignment())
@@ -91,7 +91,7 @@ class UserSelectPage(QWidget):
         add_row.addWidget(self.add_btn)
 
         select_label = QLabel("или выберите из списка:")
-        select_label.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY};")
+        apply_minigame_label_style(select_label)
 
         self.users_combo = QComboBox()
         self.users_combo.currentIndexChanged.connect(self._sync_load_button)

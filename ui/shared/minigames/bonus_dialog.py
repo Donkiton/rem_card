@@ -11,7 +11,7 @@ from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.minigames.game_select_page import GameSelectPage
 from rem_card.ui.shared.minigames.user_select_page import UserSelectPage
-from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK, TEXT_PRIMARY
+from rem_card.ui.styles.shared_styles import apply_minigame_label_style
 
 
 class BonusDialog(BaseStyledDialog):
@@ -126,7 +126,7 @@ class BonusDialog(BaseStyledDialog):
 
         top_row = QHBoxLayout()
         user_label = QLabel(str(self.current_user.get("full_name") or ""))
-        user_label.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY};")
+        apply_minigame_label_style(user_label)
         back_btn = QPushButton("К минииграм")
         back_btn.clicked.connect(self._show_games)
         top_row.addWidget(user_label)
@@ -161,9 +161,9 @@ class BonusDialog(BaseStyledDialog):
 
         top_row = QHBoxLayout()
         user_label = QLabel(str(self.current_user.get("full_name") or ""))
-        user_label.setStyleSheet(f"font-weight: bold; color: {TEXT_PRIMARY};")
+        apply_minigame_label_style(user_label)
         title_label = QLabel(ARCADE_GAME_LABELS.get(clean_key, clean_key))
-        title_label.setStyleSheet(f"font-weight: bold; color: {COLOR_PRIMARY_DARK};")
+        apply_minigame_label_style(title_label, "accent")
         back_btn = QPushButton("К минииграм")
         back_btn.clicked.connect(self._show_games)
         top_row.addWidget(user_label)

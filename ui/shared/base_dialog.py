@@ -1,5 +1,5 @@
 from rem_card.ui.shared.custom_title_bar import CustomTitleBar
-from rem_card.ui.styles.theme import STYLE_CUSTOM_DIALOG
+from rem_card.ui.styles.shared_styles import apply_custom_dialog_style
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QFrame
 from PySide6.QtCore import Qt
 
@@ -9,7 +9,7 @@ class BaseStyledDialog(QDialog):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setStyleSheet(STYLE_CUSTOM_DIALOG)
+        apply_custom_dialog_style(self)
         
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)

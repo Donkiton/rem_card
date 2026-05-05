@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QLabel, QTableWidg
 
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.minigames.user_select_page import role_label
-from rem_card.ui.styles.theme import TEXT_SECONDARY
+from rem_card.ui.styles.shared_styles import apply_minigame_label_style
 
 
 class LeaderboardDialog(BaseStyledDialog):
@@ -32,7 +32,7 @@ class LeaderboardDialog(BaseStyledDialog):
             self.table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeToContents)
         self.empty_label = QLabel("Результатов пока нет.")
         self.empty_label.setAlignment(Qt.AlignCenter)
-        self.empty_label.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        apply_minigame_label_style(self.empty_label, "secondary")
         self.content_layout.addWidget(self.table)
         self.content_layout.addWidget(self.empty_label)
 
