@@ -64,6 +64,7 @@ class NurseOrdersWidget(QWidget):
         self._last_poll_monotonic = 0.0
         self._min_poll_interval_sec = max(0.1, float(os.getenv("REMCARD_ORDERS_POLL_MIN_INTERVAL_SEC", "0.8")))
         self._silent_sync_delay_ms = max(250, int(os.getenv("REMCARD_ORDERS_SILENT_SYNC_DELAY_MS", "500")))
+        self._is_closing = False
         self._admin_only_snapshot_window_sec = max(
             3.0,
             float(os.getenv("REMCARD_ORDERS_ADMIN_ONLY_WINDOW_SEC", "15")),
@@ -122,6 +123,49 @@ class NurseOrdersWidget(QWidget):
         self._cached_has_administrations = False
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
+
+    def _reset_pending_snapshot_request(self):
+        self._snapshot_pending = False
+        self._snapshot_force_pending = False
+        self._snapshot_pending_source = "refresh"
+        self._snapshot_pending_priority = "MEDIUM"
+        self._snapshot_pending_reason = None
+
+    def _disconnect_snapshot_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_snapshot),
+            (worker.failed, self._on_snapshot_failed),
+            (worker.finished, self._on_snapshot_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def shutdown(self, timeout_ms: int = 1200):
+        self._is_closing = True
+        self._reset_pending_snapshot_request()
+        for timer_name in (
+            "_silent_sync_timer",
+            "_change_batch_timer",
+            "_soft_update_timer",
+            "timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
+
+        worker = self._snapshot_worker
+        self._snapshot_worker = None
+        self._active_request_context_key = None
+        self._active_request_force = False
+        self._active_request_priority = "MEDIUM"
+        self._disconnect_snapshot_worker(worker)
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
 
     def has_drafts(self) -> bool:
         return False
@@ -267,7 +311,7 @@ class NurseOrdersWidget(QWidget):
         )
 
     def handle_data_changes(self, payload: dict, *, tab_active: bool = True):
-        if not self.service or not self.admission_id:
+        if self._is_closing or not self.service or not self.admission_id:
             return
         has_scoped_change, scoped_change_id = self._extract_scoped_orders_change_id(payload)
         changed_entities = {
@@ -386,6 +430,8 @@ class NurseOrdersWidget(QWidget):
         return has_relevant_change, max_scoped_change_id
 
     def _queue_forced_reload_after_stale_snapshot(self, *, reason: str):
+        if self._is_closing:
+            return
         pending_inflight = bool(self._snapshot_worker is not None)
         try:
             context_hash = self._build_orders_context().hash()
@@ -429,6 +475,8 @@ class NurseOrdersWidget(QWidget):
         priority: str,
         invalidate_reason: str | None = None,
     ):
+        if self._is_closing:
+            return
         QTimer.singleShot(
             0,
             lambda: self._request_snapshot(
@@ -447,7 +495,7 @@ class NurseOrdersWidget(QWidget):
         priority: str = "MEDIUM",
         invalidate_reason: str | None = None,
     ):
-        if not self.service or not self.admission_id:
+        if self._is_closing or not self.service or not self.admission_id:
             return
 
         coordinator = self._get_read_coordinator()
@@ -537,13 +585,15 @@ class NurseOrdersWidget(QWidget):
                 "snapshot": snapshot,
             }
 
-        self._snapshot_worker = AsyncCallThread(job, parent=self)
+        self._snapshot_worker = AsyncCallThread(job)
         self._snapshot_worker.succeeded.connect(self._apply_snapshot)
         self._snapshot_worker.failed.connect(self._on_snapshot_failed)
         self._snapshot_worker.finished.connect(self._on_snapshot_finished)
         self._snapshot_worker.start()
 
     def _apply_snapshot(self, payload):
+        if self._is_closing:
+            return
         try:
             if not isinstance(payload, dict):
                 return
@@ -597,6 +647,8 @@ class NurseOrdersWidget(QWidget):
         QTimer.singleShot(0, restore)
 
     def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
+        if self._is_closing:
+            return False
         if admission_id != self.admission_id:
             return False
         current_context_key = self._current_context_key()
@@ -800,25 +852,29 @@ class NurseOrdersWidget(QWidget):
             return None
 
     def _on_snapshot_failed(self, exc):
+        if self._is_closing:
+            return
         self._clear_soft_update_state()
         logger.warning("[NurseOrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
 
     def _on_snapshot_finished(self):
+        worker = self.sender()
+        if worker is not None and self._snapshot_worker is not worker:
+            return
         self._snapshot_worker = None
         self._active_request_context_key = None
         self._active_request_force = False
         self._active_request_priority = "MEDIUM"
         self._clear_soft_update_state()
+        if self._is_closing:
+            self._reset_pending_snapshot_request()
+            return
         if self._snapshot_pending:
             force = self._snapshot_force_pending
             source = self._snapshot_pending_source
             priority = self._snapshot_pending_priority
             invalidate_reason = self._snapshot_pending_reason
-            self._snapshot_pending = False
-            self._snapshot_force_pending = False
-            self._snapshot_pending_source = "refresh"
-            self._snapshot_pending_priority = "MEDIUM"
-            self._snapshot_pending_reason = None
+            self._reset_pending_snapshot_request()
             self._defer_snapshot_request(
                 force=force,
                 source=source,
@@ -877,6 +933,9 @@ class NurseOrdersWidget(QWidget):
         self._pending_change_count = 0
 
     def _flush_change_batch(self):
+        if self._is_closing:
+            self._reset_change_batch(stop_timer=False)
+            return
         pending_context_key = self._pending_change_context_key
         should_reload = bool(self._pending_change_reload)
         batch_count = int(self._pending_change_count or 0)
@@ -918,7 +977,7 @@ class NurseOrdersWidget(QWidget):
         self._soft_update_message = ""
 
     def _enqueue_write(self, description: str, operation, on_success=None, on_error=None, *, block_ui: bool = True):
-        if not self.service:
+        if self._is_closing or not self.service:
             return
 
         queued_at = time.perf_counter()

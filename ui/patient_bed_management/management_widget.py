@@ -33,6 +33,8 @@ class PatientBedManagementWidget(QWidget):
         self.db_manager = db_manager
         self.patient_bed_service = PatientBedManagementService(db_manager, data_service=data_service)
         self._move_pending = False
+        self._is_closing = False
+        self._opening_patient_form = False
 
         self.bg_color = "#f2f3ee"
         self.border_color = "#c9c9b4"
@@ -150,21 +152,41 @@ class PatientBedManagementWidget(QWidget):
             self.bed_widgets.append(bed_widget)
 
     def _on_bed_clicked(self, bed_number: int, current_admission_id: int):
+        if self._is_closing:
+            return
         patient, admission = None, None
         if current_admission_id:
             patient, admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
         self.side_card.update_info(bed_number, patient, admission)
 
     def _open_patient_card_by_number(self, bed_number: int):
+        if self._is_closing or self._opening_patient_form:
+            return
+        self._opening_patient_form = True
+        QTimer.singleShot(0, lambda bed=int(bed_number): self._open_patient_form_safe(bed))
+
+    def _open_patient_form_safe(self, bed_number: int):
+        if self._is_closing:
+            self._opening_patient_form = False
+            return
         patient, admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
-        dialog = PatientForm(self.patient_bed_service, bed_number, patient, admission, self)
-        if dialog.exec():
-            self.refresh_bed_statuses()
-            new_patient, new_admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
-            self.side_card.update_info(bed_number, new_patient, new_admission)
+        admission_id = getattr(admission, "id", None)
+        try:
+            dialog = PatientForm(self.patient_bed_service, bed_number, patient, admission, self)
+            if dialog.exec():
+                if self._is_closing:
+                    return
+                new_patient, new_admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
+                new_admission_id = getattr(new_admission, "id", None)
+                if admission_id is not None and new_admission_id is not None and admission_id != new_admission_id:
+                    return
+                self.refresh_bed_statuses()
+                self.side_card.update_info(bed_number, new_patient, new_admission)
+        finally:
+            self._opening_patient_form = False
 
     def move_patient(self, source_bed: int, target_bed: int):
-        if self._move_pending:
+        if self._is_closing or self._move_pending:
             return
         source_bed_data = self.patient_bed_service.get_bed_by_number(source_bed)
         target_bed_data = self.patient_bed_service.get_bed_by_number(target_bed)
@@ -206,6 +228,8 @@ class PatientBedManagementWidget(QWidget):
             )
 
         def on_success(_result):
+            if self._is_closing:
+                return
             self._finish_move_pending()
             if not _result:
                 self.refresh_bed_statuses()
@@ -216,6 +240,8 @@ class PatientBedManagementWidget(QWidget):
             self.side_card.update_info(target_bed, patient, admission)
 
         def on_error(exc):
+            if self._is_closing:
+                return
             self._finish_move_pending()
             self.refresh_bed_statuses()
             CustomMessageBox.warning(self, "Ошибка", str(exc))
@@ -242,6 +268,8 @@ class PatientBedManagementWidget(QWidget):
             bed_widget.setEnabled(True)
 
     def refresh_bed_statuses(self):
+        if self._is_closing:
+            return
         rows = self.patient_bed_service.get_beds_snapshot()
         by_bed = {int(row["bed_number"]): row for row in rows}
 
@@ -263,3 +291,11 @@ class PatientBedManagementWidget(QWidget):
         if self.bed_widgets:
             selected = self.bed_widgets[0]
             self._on_bed_clicked(selected.bed_number, selected.current_admission_id)
+
+    def shutdown(self):
+        self._is_closing = True
+        self._opening_patient_form = False
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)

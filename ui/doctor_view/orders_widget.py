@@ -61,6 +61,7 @@ class OrdersWidget(QWidget):
         self._pending_structure_change_id = 0
         self._applying_pending_structure_sync = False
         self._forced_read_only = False
+        self._is_closing = False
         self._snapshot_worker = None
         self._snapshot_pending = False
         self._snapshot_force_pending = False
@@ -126,6 +127,70 @@ class OrdersWidget(QWidget):
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
         self._clear_local_cell_draft_guard()
+
+    def _reset_pending_snapshot_request(self):
+        self._snapshot_pending = False
+        self._snapshot_force_pending = False
+        self._snapshot_pending_source = "refresh"
+        self._snapshot_pending_priority = "MEDIUM"
+        self._snapshot_pending_reason = None
+
+    def _disconnect_snapshot_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_snapshot),
+            (worker.failed, self._on_snapshot_failed),
+            (worker.finished, self._on_snapshot_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def _disconnect_load_yesterday_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._on_load_yesterday_ready),
+            (worker.failed, self._on_load_yesterday_failed),
+            (worker.finished, self._on_load_yesterday_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def shutdown(self, timeout_ms: int = 1200):
+        self._is_closing = True
+        self._reset_pending_snapshot_request()
+        for timer_name in (
+            "_fast_sync_timer",
+            "_state_sync_timer",
+            "_change_batch_timer",
+            "_soft_update_timer",
+            "timer",
+        ):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
+
+        worker = self._snapshot_worker
+        self._snapshot_worker = None
+        self._active_request_context_key = None
+        self._active_request_force = False
+        self._active_request_priority = "MEDIUM"
+        self._disconnect_snapshot_worker(worker)
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+        load_worker = self._load_yesterday_worker
+        self._load_yesterday_worker = None
+        self._disconnect_load_yesterday_worker(load_worker)
+        if load_worker is not None and load_worker.isRunning():
+            load_worker.quit()
+            load_worker.wait(timeout_ms)
 
     def _clear_local_cell_draft_guard(self):
         self._local_cell_draft_guard = False
@@ -504,7 +569,7 @@ class OrdersWidget(QWidget):
         )
 
     def handle_data_changes(self, payload: dict, *, tab_active: bool = True):
-        if not self.service or not self.admission_id:
+        if self._is_closing or not self.service or not self.admission_id:
             return
         has_scoped_change, scoped_change_id = self._extract_scoped_orders_change_id(payload)
         changed_entities = {
@@ -623,6 +688,8 @@ class OrdersWidget(QWidget):
         return has_relevant_change, max_scoped_change_id
 
     def _queue_forced_reload_after_stale_snapshot(self, *, reason: str):
+        if self._is_closing:
+            return
         pending_inflight = bool(self._snapshot_worker is not None)
         try:
             context_hash = self._build_orders_context().hash()
@@ -666,6 +733,8 @@ class OrdersWidget(QWidget):
         priority: str,
         invalidate_reason: str | None = None,
     ):
+        if self._is_closing:
+            return
         QTimer.singleShot(
             0,
             lambda: self._request_snapshot(
@@ -684,7 +753,7 @@ class OrdersWidget(QWidget):
         priority: str = "MEDIUM",
         invalidate_reason: str | None = None,
     ):
-        if not self.service or not self.admission_id:
+        if self._is_closing or not self.service or not self.admission_id:
             return
 
         coordinator = self._get_read_coordinator()
@@ -774,13 +843,15 @@ class OrdersWidget(QWidget):
                 "snapshot": snapshot,
             }
 
-        self._snapshot_worker = AsyncCallThread(job, parent=self)
+        self._snapshot_worker = AsyncCallThread(job)
         self._snapshot_worker.succeeded.connect(self._apply_snapshot)
         self._snapshot_worker.failed.connect(self._on_snapshot_failed)
         self._snapshot_worker.finished.connect(self._on_snapshot_finished)
         self._snapshot_worker.start()
 
     def _apply_snapshot(self, payload):
+        if self._is_closing:
+            return
         try:
             if not isinstance(payload, dict):
                 return
@@ -834,6 +905,8 @@ class OrdersWidget(QWidget):
         QTimer.singleShot(0, restore)
 
     def _apply_snapshot_data(self, *, snapshot, admission_id, shift_date, context_key=None) -> bool:
+        if self._is_closing:
+            return False
         if admission_id != self.admission_id:
             return False
         current_context_key = self._current_context_key()
@@ -1067,25 +1140,29 @@ class OrdersWidget(QWidget):
             return None
 
     def _on_snapshot_failed(self, exc):
+        if self._is_closing:
+            return
         self._clear_soft_update_state()
         logger.warning("[OrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
 
     def _on_snapshot_finished(self):
+        worker = self.sender()
+        if worker is not None and self._snapshot_worker is not worker:
+            return
         self._snapshot_worker = None
         self._active_request_context_key = None
         self._active_request_force = False
         self._active_request_priority = "MEDIUM"
         self._clear_soft_update_state()
+        if self._is_closing:
+            self._reset_pending_snapshot_request()
+            return
         if self._snapshot_pending:
             force = self._snapshot_force_pending
             source = self._snapshot_pending_source
             priority = self._snapshot_pending_priority
             invalidate_reason = self._snapshot_pending_reason
-            self._snapshot_pending = False
-            self._snapshot_force_pending = False
-            self._snapshot_pending_source = "refresh"
-            self._snapshot_pending_priority = "MEDIUM"
-            self._snapshot_pending_reason = None
+            self._reset_pending_snapshot_request()
             self._defer_snapshot_request(
                 force=force,
                 source=source,
@@ -1144,6 +1221,9 @@ class OrdersWidget(QWidget):
         self._pending_change_count = 0
 
     def _flush_change_batch(self):
+        if self._is_closing:
+            self._reset_change_batch(stop_timer=False)
+            return
         pending_context_key = self._pending_change_context_key
         should_reload = bool(self._pending_change_reload)
         batch_count = int(self._pending_change_count or 0)
@@ -1195,7 +1275,7 @@ class OrdersWidget(QWidget):
         show_error: bool = True,
         perf_click_id: int | None = None,
     ):
-        if not self.service:
+        if self._is_closing or not self.service:
             return
 
         queued_at = time.perf_counter()
@@ -2389,7 +2469,7 @@ class OrdersWidget(QWidget):
             )
 
     def load_yesterday_orders(self):
-        if not self.admission_id or not self.service or self._is_read_only(): return
+        if self._is_closing or not self.admission_id or not self.service or self._is_read_only(): return
         
         reply = self._show_question("Вы уверены, что хотите загрузить вчерашние назначения?")
         if reply != CustomMessageBox.Yes: return
@@ -2416,13 +2496,15 @@ class OrdersWidget(QWidget):
                 "found_date": found_date,
             }
 
-        self._load_yesterday_worker = AsyncCallThread(job, parent=self)
+        self._load_yesterday_worker = AsyncCallThread(job)
         self._load_yesterday_worker.succeeded.connect(self._on_load_yesterday_ready)
         self._load_yesterday_worker.failed.connect(self._on_load_yesterday_failed)
         self._load_yesterday_worker.finished.connect(self._on_load_yesterday_finished)
         self._load_yesterday_worker.start()
 
     def _on_load_yesterday_ready(self, payload):
+        if self._is_closing:
+            return
         if not isinstance(payload, dict):
             return
         if payload.get("admission_id") != self.admission_id or payload.get("shift_date") != self.shift_date:
@@ -2461,9 +2543,13 @@ class OrdersWidget(QWidget):
         )
 
     def _on_load_yesterday_failed(self, exc):
+        if self._is_closing:
+            return
         self._show_warning(f"Не удалось найти назначения за предыдущие дни: {exc}")
 
     def _on_load_yesterday_finished(self):
+        if self._is_closing:
+            return
         self._load_yesterday_worker = None
 
     def _show_question(self, text):

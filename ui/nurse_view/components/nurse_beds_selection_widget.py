@@ -45,6 +45,7 @@ class NurseBedsSelectionWidget(QWidget):
         self._rows_by_admission_id = {}
         self._refresh_worker = None
         self._refresh_pending = False
+        self._is_closing = False
         self.init_ui()
         QTimer.singleShot(0, self.refresh)
 
@@ -96,17 +97,19 @@ class NurseBedsSelectionWidget(QWidget):
             painter.drawPixmap(x, y, pixmap)
 
     def refresh(self, *, queue_if_running: bool = True):
+        if self._is_closing:
+            return
         if self._refresh_worker and self._refresh_worker.isRunning():
             if queue_if_running:
                 self._refresh_pending = True
             return
 
         self._refresh_pending = False
-        worker = AsyncCallThread(self._load_beds_snapshot, parent=self)
+        worker = AsyncCallThread(self._load_beds_snapshot)
         self._refresh_worker = worker
         worker.succeeded.connect(self._apply_beds_snapshot)
         worker.failed.connect(self._on_refresh_failed)
-        worker.finished.connect(lambda: self._on_refresh_finished(worker))
+        worker.finished.connect(self._on_refresh_finished)
         worker.start()
 
     def _load_beds_snapshot(self):
@@ -132,6 +135,8 @@ class NurseBedsSelectionWidget(QWidget):
         }
 
     def _apply_beds_snapshot(self, snapshot):
+        if self._is_closing:
+            return
         active_patients = list(snapshot.get("patients") or [])
         now = snapshot.get("now") or datetime.datetime.now()
         yesterday = snapshot.get("yesterday") or (now - datetime.timedelta(days=1))
@@ -179,13 +184,48 @@ class NurseBedsSelectionWidget(QWidget):
         self.container.update()
 
     def _on_refresh_failed(self, exc: Exception):
+        if self._is_closing:
+            return
         pass
 
-    def _on_refresh_finished(self, worker):
+    def _on_refresh_finished(self):
+        worker = self.sender()
         if self._refresh_worker is worker:
             self._refresh_worker = None
+        elif self._refresh_worker is not None:
+            return
+        if self._is_closing:
+            self._refresh_pending = False
+            return
         if self._refresh_pending:
             QTimer.singleShot(0, self.refresh)
+
+    def _disconnect_refresh_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_beds_snapshot),
+            (worker.failed, self._on_refresh_failed),
+            (worker.finished, self._on_refresh_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def shutdown(self, timeout_ms: int = 1200):
+        self._is_closing = True
+        self._refresh_pending = False
+        worker = self._refresh_worker
+        self._refresh_worker = None
+        self._disconnect_refresh_worker(worker)
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     def _remove_bottom_stretch(self):
         if self.list_layout.count() <= 0:

@@ -20,6 +20,10 @@ class DatabaseUnavailableError(RuntimeError):
     pass
 
 
+class DatabaseClosedError(RuntimeError):
+    pass
+
+
 def is_database_unavailable_error(exc: Exception) -> bool:
     if isinstance(exc, DatabaseUnavailableError):
         return True

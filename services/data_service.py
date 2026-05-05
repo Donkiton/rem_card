@@ -22,6 +22,7 @@ class DataService(QObject):
         self._monitor = DataUpdateMonitor(self)
         self._sync_coordinator = SyncCoordinator()
         self._poll_maintenance_tasks: list[Callable[[], Any]] = []
+        self._shutting_down = False
         self._monitor.changes_detected.connect(self._emit_coordinated_changes, Qt.QueuedConnection)
         self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
         self._error_callback_requested.connect(self._dispatch_error_callback, Qt.QueuedConnection)
@@ -76,7 +77,21 @@ class DataService(QObject):
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
     ):
+        if self._shutting_down:
+            exc = RuntimeError("Application is shutting down; queued write rejected")
+            logger.info("Queued write rejected during shutdown for %s", description)
+            self.write_failed.emit(f"{description}: {exc}")
+            if on_error:
+                try:
+                    on_error(exc)
+                except Exception as callback_exc:
+                    logger.error("DataService shutdown rejection callback failed: %s", callback_exc, exc_info=True)
+            return False
+
         def handle_success(result):
+            if self._shutting_down:
+                logger.info("Queued write success callbacks skipped during shutdown for %s", description)
+                return
             self.write_finished.emit(description)
             self.request_immediate_refresh(force_emit=True, source=description)
             self._success_callback_requested.emit(on_success, result)
@@ -92,10 +107,11 @@ class DataService(QObject):
             on_success=handle_success,
             on_error=handle_error,
         )
+        return True
 
     @Slot(object, object)
     def _dispatch_success_callback(self, callback: Optional[Callable[[Any], None]], result: Any):
-        if not callback:
+        if self._shutting_down or not callback:
             return
         try:
             callback(result)
@@ -104,29 +120,36 @@ class DataService(QObject):
 
     @Slot(object, object)
     def _dispatch_error_callback(self, callback: Optional[Callable[[Exception], None]], exc: Exception):
-        if not callback:
+        if self._shutting_down or not callback:
             return
         try:
             callback(exc)
         except Exception as callback_exc:
             logger.error("DataService error callback failed: %s", callback_exc, exc_info=True)
 
-    def shutdown(self):
+    def set_shutting_down(self):
+        self._shutting_down = True
+
+    def shutdown(self) -> bool:
+        self.set_shutting_down()
         if self._monitor and self._monitor.isRunning():
             self._monitor.stop()
             self._monitor.wait(1500)
-        self._queue.shutdown(timeout=5.0)
+        drained = self._queue.shutdown(timeout=5.0)
         try:
             from rem_card.app.local_metrics import flush_metrics
 
             flush_metrics(timeout=1.0)
         except Exception:
             pass
+        return bool(drained)
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
-        if self._monitor:
+        if self._monitor and not self._shutting_down:
             self._monitor.request_refresh(force_emit=force_emit, source=source)
 
     @Slot(dict)
     def _emit_coordinated_changes(self, payload: dict):
+        if self._shutting_down:
+            return
         self.changes_detected.emit(self._sync_coordinator.classify(payload or {}))

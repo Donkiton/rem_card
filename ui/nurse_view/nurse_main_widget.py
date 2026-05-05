@@ -100,6 +100,7 @@ class NurseMainWidget(QWidget):
         self._monitor_connected = False
         self._snapshot_worker = None
         self._snapshot_pending = None
+        self._snapshot_request_id = 0
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
         self._is_closing = False
@@ -435,6 +436,43 @@ class NurseMainWidget(QWidget):
             pass
         self._monitor_connected = False
 
+    def _disconnect_snapshot_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_card_snapshot),
+            (worker.failed, self._on_card_snapshot_failed),
+            (worker.finished, self._on_card_snapshot_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def _shutdown_snapshot_worker(self, timeout_ms: int = 1200):
+        self._snapshot_pending = None
+        worker = self._snapshot_worker
+        self._snapshot_worker = None
+        if worker is None:
+            return
+        self._disconnect_snapshot_worker(worker)
+        if worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+    def _request_pending_card_snapshot(self):
+        if self._is_closing:
+            self._snapshot_pending = None
+            return
+        pending = self._snapshot_pending
+        self._snapshot_pending = None
+        if not pending:
+            return
+        self._request_card_snapshot(
+            ensure_initial_status=pending["ensure_initial_status"],
+            load_scope=pending.get("load_scope", "full"),
+        )
+
     def _request_card_snapshot(
         self,
         *,
@@ -442,11 +480,15 @@ class NurseMainWidget(QWidget):
         force_emit: bool = False,
         load_scope: str = "full",
     ):
+        if self._is_closing:
+            return
         adm_id = getattr(self.layout_manager, "current_admission_id", None)
         if not adm_id:
             return
 
+        self._snapshot_request_id += 1
         request = {
+            "request_id": self._snapshot_request_id,
             "admission_id": int(adm_id),
             "shift_date": self._current_date,
             "ensure_initial_status": bool(ensure_initial_status),
@@ -457,11 +499,11 @@ class NurseMainWidget(QWidget):
             self._snapshot_pending = request
             return
 
-        worker = AsyncCallThread(self._build_card_snapshot_job, request, parent=self)
+        worker = AsyncCallThread(self._build_card_snapshot_job, request)
         self._snapshot_worker = worker
         worker.succeeded.connect(self._apply_card_snapshot)
         worker.failed.connect(self._on_card_snapshot_failed)
-        worker.finished.connect(lambda: self._on_card_snapshot_finished(worker))
+        worker.finished.connect(self._on_card_snapshot_finished)
         worker.start()
 
         data_service = self._get_data_service()
@@ -555,6 +597,15 @@ class NurseMainWidget(QWidget):
         return request
 
     def _apply_card_snapshot(self, request: dict):
+        if self._is_closing:
+            return
+        if request.get("request_id") != self._snapshot_request_id:
+            logger.info(
+                "NurseMainWidget discarded stale snapshot request_id=%s current_request_id=%s",
+                request.get("request_id"),
+                self._snapshot_request_id,
+            )
+            return
         adm_id = getattr(self.layout_manager, "current_admission_id", None)
         if int(request["admission_id"]) != int(adm_id or 0) or request["shift_date"] != self._current_date:
             return
@@ -641,21 +692,21 @@ class NurseMainWidget(QWidget):
         )
 
     def _on_card_snapshot_failed(self, exc: Exception):
+        if self._is_closing:
+            return
         logger.error("NurseMainWidget snapshot load failed: %s", exc, exc_info=True)
 
-    def _on_card_snapshot_finished(self, worker):
+    def _on_card_snapshot_finished(self):
+        worker = self.sender()
         if self._snapshot_worker is worker:
             self._snapshot_worker = None
-        if self._snapshot_pending:
-            pending = self._snapshot_pending
+        elif self._snapshot_worker is not None:
+            return
+        if self._is_closing:
             self._snapshot_pending = None
-            QTimer.singleShot(
-                0,
-                lambda req=pending: self._request_card_snapshot(
-                    ensure_initial_status=req["ensure_initial_status"],
-                    load_scope=req.get("load_scope", "full"),
-                ),
-            )
+            return
+        if self._snapshot_pending:
+            QTimer.singleShot(0, self._request_pending_card_snapshot)
 
     def _reset_balance_view_state(self):
         if hasattr(self, "balance_controller") and self.balance_controller:
@@ -937,6 +988,8 @@ class NurseMainWidget(QWidget):
             self._refresh_ivl_from_db()
 
     def _on_data_changes(self, payload: dict):
+        if self._is_closing:
+            return
         sync_actions = payload.get("sync_actions") or {}
         full_refresh_required = bool(sync_actions.get("full_refresh_required"))
         card_snapshot_required = bool(sync_actions.get("card_snapshot_required"))
@@ -1329,6 +1382,8 @@ class NurseMainWidget(QWidget):
                 )
 
     def load_patient_card(self, admission_id, date):
+        if self._is_closing:
+            return
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
         self._balance_update_timer.stop()
@@ -1717,12 +1772,19 @@ class NurseMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        self._shutdown_snapshot_worker()
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
         self._release_add_patient_lock()
+        if hasattr(self.layout_manager, "beds_selection_widget") and hasattr(self.layout_manager.beds_selection_widget, "shutdown"):
+            self.layout_manager.beds_selection_widget.shutdown()
+        if hasattr(self.layout_manager, 'orders_widget') and hasattr(self.layout_manager.orders_widget, "shutdown"):
+            self.layout_manager.orders_widget.shutdown()
+        if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
+            self.layout_manager.nurse_orders_manager.shutdown()
 
     def closeEvent(self, event):
         self.shutdown()

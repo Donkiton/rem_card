@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.db_availability import DatabaseClosedError
 
 NETWORK_SAFE_DB_PROFILE = "network_safe_v1"
 SQLITE_BUSY_TIMEOUT_MS = max(100, int(os.environ.get("REMCARD_SQLITE_BUSY_TIMEOUT_MS", "10000")))
@@ -710,6 +711,8 @@ class SQLiteWriteController:
         return "database is locked" in message or "database table is locked" in message
 
     def _get_conn_lock(self, conn: sqlite3.Connection) -> threading.RLock:
+        if conn is None:
+            raise DatabaseClosedError("SQLite connection is closed")
         key = id(conn)
         with self._conn_locks_mutex:
             lock = self._conn_locks.get(key)
@@ -720,12 +723,16 @@ class SQLiteWriteController:
 
     @contextmanager
     def connection_guard(self, conn: sqlite3.Connection):
+        if conn is None:
+            raise DatabaseClosedError("SQLite connection is closed")
         lock = self._get_conn_lock(conn)
         with lock:
             yield
 
     @contextmanager
     def transaction(self, conn: sqlite3.Connection, source: str = "unknown"):
+        if conn is None:
+            raise DatabaseClosedError(f"SQLite connection is closed for {source}")
         started = time.perf_counter()
         status = "error"
         with self.connection_guard(conn):
@@ -857,10 +864,10 @@ class LocalWriteQueue:
                 )
             )
 
-    def shutdown(self, timeout: float = 1.0):
+    def shutdown(self, timeout: float = 1.0) -> bool:
         with self._accepting_lock:
             if not self._accepting:
-                return
+                return not self._thread.is_alive()
             self._accepting = False
 
         self._queue.put(
@@ -876,6 +883,8 @@ class LocalWriteQueue:
                 "SQLite write queue did not drain within %.1fs; pending writes may still be running.",
                 timeout,
             )
+            return False
+        return True
 
     def _worker(self):
         while True:

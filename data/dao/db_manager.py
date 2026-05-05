@@ -16,6 +16,7 @@ from rem_card.app.durable_sql_outbox import (
     is_retryable_write_error,
 )
 from rem_card.app.db_availability import (
+    DatabaseClosedError,
     is_database_unavailable_error,
     notify_database_unavailable,
 )
@@ -165,6 +166,7 @@ class DatabaseManager:
         self._last_local_cache_cleanup_ts = 0.0
         self._thread_state = threading.local()
         self._central_io_lock = threading.RLock()
+        self._closed = False
 
         self._maybe_rotate_db_lifecycle()
 
@@ -228,6 +230,7 @@ class DatabaseManager:
             profile_lock.release()
         self._remcard_conn = conn
         self._journal_conn = conn
+        self._closed = False
 
     def _reconnect(self):
         with self._central_io_lock:
@@ -1093,11 +1096,14 @@ class DatabaseManager:
         outer_transaction = not self._in_current_thread_remcard_transaction()
         try:
             with self._central_io_lock:
-                with self.write_controller.transaction(self._remcard_conn, source=source) as cursor:
+                if self._closed or self._remcard_conn is None:
+                    raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
+                conn = self._remcard_conn
+                with self.write_controller.transaction(conn, source=source) as cursor:
                     with self._mark_current_thread_remcard_transaction():
                         wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
                         yield wrapped_cursor
-                if self._remcard_conn and outer_transaction:
+                if conn and not self._closed and outer_transaction:
                     self._maybe_create_periodic_backup(source=source)
                     self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
@@ -1120,8 +1126,11 @@ class DatabaseManager:
         logger.debug("SQL RemCard Exec: %s | Params: %s", query, params)
         try:
             with self._central_io_lock:
-                cursor = self.write_controller.execute(self._remcard_conn, query, params, source=source)
-                if self._remcard_conn and not self._in_current_thread_remcard_transaction():
+                if self._closed or self._remcard_conn is None:
+                    raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
+                conn = self._remcard_conn
+                cursor = self.write_controller.execute(conn, query, params, source=source)
+                if conn and not self._closed and not self._in_current_thread_remcard_transaction():
                     self._maybe_create_periodic_backup(source=source)
                     self._after_write_committed()
             return cursor
@@ -1372,6 +1381,7 @@ class DatabaseManager:
 
     def close(self):
         logger.info("Closing unified database connection")
+        self._closed = True
         self._integrity_stop_evt.set()
         if self._integrity_thread and self._integrity_thread.is_alive():
             self._integrity_thread.join(timeout=1.5)
@@ -1381,8 +1391,12 @@ class DatabaseManager:
 
         if self._remcard_conn:
             with self._central_io_lock:
-                with self.write_controller.connection_guard(self._remcard_conn):
-                    self._create_shutdown_backup()
-                    self._remcard_conn.close()
-        self._remcard_conn = None
-        self._journal_conn = None
+                conn = self._remcard_conn
+                if conn is not None:
+                    with self.write_controller.connection_guard(conn):
+                        self._create_shutdown_backup()
+                        conn.close()
+                    self._remcard_conn = None
+                    self._journal_conn = None
+        else:
+            self._journal_conn = None

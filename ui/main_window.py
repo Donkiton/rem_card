@@ -568,7 +568,16 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._is_closing = True
+        queue_drained = True
         try:
+            if (
+                self.container
+                and hasattr(self.container, "data_service")
+                and self.container.data_service
+                and hasattr(self.container.data_service, "set_shutting_down")
+            ):
+                self.container.data_service.set_shutting_down()
+
             if hasattr(self, 'doctor_main'):
                 if hasattr(self.doctor_main, 'shutdown'):
                     self.doctor_main.shutdown()
@@ -580,11 +589,6 @@ class MainWindow(QMainWindow):
                 elif hasattr(self.nurse_main, 'stop_auto_refresh'):
                     self.nurse_main.stop_auto_refresh()
 
-            if hasattr(self, 'doctor_main') and hasattr(self.doctor_main, 'remcard_widget'):
-                rw = self.doctor_main.remcard_widget
-                if hasattr(rw, 'layout_manager') and hasattr(rw.layout_manager, 'orders_widget'):
-                    rw.layout_manager.orders_widget.clear_drafts()
-            
             is_max = getattr(self, '_is_custom_maximized', False) or self.isMaximized()
             self.settings.setValue("is_maximized", is_max)
             
@@ -610,15 +614,19 @@ class MainWindow(QMainWindow):
             if self.container:
                 if hasattr(self.container, "data_service") and self.container.data_service:
                     try:
-                        self.container.data_service.shutdown()
+                        queue_drained = bool(self.container.data_service.shutdown())
                     except Exception as exc:
+                        queue_drained = False
                         logger.warning("DataService shutdown failed in MainWindow.closeEvent: %s", exc)
 
                 if hasattr(self.container, "db_manager") and self.container.db_manager:
-                    try:
-                        self.container.db_manager.close()
-                    except Exception as exc:
-                        logger.warning("DB manager close failed in MainWindow.closeEvent: %s", exc)
+                    if queue_drained:
+                        try:
+                            self.container.db_manager.close()
+                        except Exception as exc:
+                            logger.warning("DB manager close failed in MainWindow.closeEvent: %s", exc)
+                    else:
+                        logger.warning("DB manager close skipped because queued writes did not drain")
 
         except Exception as e:
             print(f"Error during closeEvent: {e}")

@@ -91,6 +91,7 @@ class DoctorRemCardWidget(QWidget):
         self._archive_readonly_db_manager = None
         self._snapshot_worker = None
         self._snapshot_pending = None
+        self._snapshot_request_id = 0
         self._create_card_after_snapshot = False
         self._create_card_write_pending = False
         self._monitor_connected = False
@@ -460,6 +461,66 @@ class DoctorRemCardWidget(QWidget):
             pass
         self._monitor_connected = False
 
+    def _disconnect_snapshot_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._apply_card_snapshot),
+            (worker.failed, self._on_card_snapshot_failed),
+            (worker.finished, self._on_card_snapshot_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def _shutdown_snapshot_worker(self, timeout_ms: int = 1200):
+        self._snapshot_pending = None
+        self._create_card_after_snapshot = False
+        worker = self._snapshot_worker
+        self._snapshot_worker = None
+        if worker is None:
+            return
+        self._disconnect_snapshot_worker(worker)
+        if worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+    def _disconnect_bars_auth_check_worker(self, worker):
+        if worker is None:
+            return
+        for signal, slot in (
+            (worker.succeeded, self._on_bars_auth_check_succeeded),
+            (worker.failed, self._on_bars_auth_check_failed),
+            (worker.finished, self._on_bars_auth_check_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def _shutdown_bars_auth_check_worker(self, timeout_ms: int = 1200):
+        worker = self._bars_auth_check_worker
+        self._bars_auth_check_worker = None
+        self._disconnect_bars_auth_check_worker(worker)
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+    def _request_pending_card_snapshot(self):
+        if self._is_closing:
+            self._snapshot_pending = None
+            return
+        pending = self._snapshot_pending
+        self._snapshot_pending = None
+        if not pending:
+            return
+        self._request_card_snapshot(
+            ensure_initial_status=pending["ensure_initial_status"],
+            show_empty_message=pending["show_empty_message"],
+            load_scope=pending.get("load_scope", "full"),
+        )
+
     def _request_card_snapshot(
         self,
         *,
@@ -468,10 +529,14 @@ class DoctorRemCardWidget(QWidget):
         force_emit: bool = False,
         load_scope: str = "full",
     ):
+        if self._is_closing:
+            return
         if not self.admission_id:
             return
 
+        self._snapshot_request_id += 1
         request = {
+            "request_id": self._snapshot_request_id,
             "admission_id": int(self.admission_id),
             "shift_date": self._current_date,
             "ensure_initial_status": bool(ensure_initial_status),
@@ -483,11 +548,11 @@ class DoctorRemCardWidget(QWidget):
             self._snapshot_pending = request
             return
 
-        worker = AsyncCallThread(self._build_card_snapshot_job, request, parent=self)
+        worker = AsyncCallThread(self._build_card_snapshot_job, request)
         self._snapshot_worker = worker
         worker.succeeded.connect(self._apply_card_snapshot)
         worker.failed.connect(self._on_card_snapshot_failed)
-        worker.finished.connect(lambda: self._on_card_snapshot_finished(worker))
+        worker.finished.connect(self._on_card_snapshot_finished)
         worker.start()
 
         data_service = self._get_data_service()
@@ -555,6 +620,15 @@ class DoctorRemCardWidget(QWidget):
         return request
 
     def _apply_card_snapshot(self, request: dict):
+        if self._is_closing:
+            return
+        if request.get("request_id") != self._snapshot_request_id:
+            logger.info(
+                "DoctorRemCardWidget discarded stale snapshot request_id=%s current_request_id=%s",
+                request.get("request_id"),
+                self._snapshot_request_id,
+            )
+            return
         if (
             int(request["admission_id"]) != int(self.admission_id or 0)
             or request["shift_date"] != self._current_date
@@ -662,11 +736,16 @@ class DoctorRemCardWidget(QWidget):
             )
 
     def _on_card_snapshot_failed(self, exc: Exception):
+        if self._is_closing:
+            return
         logger.error("DoctorRemCardWidget snapshot load failed: %s", exc, exc_info=True)
 
-    def _on_card_snapshot_finished(self, worker):
+    def _on_card_snapshot_finished(self):
+        worker = self.sender()
         if self._snapshot_worker is worker:
             self._snapshot_worker = None
+        elif self._snapshot_worker is not None:
+            return
         if self._is_closing:
             self._snapshot_pending = None
             self._create_card_after_snapshot = False
@@ -677,16 +756,7 @@ class DoctorRemCardWidget(QWidget):
             QTimer.singleShot(0, self.on_create_card_clicked)
             return
         if self._snapshot_pending:
-            pending = self._snapshot_pending
-            self._snapshot_pending = None
-            QTimer.singleShot(
-                0,
-                lambda req=pending: self._request_card_snapshot(
-                    ensure_initial_status=req["ensure_initial_status"],
-                    show_empty_message=req["show_empty_message"],
-                    load_scope=req.get("load_scope", "full"),
-                ),
-            )
+            QTimer.singleShot(0, self._request_pending_card_snapshot)
 
     def _reset_balance_view_state(self):
         if hasattr(self, "balance_controller") and self.balance_controller:
@@ -969,6 +1039,8 @@ class DoctorRemCardWidget(QWidget):
             self._refresh_ivl_from_db()
 
     def _on_data_changes(self, payload: dict):
+        if self._is_closing or not self.admission_id:
+            return
         sync_actions = payload.get("sync_actions") or {}
         full_refresh_required = bool(sync_actions.get("full_refresh_required"))
         card_snapshot_required = bool(sync_actions.get("card_snapshot_required"))
@@ -1263,6 +1335,8 @@ class DoctorRemCardWidget(QWidget):
 
     def load_patient_card(self, admission_id, date, *, request_snapshot: bool = True, ensure_initial_status=None):
         """Обновляет данные карты для нового пациента/даты."""
+        if self._is_closing:
+            return
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
         from rem_card.app.logger import logger
@@ -2283,10 +2357,30 @@ class DoctorRemCardWidget(QWidget):
         service = self._get_bars_auth_service()
         if self._bars_auth_check_worker and self._bars_auth_check_worker.isRunning():
             return
-        self._bars_auth_check_worker = AsyncCallThread(service.check_authorized, parent=self)
-        self._bars_auth_check_worker.succeeded.connect(lambda result: self._set_bars_auth_state(result.authorized))
-        self._bars_auth_check_worker.failed.connect(lambda exc: logger.debug("BARS auth check failed: %s", exc))
-        self._bars_auth_check_worker.start()
+        worker = AsyncCallThread(service.check_authorized)
+        self._bars_auth_check_worker = worker
+        worker.succeeded.connect(self._on_bars_auth_check_succeeded)
+        worker.failed.connect(self._on_bars_auth_check_failed)
+        worker.finished.connect(self._on_bars_auth_check_finished)
+        worker.start()
+
+    def _on_bars_auth_check_succeeded(self, result):
+        if self._is_closing:
+            return
+        self._set_bars_auth_state(result.authorized)
+
+    def _on_bars_auth_check_failed(self, exc):
+        if self._is_closing:
+            return
+        logger.debug("BARS auth check failed: %s", exc)
+
+    def _on_bars_auth_check_finished(self):
+        worker = self.sender()
+        if worker is not None and self._bars_auth_check_worker is not worker:
+            return
+        self._bars_auth_check_worker = None
+        if self._is_closing:
+            return
 
     def on_refresh_beds_clicked(self):
         self.force_refresh_everywhere()
@@ -2515,14 +2609,20 @@ class DoctorRemCardWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        self._shutdown_snapshot_worker()
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
         self._release_add_patient_lock()
-        if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
-            self.layout_manager.orders_widget.clear_drafts()
+        self._shutdown_bars_auth_check_worker()
+        if hasattr(self.layout_manager, "beds_selection_widget") and hasattr(self.layout_manager.beds_selection_widget, "shutdown"):
+            self.layout_manager.beds_selection_widget.shutdown()
+        if hasattr(self.layout_manager, 'orders_widget') and hasattr(self.layout_manager.orders_widget, "shutdown"):
+            self.layout_manager.orders_widget.shutdown()
+        if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
+            self.layout_manager.nurse_orders_manager.shutdown()
         self._close_archive_readonly_manager()
 
     def closeEvent(self, event):

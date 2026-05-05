@@ -4316,6 +4316,184 @@ def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) 
     return True, "ok"
 
 
+def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    cases = [
+        (
+            "doctor_card",
+            PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+            "DoctorRemCardWidget",
+            "_request_card_snapshot",
+            ("_apply_card_snapshot", "_on_card_snapshot_failed", "_on_card_snapshot_finished", "shutdown"),
+        ),
+        (
+            "nurse_card",
+            PROJECT_ROOT / "ui" / "nurse_view" / "nurse_main_widget.py",
+            "NurseMainWidget",
+            "_request_card_snapshot",
+            ("_apply_card_snapshot", "_on_card_snapshot_failed", "_on_card_snapshot_finished", "shutdown"),
+        ),
+        (
+            "doctor_orders",
+            PROJECT_ROOT / "ui" / "doctor_view" / "orders_widget.py",
+            "OrdersWidget",
+            "_request_snapshot",
+            ("_apply_snapshot", "_apply_snapshot_data", "_on_snapshot_failed", "_on_snapshot_finished", "shutdown"),
+        ),
+        (
+            "nurse_orders",
+            PROJECT_ROOT / "ui" / "nurse_view" / "components" / "nurse_orders_widget.py",
+            "NurseOrdersWidget",
+            "_request_snapshot",
+            ("_apply_snapshot", "_apply_snapshot_data", "_on_snapshot_failed", "_on_snapshot_finished", "shutdown"),
+        ),
+        (
+            "doctor_beds",
+            PROJECT_ROOT / "ui" / "doctor_view" / "components" / "beds_selection_widget.py",
+            "BedsSelectionWidget",
+            "refresh",
+            ("_apply_beds_snapshot", "_on_refresh_failed", "_on_refresh_finished", "shutdown"),
+        ),
+        (
+            "doctor_bars_auth",
+            PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+            "DoctorRemCardWidget",
+            "_check_bars_auth_async",
+            ("_on_bars_auth_check_succeeded", "_on_bars_auth_check_failed", "_on_bars_auth_check_finished", "shutdown"),
+        ),
+        (
+            "nurse_beds",
+            PROJECT_ROOT / "ui" / "nurse_view" / "components" / "nurse_beds_selection_widget.py",
+            "NurseBedsSelectionWidget",
+            "refresh",
+            ("_apply_beds_snapshot", "_on_refresh_failed", "_on_refresh_finished", "shutdown"),
+        ),
+    ]
+
+    def _async_call_uses_parent_self(method: ast.FunctionDef) -> bool:
+        for node in ast.walk(method):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            func_name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if func_name != "AsyncCallThread":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "parent" and isinstance(keyword.value, ast.Name) and keyword.value.id == "self":
+                    return True
+        return False
+
+    for role, path, class_name, request_method_name, guarded_method_names in cases:
+        source_text = path.read_text(encoding="utf-8")
+        tree = ast.parse(source_text)
+        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        if not class_defs:
+            return False, f"{role}: {class_name} class not found"
+        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+        request_method = methods.get(request_method_name)
+        if request_method is None:
+            return False, f"{role}: {request_method_name} not found"
+        request_source = ast.get_source_segment(source_text, request_method) or ""
+        if "AsyncCallThread" not in request_source:
+            return False, f"{role}: request method does not start AsyncCallThread"
+        if _async_call_uses_parent_self(request_method):
+            return False, f"{role}: snapshot worker still uses Qt parent=self"
+        if "_is_closing" not in request_source:
+            return False, f"{role}: request method must guard _is_closing"
+
+        for method_name in guarded_method_names:
+            method = methods.get(method_name)
+            if method is None:
+                return False, f"{role}: {method_name} not found"
+            method_source = ast.get_source_segment(source_text, method) or ""
+            if "_is_closing" not in method_source:
+                return False, f"{role}: {method_name} must guard _is_closing"
+
+        shutdown_source = ast.get_source_segment(source_text, methods["shutdown"]) or ""
+        helper_source = ""
+        helper = methods.get("_shutdown_snapshot_worker")
+        if helper is not None:
+            helper_source = ast.get_source_segment(source_text, helper) or ""
+        lifecycle_source = shutdown_source + "\n" + helper_source
+        if "disconnect" not in lifecycle_source or ".wait(" not in lifecycle_source:
+            return False, f"{role}: shutdown must disconnect and wait active snapshot workers"
+        if role.endswith("_card") and "clear_drafts()" in shutdown_source:
+            return False, f"{role}: shutdown must not enqueue clear_drafts during app close"
+
+    return True, "ok"
+
+
+def _check_patient_form_open_is_deferred_from_callback(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    path = PROJECT_ROOT / "ui" / "patient_bed_management" / "management_widget.py"
+    source_text = path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+    class_defs = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "PatientBedManagementWidget"
+    ]
+    if not class_defs:
+        return False, "PatientBedManagementWidget class not found"
+    methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+    open_method = methods.get("_open_patient_card_by_number")
+    safe_method = methods.get("_open_patient_form_safe")
+    if open_method is None or safe_method is None:
+        return False, "deferred patient form helpers not found"
+    open_source = ast.get_source_segment(source_text, open_method) or ""
+    safe_source = ast.get_source_segment(source_text, safe_method) or ""
+    if "QTimer.singleShot" not in open_source:
+        return False, "PatientForm opening must be deferred with QTimer.singleShot"
+    if "dialog.exec" in open_source:
+        return False, "PatientForm.dialog.exec must not run in the original callback"
+    if "dialog.exec" not in safe_source:
+        return False, "deferred helper must still open PatientForm"
+    for guard in ("_opening_patient_form", "_is_closing"):
+        if guard not in open_source + safe_source:
+            return False, f"PatientForm deferred open missing {guard} guard"
+    return True, "ok"
+
+
+def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    data_service_text = (PROJECT_ROOT / "services" / "data_service.py").read_text(encoding="utf-8")
+    for marker in (
+        "_shutting_down",
+        "set_shutting_down",
+        "Queued write rejected during shutdown",
+        "return False",
+    ):
+        if marker not in data_service_text:
+            return False, f"DataService missing shutdown guard marker: {marker}"
+
+    main_window_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    main_tree = ast.parse(main_window_text)
+    main_classes = [node for node in main_tree.body if isinstance(node, ast.ClassDef) and node.name == "MainWindow"]
+    if not main_classes:
+        return False, "MainWindow class not found"
+    main_methods = {node.name: node for node in main_classes[0].body if isinstance(node, ast.FunctionDef)}
+    close_method = main_methods.get("closeEvent")
+    if close_method is None:
+        return False, "MainWindow.closeEvent not found"
+    close_source = ast.get_source_segment(main_window_text, close_method) or ""
+    if "set_shutting_down" not in close_source:
+        return False, "MainWindow.closeEvent must mark DataService shutting down before UI shutdown"
+    if "queue_drained" not in close_source or "db_manager.close()" not in close_source:
+        return False, "MainWindow.closeEvent must gate DB close on queue drain"
+    if "clear_drafts()" in close_source:
+        return False, "MainWindow.closeEvent must not enqueue clear_drafts during shutdown"
+
+    sqlite_text = (PROJECT_ROOT / "app" / "sqlite_shared.py").read_text(encoding="utf-8")
+    for marker in ("DatabaseClosedError", "conn is None", "def shutdown(self, timeout: float = 1.0) -> bool"):
+        if marker not in sqlite_text:
+            return False, f"sqlite_shared missing controlled shutdown marker: {marker}"
+
+    db_text = (PROJECT_ROOT / "data" / "dao" / "db_manager.py").read_text(encoding="utf-8")
+    if "DatabaseClosedError" not in db_text or "self._closed or self._remcard_conn is None" not in db_text:
+        return False, "DatabaseManager must raise controlled DatabaseClosedError after close"
+    return True, "ok"
+
+
 def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
@@ -5737,6 +5915,9 @@ def main():
             "orders_widgets_defer_snapshot_reload_thread_creation",
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
+        ("targeted_async_workers_are_parentless_and_guarded", _check_targeted_async_workers_are_parentless_and_guarded),
+        ("patient_form_open_is_deferred_from_callback", _check_patient_form_open_is_deferred_from_callback),
+        ("shutdown_queue_db_ordering_guards", _check_shutdown_queue_db_ordering_guards),
         ("orders_fast_click_path_stays_local", _check_orders_fast_click_path_stays_local),
         ("performance_a_guards_present", _check_performance_a_guards_present),
         ("report_pdf_callbacks_are_qobject_slots", _check_report_pdf_callbacks_are_qobject_slots),
