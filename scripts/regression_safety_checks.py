@@ -165,6 +165,78 @@ print(paths.BAZA_DIR)
                 os.environ[key] = value
 
 
+def _write_fake_update_package(path: str, version: str = "9.9.9") -> None:
+    os.makedirs(os.path.join(path, "_internal"), exist_ok=True)
+    for exe_name in (
+        "RemCardDoctor.exe",
+        "RemCardNurse.exe",
+        "RemCardPathSetup.exe",
+        "RemCardUpdater.exe",
+    ):
+        Path(path, exe_name).write_text("stub", encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "app": "rem_card",
+        "version": version,
+        "prog_dir": ".",
+    }
+    Path(path, "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    Path(path, "ready.ok").write_text("ok\n", encoding="utf-8")
+
+
+def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.updater_main import _build_direct_update_args
+
+    saved_env = {
+        key: os.environ.get(key)
+        for key in ("REMCARD_BAZA_DIR", "REMCARD_UPDATE_TARGET_DIR")
+    }
+    try:
+        os.environ.pop("REMCARD_BAZA_DIR", None)
+        os.environ.pop("REMCARD_UPDATE_TARGET_DIR", None)
+
+        root = os.path.join(temp_root, "share")
+        baza_dir = os.path.join(root, "Baza_rao3_jurnal")
+        upd_dir = os.path.join(baza_dir, "UPD")
+        target_dir = os.path.join(root, "Prog")
+        os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
+        os.makedirs(target_dir, exist_ok=True)
+        Path(target_dir, "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        _write_fake_update_package(upd_dir, version="1.0.1")
+
+        args = _build_direct_update_args(upd_dir)
+        if args is None:
+            return False, "direct UPD package was not recognized"
+
+        expected = {
+            "source": os.path.abspath(upd_dir),
+            "target": os.path.abspath(target_dir),
+            "baza_dir": os.path.abspath(baza_dir),
+            "lock": os.path.abspath(os.path.join(baza_dir, "locks", "remcard_update.lock")),
+            "target_version": "1.0.1",
+            "current_version": "1.0.0",
+        }
+        actual = {
+            "source": os.path.abspath(args.source),
+            "target": os.path.abspath(args.target),
+            "baza_dir": os.path.abspath(args.baza_dir),
+            "lock": os.path.abspath(args.lock),
+            "target_version": args.target_version,
+            "current_version": args.current_version,
+        }
+        if actual != expected:
+            return False, f"direct updater args mismatch: {actual}"
+        if args.parent_pid != "0" or args.starting_lock != "":
+            return False, f"unexpected direct launcher synchronization args: {args}"
+        return True, "ok"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _check_lock_read_unavailable_not_stale(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.sqlite_shared import FileWriteLock, _LOCK_READ_UNAVAILABLE
 
@@ -5914,6 +5986,7 @@ def main():
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
         ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
+        ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
         ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),
         ("schema_migration_failure_rolls_back", _check_schema_migration_failure_rolls_back),

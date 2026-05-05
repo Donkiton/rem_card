@@ -39,6 +39,8 @@ SKIP_DIR_NAMES = {
 ALLOWED_F_BLOCKS = {
     ("services/bars_auth_service.py", "BarsAuthService.list_department_patients"),
     ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
+    ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"),
+    ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"),
 }
 
 

@@ -145,8 +145,11 @@ class OrderDomainService:
             return False
         if str(latest["big_chain_id"] or "") != str(committed["big_chain_id"] or ""):
             return False
-        if str(latest["comment"] or "") != str(committed["comment"] or ""):
-            return False
+        # comment/actual_time/performer_id belong to nurse execution marks, not
+        # to the doctor's draft cell shape. A nurse may update the committed
+        # baseline while a doctor has a delete draft, and restoring the cell
+        # must collapse back to that committed baseline instead of leaving a
+        # false dirty draft.
         try:
             return float(latest["volume_ml"] or 0.0) == float(committed["volume_ml"] or 0.0)
         except Exception:

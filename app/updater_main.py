@@ -110,6 +110,10 @@ MANAGED_ROOT_FILES = (
     "manifest.json",
 )
 MANAGED_ROOT_DIRS = ("_internal",)
+UPDATE_DIR_NAME = "UPD"
+DEFAULT_TARGET_DIR_NAME = "Prog"
+BAZA_DIR_NAME = "Baza_rao3_jurnal"
+DIRECT_TARGET_DIR_ENV = "REMCARD_UPDATE_TARGET_DIR"
 
 
 class UpdateAlreadyRunning(RuntimeError):
@@ -853,6 +857,177 @@ class UpdateWindow(QDialog):
         QTimer.singleShot(2500, self.accept)
 
 
+def _path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _same_path(left: str, right: str) -> bool:
+    return _path_key(left) == _path_key(right)
+
+
+def _current_executable_dir() -> str:
+    if getattr(sys, "frozen", False) or "__compiled__" in globals():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(sys.argv[0] or __file__))
+
+
+def _iter_parent_dirs(path: str, max_depth: int = 10):
+    current = os.path.abspath(path)
+    for _ in range(max_depth):
+        yield current
+        parent = os.path.dirname(current)
+        if _same_path(parent, current):
+            break
+        current = parent
+
+
+def _load_direct_release(executable_dir: str) -> Optional[tuple[str, str, dict[str, Any]]]:
+    exe_dir = os.path.abspath(executable_dir)
+    for release_dir in _iter_parent_dirs(exe_dir):
+        manifest_path = os.path.join(release_dir, MANIFEST_FILE_NAME)
+        if not os.path.isfile(manifest_path):
+            continue
+        manifest = _read_json(manifest_path)
+        if not manifest:
+            continue
+        if str(manifest.get("app") or "rem_card") != "rem_card":
+            continue
+        prog_dir_name = str(manifest.get("prog_dir") or ".").strip() or "."
+        source_dir = os.path.abspath(os.path.join(release_dir, prog_dir_name))
+        if not _same_path(source_dir, exe_dir):
+            continue
+        if not os.path.isfile(os.path.join(source_dir, READY_FILE_NAME)):
+            continue
+        if not all(os.path.isfile(os.path.join(source_dir, exe_name)) for exe_name in REQUIRED_EXES):
+            continue
+        return os.path.abspath(release_dir), source_dir, manifest
+    return None
+
+
+def _find_update_root(path: str) -> Optional[str]:
+    for directory in _iter_parent_dirs(path):
+        if os.path.basename(directory).lower() == UPDATE_DIR_NAME.lower():
+            return os.path.abspath(directory)
+    return None
+
+
+def _looks_like_baza_dir(path: str) -> bool:
+    if os.path.basename(os.path.abspath(path)) == BAZA_DIR_NAME:
+        return True
+    markers = ("locks", "session_locks", "database", "archiv")
+    return any(os.path.isdir(os.path.join(path, marker)) for marker in markers)
+
+
+def _resolve_direct_baza_dir(release_dir: str, source_dir: str) -> str:
+    env_baza = os.environ.get("REMCARD_BAZA_DIR")
+    if env_baza:
+        return os.path.abspath(os.path.normpath(env_baza.strip().strip('"')))
+
+    update_root = _find_update_root(source_dir) or _find_update_root(release_dir)
+    if update_root:
+        update_parent = os.path.dirname(update_root)
+        if _looks_like_baza_dir(update_parent):
+            return os.path.abspath(update_parent)
+
+        sibling_baza = os.path.join(update_parent, BAZA_DIR_NAME)
+        if os.path.isdir(sibling_baza):
+            return os.path.abspath(sibling_baza)
+
+    try:
+        from rem_card.app.runtime_paths import resolve_baza_dir
+
+        return os.path.abspath(resolve_baza_dir())
+    except Exception:
+        pass
+
+    raise RuntimeError(
+        "Не удалось определить папку базы для ручного запуска обновления. "
+        "Запустите апдейтер из папки UPD внутри базы или задайте REMCARD_BAZA_DIR."
+    )
+
+
+def _resolve_direct_target_dir(baza_dir: str, release_dir: str, source_dir: str) -> str:
+    env_target = os.environ.get(DIRECT_TARGET_DIR_ENV)
+    if env_target:
+        return os.path.abspath(os.path.normpath(env_target.strip().strip('"')))
+
+    update_root = _find_update_root(source_dir) or _find_update_root(release_dir)
+    if update_root:
+        update_parent = os.path.dirname(update_root)
+        if _same_path(update_parent, baza_dir):
+            return os.path.abspath(os.path.join(os.path.dirname(baza_dir), DEFAULT_TARGET_DIR_NAME))
+        return os.path.abspath(os.path.join(update_parent, DEFAULT_TARGET_DIR_NAME))
+
+    return os.path.abspath(os.path.join(os.path.dirname(baza_dir), DEFAULT_TARGET_DIR_NAME))
+
+
+def _read_version_from_dir(directory: str) -> str:
+    try:
+        with open(os.path.join(directory, "VERSION"), "r", encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except Exception:
+        return ""
+
+
+def _build_direct_update_args(executable_dir: Optional[str] = None) -> Optional[argparse.Namespace]:
+    exe_dir = os.path.abspath(executable_dir or _current_executable_dir())
+    direct_release = _load_direct_release(exe_dir)
+    if not direct_release:
+        return None
+
+    release_dir, source_dir, manifest = direct_release
+    baza_dir = _resolve_direct_baza_dir(release_dir, source_dir)
+    target_dir = _resolve_direct_target_dir(baza_dir, release_dir, source_dir)
+    if _same_path(source_dir, target_dir):
+        raise RuntimeError("Источник обновления совпадает с рабочей папкой программы.")
+
+    target_version = str(manifest.get("version") or "").strip()
+    return argparse.Namespace(
+        source=source_dir,
+        target=target_dir,
+        baza_dir=baza_dir,
+        lock=os.path.join(baza_dir, "locks", "remcard_update.lock"),
+        starting_lock="",
+        parent_pid="0",
+        current_version=_read_version_from_dir(target_dir),
+        target_version=target_version,
+        restart_exe="",
+        launcher_host=socket.gethostname(),
+    )
+
+
+def _launch_update_from_installed_updater() -> tuple[bool, str]:
+    try:
+        from rem_card.app.update_checker import find_best_update
+        from rem_card.app.update_launcher import describe_update_lock, is_update_in_progress, launch_update
+        from rem_card.app.version import APP_VERSION
+
+        if is_update_in_progress():
+            return False, describe_update_lock()
+
+        current_version = _read_version_from_dir(_current_executable_dir()) or APP_VERSION
+        candidate = find_best_update(current_version=current_version)
+        if not candidate:
+            return False, "Готовый пакет обновления не найден или его версия не выше установленной."
+
+        if launch_update(candidate, restart_exe=None, wait_for_parent=True):
+            return True, ""
+        return False, "Не удалось запустить RemCardUpdater.exe из найденного пакета обновления."
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _show_direct_launch_error(message: str) -> int:
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
+    _show_custom_notice(
+        None,
+        "Обновление РЕМКАРТА",
+        message or "Не удалось запустить обновление.",
+    )
+    return 1
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RemCard updater")
     parser.add_argument("--source", required=True)
@@ -869,7 +1044,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = _parse_args(list(sys.argv[1:] if argv is None else argv))
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args:
+        args = _parse_args(raw_args)
+    else:
+        try:
+            args = _build_direct_update_args()
+        except Exception as exc:
+            return _show_direct_launch_error(str(exc))
+        if args is None:
+            launched, message = _launch_update_from_installed_updater()
+            if launched:
+                return 0
+            return _show_direct_launch_error(message)
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
     window = UpdateWindow(args)
