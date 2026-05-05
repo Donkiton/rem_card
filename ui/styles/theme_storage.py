@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 import json
 import os
 import time
 from typing import Any
-
-from pathlib import Path
 
 from rem_card.app.runtime_paths import get_executable_dir
 from rem_card.ui.styles.theme_presets import get_preset
@@ -24,18 +23,27 @@ STYLE_SETTINGS_ENV = "REMCARD_STYLE_SETTINGS_PATH"
 STYLE_SETTINGS_RELATIVE_PATH = os.path.join("settings", "color_scheme", "style_settings.json")
 
 
+def _resolve_dev_settings_base_dir(start_path: Path | None = None) -> str:
+    current = (start_path or Path(__file__)).resolve()
+    for candidate in current.parents:
+        if (candidate / "ui" / "styles").is_dir() and (candidate / "app").is_dir():
+            return str(candidate)
+    try:
+        return str(current.parents[2])
+    except IndexError:
+        return os.getcwd()
+
+
 def get_style_settings_path() -> str:
     override = os.environ.get(STYLE_SETTINGS_ENV)
     if override:
         return os.path.abspath(os.path.normpath(override))
-    base_dir = str(Path(__file__).resolve().parents[2])
     try:
         from rem_card.app.runtime_paths import is_compiled
 
-        if is_compiled():
-            base_dir = get_executable_dir()
+        base_dir = get_executable_dir() if is_compiled() else _resolve_dev_settings_base_dir()
     except Exception:
-        base_dir = get_executable_dir()
+        base_dir = _resolve_dev_settings_base_dir()
     return os.path.join(base_dir, STYLE_SETTINGS_RELATIVE_PATH)
 
 
