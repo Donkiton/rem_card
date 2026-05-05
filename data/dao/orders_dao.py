@@ -286,13 +286,12 @@ class OrdersDAO:
 
     def get_all_dates(self, admission_id: int) -> List[datetime]:
         """Возвращает все уникальные даты для назначений пациента."""
-        query = "SELECT DISTINCT date(datetime) as d FROM orders WHERE admission_id = ? AND COALESCE(status, '') != 'deleted' ORDER BY d ASC"
+        query = "SELECT DISTINCT datetime as dt FROM orders WHERE admission_id = ? AND COALESCE(status, '') != 'deleted' ORDER BY datetime ASC"
         rows = self.db.fetch_all_remcard(query, (admission_id,))
         dates = []
         for r in rows:
-            if r['d']:
-                dt = datetime.strptime(r['d'], '%Y-%m-%d').replace(hour=12, minute=0)
-                dates.append(dt)
+            if r['dt']:
+                dates.append(datetime.fromisoformat(str(r['dt']).replace(" ", "T")))
         return dates
 
     def soft_delete_order(self, order_id: int):

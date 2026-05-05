@@ -16,6 +16,7 @@ from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.services.report_balance import build_print_balance_final
 from rem_card.services.report_vitals_slotting import select_latest_vitals_by_report_hour
+from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
 
@@ -66,7 +67,7 @@ class FullReportWorker(QThread):
                     "admission_id": self.admission_id,
                     "patient_name": f"{patient.last_name or ''} {patient.first_name or ''} {patient.middle_name or ''}".strip() if patient else "Неизвестный",
                     "diagnosis": getattr(patient, 'diagnosis_text', None) or "—" if patient else "—",
-                    "icu_day": str((start_dt.date() - patient.admission_datetime.date()).days + 1) if patient and patient.admission_datetime else "?",
+                    "icu_day": str(ShiftService.calculate_icu_day(patient.admission_datetime, start_dt)) if patient and patient.admission_datetime else "?",
                     "start_dt": start_dt, "end_dt": end_dt, "vitals": [], "prescriptions": [], "events": [], "fluids_raw": []
                 }
                 if self.config.get("vitals", True): day_data["vitals"] = self.remcard_service.get_vitals(self.admission_id, dt)
@@ -215,7 +216,7 @@ class DataCollectorWorker(QThread):
                 "admission_id": self.admission_id,
                 "patient_name": f"{patient.last_name or ''} {patient.first_name or ''} {patient.middle_name or ''}".strip() if patient else "Неизвестный",
                 "diagnosis": getattr(patient, 'diagnosis_text', None) or "—" if patient else "—",
-                "icu_day": str((start_dt.date() - patient.admission_datetime.date()).days + 1) if patient and patient.admission_datetime else "?",
+                "icu_day": str(ShiftService.calculate_icu_day(patient.admission_datetime, start_dt)) if patient and patient.admission_datetime else "?",
                 "start_dt": start_dt, "end_dt": end_dt, "vitals": [], "prescriptions": [], "events": [], "fluids_raw": []
             }
             if self.config.get("vitals", True): data["vitals"] = self.remcard_service.get_vitals(self.admission_id, self.date)

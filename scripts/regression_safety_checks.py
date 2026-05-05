@@ -2738,6 +2738,133 @@ def _check_print_hourly_input_planned_time(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_report_night_admission_shift_dates(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.services.remcard_service import RemCardService
+    from rem_card.services.shift_service import ShiftService
+    from rem_card.ui.rem_card_sectors.sector_print import DataCollectorWorker
+
+    db_path = os.path.join(temp_root, "report_night_admission.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        admission_dt = datetime(2026, 5, 6, 3, 0, 0)
+        vital_dt = datetime(2026, 5, 6, 3, 30, 0)
+        expected_shift_start = datetime(2026, 5, 5, 8, 0, 0)
+        wrong_shift_anchor = datetime(2026, 5, 6, 12, 0, 0)
+
+        with manager.remcard_transaction(source="regression_seed_report_night_admission") as cursor:
+            cursor.execute(
+                "INSERT INTO patients(full_name, last_name, first_name) VALUES (?, ?, ?)",
+                ("Ночной Пациент", "Ночной", "Пациент"),
+            )
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime, diagnosis_text)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-NIGHT", admission_dt.isoformat(), "Тест"),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO vitals(admission_id, datetime, pulse, last_modified_by, updated_at)
+                VALUES (?, ?, 88, 'doctor', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                """,
+                (admission_id, vital_dt.isoformat()),
+            )
+            cursor.execute(
+                """
+                INSERT INTO fluids(admission_id, datetime, urine, last_modified_by, updated_at)
+                VALUES (?, ?, 150, 'nurse', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                """,
+                (admission_id, datetime(2026, 5, 6, 4, 0, 0).isoformat()),
+            )
+            cursor.execute(
+                """
+                INSERT INTO orders(
+                    admission_id, datetime, text, drug_key, latin, type, status,
+                    dose_value, dose_unit, is_per_kg, frequency, specific_times,
+                    is_committed, created_at, comment
+                )
+                VALUES (?, ?, 'Test order', 'test', 'Test', 'medication', 'active', 1, 'mg', 0, 1, '[]', 1, ?, '')
+                """,
+                (
+                    admission_id,
+                    datetime(2026, 5, 6, 4, 15, 0).isoformat(),
+                    datetime(2026, 5, 6, 4, 15, 0).isoformat(),
+                ),
+            )
+
+        service = RemCardService(
+            VitalsDAO(manager),
+            FluidsDAO(manager),
+            OrdersDAO(manager),
+            VentilationDAO(manager),
+            PatientDAO(manager),
+        )
+
+        dates = service.get_all_card_dates(admission_id)
+        if dates != [expected_shift_start]:
+            return False, f"night vital was grouped into wrong card dates: {dates}"
+
+        icu_day = ShiftService.calculate_icu_day(admission_dt, expected_shift_start)
+        if icu_day != 1:
+            return False, f"night admission ICU day should be 1, got {icu_day}"
+
+        if not service.get_vitals(admission_id, expected_shift_start):
+            return False, "night vital is missing from its real 08:00-08:00 shift"
+        if service.get_vitals(admission_id, wrong_shift_anchor):
+            return False, "night vital leaked into the next astronomical-day shift"
+        if not service.get_fluids(admission_id, expected_shift_start):
+            return False, "night fluid row is missing from its real 08:00-08:00 shift"
+        if service.get_fluids(admission_id, wrong_shift_anchor):
+            return False, "night fluid row leaked into the next astronomical-day shift"
+        if not service.get_orders(admission_id, expected_shift_start, only_committed=True):
+            return False, "night order is missing from its real 08:00-08:00 shift"
+        if service.get_orders(admission_id, wrong_shift_anchor, only_committed=True):
+            return False, "night order leaked into the next astronomical-day shift"
+
+        collected: list[dict] = []
+        errors: list[str] = []
+        worker = DataCollectorWorker(
+            service,
+            admission_id,
+            expected_shift_start,
+            {
+                "vitals": True,
+                "balance": False,
+                "prescriptions": False,
+                "events": False,
+                "ventilation": False,
+                "death_outcome": False,
+            },
+        )
+        worker.finished.connect(collected.append)
+        worker.error.connect(errors.append)
+        worker.run()
+
+        if errors:
+            return False, f"print data collection failed: {errors[-1]}"
+        if not collected:
+            return False, "print data collection did not emit data"
+
+        data = collected[0]
+        if data.get("icu_day") != "1":
+            return False, f"print ICU day should be 1, got {data.get('icu_day')}"
+        if data.get("start_dt") != expected_shift_start:
+            return False, f"print shift start mismatch: {data.get('start_dt')}"
+        if data.get("vitals_matrix", {}).get(19, {}).get("hr") != 88:
+            return False, f"night vital is missing from print matrix: {data.get('vitals_matrix')}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_sector_print_transform_snapshot(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
     from types import SimpleNamespace
@@ -6017,6 +6144,7 @@ def main():
         ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
+        ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),

@@ -219,13 +219,12 @@ class VitalsDAO:
         )
 
     def get_all_vital_dates(self, admission_id: int) -> List[datetime]:
-        query = "SELECT DISTINCT date(datetime) as d FROM vitals WHERE admission_id = ? ORDER BY d ASC"
+        query = "SELECT DISTINCT datetime as dt FROM vitals WHERE admission_id = ? ORDER BY datetime ASC"
         rows = self.db.fetch_all_remcard(query, (admission_id,))
         dates = []
         for r in rows:
-            if r["d"]:
-                dt = datetime.strptime(r["d"], "%Y-%m-%d").replace(hour=12, minute=0)
-                dates.append(dt)
+            if r["dt"]:
+                dates.append(datetime.fromisoformat(str(r["dt"]).replace(" ", "T")))
         return dates
 
     def clear_vitals(self, admission_id: int, start: datetime, end: datetime):

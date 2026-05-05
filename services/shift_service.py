@@ -122,6 +122,16 @@ class ShiftService:
         return start, end
 
     @staticmethod
+    def calculate_icu_day(admission_datetime: Optional[datetime], card_date: datetime) -> Optional[int]:
+        """Считает реанимационные сутки по сменам 08:00-08:00."""
+        if not admission_datetime or not card_date:
+            return None
+        admission_start, _ = ShiftService.get_day_period(admission_datetime)
+        card_start, _ = ShiftService.get_day_period(card_date)
+        days = (card_start.date() - admission_start.date()).days + 1
+        return max(1, days)
+
+    @staticmethod
     def get_all_card_dates(raw_dates: List[datetime]) -> List[datetime]:
         """Преобразует список дат в уникальные даты начала смен."""
         card_dates = set()

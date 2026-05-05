@@ -16,6 +16,7 @@ from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.services.report_balance import build_print_balance_final
 from rem_card.services.report_vitals_slotting import select_latest_vitals_by_report_hour
+from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
 
@@ -82,8 +83,8 @@ class FullReportWorker(QThread):
                     diagnosis = getattr(patient, 'diagnosis_text', None) or "—"
                     icu_day = "Неизвестно"
                     if patient.admission_datetime:
-                        delta = start_dt.date() - patient.admission_datetime.date()
-                        icu_day = str(delta.days + 1)
+                        icu_day_value = ShiftService.calculate_icu_day(patient.admission_datetime, start_dt)
+                        icu_day = str(icu_day_value) if icu_day_value is not None else "Неизвестно"
                 else:
                     patient_name = "Неизвестный пациент"
                     diagnosis = "—"
@@ -474,7 +475,7 @@ class DataCollectorWorker(QThread):
                 "admission_id": self.admission_id,
                 "patient_name": f"{patient.last_name or ''} {patient.first_name or ''} {patient.middle_name or ''}".strip() if patient else "Неизвестный",
                 "diagnosis": getattr(patient, 'diagnosis_text', None) or "—" if patient else "—",
-                "icu_day": str((start_dt.date() - patient.admission_datetime.date()).days + 1) if patient and patient.admission_datetime else "?",
+                "icu_day": str(ShiftService.calculate_icu_day(patient.admission_datetime, start_dt)) if patient and patient.admission_datetime else "?",
                 "start_dt": start_dt, "end_dt": end_dt, "vitals": [], "prescriptions": [], "events": [], "fluids_raw": [],
                 "ventilation_events": []
             }
