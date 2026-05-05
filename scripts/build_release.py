@@ -28,6 +28,15 @@ CHANGELOG_SUBJECT_TRANSLATIONS = {
     "Validate and invalidate vitals snapshot cache": (
         "Кеш графика витальных функций теперь проверяется на актуальность и сбрасывается при изменениях"
     ),
+    "fix: stabilize Qt worker shutdown": (
+        "Стабилизировано завершение фоновых Qt-воркеров при закрытии приложения"
+    ),
+    "fix: preserve patient card cache fast path": (
+        "Сохранено быстрое повторное открытие карты пациента через кеш"
+    ),
+    "fix: stabilize end-of-day infusion clicks": (
+        "Стабилизированы клики по длительной инфузии до конца суток"
+    ),
 }
 
 
