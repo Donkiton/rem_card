@@ -1,6 +1,8 @@
 from datetime import datetime
+import os
+import weakref
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog,
@@ -13,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rem_card.app.logger import logger
 from rem_card.services.mkb import MKBService
 from rem_card.services.patient_bed_management import AdmissionRecord, PatientBedManagementService, PatientRecord
 from rem_card.ui.patient_bed_management.tabs.diagnosis_tab import DiagnosisTabWidget
@@ -33,6 +36,38 @@ from rem_card.ui.styles.theme import (
 )
 
 
+try:
+    import shiboken6  # type: ignore
+except Exception:  # pragma: no cover - optional runtime guard
+    shiboken6 = None
+
+
+def _qt_is_valid(obj) -> bool:
+    if obj is None:
+        return False
+    if shiboken6 is None:
+        return True
+    try:
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return False
+
+
+def _current_role() -> str:
+    return str(os.environ.get("REMCARD_UI_ROLE") or "unknown")
+
+
+def _invoke_form_later(form_ref, method_name: str, *args):
+    form = form_ref()
+    if not _qt_is_valid(form):
+        return
+    if getattr(form, "_closing", False):
+        return
+    method = getattr(form, method_name, None)
+    if method is not None:
+        method(*args)
+
+
 class PatientForm(SavedFramelessDialogMixin, QDialog):
     def __init__(
         self,
@@ -50,6 +85,9 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self.admission = admission
         self.is_new_admission = patient is None and admission is None
         self._write_pending = False
+        self._closing = False
+        self._mkb_closed = False
+        self._write_description = ""
 
         self.setWindowTitle(f"Карта пациента - Койка {self.bed_number}")
         self.setMinimumSize(800, 600)
@@ -100,6 +138,7 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         header_layout.addStretch()
 
         close_button = QPushButton("x")
+        self.close_button = close_button
         close_button.setFixedSize(30, 30)
         close_button.setCursor(Qt.PointingHandCursor)
         close_button.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
@@ -224,42 +263,178 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                     )
 
             self._begin_write_pending()
+            self._write_description = description
+            logger.info(
+                "patient_form_write_start role=%s bed=%s admission_id=%s op=%s",
+                _current_role(),
+                self.bed_number,
+                getattr(self.admission, "id", None),
+                description,
+            )
             self.patient_bed_service.enqueue_write(
                 description,
                 operation,
-                on_success=lambda _result: self._on_write_success(),
-                on_error=self._on_write_error,
+                on_success=self._make_write_success_callback(description),
+                on_error=self._make_write_error_callback(description),
             )
         except Exception as exc:
             self._finish_write_pending()
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
 
+    def _make_write_success_callback(self, description: str):
+        form_ref = weakref.ref(self)
+
+        def _callback(_result):
+            form = form_ref()
+            if not _qt_is_valid(form) or getattr(form, "_closing", False):
+                logger.info(
+                    "patient_form_write_success_skip role=%s op=%s reason=invalid_or_closing",
+                    _current_role(),
+                    description,
+                )
+                return
+            logger.info(
+                "patient_form_write_success_callback role=%s bed=%s admission_id=%s op=%s",
+                _current_role(),
+                form.bed_number,
+                getattr(form.admission, "id", None),
+                description,
+            )
+            QTimer.singleShot(0, lambda ref=form_ref: _invoke_form_later(ref, "_on_write_success", description))
+
+        return _callback
+
+    def _make_write_error_callback(self, description: str):
+        form_ref = weakref.ref(self)
+
+        def _callback(exc):
+            form = form_ref()
+            if not _qt_is_valid(form) or getattr(form, "_closing", False):
+                logger.warning(
+                    "patient_form_write_error_skip role=%s op=%s error=%s",
+                    _current_role(),
+                    description,
+                    exc,
+                )
+                return
+            QTimer.singleShot(
+                0,
+                lambda ref=form_ref, err=exc: _invoke_form_later(ref, "_on_write_error", err, description),
+            )
+
+        return _callback
+
     def _begin_write_pending(self):
         self._write_pending = True
-        self.form_page.setEnabled(False)
-        self.cancel_button.setEnabled(False)
-        self.save_button.setEnabled(False)
-        self.save_button.setText("СОХРАНЕНИЕ...")
+        self._set_write_controls_enabled(False)
+        if _qt_is_valid(self.save_button):
+            self.save_button.setText("СОХРАНЕНИЕ...")
 
     def _finish_write_pending(self):
         self._write_pending = False
-        self.form_page.setEnabled(True)
-        self.cancel_button.setEnabled(True)
-        self.save_button.setEnabled(True)
-        self.save_button.setText("СОХРАНИТЬ КАРТОЧКУ")
+        self._set_write_controls_enabled(True)
+        if _qt_is_valid(self.save_button):
+            self.save_button.setText("СОХРАНИТЬ КАРТОЧКУ")
 
-    def _on_write_success(self):
+    def _set_write_controls_enabled(self, enabled: bool):
+        for widget in (
+            getattr(self, "form_page", None),
+            getattr(self, "cancel_button", None),
+            getattr(self, "save_button", None),
+            getattr(self, "close_button", None),
+        ):
+            if _qt_is_valid(widget):
+                widget.setEnabled(enabled)
+
+    def _on_write_success(self, description: str = ""):
+        if self._closing or not _qt_is_valid(self):
+            return
+        logger.info(
+            "patient_form_write_success role=%s bed=%s admission_id=%s op=%s",
+            _current_role(),
+            self.bed_number,
+            getattr(self.admission, "id", None),
+            description or self._write_description,
+        )
         self._finish_write_pending()
         self.accept()
 
-    def _on_write_error(self, exc):
+    def _on_write_error(self, exc, description: str = ""):
+        if self._closing or not _qt_is_valid(self):
+            return
+        logger.warning(
+            "patient_form_write_error role=%s bed=%s admission_id=%s op=%s error=%s",
+            _current_role(),
+            self.bed_number,
+            getattr(self.admission, "id", None),
+            description or self._write_description,
+            exc,
+        )
         self._finish_write_pending()
         CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
 
+    def _close_mkb_service_once(self):
+        if self._mkb_closed:
+            return
+        self._mkb_closed = True
+        try:
+            self.mkb_service.close_connection()
+        except Exception as exc:
+            logger.warning(
+                "patient_form_mkb_close_failed role=%s bed=%s admission_id=%s error=%s",
+                _current_role(),
+                self.bed_number,
+                getattr(self.admission, "id", None),
+                exc,
+            )
+
     def reject(self):
-        self.mkb_service.close_connection()
+        if self._write_pending and not self._closing:
+            logger.info(
+                "patient_form_reject_ignored_pending_write role=%s bed=%s admission_id=%s",
+                _current_role(),
+                self.bed_number,
+                getattr(self.admission, "id", None),
+            )
+            return
+        if self._closing:
+            return
+        self._closing = True
+        logger.info(
+            "patient_form_reject role=%s bed=%s admission_id=%s",
+            _current_role(),
+            self.bed_number,
+            getattr(self.admission, "id", None),
+        )
+        self._close_mkb_service_once()
+        super().reject()
+
+    def force_close_for_shutdown(self):
+        if self._closing:
+            return
+        self._closing = True
+        logger.info(
+            "patient_form_force_close role=%s bed=%s admission_id=%s",
+            _current_role(),
+            self.bed_number,
+            getattr(self.admission, "id", None),
+        )
+        self._close_mkb_service_once()
         super().reject()
 
     def accept(self):
-        self.mkb_service.close_connection()
+        if self._closing:
+            return
+        self._closing = True
+        logger.info(
+            "patient_form_accept role=%s bed=%s admission_id=%s",
+            _current_role(),
+            self.bed_number,
+            getattr(self.admission, "id", None),
+        )
+        self._close_mkb_service_once()
         super().accept()
+
+    def closeEvent(self, event):
+        self._close_mkb_service_once()
+        super().closeEvent(event)

@@ -1,6 +1,6 @@
 from typing import Any, Callable, Optional
 
-from PySide6.QtCore import QObject, Signal, Qt, Slot
+from PySide6.QtCore import QObject, QTimer, Signal, Qt, Slot
 
 from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import LocalWriteQueue
@@ -113,6 +113,11 @@ class DataService(QObject):
     def _dispatch_success_callback(self, callback: Optional[Callable[[Any], None]], result: Any):
         if self._shutting_down or not callback:
             return
+        QTimer.singleShot(0, lambda cb=callback, res=result: self._run_success_callback(cb, res))
+
+    def _run_success_callback(self, callback: Callable[[Any], None], result: Any):
+        if self._shutting_down or not callback:
+            return
         try:
             callback(result)
         except Exception as exc:
@@ -120,6 +125,11 @@ class DataService(QObject):
 
     @Slot(object, object)
     def _dispatch_error_callback(self, callback: Optional[Callable[[Exception], None]], exc: Exception):
+        if self._shutting_down or not callback:
+            return
+        QTimer.singleShot(0, lambda cb=callback, err=exc: self._run_error_callback(cb, err))
+
+    def _run_error_callback(self, callback: Callable[[Exception], None], exc: Exception):
         if self._shutting_down or not callback:
             return
         try:

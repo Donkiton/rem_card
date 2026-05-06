@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rem_card.app.logger import logger
 from rem_card.services.patient_bed_management import PatientBedManagementService
 from rem_card.ui.patient_bed_management.bed_widget import BedWidget
 from rem_card.ui.patient_bed_management.patient_form import PatientForm
@@ -26,11 +27,32 @@ from rem_card.ui.styles.theme import (
 )
 
 
+try:
+    import shiboken6  # type: ignore
+except Exception:  # pragma: no cover - optional runtime guard
+    shiboken6 = None
+
+
 NUM_BEDS = int(os.environ.get("REMCARD_NUM_BEDS", "12"))
 BED_GRID_COLUMNS = 3
 BED_CARD_HEIGHT = 190
 BED_GRID_SPACING = 15
 HEADER_HEIGHT = 80
+
+
+def _qt_is_valid(obj) -> bool:
+    if obj is None:
+        return False
+    if shiboken6 is None:
+        return True
+    try:
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return False
+
+
+def _current_role() -> str:
+    return str(os.environ.get("REMCARD_UI_ROLE") or "unknown")
 
 
 class PatientBedManagementWidget(QWidget):
@@ -41,6 +63,8 @@ class PatientBedManagementWidget(QWidget):
         self._move_pending = False
         self._is_closing = False
         self._opening_patient_form = False
+        self._active_patient_form = None
+        self._active_patient_form_context = None
 
         self.bed_widgets = []
         self._init_ui()
@@ -138,7 +162,7 @@ class PatientBedManagementWidget(QWidget):
         self.side_card.update_info(bed_number, patient, admission)
 
     def _open_patient_card_by_number(self, bed_number: int):
-        if self._is_closing or self._opening_patient_form:
+        if self._is_closing or self._opening_patient_form or _qt_is_valid(self._active_patient_form):
             return
         self._opening_patient_form = True
         QTimer.singleShot(0, lambda bed=int(bed_number): self._open_patient_form_safe(bed))
@@ -151,17 +175,76 @@ class PatientBedManagementWidget(QWidget):
         admission_id = getattr(admission, "id", None)
         try:
             dialog = PatientForm(self.patient_bed_service, bed_number, patient, admission, self)
-            if dialog.exec():
-                if self._is_closing:
-                    return
-                new_patient, new_admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
-                new_admission_id = getattr(new_admission, "id", None)
-                if admission_id is not None and new_admission_id is not None and admission_id != new_admission_id:
-                    return
-                self.refresh_bed_statuses()
-                self.side_card.update_info(bed_number, new_patient, new_admission)
+            self._active_patient_form = dialog
+            self._active_patient_form_context = {
+                "bed_number": int(bed_number),
+                "admission_id": admission_id,
+            }
+            logger.info(
+                "patient_form_open role=%s bed=%s admission_id=%s",
+                _current_role(),
+                int(bed_number),
+                admission_id,
+            )
+            dialog.finished.connect(
+                lambda result, bed=int(bed_number), expected_id=admission_id: self._on_patient_form_finished(
+                    result,
+                    bed,
+                    expected_id,
+                )
+            )
+            dialog.open()
+        except Exception:
+            self._active_patient_form = None
+            self._active_patient_form_context = None
+            raise
         finally:
             self._opening_patient_form = False
+
+    def _on_patient_form_finished(self, result: int, bed_number: int, expected_admission_id):
+        if not _qt_is_valid(self):
+            return
+        logger.info(
+            "patient_form_finished role=%s bed=%s admission_id=%s result=%s",
+            _current_role(),
+            int(bed_number),
+            expected_admission_id,
+            int(result),
+        )
+        self._active_patient_form = None
+        self._active_patient_form_context = None
+        self._opening_patient_form = False
+        if self._is_closing or int(result) != int(PatientForm.Accepted):
+            return
+        QTimer.singleShot(
+            0,
+            lambda bed=int(bed_number), expected_id=expected_admission_id: self._refresh_after_patient_form(
+                bed,
+                expected_id,
+            ),
+        )
+
+    def _refresh_after_patient_form(self, bed_number: int, expected_admission_id):
+        if self._is_closing or not _qt_is_valid(self):
+            return
+        logger.info(
+            "patient_form_refresh_start role=%s bed=%s admission_id=%s",
+            _current_role(),
+            int(bed_number),
+            expected_admission_id,
+        )
+        new_patient, new_admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
+        new_admission_id = getattr(new_admission, "id", None)
+        self.refresh_bed_statuses()
+        if expected_admission_id is None or new_admission_id is None or int(expected_admission_id) == int(new_admission_id):
+            self.side_card.update_info(bed_number, new_patient, new_admission)
+        logger.info(
+            "patient_form_refresh_end role=%s bed=%s admission_id=%s current_admission_id=%s",
+            _current_role(),
+            int(bed_number),
+            expected_admission_id,
+            new_admission_id,
+        )
 
     def move_patient(self, source_bed: int, target_bed: int):
         if self._is_closing or self._move_pending:
@@ -248,6 +331,7 @@ class PatientBedManagementWidget(QWidget):
     def refresh_bed_statuses(self):
         if self._is_closing:
             return
+        logger.info("patient_beds_refresh_start role=%s", _current_role())
         rows = self.patient_bed_service.get_beds_snapshot()
         by_bed = {int(row["bed_number"]): row for row in rows}
 
@@ -269,10 +353,22 @@ class PatientBedManagementWidget(QWidget):
         if self.bed_widgets:
             selected = self.bed_widgets[0]
             self._on_bed_clicked(selected.bed_number, selected.current_admission_id)
+        logger.info("patient_beds_refresh_end role=%s rows=%s", _current_role(), len(rows))
 
     def shutdown(self):
         self._is_closing = True
         self._opening_patient_form = False
+        dialog = self._active_patient_form
+        self._active_patient_form = None
+        self._active_patient_form_context = None
+        if _qt_is_valid(dialog):
+            try:
+                if hasattr(dialog, "force_close_for_shutdown"):
+                    dialog.force_close_for_shutdown()
+                else:
+                    dialog.reject()
+            except Exception as exc:
+                logger.warning("patient_form_shutdown_reject_failed role=%s error=%s", _current_role(), exc)
 
     def closeEvent(self, event):
         self.shutdown()
