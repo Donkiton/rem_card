@@ -2743,6 +2743,30 @@
       "concentration_mg_ml": 50.0,
       "default_dilution": null,
       "group": "Gemostasis"
+    },
+    "amiodaron": {
+      "latin": "Amiodaroni",
+      "aliases": [
+        "амиодарон",
+        "кордарон"
+      ],
+      "star_alias": "амио*",
+      "admin_type": "infusion",
+      "uses_line": false,
+      "duration_min": 60,
+      "default_dose": 300.0,
+      "forms": [
+        3.0
+      ],
+      "unit": "mg",
+      "form_unit": "ml",
+      "form_key": "solution_iv",
+      "concentration_mg_ml": 50.0,
+      "default_dilution": {
+        "base": "glucose_10",
+        "volume": 250
+      },
+      "group": "antiarrhythmics"
     }
   },
   "admin_types": {
