@@ -410,6 +410,87 @@
           "freq": 1
         }
       ]
+    },
+    "pneumonia": {
+      "name": "Пневмония",
+      "template_type": "simple",
+      "drugs": [
+        {
+          "drug": "ceftriaxone",
+          "form_key": "lyophilisate",
+          "dose": 1.0,
+          "unit": "g",
+          "admin_type": "infusion",
+          "duration_min": 30,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 200
+          }
+        },
+        {
+          "drug": "omeprazole",
+          "form_key": "lyophilisate",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "polarka",
+          "is_multicomp": true,
+          "raw_text": "S. KCl 4% - 20 ml + S. MgSO4 25% - 10 ml + S. Insulini - 4 IU [DIL:S. Glucose 5% - 250 мл] [KEY:polarka] [ROUTE:В/в капельно] [DUR:120]",
+          "admin_type": "infusion",
+          "duration_min": 120,
+          "dose": 0,
+          "unit": ""
+        },
+        {
+          "drug": "fizrastvor",
+          "form_key": "solution_iv",
+          "dose": 200.0,
+          "unit": "ml",
+          "admin_type": "infusion",
+          "duration_min": 30,
+          "freq": 1
+        },
+        {
+          "drug": "furosemide",
+          "form_key": "solution_iv",
+          "dose": 20.0,
+          "unit": "mg",
+          "admin_type": "bolus",
+          "duration_min": 0,
+          "freq": 1,
+          "diluent": {
+            "base": "nacl_09",
+            "volume": 10
+          }
+        },
+        {
+          "drug": "ambroxol",
+          "form_key": "tablet",
+          "dose": 30.0,
+          "unit": "mg",
+          "admin_type": "per_os",
+          "duration_min": 0,
+          "freq": 1
+        },
+        {
+          "drug": "apixaban",
+          "form_key": "tablet",
+          "dose": 2.5,
+          "unit": "mg",
+          "admin_type": "per_os",
+          "duration_min": 0,
+          "freq": 1
+        }
+      ]
     }
   },
   "diluents": {
@@ -2722,6 +2803,7 @@
   },
   "template_order": [
     "posleoper",
+    "pneumonia",
     "stroke_ischemic",
     "ketoacidoz",
     "K92.2",
