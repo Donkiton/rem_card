@@ -105,7 +105,6 @@ class DoctorRemCardWidget(QWidget):
         self._add_patient_lock_held = False
         self._add_patient_locked_by_other = False
         self._bars_auth_service = None
-        self._bars_auth_check_worker = None
         
         logger.debug(f"DoctorRemCardWidget init patient_service={self.patient_service}")
         
@@ -484,27 +483,6 @@ class DoctorRemCardWidget(QWidget):
             return
         self._disconnect_snapshot_worker(worker)
         if worker.isRunning():
-            worker.quit()
-            worker.wait(timeout_ms)
-
-    def _disconnect_bars_auth_check_worker(self, worker):
-        if worker is None:
-            return
-        for signal, slot in (
-            (worker.succeeded, self._on_bars_auth_check_succeeded),
-            (worker.failed, self._on_bars_auth_check_failed),
-            (worker.finished, self._on_bars_auth_check_finished),
-        ):
-            try:
-                signal.disconnect(slot)
-            except Exception:
-                pass
-
-    def _shutdown_bars_auth_check_worker(self, timeout_ms: int = 1200):
-        worker = self._bars_auth_check_worker
-        self._bars_auth_check_worker = None
-        self._disconnect_bars_auth_check_worker(worker)
-        if worker is not None and worker.isRunning():
             worker.quit()
             worker.wait(timeout_ms)
 
@@ -2377,37 +2355,6 @@ class DoctorRemCardWidget(QWidget):
         dialog.exec()
         self._set_bars_auth_state(dialog.authorized or service.last_authorized)
 
-    def _check_bars_auth_async(self):
-        if self._is_closing:
-            return
-        service = self._get_bars_auth_service()
-        if self._bars_auth_check_worker and self._bars_auth_check_worker.isRunning():
-            return
-        worker = AsyncCallThread(service.check_authorized)
-        self._bars_auth_check_worker = worker
-        worker.succeeded.connect(self._on_bars_auth_check_succeeded)
-        worker.failed.connect(self._on_bars_auth_check_failed)
-        worker.finished.connect(self._on_bars_auth_check_finished)
-        worker.start()
-
-    def _on_bars_auth_check_succeeded(self, result):
-        if self._is_closing:
-            return
-        self._set_bars_auth_state(result.authorized)
-
-    def _on_bars_auth_check_failed(self, exc):
-        if self._is_closing:
-            return
-        logger.debug("BARS auth check failed: %s", exc)
-
-    def _on_bars_auth_check_finished(self):
-        worker = self.sender()
-        if worker is not None and self._bars_auth_check_worker is not worker:
-            return
-        self._bars_auth_check_worker = None
-        if self._is_closing:
-            return
-
     def on_refresh_beds_clicked(self):
         self.force_refresh_everywhere()
         self.refresh_requested.emit()
@@ -2642,7 +2589,6 @@ class DoctorRemCardWidget(QWidget):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
         self._release_add_patient_lock()
-        self._shutdown_bars_auth_check_worker()
         if hasattr(self.layout_manager, "beds_selection_widget") and hasattr(self.layout_manager.beds_selection_widget, "shutdown"):
             self.layout_manager.beds_selection_widget.shutdown()
         if hasattr(self.layout_manager, 'orders_widget') and hasattr(self.layout_manager.orders_widget, "shutdown"):

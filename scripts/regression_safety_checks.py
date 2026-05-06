@@ -4631,13 +4631,6 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
             ("_apply_beds_snapshot", "_on_refresh_failed", "_on_refresh_finished", "shutdown"),
         ),
         (
-            "doctor_bars_auth",
-            PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
-            "DoctorRemCardWidget",
-            "_check_bars_auth_async",
-            ("_on_bars_auth_check_succeeded", "_on_bars_auth_check_failed", "_on_bars_auth_check_finished", "shutdown"),
-        ),
-        (
             "nurse_beds",
             PROJECT_ROOT / "ui" / "nurse_view" / "components" / "nurse_beds_selection_widget.py",
             "NurseBedsSelectionWidget",
@@ -4645,6 +4638,11 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
             ("_apply_beds_snapshot", "_on_refresh_failed", "_on_refresh_finished", "shutdown"),
         ),
     ]
+
+    doctor_widget_text = (PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py").read_text(encoding="utf-8")
+    forbidden_bars_autocheck = ("_check_bars_auth_async", "_bars_auth_check_worker", "_on_bars_auth_check_")
+    if any(marker in doctor_widget_text for marker in forbidden_bars_autocheck):
+        return False, "doctor_bars_auth: startup BARS auth-check worker must stay absent"
 
     def _async_call_uses_parent_self(method: ast.FunctionDef) -> bool:
         for node in ast.walk(method):

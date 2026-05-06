@@ -1,5 +1,6 @@
 import base64
 import datetime
+import html
 import json
 import os
 import re
@@ -14,6 +15,11 @@ from urllib.request import Request, urlopen
 
 from rem_card.app.logger import logger
 from rem_card.app.paths import LOCAL_APPDATA, LOGS_DIR
+from rem_card.services.bars_labs import (
+    normalize_bars_labs_mode,
+    parse_bars_laboratory_datetime,
+    split_bars_laboratory_result_items,
+)
 
 
 DEFAULT_BARS_URL = "http://10.30.30.12/"
@@ -24,7 +30,10 @@ DEFAULT_BARS_LOAD_TIMEOUT_SEC = 40.0
 DIRECT_FORM_API_TIMEOUT_SEC = 12.0
 DEPARTMENT_SELECT_TIMEOUT_SEC = 15.0
 NETWORK_CAPTURE_WAIT_SEC = 8.0
+BARS_CAPTURE_MAX_REQUESTS = 80
+BARS_CAPTURE_PREVIEW_CHARS = 250000
 INPATIENT_DOCTOR_FORM = "ArmPatientsInDep/pat_in_dep/healing_emp_d3"
+HOSPITALIZATION_JOURNAL_FORM = "HospPlan/hospplan"
 ISOLATED_PROFILE_DIR = os.path.join(LOCAL_APPDATA, "RemCard", "bars_browser_profile")
 BARS_DIAG_PREFIX = "[BARS]"
 AUTOMATION_PAGE_NAME = "remcard-bars-automation"
@@ -57,6 +66,7 @@ class BarsPatientProbeResult:
     full_name: str = ""
     matched_line: str = ""
     text_preview: str = ""
+    patients: list[dict[str, str]] | None = None
 
 
 @dataclass
@@ -77,6 +87,16 @@ class BarsPatientListResult:
     message: str
     department: str = ""
     patients: list[dict[str, str]] | None = None
+    text_preview: str = ""
+
+
+@dataclass
+class BarsPatientLabsResult:
+    ok: bool
+    message: str
+    patient: dict[str, str] | None = None
+    mode: str = "latest"
+    labs: list[dict[str, Any]] | None = None
     text_preview: str = ""
 
 
@@ -119,6 +139,25 @@ class BarsAuthService:
         "есиа",
         "аутентификац",
     )
+    DIAG_LIST_LIMITS = {
+        "clicked": 5,
+        "elements": 8,
+        "matches": 8,
+        "pages": 12,
+        "patients": 8,
+        "requests": 5,
+        "sample": 2,
+        "windows": 5,
+    }
+    DIAG_STRING_LIMITS = {
+        "body": 500,
+        "matched_line": 500,
+        "request_preview": 500,
+        "response_preview": 700,
+        "result": 300,
+        "text": 500,
+        "text_preview": 900,
+    }
 
     def __init__(
         self,
@@ -126,6 +165,7 @@ class BarsAuthService:
         browser_path: Optional[str] = None,
         profile_dir: Optional[str] = None,
         debug_port: Optional[int] = None,
+        auto_minimize_windows: Optional[bool] = None,
     ):
         self.bars_url = (bars_url or os.environ.get("REMCARD_BARS_URL") or DEFAULT_BARS_URL).strip()
         self.browser_path = browser_path or self._find_yandex_browser()
@@ -135,6 +175,14 @@ class BarsAuthService:
         self._use_direct_form_api = os.environ.get("REMCARD_BARS_USE_DIRECT_FORM_API") != "0"
         self._use_user_data_dir = bool(profile_dir) or os.environ.get("REMCARD_BARS_USE_USER_DATA_DIR") == "1"
         self._enable_devtools = os.environ.get("REMCARD_BARS_DISABLE_DEVTOOLS") != "1"
+        self._verbose_diag = self._read_bool_env("REMCARD_BARS_VERBOSE_LOG", False)
+        self._capture_max_requests = self._read_int_env("REMCARD_BARS_CAPTURE_MAX_REQUESTS", BARS_CAPTURE_MAX_REQUESTS)
+        self._capture_preview_chars = self._read_int_env("REMCARD_BARS_CAPTURE_PREVIEW_CHARS", BARS_CAPTURE_PREVIEW_CHARS)
+        self._auto_minimize_windows = (
+            self._read_bool_env("REMCARD_BARS_AUTO_MINIMIZE", True)
+            if auto_minimize_windows is None
+            else bool(auto_minimize_windows)
+        )
         self.debug_port = int(os.environ.get("REMCARD_BARS_DEBUG_PORT") or debug_port or DEFAULT_DEBUG_PORT)
         self._process: Optional[subprocess.Popen] = None
         self._last_authorized = False
@@ -150,6 +198,10 @@ class BarsAuthService:
             use_direct_form_api=self._use_direct_form_api,
             use_user_data_dir=self._use_user_data_dir,
             enable_devtools=self._enable_devtools,
+            verbose_log=self._verbose_diag,
+            capture_max_requests=self._capture_max_requests,
+            capture_preview_chars=self._capture_preview_chars,
+            auto_minimize_windows=self._auto_minimize_windows,
             launch_mode="explicit_user_data_dir" if self._use_user_data_dir else "system_default_profile",
             debug_port=self.debug_port,
             running_browser_pids=self._running_yandex_pids(),
@@ -186,7 +238,6 @@ class BarsAuthService:
         if devtools_before:
             existing_page = self._find_bars_debug_page()
             if existing_page:
-                self._activate_debug_page(existing_page)
                 page_url = str(existing_page.get("url") or "")
                 title = str(existing_page.get("title") or "")
                 text = self._read_page_text(existing_page)
@@ -196,6 +247,7 @@ class BarsAuthService:
                     self._diag("open_auth_window_reused_existing_authorized", url=page_url, title=title)
                     return result
 
+                self._activate_debug_page(existing_page)
                 self._last_message = "Вкладка БАРС уже открыта. Завершите вход и выбор кабинета в этом окне."
                 self._diag("open_auth_window_reused_existing_page", url=page_url, title=title)
                 return BarsAuthCheckResult(False, self._last_message, url=page_url, title=title)
@@ -250,6 +302,8 @@ class BarsAuthService:
         )
 
     def minimize_bars_windows(self) -> int:
+        if not self._auto_minimize_windows:
+            return 0
         if os.name != "nt":
             return 0
         try:
@@ -268,10 +322,17 @@ class BarsAuthService:
             "барс",
         )
         minimized = 0
+        yandex_pids = set(self._running_yandex_pids())
+        if not yandex_pids:
+            return 0
 
         def callback(hwnd, _lparam):
             nonlocal minimized
             if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value or 0) not in yandex_pids:
                 return True
             length = user32.GetWindowTextLengthW(hwnd)
             if length <= 0:
@@ -313,9 +374,16 @@ class BarsAuthService:
             "барс",
         )
         restored = 0
+        yandex_pids = set(self._running_yandex_pids())
+        if not yandex_pids:
+            return 0
 
         def callback(hwnd, _lparam):
             nonlocal restored
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value or 0) not in yandex_pids:
+                return True
             length = user32.GetWindowTextLengthW(hwnd)
             if length <= 0:
                 return True
@@ -493,22 +561,21 @@ class BarsAuthService:
         return BarsPageProbeResult(False, "Открытая вкладка БАРС не найдена")
 
     def probe_patient_by_history(self, history_number: str) -> BarsPatientProbeResult:
-        history_number = " ".join(str(history_number or "").split())
+        search_query = " ".join(str(history_number or "").split())
         started_at = time.monotonic()
         deadline = started_at + self.load_timeout_sec
-        self._diag("probe_patient_start", history_number=history_number, timeout_sec=self.load_timeout_sec)
-        if not history_number:
+        self._diag("probe_patient_start", search_query=search_query, timeout_sec=self.load_timeout_sec)
+        if not search_query:
             self._diag("probe_patient_empty_history", level="warning")
-            return BarsPatientProbeResult(False, "Введите номер истории")
+            return BarsPatientProbeResult(False, "Введите номер истории или фамилию")
         if not self._enable_devtools:
-            self._diag("probe_patient_devtools_disabled", history_number=history_number)
+            self._diag("probe_patient_devtools_disabled", search_query=search_query)
             return BarsPatientProbeResult(
                 False,
                 "DevTools-чтение отключено настройкой REMCARD_BARS_DISABLE_DEVTOOLS=1.",
-                history_number=history_number,
             )
 
-        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=False, automation=True)
         if not page:
             self._diag(
                 "probe_patient_no_bars_page",
@@ -520,8 +587,7 @@ class BarsAuthService:
             )
             return BarsPatientProbeResult(
                 False,
-                "Служебная сессия БАРС недоступна. Нажмите БАРС и пройдите авторизацию заново; после входа окно можно свернуть.",
-                history_number=history_number,
+                "Служебная вкладка БАРС недоступна. Нажмите БАРС и завершите вход; поиск по журналу не открывает Яндекс сам.",
             )
 
         ready_text = self._prepare_bars_workspace(page, timeout_sec=self._remaining_timeout(deadline))
@@ -540,13 +606,12 @@ class BarsAuthService:
                 f"Не удалось загрузить рабочий экран БАРС за {int(self.load_timeout_sec)} секунд."
                 if timed_out
                 else "БАРС открылся, но рабочий экран не найден. Вероятно, сессия истекла или кабинет не выбран.",
-                history_number=history_number,
                 text_preview=self._compact_text_preview(ready_text),
             )
 
         steps: list[str] = []
         steps.extend(self._open_hospitalization_journal(page, timeout_sec=self._remaining_timeout(deadline)))
-        steps.append(self._fill_history_search(page, history_number))
+        steps.append(self._fill_history_search(page, search_query))
         time.sleep(0.4)
         steps.append(self._click_visible_text(page, ["Найти", "Поиск", "Искать"]))
         time.sleep(2.0)
@@ -558,39 +623,40 @@ class BarsAuthService:
             return BarsPatientProbeResult(
                 False,
                 "Сценарий выполнен, но текст страницы прочитать не удалось",
-                history_number=history_number,
                 text_preview="; ".join(step for step in steps if step),
             )
 
-        full_name, matched_line, preview = self._extract_patient_line(text, history_number)
-        if full_name:
+        patients = self._extract_patient_matches_from_search_text(text, search_query)
+        if patients:
+            first_patient = patients[0]
+            message = f"Найдено пациентов: {len(patients)}" if len(patients) > 1 else "Пациент найден на странице БАРС"
             self._diag(
                 "probe_patient_success",
-                history_number=history_number,
-                full_name=full_name,
-                matched_line=matched_line,
+                search_query=search_query,
+                patients_count=len(patients),
+                patients=patients[:20],
             )
             return BarsPatientProbeResult(
                 True,
-                "Пациент найден на странице БАРС",
-                history_number=history_number,
-                full_name=full_name,
-                matched_line=matched_line,
-                text_preview=preview,
+                message,
+                history_number=first_patient.get("history_number", ""),
+                full_name=first_patient.get("full_name", ""),
+                matched_line=first_patient.get("matched_line", ""),
+                patients=patients,
             )
 
+        full_name, matched_line, preview = self._extract_patient_line(text, search_query)
         self._diag(
             "probe_patient_not_found",
             level="warning",
-            history_number=history_number,
+            search_query=search_query,
             text_len=len(text),
             matched_line=matched_line,
             preview=preview or self._compact_text_preview(text),
         )
         return BarsPatientProbeResult(
             False,
-            "ФИО по этому номеру истории не найдено в прочитанном тексте страницы",
-            history_number=history_number,
+            "Пациенты по этому запросу не найдены",
             matched_line=matched_line,
             text_preview=preview or self._compact_text_preview(text),
         )
@@ -609,7 +675,7 @@ class BarsAuthService:
                 history_number=history_number,
             )
 
-        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=False, automation=True)
         if not page:
             return BarsNetworkCaptureResult(
                 False,
@@ -705,11 +771,11 @@ class BarsAuthService:
                 department=department,
             )
 
-        page = self._ensure_bars_debug_page(background=True, allow_open=True, automation=True)
+        page = self._ensure_bars_debug_page(background=True, allow_open=False, automation=True)
         if not page:
             return BarsPatientListResult(
                 False,
-                "Вкладка БАРС недоступна. Нажмите БАРС и завершите вход.",
+                "Служебная вкладка БАРС недоступна. Нажмите БАРС и завершите вход; список пациентов не открывает Яндекс сам.",
                 department=department,
             )
         self._prepare_background_page(page)
@@ -740,7 +806,7 @@ class BarsAuthService:
 
         steps: list[str] = []
         steps.extend(self._open_inpatient_duty_doctor(page, timeout_sec=self._remaining_timeout(deadline)))
-        current_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+        current_text = self._read_inpatient_doctor_text(page)
         failed_step = self._first_failed_step(steps)
         if failed_step or not self._looks_like_inpatient_doctor_page(current_text):
             if self._deadline_expired(deadline):
@@ -776,7 +842,7 @@ class BarsAuthService:
                 reopen_steps = self._open_inpatient_duty_doctor(page, timeout_sec=self._remaining_timeout(deadline))
                 steps.extend(reopen_steps)
                 reopen_failed_step = self._first_failed_step(reopen_steps)
-                current_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+                current_text = self._read_inpatient_doctor_text(page)
                 if reopen_failed_step or not self._looks_like_inpatient_doctor_page(current_text):
                     return self._bars_scenario_failed_result(
                         department,
@@ -853,10 +919,11 @@ class BarsAuthService:
         text = self._read_page_text_with_retry(page, attempts=3, delay_sec=0.8)
         if not patients and not empty_department_response:
             patients = self._extract_visible_patient_rows(page, department)
-        captured_requests = self._summarize_captured_requests(self._get_network_capture(page), department)
+        captured_capture = self._get_network_capture(page)
+        captured_requests = self._summarize_captured_requests(captured_capture, department)
         self._restore_bars_scroll_state(page)
         empty_department_response = empty_department_response or self._has_empty_department_patients_response(
-            self._get_network_capture(page),
+            captured_capture,
             department,
         )
         self._diag(
@@ -898,6 +965,340 @@ class BarsAuthService:
             text_preview=self._compact_text_preview(text) or "; ".join(step for step in steps if step),
         )
 
+    def get_patient_labs(self, patient: dict[str, str] | str, mode: str = "latest") -> BarsPatientLabsResult:
+        patient_data = dict(patient) if isinstance(patient, dict) else {"history_number": str(patient or "")}
+        history_number = " ".join(str(patient_data.get("history_number") or "").split())
+        mode = self._normalize_labs_mode(mode)
+        started_at = time.monotonic()
+        deadline = started_at + self.load_timeout_sec
+        self._diag(
+            "patient_labs_start",
+            history_number=history_number,
+            full_name=patient_data.get("full_name"),
+            mode=mode,
+            timeout_sec=self.load_timeout_sec,
+        )
+
+        if not history_number:
+            return BarsPatientLabsResult(False, "У пациента не найден номер истории болезни", patient=patient_data, mode=mode)
+        if not self._enable_devtools:
+            return BarsPatientLabsResult(
+                False,
+                "DevTools-чтение отключено настройкой REMCARD_BARS_DISABLE_DEVTOOLS=1.",
+                patient=patient_data,
+                mode=mode,
+            )
+
+        page = self._ensure_bars_debug_page(background=True, allow_open=False, automation=True)
+        if not page:
+            return BarsPatientLabsResult(
+                False,
+                "Служебная вкладка БАРС недоступна. Нажмите БАРС и завершите вход; анализы не открывают Яндекс сам.",
+                patient=patient_data,
+                mode=mode,
+            )
+        self._prepare_background_page(page)
+        self.minimize_bars_windows()
+
+        steps: list[str] = []
+        initial_text, error_result = self._ensure_patient_labs_session_ready(page, patient_data, mode, steps)
+        if error_result:
+            return error_result
+
+        error_result = self._open_patient_history_for_labs(
+            page,
+            patient_data,
+            history_number,
+            mode,
+            deadline,
+            steps,
+            initial_text,
+        )
+        if error_result:
+            return error_result
+
+        lab_text, request_labs, dom_labs = self._read_patient_laboratory_rows(
+            page,
+            patient_data,
+            mode,
+            deadline,
+            steps,
+        )
+        if isinstance(lab_text, BarsPatientLabsResult):
+            return lab_text
+
+        labs = self._merge_laboratory_rows(request_labs, dom_labs)
+        filtered_labs = self._filter_laboratory_rows(labs, mode)
+        self._diag(
+            "patient_labs_done",
+            ok=bool(filtered_labs),
+            history_number=history_number,
+            mode=mode,
+            labs_count=len(filtered_labs),
+            raw_labs_count=len(labs),
+            request_labs_count=len(request_labs),
+            dom_labs_count=len(dom_labs),
+            steps=steps,
+            elapsed_sec=round(time.monotonic() - started_at, 2),
+            sample=filtered_labs[:5],
+        )
+
+        if filtered_labs:
+            return BarsPatientLabsResult(
+                True,
+                f"Найдено записей анализов: {len(filtered_labs)}",
+                patient=patient_data,
+                mode=mode,
+                labs=filtered_labs,
+                text_preview="; ".join(step for step in steps if step),
+            )
+        return BarsPatientLabsResult(
+            True if labs else False,
+            "Анализы с заполненным результатом не найдены" if labs else "Анализы пациента не найдены",
+            patient=patient_data,
+            mode=mode,
+            labs=[],
+            text_preview=self._compact_text_preview(lab_text) or "; ".join(step for step in steps if step),
+        )
+
+    def _patient_labs_auth_prompt_result(
+        self,
+        patient_data: dict[str, str],
+        mode: str,
+        text: str,
+    ) -> BarsPatientLabsResult:
+        return BarsPatientLabsResult(
+            False,
+            "БАРС открыт, но требуется авторизация или выбор кабинета.",
+            patient=patient_data,
+            mode=mode,
+            text_preview=self._compact_text_preview(text),
+        )
+
+    def _ensure_patient_labs_session_ready(
+        self,
+        page: dict[str, Any],
+        patient_data: dict[str, str],
+        mode: str,
+        steps: list[str],
+    ) -> tuple[str, BarsPatientLabsResult | None]:
+        initial_text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.25)
+        if self._looks_like_bars_auth_prompt(initial_text):
+            return initial_text, self._patient_labs_auth_prompt_result(patient_data, mode, initial_text)
+
+        close_result = self._close_bars_internal_windows_until_stable(page)
+        if close_result.get("closed"):
+            steps.append(f"Закрыты прежние окна БАРС: {close_result.get('closed')}")
+            initial_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            if self._looks_like_bars_auth_prompt(initial_text):
+                return initial_text, self._patient_labs_auth_prompt_result(patient_data, mode, initial_text)
+        return initial_text, None
+
+    def _open_patient_history_for_labs(
+        self,
+        page: dict[str, Any],
+        patient_data: dict[str, str],
+        history_number: str,
+        mode: str,
+        deadline: float,
+        steps: list[str],
+        initial_text: str,
+    ) -> BarsPatientLabsResult | None:
+        click_step = self._click_patient_history_link(page, history_number)
+        steps.append(click_step)
+        if self._first_failed_step([click_step]):
+            error_result, click_step = self._load_patient_history_from_labs_list(
+                page,
+                patient_data,
+                history_number,
+                mode,
+                deadline,
+                steps,
+                initial_text,
+                click_step,
+            )
+            if error_result:
+                return error_result
+
+        failed_step = self._first_failed_step([click_step])
+        if failed_step:
+            text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            return BarsPatientLabsResult(
+                False,
+                f"Сценарий БАРС остановлен: {failed_step}",
+                patient=patient_data,
+                mode=mode,
+                text_preview=self._compact_text_preview(text) or "; ".join(step for step in steps if step),
+            )
+
+        patient_text = self._wait_for_patient_history_page(
+            page,
+            history_number,
+            timeout_sec=min(8.0, self._remaining_timeout(deadline)),
+        )
+        if self._looks_like_patient_history_page(patient_text, history_number):
+            return None
+        return BarsPatientLabsResult(
+            False,
+            "История болезни пациента не открылась",
+            patient=patient_data,
+            mode=mode,
+            text_preview=self._compact_text_preview(patient_text) or "; ".join(step for step in steps if step),
+        )
+
+    def _load_patient_history_from_labs_list(
+        self,
+        page: dict[str, Any],
+        patient_data: dict[str, str],
+        history_number: str,
+        mode: str,
+        deadline: float,
+        steps: list[str],
+        initial_text: str,
+        click_step: str,
+    ) -> tuple[BarsPatientLabsResult | None, str]:
+        self._diag(
+            "patient_labs_current_list_miss_fallback",
+            history_number=history_number,
+            click_step=click_step,
+            text_preview=self._compact_text_preview(initial_text),
+        )
+        ready_text = self._prepare_bars_workspace(page, timeout_sec=self._remaining_timeout(deadline))
+        page_title = str(page.get("title") or "")
+        if not self._looks_like_bars_work_screen(ready_text, page_title):
+            timed_out = self._deadline_expired(deadline)
+            return (
+                BarsPatientLabsResult(
+                    False,
+                    f"Не удалось загрузить рабочий экран БАРС за {int(self.load_timeout_sec)} секунд."
+                    if timed_out
+                    else "БАРС открыт, но рабочий экран не найден. Сначала завершите вход и выбор кабинета.",
+                    patient=patient_data,
+                    mode=mode,
+                    text_preview=self._compact_text_preview(ready_text),
+                ),
+                click_step,
+            )
+
+        steps.append("Пациент не найден в уже открытом списке; загружаю список пациентов")
+        reopen_steps = self._open_inpatient_duty_doctor(page, timeout_sec=self._remaining_timeout(deadline))
+        steps.extend(reopen_steps)
+        current_text = self._read_inpatient_doctor_text(page)
+        failed_step = self._first_failed_step(reopen_steps)
+        if failed_step or not self._looks_like_inpatient_doctor_page(current_text):
+            return (
+                BarsPatientLabsResult(
+                    False,
+                    f"Сценарий БАРС остановлен: {failed_step or 'форма Лечащий врач (new) не открылась'}",
+                    patient=patient_data,
+                    mode=mode,
+                    text_preview=self._compact_text_preview(current_text) or "; ".join(step for step in steps if step),
+                ),
+                click_step,
+            )
+
+        department_error = self._select_patient_labs_department(page, patient_data, mode, deadline, steps)
+        if department_error:
+            return department_error, click_step
+
+        click_step = self._click_patient_history_link(page, history_number)
+        steps.append(click_step)
+        if self._first_failed_step([click_step]) and not self._deadline_expired(deadline):
+            steps.append(self._click_visible_text(page, ["Найти", "Отобрать", "<<< Отобрать >>>"]))
+            time.sleep(1.0)
+            click_step = self._click_patient_history_link(page, history_number)
+            steps.append(click_step)
+        return None, click_step
+
+    def _select_patient_labs_department(
+        self,
+        page: dict[str, Any],
+        patient_data: dict[str, str],
+        mode: str,
+        deadline: float,
+        steps: list[str],
+    ) -> BarsPatientLabsResult | None:
+        department = " ".join(str(patient_data.get("department") or self.duty_department or "").split())
+        if not department:
+            return None
+        department_step = self._select_department_filter(
+            page,
+            department,
+            timeout_sec=min(DEPARTMENT_SELECT_TIMEOUT_SEC, self._remaining_timeout(deadline)),
+        )
+        steps.append(department_step)
+        failed_step = self._first_failed_step([department_step])
+        if not failed_step:
+            time.sleep(0.8)
+            return None
+        return BarsPatientLabsResult(
+            False,
+            f"Сценарий БАРС остановлен: {failed_step}",
+            patient=patient_data,
+            mode=mode,
+            text_preview="; ".join(step for step in steps if step),
+        )
+
+    def _read_patient_laboratory_rows(
+        self,
+        page: dict[str, Any],
+        patient_data: dict[str, str],
+        mode: str,
+        deadline: float,
+        steps: list[str],
+    ) -> tuple[str | BarsPatientLabsResult, list[dict[str, Any]], list[dict[str, Any]]]:
+        self._install_network_capture(page)
+        self._clear_network_capture(page)
+        lab_step = self._open_patient_laboratory_window(page)
+        steps.append(lab_step)
+        failed_step = self._first_failed_step([lab_step])
+        if failed_step:
+            return (
+                BarsPatientLabsResult(
+                    False,
+                    f"Сценарий БАРС остановлен: {failed_step}",
+                    patient=patient_data,
+                    mode=mode,
+                    text_preview="; ".join(step for step in steps if step),
+                ),
+                [],
+                [],
+            )
+
+        lab_text = self._wait_for_laboratory_window(page, timeout_sec=min(10.0, self._remaining_timeout(deadline)))
+        if not self._looks_like_laboratory_window(lab_text):
+            return (
+                BarsPatientLabsResult(
+                    False,
+                    "Окно лабораторных исследований не открылось",
+                    patient=patient_data,
+                    mode=mode,
+                    text_preview=self._compact_text_preview(lab_text) or "; ".join(step for step in steps if step),
+                ),
+                [],
+                [],
+            )
+
+        page_size_step = self._set_labs_page_size(page, 150)
+        steps.append(page_size_step)
+        time.sleep(0.2)
+
+        request_labs = self._wait_for_laboratory_rows_from_requests(
+            page,
+            timeout_sec=min(5.0, self._remaining_timeout(deadline)),
+        )
+        if not request_labs:
+            dom_labs = self._wait_for_laboratory_rows(
+                page,
+                timeout_sec=min(8.0, self._remaining_timeout(deadline)),
+            )
+            return lab_text, request_labs, dom_labs
+
+        dom_labs = self._extract_laboratory_rows_from_dom(page)
+        if dom_labs:
+            self._diag("laboratory_rows_snapshot", rows_count=len(dom_labs))
+        return lab_text, request_labs, dom_labs
+
     def _apply_check_result(self, result: BarsAuthCheckResult):
         self._last_authorized = bool(result.authorized)
         self._last_message = result.message
@@ -931,6 +1332,21 @@ class BarsAuthService:
         except (TypeError, ValueError):
             return float(default)
         return max(1.0, value)
+
+    @staticmethod
+    def _read_bool_env(name: str, default: bool) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return bool(default)
+        return str(value).strip().lower() not in {"0", "false", "no", "off", "нет"}
+
+    @staticmethod
+    def _read_int_env(name: str, default: int) -> int:
+        try:
+            value = int(os.environ.get(name, "") or default)
+        except (TypeError, ValueError):
+            return int(default)
+        return max(1, value)
 
     @staticmethod
     def _deadline_expired(deadline: float) -> bool:
@@ -1019,7 +1435,7 @@ class BarsAuthService:
                     "--remote-debugging-address=127.0.0.1",
                 ]
             )
-        if background:
+        if background and self._auto_minimize_windows:
             args.extend(
                 [
                     "--start-minimized",
@@ -1382,7 +1798,7 @@ class BarsAuthService:
         if (!closeMarker && !small) continue;
         let z = 0;
         let node = el;
-        for (let i = 0; node && i < 5; i += 1, node = node.parentElement) {
+        for (let i = 0; node && i < 10; i += 1, node = node.parentElement) {
           const zi = parseInt(doc.defaultView.getComputedStyle(node).zIndex || '0', 10);
           if (!Number.isNaN(zi)) z = Math.max(z, zi);
         }
@@ -1391,7 +1807,7 @@ class BarsAuthService:
     }
   }
 
-  candidates.sort((a, b) => (b.z - a.z) || (a.top - b.top) || (b.left - a.left));
+  candidates.sort((a, b) => (b.z - a.z) || (b.left - a.left) || (b.top - a.top));
   let closed = 0;
   const clicked = [];
   const seen = new Set();
@@ -1417,6 +1833,54 @@ class BarsAuthService:
             log_to_main=False,
         )
         return payload
+
+    def _close_bars_internal_windows_until_stable(
+        self,
+        page: dict[str, Any],
+        *,
+        max_passes: int = 3,
+        delay_sec: float = 0.35,
+    ) -> dict[str, Any]:
+        total_closed = 0
+        total_escape_sent = 0
+        clicked: list[Any] = []
+        passes = 0
+        for _ in range(max(1, int(max_passes))):
+            payload = self._close_bars_internal_windows(page)
+            passes += 1
+            try:
+                closed = int(payload.get("closed") or 0)
+            except (TypeError, ValueError):
+                closed = 0
+            try:
+                escape_sent = int(payload.get("escapeSent") or 0)
+            except (TypeError, ValueError):
+                escape_sent = 0
+            total_closed += closed
+            total_escape_sent += escape_sent
+            payload_clicked = payload.get("clicked")
+            if isinstance(payload_clicked, list):
+                clicked.extend(payload_clicked)
+            if not closed:
+                break
+            time.sleep(max(0.0, float(delay_sec)))
+
+        result = {
+            "ok": True,
+            "closed": total_closed,
+            "escapeSent": total_escape_sent,
+            "passes": passes,
+            "clicked": clicked[:12],
+        }
+        self._diag(
+            "close_bars_internal_windows_until_stable_done",
+            closed=result["closed"],
+            escape_sent=result["escapeSent"],
+            passes=result["passes"],
+            clicked=result["clicked"],
+            log_to_main=False,
+        )
+        return result
 
     def _wait_for_bars_ready(self, page: dict[str, Any], timeout_sec: float = 4.0) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
@@ -1715,6 +2179,15 @@ class BarsAuthService:
             return value
         return value[: max_len - 3] + "..."
 
+    @staticmethod
+    def _strip_html_text(value: str, max_len: int = 180) -> str:
+        text = html.unescape(str(value or ""))
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = " ".join(text.split())
+        if len(text) <= max_len:
+            return text
+        return text[: max_len - 3] + "..."
+
     def _compact_text_preview(self, text: str, max_lines: int = 12) -> str:
         lines = []
         seen = set()
@@ -1730,12 +2203,40 @@ class BarsAuthService:
 
     def _open_hospitalization_journal(self, page: dict[str, Any], timeout_sec: Optional[float] = None) -> list[str]:
         deadline = time.monotonic() + max(0.2, float(timeout_sec or self.load_timeout_sec))
-        text = self._read_page_text_with_retry(page, attempts=2, delay_sec=0.3)
+        text = self._read_hospitalization_journal_text(page)
         if self._looks_like_hospitalization_journal(text):
             self._diag("open_hospitalization_journal_already_open")
             return ["Журнал госпитализации уже открыт"]
 
         steps: list[str] = []
+        attempted_direct_api = False
+        if self._use_direct_form_api:
+            api_step = self._open_hospitalization_journal_via_api(page)
+            attempted_direct_api = api_step.startswith("Журнал открыт")
+            if attempted_direct_api:
+                steps.append(api_step)
+                api_timeout = min(DIRECT_FORM_API_TIMEOUT_SEC, self._remaining_timeout(deadline))
+                text = self._wait_for_hospitalization_journal(page, timeout_sec=api_timeout)
+        else:
+            self._diag(
+                "open_hospitalization_journal_api_skipped",
+                reason="disabled_by_env",
+                log_to_main=False,
+            )
+        if attempted_direct_api and not self._looks_like_hospitalization_journal(text):
+            self._diag(
+                "open_hospitalization_journal_api_fallback_to_menu",
+                level="warning",
+                text_preview=self._compact_text_preview(text),
+            )
+            if steps and steps[-1] == api_step:
+                steps[-1] = "Запасной путь через меню после прямого вызова журнала"
+            else:
+                steps.append("Запасной путь через меню после прямого вызова журнала")
+
+        if self._looks_like_hospitalization_journal(text):
+            return steps
+
         steps.append(self._hover_visible_text(page, ["Регистратура"]))
         time.sleep(0.35)
         if not self._page_contains_text(page, ["Приемный покой", "Приёмный покой"]):
@@ -1753,6 +2254,88 @@ class BarsAuthService:
         steps.append(self._click_visible_text(page, ["Журнал госпитализации"]))
         self._wait_for_hospitalization_journal(page, timeout_sec=self._remaining_timeout(deadline))
         return steps
+
+    def _open_hospitalization_journal_via_api(self, page: dict[str, Any]) -> str:
+        form_json = json.dumps(HOSPITALIZATION_JOURNAL_FORM, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const formName = {form_json};
+  const result = {{
+    ok: false,
+    hasOpenD3Form: typeof window.openD3Form === 'function',
+    hasOpenWindow: typeof window.openWindow === 'function',
+    method: '',
+    pageFormName: '',
+    menuAction: '',
+    error: ''
+  }};
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const findMenuAction = () => {{
+    const nodes = Array.from(document.querySelectorAll('tr[repeatername="rptItem"], [clone_uid]'));
+    for (const node of nodes) {{
+      try {{
+        const data = node.clone && node.clone.data ? node.clone.data : null;
+        const caption = norm((data && data.MENU_CAPTION) || node.innerText || node.textContent || '');
+        const action = String((data && data.MENU_ACTION) || '');
+        if (caption === 'Журнал госпитализации' && action) return action;
+      }} catch (_) {{}}
+    }}
+    return '';
+  }};
+  const runMenuAction = () => {{
+    const action = findMenuAction();
+    if (!action) throw new Error('menu action not found');
+    result.menuAction = action;
+    return (0, eval)(action);
+  }};
+  const attempts = [];
+  attempts.push(['menu-action', runMenuAction]);
+  if (typeof window.openWindow === 'function') {{
+    attempts.push(['openWindow-string-default', () => window.openWindow(formName)]);
+    attempts.push(['openWindow-object-default', () => window.openWindow({{name: formName, caption: 'Журнал госпитализации', vars: {{}}}})]);
+    attempts.push(['openWindow-string-main', () => window.openWindow(formName, false)]);
+    attempts.push(['openWindow-object-main', () => window.openWindow({{name: formName, caption: 'Журнал госпитализации', vars: {{}}}}, false)]);
+  }}
+  if (typeof window.openD3Form === 'function') {{
+    attempts.push(['openD3Form-empty', () => window.openD3Form(formName, false, {{vars: {{}}}})]);
+    attempts.push(['openD3Form-plain', () => window.openD3Form(formName, false)]);
+  }}
+  for (const [name, fn] of attempts) {{
+    try {{
+      const page = fn();
+      result.ok = true;
+      result.method = name;
+      try {{
+        const form = page && page.form ? page.form : null;
+        result.pageFormName = String((page && (page.formName || page.name)) || (form && (form.formName || form.name || form.helpUid)) || '');
+      }} catch (_) {{}}
+      break;
+    }} catch (err) {{
+      result.error = String(err && (err.message || err) || '');
+    }}
+  }}
+  return JSON.stringify(result);
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "open_hospitalization_journal_api_success",
+                form=HOSPITALIZATION_JOURNAL_FORM,
+                method=payload.get("method"),
+                page_form_name=payload.get("pageFormName"),
+                menu_action=payload.get("menuAction"),
+            )
+            return f"Журнал открыт через API БАРС: {payload.get('method') or HOSPITALIZATION_JOURNAL_FORM}"
+        self._diag(
+            "open_hospitalization_journal_api_failed",
+            level="warning",
+            form=HOSPITALIZATION_JOURNAL_FORM,
+            has_open_d3_form=payload.get("hasOpenD3Form"),
+            has_open_window=payload.get("hasOpenWindow"),
+            error=payload.get("error"),
+        )
+        return "Журнал через API БАРС не открылся"
 
     def _open_inpatient_duty_doctor(self, page: dict[str, Any], timeout_sec: Optional[float] = None) -> list[str]:
         deadline = time.monotonic() + max(0.2, float(timeout_sec or self.load_timeout_sec))
@@ -1846,24 +2429,61 @@ class BarsAuthService:
   const result = {{
     ok: false,
     hasOpenWindow: typeof window.openWindow === 'function',
+    hasOpenD3Form: typeof window.openD3Form === 'function',
     hasD3ApiOpenWindow: Boolean(window.D3Api && typeof window.D3Api.openWindow === 'function'),
     method: '',
+    pageFormName: '',
+    menuAction: '',
     error: ''
   }};
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const findMenuAction = () => {{
+    const nodes = Array.from(document.querySelectorAll('tr[repeatername="rptItem"], [clone_uid]'));
+    for (const node of nodes) {{
+      try {{
+        const data = node.clone && node.clone.data ? node.clone.data : null;
+        const caption = norm((data && data.MENU_CAPTION) || node.innerText || node.textContent || '');
+        const action = String((data && data.MENU_ACTION) || '');
+        if (caption === 'Лечащий врач (new)' && action) return action;
+      }} catch (_) {{}}
+    }}
+    return '';
+  }};
+  const runMenuAction = () => {{
+    const action = findMenuAction();
+    if (!action) throw new Error('menu action not found');
+    result.menuAction = action;
+    return (0, eval)(action);
+  }};
   const attempts = [];
+  attempts.push(['menu-action', runMenuAction]);
+  if (typeof window.openD3Form === 'function') {{
+    attempts.push(['openD3Form-vars', () => window.openD3Form(formName, false, {{vars: {{IS_EXPERT: 0}}}})]);
+    attempts.push(['openD3Form-empty', () => window.openD3Form(formName, false, {{vars: {{}}}})]);
+  }}
   if (typeof window.openWindow === 'function') {{
-    attempts.push(['openWindow-object', () => window.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, true)]);
-    attempts.push(['openWindow-string', () => window.openWindow(formName, true)]);
+    attempts.push(['openWindow-object-main-vars', () => window.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{IS_EXPERT: 0}}}}, false)]);
+    attempts.push(['openWindow-string-main', () => window.openWindow(formName, false)]);
+    attempts.push(['openWindow-object-default', () => window.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}})]);
+    attempts.push(['openWindow-string-default', () => window.openWindow(formName)]);
+    attempts.push(['openWindow-object-modal', () => window.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, true)]);
+    attempts.push(['openWindow-string-modal', () => window.openWindow(formName, true)]);
   }}
   if (window.D3Api && typeof window.D3Api.openWindow === 'function') {{
-    attempts.push(['D3Api.openWindow-object', () => window.D3Api.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, true)]);
-    attempts.push(['D3Api.openWindow-string', () => window.D3Api.openWindow(formName, true)]);
+    attempts.push(['D3Api.openWindow-object-main', () => window.D3Api.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, false)]);
+    attempts.push(['D3Api.openWindow-string-main', () => window.D3Api.openWindow(formName, false)]);
+    attempts.push(['D3Api.openWindow-object-modal', () => window.D3Api.openWindow({{name: formName, caption: 'Лечащий врач (new)', vars: {{}}}}, true)]);
+    attempts.push(['D3Api.openWindow-string-modal', () => window.D3Api.openWindow(formName, true)]);
   }}
   for (const [name, fn] of attempts) {{
     try {{
-      fn();
+      const page = fn();
       result.ok = true;
       result.method = name;
+      try {{
+        const form = page && page.form ? page.form : null;
+        result.pageFormName = String((page && (page.formName || page.name)) || (form && (form.formName || form.name || form.helpUid)) || '');
+      }} catch (_) {{}}
       break;
     }} catch (err) {{
       result.error = String(err && (err.message || err) || '');
@@ -1878,6 +2498,8 @@ class BarsAuthService:
                 "open_inpatient_doctor_form_api_success",
                 form=INPATIENT_DOCTOR_FORM,
                 method=payload.get("method"),
+                page_form_name=payload.get("pageFormName"),
+                menu_action=payload.get("menuAction"),
             )
             return f"Форма открыта через API БАРС: {payload.get('method') or INPATIENT_DOCTOR_FORM}"
         self._diag(
@@ -1885,6 +2507,7 @@ class BarsAuthService:
             level="warning",
             form=INPATIENT_DOCTOR_FORM,
             has_open_window=payload.get("hasOpenWindow"),
+            has_open_d3_form=payload.get("hasOpenD3Form"),
             has_d3api_open_window=payload.get("hasD3ApiOpenWindow"),
             error=payload.get("error"),
         )
@@ -2064,18 +2687,128 @@ class BarsAuthService:
     def _wait_for_hospitalization_journal(self, page: dict[str, Any], timeout_sec: float) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         last_text = ""
+        seen_target_form = False
         while time.monotonic() < deadline:
-            last_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            last_text = self._read_hospitalization_journal_text(page)
             if self._looks_like_hospitalization_journal(last_text):
-                self._diag("open_hospitalization_journal_ready", text_len=len(last_text))
+                state = self._probe_hospitalization_journal_state(page)
+                self._diag(
+                    "open_hospitalization_journal_ready",
+                    text_len=len(last_text),
+                    target_open=state.get("targetOpen"),
+                    title=state.get("title"),
+                )
                 return last_text
+            state = self._probe_hospitalization_journal_state(page)
+            if state.get("targetOpen") and not seen_target_form:
+                seen_target_form = True
+                self._diag(
+                    "open_hospitalization_journal_form_seen",
+                    title=state.get("title"),
+                    page_info=state.get("pageInfo"),
+                    text_preview=self._compact_text_preview(last_text),
+                    log_to_main=False,
+                )
             time.sleep(0.35)
         self._diag(
             "open_hospitalization_journal_not_ready",
             level="warning",
+            target_form_seen=seen_target_form,
             text_preview=self._compact_text_preview(last_text),
         )
         return last_text
+
+    def _read_hospitalization_journal_text(self, page: dict[str, Any]) -> str:
+        text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+        state = self._probe_hospitalization_journal_state(page)
+        return self._merge_hospitalization_journal_text(text, state)
+
+    def _merge_hospitalization_journal_text(self, page_text: str, state: dict[str, Any]) -> str:
+        target_text = str(state.get("targetText") or "")
+        parts = [str(page_text or "")]
+        if target_text and target_text not in parts[0]:
+            parts.append(target_text)
+        merged = "\n".join(part for part in parts if part)
+        normalized = merged.lower().replace("ё", "е")
+        if (
+            state.get("targetOpen")
+            and "журнал:" in normalized
+            and "пациент" in normalized
+            and "№ иб" in normalized
+            and "журнал госпитализации" not in normalized
+        ):
+            merged = f"{merged}\nЖурнал госпитализации"
+        return merged
+
+    def _probe_hospitalization_journal_state(self, page: dict[str, Any]) -> dict[str, Any]:
+        form_json = json.dumps(HOSPITALIZATION_JOURNAL_FORM, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const formName = {form_json};
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const nodeText = (node) => {{
+    try {{ return norm(node && (node.innerText || node.textContent || '')); }} catch (_) {{ return ''; }}
+  }};
+  const pageInfo = [];
+  const targetTexts = [];
+  let targetOpen = false;
+  const readPage = (pg, source, index) => {{
+    try {{
+      const form = pg && pg.form ? pg.form : {{}};
+      const rawName = String(
+        (pg && (pg.formName || pg.name || pg.helpUid)) ||
+        (form && (form.formName || form.name || form.helpUid)) ||
+        ''
+      );
+      const formAttr = String(
+        (form && form.DOM && form.DOM.getAttribute && form.DOM.getAttribute('formname')) ||
+        (form && form.containerForm && form.containerForm.getAttribute && form.containerForm.getAttribute('formname')) ||
+        ''
+      );
+      const name = rawName || formAttr;
+      const matches = name.includes(formName) || formAttr.includes(formName);
+      pageInfo.push({{source, index, name, formAttr, matches}});
+      if (!matches) return;
+      targetOpen = true;
+      const nodes = [
+        form && form.DOM,
+        form && form.containerForm,
+        form && form.d3Form && form.d3Form.DOM,
+        pg && pg.DOM,
+        pg && pg.container
+      ];
+      for (const node of nodes) {{
+        const text = nodeText(node);
+        if (text) targetTexts.push(text);
+      }}
+    }} catch (err) {{
+      pageInfo.push({{source, index, error: String(err && (err.message || err) || '')}});
+    }}
+  }};
+  const readStack = (items, source) => {{
+    if (!Array.isArray(items)) return;
+    items.forEach((pg, index) => readPage(pg, source, index));
+  }};
+  readStack(window.SYS_pages, 'SYS_pages');
+  readStack(window.SYS_pages_window, 'SYS_pages_window');
+  try {{
+    for (const node of Array.from(document.querySelectorAll(`[formname="${{formName}}"]`))) {{
+      targetOpen = true;
+      const text = nodeText(node);
+      if (text) targetTexts.push(text);
+    }}
+  }} catch (_) {{}}
+  return JSON.stringify({{
+    ok: true,
+    title: document.title || '',
+    targetOpen,
+    pageInfo,
+    targetText: norm(targetTexts.join('\\n')).slice(0, 20000)
+  }});
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _looks_like_hospitalization_journal(text: str) -> bool:
@@ -2095,16 +2828,132 @@ class BarsAuthService:
             and "пациенты под наблюдением" in normalized
         )
 
+    def _read_inpatient_doctor_text(self, page: dict[str, Any]) -> str:
+        text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+        state = self._probe_inpatient_doctor_form_state(page)
+        return self._merge_inpatient_doctor_text(text, state)
+
+    def _merge_inpatient_doctor_text(self, page_text: str, state: dict[str, Any]) -> str:
+        target_text = str(state.get("targetText") or "")
+        parts = [str(page_text or "")]
+        if target_text and target_text not in parts[0]:
+            parts.append(target_text)
+        merged = "\n".join(part for part in parts if part)
+        normalized = merged.lower()
+        if (
+            state.get("targetOpen")
+            and "дежурный врач" in normalized
+            and "пациенты под наблюдением" in normalized
+            and "лечащий врач (new)" not in normalized
+        ):
+            merged = f"{merged}\nЛечащий врач (new)"
+        return merged
+
+    def _probe_inpatient_doctor_form_state(self, page: dict[str, Any]) -> dict[str, Any]:
+        form_json = json.dumps(INPATIENT_DOCTOR_FORM, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const formName = {form_json};
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const nodeText = (node) => {{
+    try {{ return norm(node && (node.innerText || node.textContent || '')); }} catch (_) {{ return ''; }}
+  }};
+  const pageText = (() => {{
+    const parts = [document.title, location.href];
+    try {{
+      if (document.body) parts.push(document.body.innerText || document.body.textContent || '');
+    }} catch (_) {{}}
+    return norm(parts.join('\\n'));
+  }})();
+  const pageInfo = [];
+  const targetTexts = [];
+  let targetOpen = false;
+  const readPage = (pg, source, index) => {{
+    try {{
+      const form = pg && pg.form ? pg.form : {{}};
+      const rawName = String(
+        (pg && (pg.formName || pg.name || pg.helpUid)) ||
+        (form && (form.formName || form.name || form.helpUid)) ||
+        ''
+      );
+      const formAttr = String(
+        (form && form.DOM && form.DOM.getAttribute && form.DOM.getAttribute('formname')) ||
+        (form && form.containerForm && form.containerForm.getAttribute && form.containerForm.getAttribute('formname')) ||
+        ''
+      );
+      const name = rawName || formAttr;
+      const matches = name.includes(formName) || formAttr.includes(formName);
+      pageInfo.push({{source, index, name, formAttr, matches}});
+      if (!matches) return;
+      targetOpen = true;
+      const nodes = [
+        form && form.DOM,
+        form && form.containerForm,
+        form && form.d3Form && form.d3Form.DOM,
+        pg && pg.DOM,
+        pg && pg.container
+      ];
+      for (const node of nodes) {{
+        const text = nodeText(node);
+        if (text) targetTexts.push(text);
+      }}
+    }} catch (err) {{
+      pageInfo.push({{source, index, error: String(err && (err.message || err) || '')}});
+    }}
+  }};
+  const readStack = (items, source) => {{
+    if (!Array.isArray(items)) return;
+    items.forEach((pg, index) => readPage(pg, source, index));
+  }};
+  readStack(window.SYS_pages, 'SYS_pages');
+  readStack(window.SYS_pages_window, 'SYS_pages_window');
+  try {{
+    for (const node of Array.from(document.querySelectorAll(`[formname="${{formName}}"]`))) {{
+      targetOpen = true;
+      const text = nodeText(node);
+      if (text) targetTexts.push(text);
+    }}
+  }} catch (_) {{}}
+  return JSON.stringify({{
+    ok: true,
+    title: document.title || '',
+    targetOpen,
+    pageInfo,
+    targetText: norm(targetTexts.join('\\n')).slice(0, 20000),
+    pageText: pageText.slice(0, 2000)
+  }});
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        return payload if isinstance(payload, dict) else {}
+
     def _wait_for_inpatient_doctor_page(self, page: dict[str, Any], timeout_sec: float) -> str:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         last_text = ""
+        seen_target_form = False
         while time.monotonic() < deadline:
-            last_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            state = self._probe_inpatient_doctor_form_state(page)
+            page_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            last_text = self._merge_inpatient_doctor_text(page_text, state)
             if self._looks_like_inpatient_doctor_page(last_text):
-                self._diag("open_inpatient_duty_doctor_ready", text_len=len(last_text))
+                self._diag(
+                    "open_inpatient_duty_doctor_ready",
+                    text_len=len(last_text),
+                    target_open=state.get("targetOpen"),
+                    title=state.get("title"),
+                )
                 return last_text
+            if state.get("targetOpen") and not seen_target_form:
+                seen_target_form = True
+                self._diag(
+                    "open_inpatient_duty_doctor_form_seen",
+                    title=state.get("title"),
+                    page_info=state.get("pageInfo"),
+                    text_preview=self._compact_text_preview(last_text),
+                    log_to_main=False,
+                )
             normalized = str(last_text or "").lower()
-            if "class not found" in normalized or "popupmenu" in normalized:
+            if "class not found" in normalized and "popupmenu" in normalized and not state.get("targetOpen"):
                 self._diag(
                     "open_inpatient_duty_doctor_js_error",
                     level="warning",
@@ -2115,6 +2964,7 @@ class BarsAuthService:
         self._diag(
             "open_inpatient_duty_doctor_not_ready",
             level="warning",
+            target_form_seen=seen_target_form,
             text_preview=self._compact_text_preview(last_text),
         )
         return last_text
@@ -2450,6 +3300,658 @@ class BarsAuthService:
         )
         return f"Отделение не выбрано: {payload.get('reason') or ''}".strip()
 
+    @staticmethod
+    def _normalize_labs_mode(mode: str) -> str:
+        return normalize_bars_labs_mode(mode)
+
+    def _click_patient_history_link(self, page: dict[str, Any], history_number: str) -> str:
+        history_json = json.dumps(history_number, ensure_ascii=False)
+        expression = f"""
+(() => {{
+  const history = {history_json};
+  const historyNorm = String(history || '').replace(/\\s+/g, '').toLowerCase();
+  const docs = [];
+  const walk = (win) => {{
+    try {{
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {{
+        try {{ walk(frame.contentWindow); }} catch (_) {{}}
+      }}
+    }} catch (_) {{}}
+  }};
+  walk(window);
+  const norm = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const compact = (value) => norm(value).replace(/\\s+/g, '').toLowerCase();
+  const visible = (el) => {{
+    try {{
+      const style = el.ownerDocument.defaultView.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    }} catch (_) {{
+      return false;
+    }}
+  }};
+  const clickElement = (el) => {{
+    const target = el.closest('a,button,[cmptype="HyperLink"],[onclick],[role="button"],[tabindex]') || el;
+    try {{ target.scrollIntoView({{block: 'center', inline: 'center'}}); }} catch (_) {{}}
+    const win = target.ownerDocument.defaultView;
+    for (const type of ['mousemove', 'mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click']) {{
+      try {{ target.dispatchEvent(new win.MouseEvent(type, {{bubbles: true, cancelable: true, view: win}})); }} catch (_) {{}}
+    }}
+    try {{ if (typeof target.click === 'function') target.click(); }} catch (_) {{}}
+    try {{
+      target.dispatchEvent(new win.MouseEvent('dblclick', {{bubbles: true, cancelable: true, view: win}}));
+    }} catch (_) {{}}
+    return target;
+  }};
+  const candidates = [];
+  for (const doc of docs) {{
+    const nodes = Array.from(doc.querySelectorAll('a,td,span,div,[cmptype="HyperLink"],[onclick],[role="button"],[tabindex]'));
+    for (const el of nodes) {{
+      if (!visible(el)) continue;
+      const text = norm(el.innerText || el.textContent || el.value || '');
+      const compactText = compact(text);
+      if (!compactText || !historyNorm || !compactText.includes(historyNorm)) continue;
+      const tag = String(el.tagName || '').toLowerCase();
+      const name = String(el.getAttribute('name') || '');
+      const cmptype = String(el.getAttribute('cmptype') || '');
+      const cls = String(el.className || '');
+      let score = 0;
+      if (compactText === historyNorm) score += 2000;
+      if (tag === 'a') score += 700;
+      if (name === 'HH_LINK') score += 900;
+      if (cmptype === 'HyperLink') score += 600;
+      if (cls.includes('ctrl_hyper_link')) score += 400;
+      if (el.closest('tr[repeatername], tr[name="GRID_ANALYSES_Row"], tr')) score += 120;
+      score -= Math.min(text.length, 900) / 4;
+      candidates.push({{el, text, score, tag, name, cmptype, cls}});
+    }}
+  }}
+  candidates.sort((a, b) => b.score - a.score);
+  if (!candidates.length) return JSON.stringify({{ok: false, reason: 'history link not found'}});
+  const best = candidates[0];
+  const target = clickElement(best.el);
+  return JSON.stringify({{
+    ok: true,
+    text: best.text,
+    score: best.score,
+    tag: best.tag,
+    targetTag: String(target.tagName || '').toLowerCase(),
+    name: best.name,
+    cmptype: best.cmptype
+  }});
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "click_patient_history_link_success",
+                history_number=history_number,
+                text=self._trim_value(str(payload.get("text") or ""), max_len=180),
+                score=payload.get("score"),
+                tag=payload.get("tag"),
+                target_tag=payload.get("targetTag"),
+                name=payload.get("name"),
+                cmptype=payload.get("cmptype"),
+            )
+            return f"Открыта история болезни: {history_number}"
+        self._diag(
+            "click_patient_history_link_failed",
+            level="warning",
+            history_number=history_number,
+            reason=payload.get("reason"),
+        )
+        return f"Номер ИБ не найден в списке: {history_number}"
+
+    def _wait_for_patient_history_page(self, page: dict[str, Any], history_number: str, timeout_sec: float) -> str:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_text = ""
+        while time.monotonic() < deadline:
+            last_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            if self._looks_like_patient_history_page(last_text, history_number):
+                self._diag(
+                    "patient_history_page_ready",
+                    history_number=history_number,
+                    text_len=len(last_text),
+                )
+                return last_text
+            time.sleep(0.35)
+        self._diag(
+            "patient_history_page_not_ready",
+            level="warning",
+            history_number=history_number,
+            text_preview=self._compact_text_preview(last_text),
+        )
+        return last_text
+
+    def _looks_like_patient_history_page(self, text: str, history_number: str) -> bool:
+        history_norm = self._normalize_history_fragment(history_number)
+        text_norm = self._normalize_history_fragment(text)
+        if not history_norm:
+            return False
+
+        marker_contexts = (
+            "историяболезни№",
+            "историяболезниn",
+            "историяболезниno",
+            "иб№",
+            "ибn",
+            "ибno",
+        )
+        start = 0
+        while True:
+            index = text_norm.find(history_norm, start)
+            if index < 0:
+                return False
+            before_context = text_norm[max(0, index - 90) : index]
+            if any(marker in before_context for marker in marker_contexts):
+                return True
+            start = index + len(history_norm)
+
+    def _open_patient_laboratory_window(self, page: dict[str, Any], *, allow_already_open: bool = False) -> str:
+        text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+        if self._looks_like_laboratory_window(text):
+            if allow_already_open:
+                self._diag("open_patient_laboratory_window_already_open")
+                return "Лабораторные исследования уже открыты"
+            self._diag("open_patient_laboratory_window_stale_open", level="warning")
+            close_result = self._close_bars_internal_windows_until_stable(page, max_passes=2)
+            if close_result.get("closed"):
+                time.sleep(0.25)
+
+        expression = """
+(() => {
+  const docs = [];
+  const walk = (win) => {
+    try {
+      if (!win || !win.document) return;
+      docs.push(win.document);
+      for (const frame of win.document.querySelectorAll('iframe,frame')) {
+        try { walk(frame.contentWindow); } catch (_) {}
+      }
+    } catch (_) {}
+  };
+  walk(window);
+  const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    try {
+      const style = el.ownerDocument.defaultView.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    } catch (_) {
+      return false;
+    }
+  };
+  const clickElement = (el) => {
+    const target = el.closest('a,button,[onclick],[cmptype="HyperLink"],[role="button"],[tabindex]') || el;
+    try { target.scrollIntoView({block: 'center', inline: 'center'}); } catch (_) {}
+    const win = target.ownerDocument.defaultView;
+    for (const type of ['mousemove', 'mouseover', 'mouseenter', 'mousedown', 'mouseup', 'click']) {
+      try { target.dispatchEvent(new win.MouseEvent(type, {bubbles: true, cancelable: true, view: win})); } catch (_) {}
+    }
+    try { if (typeof target.click === 'function') target.click(); } catch (_) {}
+    return target;
+  };
+  const candidates = [];
+  for (const doc of docs) {
+    const nodes = Array.from(doc.querySelectorAll('span,a,button,td,div,[onclick],[cmptype="HyperLink"],[role="button"],[tabindex]'));
+    for (const el of nodes) {
+      if (!visible(el)) continue;
+      const text = norm(el.innerText || el.textContent || el.value || '');
+      const lower = text.toLowerCase();
+      if (!lower.includes('лабораторные исследования')) continue;
+      const onclick = String(el.getAttribute('onclick') || '');
+      const tag = String(el.tagName || '').toLowerCase();
+      let score = 0;
+      if (lower === 'лабораторные исследования') score += 2000;
+      if (lower.startsWith('лабораторные исследования')) score += 700;
+      if (onclick.includes('analyses')) score += 1200;
+      if (tag === 'span' || tag === 'a' || tag === 'button') score += 300;
+      score -= Math.min(text.length, 700) / 3;
+      candidates.push({el, text, score, tag, onclick});
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  if (!candidates.length) return JSON.stringify({ok: false, reason: 'laboratory link not found'});
+  const best = candidates[0];
+  const target = clickElement(best.el);
+  return JSON.stringify({
+    ok: true,
+    text: best.text,
+    score: best.score,
+    tag: best.tag,
+    targetTag: String(target.tagName || '').toLowerCase(),
+    onclick: best.onclick
+  });
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "open_patient_laboratory_window_click_success",
+                text=self._trim_value(str(payload.get("text") or ""), max_len=180),
+                score=payload.get("score"),
+                tag=payload.get("tag"),
+                target_tag=payload.get("targetTag"),
+                onclick=self._trim_value(str(payload.get("onclick") or ""), max_len=180),
+            )
+            return "Открыты лабораторные исследования"
+        self._diag(
+            "open_patient_laboratory_window_click_failed",
+            level="warning",
+            reason=payload.get("reason"),
+        )
+        return "Лабораторные исследования не найдены"
+
+    def _wait_for_laboratory_window(self, page: dict[str, Any], timeout_sec: float) -> str:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_text = ""
+        while time.monotonic() < deadline:
+            last_text = self._read_page_text_with_retry(page, attempts=1, delay_sec=0)
+            if self._looks_like_laboratory_window(last_text):
+                self._diag("laboratory_window_ready", text_len=len(last_text))
+                return last_text
+            time.sleep(0.35)
+        self._diag(
+            "laboratory_window_not_ready",
+            level="warning",
+            text_preview=self._compact_text_preview(last_text),
+        )
+        return last_text
+
+    @staticmethod
+    def _looks_like_laboratory_window(text: str) -> bool:
+        normalized = str(text or "").lower()
+        return (
+            "лабораторные исследования" in normalized
+            and "дата записи" in normalized
+            and "результат" in normalized
+        )
+
+    def _set_labs_page_size(self, page: dict[str, Any], amount: int = 150) -> str:
+        amount_json = json.dumps(int(amount))
+        expression = f"""
+(() => {{
+  const amount = {amount_json};
+  const result = {{
+    ok: false,
+    before: '',
+    after: '',
+    rangeFound: false,
+    comboFound: false,
+    itemFound: false,
+    refreshed: false,
+    error: ''
+  }};
+  const range = document.querySelector('[cmptype="Range"][dataset="DS_ANALYSES"]');
+  if (!range) {{
+    result.error = 'range not found';
+    return JSON.stringify(result);
+  }}
+  result.rangeFound = true;
+  result.before = String(range.getAttribute('valuecount') || range.getAttribute('count') || '');
+  range.setAttribute('valuecount', String(amount));
+  range.setAttribute('count', String(amount));
+  const combo = range.querySelector('[cmptype="ComboBox"]');
+  if (combo) {{
+    result.comboFound = true;
+    combo.setAttribute('value', String(amount));
+    combo.setAttribute('keyvalue', String(amount));
+    const input = combo.querySelector('input');
+    if (input) {{
+      try {{
+        input.value = String(amount);
+        input.dispatchEvent(new Event('input', {{bubbles: true}}));
+        input.dispatchEvent(new Event('change', {{bubbles: true}}));
+      }} catch (_) {{}}
+    }}
+    try {{
+      const api = combo.ownerDocument.defaultView.D3Api || window.D3Api;
+      if (api && api.ComboBoxCtrl && typeof api.ComboBoxCtrl.setValue === 'function') {{
+        api.ComboBoxCtrl.setValue(combo, String(amount), {{}});
+      }}
+    }} catch (_) {{}}
+  }}
+  const item = Array.from(range.querySelectorAll('[cmptype="ComboItem"], [value]')).find(el => String(el.getAttribute('value') || el.value || '').trim() === String(amount));
+  if (item) {{
+    result.itemFound = true;
+    try {{
+      if (typeof CountViewItemClick === 'function' && result.before !== String(amount)) CountViewItemClick(item);
+    }} catch (_) {{}}
+  }}
+  try {{
+    if (typeof InsteadRefresh === 'function') {{
+      InsteadRefresh(range);
+      result.refreshed = true;
+    }}
+  }} catch (_) {{}}
+  result.after = String(range.getAttribute('valuecount') || range.getAttribute('count') || '');
+  result.ok = result.after === String(amount) || result.before === String(amount);
+  return JSON.stringify(result);
+}})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        if payload.get("ok"):
+            self._diag(
+                "set_labs_page_size_success",
+                amount=amount,
+                before=payload.get("before"),
+                after=payload.get("after"),
+                combo_found=payload.get("comboFound"),
+                item_found=payload.get("itemFound"),
+                refreshed=payload.get("refreshed"),
+            )
+            return f"Показ записей лаборатории выставлен: {amount}"
+        self._diag(
+            "set_labs_page_size_failed",
+            level="warning",
+            amount=amount,
+            before=payload.get("before"),
+            after=payload.get("after"),
+            range_found=payload.get("rangeFound"),
+            error=payload.get("error"),
+        )
+        return f"Не удалось выставить {amount} записей лаборатории"
+
+    def _wait_for_laboratory_rows(self, page: dict[str, Any], timeout_sec: float) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_rows: list[dict[str, Any]] = []
+        while time.monotonic() < deadline:
+            last_rows = self._extract_laboratory_rows_from_dom(page)
+            if last_rows:
+                self._diag("laboratory_rows_ready", rows_count=len(last_rows))
+                return last_rows
+            time.sleep(0.35)
+        self._diag("laboratory_rows_not_ready", level="warning", rows_count=len(last_rows))
+        return last_rows
+
+    def _wait_for_laboratory_rows_from_requests(
+        self,
+        page: dict[str, Any],
+        timeout_sec: float,
+    ) -> list[dict[str, Any]]:
+        deadline = time.monotonic() + max(0.2, float(timeout_sec))
+        last_rows: list[dict[str, Any]] = []
+        last_seq = 0
+        while time.monotonic() < deadline:
+            requests = self._get_network_capture(page, since_seq=last_seq)
+            if requests:
+                last_seq = max(
+                    last_seq,
+                    max((int(item.get("seq") or 0) for item in requests if isinstance(item, dict)), default=last_seq),
+                )
+            last_rows = self._extract_laboratory_rows_from_requests(requests)
+            if last_rows:
+                self._diag("laboratory_request_rows_ready", rows_count=len(last_rows))
+                return last_rows
+            time.sleep(0.35)
+        self._diag("laboratory_request_rows_not_ready", level="warning", rows_count=len(last_rows))
+        return last_rows
+
+    def _merge_laboratory_rows(
+        self,
+        primary_rows: list[dict[str, Any]],
+        fallback_rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for raw_row in [*primary_rows, *fallback_rows]:
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            row["date"] = self._trim_value(str(row.get("date") or ""), max_len=40)
+            row["name"] = self._strip_html_text(str(row.get("name") or ""), max_len=260)
+            row["result"] = self._strip_html_text(str(row.get("result") or ""), max_len=5000)
+            row["doctor"] = self._strip_html_text(str(row.get("doctor") or ""), max_len=160)
+            key = (row["date"], row["name"], row["result"])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(row)
+        merged.sort(
+            key=lambda row: self._parse_laboratory_datetime(str(row.get("date") or "")) or datetime.datetime.min,
+            reverse=True,
+        )
+        return merged
+
+    def _extract_laboratory_rows_from_dom(self, page: dict[str, Any]) -> list[dict[str, Any]]:
+        expression = """
+(() => {
+  const norm = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const visible = (el) => {
+    try {
+      const style = el.ownerDocument.defaultView.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    } catch (_) {
+      return false;
+    }
+  };
+  const grid = document.querySelector('[name="GRID_ANALYSES"]');
+  if (!grid) return JSON.stringify({ok: false, reason: 'grid not found', rows: []});
+  const cellText = (row, selector) => {
+    const cell = row.querySelector(selector);
+    return cell ? norm(cell.innerText || cell.textContent || cell.value || '') : '';
+  };
+  const rows = [];
+  const rowNodes = Array.from(grid.querySelectorAll('tr[name="GRID_ANALYSES_Row"], tr[repeatername="repeatername_GRID_ANALYSES"]')).filter(visible);
+  for (const row of rowNodes) {
+    const allCells = Array.from(row.querySelectorAll('td')).filter(visible).map(cell => norm(cell.innerText || cell.textContent || ''));
+    const rowIdInput = row.querySelector('input[name="GRID_ANALYSES_SelectList_Item"]');
+    const item = {
+      row_id: rowIdInput ? String(rowIdInput.value || rowIdInput.getAttribute('value') || '') : '',
+      date: cellText(row, 'td[name="HEAD_SREC_DATE"]') || allCells.find(text => /^\d{2}\.\d{2}\.\d{4}/.test(text)) || '',
+      name: cellText(row, 'td[name="HEAD_Наименование"]') || allCells[2] || '',
+      result: cellText(row, 'td[name="HEAD_Результат"]') || allCells[3] || '',
+      doctor: cellText(row, 'td[name="HEAD_REG_EMPLOYER_FIO"]') || allCells[4] || '',
+      source: 'dom'
+    };
+    if (!item.date && !item.name && !item.result) continue;
+    if (String(item.date || '').toLowerCase().includes('дата записи')) continue;
+    rows.push(item);
+  }
+  return JSON.stringify({ok: true, rows});
+})()
+"""
+        payload = self._evaluate_json_expression(page, expression)
+        raw_rows = payload.get("rows")
+        if not isinstance(raw_rows, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for raw in raw_rows:
+            if not isinstance(raw, dict):
+                continue
+            row = {
+                "date": self._trim_value(str(raw.get("date") or ""), max_len=40),
+                "name": self._strip_html_text(str(raw.get("name") or ""), max_len=260),
+                "result": self._strip_html_text(str(raw.get("result") or ""), max_len=5000),
+                "doctor": self._strip_html_text(str(raw.get("doctor") or ""), max_len=160),
+                "row_id": self._trim_value(str(raw.get("row_id") or ""), max_len=80),
+                "source": "dom",
+            }
+            if not row["date"] and not row["name"] and not row["result"]:
+                continue
+            key = (row["date"], row["name"], row["result"])
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+        return rows
+
+    def _extract_laboratory_rows_from_requests(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in requests:
+            if not isinstance(item, dict):
+                continue
+            response_text = str(item.get("response_preview") or "")
+            if not response_text:
+                continue
+
+            json_rows: list[dict[str, Any]] = []
+            if response_text.lstrip().startswith("{"):
+                try:
+                    payload = json.loads(response_text)
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict):
+                    for dataset_name, dataset in payload.items():
+                        if not isinstance(dataset, dict):
+                            continue
+                        data = dataset.get("data")
+                        if not isinstance(data, list):
+                            continue
+                        dataset_marker = str(dataset_name or "").upper()
+                        for raw_row in data:
+                            if isinstance(raw_row, dict):
+                                candidate = dict(raw_row)
+                                candidate["_DATASET_NAME"] = dataset_marker
+                                json_rows.append(candidate)
+            elif "<DataSet" in response_text and "<row>" in response_text:
+                json_rows.extend(self._parse_dataset_rows(response_text))
+
+            for raw_row in json_rows:
+                lab = self._laboratory_row_from_json_row(raw_row)
+                if not lab:
+                    continue
+                key = (lab["date"], lab["name"], lab["result"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(lab)
+
+        rows.sort(key=lambda row: self._parse_laboratory_datetime(row.get("date", "")) or datetime.datetime.min, reverse=True)
+        if rows:
+            self._diag(
+                "extract_laboratory_rows_from_requests_done",
+                rows_count=len(rows),
+                sample=rows[:5],
+            )
+        return rows
+
+    def _laboratory_row_from_json_row(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        dataset_name = str(row.get("_DATASET_NAME") or "").upper()
+        date = self._first_row_value(
+            row,
+            "SREC_DATE",
+            "REC_DATE",
+            "DATE_RECORD",
+            "RECORD_DATE",
+            "DATE_REG",
+            "REG_DATE",
+            "DATE",
+        )
+        name = self._first_row_value(
+            row,
+            "SERVICE_NAME",
+            "SERVICE",
+            "ANALYSIS_NAME",
+            "ANALYSE_NAME",
+            "LAB_NAME",
+            "NAME",
+            "RESEARCH_NAME",
+        )
+        result = self._first_row_value(
+            row,
+            "RESULT",
+            "RESULT_TEXT",
+            "RESULTS",
+            "RES",
+            "VALUE",
+            "LAB_RESULT",
+            "ANALYSIS_RESULT",
+        )
+        doctor = self._first_row_value(
+            row,
+            "REG_EMPLOYER_FIO",
+            "EMPLOYER_FIO",
+            "EMPLOYER_TO_FIO",
+            "DOCTOR",
+            "DOCTOR_FIO",
+        )
+        if not result:
+            for key, value in row.items():
+                key_text = str(key or "").upper()
+                if any(marker in key_text for marker in ("RESULT", "RES_", "_RES", "ЗНАЧ", "РЕЗУЛ")):
+                    result = self._trim_value(str(value or ""), max_len=5000)
+                    if result:
+                        break
+        if not name or not date:
+            return None
+        if "ANAL" not in dataset_name and not result and not any("RESULT" in str(key or "").upper() for key in row):
+            return None
+        return {
+            "date": self._trim_value(date, max_len=40),
+            "name": self._strip_html_text(name, max_len=260),
+            "result": self._strip_html_text(result, max_len=5000),
+            "doctor": self._strip_html_text(doctor, max_len=160),
+            "row_id": self._trim_value(self._first_row_value(row, "ID"), max_len=80),
+            "source": "request",
+        }
+
+    def _filter_laboratory_rows(self, rows: list[dict[str, Any]], mode: str) -> list[dict[str, Any]]:
+        mode = self._normalize_labs_mode(mode)
+        normalized_rows = [dict(row) for row in rows if isinstance(row, dict)]
+        normalized_rows.sort(
+            key=lambda row: self._parse_laboratory_datetime(str(row.get("date") or "")) or datetime.datetime.min,
+            reverse=True,
+        )
+        rows_with_results = [row for row in normalized_rows if str(row.get("result") or "").strip()]
+        source_rows = rows_with_results or normalized_rows
+        if mode == "all":
+            return source_rows
+        if mode == "latest":
+            dated = [
+                (self._parse_laboratory_datetime(str(row.get("date") or "")), row)
+                for row in source_rows
+            ]
+            dated = [(dt, row) for dt, row in dated if dt]
+            if not dated:
+                return source_rows[:20]
+            latest_day = max(dt.date() for dt, _row in dated)
+            return [row for dt, row in dated if dt.date() == latest_day]
+        if mode == "dynamics":
+            grouped: dict[str, list[dict[str, str]]] = {}
+            for row in source_rows:
+                for indicator, value in self._split_laboratory_result_items(str(row.get("result") or "")):
+                    grouped.setdefault(indicator, []).append(
+                        {
+                            "date": self._trim_value(str(row.get("date") or ""), max_len=40),
+                            "value": self._trim_value(value, max_len=180),
+                            "analysis": self._trim_value(str(row.get("name") or ""), max_len=220),
+                        }
+                    )
+            dynamics: list[dict[str, Any]] = []
+            for indicator, values in grouped.items():
+                values.sort(
+                    key=lambda value: self._parse_laboratory_datetime(value.get("date", "")) or datetime.datetime.min,
+                    reverse=True,
+                )
+                if len(values) < 1:
+                    continue
+                dynamics.append(
+                    {
+                        "indicator": indicator,
+                        "date": values[0].get("date", ""),
+                        "result": values[0].get("value", ""),
+                        "timeline": values[:30],
+                        "source": "dynamics",
+                    }
+                )
+            dynamics.sort(key=lambda row: str(row.get("indicator") or ""))
+            return dynamics
+        return source_rows
+
+    @staticmethod
+    def _parse_laboratory_datetime(value: str) -> Optional[datetime.datetime]:
+        return parse_bars_laboratory_datetime(value)
+
+    @staticmethod
+    def _split_laboratory_result_items(result: str) -> list[tuple[str, str]]:
+        return split_bars_laboratory_result_items(result)
+
     def _extract_visible_patient_rows(self, page: dict[str, Any], department: str) -> list[dict[str, str]]:
         expression = """
 (() => {
@@ -2617,8 +4119,14 @@ class BarsAuthService:
     ) -> list[dict[str, str]]:
         deadline = time.monotonic() + max(0.2, float(timeout_sec))
         last_patients: list[dict[str, str]] = []
+        last_seq = 0
         while time.monotonic() < deadline:
-            requests = self._get_network_capture(page)
+            requests = self._get_network_capture(page, since_seq=last_seq)
+            if requests:
+                last_seq = max(
+                    last_seq,
+                    max((int(item.get("seq") or 0) for item in requests if isinstance(item, dict)), default=last_seq),
+                )
             last_patients = self._extract_department_patients_from_requests(requests, department)
             if last_patients:
                 self._diag(
@@ -2809,15 +4317,7 @@ class BarsAuthService:
         )
         age = self._first_row_value(row, "AGE", "PATIENT_AGE")
         doctor = self._first_row_value(row, "HEALING_EMP_NAME", "HEALING_DOCTOR", "DOCTOR", "EMP_NAME")
-        diagnosis = self._first_row_value(
-            row,
-            "DIAGNOSIS",
-            "DIAGNOSIS_FROM",
-            "HOSP_MKB",
-            "MKB",
-            "MKB_NAME",
-            "DIAG_NAME",
-        )
+        diagnosis = self._first_diagnosis_from_row(row)
         return {
             "history_number": self._trim_value(history_number, max_len=260),
             "full_name": self._trim_value(full_name, max_len=220),
@@ -2838,6 +4338,40 @@ class BarsAuthService:
             if text:
                 return text
         return ""
+
+    def _first_diagnosis_from_row(self, row: dict[str, Any]) -> str:
+        diagnosis = self._first_row_value(
+            row,
+            "DIAGNOSIS",
+            "DIAGNOSIS_FROM",
+            "DIAGNOSIS_NAME",
+            "DIAGNOSIS_TEXT",
+            "MAIN_DIAGNOSIS",
+            "HOSP_DIAGNOSIS",
+            "HOSP_MKB",
+            "MKB",
+            "MKB_CODE",
+            "MKB_NAME",
+            "MKB_TEXT",
+            "DIAG",
+            "DIAG_NAME",
+            "DIAG_TEXT",
+        )
+        if diagnosis:
+            return diagnosis
+
+        keyed_values: list[str] = []
+        for key, value in row.items():
+            key_text = str(key or "").upper()
+            if not any(marker in key_text for marker in ("DIAG", "DIAGNOS", "MKB", "МКБ")):
+                continue
+            text = self._trim_value(str(value or ""), max_len=300)
+            if text:
+                keyed_values.append(text)
+        if keyed_values:
+            return keyed_values[0]
+
+        return self._first_diagnosis_match([str(value or "") for value in row.values()])
 
     def _guess_name_from_row(self, row: dict[str, Any]) -> str:
         preferred_keys = sorted(
@@ -2952,6 +4486,8 @@ class BarsAuthService:
     def _install_network_capture(self, page: dict[str, Any]) -> str:
         expression = """
 (() => {
+  const maxRequests = __MAX_REQUESTS__;
+  const previewChars = __PREVIEW_CHARS__;
   const serializeBody = (body) => {
     try {
       if (body == null) return '';
@@ -2969,19 +4505,33 @@ class BarsAuthService:
   const absoluteUrl = (win, url) => {
     try { return new URL(String(url || ''), win.location.href).href; } catch (_) { return String(url || ''); }
   };
+  const shouldCapture = (url, requestBody, responseText) => {
+    const haystack = `${url || ''}\n${requestBody || ''}\n${String(responseText || '').slice(0, 2000)}`.toLowerCase();
+    return haystack.includes('/d3/')
+      || haystack.includes('request=')
+      || haystack.includes('dataset')
+      || haystack.includes('dsdutydoctor')
+      || haystack.includes('ds_analyses')
+      || haystack.includes('analys')
+      || haystack.includes('анализ')
+      || haystack.includes('hosp_history');
+  };
   const push = (win, item) => {
     try {
       if (!win.__remcardBarsCapturedRequests) win.__remcardBarsCapturedRequests = [];
+      win.__remcardBarsCaptureSeq = Number(win.__remcardBarsCaptureSeq || 0) + 1;
+      item.seq = win.__remcardBarsCaptureSeq;
       win.__remcardBarsCapturedRequests.push(item);
-      if (win.__remcardBarsCapturedRequests.length > 200) win.__remcardBarsCapturedRequests.shift();
+      while (win.__remcardBarsCapturedRequests.length > maxRequests) win.__remcardBarsCapturedRequests.shift();
     } catch (_) {}
   };
   const patchWindow = (win) => {
     try {
-      if (!win || !win.XMLHttpRequest || win.__remcardBarsCaptureVersion === 2) return false;
+      if (!win || !win.XMLHttpRequest || win.__remcardBarsCaptureVersion === 3) return false;
       win.__remcardBarsCaptureInstalled = true;
-      win.__remcardBarsCaptureVersion = 2;
+      win.__remcardBarsCaptureVersion = 3;
       win.__remcardBarsCapturedRequests = [];
+      win.__remcardBarsCaptureSeq = 0;
 
       const xhrProto = win.XMLHttpRequest.prototype;
       const originalOpen = xhrProto.open;
@@ -3004,15 +4554,17 @@ class BarsAuthService:
             try {
               if (!this.responseType || this.responseType === 'text') responseText = String(this.responseText || '');
             } catch (_) {}
+            const responseUrl = info.url || String(this.responseURL || '');
+            if (!shouldCapture(responseUrl, requestBody, responseText)) return;
             push(win, {
               kind: 'xhr',
               method: info.method,
-              url: info.url || String(this.responseURL || ''),
+              url: responseUrl,
               body: requestBody.slice(0, 4000),
               status: this.status || 0,
               response_url: String(this.responseURL || ''),
               response_len: responseText.length,
-              response_preview: responseText.slice(0, 250000),
+              response_preview: responseText.slice(0, previewChars),
               duration_ms: Date.now() - started
             });
           });
@@ -3029,6 +4581,7 @@ class BarsAuthService:
           const requestBody = serializeBody(init && init.body);
           return originalFetch.apply(this, arguments).then((response) => {
             try {
+              if (!shouldCapture(url, requestBody, '')) return response;
               response.clone().text().then((text) => {
                 push(win, {
                   kind: 'fetch',
@@ -3038,7 +4591,7 @@ class BarsAuthService:
                   status: response.status || 0,
                   response_url: String(response.url || ''),
                   response_len: String(text || '').length,
-                  response_preview: String(text || '').slice(0, 250000),
+                  response_preview: String(text || '').slice(0, previewChars),
                   duration_ms: Date.now() - started
                 });
               }).catch(() => {
@@ -3068,6 +4621,11 @@ class BarsAuthService:
   return JSON.stringify({ok: true, patched});
 })()
 """
+        expression = (
+            expression
+            .replace("__MAX_REQUESTS__", str(int(self._capture_max_requests)))
+            .replace("__PREVIEW_CHARS__", str(int(self._capture_preview_chars)))
+        )
         payload = self._evaluate_json_expression(page, expression)
         self._diag("install_network_capture", patched=payload.get("patched"))
         return f"Перехватчик запросов установлен: {payload.get('patched') or 0}"
@@ -3080,6 +4638,7 @@ class BarsAuthService:
     try {
       if (win.__remcardBarsCapturedRequests) {
         win.__remcardBarsCapturedRequests = [];
+        win.__remcardBarsCaptureSeq = 0;
         cleared += 1;
       }
       const frames = win.document ? win.document.querySelectorAll('iframe,frame') : [];
@@ -3095,14 +4654,17 @@ class BarsAuthService:
         payload = self._evaluate_json_expression(page, expression)
         self._diag("clear_network_capture", cleared=payload.get("cleared"))
 
-    def _get_network_capture(self, page: dict[str, Any]) -> list[dict[str, Any]]:
+    def _get_network_capture(self, page: dict[str, Any], since_seq: int = 0) -> list[dict[str, Any]]:
         expression = """
 (() => {
+  const sinceSeq = __SINCE_SEQ__;
   const requests = [];
   const walk = (win) => {
     try {
       if (Array.isArray(win.__remcardBarsCapturedRequests)) {
-        for (const item of win.__remcardBarsCapturedRequests) requests.push(item);
+        for (const item of win.__remcardBarsCapturedRequests) {
+          if (!sinceSeq || Number(item.seq || 0) > sinceSeq) requests.push(item);
+        }
       }
       const frames = win.document ? win.document.querySelectorAll('iframe,frame') : [];
       for (const frame of frames) {
@@ -3114,9 +4676,34 @@ class BarsAuthService:
   return JSON.stringify({ok: true, requests});
 })()
 """
+        expression = expression.replace("__SINCE_SEQ__", str(max(0, int(since_seq or 0))))
         payload = self._evaluate_json_expression(page, expression)
         requests = payload.get("requests")
-        return requests if isinstance(requests, list) else []
+        return self._dedupe_captured_requests(requests if isinstance(requests, list) else [])
+
+    @staticmethod
+    def _dedupe_captured_requests(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deduped: dict[tuple[str, str, str, int, str], dict[str, Any]] = {}
+        order: list[tuple[str, str, str, int, str]] = []
+        for item in requests:
+            if not isinstance(item, dict):
+                continue
+            preview = str(item.get("response_preview") or "")
+            key = (
+                str(item.get("method") or ""),
+                str(item.get("url") or item.get("response_url") or ""),
+                str(item.get("body") or ""),
+                int(item.get("response_len") or len(preview) or 0),
+                preview[:300],
+            )
+            existing = deduped.get(key)
+            if existing is None:
+                order.append(key)
+                deduped[key] = item
+                continue
+            if int(item.get("seq") or 0) > int(existing.get("seq") or 0):
+                deduped[key] = item
+        return [deduped[key] for key in order]
 
     def _summarize_captured_requests(
         self,
@@ -3192,10 +4779,7 @@ class BarsAuthService:
                         "history_number": history_number,
                         "full_name": full_name,
                         "birthdate": self._trim_value(row.get("PATIENT_BIRTHDATE") or "", max_len=40),
-                        "diagnosis": self._trim_value(
-                            row.get("DIAGNOSIS_FROM") or row.get("HOSP_MKB") or "",
-                            max_len=220,
-                        ),
+                        "diagnosis": self._trim_value(self._first_diagnosis_from_row(row), max_len=220),
                     }
                 )
         matches.sort(key=lambda item: item.get("history_number", ""))
@@ -3605,9 +5189,76 @@ class BarsAuthService:
             full_name = self._guess_full_name(preview)
         return full_name, matched_line, preview
 
+    def _extract_patient_matches_from_search_text(self, text: str, query: str) -> list[dict[str, str]]:
+        lines = [self._trim_value(line.strip(), max_len=700) for line in str(text or "").splitlines()]
+        lines = [line for line in lines if line]
+        patients: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        for index, line in enumerate(lines):
+            history_match = re.search(r"(.+?\\\d{2,})", line)
+            if not history_match:
+                continue
+
+            history_number = self._trim_value(history_match.group(1), max_len=260)
+            inline_tail = line[history_match.end() :].strip()
+            context = lines[index : index + 14]
+            full_name = self._guess_full_name(inline_tail)
+            if not full_name:
+                for candidate in context[1:7]:
+                    full_name = self._guess_full_name(candidate)
+                    if full_name:
+                        break
+            if not history_number or not full_name:
+                continue
+
+            patient = {
+                "history_number": history_number,
+                "full_name": self._trim_value(full_name, max_len=220),
+                "birthdate": self._first_regex_match(context, r"\b\d{2}\.\d{2}\.\d{4}\b"),
+                "diagnosis": self._trim_value(self._first_diagnosis_match(context), max_len=300),
+                "matched_line": line,
+            }
+            if not self._patient_matches_search_query(patient, query):
+                continue
+
+            key = (patient["history_number"], patient["full_name"])
+            if key in seen:
+                continue
+            seen.add(key)
+            patients.append(patient)
+
+        patients.sort(key=lambda item: (item.get("full_name", ""), item.get("history_number", "")))
+        self._diag(
+            "extract_patient_matches_from_search_text_done",
+            query=query,
+            lines_count=len(lines),
+            patients_count=len(patients),
+        )
+        return patients
+
+    def _patient_matches_search_query(self, patient: dict[str, str], query: str) -> bool:
+        query_history = self._normalize_history_fragment(query)
+        patient_history = self._normalize_history_fragment(patient.get("history_number", ""))
+        if query_history and query_history in patient_history:
+            return True
+
+        query_text = self._normalize_patient_search(query)
+        if not query_text:
+            return True
+        full_name = self._normalize_patient_search(patient.get("full_name", ""))
+        query_words = [word for word in query_text.split() if word]
+        return bool(full_name and query_words and all(word in full_name for word in query_words))
+
     @staticmethod
     def _normalize_history(value: str) -> str:
         return re.sub(r"\s+", "", str(value or "").lower())
+
+    @staticmethod
+    def _normalize_patient_search(value: str) -> str:
+        normalized = str(value or "").lower().replace("ё", "е")
+        normalized = re.sub(r"[^0-9a-zа-я]+", " ", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
 
     @staticmethod
     def _first_regex_match(values: list[str], pattern: str) -> str:
@@ -3780,7 +5431,7 @@ class BarsAuthService:
         payload = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
             "event": event,
-            **fields,
+            **self._sanitize_diag_fields(fields),
         }
         line = json.dumps(payload, ensure_ascii=False, default=str)
         try:
@@ -3799,6 +5450,45 @@ class BarsAuthService:
             logger.error(message)
         else:
             logger.info(message)
+
+    def _sanitize_diag_fields(self, fields: dict[str, Any]) -> dict[str, Any]:
+        if self._verbose_diag:
+            return fields
+        return {key: self._sanitize_diag_value(value, key=key) for key, value in fields.items()}
+
+    def _sanitize_diag_value(self, value: Any, key: str = "", depth: int = 0) -> Any:
+        if self._verbose_diag:
+            return value
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            limit = self.DIAG_STRING_LIMITS.get(key, 900 if key.endswith("preview") else 500)
+            return self._trim_diag_string(value, limit)
+        if depth >= 5:
+            return self._trim_diag_string(str(value), 300)
+        if isinstance(value, dict):
+            return {
+                str(item_key): self._sanitize_diag_value(item_value, key=str(item_key), depth=depth + 1)
+                for item_key, item_value in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            limit = self.DIAG_LIST_LIMITS.get(key, 12)
+            sanitized = [
+                self._sanitize_diag_value(item, key=key, depth=depth + 1)
+                for item in list(value)[:limit]
+            ]
+            omitted_count = len(value) - limit
+            if omitted_count > 0:
+                sanitized.append({"_omitted_count": omitted_count})
+            return sanitized
+        return self._trim_diag_string(str(value), 500)
+
+    @staticmethod
+    def _trim_diag_string(value: str, max_len: int) -> str:
+        text = str(value or "")
+        if len(text) <= max_len:
+            return text
+        return f"{text[:max_len]}... <truncated {len(text) - max_len} chars>"
 
     def _cdp_call(self, ws_url: str, payload: dict[str, Any], timeout_sec: float = 5.0) -> dict[str, Any]:
         parsed = urlparse(ws_url)
