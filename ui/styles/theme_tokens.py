@@ -4,7 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 
-STYLE_SETTINGS_VERSION = 1
+STYLE_SETTINGS_VERSION = 2
 DEFAULT_PRESET_ID = "remcard_light"
 DEFAULT_MODE = "light"
 DEFAULT_DENSITY = "normal"
@@ -34,6 +34,7 @@ def default_role_settings() -> dict[str, Any]:
 def default_settings_payload() -> dict[str, Any]:
     return {
         "version": STYLE_SETTINGS_VERSION,
+        "custom_presets": {},
         "active": {
             "doctor": default_role_settings(),
             "nurse": default_role_settings(),

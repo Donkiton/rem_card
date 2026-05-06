@@ -17,6 +17,13 @@ QMainWindow, QDialog {{
     background-color: {t("surface.window")};
 }}
 
+QFrame#MainFrame,
+QWidget#bg_container,
+QWidget#container,
+QWidget#patient_bed_root {{
+    background-color: {t("surface.window")} !important;
+}}
+
 QToolTip {{
     background-color: {t("surface.card")} !important;
     color: {t("text.primary")} !important;

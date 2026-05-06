@@ -19,34 +19,20 @@ class ThemePreset:
 PRESETS: dict[str, ThemePreset] = {
     "remcard_light": ThemePreset(
         id="remcard_light",
-        name="Ремкарта светлая",
+        name="Светлая",
         description="Стандартная светлая тема по умолчанию.",
         default_mode="light",
-        supported_modes=("light", "dark"),
+        supported_modes=("light",),
     ),
     "remcard_dark": ThemePreset(
         id="remcard_dark",
-        name="Ремкарта темная",
+        name="Темная",
         description="Спокойный темный режим для работы ночью.",
         default_mode="dark",
-        supported_modes=("dark", "light"),
-    ),
-    "gray_compact": ThemePreset(
-        id="gray_compact",
-        name="Серая компактная",
-        description="Более плотная светлая тема для таблиц и журналов.",
-        default_mode="light",
-        supported_modes=("light", "dark"),
-        density="compact",
-    ),
-    "high_contrast": ThemePreset(
-        id="high_contrast",
-        name="Контрастная",
-        description="Повышенная читаемость элементов и текста.",
-        default_mode="light",
-        supported_modes=("light", "dark"),
+        supported_modes=("dark",),
     ),
 }
+BUILTIN_PRESET_IDS = tuple(PRESETS.keys())
 
 
 BASE_MEDICAL_TOKENS: dict[str, Any] = {
@@ -294,61 +280,6 @@ DARK_TOKENS: dict[str, Any] = {
 }
 
 
-GRAY_COMPACT_OVERRIDES: dict[str, Any] = {
-    "surface.window": "#f1f3f5",
-    "surface.panel": "#dde2e6",
-    "surface.hover": "#cfd5db",
-    "surface.pressed": "#aeb6bf",
-    "border.default": "#aeb6bf",
-    "border.subtle": "#cfd5db",
-    "button.neutral.bg": "#e3e7eb",
-    "button.neutral.hover": "#cfd5db",
-    "table.header_bg": "#dde2e6",
-    "sector.header_bg": "#dde2e6",
-    "density.control_height": "28px",
-    "density.table_padding": "4px",
-}
-
-
-HIGH_CONTRAST_LIGHT_OVERRIDES: dict[str, Any] = {
-    "surface.window": "#ffffff",
-    "surface.panel": "#f0f0f0",
-    "surface.card": "#ffffff",
-    "text.primary": "#000000",
-    "text.secondary": "#111111",
-    "text.muted": "#555555",
-    "border.default": "#222222",
-    "border.subtle": "#555555",
-    "border.focus": "#000000",
-    "button.neutral.bg": "#f5f5f5",
-    "button.neutral.text": "#000000",
-    "button.neutral.border": "#222222",
-    "button.neutral.hover": "#e3e3e3",
-    "table.row_selected_bg": "#333333",
-    "sector.title_text": "#000000",
-}
-
-
-HIGH_CONTRAST_DARK_OVERRIDES: dict[str, Any] = {
-    "surface.window": "#0d0f10",
-    "surface.panel": "#181b1d",
-    "surface.card": "#111416",
-    "surface.input": "#0d0f10",
-    "text.primary": "#ffffff",
-    "text.secondary": "#f1f1f1",
-    "text.muted": "#c6c6c6",
-    "border.default": "#d8d8d8",
-    "border.subtle": "#8a8a8a",
-    "border.focus": "#ffffff",
-    "button.neutral.bg": "#24282b",
-    "button.neutral.text": "#ffffff",
-    "button.neutral.border": "#d8d8d8",
-    "button.neutral.hover": "#343a3f",
-    "table.row_selected_bg": "#d8d8d8",
-    "sector.title_text": "#ffffff",
-}
-
-
 def list_presets() -> list[ThemePreset]:
     return list(PRESETS.values())
 
@@ -365,12 +296,6 @@ def build_tokens(preset_id: str | None = None, mode: str | None = None, override
     preset = get_preset(preset_id)
     normalized_mode = normalize_mode(mode or preset.default_mode or DEFAULT_MODE)
     base = DARK_TOKENS if normalized_mode == "dark" else LIGHT_TOKENS
-    preset_overrides: dict[str, Any] = {}
-
-    if preset.id == "gray_compact":
-        preset_overrides = GRAY_COMPACT_OVERRIDES
-    elif preset.id == "high_contrast":
-        preset_overrides = HIGH_CONTRAST_DARK_OVERRIDES if normalized_mode == "dark" else HIGH_CONTRAST_LIGHT_OVERRIDES
 
     tokens = merge_tokens(
         LIGHT_TOKENS,
@@ -382,7 +307,6 @@ def build_tokens(preset_id: str | None = None, mode: str | None = None, override
             "meta.mode": normalized_mode,
             "meta.density": preset.density,
         },
-        preset_overrides,
         overrides or {},
     )
     return tokens

@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from rem_card.app.runtime_paths import get_executable_dir
-from rem_card.ui.styles.theme_presets import get_preset
+from rem_card.ui.styles.theme_presets import BUILTIN_PRESET_IDS, get_preset
 from rem_card.ui.styles.theme_tokens import (
     DEFAULT_MODE,
     DEFAULT_PRESET_ID,
@@ -119,28 +119,85 @@ class ThemeStorage:
 
     def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         result = default_settings_payload()
-        result["version"] = int(payload.get("version") or STYLE_SETTINGS_VERSION)
+        result["version"] = STYLE_SETTINGS_VERSION
+        result["custom_presets"] = self._normalize_custom_presets(payload.get("custom_presets"))
         active = payload.get("active")
         if not isinstance(active, dict):
             return result
 
+        available_preset_ids = set(BUILTIN_PRESET_IDS) | set(result["custom_presets"])
         for role in ("doctor", "nurse"):
             role_data = active.get(role)
-            result["active"][role] = self._normalize_role_settings(role_data)
+            result["active"][role] = self._normalize_role_settings(
+                role_data,
+                available_preset_ids=available_preset_ids,
+                custom_presets=result["custom_presets"],
+            )
         return result
 
-    def _normalize_role_settings(self, data: Any) -> dict[str, Any]:
+    def _normalize_custom_presets(self, data: Any) -> dict[str, dict[str, Any]]:
+        if not isinstance(data, dict):
+            return {}
+
+        normalized: dict[str, dict[str, Any]] = {}
+        for raw_id, raw_data in data.items():
+            if not isinstance(raw_data, dict):
+                continue
+            preset_id = str(raw_data.get("id") or raw_id or "").strip()
+            if not preset_id.startswith("custom_"):
+                continue
+            name = str(raw_data.get("name") or "").strip()
+            if not name:
+                continue
+
+            base_preset_id = str(raw_data.get("base_preset_id") or DEFAULT_PRESET_ID)
+            if base_preset_id not in BUILTIN_PRESET_IDS:
+                base_preset_id = DEFAULT_PRESET_ID
+            base_preset = get_preset(base_preset_id)
+
+            mode = normalize_mode(raw_data.get("mode") or base_preset.default_mode or DEFAULT_MODE)
+            density = str(raw_data.get("density") or base_preset.density or "normal")
+            overrides = raw_data.get("overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+
+            normalized[preset_id] = {
+                "id": preset_id,
+                "name": name,
+                "description": str(raw_data.get("description") or "Пользовательская тема."),
+                "base_preset_id": base_preset_id,
+                "mode": mode,
+                "density": density,
+                "overrides": dict(overrides),
+            }
+        return normalized
+
+    def _normalize_role_settings(
+        self,
+        data: Any,
+        *,
+        available_preset_ids: set[str] | None = None,
+        custom_presets: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         normalized = default_role_settings()
         if not isinstance(data, dict):
             return normalized
 
         preset_id = str(data.get("preset_id") or DEFAULT_PRESET_ID)
-        preset = get_preset(preset_id)
-        if preset.id != preset_id:
+        available = available_preset_ids or set(BUILTIN_PRESET_IDS)
+        custom_presets = custom_presets or {}
+        if preset_id not in available:
             preset_id = DEFAULT_PRESET_ID
 
-        mode = normalize_mode(data.get("mode") or preset.default_mode or DEFAULT_MODE)
-        density = str(data.get("density") or preset.density or "normal")
+        custom = custom_presets.get(preset_id)
+        if custom:
+            mode = normalize_mode(custom.get("mode") or DEFAULT_MODE)
+            density = str(custom.get("density") or "normal")
+        else:
+            preset = get_preset(preset_id)
+            mode = normalize_mode(preset.default_mode or DEFAULT_MODE)
+            density = str(preset.density or "normal")
+
         overrides = data.get("overrides")
         if not isinstance(overrides, dict):
             overrides = {}
