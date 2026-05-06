@@ -2,7 +2,6 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFr
 from PySide6.QtCore import Qt, QTimer, Signal
 from ..shared.layout_components import SectorFactory, SplitterManager
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
-from .components.nurse_orders_widget import NurseOrdersWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
 
 class NurseRemCardLayoutManager(QWidget):
@@ -105,9 +104,9 @@ class NurseRemCardLayoutManager(QWidget):
         self.vitals_splitter.addWidget(self.sector_2v)
         self.vitals_stack.addWidget(self.vitals_splitter)
         
-        # Вкладка Назначения
-        self.orders_widget = NurseOrdersWidget(service=self.remcard_service, defer_ui=True)
-        self.vitals_stack.addWidget(self.orders_widget)
+        # Вкладка назначений создаётся лениво: на W1 она не участвует в работе.
+        self._orders_tab_placeholder = QWidget()
+        self.vitals_stack.addWidget(self._orders_tab_placeholder)
         
         # Вкладка Баланс
         self.balance_tab_widget = QWidget()
@@ -271,8 +270,6 @@ class NurseRemCardLayoutManager(QWidget):
         # Ленивая инициализация менеджера назначений для 1а и 5 через фасад сервиса
         self.nurse_orders_manager = None
         
-        self.orders_widget.orderMarked.connect(self._refresh_nurse_orders_manager)
-        
         self.lower_area.addWidget(self.left_column)
         self.lower_area.addWidget(self.selection_stack)
 
@@ -428,6 +425,28 @@ class NurseRemCardLayoutManager(QWidget):
             self.remcard_service, self.sector_1a, self.sector_5
         )
         return self.nurse_orders_manager
+
+    def ensure_orders_widget(self):
+        if hasattr(self, "orders_widget") and self.orders_widget is not None:
+            return self.orders_widget
+
+        from .components.nurse_orders_widget import NurseOrdersWidget
+
+        self.orders_widget = NurseOrdersWidget(service=self.remcard_service, defer_ui=True)
+        self.orders_widget.orderMarked.connect(self._refresh_nurse_orders_manager)
+
+        placeholder = getattr(self, "_orders_tab_placeholder", None)
+        index = self.vitals_stack.indexOf(placeholder) if placeholder is not None else -1
+        current_index = self.vitals_stack.currentIndex()
+        if index >= 0:
+            self.vitals_stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+            self.vitals_stack.insertWidget(index, self.orders_widget)
+            if current_index == index:
+                self.vitals_stack.setCurrentIndex(index)
+        else:
+            self.vitals_stack.addWidget(self.orders_widget)
+        return self.orders_widget
 
     def _refresh_nurse_orders_manager(self):
         mgr = self.ensure_nurse_orders_manager()
@@ -587,9 +606,11 @@ class NurseRemCardLayoutManager(QWidget):
             }
             if tab_name in tab_map:
                 idx = tab_map[tab_name]
+                is_orders = (tab_name == "Назначения")
+                if is_orders:
+                    self.ensure_orders_widget()
                 self.vitals_stack.setCurrentIndex(idx)
                 
-                is_orders = (tab_name == "Назначения")
                 self.bottom_row.setVisible(not is_orders)
                 self.sector_7na_b_nurse.setVisible(is_orders)
 

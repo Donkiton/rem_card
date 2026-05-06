@@ -77,6 +77,7 @@ class DoctorRemCardWidget(QWidget):
         self._balance_calculator_cls = None
         self._archive_signals_bound = False
         self._admin_signals_bound = False
+        self._orders_widget_signals_bound = False
         self._nurse_orders_balance_signals_bound = False
         self.report_controller = None
         self._card_ui_prewarm_started = False
@@ -1351,7 +1352,7 @@ class DoctorRemCardWidget(QWidget):
 
         self._balance_update_timer.stop()
 
-        orders_widget = getattr(self.layout_manager, "orders_widget", None)
+        orders_widget = self._ensure_orders_widget()
         orders_context_unchanged = False
         if orders_widget is not None:
             try:
@@ -1605,8 +1606,6 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self.layout_manager, 'orders_widget'):
             self.layout_manager.orders_widget.service = self.service
 
-        self._ensure_diet_widget()
-
         self.controls = ControlPanel(orientation=Qt.Vertical)
         self.controls.btn_yesterday.setText(" Вчерашнее")
         self.controls.btn_rollback.setText(" Отмена")
@@ -1636,28 +1635,7 @@ class DoctorRemCardWidget(QWidget):
             self.layout_manager.selection_mode_changed.connect(self._on_selection_mode_changed)
             self._on_selection_mode_changed(getattr(self.layout_manager, "current_mode", "beds"))
 
-        if hasattr(self.layout_manager, 'orders_widget'):
-            ow = self.layout_manager.orders_widget
-            ow.draftStatusChanged.connect(self.controls.set_save_active)
-            ow.draftStatusChanged.connect(self.controls.set_rollback_active)
-            ow.administrationStatusChanged.connect(self.controls.set_clean_active)
-            ow.ordersPresenceChanged.connect(self.controls.set_clear_active)
-            ow.draftStatusChanged.connect(self._schedule_balance_update)
-            ow.administrationStatusChanged.connect(self._schedule_balance_update)
-            ow.ordersPresenceChanged.connect(self._schedule_balance_update)
-            if hasattr(ow, "localBalanceChanged"):
-                ow.localBalanceChanged.connect(self._schedule_balance_update)
-            self.controls.btn_save.clicked.connect(ow.finalize_card)
-            self.controls.btn_clean_sheet.clicked.connect(self.on_clean_sheet_clicked)
-            self.controls.btn_clear.clicked.connect(self.on_clear_orders_clicked)
-            self.controls.btn_yesterday.clicked.connect(ow.load_yesterday_orders)
-            self.controls.btn_rollback.clicked.connect(self.on_rollback_clicked)
-            self.controls.btn_templates.clicked.connect(ow.open_template_dialog)
-            has_drafts = ow.has_drafts()
-            self.controls.set_save_active(has_drafts)
-            self.controls.set_rollback_active(has_drafts)
-            self.controls.set_clean_active(ow.has_administrations())
-            self.controls.set_clear_active(ow.has_orders())
+        self._bind_orders_widget_signals()
 
         if (
             hasattr(self.layout_manager, 'sector_7na_b')
@@ -1700,6 +1678,47 @@ class DoctorRemCardWidget(QWidget):
             admin_widget.btn_back_to_roles.clicked.connect(lambda: self.on_back_clicked())
             self._admin_signals_bound = True
 
+    def _ensure_orders_widget(self):
+        layout = getattr(self, "layout_manager", None)
+        if layout is None:
+            return None
+        if hasattr(layout, "ensure_orders_widget"):
+            ow = layout.ensure_orders_widget()
+        else:
+            ow = getattr(layout, "orders_widget", None)
+        if ow is not None:
+            ow.service = self.service
+            self._bind_orders_widget_signals(ow)
+        return ow
+
+    def _bind_orders_widget_signals(self, ow=None):
+        if self._orders_widget_signals_bound:
+            return
+        ow = ow or getattr(getattr(self, "layout_manager", None), "orders_widget", None)
+        if ow is None or not hasattr(self, "controls"):
+            return
+        ow.draftStatusChanged.connect(self.controls.set_save_active)
+        ow.draftStatusChanged.connect(self.controls.set_rollback_active)
+        ow.administrationStatusChanged.connect(self.controls.set_clean_active)
+        ow.ordersPresenceChanged.connect(self.controls.set_clear_active)
+        ow.draftStatusChanged.connect(self._schedule_balance_update)
+        ow.administrationStatusChanged.connect(self._schedule_balance_update)
+        ow.ordersPresenceChanged.connect(self._schedule_balance_update)
+        if hasattr(ow, "localBalanceChanged"):
+            ow.localBalanceChanged.connect(self._schedule_balance_update)
+        self.controls.btn_save.clicked.connect(ow.finalize_card)
+        self.controls.btn_clean_sheet.clicked.connect(self.on_clean_sheet_clicked)
+        self.controls.btn_clear.clicked.connect(self.on_clear_orders_clicked)
+        self.controls.btn_yesterday.clicked.connect(ow.load_yesterday_orders)
+        self.controls.btn_rollback.clicked.connect(self.on_rollback_clicked)
+        self.controls.btn_templates.clicked.connect(ow.open_template_dialog)
+        has_drafts = ow.has_drafts()
+        self.controls.set_save_active(has_drafts)
+        self.controls.set_rollback_active(has_drafts)
+        self.controls.set_clean_active(ow.has_administrations())
+        self.controls.set_clear_active(ow.has_orders())
+        self._orders_widget_signals_bound = True
+
     def _on_selection_mode_changed(self, mode: str):
         self._selection_mode = str(mode or "")
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
@@ -1731,10 +1750,9 @@ class DoctorRemCardWidget(QWidget):
         if self._card_ui_prewarm_done:
             return
         try:
-            if hasattr(self.layout_manager, 'orders_widget'):
-                ow = self.layout_manager.orders_widget
-                if getattr(ow, "main_layout", None) is None:
-                    ow.setup_ui()
+            ow = self._ensure_orders_widget()
+            if ow is not None and getattr(ow, "main_layout", None) is None:
+                ow.setup_ui()
             QTimer.singleShot(CARD_UI_PREWARM_STAGGER_MS, self._run_card_ui_prewarm_stage_3)
         except Exception as exc:
             logger.warning("Doctor card UI prewarm stage2 failed: %s", exc)
@@ -2226,6 +2244,7 @@ class DoctorRemCardWidget(QWidget):
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":
             ow = self.layout_manager.orders_widget
+            self._bind_orders_widget_signals(ow)
             if hasattr(ow, "set_context"):
                 ow.set_context(
                     service=self.service,

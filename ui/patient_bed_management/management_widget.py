@@ -186,14 +186,8 @@ class PatientBedManagementWidget(QWidget):
                 int(bed_number),
                 admission_id,
             )
-            dialog.finished.connect(
-                lambda result, bed=int(bed_number), expected_id=admission_id: self._on_patient_form_finished(
-                    result,
-                    bed,
-                    expected_id,
-                )
-            )
-            dialog.open()
+            result = dialog.exec()
+            self._on_patient_form_finished(result, int(bed_number), admission_id)
         except Exception:
             self._active_patient_form = None
             self._active_patient_form_context = None

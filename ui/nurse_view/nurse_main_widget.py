@@ -1109,7 +1109,6 @@ class NurseMainWidget(QWidget):
         self.sector8_panel.style_clicked.connect(self.on_style_clicked)
         
         self.layout_manager.sector_8.set_content(self.sector8_panel)
-        self._ensure_diet_widget()
         if hasattr(self.layout_manager, "selection_mode_changed"):
             self.layout_manager.selection_mode_changed.connect(self._on_selection_mode_changed)
             self._on_selection_mode_changed(getattr(self.layout_manager, "current_mode", "beds"))
@@ -1139,6 +1138,19 @@ class NurseMainWidget(QWidget):
         if hasattr(orders_widget, "localBalanceChanged"):
             orders_widget.localBalanceChanged.connect(self._schedule_balance_update)
         self._orders_balance_signals_bound = True
+
+    def _ensure_orders_widget(self):
+        layout = getattr(self, "layout_manager", None)
+        if layout is None:
+            return None
+        if hasattr(layout, "ensure_orders_widget"):
+            ow = layout.ensure_orders_widget()
+        else:
+            ow = getattr(layout, "orders_widget", None)
+        if ow is not None:
+            ow.service = self.remcard_service
+            self._bind_orders_balance_signals()
+        return ow
 
     def _bind_nurse_orders_balance_signals(self):
         if self._nurse_orders_balance_signals_bound:
@@ -1197,10 +1209,9 @@ class NurseMainWidget(QWidget):
         if self._card_ui_prewarm_done:
             return
         try:
-            if hasattr(self.layout_manager, 'orders_widget'):
-                ow = self.layout_manager.orders_widget
-                if getattr(ow, "main_layout", None) is None:
-                    ow.setup_ui()
+            ow = self._ensure_orders_widget()
+            if ow is not None and getattr(ow, "main_layout", None) is None:
+                ow.setup_ui()
             QTimer.singleShot(CARD_UI_PREWARM_STAGGER_MS, self._run_card_ui_prewarm_stage_3)
         except Exception as exc:
             logger.warning("Nurse card UI prewarm stage2 failed: %s", exc)
@@ -1439,8 +1450,8 @@ class NurseMainWidget(QWidget):
         self._configure_balance_quick_oral_input()
 
         # Обновляем orders_widget
-        if hasattr(self.layout_manager, "orders_widget") and self.layout_manager.orders_widget:
-            ow = self.layout_manager.orders_widget
+        ow = self._ensure_orders_widget()
+        if ow is not None:
             if hasattr(ow, "set_context"):
                 ow.set_context(
                     service=self.remcard_service,
@@ -1568,6 +1579,7 @@ class NurseMainWidget(QWidget):
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":
             ow = self.layout_manager.orders_widget
+            self._bind_orders_balance_signals()
             if hasattr(ow, "set_context"):
                 ow.set_context(
                     service=self.remcard_service,

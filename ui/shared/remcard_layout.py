@@ -79,10 +79,10 @@ class RemCardLayoutManager(QWidget):
         self._balance_grid_wrapper = None
         self._balance_tab_initialized = False
 
-        # Вкладка Назначения
-        from ..doctor_view.orders_widget import OrdersWidget
-        self.orders_widget = OrdersWidget(defer_ui=True)
-        self.vitals_stack.addWidget(self.orders_widget)
+        # Вкладка Назначения создаётся лениво: на W1 она не нужна, а импорт
+        # doctor orders тянет заметную часть startup.
+        self._orders_tab_placeholder = QWidget()
+        self.vitals_stack.addWidget(self._orders_tab_placeholder)
 
         self.vitals_stack.addWidget(self.balance_tab_widget)
 
@@ -296,7 +296,6 @@ class RemCardLayoutManager(QWidget):
 
         # Настройка сигналов
         self.sector_2b.tab_changed.connect(self.set_active_tab)
-        self.sector_7na_b.templates_requested.connect(self.orders_widget.open_template_dialog)
 
         # Безопасный запуск логики через таймер
         QTimer.singleShot(100, self._safe_init)
@@ -465,6 +464,28 @@ class RemCardLayoutManager(QWidget):
             self.remcard_service, self.sector_1a, self.sector_5
         )
         return self.nurse_orders_manager
+
+    def ensure_orders_widget(self):
+        if hasattr(self, "orders_widget") and self.orders_widget is not None:
+            return self.orders_widget
+
+        from ..doctor_view.orders_widget import OrdersWidget
+
+        self.orders_widget = OrdersWidget(service=self.remcard_service, defer_ui=True)
+        placeholder = getattr(self, "_orders_tab_placeholder", None)
+        index = self.vitals_stack.indexOf(placeholder) if placeholder is not None else -1
+        current_index = self.vitals_stack.currentIndex()
+        if index >= 0:
+            self.vitals_stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+            self.vitals_stack.insertWidget(index, self.orders_widget)
+            if current_index == index:
+                self.vitals_stack.setCurrentIndex(index)
+        else:
+            self.vitals_stack.addWidget(self.orders_widget)
+
+        self.sector_7na_b.templates_requested.connect(self.orders_widget.open_template_dialog)
+        return self.orders_widget
 
     def _refresh_beds_async(self):
         if hasattr(self, 'beds_selection_widget'):
@@ -652,6 +673,7 @@ class RemCardLayoutManager(QWidget):
             self.sector_3_4_wrapper.setFixedWidth(230)
             
             if is_orders:
+                self.ensure_orders_widget()
                 self.vitals_stack.setCurrentIndex(1)
                 self.sector_3_4_spacer.show()
             elif tab_name == "Витальные функции":
