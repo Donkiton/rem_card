@@ -353,8 +353,8 @@ class PrescriptionEngine:
         if admin_type_name:
             res += f" [ROUTE:{admin_type_name.lower()}]"
         
-        # Длительность (через тег)
-        # Добавляем только если можно разводить (для таблеток не нужно)
+        # Длительность (через тег). Для форм без длительности явно пишем 0,
+        # чтобы парсер не подставил дефолт из карточки препарата.
         can_dilute = form_info.get("can_dilute", True)
         if can_dilute:
             if duration == -1:
@@ -362,6 +362,8 @@ class PrescriptionEngine:
             else:
                 # Всегда добавляем тег, даже если 0, чтобы перебить дефолт из базы
                 res += f" [DUR:{duration}]"
+        else:
+            res += " [DUR:0]"
             
         return res
 

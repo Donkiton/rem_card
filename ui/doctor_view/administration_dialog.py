@@ -228,6 +228,8 @@ class ManualEntryDialog(BaseStyledDialog):
                             main_line += f" [DUR:{duration_val}]"
                 except:
                     pass
+        else:
+            main_line += " [DUR:0]"
 
         # Для диалога выбора препарата (DrugCharacteristicsDialog) сохраняем
         # исходный ключ, чтобы downstream-логика не теряла категорию.

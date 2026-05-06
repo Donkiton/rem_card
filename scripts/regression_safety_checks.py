@@ -703,6 +703,22 @@ def _check_order_input_real_examples(temp_root: str) -> tuple[bool, str]:
             },
         ),
         (
+            "manual_key_non_duration_form_overrides_default_duration",
+            "Ceftriaxoni [DOSE:1] [UNIT:г] [ROUTE:В/в капельно] [DUR:0] [KEY:ceftriaxone] [RU]",
+            {
+                "drug_key": "ceftriaxone",
+                "latin": "Ceftriaxoni",
+                "type": OrderType.INFUSION_CONTINUOUS,
+                "dose_value": 1.0,
+                "dose_unit": "г",
+                "is_per_kg": False,
+                "frequency": 1,
+                "specific_times": ["08:00"],
+                "duration_min": 0,
+                "comment": "[ROUTE:В/в капельно] [DUR:0]",
+            },
+        ),
+        (
             "explicit_key_with_diluent",
             "Meropenemi 1 [KEY:meropenem] + NaCl 0,9% 100 мл [DUR:180]",
             {
