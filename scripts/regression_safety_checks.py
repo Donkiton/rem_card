@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -185,6 +186,7 @@ def _write_fake_update_package(path: str, version: str = "9.9.9") -> None:
 
 
 def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import get_update_lock_path
     from rem_card.app.updater_main import _build_direct_update_args
 
     saved_env = {
@@ -212,7 +214,7 @@ def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[boo
             "source": os.path.abspath(upd_dir),
             "target": os.path.abspath(target_dir),
             "baza_dir": os.path.abspath(baza_dir),
-            "lock": os.path.abspath(os.path.join(baza_dir, "locks", "remcard_update.lock")),
+            "lock": os.path.abspath(get_update_lock_path(baza_dir, target_dir=target_dir)),
             "target_version": "1.0.1",
             "current_version": "1.0.0",
         }
@@ -235,6 +237,65 @@ def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[boo
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _check_update_locks_are_scoped_to_target(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import update_launcher
+    from rem_card.app.update_checker import get_update_lock_path
+
+    saved_env = os.environ.get("REMCARD_BAZA_DIR")
+    original_is_compiled = update_launcher.is_compiled
+    try:
+        baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal")
+        lock_dir = os.path.join(baza_dir, "locks")
+        target_dir = os.path.join(temp_root, "Prog")
+        os.makedirs(lock_dir, exist_ok=True)
+        os.makedirs(target_dir, exist_ok=True)
+        os.environ["REMCARD_BAZA_DIR"] = baza_dir
+        update_launcher.is_compiled = lambda: True
+
+        pc1_lock = get_update_lock_path(baza_dir, target_dir=target_dir, host="PC1")
+        pc2_lock = get_update_lock_path(baza_dir, target_dir=target_dir, host="PC2")
+        if os.path.abspath(pc1_lock) == os.path.abspath(pc2_lock):
+            return False, "local target locks must differ for different hosts"
+
+        remote_target = r"\\server\share\remcard\Prog"
+        remote_pc1_lock = get_update_lock_path(baza_dir, target_dir=remote_target, host="PC1")
+        remote_pc2_lock = get_update_lock_path(baza_dir, target_dir=remote_target, host="PC2")
+        if os.path.abspath(remote_pc1_lock) != os.path.abspath(remote_pc2_lock):
+            return False, "network target locks must be shared across hosts"
+
+        legacy_lock = os.path.join(lock_dir, "remcard_update.lock")
+        payload = {
+            "timestamp": time.time(),
+            "host": "OTHER-PC",
+            "target": target_dir,
+            "target_version": "1.0.1",
+        }
+        Path(legacy_lock).write_text(json.dumps(payload), encoding="utf-8")
+        if update_launcher.is_update_in_progress(target_dir=target_dir):
+            return False, "legacy lock from another host must not block local target startup"
+
+        payload["host"] = socket.gethostname()
+        payload["target_version"] = "1.0.2"
+        Path(legacy_lock).write_text(json.dumps(payload), encoding="utf-8")
+        if not update_launcher.is_update_in_progress(target_dir=target_dir):
+            return False, "legacy lock for current host and target must block startup"
+
+        os.remove(legacy_lock)
+        scoped_lock = get_update_lock_path(baza_dir, target_dir=target_dir)
+        payload["target_version"] = "1.0.3"
+        Path(scoped_lock).write_text(json.dumps(payload), encoding="utf-8")
+        if not update_launcher.is_update_in_progress(target_dir=target_dir):
+            return False, "scoped lock for current target must block startup"
+
+        return True, "ok"
+    finally:
+        update_launcher.is_compiled = original_is_compiled
+        if saved_env is None:
+            os.environ.pop("REMCARD_BAZA_DIR", None)
+        else:
+            os.environ["REMCARD_BAZA_DIR"] = saved_env
 
 
 def _check_lock_read_unavailable_not_stale(temp_root: str) -> tuple[bool, str]:
@@ -6114,6 +6175,7 @@ def main():
         ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
+        ("update_locks_are_scoped_to_target", _check_update_locks_are_scoped_to_target),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
         ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),
         ("schema_migration_failure_rolls_back", _check_schema_migration_failure_rolls_back),

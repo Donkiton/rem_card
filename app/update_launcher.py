@@ -8,7 +8,13 @@ from datetime import datetime
 from typing import Any, Optional
 
 from rem_card.app.runtime_paths import get_executable_dir, is_compiled, resolve_baza_dir
-from rem_card.app.update_checker import UpdateCandidate, get_update_lock_path, get_update_starting_lock_path
+from rem_card.app.update_checker import (
+    UpdateCandidate,
+    get_update_lock_path,
+    get_update_starting_lock_path,
+    update_lock_payload_matches_target,
+    update_lock_scope_id,
+)
 from rem_card.app.version import APP_VERSION
 
 
@@ -41,49 +47,76 @@ def _payload_age(payload: Optional[dict[str, Any]], lock_path: str) -> float:
     return max(0.0, time.time() - mtime) if mtime else UPDATE_LOCK_STALE_SEC + 1
 
 
-def _is_lock_active(path: str, stale_sec: int) -> bool:
+def _active_lock_payload(path: str, stale_sec: int, *, target_dir: Optional[str] = None) -> Optional[dict[str, Any]]:
     payload = _read_lock_payload(path)
     if not payload:
-        return False
+        return None
+
+    if target_dir and not update_lock_payload_matches_target(payload, target_dir):
+        return None
 
     if _payload_age(payload, path) > stale_sec:
         try:
             os.remove(path)
         except Exception:
-            return True
-        return False
+            return payload
+        return None
 
-    return True
+    return payload
 
 
-def is_update_in_progress(lock_path: Optional[str] = None) -> bool:
+def _is_lock_active(path: str, stale_sec: int, *, target_dir: Optional[str] = None) -> bool:
+    return _active_lock_payload(path, stale_sec, target_dir=target_dir) is not None
+
+
+def _default_lock_paths(target_dir: str) -> list[tuple[str, int]]:
+    paths = [
+        (get_update_lock_path(target_dir=target_dir), UPDATE_LOCK_STALE_SEC),
+        (get_update_starting_lock_path(target_dir=target_dir), UPDATE_STARTING_LOCK_STALE_SEC),
+        (get_update_lock_path(), UPDATE_LOCK_STALE_SEC),
+        (get_update_starting_lock_path(), UPDATE_STARTING_LOCK_STALE_SEC),
+    ]
+    result: list[tuple[str, int]] = []
+    seen: set[str] = set()
+    for path, stale_sec in paths:
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((path, stale_sec))
+    return result
+
+
+def get_active_update_lock_payload(
+    lock_path: Optional[str] = None,
+    *,
+    target_dir: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
     if not is_compiled():
-        return False
+        return None
 
     try:
+        target = os.path.abspath(target_dir or get_executable_dir())
         if lock_path:
-            return _is_lock_active(lock_path, UPDATE_LOCK_STALE_SEC)
-        return _is_lock_active(get_update_lock_path(), UPDATE_LOCK_STALE_SEC) or _is_lock_active(
-            get_update_starting_lock_path(), UPDATE_STARTING_LOCK_STALE_SEC
-        )
+            return _active_lock_payload(lock_path, UPDATE_LOCK_STALE_SEC, target_dir=target)
+        for path, stale_sec in _default_lock_paths(target):
+            payload = _active_lock_payload(path, stale_sec, target_dir=target)
+            if payload:
+                return payload
     except Exception:
-        return False
+        return None
+    return None
 
 
-def describe_update_lock(lock_path: Optional[str] = None) -> str:
+def is_update_in_progress(lock_path: Optional[str] = None, *, target_dir: Optional[str] = None) -> bool:
+    return get_active_update_lock_payload(lock_path, target_dir=target_dir) is not None
+
+
+def describe_update_lock(lock_path: Optional[str] = None, *, target_dir: Optional[str] = None) -> str:
     try:
-        paths = [lock_path] if lock_path else [get_update_lock_path(), get_update_starting_lock_path()]
+        payload = get_active_update_lock_payload(lock_path, target_dir=target_dir) or {}
     except Exception:
         return "Обновление программы уже выполняется."
-
-    payload = {}
-    for path in paths:
-        if not path:
-            continue
-        item = _read_lock_payload(path)
-        if item:
-            payload = item
-            break
     host = payload.get("host") or "неизвестно"
     started_at = payload.get("started_at") or ""
     version = payload.get("target_version") or ""
@@ -102,7 +135,7 @@ def _now_text() -> str:
 
 def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str) -> bool:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if _is_lock_active(path, UPDATE_STARTING_LOCK_STALE_SEC):
+    if _is_lock_active(path, UPDATE_STARTING_LOCK_STALE_SEC, target_dir=target_dir):
         return False
     payload = {
         "timestamp": time.time(),
@@ -112,6 +145,7 @@ def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str)
         "state": "starting",
         "source": candidate.prog_dir,
         "target": target_dir,
+        "target_scope": update_lock_scope_id(target_dir),
         "target_version": candidate.version,
     }
     raw = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
@@ -152,13 +186,17 @@ def launch_update(
 
     try:
         baza_dir = resolve_baza_dir()
-        lock_path = get_update_lock_path(baza_dir)
-        starting_lock_path = get_update_starting_lock_path(baza_dir)
         target_dir = get_executable_dir()
+        lock_path = get_update_lock_path(baza_dir, target_dir=target_dir)
+        starting_lock_path = get_update_starting_lock_path(baza_dir, target_dir=target_dir)
     except Exception:
         return False
 
-    if is_update_in_progress(lock_path) or not _write_starting_lock(starting_lock_path, candidate, target_dir):
+    if is_update_in_progress(target_dir=target_dir) or not _write_starting_lock(
+        starting_lock_path,
+        candidate,
+        target_dir,
+    ):
         return False
 
     args = [

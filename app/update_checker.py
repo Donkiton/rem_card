@@ -1,6 +1,10 @@
+import ctypes
+import hashlib
 import json
+import ntpath
 import os
 import re
+import socket
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
@@ -22,6 +26,83 @@ REQUIRED_RELEASE_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
+
+
+def _normalize_target_path(path: str) -> str:
+    raw = str(path or "").strip().strip('"')
+    if _is_network_target_path(raw):
+        return ntpath.normcase(ntpath.normpath(raw))
+    return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
+
+
+def _normalize_host(host: Optional[str] = None) -> str:
+    value = str(host or socket.gethostname() or "").strip().lower()
+    if not value:
+        return "unknown"
+    return value.split(".", 1)[0]
+
+
+def _windows_drive_root(path: str) -> str:
+    drive, _tail = ntpath.splitdrive(str(path or ""))
+    if not drive:
+        return ""
+    return drive + "\\"
+
+
+def _is_network_target_path(path: str) -> bool:
+    text = str(path or "").strip()
+    drive, _tail = ntpath.splitdrive(text)
+    if drive.startswith("\\\\"):
+        return True
+    if os.name != "nt" or not drive:
+        return False
+
+    try:
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(_windows_drive_root(text))
+        return int(drive_type) == 4  # DRIVE_REMOTE
+    except Exception:
+        return False
+
+
+def update_lock_scope_key(target_dir: str, *, host: Optional[str] = None) -> str:
+    target = _normalize_target_path(target_dir)
+    if _is_network_target_path(target):
+        return f"network:{target}"
+    return f"local:{_normalize_host(host)}:{target}"
+
+
+def update_lock_scope_id(target_dir: str, *, host: Optional[str] = None) -> str:
+    raw = update_lock_scope_key(target_dir, host=host).encode("utf-8", "surrogatepass")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def update_lock_payload_matches_target(
+    payload: dict[str, Any],
+    target_dir: str,
+    *,
+    current_host: Optional[str] = None,
+) -> bool:
+    payload_target = str(payload.get("target") or "").strip()
+    if not payload_target:
+        return True
+
+    payload_host = str(payload.get("launcher_host") or payload.get("host") or "").strip()
+    if not payload_host and not _is_network_target_path(payload_target) and not _is_network_target_path(target_dir):
+        return _normalize_target_path(payload_target) == _normalize_target_path(target_dir)
+
+    try:
+        payload_key = update_lock_scope_key(payload_target, host=payload_host)
+        current_key = update_lock_scope_key(target_dir, host=current_host)
+        return payload_key == current_key
+    except Exception:
+        return True
+
+
+def _scoped_lock_file_name(file_name: str, target_dir: Optional[str], host: Optional[str]) -> str:
+    if not target_dir:
+        return file_name
+    stem, ext = os.path.splitext(file_name)
+    return f"{stem}_{update_lock_scope_id(target_dir, host=host)}{ext}"
 
 
 @dataclass(frozen=True)
@@ -71,14 +152,26 @@ def get_legacy_update_root(baza_dir: Optional[str] = None) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(root)), UPDATE_DIR_NAME)
 
 
-def get_update_lock_path(baza_dir: Optional[str] = None) -> str:
+def get_update_lock_path(
+    baza_dir: Optional[str] = None,
+    *,
+    target_dir: Optional[str] = None,
+    host: Optional[str] = None,
+) -> str:
     root = baza_dir or resolve_baza_dir()
-    return os.path.join(os.path.abspath(root), "locks", UPDATE_LOCK_FILE_NAME)
+    file_name = _scoped_lock_file_name(UPDATE_LOCK_FILE_NAME, target_dir, host)
+    return os.path.join(os.path.abspath(root), "locks", file_name)
 
 
-def get_update_starting_lock_path(baza_dir: Optional[str] = None) -> str:
+def get_update_starting_lock_path(
+    baza_dir: Optional[str] = None,
+    *,
+    target_dir: Optional[str] = None,
+    host: Optional[str] = None,
+) -> str:
     root = baza_dir or resolve_baza_dir()
-    return os.path.join(os.path.abspath(root), "locks", UPDATE_STARTING_LOCK_FILE_NAME)
+    file_name = _scoped_lock_file_name(UPDATE_STARTING_LOCK_FILE_NAME, target_dir, host)
+    return os.path.join(os.path.abspath(root), "locks", file_name)
 
 
 def _release_dirs(update_root: str) -> Iterable[str]:

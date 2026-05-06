@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from rem_card.app.update_checker import get_update_lock_path, update_lock_scope_id
+
 try:
     from rem_card.ui.styles.theme import (
         BG_LIGHT,
@@ -139,7 +141,7 @@ class UpdateLock:
             finally:
                 os.close(fd)
         except FileExistsError as exc:
-            raise UpdateAlreadyRunning("Обновление уже выполняется на другом компьютере.") from exc
+            raise UpdateAlreadyRunning("Обновление уже выполняется для этой папки программы.") from exc
 
         self._acquired = True
         self._thread = threading.Thread(target=self._heartbeat, name="RemCardUpdateLock", daemon=True)
@@ -549,6 +551,7 @@ class UpdateWorker(QObject):
                 "pid": os.getpid(),
                 "source": source,
                 "target": target,
+                "target_scope": update_lock_scope_id(target),
                 "target_version": manifest_version or target_version,
                 "launcher_host": self.args.launcher_host,
             }
@@ -755,7 +758,7 @@ class UpdateWindow(QDialog):
         self.progress.setObjectName("UpdateProgress")
         self.progress.setRange(0, 100)
         self.progress.setValue(self._displayed_progress)
-        self.hint_label = QLabel("Не запускайте программу до завершения обновления.")
+        self.hint_label = QLabel("Не запускайте эту копию программы до завершения обновления.")
         self.hint_label.setObjectName("UpdateHint")
         self.hint_label.setWordWrap(True)
         self.close_button = QPushButton("Закрыть")
@@ -986,7 +989,7 @@ def _build_direct_update_args(executable_dir: Optional[str] = None) -> Optional[
         source=source_dir,
         target=target_dir,
         baza_dir=baza_dir,
-        lock=os.path.join(baza_dir, "locks", "remcard_update.lock"),
+        lock=get_update_lock_path(baza_dir, target_dir=target_dir),
         starting_lock="",
         parent_pid="0",
         current_version=_read_version_from_dir(target_dir),
