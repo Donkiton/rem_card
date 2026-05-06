@@ -48,7 +48,32 @@ class BedsSelectionWidget(QWidget):
         self._refresh_pending = False
         self._is_closing = False
         self.init_ui()
+        self._last_shift_start = self._current_shift_start()
+        self._shift_boundary_timer = QTimer(self)
+        self._shift_boundary_timer.timeout.connect(self._refresh_on_shift_boundary)
+        self._shift_boundary_timer.start(30000)
         QTimer.singleShot(0, self.refresh)
+
+    def _current_shift_start(self):
+        now = datetime.datetime.now()
+        if self.remcard_service and hasattr(self.remcard_service, "get_day_period"):
+            try:
+                return self.remcard_service.get_day_period(now)[0]
+            except Exception:
+                pass
+        start = now.replace(hour=8, minute=0, second=0, microsecond=0)
+        if now.hour < 8:
+            start -= datetime.timedelta(days=1)
+        return start
+
+    def _refresh_on_shift_boundary(self):
+        if self._is_closing:
+            return
+        shift_start = self._current_shift_start()
+        if self._last_shift_start == shift_start:
+            return
+        self._last_shift_start = shift_start
+        self.refresh(queue_if_running=True)
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -145,6 +170,11 @@ class BedsSelectionWidget(QWidget):
             return
         active_patients = list(snapshot.get("patients") or [])
         now = snapshot.get("now") or datetime.datetime.now()
+        if self.remcard_service and hasattr(self.remcard_service, "get_day_period"):
+            try:
+                self._last_shift_start = self.remcard_service.get_day_period(now)[0]
+            except Exception:
+                pass
         yesterday = snapshot.get("yesterday") or (now - datetime.timedelta(days=1))
         runtime_snapshot = dict(snapshot.get("runtime_snapshot") or {})
         active_patients = sort_patients_for_w1(active_patients, runtime_snapshot)
@@ -221,6 +251,8 @@ class BedsSelectionWidget(QWidget):
 
     def shutdown(self, timeout_ms: int = 1200):
         self._is_closing = True
+        if hasattr(self, "_shift_boundary_timer") and self._shift_boundary_timer:
+            self._shift_boundary_timer.stop()
         self._refresh_pending = False
         worker = self._refresh_worker
         self._refresh_worker = None
@@ -286,8 +318,10 @@ class BedsSelectionWidget(QWidget):
 
         card_exists = bool(runtime_snapshot.get("card_exists", False))
         yest_exists = bool(runtime_snapshot.get("yest_exists", False))
+        status_value = getattr(status_dto, "status", None)
+        has_outcome = bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
         row.sector_4v.btn_show_card.setEnabled(card_exists)
-        row.sector_4v.btn_new_card.setEnabled(not card_exists)
+        row.sector_4v.btn_new_card.setEnabled(not card_exists and not has_outcome)
         row.sector_4v.btn_yest_card.setEnabled(yest_exists)
 
         latest_values = runtime_snapshot.get("latest_values") or {

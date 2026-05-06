@@ -1040,12 +1040,24 @@ class RemCardService(QObject):
     def cancel_nurse_order_mark(self, admin_id: int):
         self._orders.cancel_nurse_action(admin_id)
 
+    def set_doctor_order_mark(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
+        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id)
+
+    def cancel_doctor_order_mark(self, admin_id: int):
+        self._orders.cancel_doctor_action(admin_id)
+
     # Backward compatibility for widgets expecting OrderDomainService-like API
     def set_nurse_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
         self._orders.set_nurse_status(admin_id, mark, performer_id=performer_id)
 
     def cancel_nurse_action(self, admin_id: int):
         self._orders.cancel_nurse_action(admin_id)
+
+    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
+        self._orders.set_doctor_status(admin_id, mark, performer_id=performer_id)
+
+    def cancel_doctor_action(self, admin_id: int):
+        self._orders.cancel_doctor_action(admin_id)
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
         return self._orders.get_nurse_orders_data(admission_id, shift_date)

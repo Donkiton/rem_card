@@ -789,6 +789,12 @@ class OrderService:
     def cancel_nurse_action(self, admin_id: int):
         self._domain_service.cancel_nurse_action(admin_id)
 
+    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
+        self._domain_service.set_doctor_status(admin_id, mark, performer_id=performer_id)
+
+    def cancel_doctor_action(self, admin_id: int):
+        self._domain_service.cancel_doctor_action(admin_id)
+
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
         return self._domain_service.get_nurse_orders_data(admission_id, shift_date)
 

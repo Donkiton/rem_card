@@ -907,13 +907,13 @@ class OrderDomainService:
             self._sync_transfusion_for_admin(cursor, admin_id)
             logger.info(f"[NurseAction] Admin ID {admin_id} mark set to {mark} at {now_str}.")
 
-    def cancel_nurse_action(self, admin_id: int):
+    def cancel_nurse_action(self, admin_id: int, *, allow_late_cancel: bool = False):
         """Отменяет действие медсестры (очищает comment и actual_time)."""
         with self.db.remcard_transaction() as cursor:
             row = self._fetch_admin_for_nurse_update(cursor, admin_id)
             expected_version = self._assert_nurse_admin_current(cursor, row)
 
-            if row["actual_time"]:
+            if row["actual_time"] and not allow_late_cancel:
                 act_time = datetime.fromisoformat(row["actual_time"])
                 if datetime.now() > act_time + timedelta(minutes=60):
                     logger.warning(f"[NurseAction] Cancel timeout (60m) expired for Admin ID {admin_id}")
@@ -940,6 +940,12 @@ class OrderDomainService:
                 )
             self._sync_transfusion_for_admin(cursor, admin_id)
             logger.info(f"[NurseAction] Admin ID {admin_id} mark cleared.")
+
+    def set_doctor_status(self, admin_id: int, mark: str, performer_id: Optional[int] = None):
+        self.set_nurse_status(admin_id, mark, performer_id=performer_id)
+
+    def cancel_doctor_action(self, admin_id: int):
+        self.cancel_nurse_action(admin_id, allow_late_cancel=True)
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime) -> List[Dict]:
         """Получает данные для сектора 1а. Просроченность больше не создается."""

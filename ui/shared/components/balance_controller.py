@@ -28,6 +28,10 @@ class BalanceController(QObject):
         self._hour_revision_map = {}
         self._effective_bounds_cache = None
         self._write_pending = False
+        self._allow_patient_period = False
+
+    def set_patient_period_manual_mode(self, enabled: bool):
+        self._allow_patient_period = bool(enabled)
 
     @staticmethod
     def _build_empty_hourly_cache():
@@ -138,16 +142,13 @@ class BalanceController(QObject):
             col = item.column()
             hour = (col + 8) % 24
             
-            # Определяем дату для выбранного часа
-            dt = self.shift_date.replace(hour=hour, minute=0, second=0, microsecond=0)
-            if hour < 8 and self.shift_date.hour >= 8:
-                dt += timedelta(days=1)
+            dt = self.service.vital_service.shift_service.resolve_datetime(f"{hour:02d}:00", self.shift_date)
             
             # Получаем статус (безопасный доступ через сервис)
             status_service = getattr(self.service.vital_service, 'status_service', None)
             status_event = status_service.get_current_status(self.admission_id) if status_service else None
             
-            if status_event and status_event.status.is_outcome():
+            if status_event and status_event.status.is_outcome() and not self._allow_patient_period:
                 # Лимит: время исхода + 1 час
                 limit_time = status_event.start_time + timedelta(hours=1)
                 if dt > limit_time:
@@ -294,6 +295,7 @@ class BalanceController(QObject):
                 value=val,
                 is_sum=is_sum,
                 expected_revision=expected_revision,
+                allow_patient_period=self._allow_patient_period,
             )
 
         def handle_success(result):

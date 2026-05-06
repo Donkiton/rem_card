@@ -125,6 +125,7 @@ class FluidService:
         value: float,
         is_sum: bool = False,
         expected_revision: Optional[int] = None,
+        allow_patient_period: bool = False,
     ):
         """
         Сохраняет выведение по конкретному часу и показателю.
@@ -134,12 +135,15 @@ class FluidService:
             raise ValueError(f"Unsupported fluid output field: {row_key}")
 
         target_dt = self._resolve_hour_datetime(admission_id, shift_date, hour)
-        start_dt, end_dt = self.get_balance_bounds(admission_id, shift_date)
-        if target_dt < start_dt or target_dt >= end_dt:
-            raise ValueError(
-                "Время вне допустимого периода баланса "
-                f"({start_dt.strftime('%d.%m %H:%M')} - {end_dt.strftime('%d.%m %H:%M')})"
-            )
+        if allow_patient_period:
+            self._validate_patient_period(admission_id, target_dt)
+        else:
+            start_dt, end_dt = self.get_balance_bounds(admission_id, shift_date)
+            if target_dt < start_dt or target_dt >= end_dt:
+                raise ValueError(
+                    "Время вне допустимого периода баланса "
+                    f"({start_dt.strftime('%d.%m %H:%M')} - {end_dt.strftime('%d.%m %H:%M')})"
+                )
         hour_key = target_dt.strftime("%Y-%m-%d %H")
         value = float(value)
 
@@ -239,9 +243,7 @@ class FluidService:
         return self.fluids_dao.db.fetch_one_remcard("SELECT * FROM fluids WHERE id = ?", (fluid_id,))
 
     def _resolve_hour_datetime(self, admission_id: int, shift_date: datetime, hour: int) -> datetime:
-        dt = shift_date.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if hour < 8 and shift_date.hour >= 8:
-            dt += timedelta(days=1)
+        dt = self.vital_service.shift_service.resolve_datetime(f"{hour:02d}:00", shift_date)
 
         # Если это час поступления, используем точное время поступления.
         # Важно: нельзя округлять секунды/микросекунды вниз, иначе запись
@@ -253,3 +255,22 @@ class FluidService:
             if dt.date() == adm.date() and dt.hour == adm.hour:
                 dt = adm
         return dt
+
+    def _validate_patient_period(self, admission_id: int, target_dt: datetime):
+        patient = self.vital_service.patient_dao.get_patient_by_id(admission_id)
+        if not patient:
+            raise ValueError("Пациент не найден")
+
+        admission_dt = getattr(patient, "admission_datetime", None)
+        if admission_dt and target_dt < admission_dt:
+            raise ValueError(
+                "Время меньше времени поступления "
+                f"({admission_dt.strftime('%d.%m.%Y %H:%M')})"
+            )
+
+        terminal_dt = getattr(patient, "transfer_datetime", None)
+        if terminal_dt and target_dt > terminal_dt:
+            raise ValueError(
+                "Время больше времени исхода "
+                f"({terminal_dt.strftime('%d.%m.%Y %H:%M')})"
+            )

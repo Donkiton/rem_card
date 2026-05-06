@@ -17,6 +17,7 @@ from .components.order_template_builder import build_orders_from_template
 from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
 from rem_card.app.logger import logger
 from rem_card.services.orders_sync_observability import record_orders_sync_event
+from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, 
                             BORDER_COLOR, BG_LIGHT)
 
@@ -1474,6 +1475,50 @@ class OrdersWidget(QWidget):
             changed_keys.append(key)
         self._emit_admin_cell_changes(changed_keys)
 
+    @staticmethod
+    def _admin_key_from_admin(admin):
+        if admin is None:
+            return None
+        planned_time = getattr(admin, "planned_time", None)
+        if isinstance(planned_time, str):
+            try:
+                planned_time = datetime.fromisoformat(planned_time)
+            except Exception:
+                return None
+        order_id = getattr(admin, "order_id", None)
+        if planned_time is None or order_id is None:
+            return None
+        return (order_id, planned_time.isoformat())
+
+    def _apply_pending_order_mark(self, index, admin, mark: str) -> dict:
+        if not self.model or not index.isValid() or admin is None:
+            return {}
+        key = self._admin_key_from_admin(admin)
+        if key is None:
+            return {}
+        previous = copy(self.model.admin_map.get(key)) if key in self.model.admin_map else None
+        pending_admin = copy(admin)
+        pending_admin.comment = mark or ""
+        pending_admin.actual_time = datetime.now() if mark else None
+        setattr(pending_admin, "_pending_mark", mark or "")
+        self.model.admin_map[key] = pending_admin
+        self._emit_admin_cell_changes([key])
+        return {key: (previous is not None, previous)}
+
+    def _apply_committed_order_mark(self, index, admin, mark: str):
+        if not self.model or not index.isValid() or admin is None:
+            return
+        key = self._admin_key_from_admin(admin)
+        if key is None:
+            return
+        committed_admin = copy(admin)
+        committed_admin.comment = mark or ""
+        committed_admin.actual_time = datetime.now() if mark else None
+        if hasattr(committed_admin, "_pending_mark"):
+            delattr(committed_admin, "_pending_mark")
+        self.model.admin_map[key] = committed_admin
+        self._emit_admin_cell_changes([key])
+
     def _apply_pending_cell(
         self,
         index,
@@ -2397,7 +2442,88 @@ class OrdersWidget(QWidget):
         self._handle_cell_action(index, "orders_middle_click", self.service.apply_order_middle_click)
 
     def on_cell_right_clicked(self, index):
-        self._handle_cell_action(index, "orders_right_click", self.service.apply_order_right_click)
+        self._handle_doctor_order_mark(index)
+
+    def _handle_doctor_order_mark(self, index):
+        if self._is_read_only():
+            return
+        if not index.isValid() or index.column() == 0 or not self.model:
+            return
+
+        admin = self.model.data(index, Qt.UserRole)
+        if not admin:
+            return
+
+        status = str(getattr(admin, "status", "") or "")
+        role = str(getattr(admin, "cell_role", "") or "")
+        if status != "planned" or role not in ("start", "single", "body", "end"):
+            return
+
+        admin_id = getattr(admin, "id", None)
+        try:
+            admin_id = int(admin_id)
+        except Exception:
+            admin_id = None
+        if not admin_id or admin_id < 0:
+            self._show_warning("Сначала сохраните карту назначений, затем поставьте отметку выполнения.")
+            return
+
+        mark = str(getattr(admin, "comment", "") or "")
+        set_mark = getattr(self.service, "set_doctor_order_mark", None) or getattr(self.service, "set_nurse_order_mark", None)
+        cancel_mark = getattr(self.service, "cancel_doctor_order_mark", None) or getattr(self.service, "cancel_nurse_order_mark", None)
+        if not callable(set_mark) or not callable(cancel_mark):
+            self._show_warning("Сервис отметок назначений недоступен.")
+            return
+        if mark == NURSE_MARK_EXECUTED:
+            next_mark = NURSE_MARK_NOT_EXECUTED
+            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_NOT_EXECUTED)
+        elif mark == NURSE_MARK_NOT_EXECUTED:
+            next_mark = ""
+            operation = lambda aid=admin_id: cancel_mark(aid)
+        else:
+            next_mark = NURSE_MARK_EXECUTED
+            operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_EXECUTED)
+
+        click_seq = self._next_orders_click_seq()
+        logger.info(
+            "[OrdersClick] click_accept role=doctor_mark seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s",
+            click_seq,
+            self.admission_id,
+            index.row(),
+            index.column(),
+            admin_id,
+            mark,
+            next_mark,
+        )
+
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
+        self._begin_admin_write()
+        previous_by_key = self._apply_pending_order_mark(index, admin, next_mark)
+
+        def on_success():
+            self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._apply_committed_order_mark(index, admin, next_mark)
+            self._schedule_fast_sync()
+            self._schedule_state_sync()
+
+        def on_error(exc):
+            self._finish_admin_write()
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._restore_admin_cells(previous_by_key)
+            self.request_refresh(force=True)
+
+        self._enqueue_write(
+            f"doctor_order_mark:{admin_id}:seq={click_seq}",
+            operation=operation,
+            on_success=on_success,
+            on_error=on_error,
+            block_ui=False,
+        )
 
     def _next_orders_click_seq(self) -> int:
         self._orders_click_seq += 1

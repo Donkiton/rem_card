@@ -1982,11 +1982,13 @@ def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[b
             _snapshot_worker=None,
             _create_card_after_snapshot=False,
             _snapshot_pending=None,
+            _card_snapshot_cache={},
             admission_id=1,
             service=service,
             layout_manager=layout_manager,
             refresh_calls=0,
         )
+        widget._current_status_is_outcome = MethodType(DoctorRemCardWidget._current_status_is_outcome, widget)
         widget._begin_create_card_pending = MethodType(DoctorRemCardWidget._begin_create_card_pending, widget)
         widget._finish_create_card_pending = MethodType(DoctorRemCardWidget._finish_create_card_pending, widget)
         widget._set_create_card_controls_enabled = MethodType(
@@ -2024,6 +2026,51 @@ def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[b
     finally:
         doctor_module.CustomMessageBox.warning = original_warning
         doctor_module.CustomMessageBox.information = original_information
+
+
+def _check_doctor_archive_outcome_blocks_new_card_before_snapshot(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+    from types import MethodType, SimpleNamespace
+
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+
+    _ = temp_root
+
+    class DummyButton:
+        def __init__(self):
+            self.enabled = True
+
+        def setEnabled(self, enabled):
+            self.enabled = bool(enabled)
+
+    button = DummyButton()
+    status = PatientStatusEventDTO(
+        admission_id=1,
+        status=PatientStatus.DEAD,
+        start_time=datetime(2026, 5, 3, 12, 0),
+    )
+    widget = SimpleNamespace(
+        _card_snapshot_cache=None,
+        layout_manager=SimpleNamespace(
+            _current_status_dto=status,
+            sector_4v=SimpleNamespace(btn_new_card=button),
+        ),
+        admission_id=1,
+        service=SimpleNamespace(get_current_status=lambda _admission_id: None),
+    )
+    widget._current_status_is_outcome = MethodType(DoctorRemCardWidget._current_status_is_outcome, widget)
+    widget._set_create_card_controls_enabled = MethodType(
+        DoctorRemCardWidget._set_create_card_controls_enabled,
+        widget,
+    )
+
+    if not widget._current_status_is_outcome():
+        return False, "outcome status from layout was not detected before snapshot"
+    widget._set_create_card_controls_enabled(True)
+    if button.enabled:
+        return False, "new-card button stayed enabled for outcome before snapshot"
+    return True, "ok"
 
 
 def _check_patient_status_error_refreshes_checked_state(temp_root: str) -> tuple[bool, str]:
@@ -2206,15 +2253,34 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
     from rem_card.ui.nurse_view.components.nurse_orders_widget import NurseOrdersWidget
     from rem_card.ui.shared.orders_model import OrdersModel
-    from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
+    from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 
     _ = temp_root
     app = QApplication.instance() or QApplication([])
 
     class FakeOrdersService:
+        def __init__(self):
+            self.mark_calls = []
+
         def get_day_period(self, shift_date):
             start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
             return start, start + timedelta(days=1)
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            try:
+                result = operation()
+            except Exception as exc:
+                if on_error:
+                    on_error(exc)
+                return
+            if on_success:
+                on_success(result)
+
+        def set_doctor_order_mark(self, admin_id: int, mark: str):
+            self.mark_calls.append(("set", int(admin_id), mark))
+
+        def cancel_doctor_order_mark(self, admin_id: int):
+            self.mark_calls.append(("cancel", int(admin_id), ""))
 
     shift = datetime(2026, 5, 3, 8, 0)
     service = FakeOrdersService()
@@ -2302,6 +2368,32 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_widget._restore_admin_cells(committed_delete)
         if doctor_model.data(index, Qt.UserRole) != committed_admin:
             return False, "doctor committed cell tombstone was not restored on error"
+
+        committed_admin.comment = ""
+        doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
+        doctor_widget._cached_has_drafts = False
+        doctor_model.has_any_draft = False
+        service.mark_calls.clear()
+        doctor_widget._handle_doctor_order_mark(index)
+        marked_admin = doctor_model.data(index, Qt.UserRole)
+        if getattr(marked_admin, "comment", "") != NURSE_MARK_EXECUTED:
+            return False, "doctor right click did not mark cell as executed"
+        doctor_widget._handle_doctor_order_mark(index)
+        marked_admin = doctor_model.data(index, Qt.UserRole)
+        if getattr(marked_admin, "comment", "") != NURSE_MARK_NOT_EXECUTED:
+            return False, "doctor right click did not switch executed mark to not executed"
+        doctor_widget._handle_doctor_order_mark(index)
+        marked_admin = doctor_model.data(index, Qt.UserRole)
+        if getattr(marked_admin, "comment", ""):
+            return False, "doctor right click did not clear not executed mark"
+        if service.mark_calls != [
+            ("set", 10, NURSE_MARK_EXECUTED),
+            ("set", 10, NURSE_MARK_NOT_EXECUTED),
+            ("cancel", 10, ""),
+        ]:
+            return False, f"doctor right click service calls mismatch: {service.mark_calls}"
+        if doctor_widget.has_drafts():
+            return False, "doctor order mark must not create a prescription draft"
 
         long_order = OrderDTO(id=3, admission_id=1, latin="Long", is_committed=1, duration_min=180)
         doctor_model.orders.append(long_order)
@@ -2572,6 +2664,146 @@ def _check_balance_admission_hour_visibility(temp_root: str) -> tuple[bool, str]
             return False, f"unexpected urine value: {fluid.urine}"
         if fluid.timestamp != admission_dt:
             return False, f"admission-hour timestamp drifted: expected {admission_dt.isoformat()}, got {fluid.timestamp.isoformat()}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
+def _check_balance_pre_8_shift_hour_resolution(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.services.fluid_service import FluidService
+    from rem_card.services.vital_service import VitalService
+
+    db_path = os.path.join(temp_root, "balance_pre_8_shift.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        admission_dt = datetime(2026, 5, 6, 8, 0, 0)
+        shift_date = datetime(2026, 5, 7, 7, 27, 0)
+        with manager.remcard_transaction(source="regression_seed_balance_pre_8") as cursor:
+            cursor.execute(
+                """
+                INSERT INTO patients (full_name, last_name, first_name, middle_name)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("Петров Петр", "Петров", "Петр", None),
+            )
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions (
+                    patient_id,
+                    bed_number,
+                    history_number,
+                    admission_datetime,
+                    is_active
+                )
+                VALUES (?, ?, ?, ?, 1)
+                """,
+                (patient_id, 1, "REG-FLUID-PRE8", admission_dt.isoformat()),
+            )
+            admission_id = int(cursor.lastrowid)
+
+        patient_dao = PatientDAO(manager)
+        fluids_dao = FluidsDAO(manager)
+        vital_service = VitalService(vitals_dao=None, patient_dao=patient_dao, status_service=None)
+        fluid_service = FluidService(fluids_dao, vital_service)
+
+        fluid_service.upsert_hourly_output(admission_id, shift_date, 11, "urine", 100)
+        fluid_service.upsert_hourly_output(admission_id, shift_date, 2, "drain_output", 50)
+
+        rows = manager.fetch_all_remcard(
+            """
+            SELECT datetime, urine, drain_output
+            FROM fluids
+            WHERE admission_id = ?
+            ORDER BY datetime ASC
+            """,
+            (admission_id,),
+        )
+        actual = [(row["datetime"], int(row["urine"] or 0), int(row["drain_output"] or 0)) for row in rows]
+        expected = [
+            ("2026-05-06T11:00:00", 100, 0),
+            ("2026-05-07T02:00:00", 0, 50),
+        ]
+        if actual != expected:
+            return False, f"pre-8 shift hour resolution mismatch: {actual}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
+def _check_archive_balance_patient_period_bounds(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.fluids_dao import FluidsDAO
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.services.fluid_service import FluidService
+    from rem_card.services.vital_service import VitalService
+
+    db_path = os.path.join(temp_root, "archive_balance_patient_period.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        admission_dt = datetime(2026, 5, 1, 10, 30, 0)
+        outcome_dt = datetime(2026, 5, 3, 15, 40, 0)
+        shift_date = datetime(2026, 5, 3, 12, 0, 0)
+        with manager.remcard_transaction(source="regression_seed_archive_balance_period") as cursor:
+            cursor.execute(
+                """
+                INSERT INTO patients (full_name, last_name, first_name, middle_name)
+                VALUES (?, ?, ?, ?)
+                """,
+                ("Сидоров Сидор", "Сидоров", "Сидор", None),
+            )
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions (
+                    patient_id,
+                    bed_number,
+                    history_number,
+                    admission_datetime,
+                    transfer_datetime,
+                    is_active
+                )
+                VALUES (?, ?, ?, ?, ?, 0)
+                """,
+                (patient_id, 2, "REG-FLUID-ARCH", admission_dt.isoformat(), outcome_dt.isoformat()),
+            )
+            admission_id = int(cursor.lastrowid)
+
+        patient_dao = PatientDAO(manager)
+        fluids_dao = FluidsDAO(manager)
+        vital_service = VitalService(vitals_dao=None, patient_dao=patient_dao, status_service=None)
+        fluid_service = FluidService(fluids_dao, vital_service)
+
+        fluid_service.upsert_hourly_output(
+            admission_id,
+            shift_date,
+            15,
+            "urine",
+            100,
+            allow_patient_period=True,
+        )
+        try:
+            fluid_service.upsert_hourly_output(
+                admission_id,
+                shift_date,
+                16,
+                "urine",
+                100,
+                allow_patient_period=True,
+            )
+            return False, "archive patient-period balance accepted value after outcome"
+        except ValueError as exc:
+            if "Время больше времени исхода" not in str(exc):
+                return False, f"unexpected archive patient-period error: {exc}"
 
         return True, "ok"
     finally:
@@ -5367,6 +5599,118 @@ def _check_w1_outcome_release_runs_from_change_monitor(temp_root: str) -> tuple[
     return True, "ok"
 
 
+def _check_outcome_rollback_restores_released_w1_bed(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.patient_status_dao import PatientStatusDAO
+    from rem_card.data.dto.remcard_dto import PatientStatus
+    from rem_card.services.patient_status_service import PatientStatusService
+
+    saved_local_first = os.environ.get("REMCARD_LOCAL_FIRST_SYNC")
+    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
+    db_path = os.path.join(temp_root, "outcome_rollback_w1.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        admission_dt = datetime.now().replace(microsecond=0) - timedelta(hours=2)
+        outcome_dt = datetime.now().replace(microsecond=0) - timedelta(minutes=5)
+        with manager.remcard_transaction(source="regression_seed_outcome_rollback_w1") as cursor:
+            cursor.execute("INSERT INTO beds(bed_number, status, current_admission_id) VALUES (1, 'FREE', NULL)")
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Rollback Outcome Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, 1, 'REG-OUTCOME-ROLLBACK', ?)
+                """,
+                (patient_id, admission_dt.isoformat()),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                UPDATE beds
+                SET status = 'OCCUPIED',
+                    current_admission_id = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE bed_number = 1
+                """,
+                (admission_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO patient_status_events(
+                    admission_id, status, start_time, end_time, created_by, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, 'REGRESSION', ?, ?)
+                """,
+                (
+                    admission_id,
+                    PatientStatus.ACTIVE.value,
+                    admission_dt.isoformat(),
+                    outcome_dt.isoformat(),
+                    admission_dt.isoformat(),
+                    admission_dt.isoformat(),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO patient_status_events(
+                    admission_id, status, start_time, created_by, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'REGRESSION', ?, ?)
+                """,
+                (
+                    admission_id,
+                    PatientStatus.DEAD.value,
+                    outcome_dt.isoformat(),
+                    outcome_dt.isoformat(),
+                    outcome_dt.isoformat(),
+                ),
+            )
+
+        patient_dao = PatientDAO(manager)
+        status_service = PatientStatusService(PatientStatusDAO(manager))
+        released = patient_dao.release_due_outcome_beds(delay_minutes=0)
+        if released != 1:
+            return False, f"expected one released bed, got {released}"
+        if patient_dao.get_active_patients():
+            return False, "patient remained in W1 after outcome release"
+
+        if not status_service.rollback_last_status(admission_id):
+            return False, "rollback returned False"
+
+        bed = manager.fetch_one_remcard(
+            "SELECT status, current_admission_id FROM beds WHERE bed_number = 1"
+        )
+        if not bed or bed["status"] != "OCCUPIED" or int(bed["current_admission_id"]) != admission_id:
+            return False, f"bed was not restored after rollback: {dict(bed) if bed else None}"
+
+        admission = manager.fetch_one_remcard(
+            "SELECT is_active, outcome, death_datetime, transfer_datetime FROM admissions WHERE id = ?",
+            (admission_id,),
+        )
+        if not admission or int(admission["is_active"]) != 1:
+            return False, f"admission was not reactivated: {dict(admission) if admission else None}"
+        if admission["outcome"] or admission["death_datetime"] or admission["transfer_datetime"]:
+            return False, f"outcome fields were not cleared: {dict(admission)}"
+
+        active_patients = patient_dao.get_active_patients()
+        if [p.id for p in active_patients] != [admission_id]:
+            return False, f"W1 active patients mismatch after rollback: {[p.id for p in active_patients]}"
+
+        current_status = status_service.get_current_status(admission_id)
+        if not current_status or current_status.status != PatientStatus.ACTIVE:
+            return False, f"unexpected current status after rollback: {current_status}"
+        return True, "ok"
+    finally:
+        manager.close()
+        if saved_local_first is None:
+            os.environ.pop("REMCARD_LOCAL_FIRST_SYNC", None)
+        else:
+            os.environ["REMCARD_LOCAL_FIRST_SYNC"] = saved_local_first
+
+
 def _check_build_release_reuses_prepared_version(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
@@ -5963,6 +6307,16 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
     if not local_force["balance_refresh"]:
         return False, f"local orders force should refresh balance: {local_force}"
 
+    doctor_mark_force = actions({
+        "forced": True,
+        "force_source": "doctor_order_mark:5",
+        "changed_entities": ["administrations"],
+    })
+    if doctor_mark_force["full_refresh_required"] or doctor_mark_force["card_snapshot_required"]:
+        return False, f"doctor order mark should not require full refresh: {doctor_mark_force}"
+    if not (doctor_mark_force["orders_refresh"] and doctor_mark_force["balance_refresh"]):
+        return False, f"doctor order mark should refresh orders and balance: {doctor_mark_force}"
+
     nurse_panel_force = actions({
         "forced": True,
         "force_source": "nurse_order_panel_mark:5",
@@ -6274,6 +6628,10 @@ def main():
         ("patient_bed_move_enqueue_error_refreshes", _check_patient_bed_move_enqueue_error_refreshes),
         ("archive_delete_enqueue_error_refreshes", _check_archive_delete_enqueue_error_refreshes),
         ("doctor_create_card_enqueue_error_refreshes", _check_doctor_create_card_enqueue_error_refreshes),
+        (
+            "doctor_archive_outcome_blocks_new_card_before_snapshot",
+            _check_doctor_archive_outcome_blocks_new_card_before_snapshot,
+        ),
         ("patient_status_error_refreshes_checked_state", _check_patient_status_error_refreshes_checked_state),
         ("orders_pending_states_before_commit", _check_orders_pending_states_before_commit),
         ("blood_plasma_key_ru_prescription_parse", _check_blood_plasma_key_ru_prescription_parse),
@@ -6283,6 +6641,8 @@ def main():
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
         ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
+        ("balance_pre_8_shift_hour_resolution", _check_balance_pre_8_shift_hour_resolution),
+        ("archive_balance_patient_period_bounds", _check_archive_balance_patient_period_bounds),
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
@@ -6319,6 +6679,7 @@ def main():
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
         ("w1_outcome_release_runs_from_change_monitor", _check_w1_outcome_release_runs_from_change_monitor),
+        ("outcome_rollback_restores_released_w1_bed", _check_outcome_rollback_restores_released_w1_bed),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
         ("read_coordinator_partial_snapshots", _check_read_coordinator_partial_snapshots),

@@ -30,6 +30,7 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "orders_left_click:",
     "orders_middle_click:",
     "orders_right_click:",
+    "doctor_order_mark:",
     "nurse_order_mark:",
     "nurse_order_panel_mark:",
 )
@@ -90,6 +91,7 @@ class DoctorRemCardWidget(QWidget):
         self._archive_read_only_mode = False
         self._archive_source_db_path = None
         self._archive_readonly_db_manager = None
+        self._balance_patient_period_manual_mode = False
         self._snapshot_worker = None
         self._snapshot_pending = None
         self._snapshot_request_id = 0
@@ -1234,6 +1236,33 @@ class DoctorRemCardWidget(QWidget):
             "Архивная карта открыта в режиме только чтения.",
         )
 
+    def _current_status_is_outcome(self) -> bool:
+        snapshot = self._card_snapshot_cache or {}
+        status_dto = snapshot.get("status")
+        status_value = getattr(status_dto, "status", None)
+        if status_dto and getattr(status_value, "is_outcome", lambda: False)():
+            return True
+        layout_status = getattr(getattr(self, "layout_manager", None), "_current_status_dto", None)
+        layout_status_value = getattr(layout_status, "status", None)
+        if layout_status and getattr(layout_status_value, "is_outcome", lambda: False)():
+            return True
+        patient = snapshot.get("patient")
+        if patient and (
+            getattr(patient, "transfer_datetime", None)
+            or getattr(patient, "death_datetime", None)
+            or getattr(patient, "outcome", None)
+        ):
+            return True
+        if self.admission_id and getattr(self, "service", None) and hasattr(self.service, "get_current_status"):
+            try:
+                current_status = self.service.get_current_status(self.admission_id)
+            except Exception:
+                current_status = None
+            current_status_value = getattr(current_status, "status", None)
+            if current_status and getattr(current_status_value, "is_outcome", lambda: False)():
+                return True
+        return False
+
     def _apply_archive_read_only_state(self):
         read_only = bool(self._archive_read_only_mode)
         layout = getattr(self, "layout_manager", None)
@@ -1301,7 +1330,7 @@ class DoctorRemCardWidget(QWidget):
 
             # Сохраняем бизнес-логику 4в (наличие карт), добавляя только ограничение read-only.
             s4v.set_buttons_state(card_exists, yest_exists)
-            if read_only:
+            if read_only or self._current_status_is_outcome():
                 s4v.btn_new_card.setEnabled(False)
             s4v.btn_card_list.setEnabled(True)
             s4v.btn_daily_print.setEnabled(True)
@@ -1319,7 +1348,15 @@ class DoctorRemCardWidget(QWidget):
             return fallback_patient.admission_datetime
         return datetime.now()
 
-    def load_patient_card(self, admission_id, date, *, request_snapshot: bool = True, ensure_initial_status=None):
+    def load_patient_card(
+        self,
+        admission_id,
+        date,
+        *,
+        request_snapshot: bool = True,
+        ensure_initial_status=None,
+        balance_patient_period_manual_mode: bool = False,
+    ):
         """Обновляет данные карты для нового пациента/даты."""
         if self._is_closing:
             return
@@ -1345,6 +1382,7 @@ class DoctorRemCardWidget(QWidget):
         
         self.admission_id = admission_id
         self.current_date = date
+        self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
         try:
@@ -1438,6 +1476,8 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self, 'balance_controller'):
             self.balance_controller.admission_id = admission_id
             self.balance_controller.shift_date = date
+            if hasattr(self.balance_controller, "set_patient_period_manual_mode"):
+                self.balance_controller.set_patient_period_manual_mode(self._balance_patient_period_manual_mode)
 
         diet_widget = self._ensure_diet_widget()
         if diet_widget:
@@ -1884,6 +1924,8 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self, "balance_controller") and self.balance_controller:
             self.balance_controller.admission_id = self.admission_id
             self.balance_controller.shift_date = self._current_date
+            if hasattr(self.balance_controller, "set_patient_period_manual_mode"):
+                self.balance_controller.set_patient_period_manual_mode(self._balance_patient_period_manual_mode)
         if not self._apply_balance_snapshot_if_available():
             self._request_card_snapshot(load_scope="full")
 
@@ -1901,6 +1943,14 @@ class DoctorRemCardWidget(QWidget):
     def on_create_card_clicked(self):
         if self._archive_read_only_mode:
             self._show_read_only_hint()
+            return
+        if self._current_status_is_outcome():
+            CustomMessageBox.information(
+                self,
+                "Создание карты",
+                "Создание новой карты недоступно, пока у пациента не отменен исход.",
+            )
+            self._apply_archive_read_only_state()
             return
         if self._create_card_write_pending:
             return
@@ -1982,7 +2032,7 @@ class DoctorRemCardWidget(QWidget):
         sector = getattr(getattr(self, "layout_manager", None), "sector_4v", None)
         button = getattr(sector, "btn_new_card", None)
         if button is not None:
-            button.setEnabled(enabled)
+            button.setEnabled(bool(enabled) and not self._current_status_is_outcome())
 
     def on_yest_card_clicked(self):
         from datetime import timedelta
@@ -2016,11 +2066,31 @@ class DoctorRemCardWidget(QWidget):
                     target_dt = datetime.fromtimestamp(selected_date.timestamp())
                     # Если мы открываем из списка коек (где карта еще не загружена) или дата отличается
                     if patient.id != self.admission_id or target_dt != self._current_date:
-                        QTimer.singleShot(100, lambda: self.safe_load_archived_card(target_dt, patient.id))
+                        QTimer.singleShot(
+                            100,
+                            lambda: self.safe_load_archived_card(
+                                target_dt,
+                                patient.id,
+                                balance_patient_period_manual_mode=True,
+                            ),
+                        )
+                    else:
+                        self._balance_patient_period_manual_mode = True
+                        if hasattr(self, "balance_controller") and hasattr(
+                            self.balance_controller,
+                            "set_patient_period_manual_mode",
+                        ):
+                            self.balance_controller.set_patient_period_manual_mode(True)
         except Exception as e:
             logger.error(f"Error showing archive: {e}", exc_info=True)
 
-    def safe_load_archived_card(self, selected_date, admission_id=None):
+    def safe_load_archived_card(
+        self,
+        selected_date,
+        admission_id=None,
+        *,
+        balance_patient_period_manual_mode: bool = False,
+    ):
         if self._is_loading: return
         self._ensure_card_widgets_initialized()
         from ...app.logger import logger
@@ -2063,6 +2133,7 @@ class DoctorRemCardWidget(QWidget):
                 self.layout_manager.bottom_row.show()
 
             self.current_date = selected_date
+            self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
             if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:
                 self._bind_nurse_orders_balance_signals()
                 self.layout_manager.nurse_orders_manager.set_context(target_id, self._current_date)
@@ -2092,6 +2163,8 @@ class DoctorRemCardWidget(QWidget):
         try:
             if hasattr(self, 'balance_controller'):
                 self.balance_controller.shift_date = self._current_date
+                if hasattr(self.balance_controller, "set_patient_period_manual_mode"):
+                    self.balance_controller.set_patient_period_manual_mode(self._balance_patient_period_manual_mode)
                 
             self._request_card_snapshot(
                 ensure_initial_status=not self._archive_read_only_mode,
@@ -2477,8 +2550,8 @@ class DoctorRemCardWidget(QWidget):
                 self._exit_archive_read_only_mode()
             return
         self._exit_archive_read_only_mode()
-        target_date = datetime.now()
-        self.load_patient_card(patient.id, target_date)
+        target_date = self._resolve_archive_open_date(patient.id, fallback_patient=patient)
+        self.load_patient_card(patient.id, target_date, balance_patient_period_manual_mode=True)
         self._prime_patient_header_from_w1(patient, target_date)
         self.layout_manager.set_patient_selection_mode("card")
         self.layout_manager.bottom_row.show()

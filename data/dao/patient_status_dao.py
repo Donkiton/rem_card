@@ -641,6 +641,7 @@ class PatientStatusDAO:
         Откатывает последнее изменение статуса:
         удаляет текущее активное событие и открывает предыдущее.
         """
+        now_str = datetime.now().replace(microsecond=0).isoformat()
         try:
             with self.db.remcard_transaction() as cursor:
                 # 1. Ищем текущее активное событие
@@ -665,28 +666,15 @@ class PatientStatusDAO:
                     logger.warning(f"[StatusDAO] Cannot rollback: only one status exists for admission {admission_id}")
                     return False
 
-                # 3. Удаляем текущее событие
-                cursor.execute("DELETE FROM patient_status_events WHERE id = ?", (current['id'],))
-
-                # 4. Находим предыдущее событие и открываем его
+                # 3. Находим предыдущее событие до удаления текущего.
                 cursor.execute("""
                     SELECT id, status FROM patient_status_events 
-                    WHERE admission_id = ? 
-                    ORDER BY start_time DESC LIMIT 1
-                """, (admission_id,))
+                    WHERE admission_id = ?
+                      AND id != ?
+                    ORDER BY start_time DESC, id DESC LIMIT 1
+                """, (admission_id, current['id']))
                 prev = cursor.fetchone()
                 if prev:
-                    cursor.execute(
-                        """
-                        UPDATE patient_status_events
-                        SET end_time = NULL,
-                            updated_at = ?,
-                            revision = COALESCE(revision, 0) + 1
-                        WHERE id = ?
-                        """,
-                        (datetime.now().isoformat(), prev['id'])
-                    )
-
                     current_is_outcome = current_status in (
                         PatientStatus.TRANSFERRED.value,
                         PatientStatus.DEAD.value,
@@ -695,11 +683,55 @@ class PatientStatusDAO:
                         PatientStatus.TRANSFERRED.value,
                         PatientStatus.DEAD.value,
                     )
-                    if current_is_outcome and not previous_is_outcome:
+                    should_restore_bed = current_is_outcome and not previous_is_outcome
+                    bed_number = None
+                    bed_row = None
+
+                    if should_restore_bed:
+                        cursor.execute(
+                            "SELECT bed_number FROM admissions WHERE id = ?",
+                            (admission_id,),
+                        )
+                        admission_row = cursor.fetchone()
+                        if not admission_row:
+                            logger.warning(
+                                "[StatusDAO] Cannot rollback outcome: admission %s not found",
+                                admission_id,
+                            )
+                            return False
+                        bed_number = int(admission_row["bed_number"])
+                        cursor.execute(
+                            "SELECT bed_number, current_admission_id FROM beds WHERE bed_number = ?",
+                            (bed_number,),
+                        )
+                        bed_row = cursor.fetchone()
+                        occupied_by = int(bed_row["current_admission_id"]) if bed_row and bed_row["current_admission_id"] is not None else None
+                        if occupied_by is not None and occupied_by != int(admission_id):
+                            raise DataConflictError(
+                                f"Койка {bed_number} уже занята другим пациентом. Откат исхода невозможен без переноса койки."
+                            )
+
+                    # 4. Удаляем текущее событие
+                    cursor.execute("DELETE FROM patient_status_events WHERE id = ?", (current['id'],))
+
+                    # 5. Открываем предыдущее событие.
+                    cursor.execute(
+                        """
+                        UPDATE patient_status_events
+                        SET end_time = NULL,
+                            updated_at = ?,
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
+                        (now_str, prev['id'])
+                    )
+
+                    if should_restore_bed:
                         cursor.execute(
                             """
                             UPDATE admissions
                             SET outcome = NULL,
+                                is_active = 1,
                                 transfer_datetime = NULL,
                                 transfer_department = NULL,
                                 transfer_lpu = NULL,
@@ -712,10 +744,32 @@ class PatientStatusDAO:
                                 revision = COALESCE(revision, 0) + 1
                             WHERE id = ?
                             """,
-                            (datetime.now().replace(microsecond=0).isoformat(), admission_id),
+                            (now_str, admission_id),
                         )
+
+                        if bed_row:
+                            cursor.execute(
+                                """
+                                UPDATE beds
+                                SET current_admission_id = ?,
+                                    status = 'OCCUPIED',
+                                    revision = COALESCE(revision, 0) + 1
+                                WHERE bed_number = ?
+                                  AND (current_admission_id IS NULL OR current_admission_id = ?)
+                                """,
+                                (admission_id, bed_number, admission_id),
+                            )
+                            if cursor.rowcount != 1:
+                                raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                        else:
+                            cursor.execute(
+                                """
+                                INSERT INTO beds (bed_number, status, current_admission_id, revision)
+                                VALUES (?, 'OCCUPIED', ?, 1)
+                                """,
+                                (bed_number, admission_id),
+                            )
                     
-                # При откате статуса мы НЕ трогаем is_active госпитализации
                 return True
         except DataConflictError:
             raise

@@ -35,6 +35,7 @@ class SyncCoordinator:
 
     SOURCE_PREFIX_SCOPES = {
         "orders_": {"orders", "balance"},
+        "doctor_order_mark:": {"orders", "administrations", "balance"},
         "nurse_order_mark:": {"orders", "administrations", "balance"},
         "nurse_order_panel_mark:": {"orders", "administrations", "balance"},
         "fluid": {"balance"},
