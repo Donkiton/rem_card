@@ -38,7 +38,7 @@ COLOR_SUCCESS_DARK = _t("state.success.hover", "#218838")
 COLOR_DANGER = _t("state.danger", "#e74c3c")
 COLOR_WARNING = _t("state.warning", "#f39c12")
 COLOR_INFO = _t("state.info", "#7f8c8d")
-COLOR_SECONDARY = _t("button.neutral.bg", "#6c757d")
+COLOR_SECONDARY = _t("state.secondary", "#6c757d")
 
 # --- ГРАНИЦЫ И РАМКИ ---
 BORDER_COLOR = _t("border.default", "#bdc3c7")

@@ -1,4 +1,11 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.styles.sector_styles import (
+    build_remcard_current_time_label_style,
+    build_remcard_period_label_style,
+    build_remcard_title_label_style,
+    build_remcard_top_header_style,
+)
+from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 from PySide6.QtCore import Qt, QTimer
 from datetime import datetime, timedelta
@@ -8,24 +15,9 @@ class Sector2a(BaseSectorWidget):
         super().__init__("2а", parent)
         self.label.hide()
         self.setObjectName("sector_2a_frame")
+        tokens = get_theme_manager().current_tokens()
 
-        self.setStyleSheet("""
-            QFrame#sector_2a_frame {
-                background: #e9ecef;
-                border-top: 1.5px solid #bdc3c7;
-                border-left: 1.5px solid #bdc3c7;
-                border-right: 1.5px solid #bdc3c7;
-                border-bottom: 0.5px solid #bdc3c7;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }
-            QWidget#sector_2a_info_widget {
-                background: transparent;
-                border-bottom: 0.5px solid #bdc3c7;
-            }
-        """)
+        self.setStyleSheet(build_remcard_top_header_style(tokens, "sector_2a_frame", "sector_2a_info_widget"))
         
         # Контейнер для текста
         self.info_widget = QWidget()
@@ -34,13 +26,13 @@ class Sector2a(BaseSectorWidget):
         self.info_layout.setContentsMargins(10, 0, 10, 0)
         
         self.lbl_title = QLabel("Реанимационная карта")
-        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 16px; color: #5c6770; background: transparent;")
+        self.lbl_title.setStyleSheet(build_remcard_title_label_style(tokens))
         
         self.lbl_period = QLabel("-")
-        self.lbl_period.setStyleSheet("font-size: 14px; margin-left: 20px; background: transparent; color: #495057;")
+        self.lbl_period.setStyleSheet(build_remcard_period_label_style(tokens))
         
         self.lbl_current_time = QLabel()
-        self.lbl_current_time.setStyleSheet("font-weight: bold; font-size: 14px; color: #d35400; margin-left: 15px; background: transparent;")
+        self.lbl_current_time.setStyleSheet(build_remcard_current_time_label_style(tokens))
         
         self.info_layout.addWidget(self.lbl_title)
         self.info_layout.addWidget(self.lbl_period)

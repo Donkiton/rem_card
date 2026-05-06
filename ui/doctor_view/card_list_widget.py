@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, Signal, QSize, QTimer
 from datetime import datetime
 from ..shared.async_call import AsyncCallThread
 from ..shared.custom_title_bar import CustomTitleBar
+from rem_card.ui.styles.shared_styles import apply_patient_archive_list_style
 
 class CardListWidget(QWidget):
     card_selected = Signal(object) # передает datetime
@@ -26,25 +27,7 @@ class CardListWidget(QWidget):
         layout.addWidget(self.title_lbl)
         
         self.list_widget = QListWidget()
-        self.list_widget.setStyleSheet("""
-            QListWidget { 
-                font-size: 16px; 
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                background-color: white;
-            }
-            QListWidget::item { 
-                padding: 12px; 
-                border-bottom: 1px solid #f1f2f6; 
-            }
-            QListWidget::item:selected { 
-                background-color: #6c757d;
-                color: white; 
-            }
-            QListWidget::item:hover:!selected {
-                background-color: #ecf0f1;
-            }
-        """)
+        apply_patient_archive_list_style(self.list_widget)
         self.list_widget.itemClicked.connect(self.on_item_clicked)
         layout.addWidget(self.list_widget)
 

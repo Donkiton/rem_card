@@ -21,7 +21,7 @@ KIND_LABELS = {
     "hex": "hex вне ui/styles",
     "rgb": "rgb/rgba вне ui/styles",
     "qss": "setStyleSheet вне ui/styles",
-    "old_blue": "старый синий цвет запрещен",
+    "old_blue": "старый синий цвет вне темы запрещен",
 }
 
 # Baseline текущей legacy-миграции. Обычный режим использует явные категории ниже,
@@ -45,7 +45,7 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/doctor_view/administration_dialog.py"): {"hex": 6, "qss": 4},
     Path("ui/doctor_view/archive_widget.py"): {"qss": 14},
     Path("ui/doctor_view/bars_auth_dialog.py"): {"hex": 3, "qss": 3},
-    Path("ui/doctor_view/card_list_widget.py"): {"hex": 11, "qss": 3},
+    Path("ui/doctor_view/card_list_widget.py"): {"hex": 7, "qss": 2},
     Path("ui/doctor_view/components/beds_selection_widget.py"): {"qss": 3},
     Path("ui/doctor_view/components/control_panel.py"): {"hex": 8, "qss": 7},
     Path("ui/doctor_view/components/sector8_panel.py"): {"qss": 9},
@@ -60,9 +60,9 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/nurse_view/input_widgets.py"): {"hex": 1, "qss": 2},
     Path("ui/nurse_view/nurse_remcard_layout.py"): {"hex": 2, "qss": 1},
     Path("ui/nurse_view/nurse_remcard_widget.py"): {"hex": 7, "qss": 3},
-    Path("ui/nurse_view/nurse_statistics_dialog.py"): {"hex": 10, "qss": 11},
-    Path("ui/nurse_view/sectors/nurse_sector_2a.py"): {"hex": 9, "qss": 4},
-    Path("ui/nurse_view/sectors/nurse_sector_2b.py"): {"hex": 14, "qss": 2},
+    Path("ui/nurse_view/nurse_statistics_dialog.py"): {"hex": 8, "qss": 11},
+    Path("ui/nurse_view/sectors/nurse_sector_2a.py"): {"qss": 4},
+    Path("ui/nurse_view/sectors/nurse_sector_2b.py"): {"qss": 2},
     Path("ui/nurse_view/sectors/nurse_sector_4v.py"): {"hex": 18, "qss": 10},
     Path("ui/nurse_view/sectors/nurse_sector_7na_b.py"): {"hex": 11, "qss": 2},
     Path("ui/nurse_view/sectors/nurse_sector_dev.py"): {"hex": 10, "qss": 6},
@@ -73,9 +73,9 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/patient_bed_management/side_patient_card.py"): {"qss": 7},
     Path("ui/patient_bed_management/tabs/diagnosis_tab.py"): {"qss": 17},
     Path("ui/patient_bed_management/tabs/general_tab.py"): {"qss": 1},
-    Path("ui/rem_card_sectors/balance/balance_grid.py"): {"hex": 7, "qss": 2},
+    Path("ui/rem_card_sectors/balance/balance_grid.py"): {"qss": 2},
     Path("ui/rem_card_sectors/balance/sector_2b_g.py"): {"hex": 23, "qss": 9},
-    Path("ui/rem_card_sectors/balance/sector_2b_v.py"): {"hex": 30, "qss": 16},
+    Path("ui/rem_card_sectors/balance/sector_2b_v.py"): {"hex": 25, "qss": 16},
     Path("ui/rem_card_sectors/balance/sector_2d.py"): {"hex": 26, "qss": 4},
     Path("ui/rem_card_sectors/outcome_dialogs.py"): {"hex": 12, "qss": 4},
     Path("ui/rem_card_sectors/s_print/builder.py"): {"hex": 8},
@@ -85,15 +85,15 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/rem_card_sectors/s_print/table_layout.py"): {"hex": 3},
     Path("ui/rem_card_sectors/sector_1a.py"): {"hex": 5, "qss": 3},
     Path("ui/rem_card_sectors/sector_1b.py"): {"hex": 15, "qss": 2},
-    Path("ui/rem_card_sectors/sector_2a.py"): {"hex": 9, "qss": 4},
-    Path("ui/rem_card_sectors/sector_2b.py"): {"hex": 14, "qss": 3},
+    Path("ui/rem_card_sectors/sector_2a.py"): {"qss": 4},
+    Path("ui/rem_card_sectors/sector_2b.py"): {"qss": 3},
     Path("ui/rem_card_sectors/sector_2g.py"): {"hex": 1, "qss": 2},
     Path("ui/rem_card_sectors/sector_2v.py"): {"hex": 1, "qss": 1},
     Path("ui/rem_card_sectors/sector_3a.py"): {"hex": 16, "qss": 8},
     Path("ui/rem_card_sectors/sector_3b.py"): {"hex": 17, "qss": 9},
-    Path("ui/rem_card_sectors/sector_4.py"): {"hex": 15, "qss": 7},
-    Path("ui/rem_card_sectors/sector_4_sub.py"): {"hex": 39, "qss": 22},
-    Path("ui/rem_card_sectors/sector_4a.py"): {"hex": 7, "qss": 6},
+    Path("ui/rem_card_sectors/sector_4.py"): {"hex": 14, "qss": 7},
+    Path("ui/rem_card_sectors/sector_4_sub.py"): {"hex": 38, "qss": 22},
+    Path("ui/rem_card_sectors/sector_4a.py"): {"hex": 4, "qss": 6},
     Path("ui/rem_card_sectors/sector_5.py"): {"hex": 11, "qss": 3},
     Path("ui/rem_card_sectors/sector_6.py"): {"hex": 11, "qss": 2},
     Path("ui/rem_card_sectors/sector_7bal_a.py"): {"hex": 11, "qss": 2},
@@ -104,7 +104,7 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/rem_card_sectors/sector_7vit_b.py"): {"hex": 11, "qss": 2},
     Path("ui/rem_card_sectors/sector_8.py"): {"hex": 2, "qss": 2},
     Path("ui/rem_card_sectors/sector_anal.py"): {"hex": 6, "qss": 3},
-    Path("ui/rem_card_sectors/sector_events.py"): {"hex": 46, "qss": 21, "rgb": 1},
+    Path("ui/rem_card_sectors/sector_events.py"): {"hex": 44, "qss": 21, "rgb": 1},
     Path("ui/rem_card_sectors/sector_ivl.py"): {"hex": 59, "qss": 13},
     Path("ui/rem_card_sectors/sector_print.py"): {"hex": 7, "qss": 6},
     Path("ui/rem_card_sectors/sector_proc.py"): {"hex": 6, "qss": 3},
@@ -112,7 +112,7 @@ LEGACY_BASELINE_COUNTS: dict[Path, dict[str, int]] = {
     Path("ui/rem_card_sectors/sector_w1b.py"): {"hex": 3, "qss": 3},
     Path("ui/rem_card_sectors/sector_w1b_nurse.py"): {"hex": 3, "qss": 3},
     Path("ui/shared/chart_widget.py"): {"hex": 5, "qss": 1},
-    Path("ui/shared/components/diet_intake_widget.py"): {"hex": 38, "qss": 3},
+    Path("ui/shared/components/diet_intake_widget.py"): {"hex": 37, "qss": 3},
     Path("ui/shared/components/nurse_order_card.py"): {"hex": 20, "qss": 10},
     Path("ui/shared/components/vital_settings_dialog.py"): {"hex": 3, "qss": 2},
     Path("ui/shared/hybrid_shift_time_picker.py"): {"hex": 18, "qss": 1},
@@ -240,9 +240,9 @@ def _collect_findings() -> tuple[list[Finding], list[Finding]]:
 
     for path in _iter_python_files():
         rel = _rel(path)
-        old_blue.extend(_line_findings(path, OLD_BLUE_RE, "old_blue"))
         if _is_under(rel, STYLE_ROOT):
             continue
+        old_blue.extend(_line_findings(path, OLD_BLUE_RE, "old_blue"))
         style_findings.extend(_line_findings(path, HEX_RE, "hex"))
         style_findings.extend(_line_findings(path, RGB_RE, "rgb"))
         style_findings.extend(_line_findings(path, INLINE_QSS_RE, "qss"))

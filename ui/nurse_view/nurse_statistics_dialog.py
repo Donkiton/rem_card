@@ -70,7 +70,7 @@ class PatientStatCard(QFrame):
         return w
 
 from ..shared.custom_title_bar import CustomTitleBar
-from ..styles.theme import BG_MAIN, CUSTOM_DIALOG_RADIUS
+from ..styles.theme import BG_MAIN, COLOR_PRIMARY_DARK, COLOR_SECONDARY, CUSTOM_DIALOG_RADIUS, TEXT_ON_DARK
 
 class NurseStatisticsDialog(QDialog):
     def __init__(self, patient_service, remcard_service, parent=None):
@@ -120,7 +120,7 @@ class NurseStatisticsDialog(QDialog):
         # Заголовок внутри отчета
         date_str = self.current_hour_dt.strftime("%d.%m.%Y")
         lbl_title = QLabel(f"Отчет по препаратам на {date_str}")
-        lbl_title.setStyleSheet("font-size: 20px; font-weight: bold; color: #5c6770; margin-bottom: 5px;")
+        lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLOR_PRIMARY_DARK}; margin-bottom: 5px;")
         content_wrapper.addWidget(lbl_title)
         
         self.scroll = QScrollArea()
@@ -139,7 +139,11 @@ class NurseStatisticsDialog(QDialog):
         btn_layout.addStretch()
         btn_close = QPushButton("Закрыть")
         btn_close.setFixedWidth(120)
-        btn_close.setStyleSheet("QPushButton { background-color: #6c757d; color: white; border-radius: 4px; padding: 6px; } QPushButton:hover { background-color: #5a6268; }")
+        btn_close.setStyleSheet(
+            f"QPushButton {{ background-color: {COLOR_SECONDARY}; color: {TEXT_ON_DARK}; "
+            "border-radius: 4px; padding: 6px; } "
+            f"QPushButton:hover {{ background-color: {COLOR_SECONDARY}; }}"
+        )
         btn_close.clicked.connect(self.close)
         btn_layout.addWidget(btn_close)
         btn_layout.addSpacing(10) # Сдвиг влево от правого края на 10 пикселей

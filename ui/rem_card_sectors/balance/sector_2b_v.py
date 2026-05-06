@@ -2,6 +2,7 @@ import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QLineEdit, QGridLayout)
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QIntValidator
+from rem_card.ui.styles.theme import COLOR_DANGER, COLOR_PRIMARY
 
 class Sector2b_v(QWidget):
     """Сектор баланса жидкости: Выведено и Итог (правая часть)"""
@@ -89,7 +90,7 @@ class Sector2b_v(QWidget):
         balance_lbl = QLabel("Баланс:")
         balance_lbl.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50; border: none; background: transparent;")
         self.balance_val = QLabel("0 мл")
-        self.balance_val.setStyleSheet("font-weight: bold; font-size: 16px; color: #6c757d; border: none; background: transparent;")
+        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY}; border: none; background: transparent;")
         balance_layout.addWidget(balance_lbl)
         balance_layout.addStretch()
         balance_layout.addWidget(self.balance_val)
@@ -174,11 +175,11 @@ class Sector2b_v(QWidget):
         # 5. Значение X (из сетки)
         x_val_lbl = QLabel("0")
         x_val_lbl.setFixedWidth(40)
-        x_val_lbl.setStyleSheet("font-weight: 600; color: #6c757d; font-size: 12px;")
+        x_val_lbl.setStyleSheet(f"font-weight: 600; color: {COLOR_PRIMARY}; font-size: 12px;")
         
         # 6. Единицы
         unit_lbl = QLabel("мл")
-        unit_lbl.setStyleSheet("font-size: 11px; color: #6c757d;")
+        unit_lbl.setStyleSheet(f"font-size: 11px; color: {COLOR_PRIMARY};")
         
         # Добавляем в QGridLayout
         self.grid_layout.addWidget(icon_lbl, row, 0, Qt.AlignCenter)
@@ -197,7 +198,7 @@ class Sector2b_v(QWidget):
         balance_day = int(round(total_in_daily - total_out_daily))
 
         prefix_cur = "+" if balance_cur > 0 else ""
-        color = "#6c757d" if balance_cur >= 0 else "#e74c3c"
+        color = COLOR_PRIMARY if balance_cur >= 0 else COLOR_DANGER
         
         self.balance_val.setText(f"{prefix_cur}{balance_cur}/{balance_day} мл")
         self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {color};")
@@ -215,7 +216,7 @@ class Sector2b_v(QWidget):
 
     def set_loading_state(self):
         self.balance_val.setText("—/— мл")
-        self.balance_val.setStyleSheet("font-weight: bold; font-size: 16px; color: #6c757d;")
+        self.balance_val.setStyleSheet(f"font-weight: bold; font-size: 16px; color: {COLOR_PRIMARY};")
         self.total_out_val.setText("— мл")
         self.diurez_x.setText("—")
         self.drenazh_x.setText("—")

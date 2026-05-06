@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QFrame,
@@ -30,6 +34,56 @@ from rem_card.ui.styles.theme_presets import get_preset, list_presets
 from rem_card.ui.styles.theme_tokens import normalize_role
 
 
+HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+COLOR_OVERRIDE_GROUPS = (
+    (
+        "Акценты",
+        (
+            ("sector.title_text", "Заголовки карты и активных блоков"),
+            ("surface.selected", "Выделение списков"),
+            ("table.row_selected_bg", "Выделение строк таблиц"),
+            ("table.cell_selected_bg", "Выбранная ячейка баланса"),
+            ("table.cell_selected_border", "Рамка выбранной ячейки баланса"),
+        ),
+    ),
+    (
+        "Кнопки",
+        (
+            ("button.neutral.bg", "Обычная кнопка"),
+            ("button.neutral.hover", "Обычная кнопка при наведении"),
+            ("button.neutral.text", "Текст обычной кнопки"),
+            ("button.accent.bg", "Акцентная кнопка"),
+            ("button.accent.hover", "Акцентная кнопка при наведении"),
+            ("button.success.bg", "Кнопка сохранения"),
+        ),
+    ),
+    (
+        "Рамки и поля",
+        (
+            ("border.default", "Основные рамки"),
+            ("border.subtle", "Тонкие разделители"),
+            ("border.focus", "Фокус и активная рамка"),
+            ("field.border", "Рамка поля ввода"),
+            ("field.focus_border", "Фокус поля ввода"),
+            ("sector.border", "Рамка рабочих секторов"),
+            ("dialog.border", "Рамка диалогов"),
+        ),
+    ),
+    (
+        "Таблицы и панели",
+        (
+            ("surface.panel", "Панели и шапки"),
+            ("surface.hover", "Наведение"),
+            ("surface.subtle", "Подложки"),
+            ("table.header_bg", "Фон заголовков таблиц"),
+            ("table.header_text", "Текст заголовков таблиц"),
+            ("table.grid", "Сетка таблиц"),
+        ),
+    ),
+)
+COLOR_OVERRIDE_KEYS = tuple(key for _group, items in COLOR_OVERRIDE_GROUPS for key, _label in items)
+
+
 class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
     """Единое окно выбора предзагруженной цветовой схемы для врача и медсестры."""
 
@@ -44,10 +98,11 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
         self._role_settings = self.manager.settings_for_role(self.role)
         self._current_preset_id = str(self._role_settings.get("preset_id") or "remcard_light")
         self._current_mode = str(self._role_settings.get("mode") or get_preset(self._current_preset_id).default_mode)
+        self._preview_overrides = self._sanitize_overrides(self._role_settings.get("overrides") or {})
 
         self.setWindowTitle("Цветовая схема")
-        self.setMinimumSize(760, 520)
-        self.resize(880, 620)
+        self.setMinimumSize(820, 660)
+        self.resize(940, 760)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
@@ -124,6 +179,9 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
         self.mode_group.addButton(self.dark_radio)
         mode_layout.addWidget(self.light_radio)
         mode_layout.addWidget(self.dark_radio)
+        self.clear_colors_btn = QPushButton("Сбросить цвета")
+        self.clear_colors_btn.clicked.connect(self._reset_color_overrides)
+        mode_layout.addWidget(self.clear_colors_btn)
         mode_layout.addStretch()
         self.light_radio.toggled.connect(self._on_mode_changed)
         self.dark_radio.toggled.connect(self._on_mode_changed)
@@ -198,6 +256,22 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
         preview_layout.addStretch()
         body_layout.addWidget(self.preview, 1, 1)
 
+        self.color_table = QTableWidget()
+        self.color_table.setObjectName("ThemeColorTable")
+        self.color_table.setColumnCount(3)
+        self.color_table.setHorizontalHeaderLabels(["Параметр", "Значение", "Цвет"])
+        self.color_table.verticalHeader().setVisible(False)
+        self.color_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.color_table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.color_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.color_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.color_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.color_table.setMinimumHeight(190)
+        self.color_table.setMaximumHeight(260)
+        body_layout.addWidget(self.color_table, 2, 0, 1, 2)
+        body_layout.setColumnStretch(1, 1)
+        body_layout.setRowStretch(1, 1)
+
         container_layout.addWidget(body)
 
         footer = QFrame()
@@ -243,17 +317,121 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
         self._refresh_preview()
 
     def _on_mode_changed(self):
-        if self.light_radio.isChecked() or self.dark_radio.isChecked():
+        if hasattr(self, "preview") and (self.light_radio.isChecked() or self.dark_radio.isChecked()):
             self._refresh_preview()
 
+    @staticmethod
+    def _normalize_color(value) -> str | None:
+        text = str(value or "").strip()
+        if not HEX_COLOR_RE.match(text):
+            return None
+        return text.lower()
+
+    def _sanitize_overrides(self, overrides: dict) -> dict[str, str]:
+        sanitized: dict[str, str] = {}
+        for key, value in (overrides or {}).items():
+            if key not in COLOR_OVERRIDE_KEYS:
+                continue
+            color = self._normalize_color(value)
+            if color:
+                sanitized[str(key)] = color
+        return sanitized
+
     def _preview_tokens(self) -> dict:
-        return self.manager.preview_tokens(self._selected_preset_id(), self._selected_mode())
+        return self.manager.preview_tokens(
+            self._selected_preset_id(),
+            self._selected_mode(),
+            self._sanitize_overrides(self._preview_overrides),
+        )
 
     def _refresh_preview(self):
         tokens = self._preview_tokens()
         self.preview.setStyleSheet(build_global_style(tokens) + self._preview_qss(tokens))
+        self._refresh_color_table(tokens)
         preset = get_preset(self._selected_preset_id())
-        self.status_label.setText(f"{preset.name} · {'темный' if self._selected_mode() == 'dark' else 'светлый'} режим")
+        custom_count = len(self._sanitize_overrides(self._preview_overrides))
+        custom_suffix = f" · изменено цветов: {custom_count}" if custom_count else ""
+        self.status_label.setText(
+            f"{preset.name} · {'темный' if self._selected_mode() == 'dark' else 'светлый'} режим{custom_suffix}"
+        )
+
+    def _refresh_color_table(self, tokens: dict):
+        if not hasattr(self, "color_table"):
+            return
+        self.color_table.setStyleSheet(build_global_style(tokens) + self._color_table_qss(tokens))
+        self.color_table.setRowCount(0)
+        row = 0
+        for group_name, items in COLOR_OVERRIDE_GROUPS:
+            self.color_table.insertRow(row)
+            group_item = QTableWidgetItem(group_name)
+            group_item.setFlags(Qt.ItemIsEnabled)
+            self.color_table.setItem(row, 0, group_item)
+            self.color_table.setSpan(row, 0, 1, 3)
+            row += 1
+            for key, label in items:
+                self.color_table.insertRow(row)
+                label_item = QTableWidgetItem(label)
+                value = str(tokens.get(key) or "")
+                value_item = QTableWidgetItem(value)
+                if key in self._preview_overrides:
+                    label_item.setToolTip("Пользовательское значение")
+                    value_item.setToolTip("Пользовательское значение")
+                self.color_table.setItem(row, 0, label_item)
+                self.color_table.setItem(row, 1, value_item)
+
+                color_btn = QPushButton(value)
+                color_btn.setObjectName("ThemeColorButton")
+                color_btn.setToolTip("Выбрать точный цвет")
+                color_btn.setFixedWidth(92)
+                color_btn.setStyleSheet(self._color_button_qss(value, tokens))
+                color_btn.clicked.connect(lambda _checked=False, token_key=key: self._pick_color(token_key))
+                self.color_table.setCellWidget(row, 2, color_btn)
+                row += 1
+        self.color_table.resizeRowsToContents()
+
+    def _color_table_qss(self, tokens: dict) -> str:
+        return f"""
+            QTableWidget#ThemeColorTable {{
+                background: {tokens.get("surface.card")};
+                border: 1px solid {tokens.get("border.subtle")};
+                border-radius: {tokens.get("radius.md")};
+            }}
+            QTableWidget#ThemeColorTable::item {{
+                padding: 4px;
+            }}
+            QTableWidget#ThemeColorTable::item:selected {{
+                background: transparent;
+                color: {tokens.get("text.primary")};
+            }}
+        """
+
+    def _color_button_qss(self, color: str, tokens: dict) -> str:
+        color = self._normalize_color(color) or str(tokens.get("surface.panel") or "#e9ecef")
+        qcolor = QColor(color)
+        text_color = "#000000" if qcolor.lightness() > 150 else "#ffffff"
+        return f"""
+            QPushButton#ThemeColorButton {{
+                background-color: {color};
+                color: {text_color};
+                border: 1px solid {tokens.get("border.default")};
+                border-radius: {tokens.get("radius.sm")};
+                font-weight: 700;
+                padding: 4px 8px;
+            }}
+        """
+
+    def _pick_color(self, token_key: str):
+        tokens = self._preview_tokens()
+        current = self._normalize_color(tokens.get(token_key)) or "#ffffff"
+        color = QColorDialog.getColor(QColor(current), self, "Выберите цвет")
+        if not color.isValid():
+            return
+        self._preview_overrides[token_key] = color.name().lower()
+        self._refresh_preview()
+
+    def _reset_color_overrides(self):
+        self._preview_overrides = {}
+        self._refresh_preview()
 
     def _preview_qss(self, tokens: dict) -> str:
         sector_bg = tokens.get("sector.bg")
@@ -350,6 +528,7 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
             preset_id=preset_id,
             mode=mode,
             density=preset.density,
+            overrides=self._sanitize_overrides(self._preview_overrides),
             save=True,
         )
         self.manager.apply_to_app(role=self.role)

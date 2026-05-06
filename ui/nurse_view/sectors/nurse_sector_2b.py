@@ -1,4 +1,6 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.styles.sector_styles import build_remcard_tab_button_style, build_remcard_tab_frame_style
+from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget, QLabel
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QPixmap
@@ -12,16 +14,9 @@ class NurseSector2b(BaseSectorWidget):
         super().__init__("2б (Вкладки)", parent)
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setContentsMargins(0, 0, 0, 0)
+        tokens = get_theme_manager().current_tokens()
         
-        self.setStyleSheet("""
-            background: #f8f9fa;
-            border-left: 1.5px solid #bdc3c7;
-            border-right: 1.5px solid #bdc3c7;
-            border-bottom: 1.5px solid #bdc3c7;
-            border-top: none;
-            border-bottom-left-radius: 5px;
-            border-bottom-right-radius: 5px;
-        """)
+        self.setStyleSheet(build_remcard_tab_frame_style(tokens))
 
         self.label.hide()
         
@@ -68,31 +63,7 @@ class NurseSector2b(BaseSectorWidget):
         btn.setChecked(active)
         btn.setFixedHeight(32)
         
-        style = """
-            QPushButton {
-                font-size: 13px; 
-                font-weight: bold; 
-                padding: 4px 12px; 
-                background-color: #ecf0f1; 
-                color: #2c3e50; 
-                border-radius: 5px; 
-                border: 1.5px solid #bdc3c7;
-            }
-            QPushButton:hover {
-                background-color: #dcdde1;
-            }
-            QPushButton:checked {
-                background-color: #f8f9fa;
-                color: #5c6770;
-                border: 2px solid #5c6770;
-            }
-            QPushButton:disabled {
-                color: #a4b0be;
-                background-color: #f1f2f6;
-                border-color: #dcdde1;
-            }
-        """
-        btn.setStyleSheet(style)
+        btn.setStyleSheet(build_remcard_tab_button_style(get_theme_manager().current_tokens()))
         if enabled:
             btn.clicked.connect(lambda: self.on_tab_clicked(text))
         return btn

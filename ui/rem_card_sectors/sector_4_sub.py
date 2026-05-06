@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushB
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from rem_card.services.shift_service import ShiftService
+from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
 
 class VitalBadge(QFrame):
     """Виджет плашки для вывода витального показателя."""
@@ -123,7 +124,7 @@ class Sector4b(BaseSectorWidget):
         self.info_layout.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         
         self.lbl_history = QLabel("№ -")
-        self.lbl_history.setStyleSheet("font-weight: bold; font-size: 14px; background: transparent; color: #5c6770;")
+        self.lbl_history.setStyleSheet(f"font-weight: bold; font-size: 14px; background: transparent; color: {COLOR_PRIMARY_DARK};")
         
         self.lbl_name = QLabel("-")
         self.lbl_name.setStyleSheet("font-weight: bold; font-size: 16px; background: transparent;")

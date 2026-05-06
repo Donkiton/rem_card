@@ -2,6 +2,7 @@ from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget)
 from PySide6.QtCore import Qt
 from rem_card.services.shift_service import ShiftService
+from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
 
 class Sector4(BaseSectorWidget):
     def __init__(self, parent=None):
@@ -83,7 +84,7 @@ class Sector4(BaseSectorWidget):
         self.info_layout.setSpacing(20)
         
         self.lbl_history = QLabel("№ -")
-        self.lbl_history.setStyleSheet("font-weight: bold; background: transparent; color: #5c6770;")
+        self.lbl_history.setStyleSheet(f"font-weight: bold; background: transparent; color: {COLOR_PRIMARY_DARK};")
         
         self.lbl_name = QLabel("-")
         self.lbl_name.setStyleSheet("font-weight: bold; font-size: 14px; background: transparent;")

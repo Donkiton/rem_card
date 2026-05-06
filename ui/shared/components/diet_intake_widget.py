@@ -23,6 +23,7 @@ from rem_card.app.logger import logger
 from rem_card.services import persistent_snapshot_cache
 from rem_card.services.diet_service import schedule_items
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.styles.theme import COLOR_SECONDARY
 
 
 DIET_ENTITIES = {"diet_templates", "diet_plan", "oral_intake_events"}
@@ -156,7 +157,7 @@ class DietIntakeWidget(QWidget):
 
         self.empty_label = QLabel("")
         self.empty_label.setAlignment(Qt.AlignCenter)
-        self.empty_label.setStyleSheet("color: #6c757d; font-size: 11px; border: none; background: transparent;")
+        self.empty_label.setStyleSheet(f"color: {COLOR_SECONDARY}; font-size: 11px; border: none; background: transparent;")
         self.data_layout.addWidget(self.empty_label)
         self.data_layout.addStretch()
 

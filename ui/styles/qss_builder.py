@@ -132,8 +132,8 @@ QTabBar::tab {{
 
 QTabBar::tab:selected {{
     background: {t("surface.card")};
-    color: {t("text.primary")};
-    border-color: {t("border.default")};
+    color: {t("sector.title_text")};
+    border-color: {t("border.focus")};
 }}
 
 QGroupBox {{

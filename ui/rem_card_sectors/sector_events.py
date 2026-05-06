@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QIcon
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.data.dto.remcard_dto import PatientStatus
 from rem_card.ui.rem_card_sectors.outcome_dialogs import DeathOutcomeDialog, TransferOutcomeDialog
+from rem_card.ui.styles.theme import BG_LIGHT, BORDER_COLOR, COLOR_INFO, TEXT_MUTED, TEXT_ON_DARK
 
 
 def _movement_comment_text(status, reason_text):
@@ -480,8 +481,15 @@ class SectorEvents(BaseSectorWidget):
         layout.addWidget(l_end)
 
         btn_container, btn_lay = self._create_button_container()
-        style_saved_comm = "QPushButton { border-radius: 10px; background-color: #6c757d; color: white; font-weight: bold; border: 1px solid #6c757d; }"
-        style_changed_comm = "QPushButton { border-radius: 10px; background-color: #f1f2f6; color: #7f8c8d; font-weight: bold; border: 1px solid #bdc3c7; } QPushButton:hover { background-color: #6c757d; color: white; }"
+        style_saved_comm = (
+            f"QPushButton {{ border-radius: 10px; background-color: {COLOR_INFO}; color: {TEXT_ON_DARK}; "
+            f"font-weight: bold; border: 1px solid {COLOR_INFO}; }}"
+        )
+        style_changed_comm = (
+            f"QPushButton {{ border-radius: 10px; background-color: {BG_LIGHT}; color: {TEXT_MUTED}; "
+            f"font-weight: bold; border: 1px solid {BORDER_COLOR}; }} "
+            f"QPushButton:hover {{ background-color: {COLOR_INFO}; color: {TEXT_ON_DARK}; }}"
+        )
         btn_save_comm = self._create_round_save_button(style_saved_comm)
 
         change_handler_comm = self._create_change_handler(btn_save_comm, style_changed_comm)
