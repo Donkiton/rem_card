@@ -24,6 +24,7 @@ class AdminMainWidget(QWidget):
         self.print_widget = None
         self.print_dialog = None
         self.theme_dialog = None
+        self.display_settings_dialog = None
 
         self.setup_ui()
 
@@ -36,48 +37,71 @@ class AdminMainWidget(QWidget):
 
         self.menu_widget = QWidget()
         menu_layout = QVBoxLayout(self.menu_widget)
-        menu_layout.setContentsMargins(40, 40, 40, 40)
-        menu_layout.setSpacing(20)
+        menu_layout.setContentsMargins(28, 24, 28, 20)
+        menu_layout.setSpacing(18)
 
         title = QLabel("Панель Администратора")
         title.setProperty("heading", "true")
-        title.setAlignment(Qt.AlignCenter)
+        title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         menu_layout.addWidget(title)
-
-        btn_layout = QVBoxLayout()
-        btn_layout.setSpacing(15)
-        btn_layout.setAlignment(Qt.AlignCenter)
 
         self.btn_drugs = QPushButton("Справочник препаратов")
         self.btn_groups = QPushButton("Группы препаратов")
         self.btn_forms = QPushButton("Лекарственные формы")
         self.btn_admin_types = QPushButton("Типы введения")
-        self.btn_diluents = QPushButton("Растворители (Базы)")
-        self.btn_templates = QPushButton("Клинические протоколы")
+        self.btn_diluents = QPushButton("Растворители")
+        self.btn_templates = QPushButton("Шаблоны назначений")
         self.btn_diet_templates = QPushButton("Шаблоны питания")
         self.btn_print = QPushButton("Печать / Отчеты")
         self.btn_style = QPushButton("Цветовая схема")
+        self.btn_display_settings = QPushButton("Отображение кнопок")
 
-        menu_buttons = [
+        def prepare_button(btn: QPushButton):
+            btn.setObjectName("DialogOkBtn")
+            btn.setMinimumSize(250, 44)
+            btn.setMaximumWidth(300)
+            return btn
+
+        drug_buttons = [
             self.btn_drugs,
             self.btn_groups,
             self.btn_forms,
             self.btn_admin_types,
             self.btn_diluents,
+        ]
+        template_buttons = [
             self.btn_templates,
         ]
         if self.role != "nurse":
-            menu_buttons.append(self.btn_diet_templates)
+            template_buttons.append(self.btn_diet_templates)
+
+        program_buttons = []
         if self.role == "doctor":
-            menu_buttons.append(self.btn_style)
-        menu_buttons.append(self.btn_print)
+            program_buttons.append(self.btn_style)
+        program_buttons.extend([self.btn_print, self.btn_display_settings])
 
-        for btn in menu_buttons:
-            btn.setObjectName("DialogOkBtn")
-            btn.setFixedSize(350, 60)
-            btn_layout.addWidget(btn)
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(22)
+        columns_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
 
-        menu_layout.addLayout(btn_layout)
+        def add_column(column_title: str, buttons: list[QPushButton]):
+            column = QWidget()
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            column_layout.setSpacing(10)
+            lbl = QLabel(column_title)
+            column_layout.addWidget(lbl)
+            for btn in buttons:
+                column_layout.addWidget(prepare_button(btn))
+            column_layout.addStretch()
+            columns_layout.addWidget(column)
+
+        add_column("Препараты", drug_buttons)
+        add_column("Шаблоны", template_buttons)
+        add_column("Настройка программы", program_buttons)
+        columns_layout.addStretch()
+
+        menu_layout.addLayout(columns_layout, 1)
         menu_layout.addStretch()
 
         nav_layout = QHBoxLayout()
@@ -100,6 +124,7 @@ class AdminMainWidget(QWidget):
         self.btn_diet_templates.clicked.connect(self.open_diet_templates)
         self.btn_print.clicked.connect(self.open_print)
         self.btn_style.clicked.connect(self.open_style)
+        self.btn_display_settings.clicked.connect(self.open_display_settings)
 
     def _show_page(self, widget):
         if widget is not None:
@@ -211,6 +236,12 @@ class AdminMainWidget(QWidget):
         from rem_card.ui.styles.theme_settings_dialog import ThemeSettingsDialog
 
         dialog = ThemeSettingsDialog(role="doctor", parent=self)
+        dialog.exec()
+
+    def open_display_settings(self):
+        from .display_settings_dialog import DisplaySettingsDialog
+
+        dialog = DisplaySettingsDialog(initial_role=self.role, parent=self)
         dialog.exec()
 
     def set_print_context(self, service, admission_id, date):

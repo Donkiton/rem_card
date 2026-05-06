@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
+from rem_card.app.logger import logger
 from .layout_components import SectorFactory, SplitterManager
 
 class RemCardLayoutManager(QWidget):
@@ -663,8 +664,15 @@ class RemCardLayoutManager(QWidget):
             self.sector_4b.update_status(status_dto)
 
     def set_active_tab(self, tab_name):
-        if not hasattr(self, 'vitals_stack'): return
+        if not hasattr(self, 'vitals_stack'): return tab_name
         try:
+            tab_name = "Движение" if tab_name == "События" else tab_name
+            if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
+                if not self.sector_2b.is_tab_visible(tab_name):
+                    tab_name = self.sector_2b.first_visible_tab_name()
+                if hasattr(self.sector_2b, "select_tab"):
+                    self.sector_2b.select_tab(tab_name, emit=False)
+
             is_orders = (tab_name == "Назначения")
             self.bottom_row.setVisible(not is_orders)
             self.sector_7na_b.setVisible(is_orders)
@@ -725,4 +733,7 @@ class RemCardLayoutManager(QWidget):
                     self.sector_print.refresh()
 
             self._fix_timer.start(0)
-        except: pass
+            return tab_name
+        except Exception as exc:
+            logger.warning("Не удалось переключить вкладку РЕМ карты врача на %s: %s", tab_name, exc, exc_info=True)
+            return tab_name

@@ -95,7 +95,7 @@ class DoctorMainWidget(QWidget):
         
         # Режим карты (DoctorRemCardWidget)
         from .doctor_remcard_widget import DoctorRemCardWidget
-        self.remcard_widget = DoctorRemCardWidget(self.remcard_service, None, self.patient_service)
+        self.remcard_widget = DoctorRemCardWidget(self.remcard_service, None, self.patient_service, parent=self.main_stack)
         # ВАЖНО: передаем remcard_service в LayoutManager
         if hasattr(self.remcard_widget, 'layout_manager'):
             self.remcard_widget.layout_manager.remcard_service = self.remcard_service

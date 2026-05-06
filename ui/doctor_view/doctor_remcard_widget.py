@@ -1429,9 +1429,11 @@ class DoctorRemCardWidget(QWidget):
                 )
         
         if hasattr(self, 'layout_manager'):
-            self.layout_manager.set_active_tab("Витальные функции")
+            active_tab = self.layout_manager.set_active_tab("Витальные функции") or "Витальные функции"
             if hasattr(self.layout_manager, 'sector_2b'):
-                self.layout_manager.sector_2b.on_tab_clicked("Витальные функции")
+                self.layout_manager.sector_2b.select_tab(active_tab, emit=False)
+            if active_tab != "Витальные функции":
+                self.on_tab_changed(active_tab)
 
         if hasattr(self, 'balance_controller'):
             self.balance_controller.admission_id = admission_id
@@ -2217,11 +2219,14 @@ class DoctorRemCardWidget(QWidget):
             sector_4a.update_balance(total_in_cur, total_out_cur, total_in_daily=total_in_day, total_out_daily=total_out_day)
 
     def on_tab_changed(self, tab_name):
-        self.layout_manager.set_active_tab(tab_name)
+        tab_name = self.layout_manager.set_active_tab(tab_name) or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":
-            ow = self.layout_manager.orders_widget
+            ow = self._ensure_orders_widget()
+            if ow is None:
+                logger.warning("Doctor orders tab requested, but orders widget was not initialized")
+                return
             self._bind_orders_widget_signals(ow)
             if hasattr(ow, "set_context"):
                 ow.set_context(

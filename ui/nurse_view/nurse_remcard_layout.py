@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
+from rem_card.app.logger import logger
 from ..shared.layout_components import SectorFactory, SplitterManager
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
@@ -594,6 +595,13 @@ class NurseRemCardLayoutManager(QWidget):
 
     def set_active_tab(self, tab_name):
         try:
+            tab_name = "Движение" if tab_name == "События" else tab_name
+            if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
+                if not self.sector_2b.is_tab_visible(tab_name):
+                    tab_name = self.sector_2b.first_visible_tab_name()
+                if hasattr(self.sector_2b, "select_tab"):
+                    self.sector_2b.select_tab(tab_name, emit=False)
+
             tab_map = {
                 "Витальные функции": 0,
                 "Назначения": 1,
@@ -644,4 +652,7 @@ class NurseRemCardLayoutManager(QWidget):
                     self.sector_7b_stack.setCurrentIndex(0)
                     
             self._fix_timer.start(0)
-        except: pass
+            return tab_name
+        except Exception as exc:
+            logger.warning("Не удалось переключить вкладку РЕМ карты медсестры на %s: %s", tab_name, exc, exc_info=True)
+            return tab_name

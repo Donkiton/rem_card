@@ -2,6 +2,7 @@ import hashlib
 import os
 import pickle
 import tempfile
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,7 @@ PERSISTENT_SNAPSHOT_CACHE_MIN_TTL_HOURS = max(
     float(os.environ.get("REMCARD_PERSISTENT_SNAPSHOT_CACHE_MIN_TTL_HOURS", "24")),
 )
 PERSISTENT_SNAPSHOT_CACHE_DIR = Path(LOCAL_CACHE_DIR) / "patient_snapshots"
+_CACHE_LOCK = threading.RLock()
 
 
 def _namespace_dir(namespace: str) -> Path:
@@ -65,30 +67,39 @@ def _is_expired(expires_at: Optional[str], *, now: Optional[datetime] = None) ->
 def load_snapshot(namespace: str, cache_key: Any, *, now: Optional[datetime] = None):
     if not PERSISTENT_SNAPSHOT_CACHE_ENABLED:
         return None
-    path = _cache_path(namespace, cache_key)
-    if not path.exists():
-        return None
-    try:
-        with path.open("rb") as fh:
-            payload = pickle.load(fh)
-    except Exception as exc:
-        logger.warning("[PersistentSnapshotCache] failed to read %s: %s", path, exc)
+    with _CACHE_LOCK:
+        path = _cache_path(namespace, cache_key)
+        if not path.exists():
+            return None
         try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return None
+            with path.open("rb") as fh:
+                payload = pickle.load(fh)
+        except Exception as exc:
+            logger.warning("[PersistentSnapshotCache] failed to read %s: %s", path, exc)
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
 
-    if payload.get("cache_key") != cache_key:
-        logger.warning("[PersistentSnapshotCache] cache key mismatch for %s", path)
-        return None
-    if _is_expired(payload.get("expires_at"), now=now):
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return None
-    return payload.get("snapshot")
+        if not isinstance(payload, dict):
+            logger.warning("[PersistentSnapshotCache] invalid payload type for %s: %s", path, type(payload).__name__)
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+
+        if payload.get("cache_key") != cache_key:
+            logger.warning("[PersistentSnapshotCache] cache key mismatch for %s", path)
+            return None
+        if _is_expired(payload.get("expires_at"), now=now):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return None
+        return payload.get("snapshot")
 
 
 def store_snapshot(
@@ -100,60 +111,60 @@ def store_snapshot(
 ) -> bool:
     if not PERSISTENT_SNAPSHOT_CACHE_ENABLED:
         return False
-    namespace_dir = _namespace_dir(namespace)
-    try:
-        namespace_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:
-        logger.warning("[PersistentSnapshotCache] failed to create cache dir %s: %s", namespace_dir, exc)
-        return False
+    with _CACHE_LOCK:
+        namespace_dir = _namespace_dir(namespace)
+        try:
+            namespace_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            logger.warning("[PersistentSnapshotCache] failed to create cache dir %s: %s", namespace_dir, exc)
+            return False
 
-    payload = {
-        "cache_key": cache_key,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "expires_at": (expires_at.isoformat(timespec="seconds") if expires_at else None),
-        "snapshot": snapshot,
-    }
-    path = _cache_path(namespace, cache_key)
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(namespace_dir), prefix=path.stem, suffix=".tmp") as fh:
-            tmp_path = Path(fh.name)
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(str(tmp_path), str(path))
-        prune_namespace(namespace)
-        return True
-    except Exception as exc:
-        logger.warning("[PersistentSnapshotCache] failed to write %s: %s", path, exc)
-        if tmp_path:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-        return False
+        payload = {
+            "cache_key": cache_key,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "expires_at": (expires_at.isoformat(timespec="seconds") if expires_at else None),
+            "snapshot": snapshot,
+        }
+        path = _cache_path(namespace, cache_key)
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(namespace_dir), prefix=path.stem, suffix=".tmp") as fh:
+                tmp_path = Path(fh.name)
+                pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(str(tmp_path), str(path))
+            prune_namespace(namespace)
+            return True
+        except Exception as exc:
+            logger.warning("[PersistentSnapshotCache] failed to write %s: %s", path, exc)
+            if tmp_path:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return False
 
 
 def prune_namespace(namespace: str, *, now: Optional[datetime] = None) -> None:
     if not PERSISTENT_SNAPSHOT_CACHE_ENABLED:
         return
-    namespace_dir = _namespace_dir(namespace)
-    if not namespace_dir.exists():
-        return
-    files = list(namespace_dir.glob("*.pkl"))
-    for path in files:
+    del now
+    with _CACHE_LOCK:
+        namespace_dir = _namespace_dir(namespace)
+        if not namespace_dir.exists():
+            return
+
         try:
-            with path.open("rb") as fh:
-                payload = pickle.load(fh)
-            if _is_expired(payload.get("expires_at"), now=now):
-                path.unlink(missing_ok=True)
-        except Exception:
+            files = sorted(
+                (path for path in namespace_dir.glob("*.pkl") if path.is_file()),
+                key=lambda item: item.stat().st_mtime,
+                reverse=True,
+            )
+        except Exception as exc:
+            logger.warning("[PersistentSnapshotCache] failed to list cache dir %s: %s", namespace_dir, exc)
+            return
+
+        for path in files[PERSISTENT_SNAPSHOT_CACHE_MAX_FILES:]:
             try:
                 path.unlink(missing_ok=True)
             except Exception:
                 pass
-
-    files = sorted(namespace_dir.glob("*.pkl"), key=lambda item: item.stat().st_mtime, reverse=True)
-    for path in files[PERSISTENT_SNAPSHOT_CACHE_MAX_FILES:]:
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass

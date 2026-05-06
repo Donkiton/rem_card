@@ -370,7 +370,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         sys.exit(1)
 
     from PySide6.QtNetwork import QLocalSocket, QLocalServer
-    from PySide6.QtWidgets import QApplication, QSplashScreen
+    from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QPixmap
     from PySide6.QtCore import Qt
 
@@ -404,10 +404,14 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         from rem_card.app.paths import get_icon_dir
 
         icon_path = os.path.join(get_icon_dir(), "remcardicon.ico")
-        splash_pix = QPixmap(icon_path).scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
-        splash.show()
-        app.processEvents()
+        splash = None
+        if is_compiled():
+            from PySide6.QtWidgets import QSplashScreen
+
+            splash_pix = QPixmap(icon_path).scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
+            splash.show()
+            app.processEvents()
 
         _apply_app_theme(app, args.role or "system")
 
@@ -434,7 +438,8 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         window.container = container
         logger.info("Bootstrap completed")
 
-        splash.finish(window)
+        if splash is not None:
+            splash.finish(window)
         window.show()
 
         def on_new_connection():

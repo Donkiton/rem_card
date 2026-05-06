@@ -1085,7 +1085,8 @@ class NurseMainWidget(QWidget):
         
         # Используем ИЗОЛИРОВАННЫЙ лайаут медсестры
         self.layout_manager = NurseRemCardLayoutManager(patient_service=self.patient_service,
-                                                      remcard_service=self.remcard_service)
+                                                      remcard_service=self.remcard_service,
+                                                      parent=self.main_stack)
         self.layout_manager.patient_status_service = self.remcard_service.status_service
         
         self.main_stack.addWidget(self.layout_manager)
@@ -1491,9 +1492,11 @@ class NurseMainWidget(QWidget):
             )
             self._schedule_balance_prefetch(admission_id, date)
         if hasattr(self, 'layout_manager'):
-            self.layout_manager.set_active_tab("Витальные функции")
+            active_tab = self.layout_manager.set_active_tab("Витальные функции") or "Витальные функции"
             if hasattr(self.layout_manager, 'sector_2b'):
-                self.layout_manager.sector_2b.on_tab_clicked("Витальные функции")
+                self.layout_manager.sector_2b.select_tab(active_tab, emit=False)
+            if active_tab != "Витальные функции":
+                self.on_tab_changed(active_tab)
 
     def _prime_patient_header_from_w1(self, patient, target_date):
         """Заполняет 4б/4в данными W1 до показа карты, чтобы не было визуального скачка."""
@@ -1574,11 +1577,14 @@ class NurseMainWidget(QWidget):
         self._update_balance_calculations()
 
     def on_tab_changed(self, tab_name):
-        self.layout_manager.set_active_tab(tab_name)
+        tab_name = self.layout_manager.set_active_tab(tab_name) or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":
-            ow = self.layout_manager.orders_widget
+            ow = self._ensure_orders_widget()
+            if ow is None:
+                logger.warning("Nurse orders tab requested, but orders widget was not initialized")
+                return
             self._bind_orders_balance_signals()
             if hasattr(ow, "set_context"):
                 ow.set_context(

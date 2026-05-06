@@ -13,12 +13,12 @@ class BaseSectorWidget(QFrame):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
         
-        self.label = QLabel(f"Сектор {name}")
+        self.label = QLabel(f"Сектор {name}", self)
         self.label.setAlignment(Qt.AlignCenter)
         self.main_layout.addWidget(self.label)
         
         # Контейнер для реального контента - БЕЗ ФОНА И РАМОК
-        self.container = QWidget()
+        self.container = QWidget(self)
         apply_base_sector_styles(self.label, self.container)
         self.container_layout = QVBoxLayout(self.container)
         self.container_layout.setContentsMargins(0, 0, 0, 0)

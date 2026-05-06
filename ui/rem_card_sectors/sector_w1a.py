@@ -16,13 +16,13 @@ class SectorW1a(BaseSectorWidget):
         self.init_ui()
 
     def init_ui(self):
-        self.main_container = QWidget()
+        self.main_container = QWidget(self)
         self.main_container.setObjectName("sector_w1a_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
         # Отступы для унификации
         self.main_layout_v.setContentsMargins(3, 5, 5, 4)
         
-        self.btn_stats = QPushButton("Статистика по препаратам")
+        self.btn_stats = QPushButton("Статистика по препаратам", self.main_container)
         from rem_card.app.paths import get_icon_dir
         icon_path = os.path.join(get_icon_dir(), "drugs-nurse.png")
         if os.path.exists(icon_path):
@@ -46,7 +46,7 @@ class SectorW1a(BaseSectorWidget):
         self.main_layout_v.addWidget(self.btn_stats)
         
         # W1а в данном контексте остается пустым согласно ТЗ
-        self.empty_label = QLabel("Сектор W1а")
+        self.empty_label = QLabel("Сектор W1а", self.main_container)
         self.empty_label.setAlignment(Qt.AlignCenter)
         self.empty_label.setStyleSheet("color: #bdc3c7; font-style: italic;")
         self.main_layout_v.addWidget(self.empty_label)
