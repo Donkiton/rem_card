@@ -5,6 +5,21 @@ from PySide6.QtCore import QRegularExpression, QDate, QDateTime, QTime, Qt
 from PySide6.QtGui import QRegularExpressionValidator
 from rem_card.ui.styles.theme import STYLE_FORM_DATETIME_EDIT
 
+
+class SingleClickComboBox(QComboBox):
+    """QComboBox с явным выбором пункта popup-списка по одному клику."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.view().pressed.connect(self._select_pressed_index)
+
+    def _select_pressed_index(self, index):
+        if not index.isValid():
+            return
+        self.setCurrentIndex(index.row())
+        self.hidePopup()
+
+
 class GeneralTabWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,7 +63,7 @@ class GeneralTabWidget(QWidget):
         gender_layout = QHBoxLayout()
         gender_layout.setContentsMargins(0, 0, 0, 0)
         gender_layout.setSpacing(10)
-        self.gender_combo = QComboBox()
+        self.gender_combo = SingleClickComboBox()
         self.gender_combo.setFixedHeight(34)
         self.gender_combo.setFixedWidth(220)
         self.gender_combo.addItems(["Мужской", "Женский"])
@@ -70,7 +85,7 @@ class GeneralTabWidget(QWidget):
         self.age_value_input.setFixedWidth(95)
 
         self.age_unit_label = QLabel("")
-        self.age_unit_combo = QComboBox()
+        self.age_unit_combo = SingleClickComboBox()
         self.age_unit_combo.addItems(["годы", "месяцы"])
         self.age_unit_combo.hide()
 
@@ -100,14 +115,14 @@ class GeneralTabWidget(QWidget):
         self.admission_datetime_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
         self._add_row("Дата и время поступления:", self.admission_datetime_input)
 
-        self.source_department_input = QComboBox()
+        self.source_department_input = SingleClickComboBox()
         self.source_department_input.addItems(["Приемное отделение", "Профильное отделение"])
         self.source_department_input.setCurrentText("Приемное отделение")
         self.source_department_input.setFixedHeight(34)
         self.source_department_input.setMinimumWidth(430)
         self._add_row("Откуда поступил пациент:", self.source_department_input)
 
-        self.department_profile_input = QComboBox()
+        self.department_profile_input = SingleClickComboBox()
         self.department_profile_input.addItems([
             "Терапия", "Хирургия", "Травматология", "Гинекология", "Неврология", "Кардиология", "Инфекционно-педиатрическое"
         ])

@@ -62,9 +62,11 @@ class OrderedVisibilityList(QWidget):
             if not bool(option.get("can_hide", True)):
                 self.visible[item_id] = True
         self._row_widgets: dict[str, QFrame] = {}
+        self._visual_order = list(self.order)
         self._drag_item_id: str | None = None
         self._drag_start_global_pos = QPoint()
         self._drag_active = False
+        self._drag_visual_update_scheduled = False
 
         self._setup_ui()
         self._rebuild_rows()
@@ -94,6 +96,7 @@ class OrderedVisibilityList(QWidget):
 
     def _rebuild_rows(self):
         self._clear_rows()
+        self._visual_order = list(self.order)
         for item_id in self.order:
             option = self.options[item_id]
 
@@ -155,11 +158,12 @@ class OrderedVisibilityList(QWidget):
                 self._move_dragged_row(global_pos)
                 return True
             if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+                if self._drag_item_id and self._drag_active:
+                    self._apply_drag_visual_order()
+                    self.changed.emit()
                 row = self._row_for_item_id(self._drag_item_id) if self._drag_item_id else None
                 if row is not None:
                     row.setCursor(Qt.OpenHandCursor)
-                if self._drag_item_id and self._drag_active:
-                    self.changed.emit()
                 self._drag_item_id = None
                 self._drag_active = False
                 return True
@@ -209,7 +213,8 @@ class OrderedVisibilityList(QWidget):
 
         local_pos = self.rows_widget.mapFromGlobal(global_pos)
         target_index = len(self.order)
-        for index, candidate_id in enumerate(self.order):
+        geometry_order = list(getattr(self, "_visual_order", self.order))
+        for index, candidate_id in enumerate(geometry_order):
             widget = self._row_for_item_id(candidate_id)
             if widget is None:
                 continue
@@ -225,10 +230,31 @@ class OrderedVisibilityList(QWidget):
         self.order.pop(current_index)
         new_index = max(0, min(new_index, len(self.order)))
         self.order.insert(new_index, item_id)
+        self._schedule_drag_visual_order()
 
-        self.rows_layout.removeWidget(row)
-        self.rows_layout.insertWidget(new_index, row)
-        row.setCursor(Qt.ClosedHandCursor)
+    def _schedule_drag_visual_order(self):
+        if self._drag_visual_update_scheduled:
+            return
+        self._drag_visual_update_scheduled = True
+        QTimer.singleShot(20, self._apply_drag_visual_order)
+
+    def _apply_drag_visual_order(self):
+        if not self._drag_visual_update_scheduled and not self._drag_active:
+            return
+        self._drag_visual_update_scheduled = False
+        self.rows_widget.setUpdatesEnabled(False)
+        try:
+            for visual_index, item_id in enumerate(self.order):
+                row = self._row_for_item_id(item_id)
+                if row is None:
+                    continue
+                self.rows_layout.removeWidget(row)
+                self.rows_layout.insertWidget(visual_index, row)
+                row.setCursor(Qt.ClosedHandCursor if item_id == self._drag_item_id else Qt.OpenHandCursor)
+            self._visual_order = list(self.order)
+        finally:
+            self.rows_widget.setUpdatesEnabled(True)
+            self.rows_widget.update()
 
     def state(self) -> dict:
         self._sync_order_from_list()

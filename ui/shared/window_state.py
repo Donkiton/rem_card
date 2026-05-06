@@ -1,5 +1,18 @@
 from PySide6.QtCore import QEvent, QPoint, QRect, QSettings, Qt
-from PySide6.QtWidgets import QApplication, QPushButton, QWidget
+from PySide6.QtWidgets import (
+    QAbstractButton,
+    QAbstractItemView,
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QDateEdit,
+    QDateTimeEdit,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QTextEdit,
+    QWidget,
+)
 
 
 class SavedFramelessDialogMixin:
@@ -93,6 +106,8 @@ class SavedFramelessDialogMixin:
     def _install_saved_frameless_child_filters(self) -> None:
         installed = getattr(self, "_frameless_filter_widget_ids", set())
         for child in self.findChildren(QWidget):
+            if self._is_interactive_child(child):
+                continue
             child_id = id(child)
             if child_id in installed:
                 continue
@@ -122,6 +137,25 @@ class SavedFramelessDialogMixin:
         else:
             self.setCursor(Qt.ArrowCursor)
 
+    def _is_interactive_child(self, widget) -> bool:
+        interactive_types = (
+            QAbstractButton,
+            QAbstractItemView,
+            QAbstractSpinBox,
+            QComboBox,
+            QDateEdit,
+            QDateTimeEdit,
+            QLineEdit,
+            QPlainTextEdit,
+            QTextEdit,
+        )
+        current = widget
+        while current is not None and current is not self:
+            if isinstance(current, interactive_types):
+                return True
+            current = current.parentWidget() if hasattr(current, "parentWidget") else None
+        return False
+
     def _start_resize(self, edges, global_pos: QPoint) -> None:
         self._resizing = True
         self._resize_edges = edges
@@ -144,7 +178,7 @@ class SavedFramelessDialogMixin:
         if pos.y() > getattr(self, "_drag_area_height", self.DRAG_AREA_HEIGHT):
             return False
         child = self.childAt(pos)
-        return not isinstance(child, QPushButton)
+        return not isinstance(child, QPushButton) and not self._is_interactive_child(child)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
