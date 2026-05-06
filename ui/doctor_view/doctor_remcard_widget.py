@@ -2352,8 +2352,14 @@ class DoctorRemCardWidget(QWidget):
 
         service = self._get_bars_auth_service()
         dialog = BarsAuthDialog(service, self)
-        dialog.exec()
-        self._set_bars_auth_state(dialog.authorized or service.last_authorized)
+        try:
+            dialog.exec()
+        finally:
+            deactivate = getattr(service, "deactivate", None)
+            if callable(deactivate):
+                deactivate()
+            self._bars_auth_service = None
+            self._set_bars_auth_state(False)
 
     def on_refresh_beds_clicked(self):
         self.force_refresh_everywhere()

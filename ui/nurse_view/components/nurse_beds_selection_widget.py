@@ -1,13 +1,14 @@
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QMessageBox
-from PySide6.QtCore import Qt, Signal, QUrl, QTimer, Slot
-from PySide6.QtGui import QDesktopServices, QPainter, QPixmap
+from PySide6.QtCore import Qt, Signal, QTimer, Slot
+from PySide6.QtGui import QPainter, QPixmap
 from .nurse_patient_bed_row import NursePatientBedRow
 import os
 from rem_card.app.paths import get_icon_dir
 from rem_card.app.logger import logger
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
+from rem_card.ui.shared.pdf_opener import open_pdf_file
 import pathlib
 import datetime
 
@@ -357,7 +358,7 @@ class NurseBedsSelectionWidget(QWidget):
         pdf_path = pathlib.Path(pdf_path)
         if pdf_path.exists():
             logger.info("[W1Report] daily PDF ready role=nurse size=%s path=%s", pdf_path.stat().st_size, pdf_path)
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+            open_pdf_file(pdf_path, parent=self)
 
     @Slot(str)
     def _on_daily_pdf_error(self, msg):
@@ -435,7 +436,7 @@ class NurseBedsSelectionWidget(QWidget):
         pdf_path = pathlib.Path(pdf_path)
         if pdf_path.exists():
             logger.info("[W1Report] full PDF ready role=nurse size=%s path=%s", pdf_path.stat().st_size, pdf_path)
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+            open_pdf_file(pdf_path, parent=self)
 
     @Slot(str)
     def _on_full_pdf_error(self, msg):

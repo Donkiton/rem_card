@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 import pathlib
 
-from PySide6.QtCore import QObject, QUrl, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QObject, Slot
 
 from rem_card.app.paths import REPORT_DIR
 from rem_card.app.logger import logger
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.pdf_opener import open_pdf_file
 
 
 class RemCardReportController(QObject):
@@ -37,10 +37,8 @@ class RemCardReportController(QObject):
             result = result.replace(char, "_")
         return result.replace(" ", "_")
 
-    @staticmethod
-    def _open_pdf(pdf_path: pathlib.Path):
-        if pdf_path.exists():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf_path)))
+    def _open_pdf(self, pdf_path: pathlib.Path):
+        open_pdf_file(pdf_path, parent=self.parent)
 
     def run_daily_report(self, admission_id: int, shift_date: datetime):
         if not admission_id or not self.service:

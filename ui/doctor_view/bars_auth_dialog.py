@@ -1,4 +1,4 @@
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Slot
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -39,12 +39,9 @@ class BarsAuthDialog(BaseStyledDialog):
         self._auto_accept_scheduled = False
         self._last_patient_list_result = None
         self._patient_card_buttons = []
+        self._is_closing = False
 
         self._init_content()
-
-        self._poll_timer = QTimer(self)
-        self._poll_timer.setInterval(1800)
-        self._poll_timer.timeout.connect(self._check_authorized_async)
         QTimer.singleShot(0, self._open_browser_async)
 
     def _init_content(self):
@@ -154,48 +151,93 @@ class BarsAuthDialog(BaseStyledDialog):
         self.resize(980, 760)
 
     def _set_busy(self, busy: bool):
+        if self._is_closing:
+            return
         self.btn_check.setEnabled(not busy)
         self.btn_patient_probe.setEnabled(not busy)
         self.btn_patient_list.setEnabled(not busy)
         self._set_patient_card_buttons_enabled(not busy)
 
+    @staticmethod
+    def _is_worker_running(worker) -> bool:
+        if worker is None:
+            return False
+        try:
+            return bool(worker.isRunning())
+        except RuntimeError:
+            return False
+
+    def _connect_worker(self, worker, success_slot=None, *, clear_busy: bool = False, failed_slot=None):
+        if success_slot is not None:
+            worker.succeeded.connect(success_slot)
+        worker.failed.connect(failed_slot or self._on_worker_failed)
+        worker.finished.connect(self._on_worker_finished)
+        if clear_busy:
+            worker.finished.connect(self._on_busy_worker_finished)
+
+    @Slot()
+    def _on_worker_finished(self):
+        worker = self.sender()
+        for attr_name in (
+            "_launch_worker",
+            "_check_worker",
+            "_patient_probe_worker",
+            "_patient_list_worker",
+            "_patient_labs_worker",
+            "_background_worker",
+        ):
+            if getattr(self, attr_name, None) is worker:
+                setattr(self, attr_name, None)
+                break
+
+    @Slot()
+    def _on_busy_worker_finished(self):
+        self._set_busy(False)
+
+    def _ignore_worker_failed(self, _exc):
+        return
+
     def _open_browser_async(self):
-        if self._launch_worker and self._launch_worker.isRunning():
+        if self._is_closing:
+            return
+        if self._is_worker_running(self._launch_worker):
             return
         self._set_busy(True)
         self.status_label.setText("Открываю окно БАРС...")
-        self._launch_worker = AsyncCallThread(self.auth_service.open_auth_window, parent=self)
-        self._launch_worker.succeeded.connect(self._on_browser_opened)
-        self._launch_worker.failed.connect(self._on_worker_failed)
-        self._launch_worker.finished.connect(lambda: self._set_busy(False))
+        self._launch_worker = AsyncCallThread(self.auth_service.open_auth_window)
+        self._connect_worker(self._launch_worker, self._on_browser_opened, clear_busy=True)
         self._launch_worker.start()
 
     def _on_browser_opened(self, result: BarsAuthCheckResult):
+        if self._is_closing:
+            return
         self.status_label.setText(result.message)
         if result.authorized:
             self._complete_authorization(result)
             return
         if result.message.startswith("Яндекс-Браузер не найден") or result.message.startswith("Не удалось открыть"):
-            self._poll_timer.stop()
             return
-        self._poll_timer.start()
-        QTimer.singleShot(900, self._check_authorized_async)
 
     def _check_authorized_async(self):
-        if self._check_worker and self._check_worker.isRunning():
+        if self._is_closing:
             return
-        self._check_worker = AsyncCallThread(self.auth_service.check_authorized, parent=self)
-        self._check_worker.succeeded.connect(self._on_auth_checked)
-        self._check_worker.failed.connect(self._on_worker_failed)
+        if self._is_worker_running(self._check_worker):
+            return
+        self._check_worker = AsyncCallThread(self.auth_service.check_authorized)
+        self._connect_worker(self._check_worker, self._on_auth_checked)
         self._check_worker.start()
 
     def _on_auth_checked(self, result: BarsAuthCheckResult):
+        if self._is_closing:
+            return
         self.status_label.setText(result.message)
         if result.authorized:
             self._complete_authorization(result)
 
     def _probe_patient_async(self):
-        if self._patient_probe_worker and self._patient_probe_worker.isRunning():
+        if self._is_closing:
+            return
+        if self._is_worker_running(self._patient_probe_worker):
             return
         history_number = self.history_input.text().strip()
         if not history_number:
@@ -206,34 +248,34 @@ class BarsAuthDialog(BaseStyledDialog):
         self._patient_probe_worker = AsyncCallThread(
             self.auth_service.probe_patient_by_history,
             history_number,
-            parent=self,
         )
-        self._patient_probe_worker.succeeded.connect(self._on_patient_probed)
-        self._patient_probe_worker.failed.connect(self._on_worker_failed)
-        self._patient_probe_worker.finished.connect(lambda: self._set_busy(False))
+        self._connect_worker(self._patient_probe_worker, self._on_patient_probed, clear_busy=True)
         self._patient_probe_worker.start()
 
     def _on_patient_probed(self, result: BarsPatientProbeResult):
+        if self._is_closing:
+            return
         self.status_label.setText(result.message)
         self._show_text_result(self._format_patient_probe_result(result))
         if result.ok:
             self.authorized = True
 
     def _load_patient_list_async(self):
-        if self._patient_list_worker and self._patient_list_worker.isRunning():
+        if self._is_closing:
+            return
+        if self._is_worker_running(self._patient_list_worker):
             return
         self._set_busy(True)
         self.status_label.setText("Получаю список пациентов отделения...")
         self._patient_list_worker = AsyncCallThread(
             self.auth_service.list_department_patients,
-            parent=self,
         )
-        self._patient_list_worker.succeeded.connect(self._on_patient_list_loaded)
-        self._patient_list_worker.failed.connect(self._on_worker_failed)
-        self._patient_list_worker.finished.connect(lambda: self._set_busy(False))
+        self._connect_worker(self._patient_list_worker, self._on_patient_list_loaded, clear_busy=True)
         self._patient_list_worker.start()
 
     def _on_patient_list_loaded(self, result: BarsPatientListResult):
+        if self._is_closing:
+            return
         self.status_label.setText(result.message)
         self._last_patient_list_result = result
         if result.ok and result.patients:
@@ -244,7 +286,9 @@ class BarsAuthDialog(BaseStyledDialog):
             self.authorized = True
 
     def _load_patient_labs_async(self, patient: dict, mode: str):
-        if self._patient_labs_worker and self._patient_labs_worker.isRunning():
+        if self._is_closing:
+            return
+        if self._is_worker_running(self._patient_labs_worker):
             return
         self._set_busy(True)
         full_name = patient.get("full_name") or patient.get("history_number") or "пациент"
@@ -254,14 +298,13 @@ class BarsAuthDialog(BaseStyledDialog):
             self.auth_service.get_patient_labs,
             patient,
             mode,
-            parent=self,
         )
-        self._patient_labs_worker.succeeded.connect(self._on_patient_labs_loaded)
-        self._patient_labs_worker.failed.connect(self._on_worker_failed)
-        self._patient_labs_worker.finished.connect(lambda: self._set_busy(False))
+        self._connect_worker(self._patient_labs_worker, self._on_patient_labs_loaded, clear_busy=True)
         self._patient_labs_worker.start()
 
     def _on_patient_labs_loaded(self, result: BarsPatientLabsResult):
+        if self._is_closing:
+            return
         self.status_label.setText(result.message)
         self.labs_title.setText(self._labs_title_for_result(result))
         self.labs_text.setPlainText(self._format_patient_labs_result(result))
@@ -269,16 +312,19 @@ class BarsAuthDialog(BaseStyledDialog):
             self.authorized = True
 
     def _complete_authorization(self, result: BarsAuthCheckResult):
+        if self._is_closing:
+            return
         self.authorized = True
-        self._poll_timer.stop()
         self.status_label.setText(f"{result.message}. Служебная сессия подготовлена для работы из РЕМКАРТЫ.")
         self._prepare_background_session_async()
 
     def _prepare_background_session_async(self):
-        if self._background_worker and self._background_worker.isRunning():
+        if self._is_closing:
             return
-        self._background_worker = AsyncCallThread(self.auth_service.prepare_background_session, parent=self)
-        self._background_worker.failed.connect(lambda exc: None)
+        if self._is_worker_running(self._background_worker):
+            return
+        self._background_worker = AsyncCallThread(self.auth_service.prepare_background_session)
+        self._connect_worker(self._background_worker, failed_slot=self._ignore_worker_failed)
         self._background_worker.start()
 
     def _format_patient_probe_result(self, result: BarsPatientProbeResult) -> str:
@@ -502,8 +548,36 @@ class BarsAuthDialog(BaseStyledDialog):
         return "\n".join(lines).rstrip()
 
     def _on_worker_failed(self, exc):
+        if self._is_closing:
+            return
         self.status_label.setText(f"Ошибка: {exc}")
 
+    def shutdown(self, timeout_ms: int = 1200):
+        if self._is_closing:
+            return
+        self._is_closing = True
+        self.authorized = False
+        deactivate = getattr(self.auth_service, "deactivate", None)
+        if callable(deactivate):
+            deactivate()
+        for attr_name in (
+            "_launch_worker",
+            "_check_worker",
+            "_patient_probe_worker",
+            "_patient_list_worker",
+            "_patient_labs_worker",
+            "_background_worker",
+        ):
+            worker = getattr(self, attr_name, None)
+            setattr(self, attr_name, None)
+            if self._is_worker_running(worker):
+                worker.quit()
+                worker.wait(timeout_ms)
+
     def reject(self):
-        self._poll_timer.stop()
+        self.shutdown()
         super().reject()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)

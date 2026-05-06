@@ -8,12 +8,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, 
     QPushButton, QLabel, QFrame, QApplication
 )
-from PySide6.QtCore import Qt, QSettings, QThread, Signal, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QSettings, QThread, Signal
 
 from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.services.report_balance import build_print_balance_final
 from rem_card.services.report_vitals_slotting import select_latest_vitals_by_report_hour
 from rem_card.services.shift_service import ShiftService
@@ -341,4 +341,4 @@ class NurseSectorPrint(BaseSectorWidget):
         self.pdf_worker = None
 
     def open_pdf(self):
-        if self.last_pdf and self.last_pdf.exists(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.last_pdf)))
+        if self.last_pdf and self.last_pdf.exists(): open_pdf_file(self.last_pdf, parent=self)

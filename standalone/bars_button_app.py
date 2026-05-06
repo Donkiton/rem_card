@@ -20,6 +20,7 @@ class BarsButtonStandaloneWindow(QWidget):
         super().__init__()
         self._bars_auth_service = BarsAuthService(auto_minimize_windows=False)
         self._bars_auth_check_worker = None
+        self._is_closing = False
         self._icon_dir = get_icon_dir()
 
         self.setWindowTitle("БАРС")
@@ -27,8 +28,6 @@ class BarsButtonStandaloneWindow(QWidget):
 
         if auto_open:
             QTimer.singleShot(350, self.on_bars_clicked)
-        else:
-            QTimer.singleShot(400, self._check_bars_auth_async)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -75,20 +74,40 @@ class BarsButtonStandaloneWindow(QWidget):
         try:
             dialog = BarsAuthDialog(self._bars_auth_service, self)
             dialog.exec()
-            authorized = dialog.authorized or self._bars_auth_service.last_authorized
-            self._set_bars_auth_state(authorized)
+            deactivate = getattr(self._bars_auth_service, "deactivate", None)
+            if callable(deactivate):
+                deactivate()
+            self._set_bars_auth_state(False)
         finally:
             self.btn_bars.setEnabled(True)
 
     def _check_bars_auth_async(self):
+        if self._is_closing:
+            return
         if self._bars_auth_check_worker and self._bars_auth_check_worker.isRunning():
             return
-        self._bars_auth_check_worker = AsyncCallThread(self._bars_auth_service.check_authorized, parent=self)
+        self._bars_auth_check_worker = AsyncCallThread(self._bars_auth_service.check_authorized)
         self._bars_auth_check_worker.succeeded.connect(lambda result: self._set_bars_auth_state(result.authorized))
         self._bars_auth_check_worker.failed.connect(
             lambda exc: self.status_label.setText(f"Проверка БАРС не выполнена: {exc}")
         )
+        self._bars_auth_check_worker.finished.connect(self._on_bars_auth_check_finished)
         self._bars_auth_check_worker.start()
+
+    def _on_bars_auth_check_finished(self):
+        self._bars_auth_check_worker = None
+
+    def closeEvent(self, event):
+        self._is_closing = True
+        deactivate = getattr(self._bars_auth_service, "deactivate", None)
+        if callable(deactivate):
+            deactivate()
+        worker = self._bars_auth_check_worker
+        self._bars_auth_check_worker = None
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(1200)
+        super().closeEvent(event)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

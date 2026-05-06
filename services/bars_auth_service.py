@@ -215,6 +215,11 @@ class BarsAuthService:
     def last_message(self) -> str:
         return self._last_message
 
+    def deactivate(self):
+        self._last_authorized = False
+        self._last_message = "БАРС не активен"
+        self._diag("service_deactivated")
+
     def open_auth_window(self) -> BarsAuthCheckResult:
         devtools_before = self._enable_devtools and self._devtools_available(self.debug_port)
         self._diag(
