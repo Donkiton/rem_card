@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTableView,
-    QHeaderView, QAbstractItemView, QFrame
+    QHeaderView, QAbstractItemView, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt, QTimer, Signal
 from datetime import datetime, timedelta
@@ -1060,7 +1060,7 @@ class NurseOrdersWidget(QWidget):
 
         self.main_layout = QVBoxLayout(self)
         layout = self.main_layout
-        layout.setContentsMargins(0, 4, 0, 5) 
+        layout.setContentsMargins(0, 3, 0, 5)
         layout.setSpacing(0)
         
         self.frame_container = QFrame()
@@ -1075,14 +1075,23 @@ class NurseOrdersWidget(QWidget):
         self.frame_layout = QVBoxLayout(self.frame_container)
         self.frame_layout.setContentsMargins(2, 2, 2, 2)
         self.frame_layout.setSpacing(5) 
-        layout.addWidget(self.frame_container)
+        layout.addWidget(self.frame_container, 1)
+
+        self.top_container = QFrame()
+        self.top_container.setStyleSheet("background-color: transparent;")
+        self.top_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.top_container.setFixedHeight(28)
+        self.frame_layout.addWidget(self.top_container, 0)
 
         self.table_clip_widget = QWidget()
+        self.table_clip_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.table_clip_layout = QVBoxLayout(self.table_clip_widget)
         self.table_clip_layout.setContentsMargins(0, 0, 0, 0)
-        self.frame_layout.addWidget(self.table_clip_widget)
+        self.frame_layout.addWidget(self.table_clip_widget, 1)
 
         self.table_view = QTableView()
+        self.table_view.setMinimumHeight(120)
+        self.table_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.delegate = NurseOrdersDelegate()
         self.table_view.setItemDelegate(self.delegate)
         self.table_view.pressed.connect(self._on_table_clicked)

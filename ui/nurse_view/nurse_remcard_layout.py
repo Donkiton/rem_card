@@ -87,7 +87,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_3_4_wrapper = QWidget()
         self.sector_3_4_wrapper.setFixedWidth(230) 
         wrapper_layout = QVBoxLayout(self.sector_3_4_wrapper)
-        wrapper_layout.setContentsMargins(4, 3, 0, 4) 
+        wrapper_layout.setContentsMargins(4, 3, 0, 4)
         wrapper_layout.setSpacing(0)
         wrapper_layout.addWidget(self.sector_3_4_container)
         wrapper_layout.addWidget(self.sector_3_4_spacer)
@@ -115,6 +115,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.balance_tab_layout.setContentsMargins(0, 0, 0, 0)
         self.balance_tab_layout.setSpacing(2)
         self.balance_top_splitter = None
+        self._balance_grid_wrapper = None
         self._balance_tab_initialized = False
         self.vitals_stack.addWidget(self.balance_tab_widget)
 
@@ -362,8 +363,14 @@ class NurseRemCardLayoutManager(QWidget):
             self.balance_top_splitter.addWidget(self.sector_2d)
             self.balance_top_splitter.setStretchFactor(2, 0)
         self.balance_tab_layout.addWidget(self.balance_top_splitter, 4)
+
+        self._balance_grid_wrapper = QWidget()
+        grid_wrapper_layout = QVBoxLayout(self._balance_grid_wrapper)
+        grid_wrapper_layout.setContentsMargins(0, 0, 0, 3)
+        grid_wrapper_layout.setSpacing(0)
         if self.balance_grid is not None:
-            self.balance_tab_layout.addWidget(self.balance_grid, 6)
+            grid_wrapper_layout.addWidget(self.balance_grid)
+        self.balance_tab_layout.addWidget(self._balance_grid_wrapper, 6)
 
         self._balance_tab_initialized = True
         self._fix_timer.start(0)

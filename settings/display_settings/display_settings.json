@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "active": {
+    "doctor": {
+      "sector8_buttons": {
+        "order": [
+          "add_patient",
+          "archive",
+          "refresh",
+          "bars",
+          "calc",
+          "bonus",
+          "settings",
+          "back",
+          "exit"
+        ],
+        "visible": {
+          "archive": true,
+          "refresh": false,
+          "add_patient": true,
+          "bars": false,
+          "calc": true,
+          "bonus": true,
+          "settings": true,
+          "back": true,
+          "exit": true
+        }
+      },
+      "remcard_tabs": {
+        "order": [
+          "vitals",
+          "orders",
+          "balance",
+          "ivl",
+          "events",
+          "procedures",
+          "labs",
+          "print"
+        ],
+        "visible": {
+          "vitals": true,
+          "orders": true,
+          "balance": true,
+          "events": true,
+          "ivl": true,
+          "procedures": false,
+          "labs": false,
+          "print": false
+        }
+      }
+    },
+    "nurse": {
+      "sector8_buttons": {
+        "order": [
+          "add_patient",
+          "refresh",
+          "bonus",
+          "style",
+          "back",
+          "exit"
+        ],
+        "visible": {
+          "refresh": true,
+          "add_patient": true,
+          "bonus": true,
+          "style": false,
+          "back": true,
+          "exit": true
+        }
+      },
+      "remcard_tabs": {
+        "order": [
+          "vitals",
+          "orders",
+          "balance",
+          "events",
+          "procedures",
+          "labs",
+          "print"
+        ],
+        "visible": {
+          "vitals": true,
+          "orders": true,
+          "balance": true,
+          "events": false,
+          "procedures": false,
+          "labs": false,
+          "print": false
+        }
+      }
+    }
+  }
+}
