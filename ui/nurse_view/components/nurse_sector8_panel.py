@@ -4,6 +4,10 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSize, Signal
 from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
 
+
+SHOW_STYLE_BUTTON = False
+
+
 class NurseSector8Panel(QWidget):
     """Панель управления медсестры в Секторе 8."""
     exit_clicked = Signal()
@@ -61,6 +65,7 @@ class NurseSector8Panel(QWidget):
         self.btn_style.setMinimumHeight(32)
         self.btn_style.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_style.clicked.connect(self.style_clicked.emit)
+        self.btn_style.setVisible(SHOW_STYLE_BUTTON)
 
         # 2. Кнопка Назад
         self.btn_back = QPushButton(" Назад")
@@ -83,7 +88,8 @@ class NurseSector8Panel(QWidget):
         self.layout.addWidget(self.btn_refresh)
         self.layout.addWidget(self.btn_add_patient)
         self.layout.addWidget(self.btn_bonus)
-        self.layout.addWidget(self.btn_style)
+        if SHOW_STYLE_BUTTON:
+            self.layout.addWidget(self.btn_style)
         self.layout.addWidget(self.btn_back)
         self.layout.addWidget(self.btn_exit)
 
