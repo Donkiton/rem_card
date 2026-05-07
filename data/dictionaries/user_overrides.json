@@ -743,6 +743,12 @@
       "priority_level": 3,
       "offset_min": 0,
       "color": "#bdc3c7"
+    },
+    "somatostatinopodobnoe": {
+      "name_ru": "Соматостатиноподобное",
+      "priority_level": 3,
+      "offset_min": 0,
+      "color": "#bdc3c7"
     }
   },
   "drugs": {
@@ -2763,10 +2769,52 @@
       "form_key": "solution_iv",
       "concentration_mg_ml": 50.0,
       "default_dilution": {
-        "base": "glucose_10",
+        "base": "glucose_5",
         "volume": 250
       },
       "group": "antiarrhythmics"
+    },
+    "Octreotid": {
+      "latin": "Octreotidi",
+      "aliases": [
+        "октреотид"
+      ],
+      "star_alias": "окт*",
+      "admin_type": "sc",
+      "uses_line": false,
+      "duration_min": 0,
+      "default_dose": 300.0,
+      "forms": [
+        1.0
+      ],
+      "unit": "mcg",
+      "form_unit": "ml",
+      "form_key": "solution_iv",
+      "concentration_mg_ml": 0.3,
+      "default_dilution": null,
+      "group": "somatostatinopodobnoe"
+    },
+    "Doxycyclin": {
+      "latin": "Doxycyclini",
+      "aliases": [
+        "доксициклин",
+        "видоциклин",
+        "юнидокс"
+      ],
+      "star_alias": "докс*",
+      "admin_type": "per_os",
+      "uses_line": false,
+      "duration_min": 0,
+      "default_dose": 100.0,
+      "forms": [
+        100.0
+      ],
+      "unit": "mg",
+      "form_unit": "mg",
+      "form_key": "capsule",
+      "concentration_mg_ml": 0,
+      "default_dilution": null,
+      "group": "antibiotics"
     }
   },
   "admin_types": {
