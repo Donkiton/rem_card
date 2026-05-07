@@ -143,7 +143,7 @@ class Sector8Panel(QWidget):
             button = self._button_widgets.get(button_id)
             if button is None:
                 continue
-            is_visible = bool(visible.get(button_id, True)) or button_id == "settings"
+            is_visible = bool(visible.get(button_id, True))
             button.setVisible(is_visible)
             if is_visible:
                 self.layout.addWidget(button)

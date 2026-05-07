@@ -23,14 +23,17 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "bars", "label": "БАРС", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
-        {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": False},
+        {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),
     "nurse": (
+        {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
+        {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
+        {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "style", "label": "Цветовая схема", "default_visible": False, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
@@ -172,7 +175,6 @@ def normalize_role_display_settings(role: str | None, data: Any) -> dict[str, An
         "remcard_tabs": _normalize_section(
             data.get("remcard_tabs"),
             REMCARD_TABS[role_key],
-            require_one_visible=True,
         ),
     }
 

@@ -107,11 +107,11 @@ class Sector2b(BaseSectorWidget):
         for tab_id in getattr(self, "_tab_order", list(self._tab_widgets)):
             if self._visible_tabs.get(tab_id, False):
                 return self._tab_labels[tab_id]
-        return "Витальные функции"
+        return ""
 
     def current_tab_name(self) -> str:
         for tab_id, button in self._tab_widgets.items():
-            if button.isChecked():
+            if button.isChecked() and self._visible_tabs.get(tab_id, True):
                 return self._tab_labels[tab_id]
         return self.first_visible_tab_name()
 
@@ -150,12 +150,20 @@ class Sector2b(BaseSectorWidget):
         self.save_icon.setVisible(bool(self._save_icon_requested_visible and orders_visible))
         self.tabs_layout.addStretch()
 
+        if not any(self._visible_tabs.values()):
+            self.select_tab("", emit=False)
+            return
+
         resolved_tab = previous_tab if self.is_tab_visible(previous_tab) else self.first_visible_tab_name()
         self.select_tab(resolved_tab, emit=resolved_tab != previous_tab)
 
     def select_tab(self, tab_name: str, *, emit: bool = False):
         if not self.is_tab_visible(tab_name):
             tab_name = self.first_visible_tab_name()
+        if not tab_name:
+            for button in self._tab_widgets.values():
+                button.setChecked(False)
+            return
         for button in self._tab_widgets.values():
             button.setChecked(button.text() == tab_name)
         if emit:

@@ -53,16 +53,22 @@
       "sector8_buttons": {
         "order": [
           "add_patient",
+          "archive",
           "refresh",
           "bonus",
+          "calc",
+          "settings",
           "style",
           "back",
           "exit"
         ],
         "visible": {
+          "archive": true,
           "refresh": true,
           "add_patient": true,
+          "calc": true,
           "bonus": true,
+          "settings": true,
           "style": false,
           "back": true,
           "exit": true

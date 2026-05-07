@@ -15,6 +15,7 @@ class NurseRemCardLayoutManager(QWidget):
         self.remcard_service = remcard_service
         self.current_admission_id = None
         self.current_mode = "normal"
+        self._archive_last_change_id = -1
         self._first_card_mode_switch_done = False
         self._events_status_handlers = []
         self._events_patient_context = None
@@ -495,6 +496,13 @@ class NurseRemCardLayoutManager(QWidget):
             if updates_were_enabled:
                 self.setUpdatesEnabled(True)
 
+    def _refresh_archive_if_needed(self, force: bool = False):
+        if not getattr(self, "archive_widget", None):
+            return
+        if force or not getattr(self.archive_widget, "all_archived_patients", None):
+            self.archive_widget.load_data()
+            self._archive_last_change_id = max(self._archive_last_change_id, 0)
+
     def set_patient_selection_mode(self, mode):
         if mode == "beds":
             self.selection_stack.setCurrentIndex(1)
@@ -511,6 +519,17 @@ class NurseRemCardLayoutManager(QWidget):
             self.sector_1b.setEnabled(False)
             self.current_mode = "beds"
             self.selection_mode_changed.emit("beds")
+        elif mode == "archive":
+            if self.archive_widget is None and self.patient_service:
+                from ..doctor_view.archive_widget import ArchiveWidget
+
+                self.archive_widget = ArchiveWidget(self.patient_service, remcard_service=self.remcard_service)
+                self._archive_layout.addWidget(self.archive_widget)
+            self.selection_stack.setCurrentIndex(2)
+            self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)
+            self.sector_1b.setEnabled(False)
+            self.current_mode = "archive"
+            self.selection_mode_changed.emit("archive")
         elif mode == "admin":
             if self.admin_widget is None:
                 from ..admin_view.admin_main_widget import AdminMainWidget

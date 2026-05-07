@@ -84,6 +84,7 @@ class NurseMainWidget(QWidget):
         self._balance_quick_oral_connected = False
         self._balance_calculator_cls = None
         self._admin_signals_bound = False
+        self._archive_signals_bound = False
         self._orders_balance_signals_bound = False
         self._nurse_orders_balance_signals_bound = False
         self.report_controller = None
@@ -1112,9 +1113,12 @@ class NurseMainWidget(QWidget):
         self.sector8_panel = NurseSector8Panel()
         self.sector8_panel.btn_back.clicked.connect(self.on_back_clicked)
         self.sector8_panel.btn_exit.clicked.connect(self.on_exit_clicked)
+        self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.force_refresh_everywhere)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
+        self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
+        self.sector8_panel.settings_clicked.connect(self.on_settings_clicked)
         self.sector8_panel.style_clicked.connect(self.on_style_clicked)
         
         self.layout_manager.sector_8.set_content(self.sector8_panel)
@@ -1135,6 +1139,18 @@ class NurseMainWidget(QWidget):
         self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
         self._bind_orders_balance_signals()
         self._bind_nurse_orders_balance_signals()
+
+    def _wire_dynamic_views(self):
+        archive_widget = getattr(self.layout_manager, "archive_widget", None)
+        if archive_widget and not self._archive_signals_bound:
+            archive_widget.back_requested.connect(lambda: self.on_back_clicked())
+            archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
+            self._archive_signals_bound = True
+
+        admin_widget = getattr(self.layout_manager, "admin_widget", None)
+        if admin_widget and not self._admin_signals_bound:
+            admin_widget.btn_back_to_roles.clicked.connect(self.on_back_clicked)
+            self._admin_signals_bound = True
 
     def _bind_orders_balance_signals(self):
         if self._orders_balance_signals_bound:
@@ -1681,6 +1697,13 @@ class NurseMainWidget(QWidget):
                 self.load_patient_card(patient.id, target_dt)
                 self.layout_manager.set_patient_selection_mode("card")
 
+    def on_global_archive_clicked(self):
+        self.layout_manager.set_patient_selection_mode("archive")
+        self._wire_dynamic_views()
+
+    def on_patient_selected_from_archive(self, patient):
+        self.show_archive(patient)
+
     def on_yest_card_clicked(self):
         yest_date = self.current_date - timedelta(days=1)
         self.load_patient_card(self.layout_manager.current_admission_id, yest_date)
@@ -1789,10 +1812,8 @@ class NurseMainWidget(QWidget):
 
     def on_settings_clicked(self):
         self.layout_manager.set_patient_selection_mode("admin")
+        self._wire_dynamic_views()
         admin_widget = getattr(self.layout_manager, 'admin_widget', None)
-        if admin_widget and not self._admin_signals_bound:
-            admin_widget.btn_back_to_roles.clicked.connect(self.on_back_clicked)
-            self._admin_signals_bound = True
         if admin_widget:
             admin_widget.set_print_context(
                 self.remcard_service,

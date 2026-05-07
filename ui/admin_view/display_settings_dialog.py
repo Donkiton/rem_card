@@ -192,6 +192,17 @@ class OrderedVisibilityList(QWidget):
         self.visible[item_id] = visible
         self.changed.emit()
 
+    def set_all_visible(self, visible: bool):
+        changed = False
+        for item_id, option in self.options.items():
+            next_value = True if not bool(option.get("can_hide", True)) else bool(visible)
+            if self.visible.get(item_id) != next_value:
+                self.visible[item_id] = next_value
+                changed = True
+        if changed:
+            self._rebuild_rows()
+            self.changed.emit()
+
     def _current_order(self) -> list[str]:
         return list(self.order)
 
@@ -308,6 +319,17 @@ class DisplaySettingsDialog(BaseStyledDialog):
         buttons_title = QLabel("Кнопки сектора 8 (панели управления)")
         buttons_title.setObjectName("DisplaySettingsSectionTitle")
         buttons_layout.addWidget(buttons_title)
+        buttons_actions = QHBoxLayout()
+        buttons_actions.addStretch()
+        self.buttons_show_all_btn = QPushButton("Включить все")
+        self.buttons_show_all_btn.setObjectName("DialogOkBtn")
+        self.buttons_show_all_btn.clicked.connect(lambda: self._set_sector8_all(True))
+        self.buttons_hide_all_btn = QPushButton("Отключить все")
+        self.buttons_hide_all_btn.setObjectName("DialogOkBtn")
+        self.buttons_hide_all_btn.clicked.connect(lambda: self._set_sector8_all(False))
+        buttons_actions.addWidget(self.buttons_show_all_btn)
+        buttons_actions.addWidget(self.buttons_hide_all_btn)
+        buttons_layout.addLayout(buttons_actions)
         self.buttons_container = QWidget()
         self.buttons_container_layout = QVBoxLayout(self.buttons_container)
         self.buttons_container_layout.setContentsMargins(0, 0, 0, 0)
@@ -320,6 +342,17 @@ class DisplaySettingsDialog(BaseStyledDialog):
         remcard_tabs_title = QLabel("Вкладки РЕМ карты")
         remcard_tabs_title.setObjectName("DisplaySettingsSectionTitle")
         remcard_tabs_layout.addWidget(remcard_tabs_title)
+        tabs_actions = QHBoxLayout()
+        tabs_actions.addStretch()
+        self.tabs_show_all_btn = QPushButton("Включить все")
+        self.tabs_show_all_btn.setObjectName("DialogOkBtn")
+        self.tabs_show_all_btn.clicked.connect(lambda: self._set_tabs_all(True))
+        self.tabs_hide_all_btn = QPushButton("Отключить все")
+        self.tabs_hide_all_btn.setObjectName("DialogOkBtn")
+        self.tabs_hide_all_btn.clicked.connect(lambda: self._set_tabs_all(False))
+        tabs_actions.addWidget(self.tabs_show_all_btn)
+        tabs_actions.addWidget(self.tabs_hide_all_btn)
+        remcard_tabs_layout.addLayout(tabs_actions)
         self.tabs_container = QWidget()
         self.tabs_container_layout = QVBoxLayout(self.tabs_container)
         self.tabs_container_layout.setContentsMargins(0, 0, 0, 0)
@@ -372,9 +405,16 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.tabs_list = OrderedVisibilityList(
             options=remcard_tab_options(role),
             state=draft["remcard_tabs"],
-            require_one_visible=True,
         )
         self.tabs_container_layout.addWidget(self.tabs_list)
+
+    def _set_sector8_all(self, visible: bool):
+        if self.sector8_list is not None:
+            self.sector8_list.set_all_visible(visible)
+
+    def _set_tabs_all(self, visible: bool):
+        if self.tabs_list is not None:
+            self.tabs_list.set_all_visible(visible)
 
     def _on_role_changed(self, *_args):
         self._collect_current_role()
@@ -383,16 +423,6 @@ class DisplaySettingsDialog(BaseStyledDialog):
 
     def _validate(self) -> bool:
         self._collect_current_role()
-        for role, draft in self.role_drafts.items():
-            visible_tabs = draft.get("remcard_tabs", {}).get("visible", {})
-            if not any(bool(value) for value in visible_tabs.values()):
-                role_title = "врача" if role == "doctor" else "медсестры"
-                CustomMessageBox.warning(
-                    self,
-                    "Отображение вкладок",
-                    f"Для {role_title} должна быть включена хотя бы одна вкладка РЕМ карты.",
-                )
-                return False
         return True
 
     def _save(self):

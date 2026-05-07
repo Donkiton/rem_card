@@ -14,7 +14,10 @@ class NurseSector8Panel(QWidget):
     exit_clicked = Signal()
     refresh_clicked = Signal()
     add_patient_clicked = Signal()
+    archive_clicked = Signal()
+    calc_clicked = Signal()
     bonus_clicked = Signal()
+    settings_clicked = Signal()
     style_clicked = Signal()
 
     def __init__(self, parent=None):
@@ -31,7 +34,16 @@ class NurseSector8Panel(QWidget):
 
         self.layout.addStretch()
 
-        # 1. Кнопка Обновить
+        # 1. Кнопка Архив
+        self.btn_archive = QPushButton(" Архив", self)
+        archive_icon = os.path.join(self.icon_dir, "binder.png")
+        self.btn_archive.setIcon(QIcon(archive_icon))
+        self.btn_archive.setIconSize(QSize(18, 18))
+        self.btn_archive.setMinimumHeight(32)
+        self.btn_archive.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_archive.clicked.connect(self.archive_clicked.emit)
+
+        # 2. Кнопка Обновить
         self.btn_refresh = QPushButton(" Обновить", self)
         refresh_icon = os.path.join(self.icon_dir, "refresh.png")
         self.btn_refresh.setIcon(QIcon(refresh_icon))
@@ -48,6 +60,15 @@ class NurseSector8Panel(QWidget):
         self.btn_add_patient.setMinimumHeight(32)
         self.btn_add_patient.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_add_patient.clicked.connect(self.add_patient_clicked.emit)
+
+        # Кнопка Калькулятор
+        self.btn_calc = QPushButton(" Калькулятор", self)
+        calc_icon = os.path.join(self.icon_dir, "calc.png")
+        self.btn_calc.setIcon(QIcon(calc_icon))
+        self.btn_calc.setIconSize(QSize(18, 18))
+        self.btn_calc.setMinimumHeight(32)
+        self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_calc.clicked.connect(self.calc_clicked.emit)
 
         # Кнопка Бонус
         self.btn_bonus = QPushButton(" Бонус", self)
@@ -68,7 +89,16 @@ class NurseSector8Panel(QWidget):
         self.btn_style.clicked.connect(self.style_clicked.emit)
         self.btn_style.setVisible(SHOW_STYLE_BUTTON)
 
-        # 2. Кнопка Назад
+        # Кнопка Настройки
+        self.btn_settings = QPushButton(" Настройки", self)
+        settings_icon = os.path.join(self.icon_dir, "settings.png")
+        self.btn_settings.setIcon(QIcon(settings_icon))
+        self.btn_settings.setIconSize(QSize(18, 18))
+        self.btn_settings.setMinimumHeight(32)
+        self.btn_settings.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_settings.clicked.connect(self.settings_clicked.emit)
+
+        # 3. Кнопка Назад
         self.btn_back = QPushButton(" Назад", self)
         back_icon = os.path.join(self.icon_dir, "back.png")
         self.btn_back.setIcon(QIcon(back_icon))
@@ -86,9 +116,12 @@ class NurseSector8Panel(QWidget):
         self.btn_exit.clicked.connect(self.exit_clicked.emit)
 
         self._button_widgets = {
+            "archive": self.btn_archive,
             "refresh": self.btn_refresh,
             "add_patient": self.btn_add_patient,
+            "calc": self.btn_calc,
             "bonus": self.btn_bonus,
+            "settings": self.btn_settings,
             "style": self.btn_style,
             "back": self.btn_back,
             "exit": self.btn_exit,

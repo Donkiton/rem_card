@@ -25,69 +25,59 @@ from PySide6.QtWidgets import (
 
 from rem_card.app.update_checker import get_update_lock_path, update_lock_scope_id
 
-try:
-    from rem_card.ui.styles.theme import (
-        BG_LIGHT,
-        COLOR_PRIMARY,
-        COLOR_PRIMARY_DARK,
-        CUSTOM_DIALOG_BORDER,
-        CUSTOM_DIALOG_RADIUS,
-        STYLE_CUSTOM_DIALOG,
-        TEXT_PRIMARY,
-        TEXT_SECONDARY,
-    )
-except Exception:
-    BG_LIGHT = "#e9ecef"
-    COLOR_PRIMARY = "#6c757d"
-    COLOR_PRIMARY_DARK = "#5c6770"
-    CUSTOM_DIALOG_BORDER = "#bdc3c7"
-    CUSTOM_DIALOG_RADIUS = "5px"
-    TEXT_PRIMARY = "#2c3e50"
-    TEXT_SECONDARY = "#495057"
-    STYLE_CUSTOM_DIALOG = f"""
-        QDialog {{ background-color: transparent; }}
-        QFrame#DialogMainFrame {{
-            background-color: #ffffff;
-            border: 1px solid {CUSTOM_DIALOG_BORDER};
-            border-radius: {CUSTOM_DIALOG_RADIUS};
-        }}
-        QFrame#DialogTitleBar {{
-            background-color: {BG_LIGHT};
-            border-top-left-radius: {CUSTOM_DIALOG_RADIUS};
-            border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
-            border-bottom: 1px solid {CUSTOM_DIALOG_BORDER};
-        }}
-        QLabel#DialogTitleText {{
-            color: {TEXT_PRIMARY};
-            font-weight: bold;
-            font-size: 14px;
-            padding-left: 5px;
-            background-color: transparent;
-        }}
-        QPushButton#DialogCloseBtn {{
-            background-color: transparent;
-            color: {TEXT_PRIMARY};
-            font-weight: bold;
-            font-size: 14px;
-            border: none;
-            padding: 2px 10px;
-            border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
-        }}
-        QPushButton#DialogCloseBtn:hover {{
-            background-color: #e74c3c;
-            color: white;
-        }}
-        QPushButton#DialogOkBtn {{
-            background-color: {BG_LIGHT};
-            color: {TEXT_PRIMARY};
-            font-size: 13px;
-            font-weight: bold;
-            padding: 6px 20px;
-            border: 1px solid {CUSTOM_DIALOG_BORDER};
-            border-radius: {CUSTOM_DIALOG_RADIUS};
-        }}
-        QPushButton#DialogOkBtn:hover {{ background-color: #d8dde2; }}
-    """
+# Обновлятор запускается из пакета в UPD. Импорт общей темы приложения здесь
+# создает settings/color_scheme/style_settings.json рядом с этим exe.
+BG_LIGHT = "#e9ecef"
+COLOR_PRIMARY = "#6c757d"
+COLOR_PRIMARY_DARK = "#5c6770"
+CUSTOM_DIALOG_BORDER = "#bdc3c7"
+CUSTOM_DIALOG_RADIUS = "5px"
+TEXT_PRIMARY = "#2c3e50"
+TEXT_SECONDARY = "#495057"
+STYLE_CUSTOM_DIALOG = f"""
+    QDialog {{ background-color: transparent; }}
+    QFrame#DialogMainFrame {{
+        background-color: #ffffff;
+        border: 1px solid {CUSTOM_DIALOG_BORDER};
+        border-radius: {CUSTOM_DIALOG_RADIUS};
+    }}
+    QFrame#DialogTitleBar {{
+        background-color: {BG_LIGHT};
+        border-top-left-radius: {CUSTOM_DIALOG_RADIUS};
+        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+        border-bottom: 1px solid {CUSTOM_DIALOG_BORDER};
+    }}
+    QLabel#DialogTitleText {{
+        color: {TEXT_PRIMARY};
+        font-weight: bold;
+        font-size: 14px;
+        padding-left: 5px;
+        background-color: transparent;
+    }}
+    QPushButton#DialogCloseBtn {{
+        background-color: transparent;
+        color: {TEXT_PRIMARY};
+        font-weight: bold;
+        font-size: 14px;
+        border: none;
+        padding: 2px 10px;
+        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+    }}
+    QPushButton#DialogCloseBtn:hover {{
+        background-color: #e74c3c;
+        color: white;
+    }}
+    QPushButton#DialogOkBtn {{
+        background-color: {BG_LIGHT};
+        color: {TEXT_PRIMARY};
+        font-size: 13px;
+        font-weight: bold;
+        padding: 6px 20px;
+        border: 1px solid {CUSTOM_DIALOG_BORDER};
+        border-radius: {CUSTOM_DIALOG_RADIUS};
+    }}
+    QPushButton#DialogOkBtn:hover {{ background-color: #d8dde2; }}
+"""
 
 
 READY_FILE_NAME = "ready.ok"
@@ -593,14 +583,6 @@ class UpdateWorker(QObject):
 
 
 def _show_custom_notice(parent, title: str, message: str):
-    try:
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
-        CustomMessageBox.warning(parent, title, message)
-        return
-    except Exception:
-        pass
-
     dialog = QDialog(parent)
     dialog.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
     dialog.setAttribute(Qt.WA_TranslucentBackground)
