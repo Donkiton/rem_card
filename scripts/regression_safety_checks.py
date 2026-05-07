@@ -6561,6 +6561,10 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
             return False, f"{path.name}: card_snapshot_required must not be an unconditional full-card path"
         if 'load_scope="patient_open_vitals"' not in on_changes:
             return False, f"{path.name}: vitals changes must use partial vitals snapshot"
+        if "_current_status_is_outcome()" not in on_changes:
+            return False, f"{path.name}: outcome refresh must skip redundant vitals snapshot"
+        if "skipped vitals snapshot after outcome" not in on_changes:
+            return False, f"{path.name}: outcome vitals-snapshot skip should be logged"
         local_force_pos = on_changes.find("_is_local_orders_force_payload")
         diet_pos = on_changes.find("_handle_diet_sync", local_force_pos)
         if local_force_pos < 0 or diet_pos < 0:

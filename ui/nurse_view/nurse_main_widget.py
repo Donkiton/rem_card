@@ -1054,7 +1054,15 @@ class NurseMainWidget(QWidget):
         if full_refresh_required or card_snapshot_required:
             self._request_card_snapshot()
         elif vitals_snapshot_required:
-            self._request_card_snapshot(load_scope="patient_open_vitals")
+            if self._current_status_is_outcome():
+                logger.info(
+                    "NurseMainWidget skipped vitals snapshot after outcome admission_id=%s sources=%s entities=%s",
+                    getattr(self.layout_manager, "current_admission_id", None),
+                    self._payload_force_sources(payload),
+                    sorted(changed_entities),
+                )
+            else:
+                self._request_card_snapshot(load_scope="patient_open_vitals")
 
     def _is_orders_tab_active(self) -> bool:
         return (
@@ -1255,6 +1263,41 @@ class NurseMainWidget(QWidget):
         finally:
             if not self._journal_prewarm_done:
                 self._journal_prewarm_started = False
+
+    def _current_status_is_outcome(self) -> bool:
+        snapshot = self._card_snapshot_cache or {}
+        status_dto = snapshot.get("status")
+        status_value = getattr(status_dto, "status", None)
+        if status_dto and getattr(status_value, "is_outcome", lambda: False)():
+            return True
+
+        layout_status = getattr(getattr(self, "layout_manager", None), "_current_status_dto", None)
+        layout_status_value = getattr(layout_status, "status", None)
+        if layout_status and getattr(layout_status_value, "is_outcome", lambda: False)():
+            return True
+
+        patient = snapshot.get("patient")
+        if patient and (
+            getattr(patient, "transfer_datetime", None)
+            or getattr(patient, "death_datetime", None)
+            or getattr(patient, "outcome", None)
+        ):
+            return True
+
+        admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+        if (
+            admission_id
+            and getattr(self, "remcard_service", None)
+            and hasattr(self.remcard_service, "get_current_status")
+        ):
+            try:
+                current_status = self.remcard_service.get_current_status(admission_id)
+            except Exception:
+                current_status = None
+            current_status_value = getattr(current_status, "status", None)
+            if current_status and getattr(current_status_value, "is_outcome", lambda: False)():
+                return True
+        return False
 
     def _schedule_chart_init(self, delay_ms: int = CHART_LAZY_INIT_DELAY_MS):
         if getattr(self, "chart", None) is not None or self._chart_init_pending:

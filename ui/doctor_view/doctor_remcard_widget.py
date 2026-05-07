@@ -1090,7 +1090,15 @@ class DoctorRemCardWidget(QWidget):
         if full_refresh_required or card_snapshot_required:
             self._request_card_snapshot(show_empty_message=False)
         elif vitals_snapshot_required:
-            self._request_card_snapshot(show_empty_message=False, load_scope="patient_open_vitals")
+            if self._current_status_is_outcome():
+                logger.info(
+                    "DoctorRemCardWidget skipped vitals snapshot after outcome admission_id=%s sources=%s entities=%s",
+                    self.admission_id,
+                    self._payload_force_sources(payload),
+                    sorted(changed_entities),
+                )
+            else:
+                self._request_card_snapshot(show_empty_message=False, load_scope="patient_open_vitals")
 
     def start_polling(self):
         """Подписывает карту на сервисный monitor и оставляет только чистый UI-таймер баланса."""
