@@ -12,6 +12,7 @@ block_cipher = None
 APP_ROOT = os.path.abspath(SPECPATH)
 PROJECT_ROOT = os.path.dirname(APP_ROOT)
 DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
+DISPLAY_SETTINGS_TARGET = os.path.join("rem_card", "settings", "display_settings")
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -45,6 +46,13 @@ def _dictionary_json_datas():
             result.append((source_path, DICTIONARIES_TARGET))
     return result
 
+
+def _display_settings_datas():
+    source_path = os.path.join(APP_ROOT, "settings", "display_settings", "display_settings.json")
+    if not os.path.isfile(source_path):
+        raise RuntimeError(f"Display settings file not found: {source_path}")
+    return [(source_path, DISPLAY_SETTINGS_TARGET)]
+
 a = Analysis(
     [
         os.path.join(APP_ROOT, 'run_doctor.py'),
@@ -66,6 +74,10 @@ a = Analysis(
 		# dictionaries (json): базовый набор попадает в _internal,
 		# при запуске приложения недостающие файлы копируются наружу рядом с exe.
 		*_dictionary_json_datas(),
+
+		# настройки отображения: dev-настройки попадают в _internal как базовый
+		# набор для compiled-версии и первого запуска после обновления.
+		*_display_settings_datas(),
 
 		# активные ресурсы управления пациентами и МКБ
 		_data_dir('data/mkb'),

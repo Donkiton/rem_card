@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import json
 import os
+import sys
 import time
 from typing import Any
 
@@ -123,10 +124,15 @@ def default_display_settings_payload() -> dict[str, Any]:
     }
 
 
-def _normalize_order(raw_order: Any, ids: list[str]) -> list[str]:
+def _normalize_order(raw_order: Any, ids: list[str], fallback_order: Any = None) -> list[str]:
     result: list[str] = []
     if isinstance(raw_order, list):
         for raw_id in raw_order:
+            item_id = str(raw_id)
+            if item_id in ids and item_id not in result:
+                result.append(item_id)
+    if isinstance(fallback_order, list):
+        for raw_id in fallback_order:
             item_id = str(raw_id)
             if item_id in ids and item_id not in result:
                 result.append(item_id)
@@ -140,23 +146,29 @@ def _normalize_section(
     data: Any,
     options: tuple[dict[str, Any], ...],
     *,
+    base_section: Any = None,
     require_one_visible: bool = False,
 ) -> dict[str, Any]:
     default = _default_section(options)
     if not isinstance(data, dict):
         data = {}
+    if not isinstance(base_section, dict):
+        base_section = {}
 
     ids = _option_ids(options)
-    order = _normalize_order(data.get("order"), ids)
+    order = _normalize_order(data.get("order"), ids, fallback_order=base_section.get("order"))
     raw_visible = data.get("visible")
     if not isinstance(raw_visible, dict):
         raw_visible = {}
+    base_visible = base_section.get("visible")
+    if not isinstance(base_visible, dict):
+        base_visible = {}
 
     visible: dict[str, bool] = {}
     for option in options:
         item_id = str(option["id"])
         can_hide = bool(option.get("can_hide", True))
-        default_visible = bool(default["visible"].get(item_id, True))
+        default_visible = bool(base_visible.get(item_id, default["visible"].get(item_id, True)))
         item_visible = bool(raw_visible.get(item_id, default_visible))
         visible[item_id] = item_visible if can_hide else True
 
@@ -166,15 +178,22 @@ def _normalize_section(
     return {"order": order, "visible": visible}
 
 
-def normalize_role_display_settings(role: str | None, data: Any) -> dict[str, Any]:
+def normalize_role_display_settings(role: str | None, data: Any, base_settings: Any = None) -> dict[str, Any]:
     role_key = normalize_display_role(role)
     if not isinstance(data, dict):
         data = {}
+    if not isinstance(base_settings, dict):
+        base_settings = {}
     return {
-        "sector8_buttons": _normalize_section(data.get("sector8_buttons"), SECTOR8_BUTTONS[role_key]),
+        "sector8_buttons": _normalize_section(
+            data.get("sector8_buttons"),
+            SECTOR8_BUTTONS[role_key],
+            base_section=base_settings.get("sector8_buttons"),
+        ),
         "remcard_tabs": _normalize_section(
             data.get("remcard_tabs"),
             REMCARD_TABS[role_key],
+            base_section=base_settings.get("remcard_tabs"),
         ),
     }
 
@@ -224,6 +243,9 @@ class DisplaySettingsStorage:
             self._quarantine_broken_file()
             return self._default_and_save()
 
+        if self._should_replace_uncustomized_file(payload):
+            return self._default_and_save()
+
         return self._normalize_payload(payload)
 
     def save(self, payload: dict[str, Any]) -> None:
@@ -245,23 +267,82 @@ class DisplaySettingsStorage:
         payload["active"][role_key] = normalize_role_display_settings(role_key, settings)
         self.save(payload)
 
-    def _normalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = default_display_settings_payload()
+    def _normalize_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        base_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = deepcopy(base_payload) if isinstance(base_payload, dict) else self._default_payload()
         result["version"] = DISPLAY_SETTINGS_VERSION
         active = payload.get("active")
         if not isinstance(active, dict):
             return result
         for role in ("doctor", "nurse"):
-            result["active"][role] = normalize_role_display_settings(role, active.get(role))
+            base_role_settings = (result.get("active") or {}).get(role)
+            result["active"][role] = normalize_role_display_settings(
+                role,
+                active.get(role),
+                base_settings=base_role_settings,
+            )
         return result
 
     def _default_and_save(self) -> dict[str, Any]:
-        payload = default_display_settings_payload()
+        payload = self._default_payload()
         try:
             self.save(payload)
         except Exception as exc:
             self.last_error = str(exc)
         return payload
+
+    def _default_payload(self) -> dict[str, Any]:
+        bundled = self._read_bundled_payload()
+        schema_default = default_display_settings_payload()
+        if bundled:
+            return self._normalize_payload(bundled, base_payload=schema_default)
+        return schema_default
+
+    def _read_bundled_payload(self) -> dict[str, Any] | None:
+        path = self._bundled_path()
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            return payload if isinstance(payload, dict) else None
+        except Exception as exc:
+            self.last_error = str(exc)
+            return None
+
+    def _bundled_path(self) -> str | None:
+        try:
+            from rem_card.app.runtime_paths import is_compiled
+
+            if not is_compiled():
+                return None
+            if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+                resources_dir = str(sys._MEIPASS)
+            else:
+                executable_dir = os.path.dirname(os.path.abspath(sys.executable))
+                internal_dir = os.path.join(executable_dir, "_internal")
+                resources_dir = internal_dir if os.path.isdir(internal_dir) else executable_dir
+            return os.path.join(resources_dir, "rem_card", DISPLAY_SETTINGS_RELATIVE_PATH)
+        except Exception:
+            return None
+
+    def _should_replace_uncustomized_file(self, payload: dict[str, Any]) -> bool:
+        bundled = self._read_bundled_payload()
+        if not bundled:
+            return False
+
+        schema_default = default_display_settings_payload()
+        schema_normalized = self._normalize_payload(schema_default, base_payload=schema_default)
+        bundled_normalized = self._normalize_payload(bundled, base_payload=schema_default)
+        if bundled_normalized == schema_normalized:
+            return False
+
+        current_as_schema = self._normalize_payload(payload, base_payload=schema_default)
+        return current_as_schema == schema_normalized
 
     def _quarantine_broken_file(self) -> None:
         if not os.path.exists(self.path):
