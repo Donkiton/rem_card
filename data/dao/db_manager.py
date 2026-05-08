@@ -167,6 +167,7 @@ class DatabaseManager:
         self._thread_state = threading.local()
         self._central_io_lock = threading.RLock()
         self._closed = False
+        self.startup_metrics: dict[str, float] = {}
 
         self._maybe_rotate_db_lifecycle()
 
@@ -181,16 +182,29 @@ class DatabaseManager:
         self._journal_conn: Optional[sqlite3.Connection] = None
         self._remcard_conn: Optional[sqlite3.Connection] = None
 
-        self._init_connections()
+        self._measure_startup_phase("connection_profile_ms", self._init_connections)
         self._verify_quick_integrity_or_restore()
-        self._init_unified_schema()
+        self._measure_startup_phase("schema_init_ms", self._init_unified_schema)
         self._ensure_cycle_meta_initialized()
-        self._cleanup_local_cache_artifacts(force=True)
+        self._measure_startup_phase("cache_cleanup_ms", lambda: self._cleanup_local_cache_artifacts(force=True))
         self._start_outbox_replay()
         self._start_local_replica_sync()
         self._start_integrity_monitor()
         if CHANGELOG_LIVE_TRIM_ON_STARTUP:
             self._maybe_trim_change_log_live(force=True)
+
+    def _record_startup_metric(self, name: str, value_ms: float):
+        try:
+            self.startup_metrics[name] = round(float(value_ms), 3)
+        except Exception:
+            pass
+
+    def _measure_startup_phase(self, name: str, func: Callable[[], Any]):
+        started = time.perf_counter()
+        try:
+            return func()
+        finally:
+            self._record_startup_metric(name, (time.perf_counter() - started) * 1000.0)
 
     def _maybe_rotate_db_lifecycle(self):
         result = maybe_rotate_database_if_due(
@@ -212,9 +226,13 @@ class DatabaseManager:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         profile_lock = FileWriteLock(DB_LOCK_PATH, stale_timeout_sec=10 * 60, logger=logger)
         owner_id = f"{socket.gethostname()}:{os.getpid()}:remcard_init"
+        lock_started = time.perf_counter()
         if not profile_lock.acquire(owner_id=owner_id, source="connection_profile"):
+            self._record_startup_metric("connection_lock_wait_ms", (time.perf_counter() - lock_started) * 1000.0)
             raise sqlite3.OperationalError("Could not acquire db lock for connection profile")
+        self._record_startup_metric("connection_lock_wait_ms", (time.perf_counter() - lock_started) * 1000.0)
         try:
+            connect_started = time.perf_counter()
             conn = sqlite3.connect(
                 self.db_path,
                 check_same_thread=False,
@@ -222,6 +240,7 @@ class DatabaseManager:
                 timeout=5.0,
             )
             configure_connection(conn, profile="network")
+            self._record_startup_metric("sqlite_connect_ms", (time.perf_counter() - connect_started) * 1000.0)
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_init", logger=logger) from exc
@@ -378,8 +397,11 @@ class DatabaseManager:
         return age_sec >= STARTUP_QUICKCHECK_TTL_SEC, age_sec
 
     def _verify_quick_integrity_or_restore(self):
+        decision_started = time.perf_counter()
         should_run, age_sec = self._should_run_startup_quickcheck()
+        self._record_startup_metric("quick_check_decision_ms", (time.perf_counter() - decision_started) * 1000.0)
         if not should_run:
+            self._record_startup_metric("quick_check_ms", 0.0)
             logger.info(
                 "Skipping startup quick_check for %s (last=%.1fs ago, ttl=%.1fs)",
                 self.db_path,
@@ -389,8 +411,11 @@ class DatabaseManager:
             return
 
         try:
+            quick_started = time.perf_counter()
             ok, result = run_quick_check(self._remcard_conn)
+            self._record_startup_metric("quick_check_ms", (time.perf_counter() - quick_started) * 1000.0)
         except Exception as exc:
+            self._record_startup_metric("quick_check_ms", (time.perf_counter() - quick_started) * 1000.0 if "quick_started" in locals() else 0.0)
             result = str(exc)
             if is_database_unavailable_error(exc) or is_retryable_db_availability_reason(result):
                 raise RuntimeError(f"Database quick_check could not run because DB is unavailable: {result}") from exc

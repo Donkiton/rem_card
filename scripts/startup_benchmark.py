@@ -53,7 +53,10 @@ def _benchmark_remcard(role: str) -> dict:
 
     t = _now()
     container = bootstrap()
-    steps.append(StepResult("bootstrap", _ms(t)))
+    bootstrap_ms = _ms(t)
+    steps.append(StepResult("bootstrap", bootstrap_ms))
+    startup_phases = dict(getattr(getattr(container, "db_manager", None), "startup_metrics", {}) or {})
+    startup_phases["total_bootstrap_ms"] = bootstrap_ms
 
     t = _now()
     window = MainWindow(container=None, role=role)
@@ -75,6 +78,7 @@ def _benchmark_remcard(role: str) -> dict:
         "mode": "remcard",
         "role": role,
         "steps": [asdict(step) for step in steps],
+        "startup_phases": startup_phases,
         "total_ms": total,
     }
 
@@ -116,7 +120,10 @@ def _benchmark_patient_bed_management() -> dict:
 
     t = _now()
     container = bootstrap()
-    steps.append(StepResult("bootstrap", _ms(t)))
+    bootstrap_ms = _ms(t)
+    steps.append(StepResult("bootstrap", bootstrap_ms))
+    startup_phases = dict(getattr(getattr(container, "db_manager", None), "startup_metrics", {}) or {})
+    startup_phases["total_bootstrap_ms"] = bootstrap_ms
 
     t = _now()
     db_manager = container.remcard_service.orders_dao.db
@@ -127,6 +134,7 @@ def _benchmark_patient_bed_management() -> dict:
     result = {
         "mode": "patient-bed-management",
         "steps": [asdict(step) for step in steps],
+        "startup_phases": startup_phases,
         "total_ms": total,
     }
 
