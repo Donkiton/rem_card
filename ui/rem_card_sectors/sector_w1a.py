@@ -95,7 +95,7 @@ class SectorW1a(BaseSectorWidget):
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("sector_w1a_scroll_content")
         self.scroll_layout = QVBoxLayout(self.scroll_content)
-        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setContentsMargins(0, 3, 0, 0)
         self.scroll_layout.setSpacing(0)
         self.scroll_layout.setAlignment(Qt.AlignTop)
 
@@ -308,6 +308,8 @@ class SectorW1a(BaseSectorWidget):
                 current_index = group["layout"].indexOf(card)
                 if current_index != order_index:
                     group["layout"].insertWidget(order_index, card)
+            self._pin_group_frame_height(group)
+        QTimer.singleShot(0, self._pin_group_frame_heights)
 
     def _build_patient_groups(self, data_list):
         grouped = {}
@@ -432,6 +434,28 @@ class SectorW1a(BaseSectorWidget):
         }
         self.groups[group_key] = group
         return group
+
+    def _pin_group_frame_heights(self):
+        if self._is_shutting_down:
+            return
+        for group in list(self.groups.values()):
+            self._pin_group_frame_height(group)
+        self.content_layout.invalidate()
+        self.content_layout.activate()
+        self.cards_container.adjustSize()
+        self.cards_container.updateGeometry()
+
+    def _pin_group_frame_height(self, group):
+        frame = (group or {}).get("frame")
+        if frame is None:
+            return
+        if frame.minimumHeight() == frame.maximumHeight():
+            frame.setMinimumHeight(0)
+            frame.setMaximumHeight(16777215)
+        required_height = max(frame.minimumSizeHint().height(), frame.sizeHint().height())
+        if required_height > 0:
+            frame.setFixedHeight(required_height)
+            frame.updateGeometry()
 
     def _order_sort_key(self, item):
         try:

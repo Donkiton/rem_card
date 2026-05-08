@@ -1,7 +1,7 @@
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QScrollArea, QMessageBox
-from PySide6.QtCore import Qt, Signal, QTimer, Slot
+from PySide6.QtCore import Qt, Signal, QTimer, Slot, QCoreApplication, QThread
 from PySide6.QtGui import QPainter, QPixmap
 from .nurse_patient_bed_row import NursePatientBedRow
 import os
@@ -12,8 +12,34 @@ from rem_card.ui.shared.pdf_opener import open_pdf_file
 import pathlib
 import datetime
 
+try:
+    import shiboken6  # type: ignore
+except Exception:
+    shiboken6 = None
+
 _FON_PIXMAP_CACHE = None
 _FON_PIXMAP_CACHE_PATH = None
+
+
+def _qt_is_valid(obj) -> bool:
+    if obj is None:
+        return False
+    if shiboken6 is None:
+        return True
+    try:
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return True
+
+
+def _app_is_closing() -> bool:
+    app = QCoreApplication.instance()
+    if app is None:
+        return True
+    try:
+        return bool(QCoreApplication.closingDown())
+    except Exception:
+        return False
 
 
 def _get_cached_fon_pixmap():
@@ -98,9 +124,17 @@ class NurseBedsSelectionWidget(QWidget):
             painter.drawPixmap(x, y, pixmap)
 
     def refresh(self, *, queue_if_running: bool = True):
-        if self._is_closing:
+        if self._is_closing or _app_is_closing() or not _qt_is_valid(self):
             return
-        if self._refresh_worker and self._refresh_worker.isRunning():
+        if QThread.currentThread() is not self.thread():
+            QTimer.singleShot(0, lambda: self.refresh(queue_if_running=queue_if_running))
+            return
+
+        worker = self._refresh_worker
+        if worker is not None and not _qt_is_valid(worker):
+            self._refresh_worker = None
+            worker = None
+        if worker is not None and worker.isRunning():
             if queue_if_running:
                 self._refresh_pending = True
             return
@@ -220,7 +254,7 @@ class NurseBedsSelectionWidget(QWidget):
         worker = self._refresh_worker
         self._refresh_worker = None
         self._disconnect_refresh_worker(worker)
-        if worker is not None and worker.isRunning():
+        if worker is not None and _qt_is_valid(worker) and worker.isRunning():
             worker.quit()
             worker.wait(timeout_ms)
 

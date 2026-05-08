@@ -1,5 +1,10 @@
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QStackedWidget)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QCoreApplication
+
+try:
+    import shiboken6  # type: ignore
+except Exception:
+    shiboken6 = None
 
 DOCTOR_BEDS_POLL_INTERVAL_MS = 7000
 W1_REFRESH_ENTITIES = {
@@ -18,6 +23,28 @@ W1_REFRESH_ENTITIES = {
     "oral_intake_events",
 }
 
+
+def _qt_is_valid(obj) -> bool:
+    if obj is None:
+        return False
+    if shiboken6 is None:
+        return True
+    try:
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return True
+
+
+def _app_is_closing() -> bool:
+    app = QCoreApplication.instance()
+    if app is None:
+        return True
+    try:
+        return bool(QCoreApplication.closingDown())
+    except Exception:
+        return False
+
+
 class DoctorMainWidget(QWidget):
     """Главный виджет врача. Теперь является оберткой над DoctorRemCardWidget."""
     def __init__(self, patient_service, remcard_service, parent=None):
@@ -26,26 +53,30 @@ class DoctorMainWidget(QWidget):
         self.remcard_service = remcard_service
         self._last_global_change_id = 0
         self._monitor_connected = False
+        self._is_closing = False
         
         self.init_ui()
 
     def start_auto_refresh(self):
+        if self._is_closing or _app_is_closing():
+            return
         data_service = self._get_data_service()
         if data_service and not self._monitor_connected:
             data_service.changes_detected.connect(self._on_data_changes, Qt.QueuedConnection)
             self._monitor_connected = True
-        if hasattr(self.remcard_widget.layout_manager, 'beds_selection_widget'):
-            self.remcard_widget.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
+        self._refresh_beds_if_available(queue_if_running=False)
         self._refresh_w1a()
         if data_service:
             data_service.request_immediate_refresh(force_emit=False)
 
     def auto_refresh(self, force: bool = False):
+        if self._is_closing or _app_is_closing():
+            return
         data_service = self._get_data_service()
         if force and hasattr(self.remcard_widget, "force_refresh_everywhere"):
             self.remcard_widget.force_refresh_everywhere()
-        elif self.remcard_widget.admission_id is None and hasattr(self.remcard_widget.layout_manager, 'beds_selection_widget'):
-            self.remcard_widget.layout_manager.beds_selection_widget.refresh()
+        elif getattr(self.remcard_widget, "admission_id", None) is None:
+            self._refresh_beds_if_available()
             self._refresh_w1a()
         if data_service:
             data_service.request_immediate_refresh(force_emit=force)
@@ -60,17 +91,24 @@ class DoctorMainWidget(QWidget):
         self._monitor_connected = False
 
     def shutdown(self):
+        self._is_closing = True
         self.stop_auto_refresh()
         if hasattr(self, "remcard_widget") and hasattr(self.remcard_widget, "shutdown"):
             self.remcard_widget.shutdown()
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     def _get_data_service(self):
         return getattr(self.remcard_service, "data_service", None)
 
     def _refresh_w1a(self, payload: dict | None = None):
+        if self._is_closing or _app_is_closing():
+            return
         layout = getattr(self.remcard_widget, "layout_manager", None)
         sector = getattr(layout, "sector_w1a", None)
-        if sector is None:
+        if sector is None or not _qt_is_valid(sector):
             return
         if hasattr(sector, "set_service"):
             sector.set_service(self.remcard_service)
@@ -79,10 +117,32 @@ class DoctorMainWidget(QWidget):
         elif hasattr(sector, "refresh_data"):
             sector.refresh_data()
 
-    def _on_data_changes(self, payload: dict):
-        if self.remcard_widget.admission_id is not None:
+    def _refresh_beds_if_available(self, *, queue_if_running: bool = True):
+        if self._is_closing or _app_is_closing() or not self.isVisible():
             return
-        layout = getattr(self.remcard_widget, "layout_manager", None)
+        remcard_widget = getattr(self, "remcard_widget", None)
+        if not _qt_is_valid(remcard_widget):
+            return
+        layout = getattr(remcard_widget, "layout_manager", None)
+        if layout is None or not _qt_is_valid(layout):
+            return
+        beds_widget = getattr(layout, "beds_selection_widget", None)
+        if beds_widget is None or not _qt_is_valid(beds_widget) or not hasattr(beds_widget, "refresh"):
+            return
+        beds_widget.refresh(queue_if_running=queue_if_running)
+
+    def _on_data_changes(self, payload: dict):
+        if self._is_closing or _app_is_closing() or not self.isVisible():
+            return
+        payload = payload or {}
+        remcard_widget = getattr(self, "remcard_widget", None)
+        if not _qt_is_valid(remcard_widget):
+            return
+        if getattr(remcard_widget, "admission_id", None) is not None:
+            return
+        layout = getattr(remcard_widget, "layout_manager", None)
+        if layout is not None and not _qt_is_valid(layout):
+            return
         if layout is not None and getattr(layout, "current_mode", "beds") != "beds":
             return
         changed_entities = {
@@ -95,11 +155,10 @@ class DoctorMainWidget(QWidget):
                 str(change.get("entity_name") or "")
                 for change in (payload.get("changes") or [])
                 if change.get("entity_name")
-            }
+        }
         if not payload.get("forced") and not changed_entities.intersection(W1_REFRESH_ENTITIES):
             return
-        if layout is not None and hasattr(layout, 'beds_selection_widget'):
-            layout.beds_selection_widget.refresh()
+        self._refresh_beds_if_available()
         self._refresh_w1a(payload)
 
     def init_ui(self):

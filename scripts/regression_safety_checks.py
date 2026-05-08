@@ -5973,6 +5973,14 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
             return False, f"{role}: W1 refresh must support non-queued startup refresh"
         if "if queue_if_running:" not in source:
             return False, f"{role}: W1 refresh must respect queue_if_running"
+        for marker in (
+            "QCoreApplication.closingDown()",
+            "QThread.currentThread() is not self.thread()",
+            "QTimer.singleShot(0, lambda: self.refresh(queue_if_running=queue_if_running))",
+            "not _qt_is_valid(self)",
+        ):
+            if marker not in source:
+                return False, f"{role}: W1 beds refresh missing lifecycle guard marker: {marker}"
 
     return True, "ok"
 
@@ -6025,8 +6033,11 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         "\"bed_number\": item.get(\"bed_number\")",
         "\"bed_number\": group_data.get(\"bed_number\")",
         "self.content_layout.setAlignment(Qt.AlignTop)",
+        "self.scroll_layout.setContentsMargins(0, 3, 0, 0)",
         "self.scroll_layout.addWidget(self.cards_container, 0, Qt.AlignTop)",
         "self.scroll_layout.addStretch(1)",
+        "def _pin_group_frame_height(self, group):",
+        "frame.setFixedHeight(required_height)",
         "self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)",
         "header.setStyleSheet",
         "#d7eaf8",
@@ -6049,6 +6060,102 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
     ):
         if required_sql not in service_source:
             return False, f"W1a read model must keep optimized active-admission SQL: {required_sql}"
+
+    nurse_card_source = (root / "ui" / "shared" / "components" / "nurse_order_card.py").read_text(encoding="utf-8")
+    for forbidden_marker in (
+        "COMPACT_MAIN_FONT_PX",
+        "def _apply_text_density",
+        "def _method_text_for_width",
+        "setHeightForWidth(True)",
+    ):
+        if forbidden_marker in nurse_card_source:
+            return False, f"NurseOrderCard must not change inner typography/sizing for W1a gap fix: {forbidden_marker}"
+    if "card_policy.setHeightForWidth(True)" in w1a_source:
+        return False, "W1a must not change NurseOrderCard height-for-width policy for external gap fix"
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from datetime import datetime, timedelta
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors.sector_w1a import SectorW1a
+
+    app = QApplication.instance() or QApplication([])
+    now = datetime.now().replace(second=0, microsecond=0)
+
+    def _w1a_row(row_id, admission_id, patient_name, bed_number, latin, dose, unit, comment, duration, offset_min):
+        return {
+            "id": row_id,
+            "admission_id": admission_id,
+            "patient_id": admission_id,
+            "patient_name": patient_name,
+            "bed_number": bed_number,
+            "latin": latin,
+            "dose_value": dose,
+            "dose_unit": unit,
+            "order_comment": comment,
+            "duration_min": duration,
+            "planned_time": (now + timedelta(minutes=offset_min)).isoformat(),
+            "priority": 1,
+            "comment": "",
+        }
+
+    widget = SectorW1a(service=None)
+    try:
+        widget.resize(250, 700)
+        widget.show()
+        app.processEvents()
+        widget._apply_snapshot(
+            {
+                "content_hash": "layout-gap-check",
+                "change_id": 1,
+                "rows": [
+                    _w1a_row(1, 1, "Иванов Иван Иванович", "1", "S. NaCl 0.9%", 250, "ml", "[ROUTE:В/в капельно] [DUR:30]", 30, -10),
+                    _w1a_row(2, 1, "Иванов Иван Иванович", "1", "S. Ceftriaxoni", 1, "г", "S. NaCl 0.9% - 200мл [ROUTE:В/в капельно] [DUR:30]", 30, 0),
+                    _w1a_row(3, 1, "Иванов Иван Иванович", "1", "S. Furosemidi", 20, "mg", "S. NaCl 0.9% - 10 мл [ROUTE:В/в струйно]", 0, 20),
+                    _w1a_row(4, 2, "Петров Петр Петрович", "2", "S. Azithromycini", 500, "mg", "[ROUTE:Per os (внутрь)]", 0, 0),
+                ],
+            }
+        )
+        for _ in range(3):
+            app.processEvents()
+
+        ordered_groups = sorted(widget.groups.values(), key=lambda group: group["frame"].geometry().y())
+        if len(ordered_groups) != 2:
+            return False, f"W1a layout gap check expected 2 groups, got {len(ordered_groups)}"
+
+        first_group = ordered_groups[0]
+        body_layout = first_group["layout"]
+        card_gaps = []
+        previous_geometry = None
+        for index in range(body_layout.count()):
+            item = body_layout.itemAt(index)
+            card = item.widget() if item is not None else None
+            if card is None:
+                continue
+            geometry = card.geometry()
+            if previous_geometry is not None:
+                card_gaps.append(geometry.y() - (previous_geometry.y() + previous_geometry.height()))
+            previous_geometry = geometry
+        if card_gaps != [4, 4]:
+            return False, f"W1a Ceftriaxoni card gaps must stay at body spacing 4px, got {card_gaps}"
+
+        group_gap = ordered_groups[1]["frame"].geometry().y() - (
+            ordered_groups[0]["frame"].geometry().y() + ordered_groups[0]["frame"].geometry().height()
+        )
+        if group_gap != 3:
+            return False, f"W1a patient group gap must stay at content spacing 3px, got {group_gap}"
+
+        frame = first_group["frame"]
+        header = first_group["header"]
+        body = first_group["body"]
+        expected_frame_height = header.height() + body.height() + frame.frameWidth() * 2
+        if frame.height() != expected_frame_height:
+            return False, f"W1a patient group frame has surplus height: {frame.height()} != {expected_frame_height}"
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
 
     return True, "ok"
 
