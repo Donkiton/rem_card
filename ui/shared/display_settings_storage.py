@@ -14,6 +14,8 @@ from rem_card.ui.styles.theme_storage import get_style_settings_path
 DISPLAY_SETTINGS_ENV = "REMCARD_DISPLAY_SETTINGS_PATH"
 DISPLAY_SETTINGS_VERSION = 1
 DISPLAY_SETTINGS_RELATIVE_PATH = os.path.join("settings", "display_settings", "display_settings.json")
+W1A_UPCOMING_ORDERS_DEFAULT_ENABLED = True
+W1B_LOWER_SECTOR_DEFAULT_ENABLED = True
 
 
 SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
@@ -111,6 +113,12 @@ def default_role_display_settings(role: str | None) -> dict[str, Any]:
     return {
         "sector8_buttons": _default_section(SECTOR8_BUTTONS[role_key]),
         "remcard_tabs": _default_section(REMCARD_TABS[role_key]),
+        "w1a_upcoming_orders": {
+            "enabled": W1A_UPCOMING_ORDERS_DEFAULT_ENABLED,
+        },
+        "w1b_lower_sector": {
+            "enabled": W1B_LOWER_SECTOR_DEFAULT_ENABLED,
+        },
     }
 
 
@@ -178,6 +186,28 @@ def _normalize_section(
     return {"order": order, "visible": visible}
 
 
+def _normalize_w1a_upcoming_orders_section(data: Any, *, base_section: Any = None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(base_section, dict):
+        base_section = {}
+    default_enabled = bool(base_section.get("enabled", W1A_UPCOMING_ORDERS_DEFAULT_ENABLED))
+    return {
+        "enabled": bool(data.get("enabled", default_enabled)),
+    }
+
+
+def _normalize_w1b_lower_sector_section(data: Any, *, base_section: Any = None) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        data = {}
+    if not isinstance(base_section, dict):
+        base_section = {}
+    default_enabled = bool(base_section.get("enabled", W1B_LOWER_SECTOR_DEFAULT_ENABLED))
+    return {
+        "enabled": bool(data.get("enabled", default_enabled)),
+    }
+
+
 def normalize_role_display_settings(role: str | None, data: Any, base_settings: Any = None) -> dict[str, Any]:
     role_key = normalize_display_role(role)
     if not isinstance(data, dict):
@@ -194,6 +224,14 @@ def normalize_role_display_settings(role: str | None, data: Any, base_settings: 
             data.get("remcard_tabs"),
             REMCARD_TABS[role_key],
             base_section=base_settings.get("remcard_tabs"),
+        ),
+        "w1a_upcoming_orders": _normalize_w1a_upcoming_orders_section(
+            data.get("w1a_upcoming_orders"),
+            base_section=base_settings.get("w1a_upcoming_orders"),
+        ),
+        "w1b_lower_sector": _normalize_w1b_lower_sector_section(
+            data.get("w1b_lower_sector"),
+            base_section=base_settings.get("w1b_lower_sector"),
         ),
     }
 
@@ -219,6 +257,22 @@ def ordered_visible_ids(section: dict[str, Any]) -> list[str]:
     if not isinstance(order, list) or not isinstance(visible, dict):
         return []
     return [str(item_id) for item_id in order if bool(visible.get(str(item_id), False))]
+
+
+def w1a_upcoming_orders_enabled(payload: dict[str, Any], role: str | None) -> bool:
+    settings = role_display_settings_from_payload(payload, role)
+    section = settings.get("w1a_upcoming_orders")
+    if not isinstance(section, dict):
+        return W1A_UPCOMING_ORDERS_DEFAULT_ENABLED
+    return bool(section.get("enabled", W1A_UPCOMING_ORDERS_DEFAULT_ENABLED))
+
+
+def w1b_lower_sector_enabled(payload: dict[str, Any], role: str | None) -> bool:
+    settings = role_display_settings_from_payload(payload, role)
+    section = settings.get("w1b_lower_sector")
+    if not isinstance(section, dict):
+        return W1B_LOWER_SECTOR_DEFAULT_ENABLED
+    return bool(section.get("enabled", W1B_LOWER_SECTOR_DEFAULT_ENABLED))
 
 
 class DisplaySettingsStorage:

@@ -145,8 +145,8 @@ class SectorFactory:
             sectors['sector_anal'] = None
             sectors['sector_print'] = None
 
-        sectors['sector_w1b'] = SectorW1b() if use_doctor_w1b else None
-        sectors['sector_w1b_nurse'] = SectorW1bNurse() if use_nurse_w1b else None
+        sectors['sector_w1b'] = SectorW1b(role="doctor") if use_doctor_w1b else None
+        sectors['sector_w1b_nurse'] = SectorW1bNurse(role="nurse") if use_nurse_w1b else None
         
         return sectors
 

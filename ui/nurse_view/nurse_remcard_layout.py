@@ -258,7 +258,7 @@ class NurseRemCardLayoutManager(QWidget):
         # Контейнер для 1а / W1а
         self.sector_1a_stack = CurrentPageStack()
         self.sector_1a_stack.addWidget(self.sector_1a)
-        self.sector_w1a = SectorW1a(self.remcard_service)
+        self.sector_w1a = SectorW1a(self.remcard_service, role="nurse")
         self.sector_1a_stack.addWidget(self.sector_w1a)
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)

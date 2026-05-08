@@ -5985,6 +5985,141 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_w1a_display_settings_sleep_behavior(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage
+    from rem_card.ui.rem_card_sectors.sector_w1a import SectorW1a
+    from rem_card.ui.rem_card_sectors.sector_w1b import SectorW1b
+
+    app = QApplication.instance() or QApplication([])
+    display_settings_path = Path(temp_root) / "display_settings_w1a_regression.json"
+    saved_display_settings_path = os.environ.get("REMCARD_DISPLAY_SETTINGS_PATH")
+    os.environ["REMCARD_DISPLAY_SETTINGS_PATH"] = str(display_settings_path)
+
+    class _CountingW1aService:
+        def __init__(self):
+            self.calls = 0
+
+        def build_w1a_upcoming_orders_snapshot(self, *_args):
+            self.calls += 1
+            return {"content_hash": "disabled", "change_id": 1, "rows": []}
+
+    disabled_widget = None
+    disabled_w1b_widget = None
+    try:
+        storage = DisplaySettingsStorage()
+        payload = storage.load()
+        payload["active"]["doctor"]["w1a_upcoming_orders"]["enabled"] = False
+        payload["active"]["nurse"]["w1a_upcoming_orders"]["enabled"] = True
+        payload["active"]["doctor"]["w1b_lower_sector"]["enabled"] = False
+        payload["active"]["nurse"]["w1b_lower_sector"]["enabled"] = True
+        storage.save(payload)
+
+        disabled_service = _CountingW1aService()
+        disabled_widget = SectorW1a(service=disabled_service, role="doctor")
+        disabled_widget.show()
+        for _ in range(4):
+            app.processEvents()
+        disabled_widget.refresh_data(force=True)
+        disabled_widget.handle_data_changes({"forced": True})
+        for _ in range(4):
+            app.processEvents()
+
+        if disabled_service.calls != 0:
+            return False, f"disabled doctor W1a must not call snapshot loader, got {disabled_service.calls}"
+        if disabled_widget._refresh_worker is not None:
+            return False, "disabled doctor W1a must not create refresh worker"
+        if disabled_widget.main_container.isVisible():
+            return False, "disabled doctor W1a must not render sector content"
+        if disabled_widget._time_timer.isActive() or disabled_widget._refresh_timer.isActive():
+            return False, "disabled doctor W1a must keep timers asleep"
+
+        disabled_w1b_widget = SectorW1b(role="doctor")
+        disabled_w1b_widget.show()
+        app.processEvents()
+        if disabled_w1b_widget.main_container.isVisible():
+            return False, "disabled doctor W1b must not render lower sector content"
+        if disabled_w1b_widget.maximumHeight() != 0:
+            return False, "disabled doctor W1b must collapse to zero maximum height"
+        if disabled_w1b_widget.sizeHint().height() != 0 or disabled_w1b_widget.minimumSizeHint().height() != 0:
+            return False, "disabled doctor W1b must report zero layout hints"
+    finally:
+        if disabled_widget is not None:
+            disabled_widget.close()
+            disabled_widget.deleteLater()
+            app.processEvents()
+        if disabled_w1b_widget is not None:
+            disabled_w1b_widget.close()
+            disabled_w1b_widget.deleteLater()
+            app.processEvents()
+        if saved_display_settings_path is None:
+            os.environ.pop("REMCARD_DISPLAY_SETTINGS_PATH", None)
+        else:
+            os.environ["REMCARD_DISPLAY_SETTINGS_PATH"] = saved_display_settings_path
+
+    return True, "ok"
+
+
+def _w1a_card_gaps(group: dict) -> list[int]:
+    body_layout = group["layout"]
+    card_gaps = []
+    previous_geometry = None
+    for index in range(body_layout.count()):
+        item = body_layout.itemAt(index)
+        card = item.widget() if item is not None else None
+        if card is None:
+            continue
+        geometry = card.geometry()
+        if previous_geometry is not None:
+            card_gaps.append(geometry.y() - (previous_geometry.y() + previous_geometry.height()))
+        previous_geometry = geometry
+    return card_gaps
+
+
+def _check_w1a_long_order_card(long_card) -> tuple[bool, str]:
+    if long_card is None:
+        return False, "W1a long multi-component card is missing"
+    for label_name in ("lbl_line1", "lbl_line2", "lbl_method_dur"):
+        label = getattr(long_card, label_name)
+        if label.isVisible() and label.height() < label.heightForWidth(label.width()):
+            return False, f"W1a long order clips {label_name}: {label.height()} < {label.heightForWidth(label.width())}"
+    if long_card.lbl_line1.font().pixelSize() != 12 or long_card.lbl_method_dur.font().pixelSize() != 11:
+        return False, "W1a long order must keep NurseOrderCard font sizes unchanged"
+    return True, "ok"
+
+
+def _check_w1a_rendered_layout(widget) -> tuple[bool, str]:
+    ordered_groups = sorted(widget.groups.values(), key=lambda group: group["frame"].geometry().y())
+    if len(ordered_groups) != 2:
+        return False, f"W1a layout gap check expected 2 groups, got {len(ordered_groups)}"
+
+    first_group = ordered_groups[0]
+    card_gaps = _w1a_card_gaps(first_group)
+    if card_gaps != [4, 4]:
+        return False, f"W1a Ceftriaxoni card gaps must stay at body spacing 4px, got {card_gaps}"
+
+    ok, details = _check_w1a_long_order_card(widget.cards.get(1))
+    if not ok:
+        return False, details
+
+    group_gap = ordered_groups[1]["frame"].geometry().y() - (
+        ordered_groups[0]["frame"].geometry().y() + ordered_groups[0]["frame"].geometry().height()
+    )
+    if group_gap != 3:
+        return False, f"W1a patient group gap must stay at content spacing 3px, got {group_gap}"
+
+    frame = first_group["frame"]
+    header = first_group["header"]
+    body = first_group["body"]
+    expected_frame_height = header.height() + body.height() + frame.frameWidth() * 2
+    if frame.height() != expected_frame_height:
+        return False, f"W1a patient group frame has surplus height: {frame.height()} != {expected_frame_height}"
+    return True, "ok"
+
+
 def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
@@ -6005,12 +6140,22 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
             return False, f"{role}: W1 stacks must use CurrentPageStack"
         if "self.sector_1b_stack = CurrentPageStack()" not in source:
             return False, f"{role}: sector_1b_stack still uses max-size QStackedWidget behavior"
-        if "SectorW1a(self.remcard_service)" not in source:
-            return False, f"{role}: W1a must receive remcard_service for targeted refresh"
+        expected_w1a_ctor = (
+            'SectorW1a(self.remcard_service, role="doctor")'
+            if role == "doctor"
+            else 'SectorW1a(self.remcard_service, role="nurse")'
+        )
+        if expected_w1a_ctor not in source:
+            return False, f"{role}: W1a must receive remcard_service and role for targeted refresh"
         if "self.l_layout.setContentsMargins(3, 5, 5, 4)" in source:
             return False, f"{role}: W1 mode must not add column margins on top of W1a/1a sector margins"
 
     w1a_source = (root / "ui" / "rem_card_sectors" / "sector_w1a.py").read_text(encoding="utf-8")
+    display_storage_source = (root / "ui" / "shared" / "display_settings_storage.py").read_text(encoding="utf-8")
+    display_dialog_source = (root / "ui" / "admin_view" / "display_settings_dialog.py").read_text(encoding="utf-8")
+    admin_main_source = (root / "ui" / "admin_view" / "admin_main_widget.py").read_text(encoding="utf-8")
+    doctor_w1b_source = (root / "ui" / "rem_card_sectors" / "sector_w1b.py").read_text(encoding="utf-8")
+    nurse_w1b_source = (root / "ui" / "rem_card_sectors" / "sector_w1b_nurse.py").read_text(encoding="utf-8")
     forbidden_w1a_markers = [
         "Статистика по препаратам",
         "open_statistics_requested",
@@ -6025,6 +6170,10 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
     for marker in (
         "build_w1a_upcoming_orders_snapshot",
         "handle_data_changes",
+        "apply_display_settings",
+        "w1a_upcoming_orders_enabled",
+        "not self._display_enabled",
+        "_sleep_display_disabled",
         "_build_patient_groups",
         "w1a_patient_group_header",
         "card_data.pop(\"patient_name\", None)",
@@ -6047,6 +6196,46 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
     ):
         if marker not in w1a_source:
             return False, f"W1a missing targeted behavior marker: {marker}"
+    for marker in (
+        '"w1a_upcoming_orders"',
+        "W1A_UPCOMING_ORDERS_DEFAULT_ENABLED = True",
+        "def w1a_upcoming_orders_enabled",
+        '"w1b_lower_sector"',
+        "W1B_LOWER_SECTOR_DEFAULT_ENABLED = True",
+        "def w1b_lower_sector_enabled",
+    ):
+        if marker not in display_storage_source:
+            return False, f"display settings storage missing W1a marker: {marker}"
+    for marker in (
+        'super().__init__("Отображение", parent)',
+        '"W1a - ближайшие назначения"',
+        '"Показывать ближайшие назначения"',
+        '"W1b - нижний сектор"',
+        '"Показывать нижний сектор W1b"',
+        '"W1a+W1b"',
+        "DisplaySettingsOptionCard",
+        '"zebra"',
+    ):
+        if marker not in display_dialog_source:
+            return False, f"display settings dialog missing W1a/visual marker: {marker}"
+    for marker in (
+        'SectorW1b(role="doctor")',
+        'SectorW1bNurse(role="nurse")',
+    ):
+        if marker not in layout_components:
+            return False, f"W1b factory must create role-aware sector: {marker}"
+    for role, source in (("doctor", doctor_w1b_source), ("nurse", nurse_w1b_source)):
+        for marker in (
+            "w1b_lower_sector_enabled",
+            "apply_display_settings",
+            "def sizeHint(self)",
+            "QSize(0, 0)",
+            "self.setMaximumHeight(0)",
+        ):
+            if marker not in source:
+                return False, f"{role} W1b missing display toggle marker: {marker}"
+    if 'QPushButton("Отображение")' not in admin_main_source:
+        return False, "admin program settings button must be renamed to Отображение"
 
     service_source = (root / "services" / "order_domain_service.py").read_text(encoding="utf-8")
     if "def get_upcoming_orders_across_active_admissions" not in service_source:
@@ -6107,7 +6296,11 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
             "comment": "",
         }
 
-    widget = SectorW1a(service=None)
+    ok, details = _check_w1a_display_settings_sleep_behavior(temp_root)
+    if not ok:
+        return False, details
+
+    widget = SectorW1a(service=None, role="nurse")
     try:
         widget.resize(250, 700)
         widget.show()
@@ -6138,48 +6331,9 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         for _ in range(3):
             app.processEvents()
 
-        ordered_groups = sorted(widget.groups.values(), key=lambda group: group["frame"].geometry().y())
-        if len(ordered_groups) != 2:
-            return False, f"W1a layout gap check expected 2 groups, got {len(ordered_groups)}"
-
-        first_group = ordered_groups[0]
-        body_layout = first_group["layout"]
-        card_gaps = []
-        previous_geometry = None
-        for index in range(body_layout.count()):
-            item = body_layout.itemAt(index)
-            card = item.widget() if item is not None else None
-            if card is None:
-                continue
-            geometry = card.geometry()
-            if previous_geometry is not None:
-                card_gaps.append(geometry.y() - (previous_geometry.y() + previous_geometry.height()))
-            previous_geometry = geometry
-        if card_gaps != [4, 4]:
-            return False, f"W1a Ceftriaxoni card gaps must stay at body spacing 4px, got {card_gaps}"
-
-        long_card = widget.cards.get(1)
-        if long_card is None:
-            return False, "W1a long multi-component card is missing"
-        for label_name in ("lbl_line1", "lbl_line2", "lbl_method_dur"):
-            label = getattr(long_card, label_name)
-            if label.isVisible() and label.height() < label.heightForWidth(label.width()):
-                return False, f"W1a long order clips {label_name}: {label.height()} < {label.heightForWidth(label.width())}"
-        if long_card.lbl_line1.font().pixelSize() != 12 or long_card.lbl_method_dur.font().pixelSize() != 11:
-            return False, "W1a long order must keep NurseOrderCard font sizes unchanged"
-
-        group_gap = ordered_groups[1]["frame"].geometry().y() - (
-            ordered_groups[0]["frame"].geometry().y() + ordered_groups[0]["frame"].geometry().height()
-        )
-        if group_gap != 3:
-            return False, f"W1a patient group gap must stay at content spacing 3px, got {group_gap}"
-
-        frame = first_group["frame"]
-        header = first_group["header"]
-        body = first_group["body"]
-        expected_frame_height = header.height() + body.height() + frame.frameWidth() * 2
-        if frame.height() != expected_frame_height:
-            return False, f"W1a patient group frame has surplus height: {frame.height()} != {expected_frame_height}"
+        ok, details = _check_w1a_rendered_layout(widget)
+        if not ok:
+            return False, details
     finally:
         widget.close()
         widget.deleteLater()

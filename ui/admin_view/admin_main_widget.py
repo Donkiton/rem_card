@@ -54,7 +54,7 @@ class AdminMainWidget(QWidget):
         self.btn_diet_templates = QPushButton("Шаблоны питания")
         self.btn_print = QPushButton("Печать / Отчеты")
         self.btn_style = QPushButton("Цветовая схема")
-        self.btn_display_settings = QPushButton("Отображение кнопок")
+        self.btn_display_settings = QPushButton("Отображение")
 
         def prepare_button(btn: QPushButton):
             btn.setObjectName("DialogOkBtn")

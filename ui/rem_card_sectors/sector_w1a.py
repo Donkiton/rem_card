@@ -10,6 +10,11 @@ from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.components.nurse_order_card import NurseOrderCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.display_settings_storage import (
+    DisplaySettingsStorage,
+    normalize_display_role,
+    w1a_upcoming_orders_enabled,
+)
 
 
 W1A_BEFORE_MIN = 60
@@ -39,9 +44,11 @@ W1A_REFRESH_SOURCE_PREFIXES = (
 class SectorW1a(BaseSectorWidget):
     """Сектор W1a со списком ближайших назначений по активным пациентам."""
 
-    def __init__(self, service=None, parent=None):
+    def __init__(self, service=None, parent=None, role: str | None = "doctor"):
         super().__init__("W1a", parent)
         self.service = service
+        self.role = normalize_display_role(role)
+        self._display_enabled = self._read_display_enabled()
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setStyleSheet("background: transparent;")
@@ -68,7 +75,8 @@ class SectorW1a(BaseSectorWidget):
         self._refresh_timer.timeout.connect(lambda: self.refresh_data(force=True))
 
         self.init_ui()
-        QTimer.singleShot(0, self.refresh_data)
+        if self._display_enabled:
+            QTimer.singleShot(0, self.refresh_data)
 
     def init_ui(self):
         if self.layout():
@@ -164,15 +172,65 @@ class SectorW1a(BaseSectorWidget):
         )
 
         self.set_content(self.main_container)
+        self.main_container.setVisible(self._display_enabled)
+        self.empty_label.setVisible(False if not self._display_enabled else self.empty_label.isVisible())
 
     def set_service(self, service):
         if self.service is service:
             return
         self.service = service
-        self.refresh_data(force=True)
+        if self._display_enabled:
+            self.refresh_data(force=True)
+
+    def apply_display_settings(self):
+        next_enabled = self._read_display_enabled()
+        if next_enabled == self._display_enabled:
+            return
+        self._display_enabled = next_enabled
+        self.main_container.setVisible(self._display_enabled)
+        if self._display_enabled:
+            self.refresh_data(force=True)
+        else:
+            self._sleep_display_disabled()
+
+    def _read_display_enabled(self) -> bool:
+        try:
+            payload = DisplaySettingsStorage().load()
+            return w1a_upcoming_orders_enabled(payload, self.role)
+        except Exception:
+            return True
+
+    def _sleep_display_disabled(self):
+        self._time_timer.stop()
+        self._refresh_timer.stop()
+        self._refresh_pending = False
+        self._force_render_after_refresh = False
+        worker = self._refresh_worker
+        self._refresh_worker = None
+        if worker is not None:
+            self._disconnect_worker(worker)
+        self._pending_marks.clear()
+        self._all_data = []
+        self._last_content_hash = None
+        self._clear_cards_and_groups()
+        self.empty_label.setVisible(False)
+        self.cards_container.adjustSize()
+        self.cards_container.updateGeometry()
+
+    def _clear_cards_and_groups(self):
+        for card in list(self.cards.values()):
+            card.setParent(None)
+            card.deleteLater()
+        self.cards.clear()
+        for group in list(self.groups.values()):
+            frame = group.get("frame")
+            if frame is not None:
+                frame.setParent(None)
+                frame.deleteLater()
+        self.groups.clear()
 
     def refresh_data(self, force: bool = False):
-        if self._is_shutting_down or not self.service:
+        if self._is_shutting_down or not self._display_enabled or not self.service:
             return
         if force:
             self._force_render_after_refresh = True
@@ -191,7 +249,7 @@ class SectorW1a(BaseSectorWidget):
         self._refresh_worker.start()
 
     def handle_data_changes(self, payload: dict):
-        if self._is_shutting_down:
+        if self._is_shutting_down or not self._display_enabled:
             return
         if not self._payload_should_refresh(payload or {}):
             return
@@ -222,7 +280,7 @@ class SectorW1a(BaseSectorWidget):
         )
 
     def _apply_snapshot(self, snapshot):
-        if self._is_shutting_down:
+        if self._is_shutting_down or not self._display_enabled:
             return
         snapshot = dict(snapshot or {})
         content_hash = str(snapshot.get("content_hash") or "")
@@ -250,12 +308,12 @@ class SectorW1a(BaseSectorWidget):
         if worker is not None:
             self._disconnect_worker(worker)
         self._refresh_worker = None
-        if self._refresh_pending and not self._is_shutting_down:
+        if self._refresh_pending and not self._is_shutting_down and self._display_enabled:
             self._refresh_pending = False
             QTimer.singleShot(0, lambda: self.refresh_data(force=True))
 
     def _render_from_cache(self):
-        if self._is_shutting_down:
+        if self._is_shutting_down or not self._display_enabled:
             return
         now = datetime.now()
         visible_data = [
@@ -493,7 +551,7 @@ class SectorW1a(BaseSectorWidget):
 
     def _schedule_next_time_tick(self, now: datetime | None = None):
         self._time_timer.stop()
-        if not self._all_data:
+        if not self._display_enabled or not self._all_data:
             return
         now = now or datetime.now()
         next_minute = (now.replace(second=0, microsecond=0) + timedelta(minutes=1))
@@ -553,6 +611,8 @@ class SectorW1a(BaseSectorWidget):
         on_success(result)
 
     def handle_status_change(self, admin_id, mark):
+        if not self._display_enabled:
+            return
         if mark not in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
             return
 

@@ -80,11 +80,51 @@ class OrderedVisibilityList(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.rows_widget = QWidget(self.scroll)
+        self.scroll.setObjectName("DisplaySettingsListScroll")
+        self.rows_widget.setObjectName("DisplaySettingsRowsWidget")
         self.rows_layout = QVBoxLayout(self.rows_widget)
-        self.rows_layout.setContentsMargins(0, 0, 0, 0)
-        self.rows_layout.setSpacing(8)
+        self.rows_layout.setContentsMargins(8, 8, 8, 8)
+        self.rows_layout.setSpacing(0)
         self.scroll.setWidget(self.rows_widget)
         root_layout.addWidget(self.scroll)
+        self.setStyleSheet(
+            """
+            QScrollArea#DisplaySettingsListScroll {
+                background-color: #ffffff;
+                border: 1px solid #c7d1da;
+                border-radius: 6px;
+            }
+            QWidget#DisplaySettingsRowsWidget {
+                background-color: #ffffff;
+            }
+            QFrame#DisplaySettingsRow {
+                border-left: 1px solid #d7dfe7;
+                border-right: 1px solid #d7dfe7;
+                border-bottom: 1px solid #d7dfe7;
+                background-color: #ffffff;
+            }
+            QFrame#DisplaySettingsRow[firstRow="true"] {
+                border-top: 1px solid #d7dfe7;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+            }
+            QFrame#DisplaySettingsRow[lastRow="true"] {
+                border-bottom-left-radius: 5px;
+                border-bottom-right-radius: 5px;
+            }
+            QFrame#DisplaySettingsRow[zebra="odd"] {
+                background-color: #f5f8fb;
+            }
+            QFrame#DisplaySettingsRow:hover {
+                background-color: #eef6fc;
+                border-color: #9fb8d0;
+            }
+            QLabel#DisplaySettingsDragHandle {
+                color: #6c7a89;
+                font-weight: bold;
+            }
+            """
+        )
 
     def _clear_rows(self):
         self._row_widgets = {}
@@ -97,12 +137,16 @@ class OrderedVisibilityList(QWidget):
     def _rebuild_rows(self):
         self._clear_rows()
         self._visual_order = list(self.order)
-        for item_id in self.order:
+        total_rows = len(self.order)
+        for row_index, item_id in enumerate(self.order):
             option = self.options[item_id]
 
             row = QFrame(self.rows_widget)
             row.setObjectName("DisplaySettingsRow")
             row.setProperty("display_item_id", item_id)
+            row.setProperty("zebra", "odd" if row_index % 2 else "even")
+            row.setProperty("firstRow", "true" if row_index == 0 else "false")
+            row.setProperty("lastRow", "true" if row_index == total_rows - 1 else "false")
             row.setCursor(Qt.OpenHandCursor)
             row.installEventFilter(self)
             row_layout = QHBoxLayout(row)
@@ -110,6 +154,7 @@ class OrderedVisibilityList(QWidget):
             row_layout.setSpacing(10)
 
             drag_label = QLabel("☰", row)
+            drag_label.setObjectName("DisplaySettingsDragHandle")
             drag_label.setProperty("display_item_id", item_id)
             drag_label.setCursor(Qt.OpenHandCursor)
             drag_label.installEventFilter(self)
@@ -277,7 +322,7 @@ class OrderedVisibilityList(QWidget):
 
 class DisplaySettingsDialog(BaseStyledDialog):
     def __init__(self, initial_role: str | None = "doctor", parent=None):
-        super().__init__("Отображение кнопок", parent)
+        super().__init__("Отображение", parent)
         self.storage = DisplaySettingsStorage()
         self.payload = self.storage.load()
         self.role_drafts = {
@@ -287,6 +332,8 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.current_role = "doctor"
         self.sector8_list: OrderedVisibilityList | None = None
         self.tabs_list: OrderedVisibilityList | None = None
+        self.w1a_switch: ToggleSwitch | None = None
+        self.w1b_switch: ToggleSwitch | None = None
 
         self.resize(720, 560)
         self._setup_ui()
@@ -359,6 +406,46 @@ class DisplaySettingsDialog(BaseStyledDialog):
         remcard_tabs_layout.addWidget(self.tabs_container, 1)
         self.tabs.addTab(self.remcard_tabs_page, "Вкладки РЕМ карты")
 
+        self.w1a_page = QWidget()
+        w1a_layout = QVBoxLayout(self.w1a_page)
+        w1a_layout.setContentsMargins(12, 12, 12, 12)
+        w1a_layout.setSpacing(12)
+        w1a_title = QLabel("W1a - ближайшие назначения")
+        w1a_title.setObjectName("DisplaySettingsSectionTitle")
+        w1a_layout.addWidget(w1a_title)
+
+        w1a_row = QFrame()
+        w1a_row.setObjectName("DisplaySettingsOptionCard")
+        w1a_row_layout = QHBoxLayout(w1a_row)
+        w1a_row_layout.setContentsMargins(12, 10, 12, 10)
+        w1a_row_layout.setSpacing(12)
+        w1a_label = QLabel("Показывать ближайшие назначения")
+        w1a_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.w1a_switch = ToggleSwitch()
+        self.w1a_switch.stateChanged.connect(lambda *_args: self._collect_current_role())
+        w1a_row_layout.addWidget(w1a_label)
+        w1a_row_layout.addWidget(self.w1a_switch)
+        w1a_layout.addWidget(w1a_row)
+
+        w1b_title = QLabel("W1b - нижний сектор")
+        w1b_title.setObjectName("DisplaySettingsSectionTitle")
+        w1a_layout.addWidget(w1b_title)
+
+        w1b_row = QFrame()
+        w1b_row.setObjectName("DisplaySettingsOptionCard")
+        w1b_row_layout = QHBoxLayout(w1b_row)
+        w1b_row_layout.setContentsMargins(12, 10, 12, 10)
+        w1b_row_layout.setSpacing(12)
+        w1b_label = QLabel("Показывать нижний сектор W1b")
+        w1b_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.w1b_switch = ToggleSwitch()
+        self.w1b_switch.stateChanged.connect(lambda *_args: self._collect_current_role())
+        w1b_row_layout.addWidget(w1b_label)
+        w1b_row_layout.addWidget(self.w1b_switch)
+        w1a_layout.addWidget(w1b_row)
+        w1a_layout.addStretch()
+        self.tabs.addTab(self.w1a_page, "W1a+W1b")
+
         footer = QHBoxLayout()
         footer.addStretch()
         cancel_btn = QPushButton("Отмена")
@@ -370,6 +457,21 @@ class DisplaySettingsDialog(BaseStyledDialog):
         footer.addWidget(cancel_btn)
         footer.addWidget(self.save_btn)
         main_layout.addLayout(footer)
+        self.setStyleSheet(
+            self.styleSheet()
+            + """
+            QLabel#DisplaySettingsSectionTitle {
+                font-weight: bold;
+                color: #2c3e50;
+                padding: 0 0 4px 0;
+            }
+            QFrame#DisplaySettingsOptionCard {
+                background-color: #ffffff;
+                border: 1px solid #c7d1da;
+                border-radius: 6px;
+            }
+            """
+        )
 
     def _clear_container(self, layout: QVBoxLayout):
         while layout.count():
@@ -379,13 +481,24 @@ class DisplaySettingsDialog(BaseStyledDialog):
                 widget.deleteLater()
 
     def _collect_current_role(self):
-        if self.sector8_list is None or self.tabs_list is None:
+        if (
+            self.sector8_list is None
+            or self.tabs_list is None
+            or self.w1a_switch is None
+            or self.w1b_switch is None
+        ):
             return
         self.role_drafts[self.current_role] = normalize_role_display_settings(
             self.current_role,
             {
                 "sector8_buttons": self.sector8_list.state(),
                 "remcard_tabs": self.tabs_list.state(),
+                "w1a_upcoming_orders": {
+                    "enabled": self.w1a_switch.isChecked(),
+                },
+                "w1b_lower_sector": {
+                    "enabled": self.w1b_switch.isChecked(),
+                },
             },
         )
 
@@ -407,6 +520,12 @@ class DisplaySettingsDialog(BaseStyledDialog):
             state=draft["remcard_tabs"],
         )
         self.tabs_container_layout.addWidget(self.tabs_list)
+        if self.w1a_switch is not None:
+            self.w1a_switch.setChecked(bool(draft.get("w1a_upcoming_orders", {}).get("enabled", True)))
+            self.w1a_switch.position = 1.0 if self.w1a_switch.isChecked() else 0.0
+        if self.w1b_switch is not None:
+            self.w1b_switch.setChecked(bool(draft.get("w1b_lower_sector", {}).get("enabled", True)))
+            self.w1b_switch.position = 1.0 if self.w1b_switch.isChecked() else 0.0
 
     def _set_sector8_all(self, visible: bool):
         if self.sector8_list is not None:

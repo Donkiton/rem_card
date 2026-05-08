@@ -261,7 +261,7 @@ class RemCardLayoutManager(QWidget):
         # Контейнер для 1а / W1а (как у медсестры)
         self.sector_1a_stack = CurrentPageStack()
         from ..rem_card_sectors.sector_w1a import SectorW1a
-        self.sector_w1a = SectorW1a(self.remcard_service)
+        self.sector_w1a = SectorW1a(self.remcard_service, role="doctor")
         
         self.sector_1a_stack.addWidget(self.sector_1a)  # index 0: 1а (карта)
         self.sector_1a_stack.addWidget(self.sector_w1a) # index 1: W1а (койки)
