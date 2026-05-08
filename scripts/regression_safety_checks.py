@@ -6072,6 +6072,13 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
             return False, f"NurseOrderCard must not change inner typography/sizing for W1a gap fix: {forbidden_marker}"
     if "card_policy.setHeightForWidth(True)" in w1a_source:
         return False, "W1a must not change NurseOrderCard height-for-width policy for external gap fix"
+    for required_marker in (
+        "contentHeightChanged = Signal()",
+        "required_height = max(ORDER_CARD_MIN_HEIGHT, self.heightForWidth(width))",
+        "self.setFixedHeight(required_height)",
+    ):
+        if required_marker not in nurse_card_source:
+            return False, f"NurseOrderCard must grow card height for wrapped multi-component orders: {required_marker}"
 
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from datetime import datetime, timedelta
@@ -6110,7 +6117,18 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
                 "content_hash": "layout-gap-check",
                 "change_id": 1,
                 "rows": [
-                    _w1a_row(1, 1, "Иванов Иван Иванович", "1", "S. NaCl 0.9%", 250, "ml", "[ROUTE:В/в капельно] [DUR:30]", 30, -10),
+                    _w1a_row(
+                        1,
+                        1,
+                        "Иванов Иван Иванович",
+                        "1",
+                        "KCl 4% - 20 ml + S. MgSO4 25% - 10 ml + S. Insulini - 4 IU",
+                        0,
+                        "",
+                        "S. Glucose 5% - 250 мл [ROUTE:В/в капельно] [DUR:120]",
+                        120,
+                        -10,
+                    ),
                     _w1a_row(2, 1, "Иванов Иван Иванович", "1", "S. Ceftriaxoni", 1, "г", "S. NaCl 0.9% - 200мл [ROUTE:В/в капельно] [DUR:30]", 30, 0),
                     _w1a_row(3, 1, "Иванов Иван Иванович", "1", "S. Furosemidi", 20, "mg", "S. NaCl 0.9% - 10 мл [ROUTE:В/в струйно]", 0, 20),
                     _w1a_row(4, 2, "Петров Петр Петрович", "2", "S. Azithromycini", 500, "mg", "[ROUTE:Per os (внутрь)]", 0, 0),
@@ -6139,6 +6157,16 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
             previous_geometry = geometry
         if card_gaps != [4, 4]:
             return False, f"W1a Ceftriaxoni card gaps must stay at body spacing 4px, got {card_gaps}"
+
+        long_card = widget.cards.get(1)
+        if long_card is None:
+            return False, "W1a long multi-component card is missing"
+        for label_name in ("lbl_line1", "lbl_line2", "lbl_method_dur"):
+            label = getattr(long_card, label_name)
+            if label.isVisible() and label.height() < label.heightForWidth(label.width()):
+                return False, f"W1a long order clips {label_name}: {label.height()} < {label.heightForWidth(label.width())}"
+        if long_card.lbl_line1.font().pixelSize() != 12 or long_card.lbl_method_dur.font().pixelSize() != 11:
+            return False, "W1a long order must keep NurseOrderCard font sizes unchanged"
 
         group_gap = ordered_groups[1]["frame"].geometry().y() - (
             ordered_groups[0]["frame"].geometry().y() + ordered_groups[0]["frame"].geometry().height()

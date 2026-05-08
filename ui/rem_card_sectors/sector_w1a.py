@@ -57,6 +57,7 @@ class SectorW1a(BaseSectorWidget):
         self._force_render_after_refresh = False
         self._is_shutting_down = False
         self._last_error_ts = 0.0
+        self._group_pin_pending = False
 
         self._time_timer = QTimer(self)
         self._time_timer.setSingleShot(True)
@@ -303,13 +304,14 @@ class SectorW1a(BaseSectorWidget):
                     card = NurseOrderCard(card_data)
                     card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
                     card.statusChanged.connect(self.handle_status_change)
+                    card.contentHeightChanged.connect(self._queue_group_frame_pin)
                     self.cards[admin_id] = card
 
                 current_index = group["layout"].indexOf(card)
                 if current_index != order_index:
                     group["layout"].insertWidget(order_index, card)
             self._pin_group_frame_height(group)
-        QTimer.singleShot(0, self._pin_group_frame_heights)
+        self._queue_group_frame_pin()
 
     def _build_patient_groups(self, data_list):
         grouped = {}
@@ -436,6 +438,7 @@ class SectorW1a(BaseSectorWidget):
         return group
 
     def _pin_group_frame_heights(self):
+        self._group_pin_pending = False
         if self._is_shutting_down:
             return
         for group in list(self.groups.values()):
@@ -444,6 +447,12 @@ class SectorW1a(BaseSectorWidget):
         self.content_layout.activate()
         self.cards_container.adjustSize()
         self.cards_container.updateGeometry()
+
+    def _queue_group_frame_pin(self):
+        if self._is_shutting_down or self._group_pin_pending:
+            return
+        self._group_pin_pending = True
+        QTimer.singleShot(0, self._pin_group_frame_heights)
 
     def _pin_group_frame_height(self, group):
         frame = (group or {}).get("frame")

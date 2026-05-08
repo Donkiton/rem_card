@@ -13,6 +13,9 @@ from rem_card.services.order_domain_service import (
     NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 )
 
+ORDER_CARD_MIN_HEIGHT = 48
+
+
 class StatusPopup(QFrame):
     """Окошко выбора выполнения (Выполнено / Не выполнено)."""
     actionSelected = Signal(str) # 'done' или 'not_done'
@@ -69,16 +72,20 @@ class StatusPopup(QFrame):
 class NurseOrderCard(QFrame):
     """Карточка назначения для сектора 1а."""
     statusChanged = Signal(int, str) # admin_id, new_status
+    contentHeightChanged = Signal()
 
     def __init__(self, admin_data, parent=None):
         super().__init__(parent)
         self.data = admin_data
         self.last_click_time = 0
         self._bg_color = QColor("#f8f9fa")
+        self._height_sync_timer = QTimer(self)
+        self._height_sync_timer.setSingleShot(True)
+        self._height_sync_timer.timeout.connect(self._sync_height_to_width)
         
         self.setObjectName("order_card")
         # Позволяем карточке иметь минимальную высоту, но расти при переносе текста
-        self.setMinimumHeight(48)
+        self.setMinimumHeight(ORDER_CARD_MIN_HEIGHT)
         self.init_ui()
         
         self.update_signal()
@@ -276,6 +283,30 @@ class NurseOrderCard(QFrame):
 
         self.update_signal()
         self.update_action_button()
+        self.updateGeometry()
+        self._queue_height_sync()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.oldSize().width() != event.size().width():
+            self._queue_height_sync()
+
+    def _queue_height_sync(self):
+        if not self._height_sync_timer.isActive():
+            self._height_sync_timer.start(0)
+
+    def _sync_height_to_width(self):
+        width = self.width()
+        if width <= 0:
+            return
+        required_height = max(ORDER_CARD_MIN_HEIGHT, self.heightForWidth(width))
+        if required_height <= 0:
+            return
+        if self.minimumHeight() == required_height and self.maximumHeight() == required_height:
+            return
+        self.setFixedHeight(required_height)
+        self.updateGeometry()
+        self.contentHeightChanged.emit()
 
     @staticmethod
     def _patient_name_from_data(data):
