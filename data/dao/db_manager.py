@@ -1,4 +1,5 @@
 import os
+import random
 import socket
 import sqlite3
 import threading
@@ -80,6 +81,18 @@ DEFERRED_WRITE_FALLBACK_ENABLED = os.environ.get("REMCARD_DEFERRED_WRITE_FALLBAC
 READ_LOCK_RETRIES = 2
 READ_LOCK_RETRY_DELAY_SEC = 0.08
 LOCKED_READ_LOG_INTERVAL_SEC = 15.0
+CONNECTION_PROFILE_LOCK_TIMEOUT_SEC = max(
+    0.1,
+    float(os.environ.get("REMCARD_CONNECTION_PROFILE_LOCK_TIMEOUT_SEC", "12")),
+)
+CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC = max(
+    0.01,
+    float(os.environ.get("REMCARD_CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC", "0.05")),
+)
+CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC = max(
+    CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC,
+    float(os.environ.get("REMCARD_CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC", "0.15")),
+)
 STARTUP_QUICKCHECK_TTL_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_TTL_SEC", "120")),
@@ -226,11 +239,7 @@ class DatabaseManager:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         profile_lock = FileWriteLock(DB_LOCK_PATH, stale_timeout_sec=10 * 60, logger=logger)
         owner_id = f"{socket.gethostname()}:{os.getpid()}:remcard_init"
-        lock_started = time.perf_counter()
-        if not profile_lock.acquire(owner_id=owner_id, source="connection_profile"):
-            self._record_startup_metric("connection_lock_wait_ms", (time.perf_counter() - lock_started) * 1000.0)
-            raise sqlite3.OperationalError("Could not acquire db lock for connection profile")
-        self._record_startup_metric("connection_lock_wait_ms", (time.perf_counter() - lock_started) * 1000.0)
+        self._acquire_connection_profile_lock(profile_lock, owner_id)
         try:
             connect_started = time.perf_counter()
             conn = sqlite3.connect(
@@ -250,6 +259,67 @@ class DatabaseManager:
         self._remcard_conn = conn
         self._journal_conn = conn
         self._closed = False
+
+    def _acquire_connection_profile_lock(self, profile_lock: FileWriteLock, owner_id: str):
+        lock_started = time.perf_counter()
+        deadline = lock_started + CONNECTION_PROFILE_LOCK_TIMEOUT_SEC
+        attempts = 0
+        while True:
+            attempts += 1
+            if profile_lock.acquire(owner_id=owner_id, source="connection_profile"):
+                self._record_startup_metric(
+                    "connection_lock_wait_ms",
+                    (time.perf_counter() - lock_started) * 1000.0,
+                )
+                if attempts > 1:
+                    logger.info(
+                        "Acquired connection_profile lock after waiting %.3fs attempts=%s",
+                        time.perf_counter() - lock_started,
+                        attempts,
+                    )
+                return
+
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                self._record_startup_metric(
+                    "connection_lock_wait_ms",
+                    (time.perf_counter() - lock_started) * 1000.0,
+                )
+                holder = self._describe_file_lock_holder(profile_lock)
+                raise sqlite3.OperationalError(
+                    "Could not acquire db lock for connection profile "
+                    f"after {CONNECTION_PROFILE_LOCK_TIMEOUT_SEC:.1f}s; {holder}"
+                )
+
+            delay = min(
+                remaining,
+                random.uniform(CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC, CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC),
+            )
+            time.sleep(delay)
+
+    @staticmethod
+    def _describe_file_lock_holder(lock: FileWriteLock) -> str:
+        try:
+            payload = lock._try_read_payload()
+        except Exception as exc:
+            return f"lock holder unavailable: {exc}"
+        if not payload:
+            return "lock holder unavailable"
+        if not isinstance(payload, dict):
+            return "lock holder unreadable"
+        age_sec = None
+        try:
+            age_sec = max(0.0, time.time() - float(payload.get("timestamp")))
+        except Exception:
+            pass
+        parts = [
+            f"host={payload.get('host', 'unknown')}",
+            f"pid={payload.get('pid', 'unknown')}",
+            f"source={payload.get('source', 'unknown')}",
+        ]
+        if age_sec is not None:
+            parts.append(f"age_sec={age_sec:.1f}")
+        return "lock holder: " + ", ".join(parts)
 
     def _reconnect(self):
         with self._central_io_lock:
