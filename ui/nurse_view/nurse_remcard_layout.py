@@ -1,9 +1,15 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
+from rem_card.ui.shared.display_settings_storage import (
+    DisplaySettingsStorage,
+    w1a_upcoming_orders_enabled,
+    w1b_lower_sector_enabled,
+)
 from ..shared.layout_components import CurrentPageStack, SectorFactory, SplitterManager
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
+from ..rem_card_sectors.sector_w1c import SectorW1c
 
 class NurseRemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
@@ -260,6 +266,8 @@ class NurseRemCardLayoutManager(QWidget):
         self.sector_1a_stack.addWidget(self.sector_1a)
         self.sector_w1a = SectorW1a(self.remcard_service, role="nurse")
         self.sector_1a_stack.addWidget(self.sector_w1a)
+        self.sector_w1c = SectorW1c()
+        self.sector_1a_stack.addWidget(self.sector_w1c)
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         
@@ -284,9 +292,9 @@ class NurseRemCardLayoutManager(QWidget):
 
         # Устанавливаем начальный режим (выбор коек) сразу, чтобы не было "вспышки" секторов карты
         self.selection_stack.setCurrentIndex(1)
-        self.sector_1a_stack.setCurrentIndex(1)
         self.sector_1b_stack.setCurrentIndex(1)
         self.current_mode = "beds"
+        self._apply_w1_beds_sector_visibility(refresh_w1a=False)
         QTimer.singleShot(0, lambda: self.selection_mode_changed.emit("beds"))
         QTimer.singleShot(0, self._refresh_beds_async)
 
@@ -503,6 +511,43 @@ class NurseRemCardLayoutManager(QWidget):
             self.archive_widget.load_data()
             self._archive_last_change_id = max(self._archive_last_change_id, 0)
 
+    def _w1_display_flags(self) -> tuple[bool, bool]:
+        try:
+            payload = DisplaySettingsStorage().load()
+            return (
+                w1a_upcoming_orders_enabled(payload, "nurse"),
+                w1b_lower_sector_enabled(payload, "nurse"),
+            )
+        except Exception:
+            return True, True
+
+    def _apply_w1_beds_sector_visibility(self, *, refresh_w1a: bool = True):
+        if not hasattr(self, "sector_1a_stack") or not hasattr(self, "sector_1b_stack"):
+            return
+
+        w1a_enabled, w1b_enabled = self._w1_display_flags()
+        use_w1c = not w1a_enabled and not w1b_enabled
+
+        if hasattr(self, "sector_w1a"):
+            self.sector_w1a.apply_display_settings()
+        if hasattr(self, "sector_w1b_nurse"):
+            self.sector_w1b_nurse.apply_display_settings()
+
+        if use_w1c and hasattr(self, "sector_w1c"):
+            self.sector_1a_stack.setCurrentWidget(self.sector_w1c)
+        else:
+            self.sector_1a_stack.setCurrentWidget(self.sector_w1a)
+            if refresh_w1a and w1a_enabled:
+                self.sector_w1a.refresh_data()
+
+        self.sector_1b_stack.setCurrentIndex(1)
+        self.left_column.updateGeometry()
+        self.left_column.update()
+
+    def apply_display_settings(self):
+        if getattr(self, "current_mode", None) in ("beds", "patient_bed_management"):
+            self._apply_w1_beds_sector_visibility(refresh_w1a=False)
+
     def set_patient_selection_mode(self, mode):
         if mode == "beds":
             self.selection_stack.setCurrentIndex(1)
@@ -512,11 +557,7 @@ class NurseRemCardLayoutManager(QWidget):
             if hasattr(self, 'l_layout'):
                 self.l_layout.setContentsMargins(0, 0, 0, 0)
 
-            self.sector_1a_stack.setCurrentIndex(1) # Показываем W1a
-            if hasattr(self, 'sector_1b_stack'):
-                self.sector_1b_stack.setCurrentIndex(1) # Показываем W1b-nurse
-            if hasattr(self, 'sector_w1a'):
-                self.sector_w1a.refresh_data()
+            self._apply_w1_beds_sector_visibility()
             QTimer.singleShot(0, self._refresh_beds_async)
             self.sector_1b.setEnabled(False)
             self.current_mode = "beds"
@@ -549,11 +590,7 @@ class NurseRemCardLayoutManager(QWidget):
 
             if hasattr(self, 'l_layout'):
                 self.l_layout.setContentsMargins(0, 0, 0, 0)
-            self.sector_1a_stack.setCurrentIndex(1)
-            if hasattr(self, 'sector_1b_stack'):
-                self.sector_1b_stack.setCurrentIndex(1)
-            if hasattr(self, 'sector_w1a'):
-                self.sector_w1a.refresh_data()
+            self._apply_w1_beds_sector_visibility()
             self.sector_1b.setEnabled(False)
 
             if hasattr(self.journal_widget, "refresh_bed_statuses"):

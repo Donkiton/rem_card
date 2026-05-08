@@ -1,6 +1,11 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
+from rem_card.ui.shared.display_settings_storage import (
+    DisplaySettingsStorage,
+    w1a_upcoming_orders_enabled,
+    w1b_lower_sector_enabled,
+)
 from .layout_components import CurrentPageStack, SectorFactory, SplitterManager
 
 class RemCardLayoutManager(QWidget):
@@ -261,10 +266,13 @@ class RemCardLayoutManager(QWidget):
         # Контейнер для 1а / W1а (как у медсестры)
         self.sector_1a_stack = CurrentPageStack()
         from ..rem_card_sectors.sector_w1a import SectorW1a
+        from ..rem_card_sectors.sector_w1c import SectorW1c
         self.sector_w1a = SectorW1a(self.remcard_service, role="doctor")
+        self.sector_w1c = SectorW1c()
         
         self.sector_1a_stack.addWidget(self.sector_1a)  # index 0: 1а (карта)
         self.sector_1a_stack.addWidget(self.sector_w1a) # index 1: W1а (койки)
+        self.sector_1a_stack.addWidget(self.sector_w1c) # index 2: W1c (пустая рамка)
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         
@@ -286,9 +294,9 @@ class RemCardLayoutManager(QWidget):
 
         # Устанавливаем начальный режим (выбор коек) сразу, чтобы не было "вспышки" секторов карты
         self.selection_stack.setCurrentIndex(1)
-        self.sector_1a_stack.setCurrentIndex(1)
         self.sector_1b_stack.setCurrentIndex(1)
         self.current_mode = "beds"
+        self._apply_w1_beds_sector_visibility(refresh_w1a=False)
         QTimer.singleShot(0, lambda: self.selection_mode_changed.emit("beds"))
         QTimer.singleShot(0, self._refresh_beds_async)
 
@@ -530,6 +538,43 @@ class RemCardLayoutManager(QWidget):
             self.archive_widget.load_data()
             self._archive_last_change_id = max(self._archive_last_change_id, 0)
 
+    def _w1_display_flags(self) -> tuple[bool, bool]:
+        try:
+            payload = DisplaySettingsStorage().load()
+            return (
+                w1a_upcoming_orders_enabled(payload, "doctor"),
+                w1b_lower_sector_enabled(payload, "doctor"),
+            )
+        except Exception:
+            return True, True
+
+    def _apply_w1_beds_sector_visibility(self, *, refresh_w1a: bool = True):
+        if not hasattr(self, "sector_1a_stack") or not hasattr(self, "sector_1b_stack"):
+            return
+
+        w1a_enabled, w1b_enabled = self._w1_display_flags()
+        use_w1c = not w1a_enabled and not w1b_enabled
+
+        if hasattr(self, "sector_w1a"):
+            self.sector_w1a.apply_display_settings()
+        if hasattr(self, "sector_w1b"):
+            self.sector_w1b.apply_display_settings()
+
+        if use_w1c and hasattr(self, "sector_w1c"):
+            self.sector_1a_stack.setCurrentWidget(self.sector_w1c)
+        else:
+            self.sector_1a_stack.setCurrentWidget(self.sector_w1a)
+            if refresh_w1a and w1a_enabled:
+                self.sector_w1a.refresh_data()
+
+        self.sector_1b_stack.setCurrentIndex(1)
+        self.left_column.updateGeometry()
+        self.left_column.update()
+
+    def apply_display_settings(self):
+        if getattr(self, "current_mode", None) in ("beds", "patient_bed_management"):
+            self._apply_w1_beds_sector_visibility(refresh_w1a=False)
+
     def set_patient_selection_mode(self, mode):
         """Переключает режимы: 'card', 'beds', 'archive', 'admin', 'patient_bed_management'."""
         if not hasattr(self, 'selection_stack'): return
@@ -544,13 +589,7 @@ class RemCardLayoutManager(QWidget):
             if hasattr(self, 'l_layout'):
                 self.l_layout.setContentsMargins(0, 0, 0, 0)
             
-            # Показываем заглушки W1а и W1b
-            if hasattr(self, 'sector_1a_stack'):
-                self.sector_1a_stack.setCurrentIndex(1)
-            if hasattr(self, 'sector_1b_stack'):
-                self.sector_1b_stack.setCurrentIndex(1)
-            if hasattr(self, 'sector_w1a'):
-                self.sector_w1a.refresh_data()
+            self._apply_w1_beds_sector_visibility()
             
             if hasattr(self, 'beds_selection_widget'):
                 logger.debug("Scheduling beds_selection_widget.refresh()")
@@ -588,12 +627,7 @@ class RemCardLayoutManager(QWidget):
 
             if hasattr(self, 'l_layout'):
                 self.l_layout.setContentsMargins(0, 0, 0, 0)
-            if hasattr(self, 'sector_1a_stack'):
-                self.sector_1a_stack.setCurrentIndex(1)
-            if hasattr(self, 'sector_1b_stack'):
-                self.sector_1b_stack.setCurrentIndex(1)
-            if hasattr(self, 'sector_w1a'):
-                self.sector_w1a.refresh_data()
+            self._apply_w1_beds_sector_visibility()
             self.sector_1b.setEnabled(False)
 
             if hasattr(self.journal_widget, "refresh_bed_statuses"):

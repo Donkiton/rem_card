@@ -6120,6 +6120,71 @@ def _check_w1a_rendered_layout(widget) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_w1c_placeholder_widget() -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors.sector_w1c import SectorW1c
+
+    app = QApplication.instance() or QApplication([])
+    widget = SectorW1c()
+    try:
+        widget.resize(250, 600)
+        widget.show()
+        app.processEvents()
+
+        if not widget.main_container.isVisible():
+            return False, "W1c placeholder frame must be visible"
+        if widget.main_layout_v.count() != 0:
+            return False, "W1c placeholder must not render inner content"
+        margins = widget.layout().contentsMargins()
+        if (margins.left(), margins.top(), margins.right(), margins.bottom()) != (3, 5, 5, 4):
+            return False, "W1c placeholder must use W1a outer margins"
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+    return True, "ok"
+
+
+def _check_w1c_source_markers(root: Path, layout_cases: list[tuple[str, Path]]) -> tuple[bool, str]:
+    w1c_source = (root / "ui" / "rem_card_sectors" / "sector_w1c.py").read_text(encoding="utf-8")
+    missing_w1c_markers = [
+        marker
+        for marker in (
+            "class SectorW1c",
+            "setContentsMargins(3, 5, 5, 4)",
+            "sector_w1c_main_container",
+            "QWidget#sector_w1c_main_container",
+            "setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)",
+        )
+        if marker not in w1c_source
+    ]
+    if missing_w1c_markers:
+        return False, f"W1c placeholder sector missing marker: {missing_w1c_markers[0]}"
+
+    for role, path in layout_cases:
+        source = path.read_text(encoding="utf-8")
+        missing_layout_markers = [
+            marker
+            for marker in (
+                "SectorW1c",
+                "self.sector_w1c = SectorW1c()",
+                "self.sector_1a_stack.addWidget(self.sector_w1c)",
+                "def _apply_w1_beds_sector_visibility",
+                "use_w1c = not w1a_enabled and not w1b_enabled",
+                "self.sector_1a_stack.setCurrentWidget(self.sector_w1c)",
+            )
+            if marker not in source
+        ]
+        if missing_layout_markers:
+            return False, f"{role}: W1c layout routing missing marker: {missing_layout_markers[0]}"
+
+    return True, "ok"
+
+
 def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
@@ -6234,6 +6299,9 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         ):
             if marker not in source:
                 return False, f"{role} W1b missing display toggle marker: {marker}"
+    ok, details = _check_w1c_source_markers(root, layout_cases)
+    if not ok:
+        return False, details
     if 'QPushButton("Отображение")' not in admin_main_source:
         return False, "admin program settings button must be renamed to Отображение"
 
@@ -6297,6 +6365,9 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         }
 
     ok, details = _check_w1a_display_settings_sleep_behavior(temp_root)
+    if not ok:
+        return False, details
+    ok, details = _check_w1c_placeholder_widget()
     if not ok:
         return False, details
 
