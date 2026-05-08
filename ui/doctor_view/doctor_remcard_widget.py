@@ -2729,6 +2729,8 @@ class DoctorRemCardWidget(QWidget):
             self.layout_manager.orders_widget.shutdown()
         if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
             self.layout_manager.nurse_orders_manager.shutdown()
+        if hasattr(self.layout_manager, "sector_w1a") and hasattr(self.layout_manager.sector_w1a, "shutdown"):
+            self.layout_manager.sector_w1a.shutdown()
         self._close_archive_readonly_manager()
 
     def closeEvent(self, event):

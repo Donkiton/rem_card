@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
-from ..shared.layout_components import SectorFactory, SplitterManager
+from ..shared.layout_components import CurrentPageStack, SectorFactory, SplitterManager
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
 
@@ -256,15 +256,15 @@ class NurseRemCardLayoutManager(QWidget):
         self.l_layout.setSpacing(0)
         
         # Контейнер для 1а / W1а
-        self.sector_1a_stack = QStackedWidget()
+        self.sector_1a_stack = CurrentPageStack()
         self.sector_1a_stack.addWidget(self.sector_1a)
-        self.sector_w1a = SectorW1a()
+        self.sector_w1a = SectorW1a(self.remcard_service)
         self.sector_1a_stack.addWidget(self.sector_w1a)
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         
         # Контейнер для 1б / W1b-nurse
-        self.sector_1b_stack = QStackedWidget()
+        self.sector_1b_stack = CurrentPageStack()
         self.sector_1b_stack.addWidget(self.sector_1b)        # index 0: 1б (карта)
         self.sector_1b_stack.addWidget(self.sector_w1b_nurse) # index 1: W1b-nurse (койки)
         
@@ -507,14 +507,16 @@ class NurseRemCardLayoutManager(QWidget):
         if mode == "beds":
             self.selection_stack.setCurrentIndex(1)
 
-            # Делаем те же внешние отступы левой колонки, что и у врача,
-            # чтобы W1a и W1b визуально совпадали по положению рамок.
+            # W1a/W1b сами управляют рамками и внешними отступами.
+            # Лишний отступ колонки смещает W1a относительно эталонного 1a.
             if hasattr(self, 'l_layout'):
-                self.l_layout.setContentsMargins(3, 5, 5, 4)
+                self.l_layout.setContentsMargins(0, 0, 0, 0)
 
             self.sector_1a_stack.setCurrentIndex(1) # Показываем W1a
             if hasattr(self, 'sector_1b_stack'):
                 self.sector_1b_stack.setCurrentIndex(1) # Показываем W1b-nurse
+            if hasattr(self, 'sector_w1a'):
+                self.sector_w1a.refresh_data()
             QTimer.singleShot(0, self._refresh_beds_async)
             self.sector_1b.setEnabled(False)
             self.current_mode = "beds"
@@ -546,10 +548,12 @@ class NurseRemCardLayoutManager(QWidget):
             self.selection_stack.setCurrentIndex(4)
 
             if hasattr(self, 'l_layout'):
-                self.l_layout.setContentsMargins(3, 5, 5, 4)
+                self.l_layout.setContentsMargins(0, 0, 0, 0)
             self.sector_1a_stack.setCurrentIndex(1)
             if hasattr(self, 'sector_1b_stack'):
                 self.sector_1b_stack.setCurrentIndex(1)
+            if hasattr(self, 'sector_w1a'):
+                self.sector_w1a.refresh_data()
             self.sector_1b.setEnabled(False)
 
             if hasattr(self.journal_widget, "refresh_bed_statuses"):

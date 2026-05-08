@@ -36,6 +36,7 @@ class DoctorMainWidget(QWidget):
             self._monitor_connected = True
         if hasattr(self.remcard_widget.layout_manager, 'beds_selection_widget'):
             self.remcard_widget.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
+        self._refresh_w1a()
         if data_service:
             data_service.request_immediate_refresh(force_emit=False)
 
@@ -45,6 +46,7 @@ class DoctorMainWidget(QWidget):
             self.remcard_widget.force_refresh_everywhere()
         elif self.remcard_widget.admission_id is None and hasattr(self.remcard_widget.layout_manager, 'beds_selection_widget'):
             self.remcard_widget.layout_manager.beds_selection_widget.refresh()
+            self._refresh_w1a()
         if data_service:
             data_service.request_immediate_refresh(force_emit=force)
 
@@ -64,6 +66,18 @@ class DoctorMainWidget(QWidget):
 
     def _get_data_service(self):
         return getattr(self.remcard_service, "data_service", None)
+
+    def _refresh_w1a(self, payload: dict | None = None):
+        layout = getattr(self.remcard_widget, "layout_manager", None)
+        sector = getattr(layout, "sector_w1a", None)
+        if sector is None:
+            return
+        if hasattr(sector, "set_service"):
+            sector.set_service(self.remcard_service)
+        if payload is not None and hasattr(sector, "handle_data_changes"):
+            sector.handle_data_changes(payload)
+        elif hasattr(sector, "refresh_data"):
+            sector.refresh_data()
 
     def _on_data_changes(self, payload: dict):
         if self.remcard_widget.admission_id is not None:
@@ -86,6 +100,7 @@ class DoctorMainWidget(QWidget):
             return
         if layout is not None and hasattr(layout, 'beds_selection_widget'):
             layout.beds_selection_widget.refresh()
+        self._refresh_w1a(payload)
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
@@ -99,6 +114,8 @@ class DoctorMainWidget(QWidget):
         # ВАЖНО: передаем remcard_service в LayoutManager
         if hasattr(self.remcard_widget, 'layout_manager'):
             self.remcard_widget.layout_manager.remcard_service = self.remcard_service
+            if hasattr(self.remcard_widget.layout_manager, "sector_w1a"):
+                self.remcard_widget.layout_manager.sector_w1a.set_service(self.remcard_service)
         self.remcard_widget.back_to_roles_requested.connect(self.back_to_roles)
         self.remcard_widget.refresh_requested.connect(lambda: self.auto_refresh(force=True))
         self.main_stack.addWidget(self.remcard_widget)

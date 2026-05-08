@@ -1,3 +1,5 @@
+import hashlib
+import json
 from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -1061,6 +1063,41 @@ class RemCardService(QObject):
 
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
         return self._orders.get_nurse_orders_data(admission_id, shift_date)
+
+    @staticmethod
+    def _upcoming_orders_content_hash(rows: Sequence[dict]) -> str:
+        stable_rows = []
+        volatile_keys = {"signal_state"}
+        for row in rows or []:
+            stable_rows.append(
+                {
+                    str(key): value
+                    for key, value in sorted(dict(row).items())
+                    if key not in volatile_keys
+                }
+            )
+        payload = json.dumps(stable_rows, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def build_w1a_upcoming_orders_snapshot(self, shift_date: Optional[datetime] = None) -> Dict[str, Any]:
+        effective_shift_date = shift_date or datetime.now()
+        rows = [
+            dict(row)
+            for row in self._orders.get_upcoming_orders_across_active_admissions(effective_shift_date)
+        ]
+        if self.data_service and hasattr(self.data_service, "get_latest_change_id"):
+            change_id = self.data_service.get_latest_change_id(admission_id=None, include_global=True)
+        elif hasattr(self.orders_dao.db, "get_latest_change_id"):
+            change_id = self.orders_dao.db.get_latest_change_id(admission_id=None, include_global=True)
+        else:
+            change_id = 0
+        return {
+            "scope": "w1a_upcoming_orders",
+            "shift_date": effective_shift_date,
+            "rows": rows,
+            "change_id": change_id,
+            "content_hash": self._upcoming_orders_content_hash(rows),
+        }
 
     def get_nurse_statistics_rows(self, admission_ids: Sequence[int]):
         return self._orders.get_nurse_statistics_rows(admission_ids)

@@ -798,6 +798,9 @@ class OrderService:
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
         return self._domain_service.get_nurse_orders_data(admission_id, shift_date)
 
+    def get_upcoming_orders_across_active_admissions(self, shift_date: datetime):
+        return self._domain_service.get_upcoming_orders_across_active_admissions(shift_date)
+
     def get_nurse_statistics_rows(self, admission_ids: Sequence[int]):
         if not admission_ids:
             return []

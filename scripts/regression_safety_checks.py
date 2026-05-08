@@ -5977,6 +5977,82 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+
+    layout_components = (root / "ui" / "shared" / "layout_components.py").read_text(encoding="utf-8")
+    if "class CurrentPageStack(QStackedWidget)" not in layout_components:
+        return False, "CurrentPageStack guard is missing"
+    if "def sizeHint(self)" not in layout_components or "currentWidget()" not in layout_components:
+        return False, "CurrentPageStack must size from current widget only"
+
+    layout_cases = [
+        ("doctor", root / "ui" / "shared" / "remcard_layout.py"),
+        ("nurse", root / "ui" / "nurse_view" / "nurse_remcard_layout.py"),
+    ]
+    for role, path in layout_cases:
+        source = path.read_text(encoding="utf-8")
+        if "CurrentPageStack" not in source:
+            return False, f"{role}: W1 stacks must use CurrentPageStack"
+        if "self.sector_1b_stack = CurrentPageStack()" not in source:
+            return False, f"{role}: sector_1b_stack still uses max-size QStackedWidget behavior"
+        if "SectorW1a(self.remcard_service)" not in source:
+            return False, f"{role}: W1a must receive remcard_service for targeted refresh"
+        if "self.l_layout.setContentsMargins(3, 5, 5, 4)" in source:
+            return False, f"{role}: W1 mode must not add column margins on top of W1a/1a sector margins"
+
+    w1a_source = (root / "ui" / "rem_card_sectors" / "sector_w1a.py").read_text(encoding="utf-8")
+    forbidden_w1a_markers = [
+        "Статистика по препаратам",
+        "open_statistics_requested",
+        "build_full_card_snapshot",
+        "build_card_snapshot",
+        "get_nurse_orders_data(",
+        "self.content_layout.addStretch(1)",
+    ]
+    for marker in forbidden_w1a_markers:
+        if marker in w1a_source:
+            return False, f"W1a contains forbidden legacy/full-card marker: {marker}"
+    for marker in (
+        "build_w1a_upcoming_orders_snapshot",
+        "handle_data_changes",
+        "_build_patient_groups",
+        "w1a_patient_group_header",
+        "card_data.pop(\"patient_name\", None)",
+        "self.content_layout.setContentsMargins(2, 0, 2, 0)",
+        "_bed_sort_key",
+        "\"bed_number\": item.get(\"bed_number\")",
+        "\"bed_number\": group_data.get(\"bed_number\")",
+        "self.content_layout.setAlignment(Qt.AlignTop)",
+        "self.scroll_layout.addWidget(self.cards_container, 0, Qt.AlignTop)",
+        "self.scroll_layout.addStretch(1)",
+        "self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)",
+        "header.setStyleSheet",
+        "#d7eaf8",
+        "#7f9fbd",
+        "nurse_order_panel_mark:w1a:",
+        "W1A_TIME_RECOMPUTE_MAX_MS = 60 * 1000",
+    ):
+        if marker not in w1a_source:
+            return False, f"W1a missing targeted behavior marker: {marker}"
+
+    service_source = (root / "services" / "order_domain_service.py").read_text(encoding="utf-8")
+    if "def get_upcoming_orders_across_active_admissions" not in service_source:
+        return False, "service read model for W1a is missing"
+    for required_sql in (
+        "JOIN beds b ON b.current_admission_id = adm.id AND b.status = 'OCCUPIED'",
+        "JOIN patients p ON p.id = adm.patient_id",
+        "b.bed_number AS bed_number",
+        "ORDER BY CAST(b.bed_number AS INTEGER) ASC",
+        "GROUP BY a2.order_id, a2.planned_time",
+    ):
+        if required_sql not in service_source:
+            return False, f"W1a read model must keep optimized active-admission SQL: {required_sql}"
+
+    return True, "ok"
+
+
 def _check_w1_outcome_timer_ticks_without_beds_refresh(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -7161,6 +7237,7 @@ def main():
         ("chart_snapshot_dedupes_unchanged_payload", _check_chart_snapshot_dedupes_unchanged_payload),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
+        ("w1a_w1b_targeted_layout_and_read_model", _check_w1a_w1b_targeted_layout_and_read_model),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
         ("w1_outcome_release_runs_from_change_monitor", _check_w1_outcome_release_runs_from_change_monitor),
         ("outcome_rollback_restores_released_w1_bed", _check_outcome_rollback_restores_released_w1_bed),

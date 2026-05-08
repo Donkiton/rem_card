@@ -996,6 +996,107 @@ class OrderDomainService:
 
         return result
 
+    @staticmethod
+    def _signal_state_for_time(planned_time) -> str:
+        try:
+            planned_dt = datetime.fromisoformat(str(planned_time).replace(" ", "T"))
+        except Exception:
+            return ""
+        diff_minutes = (datetime.now() - planned_dt).total_seconds() / 60.0
+        if -60 <= diff_minutes < 0:
+            return "upcoming"
+        if 0 <= diff_minutes < 60:
+            return "current"
+        if 60 <= diff_minutes < 180:
+            return "overdue"
+        return ""
+
+    def get_upcoming_orders_across_active_admissions(self, shift_date: datetime) -> List[Dict]:
+        """Lightweight W1a read model for active-bed upcoming orders."""
+        self._sanitize_legacy_statuses_once(allow_write=False)
+
+        start_dt, end_dt = self._get_day_period_local(shift_date)
+        query = """
+            SELECT
+                p.id AS patient_id,
+                o.admission_id AS admission_id,
+                b.bed_number AS bed_number,
+                COALESCE(
+                    NULLIF(TRIM(
+                        COALESCE(p.last_name, '') || ' ' ||
+                        COALESCE(p.first_name, '') || ' ' ||
+                        COALESCE(p.middle_name, '')
+                    ), ''),
+                    NULLIF(TRIM(COALESCE(p.full_name, '')), ''),
+                    'Неизвестно'
+                ) AS patient_name,
+                a.id AS id,
+                a.id AS admin_id,
+                a.order_id AS order_id,
+                a.planned_time AS planned_time,
+                a.actual_time AS actual_time,
+                a.status AS status,
+                a.version AS expected_revision,
+                a.comment AS comment,
+                a.cell_role AS cell_role,
+                a.updated_at AS updated_at,
+                o.text AS order_title,
+                o.latin AS latin,
+                o.drug_key AS drug_key,
+                o.dose_value AS dose_value,
+                o.dose_unit AS dose_unit,
+                o.comment AS order_comment,
+                o.type AS order_type,
+                o.duration_min AS duration_min,
+                o.revision AS order_revision
+            FROM administrations a
+            JOIN orders o ON a.order_id = o.id
+            JOIN admissions adm ON adm.id = o.admission_id
+            JOIN patients p ON p.id = adm.patient_id
+            JOIN beds b ON b.current_admission_id = adm.id AND b.status = 'OCCUPIED'
+            LEFT JOIN patient_status_events pse
+                ON pse.admission_id = adm.id AND pse.end_time IS NULL
+            WHERE a.planned_time >= ? AND a.planned_time < ?
+              AND a.is_committed = 1
+              AND a.id IN (
+                  SELECT MAX(a2.id)
+                  FROM administrations a2
+                  JOIN orders o2 ON o2.id = a2.order_id
+                  WHERE a2.is_committed = 1
+                    AND a2.planned_time >= ? AND a2.planned_time < ?
+                  GROUP BY a2.order_id, a2.planned_time
+              )
+              AND a.cell_role IN ('start', 'single')
+              AND COALESCE(a.status, '') = 'planned'
+              AND COALESCE(pse.status, 'ACTIVE') NOT IN ('TRANSFERRED', 'DEAD')
+              /* Mirrors sector 1a: committed administrations stay visible while
+                 an unsaved doctor delete draft is pending on the order row. */
+            ORDER BY CAST(b.bed_number AS INTEGER) ASC, b.bed_number ASC, a.planned_time ASC, a.id ASC
+        """
+        rows = self.db.fetch_all_remcard(
+            query,
+            (
+                start_dt.isoformat(),
+                end_dt.isoformat(),
+                start_dt.isoformat(),
+                end_dt.isoformat(),
+            ),
+        )
+
+        groups_dict = self._load_groups_priority()
+        drugs_dict = self._load_drugs_groups()
+
+        result = []
+        for row in rows:
+            rd = dict(row)
+            drug_key = rd.get("drug_key")
+            group_key = drugs_dict.get(drug_key, "unknown")
+            rd["priority"] = groups_dict.get(group_key, 999)
+            rd["group_name"] = group_key
+            rd["signal_state"] = self._signal_state_for_time(rd.get("planned_time"))
+            result.append(rd)
+        return result
+
     def _get_day_period_local(self, date: datetime) -> Tuple[datetime, datetime]:
         start = date.replace(hour=8, minute=0, second=0, microsecond=0)
         if date.hour < 8:

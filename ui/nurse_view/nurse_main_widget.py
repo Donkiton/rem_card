@@ -1035,6 +1035,7 @@ class NurseMainWidget(QWidget):
         ):
             if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
                 self.layout_manager.beds_selection_widget.refresh()
+            self._refresh_w1a(payload)
         if self._selection_mode == "archive":
             archive_widget = getattr(self.layout_manager, "archive_widget", None)
             if archive_widget and (full_refresh_required or changed_entities.intersection({"patients", "admissions"})):
@@ -1101,6 +1102,7 @@ class NurseMainWidget(QWidget):
         self._ensure_monitor_subscription()
         if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
             self.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
+        self._refresh_w1a()
         data_service = self._get_data_service()
         if data_service:
             data_service.request_immediate_refresh(force_emit=False)
@@ -1122,6 +1124,8 @@ class NurseMainWidget(QWidget):
                                                       remcard_service=self.remcard_service,
                                                       parent=self.main_stack)
         self.layout_manager.patient_status_service = self.remcard_service.status_service
+        if hasattr(self.layout_manager, "sector_w1a"):
+            self.layout_manager.sector_w1a.set_service(self.remcard_service)
         
         self.main_stack.addWidget(self.layout_manager)
         main_layout.addWidget(self.main_stack)
@@ -1164,6 +1168,17 @@ class NurseMainWidget(QWidget):
         self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
         self._bind_orders_balance_signals()
         self._bind_nurse_orders_balance_signals()
+
+    def _refresh_w1a(self, payload: dict | None = None):
+        sector = getattr(getattr(self, "layout_manager", None), "sector_w1a", None)
+        if sector is None:
+            return
+        if hasattr(sector, "set_service"):
+            sector.set_service(self.remcard_service)
+        if payload is not None and hasattr(sector, "handle_data_changes"):
+            sector.handle_data_changes(payload)
+        elif hasattr(sector, "refresh_data"):
+            sector.refresh_data()
 
     def _wire_dynamic_views(self):
         archive_widget = getattr(self.layout_manager, "archive_widget", None)
@@ -1923,6 +1938,8 @@ class NurseMainWidget(QWidget):
             self.layout_manager.orders_widget.shutdown()
         if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
             self.layout_manager.nurse_orders_manager.shutdown()
+        if hasattr(self.layout_manager, "sector_w1a") and hasattr(self.layout_manager.sector_w1a, "shutdown"):
+            self.layout_manager.sector_w1a.shutdown()
 
     def closeEvent(self, event):
         self.shutdown()

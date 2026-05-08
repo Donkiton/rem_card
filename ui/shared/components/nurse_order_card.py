@@ -86,7 +86,26 @@ class NurseOrderCard(QFrame):
     def get_bg_color(self): return self._bg_color
     def set_bg_color(self, color):
         self._bg_color = color
-        self.setStyleSheet(f"QFrame#order_card {{ background-color: {color.name()}; border: 1.2px solid #dee2e6; border-radius: 4px; }}")
+        self.setStyleSheet(f"""
+            QFrame#order_card {{
+                background-color: {color.name()};
+                border: 1.2px solid #dee2e6;
+                border-radius: 4px;
+            }}
+            QLabel#order_card_patient_header {{
+                background-color: #e9ecef;
+                color: #2c3e50;
+                font-size: 11px;
+                font-weight: bold;
+                border: none;
+                border-bottom: 1px solid #d7dce0;
+                padding: 3px 5px;
+            }}
+            QWidget#order_card_body {{
+                background: transparent;
+                border: none;
+            }}
+        """)
     
     bg_color = Property(QColor, get_bg_color, set_bg_color)
 
@@ -97,14 +116,34 @@ class NurseOrderCard(QFrame):
         return f"{str(hours).replace('.', ',')} ч."
 
     def init_ui(self):
-        # ГЛАВНЫЙ ЛЕЙАУТ: Горизонтальный (Инфо блок слева | Текст центр | Кнопка справа)
-        self.h_main_layout = QHBoxLayout(self)
-        self.h_main_layout.setContentsMargins(4, 4, 4, 4)
-        self.h_main_layout.setSpacing(6)
-
         from PySide6.QtWidgets import QSizePolicy
         # Смена на Maximum гарантирует, что карточка не будет расти больше чем нужно её содержимому
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        patient_name = self._patient_name_from_data(self.data)
+        self.lbl_patient_header = None
+
+        if patient_name:
+            self.v_card_layout = QVBoxLayout(self)
+            self.v_card_layout.setContentsMargins(0, 0, 0, 0)
+            self.v_card_layout.setSpacing(0)
+
+            self.lbl_patient_header = QLabel(patient_name)
+            self.lbl_patient_header.setObjectName("order_card_patient_header")
+            self.lbl_patient_header.setWordWrap(True)
+            self.lbl_patient_header.setAlignment(Qt.AlignCenter)
+            self.v_card_layout.addWidget(self.lbl_patient_header)
+
+            self.body_widget = QWidget()
+            self.body_widget.setObjectName("order_card_body")
+            self.h_main_layout = QHBoxLayout(self.body_widget)
+            self.h_main_layout.setContentsMargins(4, 4, 4, 4)
+            self.h_main_layout.setSpacing(6)
+            self.v_card_layout.addWidget(self.body_widget)
+        else:
+            # ГЛАВНЫЙ ЛЕЙАУТ: Горизонтальный (Инфо блок слева | Текст центр | Кнопка справа)
+            self.h_main_layout = QHBoxLayout(self)
+            self.h_main_layout.setContentsMargins(4, 4, 4, 4)
+            self.h_main_layout.setSpacing(6)
 
         # 1. ЛЕВАЯ ПАНЕЛЬ (ВРЕМЯ + СИГНАЛИЗАТОР)
         self.v_left_panel = QVBoxLayout()
@@ -183,6 +222,9 @@ class NurseOrderCard(QFrame):
 
     def update_data(self, new_data):
         self.data = new_data
+        patient_name = self._patient_name_from_data(self.data)
+        if self.lbl_patient_header is not None:
+            self.lbl_patient_header.setText(patient_name)
         
         # --- Сбор данных ---
         latin = self.data.get('latin', '')
@@ -234,6 +276,14 @@ class NurseOrderCard(QFrame):
 
         self.update_signal()
         self.update_action_button()
+
+    @staticmethod
+    def _patient_name_from_data(data):
+        return str(
+            (data or {}).get("patient_name")
+            or (data or {}).get("patient_full_name")
+            or ""
+        ).strip()
 
     def _extract_diluent(self, comment):
         if not comment: return ""
@@ -337,8 +387,11 @@ class NurseOrderCard(QFrame):
     def handle_popup_action(self, action):
         self.popup.close()
         new_mark = NURSE_MARK_EXECUTED if action == "done" else NURSE_MARK_NOT_EXECUTED
-        self.animate_highlight(action)
-        QTimer.singleShot(1000, lambda: self.statusChanged.emit(self.data['id'], new_mark))
+        defer_visual = bool(self.data.get("defer_mark_visual"))
+        if not defer_visual:
+            self.animate_highlight(action)
+        delay_ms = 0 if defer_visual else 1000
+        QTimer.singleShot(delay_ms, lambda: self.statusChanged.emit(self.data['id'], new_mark))
 
     def animate_highlight(self, action):
         color_name = "#c8e6c9" if action == "done" else "#ffcdd2"

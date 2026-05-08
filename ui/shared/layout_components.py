@@ -1,5 +1,21 @@
-from PySide6.QtWidgets import QSplitter, QSizePolicy, QWidget, QVBoxLayout
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QSplitter, QSizePolicy, QStackedWidget, QWidget, QVBoxLayout
+from PySide6.QtCore import Qt, QSize
+
+
+class CurrentPageStack(QStackedWidget):
+    """QStackedWidget with size hints scoped to the currently visible page."""
+
+    def sizeHint(self):
+        current = self.currentWidget()
+        if current is None:
+            return QSize(0, 0)
+        return current.sizeHint()
+
+    def minimumSizeHint(self):
+        current = self.currentWidget()
+        if current is None:
+            return QSize(0, 0)
+        return current.minimumSizeHint()
 
 class SectorFactory:
     """Фабрика для создания и начальной настройки всех секторов ремкарты."""

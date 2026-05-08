@@ -1,68 +1,574 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QPushButton)
-from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QIcon
-import os
+import time
+from datetime import datetime, timedelta
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QLabel, QFrame, QScrollArea, QSizePolicy, QWidget, QVBoxLayout
+
+from rem_card.app.logger import logger
+from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.components.nurse_order_card import NurseOrderCard
+from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+
+W1A_BEFORE_MIN = 60
+W1A_AFTER_MIN = 180
+W1A_PENDING_MARK_TTL_SEC = 8.0
+W1A_TIME_RECOMPUTE_MAX_MS = 60 * 1000
+W1A_REFRESH_DEBOUNCE_MS = 150
+W1A_REFRESH_ENTITIES = {
+    "orders",
+    "administrations",
+    "patients",
+    "admissions",
+    "beds",
+    "patient_status_events",
+}
+W1A_REFRESH_SOURCE_PREFIXES = (
+    "orders_",
+    "doctor_order_mark:",
+    "nurse_order_mark:",
+    "nurse_order_panel_mark:",
+    "patient_bed",
+    "status_",
+    "archive_",
+)
+
 
 class SectorW1a(BaseSectorWidget):
-    """Сектор W1а, отображаемый в режиме списка коек (вместо 1а)."""
-    open_statistics_requested = Signal()
+    """Сектор W1a со списком ближайших назначений по активным пациентам."""
 
-    def __init__(self, parent=None):
-        super().__init__("W1а", parent)
+    def __init__(self, service=None, parent=None):
+        super().__init__("W1a", parent)
+        self.service = service
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setStyleSheet("background: transparent;")
+
+        self.cards = {}
+        self.groups = {}
+        self._all_data = []
+        self._pending_marks = {}
+        self._last_content_hash = None
+        self._last_change_id = 0
+        self._refresh_worker = None
+        self._refresh_pending = False
+        self._force_render_after_refresh = False
+        self._is_shutting_down = False
+        self._last_error_ts = 0.0
+
+        self._time_timer = QTimer(self)
+        self._time_timer.setSingleShot(True)
+        self._time_timer.timeout.connect(self._render_from_cache)
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(lambda: self.refresh_data(force=True))
+
         self.init_ui()
+        QTimer.singleShot(0, self.refresh_data)
 
     def init_ui(self):
-        self.main_container = QWidget(self)
+        if self.layout():
+            self.layout().setContentsMargins(3, 5, 5, 4)
+
+        self.main_container = QWidget()
         self.main_container.setObjectName("sector_w1a_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
-        # Отступы для унификации
-        self.main_layout_v.setContentsMargins(3, 5, 5, 4)
-        
-        self.btn_stats = QPushButton("Статистика по препаратам", self.main_container)
-        from rem_card.app.paths import get_icon_dir
-        icon_path = os.path.join(get_icon_dir(), "drugs-nurse.png")
-        if os.path.exists(icon_path):
-            self.btn_stats.setIcon(QIcon(icon_path))
-            self.btn_stats.setIconSize(QSize(24, 24))
-        
-        self.btn_stats.setStyleSheet("""
-            QPushButton {
-                background-color: #e9ecef;
-                border: 1px solid #ced4da;
-                border-radius: 4px;
-                padding: 5px;
-                color: black;
-            }
-            QPushButton:hover {
-                background-color: #dee2e6;
-            }
-        """)
-        self.btn_stats.clicked.connect(self.open_statistics_requested.emit)
-        self.btn_stats.hide() # По умолчанию скрыта, включаем только для медсестры
-        self.main_layout_v.addWidget(self.btn_stats)
-        
-        # W1а в данном контексте остается пустым согласно ТЗ
-        self.empty_label = QLabel("Сектор W1а", self.main_container)
-        self.empty_label.setAlignment(Qt.AlignCenter)
-        self.empty_label.setStyleSheet("color: #bdc3c7; font-style: italic;")
-        self.main_layout_v.addWidget(self.empty_label)
-        
-        self.main_layout_v.addStretch()
+        self.main_layout_v.setContentsMargins(2, 2, 2, 2)
+        self.main_layout_v.setSpacing(0)
 
-        self.main_container.setStyleSheet("""
+        self.header_lbl = QLabel("Ближайшие назначения")
+        self.header_lbl.setObjectName("sector_header")
+        self.header_lbl.setAlignment(Qt.AlignCenter)
+        self.header_lbl.setFixedHeight(28)
+        self.main_layout_v.addWidget(self.header_lbl)
+
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+
+        self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("sector_w1a_scroll_content")
+        self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll_layout.setSpacing(0)
+        self.scroll_layout.setAlignment(Qt.AlignTop)
+
+        self.cards_container = QWidget()
+        self.cards_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.content_layout = QVBoxLayout(self.cards_container)
+        self.content_layout.setContentsMargins(2, 0, 2, 0)
+        self.content_layout.setSpacing(3)
+        self.content_layout.setAlignment(Qt.AlignTop)
+
+        self.empty_label = QLabel("Нет ближайших назначений")
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setStyleSheet("color: #7f8c8d; font-style: italic; padding: 10px 4px;")
+        self.content_layout.addWidget(self.empty_label)
+
+        self.scroll_layout.addWidget(self.cards_container, 0, Qt.AlignTop)
+        self.scroll_layout.addStretch(1)
+        self.scroll_area.setWidget(self.scroll_content)
+        self.main_layout_v.addWidget(self.scroll_area)
+
+        self.main_container.setStyleSheet(
+            """
             QWidget#sector_w1a_main_container {
                 background-color: #f8f9fa;
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
             }
-        """)
+            QLabel#sector_header {
+                font-weight: bold;
+                font-size: 13px;
+                color: #2c3e50;
+                background-color: #e9ecef;
+                border: none;
+                border-bottom: 1px solid #bdc3c7;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+            }
+            QWidget#sector_w1a_scroll_content {
+                background-color: transparent;
+            }
+            QFrame#w1a_patient_group_card {
+                background-color: #ffffff;
+                border: 1.6px solid #7f9fbd;
+                border-radius: 5px;
+            }
+            QLabel#w1a_patient_group_header {
+                background-color: #d7eaf8;
+                color: #173b57;
+                font-size: 12px;
+                font-weight: bold;
+                border: none;
+                border-bottom: 1.6px solid #7f9fbd;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                padding: 5px 6px;
+            }
+            QFrame#w1a_patient_group_body {
+                background-color: #ffffff;
+                border: none;
+                border-bottom-left-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            """
+        )
 
         self.set_content(self.main_container)
 
-    def set_stats_button_visible(self, visible: bool):
-        if hasattr(self, 'btn_stats'):
-            self.btn_stats.setVisible(visible)
+    def set_service(self, service):
+        if self.service is service:
+            return
+        self.service = service
+        self.refresh_data(force=True)
+
+    def refresh_data(self, force: bool = False):
+        if self._is_shutting_down or not self.service:
+            return
+        if force:
+            self._force_render_after_refresh = True
+        if self._refresh_worker is not None and self._refresh_worker.isRunning():
+            self._refresh_pending = True
+            return
+
+        loader = getattr(self.service, "build_w1a_upcoming_orders_snapshot", None)
+        if not callable(loader):
+            return
+
+        self._refresh_worker = AsyncCallThread(loader, datetime.now())
+        self._refresh_worker.succeeded.connect(self._apply_snapshot)
+        self._refresh_worker.failed.connect(self._on_refresh_failed)
+        self._refresh_worker.finished.connect(self._on_refresh_finished)
+        self._refresh_worker.start()
+
+    def handle_data_changes(self, payload: dict):
+        if self._is_shutting_down:
+            return
+        if not self._payload_should_refresh(payload or {}):
+            return
+        self._refresh_timer.start(W1A_REFRESH_DEBOUNCE_MS)
+
+    def _payload_should_refresh(self, payload: dict) -> bool:
+        if payload.get("forced") or payload.get("gap_detected"):
+            return True
+        changed_entities = {
+            str(entity)
+            for entity in (payload.get("changed_entities") or [])
+            if entity is not None
+        }
+        if not changed_entities:
+            changed_entities = {
+                str(change.get("entity_name") or "")
+                for change in (payload.get("changes") or [])
+                if change.get("entity_name")
+            }
+        if changed_entities.intersection(W1A_REFRESH_ENTITIES):
+            return True
+        force_sources = list(payload.get("force_sources") or [])
+        if payload.get("force_source"):
+            force_sources.append(str(payload.get("force_source")))
+        return any(
+            str(source or "").startswith(W1A_REFRESH_SOURCE_PREFIXES)
+            for source in force_sources
+        )
+
+    def _apply_snapshot(self, snapshot):
+        if self._is_shutting_down:
+            return
+        snapshot = dict(snapshot or {})
+        content_hash = str(snapshot.get("content_hash") or "")
+        force_render = self._force_render_after_refresh
+        self._force_render_after_refresh = False
+        self._last_change_id = int(snapshot.get("change_id") or self._last_change_id or 0)
+
+        if content_hash and content_hash == self._last_content_hash and not force_render:
+            self._schedule_next_time_tick()
+            return
+
+        self._last_content_hash = content_hash or self._last_content_hash
+        self._all_data = [dict(item) for item in (snapshot.get("rows") or [])]
+        self._render_from_cache()
+
+    def _on_refresh_failed(self, exc):
+        self._force_render_after_refresh = False
+        now = time.monotonic()
+        if now - self._last_error_ts > 15.0:
+            self._last_error_ts = now
+            logger.warning("W1a upcoming orders refresh failed: %s", exc, exc_info=True)
+
+    def _on_refresh_finished(self):
+        worker = self._refresh_worker
+        if worker is not None:
+            self._disconnect_worker(worker)
+        self._refresh_worker = None
+        if self._refresh_pending and not self._is_shutting_down:
+            self._refresh_pending = False
+            QTimer.singleShot(0, lambda: self.refresh_data(force=True))
+
+    def _render_from_cache(self):
+        if self._is_shutting_down:
+            return
+        now = datetime.now()
+        visible_data = [
+            item
+            for item in self._apply_pending_marks(self._all_data)
+            if self._is_visible(item, now)
+        ]
+        self._sync_cards(visible_data)
+        self._schedule_next_time_tick(now)
+        self.update()
+        self.scroll_area.viewport().update()
+
+    def _sync_cards(self, data_list):
+        groups = self._build_patient_groups(data_list)
+        new_ids = {int(item["id"]) for item in data_list if item.get("id") is not None}
+        for admin_id in list(self.cards.keys()):
+            if admin_id not in new_ids:
+                card = self.cards.pop(admin_id)
+                card.setParent(None)
+                card.deleteLater()
+
+        new_group_keys = {group["key"] for group in groups}
+        for group_key in list(self.groups.keys()):
+            if group_key not in new_group_keys:
+                group = self.groups.pop(group_key)
+                group["frame"].setParent(None)
+                group["frame"].deleteLater()
+
+        self.empty_label.setVisible(not data_list)
+        for group_index, group_data in enumerate(groups):
+            group = self._ensure_patient_group(group_data)
+            current_group_index = self.content_layout.indexOf(group["frame"])
+            if current_group_index != group_index:
+                self.content_layout.insertWidget(group_index, group["frame"])
+
+            for order_index, item in enumerate(group_data["items"]):
+                admin_id = int(item["id"])
+                card_data = dict(item)
+                card_data["defer_mark_visual"] = True
+                card_data.pop("patient_name", None)
+                card_data.pop("patient_full_name", None)
+                if admin_id in self.cards:
+                    card = self.cards[admin_id]
+                    card.update_data(card_data)
+                else:
+                    card = NurseOrderCard(card_data)
+                    card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+                    card.statusChanged.connect(self.handle_status_change)
+                    self.cards[admin_id] = card
+
+                current_index = group["layout"].indexOf(card)
+                if current_index != order_index:
+                    group["layout"].insertWidget(order_index, card)
+
+    def _build_patient_groups(self, data_list):
+        grouped = {}
+        for item in sorted(data_list, key=self._order_sort_key):
+            key = self._patient_group_key(item)
+            group = grouped.setdefault(
+                key,
+                {
+                    "key": key,
+                    "patient_name": str(item.get("patient_name") or "Пациент").strip() or "Пациент",
+                    "bed_number": item.get("bed_number"),
+                    "items": [],
+                },
+            )
+            group["items"].append(item)
+
+        groups = list(grouped.values())
+        groups.sort(
+            key=lambda group: (
+                self._group_sort_key(group)
+            )
+        )
+        return groups
+
+    def _group_sort_key(self, group):
+        items = group.get("items") or []
+        first_item = items[0] if items else {}
+        return (
+            self._bed_sort_key(group.get("bed_number")),
+            self._order_sort_key(first_item),
+        )
+
+    def _bed_sort_key(self, bed_number):
+        value = str(bed_number if bed_number is not None else "").strip()
+        if not value:
+            return (1, 999999, "")
+        try:
+            return (0, int(value), value)
+        except ValueError:
+            return (0, 999999, value.lower())
+
+    def _patient_group_key(self, item):
+        admission_id = item.get("admission_id")
+        patient_id = item.get("patient_id")
+        if admission_id is not None:
+            return f"admission:{admission_id}"
+        if patient_id is not None:
+            return f"patient:{patient_id}"
+        return f"patient-name:{str(item.get('patient_name') or '').strip().lower()}"
+
+    def _ensure_patient_group(self, group_data):
+        group_key = group_data["key"]
+        patient_name = group_data["patient_name"]
+        if group_key in self.groups:
+            group = self.groups[group_key]
+            group["header"].setText(patient_name)
+            group["bed_number"] = group_data.get("bed_number")
+            return group
+
+        frame = QFrame()
+        frame.setObjectName("w1a_patient_group_card")
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        frame.setStyleSheet(
+            """
+            QFrame#w1a_patient_group_card {
+                background-color: #ffffff;
+                border: 1.6px solid #7f9fbd;
+                border-radius: 5px;
+            }
+            """
+        )
+
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(0)
+
+        header = QLabel(patient_name)
+        header.setObjectName("w1a_patient_group_header")
+        header.setWordWrap(True)
+        header.setAlignment(Qt.AlignCenter)
+        header.setMinimumHeight(26)
+        header.setStyleSheet(
+            """
+            QLabel#w1a_patient_group_header {
+                background-color: #d7eaf8;
+                color: #173b57;
+                font-size: 12px;
+                font-weight: bold;
+                border: none;
+                border-bottom: 1.6px solid #7f9fbd;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                padding: 5px 6px;
+            }
+            """
+        )
+        frame_layout.addWidget(header)
+
+        body = QFrame()
+        body.setObjectName("w1a_patient_group_body")
+        body.setStyleSheet(
+            """
+            QFrame#w1a_patient_group_body {
+                background-color: #ffffff;
+                border: none;
+                border-bottom-left-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            """
+        )
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(5, 5, 5, 5)
+        body_layout.setSpacing(4)
+        frame_layout.addWidget(body)
+
+        group = {
+            "frame": frame,
+            "header": header,
+            "body": body,
+            "layout": body_layout,
+            "bed_number": group_data.get("bed_number"),
+        }
+        self.groups[group_key] = group
+        return group
+
+    def _order_sort_key(self, item):
+        try:
+            planned_dt = datetime.fromisoformat(str(item.get("planned_time")).replace(" ", "T"))
+        except Exception:
+            planned_dt = datetime.max
+        return (
+            planned_dt.isoformat(),
+            int(item.get("priority") or 999),
+            str(item.get("latin") or "").lower(),
+            int(item.get("id") or 0),
+        )
+
+    def _is_visible(self, item, now: datetime) -> bool:
+        if item.get("comment"):
+            return False
+        try:
+            planned_dt = datetime.fromisoformat(str(item.get("planned_time")).replace(" ", "T"))
+        except Exception:
+            return False
+        return (
+            planned_dt - timedelta(minutes=W1A_BEFORE_MIN)
+            <= now
+            < planned_dt + timedelta(minutes=W1A_AFTER_MIN)
+        )
+
+    def _schedule_next_time_tick(self, now: datetime | None = None):
+        self._time_timer.stop()
+        if not self._all_data:
+            return
+        now = now or datetime.now()
+        next_minute = (now.replace(second=0, microsecond=0) + timedelta(minutes=1))
+        delay_ms = max(1000, int((next_minute - now).total_seconds() * 1000) + 25)
+        self._time_timer.start(min(delay_ms, W1A_TIME_RECOMPUTE_MAX_MS))
+
+    def _set_pending_mark(self, admin_id: int, mark: str):
+        self._pending_marks[int(admin_id)] = {
+            "mark": str(mark or ""),
+            "started_mono": time.monotonic(),
+            "actual_time": datetime.now().isoformat(),
+        }
+
+    def _get_pending_mark(self, admin_id: int):
+        if admin_id is None:
+            return None
+        pending = self._pending_marks.get(int(admin_id))
+        if not pending:
+            return None
+        if (time.monotonic() - float(pending.get("started_mono") or 0.0)) > W1A_PENDING_MARK_TTL_SEC:
+            self._pending_marks.pop(int(admin_id), None)
+            return None
+        return pending
+
+    def _apply_pending_marks(self, data_list):
+        if not self._pending_marks:
+            return data_list
+
+        for admin_id, pending in list(self._pending_marks.items()):
+            if (time.monotonic() - float(pending.get("started_mono") or 0.0)) > W1A_PENDING_MARK_TTL_SEC:
+                self._pending_marks.pop(admin_id, None)
+
+        patched = []
+        for item in data_list:
+            patched_item = dict(item)
+            pending = self._get_pending_mark(patched_item.get("id"))
+            if pending:
+                patched_item["comment"] = pending.get("mark") or ""
+                patched_item["actual_time"] = patched_item.get("actual_time") or pending.get("actual_time")
+            patched.append(patched_item)
+        return patched
+
+    def _enqueue_write(self, description: str, operation, *, on_success, on_error):
+        if hasattr(self.service, "enqueue_write"):
+            self.service.enqueue_write(
+                description=description,
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+        try:
+            result = operation()
+        except Exception as exc:
+            on_error(exc)
+            return
+        on_success(result)
+
+    def handle_status_change(self, admin_id, mark):
+        if mark not in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
+            return
+
+        def operation(aid=admin_id, value=mark):
+            if hasattr(self.service, "set_nurse_order_mark"):
+                return self.service.set_nurse_order_mark(aid, value)
+            return self.service.set_nurse_status(aid, value)
+
+        self._set_pending_mark(admin_id, mark)
+        self._render_from_cache()
+        self._enqueue_write(
+            f"nurse_order_panel_mark:w1a:{admin_id}",
+            operation,
+            on_success=lambda _result=None, aid=admin_id: self._on_mark_write_success(aid),
+            on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc),
+        )
+
+    def _on_mark_write_success(self, admin_id: int):
+        pending = self._pending_marks.get(int(admin_id))
+        if pending:
+            pending["started_mono"] = time.monotonic()
+        self.refresh_data(force=True)
+
+    def _on_mark_write_error(self, admin_id: int, exc: Exception):
+        self._pending_marks.pop(int(admin_id), None)
+        self._render_from_cache()
+        self.refresh_data(force=True)
+        CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения: {exc}")
+
+    def _disconnect_worker(self, worker):
+        for signal, slot in (
+            (worker.succeeded, self._apply_snapshot),
+            (worker.failed, self._on_refresh_failed),
+            (worker.finished, self._on_refresh_finished),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
+
+    def shutdown(self):
+        self._is_shutting_down = True
+        self._time_timer.stop()
+        self._refresh_timer.stop()
+        worker = self._refresh_worker
+        self._refresh_worker = None
+        if worker is None:
+            return
+        self._disconnect_worker(worker)
+        if worker.isRunning():
+            worker.quit()
+            worker.wait(1200)

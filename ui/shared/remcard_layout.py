@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
-from .layout_components import SectorFactory, SplitterManager
+from .layout_components import CurrentPageStack, SectorFactory, SplitterManager
 
 class RemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
@@ -259,9 +259,9 @@ class RemCardLayoutManager(QWidget):
         self.l_layout.setSpacing(0)
         
         # Контейнер для 1а / W1а (как у медсестры)
-        self.sector_1a_stack = QStackedWidget()
+        self.sector_1a_stack = CurrentPageStack()
         from ..rem_card_sectors.sector_w1a import SectorW1a
-        self.sector_w1a = SectorW1a()
+        self.sector_w1a = SectorW1a(self.remcard_service)
         
         self.sector_1a_stack.addWidget(self.sector_1a)  # index 0: 1а (карта)
         self.sector_1a_stack.addWidget(self.sector_w1a) # index 1: W1а (койки)
@@ -269,7 +269,7 @@ class RemCardLayoutManager(QWidget):
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         
         # Контейнер для 1б / W1b
-        self.sector_1b_stack = QStackedWidget()
+        self.sector_1b_stack = CurrentPageStack()
         self.sector_1b_stack.addWidget(self.sector_1b)  # index 0: 1б (карта)
         self.sector_1b_stack.addWidget(self.sector_w1b) # index 1: W1b (койки)
         
@@ -539,15 +539,18 @@ class RemCardLayoutManager(QWidget):
             logger.debug(f"Switching to 'beds' mode, remcard_service exists: {self.remcard_service is not None}")
             self.selection_stack.setCurrentIndex(1)
             
-            # Устанавливаем отступы 3px для левой колонки (W1а и W1b)
+            # W1a/W1b сами управляют рамками и внешними отступами.
+            # Лишний отступ колонки смещает W1a относительно эталонного 1a.
             if hasattr(self, 'l_layout'):
-                self.l_layout.setContentsMargins(3, 5, 5, 4)
+                self.l_layout.setContentsMargins(0, 0, 0, 0)
             
             # Показываем заглушки W1а и W1b
             if hasattr(self, 'sector_1a_stack'):
                 self.sector_1a_stack.setCurrentIndex(1)
             if hasattr(self, 'sector_1b_stack'):
                 self.sector_1b_stack.setCurrentIndex(1)
+            if hasattr(self, 'sector_w1a'):
+                self.sector_w1a.refresh_data()
             
             if hasattr(self, 'beds_selection_widget'):
                 logger.debug("Scheduling beds_selection_widget.refresh()")
@@ -584,11 +587,13 @@ class RemCardLayoutManager(QWidget):
             self.selection_stack.setCurrentIndex(4)
 
             if hasattr(self, 'l_layout'):
-                self.l_layout.setContentsMargins(3, 5, 5, 4)
+                self.l_layout.setContentsMargins(0, 0, 0, 0)
             if hasattr(self, 'sector_1a_stack'):
                 self.sector_1a_stack.setCurrentIndex(1)
             if hasattr(self, 'sector_1b_stack'):
                 self.sector_1b_stack.setCurrentIndex(1)
+            if hasattr(self, 'sector_w1a'):
+                self.sector_w1a.refresh_data()
             self.sector_1b.setEnabled(False)
 
             if hasattr(self.journal_widget, "refresh_bed_statuses"):
