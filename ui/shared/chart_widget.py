@@ -1,7 +1,6 @@
 import os
 import pyqtgraph as pg
 import warnings
-import numpy as np
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, QEvent, QRect, QTimeLine
 from PySide6.QtGui import QPainter, QFont, QColor, QBrush
@@ -202,11 +201,10 @@ class ChartWidget(QWidget):
         
         self.curve_items = []
         self.fill_items = []
+        self._curve_by_key = {}
+        self._scatter_items = {}
 
-        # РЎР»РѕР№ РґР»СЏ РјР°Р»РµРЅСЊРєРёС… РјР°СЂРєРµСЂРѕРІ (С‚РѕС‡РµРє) РЅР° РјРµСЃС‚Р°С… СЂРµР°Р»СЊРЅС‹С… РёР·РјРµСЂРµРЅРёР№
-        # Р Р°Р·РјРµСЂ 3 РїРёРєСЃРµР»СЏ (СЃРѕРѕС‚РІРµС‚СЃС‚РІСѓРµС‚ С‚РѕР»С‰РёРЅРµ Р»РёРЅРёР№), РЅРµ РєР»РёРєР°Р±РµР»РµРЅ
-        self.scatter_vitals = pg.ScatterPlotItem(size=3, pen=None)
-        self.plot_widget.addItem(self.scatter_vitals)
+        self._init_reusable_plot_items()
 
         self.current_vitals = []
         self._last_render_key = None
@@ -268,6 +266,43 @@ class ChartWidget(QWidget):
                 border-top: none !important;
             }}
         """)
+
+    def _init_reusable_plot_items(self):
+        curve_specs = (
+            ("sys", "ad", 2),
+            ("dia", "ad", 2),
+            ("pulse", "pulse", 3),
+            ("spo2", "spo2", 2),
+            ("temp", "temp", 2),
+            ("rr", "rr", 2),
+            ("cvp", "cvp", 2),
+        )
+        for key, color_key, width in curve_specs:
+            curve = pg.PlotDataItem(pen=pg.mkPen(self.colors[color_key], width=width))
+            curve.setZValue(10)
+            self.plot_widget.addItem(curve)
+            self._curve_by_key[key] = curve
+            self.curve_items.append(curve)
+
+        fill = pg.FillBetweenItem(
+            self._curve_by_key["sys"],
+            self._curve_by_key["dia"],
+            brush=pg.mkBrush(self.colors["ad_fill"]),
+        )
+        fill.setZValue(-10)
+        self.plot_widget.addItem(fill)
+        self.fill_items.append(fill)
+
+        self.scatter_vitals = pg.ScatterPlotItem(size=3, pen=None, brush=self.colors["ad"])
+        self.scatter_vitals.setZValue(20)
+        self.plot_widget.addItem(self.scatter_vitals)
+        self._scatter_items["ad"] = self.scatter_vitals
+
+        for key in ("pulse", "spo2", "temp", "rr", "cvp"):
+            scatter = pg.ScatterPlotItem(size=3, pen=None, brush=self.colors[key])
+            scatter.setZValue(20)
+            self.plot_widget.addItem(scatter)
+            self._scatter_items[key] = scatter
 
     def eventFilter(self, source, event):
         if event.type() == QEvent.Wheel:
@@ -467,14 +502,12 @@ class ChartWidget(QWidget):
         self._fade_action = None
         self._fade_target_state = None
 
-        for item in self.curve_items:
-            self.plot_widget.removeItem(item)
-        for item in self.fill_items:
-            self.plot_widget.removeItem(item)
-        self.curve_items.clear()
-        self.fill_items.clear()
-
+        for item in getattr(self, "_curve_by_key", {}).values():
+            item.setData([], [])
         self.scatter_vitals.setData([])
+        for key, item in getattr(self, "_scatter_items", {}).items():
+            if key != "ad":
+                item.setData([])
         self.slice_line.hide()
         self.slice_line.setOpacity(0)
         self.tooltip.hide()
@@ -571,82 +604,39 @@ class ChartWidget(QWidget):
             d = processed
             self.current_vitals = vitals
 
-        # РћС‡РёСЃС‚РєР° СЃС‚Р°СЂС‹С… РєСЂРёРІС‹С… Рё Р·Р°Р»РёРІРѕРє
-        for item in self.curve_items:
-            self.plot_widget.removeItem(item)
-        for item in self.fill_items:
-            self.plot_widget.removeItem(item)
-        self.curve_items.clear()
-        self.fill_items.clear()
+        for key, curve in self._curve_by_key.items():
+            curve.setData(d[f'{key}_x'], d[f'{key}_y'])
 
-        def get_chunks(x_arr, y_arr):
-            if len(y_arr) == 0:
-                return []
-            nan_idx = np.flatnonzero(np.isnan(y_arr))
-            if nan_idx.size == 0:
-                return [(x_arr, y_arr)]
-
-            chunks = []
-            start_idx = 0
-            for idx in nan_idx:
-                if idx > start_idx:
-                    chunks.append((x_arr[start_idx:idx], y_arr[start_idx:idx]))
-                start_idx = idx + 1
-            if start_idx < len(y_arr):
-                chunks.append((x_arr[start_idx:], y_arr[start_idx:]))
-            return chunks
-
-        # РћС‚СЂРёСЃРѕРІРєР° РђР” (sys, dia) СЃ СЂР°Р·Р±РёРІРєРѕР№ РЅР° СЃРµРіРјРµРЅС‚С‹
-        sys_chunks = get_chunks(d['sys_x'], d['sys_y'])
-        dia_chunks = get_chunks(d['dia_x'], d['dia_y'])
-        
-        # РћР¶РёРґР°РµРј, С‡С‚Рѕ РєСѓСЃРєРё sys Рё dia СЃРѕРІРїР°РґР°СЋС‚ РїРѕ X
-        for i in range(min(len(sys_chunks), len(dia_chunks))):
-            c_sys = pg.PlotDataItem(sys_chunks[i][0], sys_chunks[i][1], pen=pg.mkPen(self.colors['ad'], width=2))
-            c_dia = pg.PlotDataItem(dia_chunks[i][0], dia_chunks[i][1], pen=pg.mkPen(self.colors['ad'], width=2))
-            self.plot_widget.addItem(c_sys)
-            self.plot_widget.addItem(c_dia)
-            self.curve_items.extend([c_sys, c_dia])
-            
-            fill = pg.FillBetweenItem(c_sys, c_dia, brush=pg.mkBrush(self.colors['ad_fill']))
-            fill.setZValue(-10)
-            self.plot_widget.addItem(fill)
-            self.fill_items.append(fill)
-
-        # РћС‚СЂРёСЃРѕРІРєР° РѕСЃС‚Р°Р»СЊРЅС‹С… РїРѕРєР°Р·Р°С‚РµР»РµР№
-        for k, color, w in [('pulse', self.colors['pulse'], 3), 
-                            ('spo2', self.colors['spo2'], 2), 
-                            ('temp', self.colors['temp'], 2),
-                            ('rr', self.colors['rr'], 2),
-                            ('cvp', self.colors['cvp'], 2)]:
-            chunks = get_chunks(d[f'{k}_x'], d[f'{k}_y'])
-            for cx, cy in chunks:
-                curve = pg.PlotDataItem(cx, cy, pen=pg.mkPen(color, width=w))
-                self.plot_widget.addItem(curve)
-                self.curve_items.append(curve)
-
-        # РћС‚СЂРёСЃРѕРІРєР° РјР°СЂРєРµСЂРѕРІ РЅР° РѕСЂРёРіРёРЅР°Р»СЊРЅС‹С… С‚РѕС‡РєР°С…
-        scatter_spots = []
+        scatter_data = {
+            "ad": {"x": [], "y": []},
+            "pulse": {"x": [], "y": []},
+            "spo2": {"x": [], "y": []},
+            "temp": {"x": [], "y": []},
+            "rr": {"x": [], "y": []},
+            "cvp": {"x": [], "y": []},
+        }
         for v in self.current_vitals:
             ex_x = (v.timestamp - self.start_time).total_seconds() / 3600.0
-            def add_spot(val, color, is_cvp=False):
+            def add_spot(val, key, is_cvp=False):
                 try:
                     if val is not None:
                         v_float = float(val)
                         if is_cvp and v_float == -1.0:
                             v_float = 0.0
-                        scatter_spots.append({'pos': (ex_x, v_float), 'brush': color})
+                        scatter_data[key]["x"].append(ex_x)
+                        scatter_data[key]["y"].append(v_float)
                 except: pass
             
-            add_spot(v.sys, self.colors['ad'])
-            add_spot(v.dia, self.colors['ad'])
-            add_spot(v.pulse, self.colors['pulse'])
-            add_spot(v.spo2, self.colors['spo2'])
-            add_spot(v.temp, self.colors['temp'])
-            add_spot(getattr(v, 'rr', None), self.colors['rr'])
-            add_spot(getattr(v, 'cvp', None), self.colors['cvp'], is_cvp=True)
+            add_spot(v.sys, "ad")
+            add_spot(v.dia, "ad")
+            add_spot(v.pulse, "pulse")
+            add_spot(v.spo2, "spo2")
+            add_spot(v.temp, "temp")
+            add_spot(getattr(v, 'rr', None), "rr")
+            add_spot(getattr(v, 'cvp', None), "cvp", is_cvp=True)
             
-        self.scatter_vitals.setData(scatter_spots)
+        for key, item in self._scatter_items.items():
+            item.setData(x=scatter_data[key]["x"], y=scatter_data[key]["y"])
 
         self.header_spacer.update()
 
