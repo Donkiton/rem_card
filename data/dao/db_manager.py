@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import socket
@@ -26,6 +27,7 @@ from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import (
     BAZA_DIR,
+    BACKUP_HEALTH_DIR,
     BACKUPS_RC_DIR,
     BACKUPS_VALID_DIR,
     CLIENT_POLICY_PATH,
@@ -35,6 +37,7 @@ from rem_card.app.paths import (
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
     LOCAL_REMCARD_REPLICA_PATH,
+    QUARANTINE_DIR,
 )
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 from rem_card.app.startup_db_guard import (
@@ -44,6 +47,7 @@ from rem_card.app.startup_db_guard import (
 )
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
+    NETWORK_SAFE_DB_PROFILE,
     SQLiteWriteController,
     backup_connection,
     configure_connection,
@@ -52,6 +56,7 @@ from rem_card.app.sqlite_shared import (
     run_integrity_check,
     run_quick_check,
 )
+from rem_card.app.version import APP_VERSION
 
 
 GLOBAL_CHANGELOG_ENTITIES = ("patients", "admissions", "beds", "operations", "diet_templates")
@@ -98,6 +103,8 @@ STARTUP_QUICKCHECK_TTL_SEC = max(
     float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_TTL_SEC", "120")),
 )
 STARTUP_QUICKCHECK_META_KEY = "startup_last_quick_check_ts"
+STARTUP_QUICKCHECK_STATE_VERSION = 2
+STARTUP_QUICKCHECK_STATE_PATH = os.path.join(BACKUP_HEALTH_DIR, "startup_quick_check_state.json")
 SHUTDOWN_BACKUP_MIN_INTERVAL_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_SHUTDOWN_BACKUP_MIN_INTERVAL_SEC", str(6 * 60 * 60))),
@@ -181,6 +188,9 @@ class DatabaseManager:
         self._central_io_lock = threading.RLock()
         self._closed = False
         self.startup_metrics: dict[str, float] = {}
+        self._startup_pre_connect_fingerprint: Optional[dict[str, Any]] = self._startup_db_fingerprint()
+        self._startup_quickcheck_ok_ts: Optional[int] = None
+        self._startup_quickcheck_skipped_ts: Optional[int] = None
 
         self._maybe_rotate_db_lifecycle()
 
@@ -233,6 +243,8 @@ class DatabaseManager:
             logger.warning("DB lifecycle status: %s | %s", status, result)
         elif status not in ("missing", "not_due", "rotation_lock_busy"):
             logger.info("DB lifecycle status: %s | %s", status, result)
+        if status not in ("not_due", "rotation_lock_busy", "deferred_active_beds"):
+            self._startup_pre_connect_fingerprint = None
 
     def _init_connections(self):
         logger.info("Initializing unified DB connection at %s", self.db_path)
@@ -241,6 +253,8 @@ class DatabaseManager:
         owner_id = f"{socket.gethostname()}:{os.getpid()}:remcard_init"
         self._acquire_connection_profile_lock(profile_lock, owner_id)
         try:
+            if self._startup_pre_connect_fingerprint is None:
+                self._startup_pre_connect_fingerprint = self._startup_db_fingerprint()
             connect_started = time.perf_counter()
             conn = sqlite3.connect(
                 self.db_path,
@@ -446,25 +460,129 @@ class DatabaseManager:
             return None
 
     def _write_startup_quickcheck_ts(self, ts: Optional[int] = None):
+        value = int(time.time()) if ts is None else int(ts)
         if not self._remcard_conn or not self._meta_table_exists():
             return
-        value = int(time.time()) if ts is None else int(ts)
         try:
             self._remcard_conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                 (STARTUP_QUICKCHECK_META_KEY, value),
             )
+            self._remcard_conn.commit()
         except Exception as exc:
             logger.debug("Failed to update startup quick_check marker: %s", exc)
+            return
+        self._startup_quickcheck_ok_ts = value
+        self._startup_quickcheck_skipped_ts = None
+        self._write_startup_quickcheck_state(value, result="ok")
+
+    def _normalized_startup_db_path(self) -> str:
+        return os.path.normcase(os.path.abspath(str(self.db_path)))
+
+    def _startup_db_fingerprint(self) -> Optional[dict[str, Any]]:
+        try:
+            stat_result = os.stat(self.db_path)
+        except Exception as exc:
+            logger.debug("Failed to stat startup quick_check DB: %s", exc)
+            return None
+        return {
+            "db_path_norm": self._normalized_startup_db_path(),
+            "size_bytes": int(stat_result.st_size),
+            "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+            "db_profile": NETWORK_SAFE_DB_PROFILE,
+            "state_version": STARTUP_QUICKCHECK_STATE_VERSION,
+        }
+
+    @staticmethod
+    def _latest_mtime_ns_under(path: str) -> int:
+        if not path or not os.path.exists(path):
+            return 0
+        latest = 0
+        for root, dirs, files in os.walk(path):
+            for name in list(dirs) + list(files):
+                candidate = os.path.join(root, name)
+                try:
+                    stat_result = os.stat(candidate)
+                except OSError:
+                    continue
+                latest = max(
+                    latest,
+                    int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+                )
+        return latest
+
+    def _startup_failure_marker_mtime_ns(self) -> int:
+        return max(
+            self._latest_mtime_ns_under(INVALID_BACKUPS_DIR),
+            self._latest_mtime_ns_under(QUARANTINE_DIR),
+        )
+
+    def _read_startup_quickcheck_state(self) -> Optional[dict[str, Any]]:
+        try:
+            with open(STARTUP_QUICKCHECK_STATE_PATH, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except FileNotFoundError:
+            return None
+        except Exception as exc:
+            logger.debug("Failed to read startup quick_check state: %s", exc)
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _write_startup_quickcheck_state(self, checked_at_epoch: int, *, result: str):
+        fingerprint = self._startup_db_fingerprint()
+        if not fingerprint:
+            return
+        payload = {
+            **fingerprint,
+            "checked_at_epoch": int(checked_at_epoch),
+            "result": str(result or ""),
+            "app_version": APP_VERSION,
+            "failure_marker_mtime_ns": self._startup_failure_marker_mtime_ns(),
+        }
+        try:
+            os.makedirs(os.path.dirname(STARTUP_QUICKCHECK_STATE_PATH), exist_ok=True)
+            temp_path = (
+                f"{STARTUP_QUICKCHECK_STATE_PATH}.tmp_"
+                f"{os.getpid()}_{threading.get_ident()}_{int(time.time() * 1000)}"
+            )
+            with open(temp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            os.replace(temp_path, STARTUP_QUICKCHECK_STATE_PATH)
+        except Exception as exc:
+            logger.debug("Failed to write startup quick_check state: %s", exc)
+
+    def _startup_quickcheck_state_matches(self, state: dict[str, Any], fingerprint: dict[str, Any]) -> bool:
+        if int(state.get("state_version") or 0) != STARTUP_QUICKCHECK_STATE_VERSION:
+            return False
+        if str(state.get("result") or "") != "ok":
+            return False
+        for key in ("db_path_norm", "size_bytes", "mtime_ns", "db_profile"):
+            if state.get(key) != fingerprint.get(key):
+                return False
+        try:
+            stored_marker = int(state.get("failure_marker_mtime_ns") or 0)
+        except Exception:
+            return False
+        return self._startup_failure_marker_mtime_ns() <= stored_marker
 
     def _should_run_startup_quickcheck(self) -> tuple[bool, Optional[float]]:
         if STARTUP_QUICKCHECK_TTL_SEC <= 0:
             return True, None
-        last_ts = self._read_startup_quickcheck_ts()
-        if not last_ts:
+        state = self._read_startup_quickcheck_state()
+        if not state:
             return True, None
-        age_sec = max(0.0, time.time() - float(last_ts))
-        return age_sec >= STARTUP_QUICKCHECK_TTL_SEC, age_sec
+        fingerprint = getattr(self, "_startup_pre_connect_fingerprint", None) or self._startup_db_fingerprint()
+        if not fingerprint or not self._startup_quickcheck_state_matches(state, fingerprint):
+            return True, None
+        try:
+            checked_at = float(state.get("checked_at_epoch"))
+        except Exception:
+            return True, None
+        age_sec = max(0.0, time.time() - checked_at)
+        should_run = age_sec >= STARTUP_QUICKCHECK_TTL_SEC
+        if not should_run:
+            self._startup_quickcheck_skipped_ts = int(checked_at)
+        return should_run, age_sec
 
     def _verify_quick_integrity_or_restore(self):
         decision_started = time.perf_counter()
@@ -1493,5 +1611,10 @@ class DatabaseManager:
                         conn.close()
                     self._remcard_conn = None
                     self._journal_conn = None
+                    quickcheck_ok_ts = getattr(self, "_startup_quickcheck_ok_ts", None)
+                    quickcheck_skipped_ts = getattr(self, "_startup_quickcheck_skipped_ts", None)
+                    quickcheck_state_ts = quickcheck_ok_ts if quickcheck_ok_ts is not None else quickcheck_skipped_ts
+                    if quickcheck_state_ts is not None:
+                        self._write_startup_quickcheck_state(int(quickcheck_state_ts), result="ok")
         else:
             self._journal_conn = None
