@@ -600,6 +600,299 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
         manager.close()
 
 
+def _check_startup_metrics_are_reported(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.dao.db_manager import DatabaseManager
+
+    db_path = os.path.join(temp_root, "startup_metrics.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        metrics = dict(getattr(manager, "startup_metrics", {}) or {})
+        required = {
+            "connection_lock_wait_ms",
+            "connection_profile_ms",
+            "sqlite_connect_ms",
+            "quick_check_decision_ms",
+            "quick_check_ms",
+            "schema_init_ms",
+            "cache_cleanup_ms",
+        }
+        missing = sorted(required - set(metrics))
+        if missing:
+            return False, f"DatabaseManager startup metrics missing: {missing}"
+        for key in required:
+            try:
+                value = float(metrics[key])
+            except Exception:
+                return False, f"startup metric {key} is not numeric: {metrics.get(key)!r}"
+            if value < 0:
+                return False, f"startup metric {key} is negative: {value}"
+    finally:
+        manager.close()
+
+    benchmark_source = (PROJECT_ROOT / "scripts" / "startup_benchmark.py").read_text(encoding="utf-8")
+    for needle in ("startup_phases", "total_bootstrap_ms"):
+        if needle not in benchmark_source:
+            return False, f"startup_benchmark.py must report {needle}"
+    return True, "ok"
+
+
+def _check_connection_profile_lock_waits_and_times_out(temp_root: str) -> tuple[bool, str]:
+    import rem_card.data.dao.db_manager as dbm
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = os.path.join(temp_root, "db.lock")
+    original_timeout = dbm.CONNECTION_PROFILE_LOCK_TIMEOUT_SEC
+    original_min = dbm.CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC
+    original_max = dbm.CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC
+
+    def make_manager():
+        manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+        manager.startup_metrics = {}
+        return manager
+
+    try:
+        dbm.CONNECTION_PROFILE_LOCK_TIMEOUT_SEC = 1.0
+        dbm.CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC = 0.01
+        dbm.CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC = 0.02
+
+        ready = threading.Event()
+        done = threading.Event()
+
+        def holder():
+            lock = FileWriteLock(lock_path, stale_timeout_sec=60.0)
+            if not lock.acquire(owner_id="holder", source="connection_profile_holder"):
+                ready.set()
+                return
+            ready.set()
+            try:
+                time.sleep(0.12)
+            finally:
+                lock.release()
+                done.set()
+
+        thread = threading.Thread(target=holder, daemon=True)
+        thread.start()
+        if not ready.wait(1.0):
+            return False, "holder did not acquire connection profile lock"
+
+        waiter = FileWriteLock(lock_path, stale_timeout_sec=60.0)
+        manager = make_manager()
+        started = time.perf_counter()
+        manager._acquire_connection_profile_lock(waiter, "waiter")
+        elapsed = time.perf_counter() - started
+        waiter.release()
+        thread.join(timeout=1.0)
+        if elapsed < 0.08:
+            return False, f"connection profile lock did not wait for holder release: {elapsed:.3f}s"
+        if float(manager.startup_metrics.get("connection_lock_wait_ms", 0.0)) <= 0:
+            return False, "connection lock wait metric was not recorded"
+
+        dbm.CONNECTION_PROFILE_LOCK_TIMEOUT_SEC = 0.12
+        dbm.CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC = 0.01
+        dbm.CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC = 0.02
+        timeout_ready = threading.Event()
+        release_timeout_holder = threading.Event()
+
+        def long_holder():
+            lock = FileWriteLock(lock_path, stale_timeout_sec=60.0)
+            if not lock.acquire(owner_id="timeout-holder", source="connection_profile_holder"):
+                timeout_ready.set()
+                return
+            timeout_ready.set()
+            try:
+                release_timeout_holder.wait(1.0)
+            finally:
+                lock.release()
+
+        thread = threading.Thread(target=long_holder, daemon=True)
+        thread.start()
+        if not timeout_ready.wait(1.0):
+            return False, "timeout holder did not acquire connection profile lock"
+
+        timed_out = False
+        try:
+            make_manager()._acquire_connection_profile_lock(FileWriteLock(lock_path, stale_timeout_sec=60.0), "waiter")
+        except Exception as exc:
+            text = str(exc)
+            timed_out = True
+            for needle in ("connection profile", "host=", "pid=", "source=", "age_sec="):
+                if needle not in text:
+                    return False, f"controlled timeout message missing {needle}: {text}"
+        finally:
+            release_timeout_holder.set()
+            thread.join(timeout=1.0)
+        if not timed_out:
+            return False, "connection profile lock timeout did not raise"
+
+        source = (PROJECT_ROOT / "data" / "dao" / "db_manager.py").read_text(encoding="utf-8")
+        init_start = source.find("def _init_connections")
+        init_end = source.find("def _acquire_connection_profile_lock", init_start)
+        init_source = source[init_start:init_end]
+        if "recover_shared_db_with_locks" in init_source:
+            return False, "connection_profile lock path must not trigger recovery"
+        return True, "ok"
+    finally:
+        dbm.CONNECTION_PROFILE_LOCK_TIMEOUT_SEC = original_timeout
+        dbm.CONNECTION_PROFILE_LOCK_RETRY_MIN_SEC = original_min
+        dbm.CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC = original_max
+        for path in (lock_path,):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
+
+def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
+    import rem_card.data.dao.db_manager as dbm
+
+    root = Path(temp_root) / "startup_quickcheck_state_v2"
+    state_path = root / "backup_health" / "startup_quick_check_state.json"
+    invalid_dir = root / "invalid_backups"
+    quarantine_dir = root / "quarantine"
+    db_path = root / "remcard.db"
+    root.mkdir(parents=True, exist_ok=True)
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    original_values = {
+        "state_path": dbm.STARTUP_QUICKCHECK_STATE_PATH,
+        "invalid_dir": dbm.INVALID_BACKUPS_DIR,
+        "quarantine_dir": dbm.QUARANTINE_DIR,
+        "ttl": dbm.STARTUP_QUICKCHECK_TTL_SEC,
+        "profile": dbm.NETWORK_SAFE_DB_PROFILE,
+        "quick": dbm.run_quick_check,
+        "recover": dbm.recover_shared_db_with_locks,
+    }
+
+    manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+    manager.db_path = str(db_path)
+    manager.startup_metrics = {}
+
+    def write_db(payload: bytes):
+        db_path.write_bytes(payload)
+        time.sleep(0.01)
+
+    def write_valid_state(age_sec: int = 0, result: str = "ok"):
+        manager._write_startup_quickcheck_state(int(time.time()) - age_sec, result=result)
+
+    def should_run() -> bool:
+        return bool(manager._should_run_startup_quickcheck()[0])
+
+    def mutate_state(key: str, value):
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        payload[key] = value
+        state_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    try:
+        dbm.STARTUP_QUICKCHECK_STATE_PATH = str(state_path)
+        dbm.INVALID_BACKUPS_DIR = str(invalid_dir)
+        dbm.QUARANTINE_DIR = str(quarantine_dir)
+        dbm.STARTUP_QUICKCHECK_TTL_SEC = 60.0
+        dbm.NETWORK_SAFE_DB_PROFILE = "network"
+
+        write_db(b"fingerprint-v1")
+        if not should_run():
+            return False, "missing startup quick_check state must run quick_check"
+
+        write_valid_state()
+        if should_run():
+            return False, "valid matching startup quick_check state must skip within TTL"
+
+        manager._startup_pre_connect_fingerprint = manager._startup_db_fingerprint()
+        write_valid_state()
+        changed_ns = time.time_ns() + 1_000_000_000
+        os.utime(db_path, ns=(changed_ns, changed_ns))
+        if should_run():
+            return False, "matching pre-connect DB fingerprint must survive current startup PRAGMA mtime drift"
+        manager._startup_pre_connect_fingerprint = None
+
+        write_valid_state(age_sec=120)
+        if not should_run():
+            return False, "expired startup quick_check state must run quick_check"
+
+        write_db(b"fingerprint-size")
+        write_valid_state()
+        db_path.write_bytes(b"fingerprint-size-changed")
+        if not should_run():
+            return False, "changed DB size must run quick_check"
+
+        write_db(b"fingerprint-mtime")
+        write_valid_state()
+        changed_ns = time.time_ns() + 2_000_000_000
+        os.utime(db_path, ns=(changed_ns, changed_ns))
+        if not should_run():
+            return False, "changed DB mtime must run quick_check"
+
+        write_db(b"fingerprint-path")
+        write_valid_state()
+        other_db = root / "other_remcard.db"
+        other_db.write_bytes(db_path.read_bytes())
+        manager.db_path = str(other_db)
+        if not should_run():
+            return False, "changed normalized DB path must run quick_check"
+        manager.db_path = str(db_path)
+
+        write_db(b"fingerprint-profile")
+        write_valid_state()
+        mutate_state("db_profile", "legacy")
+        if not should_run():
+            return False, "changed DB profile must run quick_check"
+
+        write_db(b"fingerprint-corrupt-state")
+        write_valid_state()
+        state_path.write_text("{not-json", encoding="utf-8")
+        if not should_run():
+            return False, "corrupt startup quick_check state must run quick_check"
+
+        write_db(b"fingerprint-failed-result")
+        write_valid_state(result="failed")
+        if not should_run():
+            return False, "non-ok previous startup quick_check result must run quick_check"
+
+        write_db(b"fingerprint-failure-marker")
+        write_valid_state()
+        time.sleep(0.02)
+        (invalid_dir / "migration_failure.marker").write_text("failed", encoding="utf-8")
+        if not should_run():
+            return False, "newer recovery/migration failure marker must run quick_check"
+
+        write_db(b"fingerprint-quick-failure")
+        write_valid_state(age_sec=120)
+        manager._remcard_conn = object()
+        manager._close_connections_for_restore = lambda: None
+        recovery_calls: list[dict] = []
+
+        class RecoveryResult:
+            ok = False
+            technical_reason = "mock recovery stopped"
+            restored_from = None
+            quarantine_path = None
+
+        dbm.run_quick_check = lambda conn: (False, "database disk image is malformed")
+        dbm.recover_shared_db_with_locks = lambda **kwargs: recovery_calls.append(kwargs) or RecoveryResult()
+        try:
+            manager._verify_quick_integrity_or_restore()
+        except RuntimeError as exc:
+            if "safe recovery" not in str(exc):
+                return False, f"unexpected quick_check failure handling: {exc}"
+        else:
+            return False, "failed quick_check was bypassed by startup quick_check state"
+        if not recovery_calls:
+            return False, "confirmed quick_check failure did not enter recovery path"
+
+        return True, "ok"
+    finally:
+        dbm.STARTUP_QUICKCHECK_STATE_PATH = original_values["state_path"]
+        dbm.INVALID_BACKUPS_DIR = original_values["invalid_dir"]
+        dbm.QUARANTINE_DIR = original_values["quarantine_dir"]
+        dbm.STARTUP_QUICKCHECK_TTL_SEC = original_values["ttl"]
+        dbm.NETWORK_SAFE_DB_PROFILE = original_values["profile"]
+        dbm.run_quick_check = original_values["quick"]
+        dbm.recover_shared_db_with_locks = original_values["recover"]
+
+
 def _check_blood_plasma_key_ru_prescription_parse(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.dto.remcard_dto import OrderType
     from rem_card.ui.doctor_view.components.order_input_handler import OrderInputHandler
@@ -5433,6 +5726,188 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
     return True, "ok"
 
 
+def _check_chart_heavy_redraw_performance(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime, timedelta
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.shared.chart_widget import ChartWidget
+
+    class Vital:
+        def __init__(self, idx: int, timestamp: datetime, updated_at: str):
+            self.id = idx
+            self.timestamp = timestamp
+            self.sys = 110 + (idx % 25)
+            self.dia = 65 + (idx % 15)
+            self.pulse = 70 + (idx % 20)
+            self.temp = 36.2 + ((idx % 7) * 0.1)
+            self.spo2 = 95 + (idx % 4)
+            self.rr = 15 + (idx % 6)
+            self.cvp = 5 + (idx % 3)
+            self.updated_at = updated_at
+
+        def clone(self):
+            copied = Vital(self.id, self.timestamp, self.updated_at)
+            copied.sys = self.sys
+            copied.dia = self.dia
+            copied.pulse = self.pulse
+            copied.temp = self.temp
+            copied.spo2 = self.spo2
+            copied.rr = self.rr
+            copied.cvp = self.cvp
+            return copied
+
+    def percentile(values: list[float], p: float) -> float:
+        arr = sorted(values)
+        k = (len(arr) - 1) * p
+        f = int(k)
+        c = min(f + 1, len(arr) - 1)
+        if f == c:
+            return arr[f]
+        return arr[f] + (arr[c] - arr[f]) * (k - f)
+
+    app = QApplication.instance() or QApplication([])
+    chart = ChartWidget()
+    start = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+    base = start - timedelta(hours=24)
+    vitals = [
+        Vital(i + 1, base + timedelta(minutes=15 * i), f"2026-01-01T00:00:{i % 60:02d}")
+        for i in range(220)
+    ]
+    intervals = []
+    current = (start - timedelta(hours=36)).replace(second=0, microsecond=0)
+    for _idx in range(180):
+        active_start = current
+        active_end = active_start + timedelta(minutes=15)
+        intervals.append((active_start, active_end))
+        current = active_end + timedelta(minutes=5)
+
+    try:
+        chart.update_data(vitals, start, active_intervals=intervals)
+        app.processEvents()
+
+        samples = []
+        for idx in range(5):
+            mutated = [vital.clone() for vital in vitals]
+            mutated[-1].pulse += idx + 1
+            mutated[-1].updated_at = f"2030-01-01T00:00:{idx:02d}"
+            started = time.perf_counter()
+            chart.update_data(mutated, start, active_intervals=intervals)
+            app.processEvents()
+            samples.append((time.perf_counter() - started) * 1000.0)
+
+        p95 = percentile(samples, 0.95)
+        limit_ms = float(os.environ.get("REMCARD_CHART_HEAVY_REDRAW_LIMIT_MS", "200"))
+        rendered_curves = len(chart.curve_items)
+        rendered_fills = len(chart.fill_items)
+        if p95 > limit_ms:
+            return (
+                False,
+                f"heavy chart redraw p95={p95:.1f}ms > {limit_ms:.1f}ms; samples={[round(v, 1) for v in samples]}",
+            )
+        if rendered_curves > 20 or rendered_fills > 4:
+            return False, f"chart must reuse plot items, got curves={rendered_curves}, fills={rendered_fills}"
+        return True, f"p95={p95:.1f}ms samples={[round(v, 1) for v in samples]}"
+    finally:
+        chart.deleteLater()
+        app.processEvents()
+
+
+def _check_chart_snapshot_dedupes_unchanged_payload(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime, timedelta
+    from types import MethodType, SimpleNamespace
+
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+    from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget
+    from rem_card.ui.shared.chart_widget import ChartWidget
+
+    class Vital:
+        def __init__(self, idx: int, timestamp: datetime, updated_at: str):
+            self.id = idx
+            self.timestamp = timestamp
+            self.sys = 120 + idx
+            self.dia = 70 + idx
+            self.pulse = 80 + idx
+            self.temp = 36.5
+            self.spo2 = 98
+            self.updated_at = updated_at
+
+    class FakeChart:
+        def __init__(self):
+            self.calls = 0
+            self.calls_payload = []
+
+        @staticmethod
+        def _normalize_key_dt(value):
+            return ChartWidget._normalize_key_dt(value)
+
+        @classmethod
+        def _build_vitals_key(cls, vitals):
+            return ChartWidget._build_vitals_key(vitals)
+
+        @classmethod
+        def _build_intervals_key(cls, active_intervals):
+            return ChartWidget._build_intervals_key(active_intervals)
+
+        def update_data(self, vitals, start_time, active_intervals=None):
+            self.calls += 1
+            self.calls_payload.append((len(vitals or []), start_time, tuple(active_intervals or ())))
+
+    start = datetime(2026, 5, 3, 8, 0, 0)
+    vitals = [
+        Vital(1, start - timedelta(hours=2), "2026-05-03T08:01:00"),
+        Vital(2, start + timedelta(hours=1), "2026-05-03T09:01:00"),
+    ]
+    intervals = [(start - timedelta(hours=1), start + timedelta(hours=2))]
+    vitals_snapshot = {
+        "admission_id": 77,
+        "scope": "patient_vitals",
+        "version": 10,
+        "start_dt": start,
+        "vitals_extended": vitals,
+        "chart_active_intervals": intervals,
+    }
+    full_snapshot = {
+        **vitals_snapshot,
+        "scope": "patient_card",
+        "balance_runtime": {"active_intervals": intervals, "totals": {}},
+    }
+    changed_snapshot = {
+        **full_snapshot,
+        "version": 11,
+        "vitals_extended": [
+            vitals[0],
+            Vital(2, start + timedelta(hours=1), "2026-05-03T09:02:00"),
+        ],
+    }
+
+    cases = [
+        ("doctor", DoctorRemCardWidget, SimpleNamespace(current_admission_id=77)),
+        ("nurse", NurseMainWidget, SimpleNamespace(current_admission_id=77)),
+    ]
+    for role, widget_cls, layout_manager in cases:
+        fake = SimpleNamespace(
+            admission_id=77,
+            layout_manager=layout_manager,
+            chart=FakeChart(),
+            _last_applied_chart_signature=None,
+        )
+        fake._chart_snapshot_signature = MethodType(widget_cls._chart_snapshot_signature, fake)
+        widget_cls._update_chart_from_snapshot(fake, vitals_snapshot)
+        widget_cls._update_chart_from_snapshot(fake, full_snapshot)
+        if fake.chart.calls != 1:
+            return False, f"{role}: unchanged full snapshot must not call chart.update_data twice"
+        widget_cls._update_chart_from_snapshot(fake, changed_snapshot)
+        if fake.chart.calls != 2:
+            return False, f"{role}: changed vitals payload must redraw chart"
+
+    return True, "ok"
+
+
 def _check_journal_prewarm_is_opt_in(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     root = Path(__file__).resolve().parents[1]
@@ -6608,6 +7083,9 @@ def main():
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
+        ("startup_metrics_are_reported", _check_startup_metrics_are_reported),
+        ("connection_profile_lock_waits_and_times_out", _check_connection_profile_lock_waits_and_times_out),
+        ("startup_quickcheck_state_v2", _check_startup_quickcheck_state_v2),
         ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
@@ -6679,6 +7157,8 @@ def main():
         ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
         ("chart_clears_on_card_context_change", _check_chart_clears_on_card_context_change),
+        ("chart_heavy_redraw_performance", _check_chart_heavy_redraw_performance),
+        ("chart_snapshot_dedupes_unchanged_payload", _check_chart_snapshot_dedupes_unchanged_payload),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
