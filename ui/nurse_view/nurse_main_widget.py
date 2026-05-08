@@ -92,6 +92,7 @@ class NurseMainWidget(QWidget):
         self._card_ui_prewarm_done = False
         self._chart_init_pending = False
         self._last_applied_card_snapshot_signature = None
+        self._last_applied_chart_signature = None
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
         self._selection_mode = "beds"
@@ -347,6 +348,30 @@ class NurseMainWidget(QWidget):
             and getattr(chart, "start_time", None) == start_dt
             and bool(getattr(chart, "vitals_data", None))
         )
+
+    def _chart_snapshot_signature(self, snapshot: dict):
+        chart = getattr(self, "chart", None)
+        if not snapshot or chart is None:
+            return None
+        chart_cls = chart.__class__
+        normalize_dt = getattr(chart_cls, "_normalize_key_dt", None)
+        build_vitals_key = getattr(chart_cls, "_build_vitals_key", None)
+        build_intervals_key = getattr(chart_cls, "_build_intervals_key", None)
+        if not (normalize_dt and build_vitals_key and build_intervals_key):
+            return None
+        runtime = snapshot.get("balance_runtime") or {}
+        active_intervals = snapshot.get("chart_active_intervals") or runtime.get("active_intervals")
+        try:
+            admission_id = getattr(getattr(self, "layout_manager", None), "current_admission_id", None)
+            return (
+                int(snapshot.get("admission_id") or admission_id or 0),
+                normalize_dt(snapshot.get("start_dt")),
+                build_vitals_key(snapshot.get("vitals_extended") or []),
+                build_intervals_key(active_intervals or []),
+            )
+        except Exception as exc:
+            logger.debug("Nurse chart snapshot signature failed: %s", exc)
+            return None
 
     def _ensure_diet_widget(self):
         if getattr(self, "diet_intake_widget", None) is not None:
@@ -1350,11 +1375,24 @@ class NurseMainWidget(QWidget):
         if not snapshot or getattr(self, "chart", None) is None:
             return
         runtime = snapshot.get("balance_runtime") or {}
+        chart_signature = self._chart_snapshot_signature(snapshot)
+        if (
+            chart_signature is not None
+            and chart_signature == self._last_applied_chart_signature
+        ):
+            logger.info(
+                "NurseMainWidget skipped unchanged chart snapshot admission_id=%s scope=%s version=%s",
+                snapshot.get("admission_id"),
+                snapshot.get("scope"),
+                snapshot.get("version"),
+            )
+            return
         self.chart.update_data(
             snapshot.get("vitals_extended") or [],
             snapshot.get("start_dt"),
             active_intervals=snapshot.get("chart_active_intervals") or runtime.get("active_intervals"),
         )
+        self._last_applied_chart_signature = chart_signature
 
     def _ensure_card_widgets_initialized(self):
         if hasattr(self, "vitals_input") and hasattr(self, "balance_controller"):
@@ -1488,13 +1526,17 @@ class NurseMainWidget(QWidget):
 
         if hasattr(self, "chart"):
             self.chart.admission_id = admission_id
+            chart_matches_target = self._chart_matches_context(admission_id, start_dt)
+            if not chart_matches_target:
+                self._last_applied_chart_signature = None
             if (
                 hasattr(self.chart, "clear_for_context")
                 and not cached_vitals_snapshot
-                and not self._chart_matches_context(admission_id, start_dt)
+                and not chart_matches_target
             ):
                 self.chart.clear_for_context(admission_id=admission_id, start_time=start_dt)
         else:
+            self._last_applied_chart_signature = None
             self._schedule_chart_init()
         self.vitals_input.admission_id = admission_id
         self.vitals_input.shift_date = date
