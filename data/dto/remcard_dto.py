@@ -1,7 +1,9 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from enum import Enum
+
+from rem_card.app.patient_age import format_patient_age, format_patient_age_from_birth_date
 
 class OrderType(Enum):
     MEDICATION = "medication"
@@ -88,7 +90,9 @@ class PatientDTO:
     
     # Новые поля для расширенной синхронизации
     age: Optional[int] = None
+    age_months: Optional[int] = None
     age_unit: Optional[str] = "л"
+    birth_date: Optional[date] = None
     mkb_code: Optional[str] = None
     operation_info: Optional[str] = None
     full_name: Optional[str] = None
@@ -108,6 +112,15 @@ class PatientDTO:
         # Убираем лишние пробелы, если какие-то части имени отсутствуют
         name = " ".join(part for part in [last, f, m] if part).strip()
         return name if name else (self.full_name if self.full_name else "Неизвестно")
+
+    def get_display_age(self, reference_date: Optional[datetime] = None) -> str:
+        age_text = format_patient_age_from_birth_date(
+            self.birth_date,
+            reference_date or self.admission_datetime,
+        )
+        if age_text:
+            return age_text
+        return format_patient_age(self.age, self.age_unit, self.age_months)
 
 @dataclass
 class RemCardDTO:

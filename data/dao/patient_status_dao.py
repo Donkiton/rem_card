@@ -34,22 +34,38 @@ class PatientStatusDAO:
         row = self.db.fetch_one_remcard(
             """
             SELECT
-                id,
-                admission_datetime,
-                department_profile,
-                source_department,
-                transfer_datetime,
-                transfer_department,
-                transfer_lpu,
-                transfer_lpu_other,
-                death_datetime,
-                clinical_death_datetime,
-                cardiac_arrest_cause,
-                cardiac_arrest_measures_json,
-                outcome,
-                COALESCE(revision, 0) AS revision
-            FROM admissions
-            WHERE id = ?
+                a.id,
+                a.admission_datetime,
+                a.department_profile,
+                a.source_department,
+                a.history_number,
+                a.patient_age,
+                a.patient_months,
+                a.patient_age_unit,
+                a.patient_gender,
+                p.birth_date,
+                p.last_name,
+                p.first_name,
+                p.middle_name,
+                p.full_name,
+                TRIM(
+                    COALESCE(p.last_name, '') || ' ' ||
+                    COALESCE(p.first_name, '') || ' ' ||
+                    COALESCE(p.middle_name, '')
+                ) AS patient_name,
+                a.transfer_datetime,
+                a.transfer_department,
+                a.transfer_lpu,
+                a.transfer_lpu_other,
+                a.death_datetime,
+                a.clinical_death_datetime,
+                a.cardiac_arrest_cause,
+                a.cardiac_arrest_measures_json,
+                a.outcome,
+                COALESCE(a.revision, 0) AS revision
+            FROM admissions a
+            JOIN patients p ON a.patient_id = p.id
+            WHERE a.id = ?
             """,
             (admission_id,),
         )

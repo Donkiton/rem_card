@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from ..dto.remcard_dto import PatientDTO
 from .patient_status_dao import PatientStatusDAO
 from ..dto.remcard_dto import PatientStatus
+from rem_card.app.patient_age import parse_date_value
 from rem_card.services.shift_service import ShiftService
 from ...app.logger import logger
 from ...app.paths import ARCHIV_DIR, DB_CYCLE_ARCHIVE_DIR
@@ -24,9 +25,9 @@ class PatientDAO:
     def get_active_patients(self) -> List[PatientDTO]:
         query = """
             SELECT 
-                a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name,
+                a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name, p.birth_date,
                 a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
-                a.diagnosis_text, a.patient_age, a.patient_age_unit,
+                a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit,
                 a.diagnosis_code as mkb_code,
                 COALESCE(
                     a.operation_description,
@@ -77,9 +78,9 @@ class PatientDAO:
     def get_patient_by_id(self, admission_id: int) -> Optional[PatientDTO]:
         query = """
             SELECT 
-                a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name,
+                a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name, p.birth_date,
                 a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
-                a.diagnosis_text, a.patient_age, a.patient_age_unit,
+                a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit,
                 a.diagnosis_code as mkb_code,
                 COALESCE(
                     a.operation_description,
@@ -96,9 +97,9 @@ class PatientDAO:
                 raise
             fallback_query = """
                 SELECT 
-                    a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name,
+                    a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name, p.birth_date,
                     a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
-                    a.diagnosis_text, a.patient_age, a.patient_age_unit,
+                    a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit,
                     a.diagnosis_code as mkb_code,
                     a.operation_description as operation_info
                 FROM admissions a
@@ -297,7 +298,9 @@ class PatientDAO:
                 transfer_datetime=_safe_parse_dt(_row_get(r, "transfer_datetime")),
                 diagnosis_text=_row_get(r, "diagnosis_text") or "",
                 age=_row_get(r, "patient_age"),
+                age_months=_row_get(r, "patient_months"),
                 age_unit=_row_get(r, "patient_age_unit"),
+                birth_date=parse_date_value(_row_get(r, "birth_date")),
                 mkb_code=_row_get(r, "mkb_code"),
                 operation_info=_row_get(r, "operation_info"),
                 full_name=full_name,
@@ -314,7 +317,7 @@ class PatientDAO:
         admission_columns: Optional[set[str]] = None,
         has_operations_table: bool = True,
     ) -> str:
-        patient_columns = patient_columns or {"last_name", "first_name", "middle_name", "full_name"}
+        patient_columns = patient_columns or {"last_name", "first_name", "middle_name", "full_name", "birth_date"}
         admission_columns = admission_columns or {
             "history_number",
             "bed_number",
@@ -323,6 +326,7 @@ class PatientDAO:
             "death_datetime",
             "diagnosis_text",
             "patient_age",
+            "patient_months",
             "patient_age_unit",
             "diagnosis_code",
             "operation_description",
@@ -364,12 +368,14 @@ class PatientDAO:
                 {p_col('first_name')} as first_name,
                 {p_col('middle_name')} as middle_name,
                 {p_col('full_name')} as full_name,
+                {p_col('birth_date')} as birth_date,
                 {a_col('history_number')} as history_number,
                 {a_col('bed_number')} as bed_number,
                 {a_col('admission_datetime')} as admission_datetime,
                 {transfer_expr} as transfer_datetime,
                 {a_col('diagnosis_text')} as diagnosis_text,
                 {a_col('patient_age')} as patient_age,
+                {a_col('patient_months')} as patient_months,
                 {a_col('patient_age_unit')} as patient_age_unit,
                 {a_col('diagnosis_code')} as mkb_code,
                 {operation_expr} as operation_info

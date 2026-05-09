@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 10
-SCHEMA_MIN_MIGRATION_VERSION = 10
+SCHEMA_FASTPATH_REV = 11
+SCHEMA_MIN_MIGRATION_VERSION = 11
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -38,7 +38,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
 )
 
 _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
-    "patients": {"admission_uid", "last_name", "first_name", "middle_name"},
+    "patients": {"admission_uid", "birth_date", "last_name", "first_name", "middle_name"},
     "admissions": {
         "death_datetime",
         "operation_description",
@@ -534,6 +534,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             full_name TEXT NOT NULL,
             admission_uid TEXT,
+            birth_date TEXT,
             last_name TEXT,
             first_name TEXT,
             middle_name TEXT
@@ -986,6 +987,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     )
 
     _ensure_column(conn, "patients", "admission_uid", "TEXT", logger)
+    _ensure_column(conn, "patients", "birth_date", "TEXT", logger)
     _ensure_column(conn, "patients", "last_name", "TEXT", logger)
     _ensure_column(conn, "patients", "first_name", "TEXT", logger)
     _ensure_column(conn, "patients", "middle_name", "TEXT", logger)
@@ -1200,6 +1202,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 8, "orders optimistic lock revision")
     _mark_schema_migration(conn, 9, "medical audit log foundation")
     _mark_schema_migration(conn, 10, "optimistic lock revisions for clinical domains")
+    _mark_schema_migration(conn, 11, "patients.birth_date for calculated age")
 
     for table in (
         "vitals",

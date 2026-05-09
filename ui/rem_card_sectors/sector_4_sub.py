@@ -253,7 +253,7 @@ class Sector4b(BaseSectorWidget):
         if not patient: return
         self.lbl_history.setText(f"№ {patient.history_number}")
         self.lbl_name.setText(patient.get_display_name())
-        age_str = f"{patient.age} {patient.age_unit}" if patient.age else "-"
+        age_str = patient.get_display_age(current_date) or "-"
         self.lbl_age.setText(f"Возраст: {age_str}")
         if patient.admission_datetime:
             # Нумерация суток должна идти по сменам 08:00-08:00, а не по полным 24 часам

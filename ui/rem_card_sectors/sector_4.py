@@ -121,7 +121,7 @@ class Sector4(BaseSectorWidget):
         self.lbl_history.setText(f"№ {patient.history_number}")
         self.lbl_name.setText(patient.get_display_name())
         
-        age_str = f"{patient.age} {patient.age_unit}" if patient.age else "-"
+        age_str = patient.get_display_age(current_date) or "-"
         self.lbl_age.setText(f"Возраст: {age_str}")
         
         # Расчет суток

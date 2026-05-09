@@ -1,8 +1,14 @@
 from datetime import datetime
 
-from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QHBoxLayout, QComboBox, QSpinBox, QLabel, QDateTimeEdit
+from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QHBoxLayout, QComboBox, QLabel, QDateTimeEdit
 from PySide6.QtCore import QRegularExpression, QDate, QDateTime, QTime, Qt
 from PySide6.QtGui import QRegularExpressionValidator
+from rem_card.app.patient_age import (
+    format_patient_age,
+    format_patient_age_from_birth_date,
+    parse_date_value,
+    storage_age_from_birth_date,
+)
 from rem_card.ui.styles.theme import STYLE_FORM_DATETIME_EDIT
 
 
@@ -32,6 +38,7 @@ class GeneralTabWidget(QWidget):
         self.form_layout.setHorizontalSpacing(14)
         self.form_layout.setVerticalSpacing(10)
         self._row_labels = []
+        self._legacy_age_text = ""
         self._init_ui()
 
     def _add_row(self, label_text: str, field_widget):
@@ -72,39 +79,27 @@ class GeneralTabWidget(QWidget):
         gender_layout.addStretch(1)
         self._add_row("Пол:", gender_layout)
 
-        age_layout = QHBoxLayout()
-        age_layout.setContentsMargins(0, 0, 0, 0)
-        age_layout.setSpacing(8)
-        self.age_value_input = QSpinBox()
-        self.age_value_input.setMinimum(0)
-        self.age_value_input.setMaximum(150)
-        self.age_value_input.setValue(0)
-        self.age_value_input.setSpecialValueText(" ")
-        self.age_value_input.valueChanged.connect(self._on_age_value_changed)
-        self.age_value_input.setFixedHeight(34)
-        self.age_value_input.setFixedWidth(95)
+        birth_layout = QHBoxLayout()
+        birth_layout.setContentsMargins(0, 0, 0, 0)
+        birth_layout.setSpacing(12)
+        self.birth_date_input = QLineEdit()
+        birth_date_regex = QRegularExpression(r"^[0-9.,/]*$")
+        self.birth_date_input.setValidator(QRegularExpressionValidator(birth_date_regex))
+        self.birth_date_input.setPlaceholderText("дд.мм.гггг")
+        self.birth_date_input.setMaxLength(10)
+        self.birth_date_input.setFixedHeight(34)
+        self.birth_date_input.setFixedWidth(160)
+        self.birth_date_input.textEdited.connect(self._on_birth_date_text_edited)
+        self.birth_date_input.editingFinished.connect(self._normalize_birth_date_field)
 
-        self.age_unit_label = QLabel("")
-        self.age_unit_combo = SingleClickComboBox()
-        self.age_unit_combo.addItems(["годы", "месяцы"])
-        self.age_unit_combo.hide()
+        self.age_preview_label = QLabel("Возраст: —")
+        self.age_preview_label.setMinimumHeight(34)
+        self.age_preview_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
-        self.months_input = QSpinBox()
-        self.months_input.setMinimum(0)
-        self.months_input.setMaximum(11)
-        self.months_input.setFixedHeight(34)
-        self.months_input.setFixedWidth(80)
-        self.months_input.hide()
-
-        self.months_label = QLabel("месяцев")
-        self.months_label.hide()
-
-        age_layout.addWidget(self.age_value_input)
-        age_layout.addWidget(self.age_unit_label)
-        age_layout.addWidget(self.months_input)
-        age_layout.addWidget(self.months_label)
-        age_layout.addStretch(1)
-        self._add_row("Возраст:", age_layout)
+        birth_layout.addWidget(self.birth_date_input)
+        birth_layout.addWidget(self.age_preview_label)
+        birth_layout.addStretch(1)
+        self._add_row("Дата рождения:", birth_layout)
 
         self.admission_datetime_input = QDateTimeEdit()
         self.admission_datetime_input.setDateTime(QDateTime.currentDateTime())
@@ -113,6 +108,7 @@ class GeneralTabWidget(QWidget):
         self.admission_datetime_input.setFixedHeight(34)
         self.admission_datetime_input.setFixedWidth(280)
         self.admission_datetime_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
+        self.admission_datetime_input.dateTimeChanged.connect(self._update_age_preview)
         self._add_row("Дата и время поступления:", self.admission_datetime_input)
 
         self.source_department_input = SingleClickComboBox()
@@ -131,48 +127,74 @@ class GeneralTabWidget(QWidget):
         self.department_profile_input.setMinimumWidth(430)
         self._add_row("Профиль основного отделения:", self.department_profile_input)
 
-    def _get_age_suffix(self, n, unit="годы"):
-        if unit == "месяцы":
-            if 11 <= n <= 19: return "месяцев"
-            m = n % 10
-            if m == 1: return "месяц"
-            if 2 <= m <= 4: return "месяца"
-            return "месяцев"
-        else:
-            if 11 <= n <= 19: return "лет"
-            m = n % 10
-            if m == 1: return "год"
-            if 2 <= m <= 4: return "года"
-            return "лет"
+    def _selected_birth_date(self):
+        text = self.birth_date_input.text().strip()
+        return parse_date_value(text) if text else None
 
-    def _on_age_value_changed(self, value: int):
-        if value == 0 and self.age_value_input.text() == " ":
-            self.age_unit_label.setText("")
-            self.months_input.hide()
-            self.months_label.hide()
+    def _reference_datetime(self) -> datetime:
+        if hasattr(self, "admission_datetime_input"):
+            return self.admission_datetime_input.dateTime().toPython()
+        return datetime.now()
+
+    def _update_age_preview(self, *_args):
+        birth_date = self._selected_birth_date()
+        if birth_date is None:
+            fallback = self._legacy_age_text
+            if fallback and not self.birth_date_input.text().strip():
+                self.age_preview_label.setText(f"Возраст: {fallback}")
+            else:
+                self.age_preview_label.setText("Возраст: —")
             return
 
-        self.age_value_input.setSpecialValueText(None)
+        age_text = format_patient_age_from_birth_date(birth_date, self._reference_datetime())
+        self.age_preview_label.setText(f"Возраст: {age_text or '—'}")
 
-        unit = self.age_unit_combo.currentText()
-        self.age_unit_label.setText(self._get_age_suffix(value, unit))
+    def _on_birth_date_text_edited(self, text: str):
+        normalized = self._normalize_birth_date_text(text)
+        if normalized != text:
+            cursor_pos = min(self.birth_date_input.cursorPosition(), len(normalized))
+            self.birth_date_input.blockSignals(True)
+            self.birth_date_input.setText(normalized)
+            self.birth_date_input.setCursorPosition(cursor_pos)
+            self.birth_date_input.blockSignals(False)
+        self._update_age_preview()
 
-        if unit == "годы" and value <= 3:
-            self.months_input.show()
-            self.months_label.show()
-        else:
-            self.months_input.hide()
-            self.months_label.hide()
+    def _normalize_birth_date_field(self):
+        birth_date = self._selected_birth_date()
+        if birth_date is None:
+            self._update_age_preview()
+            return
+        self.birth_date_input.blockSignals(True)
+        self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+        self.birth_date_input.blockSignals(False)
+        self._update_age_preview()
+
+    @staticmethod
+    def _normalize_birth_date_text(text: str) -> str:
+        result = []
+        separator_count = 0
+        for char in str(text or ""):
+            if char.isdigit():
+                result.append(char)
+            elif char in ".,/" and separator_count < 2 and result and result[-1] != ".":
+                result.append(".")
+                separator_count += 1
+        return "".join(result)[:10]
 
     def get_data(self):
+        admission_datetime = self.admission_datetime_input.dateTime().toPython()
+        birth_date = self._selected_birth_date()
+        age_data = storage_age_from_birth_date(birth_date, admission_datetime)
         return {
             "history_number": self.history_number_input.text().strip(),
             "full_name": self.full_name_input.text().strip(),
             "gender": self.gender_combo.currentText(),
-            "age_value": self.age_value_input.value(),
-            "age_unit": self.age_unit_combo.currentText(),
-            "months": self.months_input.value() if (self.age_unit_combo.currentText() == "годы" and self.age_value_input.value() <= 3) else None,
-            "admission_datetime": self.admission_datetime_input.dateTime().toPython(),
+            "birth_date": birth_date,
+            "birth_date_text": self.birth_date_input.text().strip(),
+            "age_value": age_data["patient_age"],
+            "age_unit": age_data["patient_age_unit"],
+            "months": age_data["patient_months"],
+            "admission_datetime": admission_datetime,
             "source_department": self.source_department_input.currentText(),
             "department_profile": self.department_profile_input.currentText()
         }
@@ -203,6 +225,11 @@ class GeneralTabWidget(QWidget):
     def set_data(self, patient, admission):
         if patient:
             self.full_name_input.setText(patient.full_name or "")
+            birth_date = parse_date_value(getattr(patient, "birth_date", None))
+            if birth_date:
+                self.birth_date_input.blockSignals(True)
+                self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+                self.birth_date_input.blockSignals(False)
 
         if admission:
             self.history_number_input.setText(admission.history_number or "")
@@ -211,18 +238,13 @@ class GeneralTabWidget(QWidget):
             if admission.patient_gender:
                 self.gender_combo.setCurrentText(admission.patient_gender)
 
-            if admission.patient_age is not None:
-                self.age_value_input.setValue(admission.patient_age)
-
-            if admission.patient_months is not None:
-                self.months_input.blockSignals(True)
-                self.months_input.setValue(admission.patient_months)
-                self.months_input.blockSignals(False)
-
-            if admission.patient_age_unit:
-                self.age_unit_combo.setCurrentText(admission.patient_age_unit)
-
-            self._on_age_value_changed(self.age_value_input.value())
+            if not self._selected_birth_date():
+                self._legacy_age_text = format_patient_age(
+                    admission.patient_age,
+                    admission.patient_age_unit,
+                    admission.patient_months,
+                )
+            self._update_age_preview()
 
             if admission.department_profile:
                 self.department_profile_input.setCurrentText(admission.department_profile)

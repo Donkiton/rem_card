@@ -2,6 +2,7 @@ import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QColor, QFontMetrics
+from rem_card.app.patient_age import calculate_age_components, format_patient_age, format_patient_age_from_birth_date
 from rem_card.ui.styles.theme import (
     STYLE_SIDE_PATIENT_ACTION_BUTTON,
     STYLE_SIDE_PATIENT_CARD,
@@ -204,14 +205,18 @@ class SidePatientCard(QFrame):
             photo_name = "noman.png"
             years = admission.patient_age
             months = admission.patient_months
-            unit = admission.patient_age_unit # "годы" или "месяцы"
+            unit = admission.patient_age_unit
+            birth_date = getattr(patient, "birth_date", None)
+            reference_date = admission.admission_datetime
 
             is_kid = False
-            if unit == "месяцы" and months is not None and months > 0:
+            age_components = calculate_age_components(birth_date, reference_date)
+            if age_components is not None:
+                is_kid = age_components.years < 10
+            elif unit == "месяцы" and years is not None:
                 is_kid = True
-            elif unit == "годы" and years is not None:
-                if years < 10:
-                    is_kid = True
+            elif unit == "годы" and years is not None and years < 10:
+                is_kid = True
 
             # Если это не ребенок, проверяем пол для выбора man/woman
             if is_kid:
@@ -234,34 +239,15 @@ class SidePatientCard(QFrame):
             self.history_label.setText(f"ИБ № {admission.history_number or '—'}")
             self.name_label.setText(patient.full_name or "Неизвестный")
 
-            self.age_label.setText(f"Возраст: {self._format_age(years, months, unit)}")
+            age_text = format_patient_age_from_birth_date(birth_date, reference_date)
+            if not age_text:
+                age_text = format_patient_age(years, unit, months) or "Неизвестно"
+            self.age_label.setText(f"Возраст: {age_text}")
 
             diagnosis_text = admission.diagnosis_text or "—"
             self.diagnosis_label.setText(f"Диагноз: {diagnosis_text}")
             self.diagnosis_label.setToolTip(str(diagnosis_text) if diagnosis_text != "—" else "")
             self.admission_label.setText(f"Поступил: {admission.admission_datetime.strftime('%d.%m.%Y %H:%M') if admission.admission_datetime else '—'}")
-
-    def _format_age(self, years, months, unit):
-        def pluralize(n, form1, form2, form5):
-            n = abs(n) % 100
-            n1 = n % 10
-            if 11 <= n <= 19: return form5
-            if 2 <= n1 <= 4: return form2
-            if n1 == 1: return form1
-            return form5
-
-        y = years or 0
-        m = months or 0
-
-        if y == 0 and m > 0:
-            return f"{m} {pluralize(m, 'месяц', 'месяца', 'месяцев')}"
-        elif y > 0:
-            res = f"{y} {pluralize(y, 'год', 'года', 'лет')}"
-            if m > 0:
-                res += f" {m} {pluralize(m, 'месяц', 'месяца', 'месяцев')}"
-            return res
-        else:
-            return "Неизвестно"
 
     def _get_pixmap(self, path):
         pix = QPixmap(path)

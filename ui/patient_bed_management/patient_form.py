@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.logger import logger
+from rem_card.app.patient_age import storage_age_from_birth_date
 from rem_card.services.mkb import MKBService
 from rem_card.services.patient_bed_management import AdmissionRecord, PatientBedManagementService, PatientRecord
 from rem_card.ui.patient_bed_management.tabs.diagnosis_tab import DiagnosisTabWidget
@@ -213,6 +214,14 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         if not gen["history_number"] or not gen["full_name"]:
             CustomMessageBox.warning(self, "Ошибка", "Заполните номер ИБ и ФИО пациента")
             return False
+        if not gen.get("birth_date"):
+            message = "Укажите корректную дату рождения" if gen.get("birth_date_text") else "Укажите дату рождения пациента"
+            CustomMessageBox.warning(self, "Ошибка", message)
+            return False
+        admission_datetime = gen.get("admission_datetime")
+        if admission_datetime and gen["birth_date"] > admission_datetime.date():
+            CustomMessageBox.warning(self, "Ошибка", "Дата рождения не может быть позже даты поступления")
+            return False
         if not diag["diagnosis_text"]:
             CustomMessageBox.warning(self, "Ошибка", "Необходимо указать диагноз")
             return False
@@ -226,14 +235,18 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         try:
             gen_data = self.general_tab.get_data()
             diag_data = self.diagnosis_tab.get_data()
-            patient_data = {"full_name": gen_data["full_name"]}
+            age_data = storage_age_from_birth_date(gen_data["birth_date"], gen_data["admission_datetime"])
+            patient_data = {
+                "full_name": gen_data["full_name"],
+                "birth_date": gen_data["birth_date"],
+            }
             admission_data = {
                 "bed_number": self.bed_number,
                 "history_number": gen_data["history_number"],
                 "admission_datetime": gen_data["admission_datetime"],
-                "patient_age": gen_data["age_value"],
-                "patient_months": gen_data["months"],
-                "patient_age_unit": gen_data["age_unit"],
+                "patient_age": age_data["patient_age"],
+                "patient_months": age_data["patient_months"],
+                "patient_age_unit": age_data["patient_age_unit"],
                 "patient_gender": gen_data["gender"],
                 "diagnosis_code": diag_data["diagnosis_code"],
                 "diagnosis_text": diag_data["diagnosis_text"],

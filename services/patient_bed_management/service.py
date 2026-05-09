@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Callable, Optional
 
+from rem_card.app.patient_age import parse_date_value
 from rem_card.services.concurrency import assert_revision_matches
 
 
@@ -13,6 +14,7 @@ class PatientRecord:
     id: int
     full_name: str
     admission_uid: Optional[str] = None
+    birth_date: Optional[date] = None
 
 
 @dataclass
@@ -86,6 +88,7 @@ class PatientBedManagementService:
                 p.id AS p_id,
                 p.full_name,
                 p.admission_uid,
+                p.birth_date,
                 a.*
             FROM beds b
             JOIN admissions a ON a.id = b.current_admission_id
@@ -103,6 +106,7 @@ class PatientBedManagementService:
             id=int(data["p_id"]),
             full_name=str(data.get("full_name") or ""),
             admission_uid=data.get("admission_uid"),
+            birth_date=self._parse_date(data.get("birth_date")),
         )
         admission = AdmissionRecord(
             id=int(data["id"]) if data.get("id") is not None else None,
@@ -125,13 +129,14 @@ class PatientBedManagementService:
     def create_patient_and_admission(self, patient_data: dict[str, Any], admission_data: dict[str, Any]) -> int:
         admission_uid = str(patient_data.get("admission_uid") or uuid.uuid4())
         full_name = str(patient_data.get("full_name") or "").strip()
+        birth_date = self._to_sql_date(patient_data.get("birth_date"))
         if not full_name:
             raise ValueError("ФИО пациента не заполнено.")
 
         def operation(cursor):
             cursor.execute(
-                "INSERT INTO patients (full_name, admission_uid) VALUES (?, ?)",
-                (full_name, admission_uid),
+                "INSERT INTO patients (full_name, admission_uid, birth_date) VALUES (?, ?, ?)",
+                (full_name, admission_uid, birth_date),
             )
             patient_id = int(cursor.lastrowid)
             now = self._now_text()
@@ -189,11 +194,15 @@ class PatientBedManagementService:
         expected_admission_revision: Optional[int] = None,
     ) -> bool:
         full_name = str(patient_data.get("full_name") or "").strip()
+        birth_date = self._to_sql_date(patient_data.get("birth_date"))
         if not full_name:
             raise ValueError("ФИО пациента не заполнено.")
 
         def operation(cursor):
-            cursor.execute("UPDATE patients SET full_name = ? WHERE id = ?", (full_name, int(patient_id)))
+            cursor.execute(
+                "UPDATE patients SET full_name = ?, birth_date = ? WHERE id = ?",
+                (full_name, birth_date, int(patient_id)),
+            )
             cursor.execute(
                 """
                 UPDATE admissions
@@ -345,12 +354,21 @@ class PatientBedManagementService:
             return None
 
     @staticmethod
+    def _parse_date(value) -> Optional[date]:
+        return parse_date_value(value)
+
+    @staticmethod
     def _to_sql_dt(value) -> Optional[str]:
         if value is None:
             return None
         if isinstance(value, datetime):
             return value.replace(microsecond=0).isoformat(sep=" ")
         return str(value)
+
+    @staticmethod
+    def _to_sql_date(value) -> Optional[str]:
+        parsed = parse_date_value(value)
+        return parsed.isoformat() if parsed else None
 
     @staticmethod
     def _now_text() -> str:
