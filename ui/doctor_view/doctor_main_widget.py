@@ -7,7 +7,15 @@ except Exception:
     shiboken6 = None
 
 DOCTOR_BEDS_POLL_INTERVAL_MS = 7000
-W1_REFRESH_ENTITIES = {
+W1A_PANEL_REFRESH_ENTITIES = {
+    "orders",
+    "administrations",
+    "patients",
+    "admissions",
+    "beds",
+    "patient_status_events",
+}
+W1_BEDS_REFRESH_ENTITIES = {
     "patients",
     "admissions",
     "beds",
@@ -17,11 +25,15 @@ W1_REFRESH_ENTITIES = {
     "patient_status_events",
     "fluids",
     "orders",
-    "administrations",
-    "diet_templates",
     "diet_plan",
     "oral_intake_events",
 }
+W1_REFRESH_ENTITIES = W1_BEDS_REFRESH_ENTITIES | W1A_PANEL_REFRESH_ENTITIES | {"diet_templates"}
+W1_BEDS_REFRESH_SOURCE_PREFIXES = (
+    "patient_bed",
+    "archive_",
+    "status_",
+)
 
 
 def _qt_is_valid(obj) -> bool:
@@ -156,10 +168,26 @@ class DoctorMainWidget(QWidget):
                 for change in (payload.get("changes") or [])
                 if change.get("entity_name")
         }
-        if not payload.get("forced") and not changed_entities.intersection(W1_REFRESH_ENTITIES):
+        force_sources = list(payload.get("force_sources") or [])
+        if payload.get("force_source"):
+            force_sources.append(str(payload.get("force_source")))
+        forced_refresh = bool(payload.get("gap_detected") or (payload.get("forced") and not force_sources))
+        has_w1_changes = bool(changed_entities.intersection(W1_REFRESH_ENTITIES))
+        forced_event = bool(payload.get("forced") or payload.get("gap_detected"))
+        if not forced_event and not has_w1_changes:
             return
-        self._refresh_beds_if_available()
-        self._refresh_w1a(payload)
+        if (
+            forced_refresh
+            or changed_entities.intersection(W1_BEDS_REFRESH_ENTITIES)
+            or any(
+                source.startswith(prefix)
+                for source in force_sources
+                for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
+            )
+        ):
+            self._refresh_beds_if_available()
+        if forced_event or changed_entities.intersection(W1A_PANEL_REFRESH_ENTITIES):
+            self._refresh_w1a(payload)
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)

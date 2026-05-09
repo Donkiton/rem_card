@@ -54,6 +54,7 @@ class SectorW1a(BaseSectorWidget):
         self.setStyleSheet("background: transparent;")
 
         self.cards = {}
+        self._card_signatures = {}
         self.groups = {}
         self._all_data = []
         self._pending_marks = {}
@@ -61,10 +62,11 @@ class SectorW1a(BaseSectorWidget):
         self._last_change_id = 0
         self._refresh_worker = None
         self._refresh_pending = False
-        self._force_render_after_refresh = False
         self._is_shutting_down = False
         self._last_error_ts = 0.0
         self._group_pin_pending = False
+        self._group_pin_rerun_requested = False
+        self._last_render_signature = None
 
         self._time_timer = QTimer(self)
         self._time_timer.setSingleShot(True)
@@ -103,13 +105,16 @@ class SectorW1a(BaseSectorWidget):
 
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("sector_w1a_scroll_content")
+        self.scroll_content.setMinimumWidth(0)
+        self.scroll_content.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_layout.setContentsMargins(0, 3, 0, 0)
         self.scroll_layout.setSpacing(0)
         self.scroll_layout.setAlignment(Qt.AlignTop)
 
         self.cards_container = QWidget()
-        self.cards_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.cards_container.setMinimumWidth(0)
+        self.cards_container.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Maximum)
         self.content_layout = QVBoxLayout(self.cards_container)
         self.content_layout.setContentsMargins(2, 0, 2, 0)
         self.content_layout.setSpacing(3)
@@ -204,7 +209,8 @@ class SectorW1a(BaseSectorWidget):
         self._time_timer.stop()
         self._refresh_timer.stop()
         self._refresh_pending = False
-        self._force_render_after_refresh = False
+        self._group_pin_pending = False
+        self._group_pin_rerun_requested = False
         worker = self._refresh_worker
         self._refresh_worker = None
         if worker is not None:
@@ -212,6 +218,7 @@ class SectorW1a(BaseSectorWidget):
         self._pending_marks.clear()
         self._all_data = []
         self._last_content_hash = None
+        self._last_render_signature = None
         self._clear_cards_and_groups()
         self.empty_label.setVisible(False)
         self.cards_container.adjustSize()
@@ -222,6 +229,7 @@ class SectorW1a(BaseSectorWidget):
             card.setParent(None)
             card.deleteLater()
         self.cards.clear()
+        self._card_signatures.clear()
         for group in list(self.groups.values()):
             frame = group.get("frame")
             if frame is not None:
@@ -232,8 +240,7 @@ class SectorW1a(BaseSectorWidget):
     def refresh_data(self, force: bool = False):
         if self._is_shutting_down or not self._display_enabled or not self.service:
             return
-        if force:
-            self._force_render_after_refresh = True
+        # force is accepted for API compatibility; content hash still gates rendering.
         if self._refresh_worker is not None and self._refresh_worker.isRunning():
             self._refresh_pending = True
             return
@@ -242,11 +249,12 @@ class SectorW1a(BaseSectorWidget):
         if not callable(loader):
             return
 
-        self._refresh_worker = AsyncCallThread(loader, datetime.now())
-        self._refresh_worker.succeeded.connect(self._apply_snapshot)
-        self._refresh_worker.failed.connect(self._on_refresh_failed)
-        self._refresh_worker.finished.connect(self._on_refresh_finished)
-        self._refresh_worker.start()
+        worker = AsyncCallThread(loader, datetime.now())
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._apply_snapshot)
+        worker.failed.connect(self._on_refresh_failed)
+        worker.finished.connect(self._on_refresh_finished)
+        worker.start()
 
     def handle_data_changes(self, payload: dict):
         if self._is_shutting_down or not self._display_enabled:
@@ -282,13 +290,14 @@ class SectorW1a(BaseSectorWidget):
     def _apply_snapshot(self, snapshot):
         if self._is_shutting_down or not self._display_enabled:
             return
+        sender = self.sender()
+        if sender is not None and sender is not self._refresh_worker:
+            return
         snapshot = dict(snapshot or {})
         content_hash = str(snapshot.get("content_hash") or "")
-        force_render = self._force_render_after_refresh
-        self._force_render_after_refresh = False
         self._last_change_id = int(snapshot.get("change_id") or self._last_change_id or 0)
 
-        if content_hash and content_hash == self._last_content_hash and not force_render:
+        if content_hash and content_hash == self._last_content_hash and not self._pending_marks:
             self._schedule_next_time_tick()
             return
 
@@ -297,14 +306,19 @@ class SectorW1a(BaseSectorWidget):
         self._render_from_cache()
 
     def _on_refresh_failed(self, exc):
-        self._force_render_after_refresh = False
+        sender = self.sender()
+        if sender is not None and sender is not self._refresh_worker:
+            return
         now = time.monotonic()
         if now - self._last_error_ts > 15.0:
             self._last_error_ts = now
             logger.warning("W1a upcoming orders refresh failed: %s", exc, exc_info=True)
 
     def _on_refresh_finished(self):
-        worker = self._refresh_worker
+        worker = self.sender() or self._refresh_worker
+        if worker is not None and worker is not self._refresh_worker:
+            self._disconnect_worker(worker)
+            return
         if worker is not None:
             self._disconnect_worker(worker)
         self._refresh_worker = None
@@ -321,55 +335,100 @@ class SectorW1a(BaseSectorWidget):
             for item in self._apply_pending_marks(self._all_data)
             if self._is_visible(item, now)
         ]
+        render_signature = self._visible_render_signature(visible_data)
+        if render_signature == self._last_render_signature and not self._pending_marks:
+            self._refresh_visible_card_signals(render_signature[0])
+            self._schedule_next_time_tick(now)
+            return
+        self._last_render_signature = render_signature
         self._sync_cards(visible_data)
         self._schedule_next_time_tick(now)
         self.update()
         self.scroll_area.viewport().update()
 
     def _sync_cards(self, data_list):
+        started_mono = time.monotonic()
+        stats = {"created": 0, "updated": 0, "removed": 0, "moved": 0, "groups_removed": 0}
+        main_updates_enabled = self.main_container.updatesEnabled()
+        cards_updates_enabled = self.cards_container.updatesEnabled()
+        if main_updates_enabled:
+            self.main_container.setUpdatesEnabled(False)
+        if cards_updates_enabled:
+            self.cards_container.setUpdatesEnabled(False)
         groups = self._build_patient_groups(data_list)
         new_ids = {int(item["id"]) for item in data_list if item.get("id") is not None}
-        for admin_id in list(self.cards.keys()):
-            if admin_id not in new_ids:
-                card = self.cards.pop(admin_id)
-                card.setParent(None)
-                card.deleteLater()
+        try:
+            for admin_id in list(self.cards.keys()):
+                if admin_id not in new_ids:
+                    card = self.cards.pop(admin_id)
+                    self._card_signatures.pop(admin_id, None)
+                    card.setParent(None)
+                    card.deleteLater()
+                    stats["removed"] += 1
 
-        new_group_keys = {group["key"] for group in groups}
-        for group_key in list(self.groups.keys()):
-            if group_key not in new_group_keys:
-                group = self.groups.pop(group_key)
-                group["frame"].setParent(None)
-                group["frame"].deleteLater()
+            new_group_keys = {group["key"] for group in groups}
+            for group_key in list(self.groups.keys()):
+                if group_key not in new_group_keys:
+                    group = self.groups.pop(group_key)
+                    group["frame"].setParent(None)
+                    group["frame"].deleteLater()
+                    stats["groups_removed"] += 1
 
-        self.empty_label.setVisible(not data_list)
-        for group_index, group_data in enumerate(groups):
-            group = self._ensure_patient_group(group_data)
-            current_group_index = self.content_layout.indexOf(group["frame"])
-            if current_group_index != group_index:
-                self.content_layout.insertWidget(group_index, group["frame"])
+            if self.empty_label.isVisible() == bool(data_list):
+                self.empty_label.setVisible(not data_list)
+            for group_index, group_data in enumerate(groups):
+                group = self._ensure_patient_group(group_data)
+                current_group_index = self.content_layout.indexOf(group["frame"])
+                if current_group_index != group_index:
+                    self.content_layout.insertWidget(group_index, group["frame"])
+                    stats["moved"] += 1
 
-            for order_index, item in enumerate(group_data["items"]):
-                admin_id = int(item["id"])
-                card_data = dict(item)
-                card_data["defer_mark_visual"] = True
-                card_data.pop("patient_name", None)
-                card_data.pop("patient_full_name", None)
-                if admin_id in self.cards:
-                    card = self.cards[admin_id]
-                    card.update_data(card_data)
-                else:
-                    card = NurseOrderCard(card_data)
-                    card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-                    card.statusChanged.connect(self.handle_status_change)
-                    card.contentHeightChanged.connect(self._queue_group_frame_pin)
-                    self.cards[admin_id] = card
+                for order_index, item in enumerate(group_data["items"]):
+                    admin_id = int(item["id"])
+                    card_data = dict(item)
+                    card_data["defer_mark_visual"] = True
+                    card_data.pop("patient_name", None)
+                    card_data.pop("patient_full_name", None)
+                    card_signature = self._card_data_signature(card_data)
+                    if admin_id in self.cards:
+                        card = self.cards[admin_id]
+                        if self._card_signatures.get(admin_id) != card_signature:
+                            card.update_data(card_data)
+                            self._card_signatures[admin_id] = card_signature
+                            stats["updated"] += 1
+                    else:
+                        card = NurseOrderCard(card_data)
+                        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+                        card.statusChanged.connect(self.handle_status_change)
+                        card.contentHeightChanged.connect(self._queue_group_frame_pin)
+                        self.cards[admin_id] = card
+                        self._card_signatures[admin_id] = card_signature
+                        stats["created"] += 1
 
-                current_index = group["layout"].indexOf(card)
-                if current_index != order_index:
-                    group["layout"].insertWidget(order_index, card)
-            self._pin_group_frame_height(group)
+                    current_index = group["layout"].indexOf(card)
+                    if current_index != order_index:
+                        group["layout"].insertWidget(order_index, card)
+                        stats["moved"] += 1
+                self._pin_group_frame_height(group)
+        finally:
+            if cards_updates_enabled:
+                self.cards_container.setUpdatesEnabled(True)
+            if main_updates_enabled:
+                self.main_container.setUpdatesEnabled(True)
+
+        self._refresh_visible_card_signals(new_ids)
         self._queue_group_frame_pin()
+        if any(stats.values()):
+            logger.debug(
+                "W1a sync cards created=%s updated=%s removed=%s moved=%s groups_removed=%s rows=%s elapsed_ms=%.1f",
+                stats["created"],
+                stats["updated"],
+                stats["removed"],
+                stats["moved"],
+                stats["groups_removed"],
+                len(data_list),
+                (time.monotonic() - started_mono) * 1000.0,
+            )
 
     def _build_patient_groups(self, data_list):
         grouped = {}
@@ -425,7 +484,8 @@ class SectorW1a(BaseSectorWidget):
         patient_name = group_data["patient_name"]
         if group_key in self.groups:
             group = self.groups[group_key]
-            group["header"].setText(patient_name)
+            if group["header"].text() != patient_name:
+                group["header"].setText(patient_name)
             group["bed_number"] = group_data.get("bed_number")
             return group
 
@@ -450,7 +510,7 @@ class SectorW1a(BaseSectorWidget):
         header.setObjectName("w1a_patient_group_header")
         header.setWordWrap(True)
         header.setAlignment(Qt.AlignCenter)
-        header.setMinimumHeight(26)
+        header.setFixedHeight(26)
         header.setStyleSheet(
             """
             QLabel#w1a_patient_group_header {
@@ -496,6 +556,8 @@ class SectorW1a(BaseSectorWidget):
         return group
 
     def _pin_group_frame_heights(self):
+        rerun_requested = self._group_pin_rerun_requested
+        self._group_pin_rerun_requested = False
         self._group_pin_pending = False
         if self._is_shutting_down:
             return
@@ -503,11 +565,17 @@ class SectorW1a(BaseSectorWidget):
             self._pin_group_frame_height(group)
         self.content_layout.invalidate()
         self.content_layout.activate()
-        self.cards_container.adjustSize()
         self.cards_container.updateGeometry()
+        if rerun_requested or self._group_pin_rerun_requested:
+            self._group_pin_rerun_requested = False
+            self._group_pin_pending = True
+            QTimer.singleShot(0, self._pin_group_frame_heights)
 
     def _queue_group_frame_pin(self):
-        if self._is_shutting_down or self._group_pin_pending:
+        if self._is_shutting_down:
+            return
+        if self._group_pin_pending:
+            self._group_pin_rerun_requested = True
             return
         self._group_pin_pending = True
         QTimer.singleShot(0, self._pin_group_frame_heights)
@@ -519,10 +587,83 @@ class SectorW1a(BaseSectorWidget):
         if frame.minimumHeight() == frame.maximumHeight():
             frame.setMinimumHeight(0)
             frame.setMaximumHeight(16777215)
-        required_height = max(frame.minimumSizeHint().height(), frame.sizeHint().height())
+        required_height = max(
+            frame.minimumSizeHint().height(),
+            frame.sizeHint().height(),
+            self._patient_group_natural_height(group),
+        )
         if required_height > 0:
             frame.setFixedHeight(required_height)
             frame.updateGeometry()
+
+    @staticmethod
+    def _patient_group_natural_height(group):
+        frame = (group or {}).get("frame")
+        header = (group or {}).get("header")
+        body = (group or {}).get("body")
+        if frame is None or header is None or body is None:
+            return 0
+
+        frame_layout = frame.layout()
+        margins = frame_layout.contentsMargins() if frame_layout is not None else None
+        spacing = max(0, frame_layout.spacing()) if frame_layout is not None else 0
+        vertical_margins = margins.top() + margins.bottom() if margins is not None else 0
+
+        if header.minimumHeight() == header.maximumHeight():
+            header_height = header.maximumHeight()
+        else:
+            header_width = max(1, header.width() or frame.width() or header.sizeHint().width())
+            header_for_width = header.heightForWidth(header_width) if header.hasHeightForWidth() else -1
+            header_height = max(
+                header.minimumHeight(),
+                header.minimumSizeHint().height(),
+                header_for_width,
+            )
+        body_height = max(body.minimumSizeHint().height(), body.sizeHint().height())
+        return int(vertical_margins + header_height + spacing + body_height + frame.frameWidth() * 2)
+
+    def _visible_render_signature(self, data_list):
+        return (
+            tuple(int(item["id"]) for item in data_list if item.get("id") is not None),
+            tuple(self._card_data_signature(self._card_payload_for_signature(item)) for item in data_list),
+        )
+
+    def _card_payload_for_signature(self, item):
+        card_data = dict(item)
+        card_data["defer_mark_visual"] = True
+        card_data.pop("patient_name", None)
+        card_data.pop("patient_full_name", None)
+        return card_data
+
+    @staticmethod
+    def _card_data_signature(item):
+        keys = (
+            "id",
+            "planned_time",
+            "actual_time",
+            "status",
+            "comment",
+            "cell_role",
+            "expected_revision",
+            "order_id",
+            "order_title",
+            "latin",
+            "drug_key",
+            "dose_value",
+            "dose_unit",
+            "order_comment",
+            "order_type",
+            "duration_min",
+            "order_revision",
+            "defer_mark_visual",
+        )
+        return tuple((key, item.get(key)) for key in keys)
+
+    def _refresh_visible_card_signals(self, visible_ids):
+        for admin_id in visible_ids or ():
+            card = self.cards.get(int(admin_id))
+            if card is not None and hasattr(card, "refresh_time_state"):
+                card.refresh_time_state()
 
     def _order_sort_key(self, item):
         try:

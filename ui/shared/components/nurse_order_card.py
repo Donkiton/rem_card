@@ -14,6 +14,16 @@ from rem_card.services.order_domain_service import (
 )
 
 ORDER_CARD_MIN_HEIGHT = 48
+_ICON_PIXMAP_CACHE = {}
+
+
+def _cached_icon_pixmap(icon_name: str) -> QPixmap:
+    path = os.path.join(get_icon_dir(), icon_name)
+    pixmap = _ICON_PIXMAP_CACHE.get(path)
+    if pixmap is None:
+        pixmap = QPixmap(path)
+        _ICON_PIXMAP_CACHE[path] = pixmap
+    return pixmap
 
 
 class StatusPopup(QFrame):
@@ -33,7 +43,7 @@ class StatusPopup(QFrame):
         # Кнопки 44x44
         self.btn_done = QPushButton()
         self.btn_done.setFixedSize(44, 44)
-        self.btn_done.setIcon(QPixmap(os.path.join(get_icon_dir(), "done.png")))
+        self.btn_done.setIcon(_cached_icon_pixmap("done.png"))
         self.btn_done.setIconSize(QSize(36, 36))
         self.btn_done.setToolTip("Выполнено")
         self.btn_done.clicked.connect(lambda: self.actionSelected.emit("done"))
@@ -41,7 +51,7 @@ class StatusPopup(QFrame):
 
         self.btn_not_done = QPushButton()
         self.btn_not_done.setFixedSize(44, 44)
-        self.btn_not_done.setIcon(QPixmap(os.path.join(get_icon_dir(), "notdone.png")))
+        self.btn_not_done.setIcon(_cached_icon_pixmap("notdone.png"))
         self.btn_not_done.setIconSize(QSize(36, 36))
         self.btn_not_done.setToolTip("Не выполнено")
         self.btn_not_done.clicked.connect(lambda: self.actionSelected.emit("not_done"))
@@ -286,6 +296,9 @@ class NurseOrderCard(QFrame):
         self.updateGeometry()
         self._queue_height_sync()
 
+    def refresh_time_state(self):
+        self.update_signal()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if event.oldSize().width() != event.size().width():
@@ -354,15 +367,14 @@ class NurseOrderCard(QFrame):
             icon_name = "signal_lost.png"
         
         if icon_name:
-            path = os.path.join(get_icon_dir(), icon_name)
-            self.lbl_signal.setPixmap(QPixmap(path))
+            self.lbl_signal.setPixmap(_cached_icon_pixmap(icon_name))
             self.lbl_signal.show()
         else:
             self.lbl_signal.hide()
 
     def update_action_button(self):
         mark = self.data.get('comment', '') 
-        icon_path = os.path.join(get_icon_dir(), "chek_mark.png")
+        icon_name = "chek_mark.png"
         tooltip = "Отметить выполнение"
         enabled = True
 
@@ -373,14 +385,14 @@ class NurseOrderCard(QFrame):
         """)
 
         if mark == NURSE_MARK_EXECUTED:
-            icon_path = os.path.join(get_icon_dir(), "done.png")
+            icon_name = "done.png"
             tooltip = "Выполнено"
         elif mark == NURSE_MARK_NOT_EXECUTED:
-            icon_path = os.path.join(get_icon_dir(), "notdone.png")
+            icon_name = "notdone.png"
             tooltip = "Не выполнено"
 
         self.btn_action.show()
-        if icon_path:
+        if icon_name:
             # Чтобы иконка не становилась серой (disabled effect), если кнопка выключена,
             # мы применяем стиль, который переопределяет disabled state
             if not enabled:
@@ -391,13 +403,14 @@ class NurseOrderCard(QFrame):
                 """)
                 # Используем QIcon с режимом Normal, чтобы избежать автоматического обесцвечивания
                 from PySide6.QtGui import QIcon
-                icon = QIcon(icon_path)
+                pixmap = _cached_icon_pixmap(icon_name)
+                icon = QIcon(pixmap)
                 # Добавляем пиксмап для состояния Disabled
-                icon.addPixmap(QPixmap(icon_path), QIcon.Disabled, QIcon.On)
-                icon.addPixmap(QPixmap(icon_path), QIcon.Disabled, QIcon.Off)
+                icon.addPixmap(pixmap, QIcon.Disabled, QIcon.On)
+                icon.addPixmap(pixmap, QIcon.Disabled, QIcon.Off)
                 self.btn_action.setIcon(icon)
             else:
-                self.btn_action.setIcon(QPixmap(icon_path))
+                self.btn_action.setIcon(_cached_icon_pixmap(icon_name))
                 
         self.btn_action.setToolTip(tooltip)
         self.btn_action.setEnabled(enabled)
@@ -443,4 +456,4 @@ class NurseOrderCard(QFrame):
         self.anim.start()
         
         icon_file = "done.png" if action == "done" else "notdone.png"
-        self.btn_action.setIcon(QPixmap(os.path.join(get_icon_dir(), icon_file)))
+        self.btn_action.setIcon(_cached_icon_pixmap(icon_file))

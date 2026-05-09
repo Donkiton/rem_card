@@ -32,6 +32,14 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "nurse_order_panel_mark:",
 )
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
+W1A_PANEL_REFRESH_ENTITIES = {
+    "orders",
+    "administrations",
+    "patients",
+    "admissions",
+    "beds",
+    "patient_status_events",
+}
 VITALS_CACHE_CHANGE_ENTITIES = {
     "patients",
     "admissions",
@@ -52,7 +60,7 @@ CARD_CACHE_CHANGE_ENTITIES = VITALS_CACHE_CHANGE_ENTITIES | ORDER_CHANGE_ENTITIE
     "devices",
     "respiratory_support",
 }
-W1_REFRESH_ENTITIES = {
+W1_BEDS_REFRESH_ENTITIES = {
     "patients",
     "admissions",
     "beds",
@@ -62,11 +70,15 @@ W1_REFRESH_ENTITIES = {
     "patient_status_events",
     "fluids",
     "orders",
-    "administrations",
-    "diet_templates",
     "diet_plan",
     "oral_intake_events",
 }
+W1_REFRESH_ENTITIES = W1_BEDS_REFRESH_ENTITIES | W1A_PANEL_REFRESH_ENTITIES | {"diet_templates"}
+W1_BEDS_REFRESH_SOURCE_PREFIXES = (
+    "patient_bed",
+    "archive_",
+    "status_",
+)
 
 class NurseMainWidget(QWidget):
     """Главный виджет медсестры с изолированным UI и исправленной навигацией."""
@@ -1030,12 +1042,27 @@ class NurseMainWidget(QWidget):
         changed_entities = self._changed_entities_from_payload(payload)
         self._invalidate_vitals_cache_from_payload(payload, changed_entities)
         orders_entities = {"orders", "administrations"}
-        if self._selection_mode == "beds" and (
-            full_refresh_required or changed_entities.intersection(W1_REFRESH_ENTITIES)
-        ):
-            if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
+        has_w1_changes = bool(changed_entities.intersection(W1_REFRESH_ENTITIES))
+        if self._selection_mode == "beds" and (full_refresh_required or has_w1_changes or payload.get("forced")):
+            force_sources = self._payload_force_sources(payload)
+            beds_refresh_needed = (
+                full_refresh_required
+                or bool(changed_entities.intersection(W1_BEDS_REFRESH_ENTITIES))
+                or any(
+                    source.startswith(prefix)
+                    for source in force_sources
+                    for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
+                )
+            )
+            w1a_refresh_needed = (
+                full_refresh_required
+                or bool(changed_entities.intersection(W1A_PANEL_REFRESH_ENTITIES))
+                or bool(payload.get("forced"))
+            )
+            if beds_refresh_needed and hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
                 self.layout_manager.beds_selection_widget.refresh()
-            self._refresh_w1a(payload)
+            if w1a_refresh_needed:
+                self._refresh_w1a(payload)
         if self._selection_mode == "archive":
             archive_widget = getattr(self.layout_manager, "archive_widget", None)
             if archive_widget and (full_refresh_required or changed_entities.intersection({"patients", "admissions"})):
