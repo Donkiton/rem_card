@@ -64,7 +64,6 @@
           "bonus",
           "calc",
           "settings",
-          "style",
           "back",
           "exit"
         ],
@@ -75,7 +74,6 @@
           "calc": true,
           "bonus": true,
           "settings": true,
-          "style": false,
           "back": true,
           "exit": true
         }

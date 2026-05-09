@@ -37,7 +37,6 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
-        {"id": "style", "label": "Цветовая схема", "default_visible": False, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),

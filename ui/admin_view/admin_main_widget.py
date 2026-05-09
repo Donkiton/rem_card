@@ -76,7 +76,7 @@ class AdminMainWidget(QWidget):
             template_buttons.append(self.btn_diet_templates)
 
         program_buttons = []
-        if self.role == "doctor":
+        if self.role in ("doctor", "nurse"):
             program_buttons.append(self.btn_style)
         program_buttons.extend([self.btn_print, self.btn_display_settings])
 
@@ -235,7 +235,8 @@ class AdminMainWidget(QWidget):
     def open_style(self):
         from rem_card.ui.styles.theme_settings_dialog import ThemeSettingsDialog
 
-        dialog = ThemeSettingsDialog(role="doctor", parent=self)
+        role = self.role if self.role in ("doctor", "nurse") else "doctor"
+        dialog = ThemeSettingsDialog(role=role, parent=self)
         dialog.exec()
 
     def open_display_settings(self):

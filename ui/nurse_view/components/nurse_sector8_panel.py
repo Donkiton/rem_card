@@ -6,9 +6,6 @@ from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, 
 from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
 
 
-SHOW_STYLE_BUTTON = False
-
-
 class NurseSector8Panel(QWidget):
     """Панель управления медсестры в Секторе 8."""
     exit_clicked = Signal()
@@ -18,7 +15,6 @@ class NurseSector8Panel(QWidget):
     calc_clicked = Signal()
     bonus_clicked = Signal()
     settings_clicked = Signal()
-    style_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,16 +75,6 @@ class NurseSector8Panel(QWidget):
         self.btn_bonus.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_bonus.clicked.connect(self.bonus_clicked.emit)
 
-        # Кнопка Цветовая схема
-        self.btn_style = QPushButton(" Цветовая схема", self)
-        style_icon = os.path.join(self.icon_dir, "color.svg")
-        self.btn_style.setIcon(QIcon(style_icon))
-        self.btn_style.setIconSize(QSize(18, 18))
-        self.btn_style.setMinimumHeight(32)
-        self.btn_style.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.btn_style.clicked.connect(self.style_clicked.emit)
-        self.btn_style.setVisible(SHOW_STYLE_BUTTON)
-
         # Кнопка Настройки
         self.btn_settings = QPushButton(" Настройки", self)
         settings_icon = os.path.join(self.icon_dir, "settings.png")
@@ -122,7 +108,6 @@ class NurseSector8Panel(QWidget):
             "calc": self.btn_calc,
             "bonus": self.btn_bonus,
             "settings": self.btn_settings,
-            "style": self.btn_style,
             "back": self.btn_back,
             "exit": self.btn_exit,
         }
@@ -141,7 +126,7 @@ class NurseSector8Panel(QWidget):
             visible = section["visible"]
         except Exception:
             order = list(getattr(self, "_button_widgets", {}).keys())
-            visible = {button_id: button_id != "style" or SHOW_STYLE_BUTTON for button_id in order}
+            visible = {button_id: True for button_id in order}
 
         self._clear_layout()
         self.layout.addStretch()
