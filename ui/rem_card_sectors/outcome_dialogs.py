@@ -20,7 +20,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rem_card.app.patient_age import format_patient_age, format_patient_age_from_birth_date
 from rem_card.services.shift_service import ShiftService
+from rem_card.services.doctor_list_service import DoctorListStore
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.hybrid_shift_time_picker import HybridShiftTimePicker
@@ -48,6 +50,11 @@ TRANSFER_TIME_SECTION_WIDTH = 374
 DEATH_TIME_SECTION_WIDTH = 400
 DEATH_WIDE_SECTION_WIDTH = (DEATH_TIME_SECTION_WIDTH * 2) + 14
 FORM_FIELD_MAX_WIDTH = 520
+PROTOCOL_FIELD_MAX_WIDTH = 680
+
+DEFAULT_DEATH_PROTOCOL_POSITION = "врач анестезиолог-реаниматолог"
+DEFAULT_DEATH_PROTOCOL_WORKPLACE = 'КГБУЗ "Городская больница" им М.И. Шевчук МЗХК'
+DEFAULT_DEATH_PROTOCOL_CPR_STOP_REASON = "Неэффективности реанимационных мероприятий в течение 30 минут"
 
 AIRWAY_TEXT = (
     "Интубация трахеи немедленно. Трубка диаметром 7,5. "
@@ -403,6 +410,8 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self.admission_context = dict(admission_context or {})
         self.airway_text = self._resolve_airway_text()
         self.measure_edits: List[Tuple[str, QPlainTextEdit]] = []
+        self.doctor_store = DoctorListStore()
+        self.doctor_names = self._load_doctor_names()
         self._last_auto_comment = ""
         self._comment_manually_changed = False
         self.setFixedWidth(874)
@@ -482,6 +491,11 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         body_layout.addWidget(self.measures_frame)
         self._rebuild_measures()
 
+        self.protocol_frame, self.protocol_layout = self._section("Протокол установления смерти человека")
+        self.protocol_frame.setFixedWidth(DEATH_WIDE_SECTION_WIDTH)
+        self._build_protocol_fields()
+        body_layout.addWidget(self.protocol_frame)
+
         scroll.setWidget(body)
         self.content_layout.addWidget(scroll, 1)
         self.content_layout.addLayout(self._buttons())
@@ -524,6 +538,115 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             grid.addWidget(edit, row, 1)
             self.measure_edits.append((label_text, edit))
         self.measures_layout.addLayout(grid)
+
+    def _load_doctor_names(self) -> List[str]:
+        try:
+            return self.doctor_store.load_doctors()
+        except Exception:
+            return []
+
+    def _patient_name_text(self) -> str:
+        name = str(self.admission_context.get("patient_name") or "").strip()
+        if name:
+            return name
+        parts = [
+            self.admission_context.get("last_name"),
+            self.admission_context.get("first_name"),
+            self.admission_context.get("middle_name"),
+        ]
+        joined = " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
+        return joined or str(self.admission_context.get("full_name") or "").strip()
+
+    def _patient_age_text(self) -> str:
+        reference_date = (
+            self.admission_context.get("death_datetime")
+            or self.admission_context.get("transfer_datetime")
+            or self.admission_context.get("admission_datetime")
+        )
+        age_text = format_patient_age_from_birth_date(self.admission_context.get("birth_date"), reference_date)
+        if age_text:
+            return age_text
+        return format_patient_age(
+            self.admission_context.get("patient_age"),
+            self.admission_context.get("patient_age_unit"),
+            self.admission_context.get("patient_months"),
+        )
+
+    def _protocol_line(self, text: str = "", *, read_only: bool = False) -> QLineEdit:
+        edit = QLineEdit()
+        edit.setText(str(text or ""))
+        edit.setMaximumWidth(PROTOCOL_FIELD_MAX_WIDTH)
+        edit.setReadOnly(read_only)
+        return edit
+
+    def _protocol_text(self, text: str = "") -> QPlainTextEdit:
+        edit = QPlainTextEdit()
+        edit.setPlainText(str(text or ""))
+        edit.setMaximumWidth(PROTOCOL_FIELD_MAX_WIDTH)
+        edit.setFixedHeight(54)
+        edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        return edit
+
+    def _add_protocol_row(self, grid: QGridLayout, row: int, label_text: str, widget: QWidget):
+        label = QLabel(label_text)
+        grid.addWidget(label, row, 0, Qt.AlignTop)
+        grid.addWidget(widget, row, 1)
+
+    def _build_protocol_fields(self):
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+
+        self.protocol_doctor_combo = QComboBox()
+        self.protocol_doctor_combo.setEditable(True)
+        self.protocol_doctor_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.protocol_doctor_combo.setMaximumWidth(PROTOCOL_FIELD_MAX_WIDTH)
+        self.protocol_doctor_combo.addItems(self.doctor_names)
+        if self.doctor_names:
+            self.protocol_doctor_combo.setCurrentIndex(0)
+        else:
+            self.protocol_doctor_combo.setEditText("")
+
+        self.protocol_position_edit = self._protocol_line(DEFAULT_DEATH_PROTOCOL_POSITION)
+        self.protocol_workplace_edit = self._protocol_line(DEFAULT_DEATH_PROTOCOL_WORKPLACE)
+        self.protocol_patient_edit = self._protocol_line(self._patient_name_text())
+        self.protocol_gender_edit = self._protocol_line(self.admission_context.get("patient_gender") or "")
+        self.protocol_age_edit = self._protocol_line(self._patient_age_text())
+        self.protocol_history_edit = self._protocol_line(self.admission_context.get("history_number") or "")
+        self.protocol_other_edit = self._protocol_text("")
+        self.protocol_cpr_reason_edit = self._protocol_text(DEFAULT_DEATH_PROTOCOL_CPR_STOP_REASON)
+
+        self._add_protocol_row(grid, 0, "Врач:", self.protocol_doctor_combo)
+        self._add_protocol_row(grid, 1, "Должность:", self.protocol_position_edit)
+        self._add_protocol_row(grid, 2, "Место работы:", self.protocol_workplace_edit)
+        self._add_protocol_row(grid, 3, "Пациент:", self.protocol_patient_edit)
+        self._add_protocol_row(grid, 4, "Пол:", self.protocol_gender_edit)
+        self._add_protocol_row(grid, 5, "Возраст:", self.protocol_age_edit)
+        self._add_protocol_row(grid, 6, "Номер истории:", self.protocol_history_edit)
+        self._add_protocol_row(grid, 7, "Иное:", self.protocol_other_edit)
+        self._add_protocol_row(grid, 8, "СЛР остановлена по причине:", self.protocol_cpr_reason_edit)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        self.protocol_layout.addLayout(grid)
+
+    def _protocol_payload(self) -> Dict[str, str]:
+        biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
+        doctor = self.protocol_doctor_combo.currentText().strip()
+        return {
+            "doctor": doctor,
+            "position": self.protocol_position_edit.text().strip(),
+            "workplace": self.protocol_workplace_edit.text().strip(),
+            "patient": self.protocol_patient_edit.text().strip(),
+            "gender": self.protocol_gender_edit.text().strip(),
+            "age": self.protocol_age_edit.text().strip(),
+            "history_number": self.protocol_history_edit.text().strip(),
+            "other": self.protocol_other_edit.toPlainText().strip(),
+            "cpr_stop_reason": self.protocol_cpr_reason_edit.toPlainText().strip(),
+            "biological_death_date": biological_dt.strftime("%d.%m.%Y"),
+            "biological_death_time": biological_dt.strftime("%H:%M"),
+            "signature_doctor": doctor,
+        }
 
     def _resolve_airway_text(self) -> str:
         active_ventilation = self.admission_context.get("active_ventilation")
@@ -671,6 +794,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             "cardiac_arrest_cause": cause,
             "measures": measures,
             "comment": comment,
+            "death_protocol": self._protocol_payload(),
         }
 
         self.result_data = {

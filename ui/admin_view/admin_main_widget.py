@@ -20,6 +20,7 @@ class AdminMainWidget(QWidget):
         self.forms_widget = None
         self.templates_widget = None
         self.diet_templates_widget = None
+        self.doctor_list_dialog = None
         self.admin_types_widget = None
         self.print_widget = None
         self.print_dialog = None
@@ -53,6 +54,7 @@ class AdminMainWidget(QWidget):
         self.btn_diluents = QPushButton("Растворители")
         self.btn_templates = QPushButton("Шаблоны назначений")
         self.btn_diet_templates = QPushButton("Шаблоны питания")
+        self.btn_doctor_list = QPushButton("Список врачей")
         self.btn_print = QPushButton("Печать / Отчеты")
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
@@ -73,6 +75,7 @@ class AdminMainWidget(QWidget):
         ]
         template_buttons = [
             self.btn_templates,
+            self.btn_doctor_list,
         ]
         if self.role != "nurse":
             template_buttons.append(self.btn_diet_templates)
@@ -123,6 +126,7 @@ class AdminMainWidget(QWidget):
         self.btn_admin_types.clicked.connect(self.open_admin_types)
         self.btn_diluents.clicked.connect(self.open_diluents)
         self.btn_templates.clicked.connect(self.open_templates)
+        self.btn_doctor_list.clicked.connect(self.open_doctor_list)
         self.btn_diet_templates.clicked.connect(self.open_diet_templates)
         self.btn_print.clicked.connect(self.open_print)
         self.btn_style.clicked.connect(self.open_style)
@@ -222,6 +226,15 @@ class AdminMainWidget(QWidget):
 
     def open_templates(self):
         self._show_page(self._ensure_templates_widget())
+
+    def open_doctor_list(self):
+        if self.doctor_list_dialog is None:
+            from .doctor_list_dialog import DoctorListDialog
+
+            self.doctor_list_dialog = DoctorListDialog(parent=self)
+        self.doctor_list_dialog.show()
+        self.doctor_list_dialog.raise_()
+        self.doctor_list_dialog.activateWindow()
 
     def open_diet_templates(self):
         self._show_page(self._ensure_diet_templates_widget())

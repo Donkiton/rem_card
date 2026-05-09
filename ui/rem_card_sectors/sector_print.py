@@ -34,9 +34,12 @@ class PrintConfig:
         self.version = "1.0"
         
     def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool, 
-             ventilation: bool, labs: bool, procedures: bool, death_outcome: bool = None):
+             ventilation: bool, labs: bool, procedures: bool, death_outcome: bool = None, death_protocol: bool = None):
+        current = self.load()
         if death_outcome is None:
-            death_outcome = self.load().get("death_outcome", False)
+            death_outcome = current.get("death_outcome", True)
+        if death_protocol is None:
+            death_protocol = current.get("death_protocol", death_outcome)
         self.settings.setValue("sector_print/version", self.version)
         self.settings.setValue("sector_print/sections/vitals", vitals)
         self.settings.setValue("sector_print/sections/balance", balance)
@@ -46,9 +49,11 @@ class PrintConfig:
         self.settings.setValue("sector_print/sections/labs", labs)
         self.settings.setValue("sector_print/sections/procedures", procedures)
         self.settings.setValue("sector_print/sections/death_outcome", death_outcome)
+        self.settings.setValue("sector_print/sections/death_protocol", death_protocol)
         self.settings.sync()
         
     def load(self):
+        death_outcome = self.settings.value("sector_print/sections/death_outcome", True, type=bool)
         return {
             "vitals": self.settings.value("sector_print/sections/vitals", True, type=bool),
             "balance": self.settings.value("sector_print/sections/balance", True, type=bool),
@@ -57,7 +62,8 @@ class PrintConfig:
             "ventilation": self.settings.value("sector_print/sections/ventilation", False, type=bool),
             "labs": self.settings.value("sector_print/sections/labs", False, type=bool),
             "procedures": self.settings.value("sector_print/sections/procedures", False, type=bool),
-            "death_outcome": self.settings.value("sector_print/sections/death_outcome", False, type=bool),
+            "death_outcome": death_outcome,
+            "death_protocol": self.settings.value("sector_print/sections/death_protocol", death_outcome, type=bool),
         }
 
 class FullReportWorker(QThread):
@@ -435,7 +441,8 @@ class DataCollectorWorker(QThread):
 
     @staticmethod
     def _attach_death_outcome_section(data: dict, remcard_service, config, start_dt, end_dt):
-        if config.get("death_outcome", False):
+        include_protocol = config.get("death_protocol", config.get("death_outcome", False))
+        if config.get("death_outcome", False) or include_protocol:
             data["death_outcome"] = build_death_outcome_struct(
                 remcard_service,
                 data.get("admission_id") or data.get("id"),

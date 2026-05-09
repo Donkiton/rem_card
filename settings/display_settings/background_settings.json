@@ -24,6 +24,14 @@
       "start": "05-12",
       "end": "05-13",
       "locked": false
+    },
+    {
+      "id": "background_20260509_212312",
+      "name": "Фон 09.05-09.05",
+      "file": "fon_20260509_212318_nekuri.png",
+      "start": "05-31",
+      "end": "05-31",
+      "locked": false
     }
   ]
 }

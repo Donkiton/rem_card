@@ -274,6 +274,14 @@ class ReportBuilder:
                 page-break-inside: avoid;
                 break-inside: avoid;
             }
+            .death-protocol-section,
+            .death-protocol-section table,
+            .death-protocol-section tbody,
+            .death-protocol-section tr {
+                page-break-inside: avoid;
+                page-break-after: auto;
+                break-inside: avoid;
+            }
         </style>
         """
         return css.replace("__TABLE_WIDTH__", table_width)
@@ -286,7 +294,15 @@ class ReportBuilder:
         if config.get("balance", True): sections.append(render_balance(data, hours, table_width_pt))
         if config.get("ventilation", False): sections.append(render_ventilation(data, table_width_pt))
         if config.get("events", True): sections.append(render_events(data, table_width_pt))
-        if config.get("death_outcome", False): sections.append(render_death_outcome(data, table_width_pt))
+        if config.get("death_outcome", False) or config.get("death_protocol", config.get("death_outcome", False)):
+            sections.append(
+                render_death_outcome(
+                    data,
+                    table_width_pt,
+                    include_outcome=config.get("death_outcome", False),
+                    include_protocol=config.get("death_protocol", config.get("death_outcome", False)),
+                )
+            )
         visible_sections = [section for section in sections if section]
         return '<div class="section-gap">&nbsp;</div>'.join(visible_sections)
 
