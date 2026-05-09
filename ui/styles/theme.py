@@ -4,6 +4,7 @@
 
 from rem_card.ui.styles.chart_styles import analytics_chart_colors
 from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.styles.tooltip_style import TOOLTIP_BG, TOOLTIP_BORDER, TOOLTIP_TEXT
 
 
 def get_current_tokens(role: str | None = None) -> dict:
@@ -625,9 +626,9 @@ QMainWindow, QDialog {{
 
 /* Подсказки - форсированный стиль для читаемости */
 QToolTip {{
-    background-color: #ffffff !important;
-    color: #2c3e50 !important;
-    border: 1px solid #bdc3c7 !important;
+    background-color: {TOOLTIP_BG} !important;
+    color: {TOOLTIP_TEXT} !important;
+    border: 1px solid {TOOLTIP_BORDER} !important;
     padding: 5px !important;
     font-size: 13px !important;
 }}

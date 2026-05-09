@@ -33,8 +33,10 @@ def _apply_app_theme(app, role: Optional[str] = None):
     except Exception:
         try:
             from rem_card.ui.styles.theme import GLOBAL_STYLE
+            from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
 
             app.setStyleSheet(GLOBAL_STYLE)
+            apply_tooltip_palette(app)
         except Exception:
             pass
 

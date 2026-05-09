@@ -4,11 +4,10 @@ import re
 from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QPushButton, QFrame, QApplication, QToolTip
+    QPushButton, QFrame
 )
-from PySide6.QtCore import Qt, Signal, QTimer, QRect, QPoint, Property, QPropertyAnimation, QEasingCurve, QSize
-from PySide6.QtGui import QPixmap, QColor, QPalette
-from rem_card.data.dto.remcard_dto import OrderType
+from PySide6.QtCore import Qt, Signal, QTimer, QPoint, Property, QPropertyAnimation, QEasingCurve, QSize
+from PySide6.QtGui import QPixmap, QColor
 from rem_card.services.order_domain_service import (
     NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 )
@@ -72,12 +71,19 @@ class StatusPopup(QFrame):
             QPushButton:hover {
                 background-color: #e9ecef;
             }
-            QToolTip {
-                background-color: #F5F5DC;
-                color: #000000;
-                border: 1px solid #bdc3c7;
-            }
         """)
+
+
+class ClickableSignalLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 class NurseOrderCard(QFrame):
     """Карточка назначения для сектора 1а."""
@@ -157,7 +163,7 @@ class NurseOrderCard(QFrame):
             self.h_main_layout.setSpacing(6)
             self.v_card_layout.addWidget(self.body_widget)
         else:
-            # ГЛАВНЫЙ ЛЕЙАУТ: Горизонтальный (Инфо блок слева | Текст центр | Кнопка справа)
+            # ГЛАВНЫЙ ЛЕЙАУТ: Горизонтальный (Инфо блок слева | Текст справа)
             self.h_main_layout = QHBoxLayout(self)
             self.h_main_layout.setContentsMargins(4, 4, 4, 4)
             self.h_main_layout.setSpacing(6)
@@ -181,10 +187,16 @@ class NurseOrderCard(QFrame):
         signal_layout.setContentsMargins(0, 0, 0, 0)
         signal_layout.setSpacing(0)
         
-        self.lbl_signal = QLabel() # Сигнализатор (Размер 38x38 по ТЗ)
+        self.lbl_signal = ClickableSignalLabel() # Сигнализатор (Размер 38x38 по ТЗ)
         self.lbl_signal.setFixedSize(38, 38) 
         self.lbl_signal.setScaledContents(True)
-        self.lbl_signal.setStyleSheet("padding: 0px; margin: 0px;")
+        self.lbl_signal.setCursor(Qt.PointingHandCursor)
+        self.lbl_signal.setToolTip("Отметить выполнение")
+        self.lbl_signal.clicked.connect(self.on_action_clicked)
+        self.lbl_signal.setStyleSheet("""
+            padding: 0px;
+            margin: 0px;
+        """)
         
         # Центруем по горизонтали и вертикали внутри контейнера
         signal_layout.addStretch(1)
@@ -218,21 +230,6 @@ class NurseOrderCard(QFrame):
         self.v_text_layout.addWidget(self.lbl_method_dur)
         
         self.h_main_layout.addLayout(self.v_text_layout, 1)
-
-        # 3. КНОПКА СПРАВА
-        self.v_right_panel = QVBoxLayout()
-        self.v_right_panel.setContentsMargins(0, 0, 0, 0)
-        self.btn_action = QPushButton()
-        self.btn_action.setFixedSize(32, 32)
-        self.btn_action.setIconSize(QSize(28, 28))
-        self.btn_action.setStyleSheet("""
-            QPushButton { background: transparent; border: none; }
-            QToolTip { background-color: #F5F5DC; color: #000000; border: 1px solid #bdc3c7; }
-        """)
-        self.btn_action.clicked.connect(self.on_action_clicked)
-        self.v_right_panel.addWidget(self.btn_action)
-        self.v_right_panel.addStretch(1) # Прижимаем кнопку к верху (на уровень препарата)
-        self.h_main_layout.addLayout(self.v_right_panel, 0)
 
         self.update_data(self.data)
         self.set_bg_color(QColor("#f8f9fa"))
@@ -292,7 +289,6 @@ class NurseOrderCard(QFrame):
         self.lbl_method_dur.setVisible(bool(tail_parts))
 
         self.update_signal()
-        self.update_action_button()
         self.updateGeometry()
         self._queue_height_sync()
 
@@ -372,49 +368,6 @@ class NurseOrderCard(QFrame):
         else:
             self.lbl_signal.hide()
 
-    def update_action_button(self):
-        mark = self.data.get('comment', '') 
-        icon_name = "chek_mark.png"
-        tooltip = "Отметить выполнение"
-        enabled = True
-
-        # Сбрасываем возможные кастомные стили с предыдущих вызовов
-        self.btn_action.setStyleSheet("""
-            QPushButton { background: transparent; border: none; }
-            QToolTip { background-color: #F5F5DC; color: #000000; border: 1px solid #bdc3c7; }
-        """)
-
-        if mark == NURSE_MARK_EXECUTED:
-            icon_name = "done.png"
-            tooltip = "Выполнено"
-        elif mark == NURSE_MARK_NOT_EXECUTED:
-            icon_name = "notdone.png"
-            tooltip = "Не выполнено"
-
-        self.btn_action.show()
-        if icon_name:
-            # Чтобы иконка не становилась серой (disabled effect), если кнопка выключена,
-            # мы применяем стиль, который переопределяет disabled state
-            if not enabled:
-                self.btn_action.setStyleSheet("""
-                    QPushButton { background: transparent; border: none; }
-                    QPushButton:disabled { color: transparent; }
-                    QToolTip { background-color: #F5F5DC; color: #000000; border: 1px solid #bdc3c7; }
-                """)
-                # Используем QIcon с режимом Normal, чтобы избежать автоматического обесцвечивания
-                from PySide6.QtGui import QIcon
-                pixmap = _cached_icon_pixmap(icon_name)
-                icon = QIcon(pixmap)
-                # Добавляем пиксмап для состояния Disabled
-                icon.addPixmap(pixmap, QIcon.Disabled, QIcon.On)
-                icon.addPixmap(pixmap, QIcon.Disabled, QIcon.Off)
-                self.btn_action.setIcon(icon)
-            else:
-                self.btn_action.setIcon(_cached_icon_pixmap(icon_name))
-                
-        self.btn_action.setToolTip(tooltip)
-        self.btn_action.setEnabled(enabled)
-
     def on_action_clicked(self):
         import time
         now_ts = time.time()
@@ -424,8 +377,8 @@ class NurseOrderCard(QFrame):
 
         self.popup = StatusPopup(self)
         self.popup.actionSelected.connect(self.handle_popup_action)
-        pos = self.btn_action.mapToGlobal(QPoint(0, 0))
-        self.popup.move(pos.x() + self.btn_action.width() + 5, pos.y() - 10)
+        pos = self.lbl_signal.mapToGlobal(QPoint(0, 0))
+        self.popup.move(pos.x() + self.lbl_signal.width() + 5, pos.y() - 10)
         self.popup.show()
 
     def handle_popup_action(self, action):
@@ -455,5 +408,3 @@ class NurseOrderCard(QFrame):
         self.anim.finished.connect(start_fadeout)
         self.anim.start()
         
-        icon_file = "done.png" if action == "done" else "notdone.png"
-        self.btn_action.setIcon(_cached_icon_pixmap(icon_file))

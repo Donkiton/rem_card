@@ -11,6 +11,7 @@ from rem_card.ui.styles.qss_builder import build_global_style
 from rem_card.ui.styles.theme_presets import build_tokens, get_preset, list_presets
 from rem_card.ui.styles.theme_storage import ThemeStorage, role_settings_from_payload
 from rem_card.ui.styles.theme_tokens import default_role_settings, default_settings_payload, normalize_mode, normalize_role
+from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
 
 
 class ThemeManager:
@@ -128,6 +129,7 @@ class ThemeManager:
         if target_app is not None:
             tokens = self.tokens_for_role(self._active_role)
             target_app.setStyleSheet(build_global_style(tokens))
+            apply_tooltip_palette(target_app)
             self._apply_runtime_container_styles(target_app, tokens)
 
     def _apply_runtime_container_styles(self, app: QApplication, tokens: dict[str, Any]) -> None:

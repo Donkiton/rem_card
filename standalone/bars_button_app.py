@@ -11,6 +11,7 @@ from rem_card.services.bars_auth_service import BarsAuthService
 from rem_card.ui.doctor_view.bars_auth_dialog import BarsAuthDialog
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.styles.theme import GLOBAL_STYLE
+from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
 
 
 class BarsButtonStandaloneWindow(QWidget):
@@ -126,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("БАРС standalone")
     app.setStyleSheet(GLOBAL_STYLE)
+    apply_tooltip_palette(app)
 
     window = BarsButtonStandaloneWindow(auto_open=not args.manual)
     window.show()

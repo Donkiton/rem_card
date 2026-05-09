@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from rem_card.ui.styles.theme_tokens import token
+from rem_card.ui.styles.tooltip_style import TOOLTIP_BG, TOOLTIP_BORDER, TOOLTIP_TEXT
 
 
 def build_global_style(tokens: dict[str, str]) -> str:
@@ -25,9 +26,9 @@ QWidget#patient_bed_root {{
 }}
 
 QToolTip {{
-    background-color: {t("surface.card")} !important;
-    color: {t("text.primary")} !important;
-    border: 1px solid {t("border.default")} !important;
+    background-color: {TOOLTIP_BG} !important;
+    color: {TOOLTIP_TEXT} !important;
+    border: 1px solid {TOOLTIP_BORDER} !important;
     padding: 5px !important;
     font-size: 13px !important;
 }}
