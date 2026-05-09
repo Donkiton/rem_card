@@ -14,6 +14,8 @@ from rem_card.services.order_domain_service import (
 
 ORDER_CARD_MIN_HEIGHT = 48
 _ICON_PIXMAP_CACHE = {}
+_MULTICOMP_SEPARATOR_RE = re.compile(r"\s+\+\s+")
+_IU_TOKEN_RE = re.compile(r"(?<![A-Za-zА-Яа-яЁё])IU(?![A-Za-zА-Яа-яЁё])", re.IGNORECASE)
 
 
 def _cached_icon_pixmap(icon_name: str) -> QPixmap:
@@ -138,6 +140,67 @@ class NurseOrderCard(QFrame):
         hours = round(minutes / 60.0, 1)
         return f"{str(hours).replace('.', ',')} ч."
 
+    @staticmethod
+    def _normalize_display_units(text) -> str:
+        return _IU_TOKEN_RE.sub("ЕД", str(text or ""))
+
+    @staticmethod
+    def _format_dose(dose, unit) -> str:
+        try:
+            dose_str = f"{float(dose):g}"
+        except (TypeError, ValueError):
+            dose_str = str(dose or "").strip()
+        unit_str = NurseOrderCard._normalize_display_units(unit).strip()
+        result = f"{dose_str} {unit_str}".strip()
+        return "" if result == "0" else result
+
+    @staticmethod
+    def _is_empty_dose(dose, unit) -> bool:
+        if str(unit or "").strip():
+            return False
+        try:
+            return float(dose or 0) == 0
+        except (TypeError, ValueError):
+            return not str(dose or "").strip()
+
+    @staticmethod
+    def _split_components(latin: str) -> list[str]:
+        return [
+            NurseOrderCard._normalize_display_units(part).strip()
+            for part in _MULTICOMP_SEPARATOR_RE.split(str(latin or "").strip())
+            if part.strip()
+        ]
+
+    def _is_multicomponent_order(self, drug_key: str, latin: str, dose, unit) -> bool:
+        components = self._split_components(latin)
+        if len(components) < 2:
+            return False
+
+        key = str(drug_key or "").strip()
+        if key:
+            try:
+                from rem_card.services.prescription_engine import engine
+
+                drug_data = engine.drugs.get(key, {}) or {}
+                if drug_data.get("is_multicomp"):
+                    return True
+            except Exception:
+                pass
+
+        return self._is_empty_dose(dose, unit)
+
+    def _build_drug_text(self, latin, dose, unit, order_type_val, drug_key: str) -> tuple[str, bool]:
+        if self._is_multicomponent_order(drug_key, latin, dose, unit):
+            return "\n".join(self._split_components(latin)), True
+
+        latin = str(latin or "")
+        prefix = ""
+        if drug_key not in ('ruchnoivvod', 'plasma', 'blood') and not re.match(r'^[A-Za-z]+\. ', latin.strip()):
+            prefix = "S. " if order_type_val != "procedure" else ""
+
+        dose_str = self._format_dose(dose, unit)
+        return self._normalize_display_units(f"{prefix}{latin} {dose_str}".strip()), False
+
     def init_ui(self):
         from PySide6.QtWidgets import QSizePolicy
         # Смена на Maximum гарантирует, что карточка не будет расти больше чем нужно её содержимому
@@ -253,19 +316,14 @@ class NurseOrderCard(QFrame):
 
         # --- Форматирование ---
         drug_key = str(self.data.get('drug_key', '') or '').strip().lower()
-        prefix = ""
-        if drug_key not in ('ruchnoivvod', 'plasma', 'blood') and not re.match(r'^[A-Za-z]+\. ', latin.strip()):
-            prefix = "S. " if order_type_val != "procedure" else ""
             
         # 1. Время (Левая панель)
         self.lbl_time.setText(planned_dt.strftime("%H:%M"))
 
         # 2. Препарат + Доза (Строка 1 центра)
-        dose_str = f"{dose:g} {unit}".strip()
-        if dose_str == "0":
-            dose_str = ""
-            
-        self.lbl_line1.setText(f"{prefix}{latin} {dose_str}".strip())
+        drug_text, is_multicomponent = self._build_drug_text(latin, dose, unit, order_type_val, drug_key)
+        self.lbl_line1.setWordWrap(not is_multicomponent)
+        self.lbl_line1.setText(drug_text)
 
         # 3. Растворитель (Строка 2 центра)
         self.lbl_line2.setText(diluent)
