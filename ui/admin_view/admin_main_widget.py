@@ -25,6 +25,7 @@ class AdminMainWidget(QWidget):
         self.print_dialog = None
         self.theme_dialog = None
         self.display_settings_dialog = None
+        self.background_settings_dialog = None
 
         self.setup_ui()
 
@@ -55,6 +56,7 @@ class AdminMainWidget(QWidget):
         self.btn_print = QPushButton("Печать / Отчеты")
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
+        self.btn_background_settings = QPushButton("Изменение фона")
 
         def prepare_button(btn: QPushButton):
             btn.setObjectName("DialogOkBtn")
@@ -78,7 +80,7 @@ class AdminMainWidget(QWidget):
         program_buttons = []
         if self.role in ("doctor", "nurse"):
             program_buttons.append(self.btn_style)
-        program_buttons.extend([self.btn_print, self.btn_display_settings])
+        program_buttons.extend([self.btn_print, self.btn_display_settings, self.btn_background_settings])
 
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(22)
@@ -125,6 +127,7 @@ class AdminMainWidget(QWidget):
         self.btn_print.clicked.connect(self.open_print)
         self.btn_style.clicked.connect(self.open_style)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
+        self.btn_background_settings.clicked.connect(self.open_background_settings)
 
     def _show_page(self, widget):
         if widget is not None:
@@ -243,6 +246,12 @@ class AdminMainWidget(QWidget):
         from .display_settings_dialog import DisplaySettingsDialog
 
         dialog = DisplaySettingsDialog(initial_role=self.role, parent=self)
+        dialog.exec()
+
+    def open_background_settings(self):
+        from .background_settings_dialog import BackgroundSettingsDialog
+
+        dialog = BackgroundSettingsDialog(parent=self)
         dialog.exec()
 
     def set_print_context(self, service, admission_id, date):

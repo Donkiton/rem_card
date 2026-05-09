@@ -68,10 +68,10 @@
           "exit"
         ],
         "visible": {
-          "archive": true,
-          "refresh": true,
+          "archive": false,
+          "refresh": false,
           "add_patient": true,
-          "calc": true,
+          "calc": false,
           "bonus": true,
           "settings": true,
           "back": true,
@@ -102,7 +102,7 @@
         "enabled": true
       },
       "w1b_lower_sector": {
-        "enabled": true
+        "enabled": false
       }
     }
   }

@@ -36,6 +36,7 @@ BACKUP_MAX_TOTAL_BYTES = max(
 )
 
 CHANGE_LOG_RETENTION_DAYS = max(1, int(os.environ.get("REMCARD_CHANGELOG_RETENTION_DAYS", "14")))
+REPORT_RETENTION_DAYS = max(1, int(os.environ.get("REMCARD_REPORT_RETENTION_DAYS", "7")))
 CHANGE_LOG_MAX_ROWS = max(10_000, int(os.environ.get("REMCARD_CHANGELOG_MAX_ROWS", "120000")))
 CHANGE_LOG_PRUNE_BATCH = max(1000, int(os.environ.get("REMCARD_CHANGELOG_PRUNE_BATCH", "50000")))
 CHANGE_LOG_COMPACT_MIN_FREE_BYTES = max(
@@ -104,8 +105,8 @@ def perform_daily_backup_and_cleanup():
             )
 
         # 4) Cleanup old reports (> 1 week)
-        cutoff_7_days = now - timedelta(days=7)
-        _cleanup_old_files(REPORT_DIR, "*", cutoff_7_days, "report")
+        cutoff_report_days = now - timedelta(days=REPORT_RETENTION_DAYS)
+        _cleanup_old_report_files(REPORT_DIR, cutoff_report_days)
 
         # 5) Cleanup old local runtime logs (> 30 days)
         cutoff_30_days = now - timedelta(days=30)
@@ -195,6 +196,38 @@ def _cleanup_old_files(directory, pattern, cutoff_date, file_type):
                 logger.info("Deleted old %s: %s", file_type, filepath)
         except Exception as exc:
             logger.error("Failed to delete old %s %s: %s", file_type, filepath, exc)
+
+
+def _cleanup_old_report_files(directory, cutoff_date):
+    if not os.path.exists(directory):
+        return
+
+    search_pattern = os.path.join(directory, "*")
+    for filepath in glob.glob(search_pattern):
+        if not os.path.isfile(filepath):
+            continue
+        try:
+            created_at = datetime.fromtimestamp(_get_report_creation_timestamp(filepath))
+            if created_at < cutoff_date:
+                os.remove(filepath)
+                logger.info("Deleted old report: %s", filepath)
+        except Exception as exc:
+            logger.error("Failed to delete old report %s: %s", filepath, exc)
+
+
+def _get_report_creation_timestamp(filepath: str) -> float:
+    try:
+        created_at = os.path.getctime(filepath)
+    except OSError:
+        return os.path.getmtime(filepath)
+
+    if os.name == "nt":
+        return created_at
+
+    try:
+        return min(created_at, os.path.getmtime(filepath))
+    except OSError:
+        return created_at
 
 
 def _enforce_backup_limits(backup_dir: str):

@@ -1077,12 +1077,6 @@ class NurseOrdersWidget(QWidget):
         self.frame_layout.setSpacing(5) 
         layout.addWidget(self.frame_container, 1)
 
-        self.top_container = QFrame()
-        self.top_container.setStyleSheet("background-color: transparent;")
-        self.top_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.top_container.setFixedHeight(28)
-        self.frame_layout.addWidget(self.top_container, 0)
-
         self.table_clip_widget = QWidget()
         self.table_clip_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.table_clip_layout = QVBoxLayout(self.table_clip_widget)

@@ -5,8 +5,8 @@ from PySide6.QtCore import Qt, Signal, QTimer, Slot, QCoreApplication, QThread
 from PySide6.QtGui import QPainter, QPixmap
 from .patient_bed_row import PatientBedRow
 import os
-from rem_card.app.paths import get_icon_dir
 from rem_card.app.logger import logger
+from rem_card.ui.shared.background_settings import get_active_background_path
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 import pathlib
@@ -45,7 +45,7 @@ def _app_is_closing() -> bool:
 def _get_cached_fon_pixmap():
     global _FON_PIXMAP_CACHE, _FON_PIXMAP_CACHE_PATH
 
-    icon_path = str(pathlib.Path(get_icon_dir()) / "fon.png")
+    icon_path = get_active_background_path()
     if _FON_PIXMAP_CACHE is not None and _FON_PIXMAP_CACHE_PATH == icon_path:
         return _FON_PIXMAP_CACHE
 
@@ -53,6 +53,13 @@ def _get_cached_fon_pixmap():
     _FON_PIXMAP_CACHE = pixmap if not pixmap.isNull() else QPixmap()
     _FON_PIXMAP_CACHE_PATH = icon_path
     return _FON_PIXMAP_CACHE
+
+
+def _clear_fon_pixmap_cache():
+    global _FON_PIXMAP_CACHE, _FON_PIXMAP_CACHE_PATH
+
+    _FON_PIXMAP_CACHE = None
+    _FON_PIXMAP_CACHE_PATH = None
 
 
 class BedsSelectionWidget(QWidget):
@@ -152,6 +159,10 @@ class BedsSelectionWidget(QWidget):
             y = (self.height() - pixmap.height()) // 2
 
             painter.drawPixmap(x, y, pixmap)
+
+    def apply_background_settings(self):
+        _clear_fon_pixmap_cache()
+        self.update()
 
     def refresh(self, *, queue_if_running: bool = True):
         """Асинхронно обновляет список занятых коек."""

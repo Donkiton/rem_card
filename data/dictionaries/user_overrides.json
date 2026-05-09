@@ -2815,6 +2815,36 @@
       "concentration_mg_ml": 0,
       "default_dilution": null,
       "group": "antibiotics"
+    },
+    "polar_fiz": {
+      "is_multicomp": true,
+      "latin": "Полярка на физе",
+      "aliases": [
+        "полярка для бедных"
+      ],
+      "star_alias": "поля*",
+      "admin_type": "infusion",
+      "uses_line": false,
+      "duration_min": 120,
+      "form_key": "solution_iv",
+      "default_dilution": {
+        "base": "nacl_09",
+        "volume": 200
+      },
+      "components": [
+        {
+          "drug_key": "kcl_amp",
+          "default_dose": 20.0
+        },
+        {
+          "drug_key": "mgso4_amp",
+          "default_dose": 10.0
+        }
+      ],
+      "unit": "ml",
+      "form_unit": "ml",
+      "forms": [],
+      "group": "fluids"
     }
   },
   "admin_types": {

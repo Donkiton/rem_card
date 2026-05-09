@@ -1,4 +1,5 @@
 import os
+from functools import partial
 from math import ceil
 
 from PySide6.QtCore import Qt, QTimer
@@ -186,14 +187,38 @@ class PatientBedManagementWidget(QWidget):
                 int(bed_number),
                 admission_id,
             )
-            result = dialog.exec()
-            self._on_patient_form_finished(result, int(bed_number), admission_id)
+            dialog.setModal(True)
+            dialog.finished.connect(
+                partial(
+                    self._finish_patient_form_dialog,
+                    dialog,
+                    bed_number=int(bed_number),
+                    expected_admission_id=admission_id,
+                )
+            )
+            dialog.open()
         except Exception:
             self._active_patient_form = None
             self._active_patient_form_context = None
             raise
         finally:
             self._opening_patient_form = False
+
+    def _finish_patient_form_dialog(self, dialog, result: int, bed_number: int, expected_admission_id):
+        if self._active_patient_form is not dialog:
+            logger.info(
+                "patient_form_finished_skip_stale role=%s bed=%s admission_id=%s result=%s",
+                _current_role(),
+                int(bed_number),
+                expected_admission_id,
+                int(result),
+            )
+            if _qt_is_valid(dialog):
+                dialog.deleteLater()
+            return
+        self._on_patient_form_finished(result, int(bed_number), expected_admission_id)
+        if _qt_is_valid(dialog):
+            dialog.deleteLater()
 
     def _on_patient_form_finished(self, result: int, bed_number: int, expected_admission_id):
         if not _qt_is_valid(self):

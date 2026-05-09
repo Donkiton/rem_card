@@ -2847,6 +2847,51 @@ def _check_backup_count_limit_enforcement(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_report_cleanup_uses_creation_age(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.app import backup_and_cleanup
+
+    report_dir = os.path.join(temp_root, "reports")
+    os.makedirs(report_dir, exist_ok=True)
+
+    old_report = os.path.join(report_dir, "old_report.pdf")
+    fresh_report = os.path.join(report_dir, "fresh_report.pdf")
+    Path(old_report).write_bytes(b"old")
+    Path(fresh_report).write_bytes(b"fresh")
+
+    now = datetime(2026, 5, 9, 12, 0, 0)
+    old_created_ts = (now - timedelta(days=8)).timestamp()
+    fresh_created_ts = (now - timedelta(days=2)).timestamp()
+    fresh_modified_ts = (now - timedelta(hours=1)).timestamp()
+    os.utime(old_report, (fresh_modified_ts, fresh_modified_ts))
+    os.utime(fresh_report, (fresh_modified_ts, fresh_modified_ts))
+
+    original_getctime = backup_and_cleanup.os.path.getctime
+    try:
+        old_abs = os.path.abspath(old_report)
+        fresh_abs = os.path.abspath(fresh_report)
+
+        def fake_getctime(path):
+            abs_path = os.path.abspath(path)
+            if abs_path == old_abs:
+                return old_created_ts
+            if abs_path == fresh_abs:
+                return fresh_created_ts
+            return original_getctime(path)
+
+        backup_and_cleanup.os.path.getctime = fake_getctime
+        backup_and_cleanup._cleanup_old_report_files(report_dir, now - timedelta(days=7))
+    finally:
+        backup_and_cleanup.os.path.getctime = original_getctime
+
+    if os.path.exists(old_report):
+        return False, "old report was not removed by creation age"
+    if not os.path.exists(fresh_report):
+        return False, "fresh report was removed unexpectedly"
+    return True, "ok"
+
+
 def _check_runtime_backup_rotation_scans_valid_dir(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.paths import BACKUPS_RC_DIR, BACKUPS_VALID_DIR
     from rem_card.data.dao import db_manager as rem_db_manager
@@ -3337,6 +3382,31 @@ def _check_print_hourly_input_planned_time(temp_root: str) -> tuple[bool, str]:
     if (chain_hourly[1]["infusion"], chain_hourly[2]["infusion"], chain_hourly[3]["infusion"]) != (120.0, 120.0, 0.0):
         return False, f"chain infusion used actual start instead of planned start: {[chain_hourly[i]['infusion'] for i in (1, 2, 3)]}"
 
+    return True, "ok"
+
+
+def _check_print_balance_tables_input_before_output(temp_root: str) -> tuple[bool, str]:
+    from rem_card.ui.rem_card_sectors.s_print.balance import render_balance
+
+    hours = [str((8 + i) % 24) for i in range(24)]
+    html = render_balance(
+        {
+            "balance_final": {
+                "in_hourly": {0: {"infusion": 100}},
+                "out_hourly": {0: {"urine": 50}},
+                "in_cur": {"total": 100},
+                "out_cur": {"urine": 50, "drain": 0, "ng": 0, "stool": 0, "other": 0},
+            }
+        },
+        hours,
+        720,
+    )
+    input_idx = html.find("ПОЧАСОВОЕ ВВЕДЕНИЕ")
+    output_idx = html.find("ПОЧАСОВОЕ ВЫВЕДЕНИЕ")
+    if input_idx < 0 or output_idx < 0:
+        return False, "balance report table titles were not rendered"
+    if input_idx > output_idx:
+        return False, "balance report renders output before input"
     return True, "ok"
 
 
@@ -5281,8 +5351,12 @@ def _check_patient_form_open_is_deferred_from_callback(temp_root: str) -> tuple[
         return False, "PatientForm opening must be deferred with QTimer.singleShot"
     if "dialog.exec" in open_source:
         return False, "PatientForm.dialog.exec must not run in the original callback"
-    if "dialog.exec" not in safe_source:
+    if "dialog.exec" in safe_source:
+        return False, "PatientForm.dialog.exec must not run in the deferred helper"
+    if "dialog.open" not in safe_source:
         return False, "deferred helper must still open PatientForm"
+    if "finished.connect" not in safe_source or "_finish_patient_form_dialog" not in source_text:
+        return False, "PatientForm nonblocking open must handle finished signal"
     for guard in ("_opening_patient_form", "_is_closing"):
         if guard not in open_source + safe_source:
             return False, f"PatientForm deferred open missing {guard} guard"
@@ -7557,11 +7631,13 @@ def main():
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
+        ("report_cleanup_uses_creation_age", _check_report_cleanup_uses_creation_age),
         ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
         ("balance_pre_8_shift_hour_resolution", _check_balance_pre_8_shift_hour_resolution),
         ("archive_balance_patient_period_bounds", _check_archive_balance_patient_period_bounds),
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
+        ("print_balance_tables_input_before_output", _check_print_balance_tables_input_before_output),
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),

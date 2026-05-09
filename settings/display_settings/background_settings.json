@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "backgrounds": [
+    {
+      "id": "default",
+      "name": "Стандартный фон",
+      "file": "fon.png",
+      "start": "01-01",
+      "end": "12-31",
+      "locked": true
+    },
+    {
+      "id": "background_20260509_123815",
+      "name": "Фон 09.05-12.05",
+      "file": "fon_20260509_123847_fon_9maya.png",
+      "start": "05-09",
+      "end": "05-11",
+      "locked": false
+    },
+    {
+      "id": "background_20260509_124501",
+      "name": "Фон 09.05-09.05",
+      "file": "fon_20260509_124508_0abb8406-5e64-4f43-815a-091770979a26.png",
+      "start": "05-12",
+      "end": "05-13",
+      "locked": false
+    }
+  ]
+}

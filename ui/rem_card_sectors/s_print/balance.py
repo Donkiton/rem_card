@@ -81,18 +81,18 @@ def render_balance(data, hours, table_width_pt):
 
     html = '<div class="section section-avoid balance-section">'
     html += _render_hourly_balance_table(
-        f'ПОЧАСОВОЕ ВЫВЕДЕНИЕ. {totals["total_out"]} мл.',
-        out_rows,
-        out_hourly,
+        f'ПОЧАСОВОЕ ВВЕДЕНИЕ. {totals["total_in"]} мл.',
+        in_rows,
+        in_hourly,
         hours,
         table_width_pt,
         name_width,
         matrix_widths,
     )
     html += _render_hourly_balance_table(
-        f'ПОЧАСОВОЕ ВВЕДЕНИЕ. {totals["total_in"]} мл.',
-        in_rows,
-        in_hourly,
+        f'ПОЧАСОВОЕ ВЫВЕДЕНИЕ. {totals["total_out"]} мл.',
+        out_rows,
+        out_hourly,
         hours,
         table_width_pt,
         name_width,

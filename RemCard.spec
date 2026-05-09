@@ -48,10 +48,18 @@ def _dictionary_json_datas():
 
 
 def _display_settings_datas():
-    source_path = os.path.join(APP_ROOT, "settings", "display_settings", "display_settings.json")
-    if not os.path.isfile(source_path):
-        raise RuntimeError(f"Display settings file not found: {source_path}")
-    return [(source_path, DISPLAY_SETTINGS_TARGET)]
+    source_dir = os.path.join(APP_ROOT, "settings", "display_settings")
+    if not os.path.isdir(source_dir):
+        raise RuntimeError(f"Display settings directory not found: {source_dir}")
+
+    result = []
+    for name in sorted(os.listdir(source_dir)):
+        source_path = os.path.join(source_dir, name)
+        if os.path.isfile(source_path) and name.lower().endswith(".json"):
+            result.append((source_path, DISPLAY_SETTINGS_TARGET))
+    if not any(os.path.basename(source) == "display_settings.json" for source, _target in result):
+        raise RuntimeError(f"Display settings file not found: {os.path.join(source_dir, 'display_settings.json')}")
+    return result
 
 a = Analysis(
     [
