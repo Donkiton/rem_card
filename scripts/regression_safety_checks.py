@@ -3920,6 +3920,195 @@ def _check_full_report_movement_summary(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_full_report_bulk_collector_prefetches_once(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+    from types import SimpleNamespace
+
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_full_report_data
+
+    start = datetime(2026, 4, 24, 8, 0)
+    dates = [start + timedelta(days=index) for index in range(3)]
+    counters = {
+        "patient": 0,
+        "current_status": 0,
+        "movement_events": 0,
+        "outcome_context": 0,
+        "vitals": 0,
+        "orders": 0,
+        "administrations": 0,
+        "fluids": 0,
+        "ventilation": 0,
+        "oral_events": 0,
+        "settings_sql": 0,
+        "diet_sql": 0,
+    }
+
+    class FakeDB:
+        def fetch_all_remcard(self, query, params=()):
+            if "FROM vital_settings" in query:
+                counters["settings_sql"] += 1
+                return []
+            if "FROM diet_plan" in query:
+                counters["diet_sql"] += 1
+                return []
+            return []
+
+    class FakeVitalsDAO:
+        db = FakeDB()
+
+        def get_vitals(self, admission_id, report_start, report_end):
+            counters["vitals"] += 1
+            return [SimpleNamespace(timestamp=report_start + timedelta(hours=1), pulse=80)]
+
+    class FakeOrdersDAO:
+        def get_orders_in_range(self, admission_id, report_start, report_end, only_committed=False):
+            counters["orders"] += 1
+            order = SimpleNamespace(
+                id=10,
+                created_at=report_start,
+                _print_order_datetime=report_start + timedelta(hours=2),
+            )
+            return [order]
+
+    class FakeFluidService:
+        def get_balance_bounds_for_state(self, admission_id, date, *, patient=None, current_status=None, shift_bounds=None):
+            return shift_bounds
+
+        def get_fluids_in_bounds(self, admission_id, report_start, report_end):
+            counters["fluids"] += 1
+            return [SimpleNamespace(timestamp=report_start + timedelta(hours=3))]
+
+    class FakeVitalService:
+        def get_effective_bounds_for_patient(self, patient, date, *, default_bounds=None):
+            return default_bounds
+
+    class FakeStatusService:
+        def get_current_status(self, admission_id):
+            counters["current_status"] += 1
+            return None
+
+        def get_events(self, admission_id):
+            counters["movement_events"] += 1
+            return [
+                PatientStatusEventDTO(
+                    id=1,
+                    admission_id=admission_id,
+                    status=PatientStatus.ACTIVE,
+                    reason_text="Поступил",
+                    start_time=start + timedelta(hours=1),
+                    end_time=None,
+                )
+            ]
+
+        def get_admission_outcome_context(self, admission_id):
+            counters["outcome_context"] += 1
+            return {}
+
+    class FakeOralDAO:
+        def get_events(self, admission_id, report_start, report_end):
+            counters["oral_events"] += 1
+            return []
+
+    class FakeDietPlanDAO:
+        db = FakeDB()
+
+    class FakeService:
+        vitals_dao = FakeVitalsDAO()
+        orders_dao = FakeOrdersDAO()
+        fluid_service = FakeFluidService()
+        status_service = FakeStatusService()
+        _vitals = FakeVitalService()
+        _oral_intake = SimpleNamespace(dao=FakeOralDAO())
+        _diet_plan = SimpleNamespace(dao=FakeDietPlanDAO())
+
+        def get_day_period(self, date):
+            return date, date + timedelta(days=1)
+
+        def get_patient(self, admission_id):
+            counters["patient"] += 1
+            return SimpleNamespace(
+                last_name="Тест",
+                first_name="Пациент",
+                middle_name="",
+                diagnosis_text="Диагноз",
+                admission_datetime=start,
+            )
+
+        def get_latest_administrations_for_order_ids(self, **kwargs):
+            counters["administrations"] += 1
+            return [
+                {
+                    "id": 100,
+                    "order_id": 10,
+                    "planned_time": (start + timedelta(hours=2)).isoformat(sep=" "),
+                    "status": "planned",
+                }
+            ]
+
+        def get_ventilation_timeline(self, admission_id):
+            counters["ventilation"] += 1
+            return [SimpleNamespace(timestamp=start + timedelta(hours=4))]
+
+    def transform(data, service, config):
+        service.get_vital_settings_cached(data["admission_id"], data["start_dt"])
+        service.get_latest_administrations_for_order_ids(
+            order_ids=[order.id for order in data.get("prescriptions", [])],
+            start_dt=data["start_dt"],
+            end_dt=data["end_dt"],
+        )
+        service.get_oral_intake_events(data["admission_id"], data["start_dt"])
+        service.get_oral_intake_totals(data["admission_id"], data["start_dt"], current_time=data["end_dt"])
+        service.status_service.get_admission_outcome_context(data["admission_id"])
+        return data
+
+    result = collect_full_report_data(
+        FakeService(),
+        7,
+        dates,
+        {
+            "vitals": True,
+            "balance": True,
+            "prescriptions": True,
+            "events": True,
+            "ventilation": True,
+            "death_outcome": True,
+            "death_protocol": True,
+        },
+        transform,
+        include_ventilation=True,
+    )
+
+    if len(result) != 3:
+        return False, f"expected 3 days, got {len(result)}"
+    expected_once = {
+        "patient",
+        "current_status",
+        "movement_events",
+        "outcome_context",
+        "vitals",
+        "orders",
+        "administrations",
+        "fluids",
+        "ventilation",
+        "oral_events",
+        "settings_sql",
+        "diet_sql",
+    }
+    repeated = {name: value for name, value in counters.items() if name in expected_once and value != 1}
+    if repeated:
+        return False, f"bulk collector repeated prefetches: {repeated}"
+
+    if not result[0].get("events_struct_override"):
+        return False, "first day admission movement should be printed"
+    if not result[1].get("hide_events_section"):
+        return False, "unchanged middle day movement should be hidden"
+    if not result[2].get("events_struct_override"):
+        return False, "last generated day should contain full movement summary"
+
+    return True, "ok"
+
+
 def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -7833,6 +8022,7 @@ def main():
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("full_report_movement_summary", _check_full_report_movement_summary),
+        ("full_report_bulk_collector_prefetches_once", _check_full_report_bulk_collector_prefetches_once),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),

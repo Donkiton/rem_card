@@ -19,12 +19,8 @@ from rem_card.services.report_vitals_slotting import select_latest_vitals_by_rep
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
-from rem_card.ui.rem_card_sectors.s_print.movement import (
-    build_changed_day_movement_struct,
-    build_full_movement_struct,
-    movement_comment_text,
-    movement_summary_date as resolve_movement_summary_date,
-)
+from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_full_report_data
+from rem_card.ui.rem_card_sectors.s_print.movement import movement_comment_text
 
 
 def _movement_comment_text(status_value, reason_text):
@@ -82,77 +78,17 @@ class FullReportWorker(QThread):
 
     def run(self):
         try:
-            results = []
-            periods = [(dt, *self.remcard_service.get_day_period(dt)) for dt in self.dates]
-            movement_events = []
-            movement_struct = []
-            movement_summary_date = periods[-1][0] if periods else None
-
-            if self.config.get("events", True):
-                status_service = getattr(self.remcard_service, "status_service", None)
-                if status_service and hasattr(status_service, "get_events"):
-                    movement_events = status_service.get_events(self.admission_id)
-                    movement_struct = build_full_movement_struct(movement_events)
-                    movement_summary_date = resolve_movement_summary_date(periods, movement_events)
-
-            for dt, start_dt, end_dt in periods:
-                
-                patient = self.remcard_service.get_patient(self.admission_id)
-                if patient:
-                    patient_name = f"{patient.last_name or ''} {patient.first_name or ''} {patient.middle_name or ''}".strip()
-                    diagnosis = getattr(patient, 'diagnosis_text', None) or "—"
-                    icu_day = "Неизвестно"
-                    if patient.admission_datetime:
-                        icu_day_value = ShiftService.calculate_icu_day(patient.admission_datetime, start_dt)
-                        icu_day = str(icu_day_value) if icu_day_value is not None else "Неизвестно"
-                else:
-                    patient_name = "Неизвестный пациент"
-                    diagnosis = "—"
-                    icu_day = "?"
-
-                day_data = {
-                    "admission_id": self.admission_id,
-                    "patient_name": patient_name,
-                    "diagnosis": diagnosis,
-                    "icu_day": icu_day,
-                    "start_dt": start_dt,
-                    "end_dt": end_dt,
-                    "vitals": [],
-                    "prescriptions": [],
-                    "events": [],
-                    "fluids_raw": [],
-                    "ventilation_events": [],
-                }
-
-                if self.config.get("vitals", True):
-                    day_data["vitals"] = self.remcard_service.get_vitals(self.admission_id, dt)
-                
-                day_data["prescriptions"] = self.remcard_service.get_orders(self.admission_id, dt, only_committed=True)
-
-                if self.config.get("balance", True):
-                    if hasattr(self.remcard_service, 'get_fluids'):
-                        day_data["fluids_raw"] = self.remcard_service.get_fluids(self.admission_id, dt)
-
-                if self.config.get("events", True):
-                    if dt == movement_summary_date and movement_struct:
-                        day_data["events_struct_override"] = movement_struct
-                    else:
-                        day_movement_struct = build_changed_day_movement_struct(movement_events, start_dt, end_dt)
-                        if day_movement_struct:
-                            day_data["events_struct_override"] = day_movement_struct
-                        else:
-                            day_data["events_struct_override"] = []
-                            day_data["hide_events_section"] = True
-                if self.config.get("ventilation", False):
-                    day_data["ventilation_events"] = DataCollectorWorker.collect_ventilation_events(
-                        self.remcard_service,
-                        self.admission_id,
-                        start_dt,
-                        end_dt,
-                    )
-
-                processed_day = DataCollectorWorker.transform_data_static(day_data, self.remcard_service, self.config)
-                results.append(processed_day)
+            results = collect_full_report_data(
+                self.remcard_service,
+                self.admission_id,
+                self.dates,
+                self.config,
+                DataCollectorWorker.transform_data_static,
+                include_ventilation=True,
+                unknown_patient_name="Неизвестный пациент",
+                unknown_icu_day="?",
+                missing_admission_icu_day="Неизвестно",
+            )
 
             self.finished.emit(results)
         except Exception as e:

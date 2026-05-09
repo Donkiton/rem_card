@@ -181,36 +181,81 @@ class OrdersDAO:
             select_clause="*",
         )
         rows = self.db.fetch_all_remcard(query, params)
-        
-        orders = []
-        for r in rows:
-            rd = dict(r)
-            orders.append(OrderDTO(
-                id=rd['id'],
-                admission_id=rd['admission_id'],
-                drug_key=rd['drug_key'],
-                latin=rd['latin'],
-                type=OrderType(rd['type']),
-                status=OrderStatus(rd['status']),
-                dose_value=rd['dose_value'],
-                dose_unit=rd['dose_unit'],
-                is_per_kg=bool(rd['is_per_kg']),
-                frequency=rd['frequency'],
-                specific_times=json.loads(rd['specific_times'] or "[]"),
-                rate_ml_h=rd.get('rate_ml_h'),
-                volume_total=rd.get('volume_total'),
-                duration_min=rd.get('duration_min'),
-                sort_order=rd.get('sort_order', 0) or 0,
-                draft_sort_order=rd.get('draft_sort_order'),
-                is_finalized=bool(rd.get('is_finalized', 0)),
-                is_committed=rd.get('is_committed', 0),
-                revision=rd.get('revision', 0) or 0,
-                created_at=datetime.fromisoformat(rd['created_at']),
-                comment=rd['comment'],
-                last_modified_by=rd.get('last_modified_by'),
-                updated_at=rd.get('updated_at')
-            ))
-        return orders
+        return [self._map_order_row(row) for row in rows]
+
+    def get_orders_in_range(
+        self,
+        admission_id: int,
+        start_dt: datetime,
+        end_dt: datetime,
+        only_committed: bool = False,
+    ) -> List[OrderDTO]:
+        if only_committed:
+            query = """
+                SELECT *
+                FROM orders
+                WHERE admission_id = ?
+                  AND datetime >= ? AND datetime < ?
+                  AND (
+                      (is_committed = 1 AND COALESCE(status, '') NOT IN ('deleted', 'cancelled'))
+                      OR
+                      (is_committed = 0 AND EXISTS (
+                          SELECT 1
+                          FROM administrations a
+                          WHERE a.order_id = orders.id
+                            AND a.is_committed = 1
+                            AND COALESCE(a.status, '') NOT IN ('deleted', 'cancelled')
+                      ))
+                  )
+                ORDER BY COALESCE(sort_order, 0) ASC, created_at ASC, id ASC
+            """
+        else:
+            query = """
+                SELECT *
+                FROM orders
+                WHERE admission_id = ?
+                  AND datetime >= ? AND datetime < ?
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, created_at ASC, id ASC
+            """
+        rows = self.db.fetch_all_remcard(
+            query,
+            (admission_id, start_dt.isoformat(), end_dt.isoformat()),
+        )
+        return [self._map_order_row(row) for row in rows]
+
+    @staticmethod
+    def _map_order_row(row) -> OrderDTO:
+        rd = dict(row)
+        order = OrderDTO(
+            id=rd['id'],
+            admission_id=rd['admission_id'],
+            drug_key=rd['drug_key'],
+            latin=rd['latin'],
+            type=OrderType(rd['type']),
+            status=OrderStatus(rd['status']),
+            dose_value=rd['dose_value'],
+            dose_unit=rd['dose_unit'],
+            is_per_kg=bool(rd['is_per_kg']),
+            frequency=rd['frequency'],
+            specific_times=json.loads(rd['specific_times'] or "[]"),
+            rate_ml_h=rd.get('rate_ml_h'),
+            volume_total=rd.get('volume_total'),
+            duration_min=rd.get('duration_min'),
+            sort_order=rd.get('sort_order', 0) or 0,
+            draft_sort_order=rd.get('draft_sort_order'),
+            is_finalized=bool(rd.get('is_finalized', 0)),
+            is_committed=rd.get('is_committed', 0),
+            revision=rd.get('revision', 0) or 0,
+            created_at=datetime.fromisoformat(rd['created_at']),
+            comment=rd['comment'],
+            last_modified_by=rd.get('last_modified_by'),
+            updated_at=rd.get('updated_at')
+        )
+        raw_datetime = rd.get("datetime")
+        if raw_datetime:
+            setattr(order, "_print_order_datetime", datetime.fromisoformat(str(raw_datetime).replace(" ", "T")))
+        return order
 
     def get_order_ids(self, admission_id: int, date: Optional[datetime] = None, only_committed: bool = False) -> List[int]:
         query, params = self._build_visible_orders_query(
