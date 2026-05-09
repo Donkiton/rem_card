@@ -69,16 +69,16 @@ class DoctorMainWidget(QWidget):
         
         self.init_ui()
 
-    def start_auto_refresh(self):
+    def start_auto_refresh(self, *, wake_monitor: bool = True):
         if self._is_closing or _app_is_closing():
             return
         data_service = self._get_data_service()
         if data_service and not self._monitor_connected:
             data_service.changes_detected.connect(self._on_data_changes, Qt.QueuedConnection)
             self._monitor_connected = True
-        self._refresh_beds_if_available(queue_if_running=False)
+        self._refresh_beds_if_available(queue_if_running=False, allow_hidden=True)
         self._refresh_w1a()
-        if data_service:
+        if data_service and wake_monitor:
             data_service.request_immediate_refresh(force_emit=False)
 
     def auto_refresh(self, force: bool = False):
@@ -129,8 +129,8 @@ class DoctorMainWidget(QWidget):
         elif hasattr(sector, "refresh_data"):
             sector.refresh_data()
 
-    def _refresh_beds_if_available(self, *, queue_if_running: bool = True):
-        if self._is_closing or _app_is_closing() or not self.isVisible():
+    def _refresh_beds_if_available(self, *, queue_if_running: bool = True, allow_hidden: bool = False):
+        if self._is_closing or _app_is_closing() or (not allow_hidden and not self.isVisible()):
             return
         remcard_widget = getattr(self, "remcard_widget", None)
         if not _qt_is_valid(remcard_widget):

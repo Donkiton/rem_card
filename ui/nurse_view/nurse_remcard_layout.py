@@ -472,7 +472,7 @@ class NurseRemCardLayoutManager(QWidget):
 
     def _refresh_beds_async(self):
         self.beds_selection_widget.remcard_service = self.remcard_service
-        self.beds_selection_widget.refresh()
+        self.beds_selection_widget.refresh(queue_if_running=False)
 
     def _ensure_journal_widget(self):
         if self.journal_widget is not None:

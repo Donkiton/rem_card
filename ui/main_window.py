@@ -109,6 +109,8 @@ class MainWindow(QMainWindow):
         self._role_lock = role_session_lock
         self._role_lock_key = role_key if role_session_lock else None
         self._role_lock_owner_id = f"{socket.gethostname()}:{os.getpid()}:rem_card_ui"
+        self._initial_role_ui_ready = False
+        self._initial_role_auto_refresh_started = False
         
         self.setup_base_ui()
 
@@ -253,6 +255,9 @@ class MainWindow(QMainWindow):
         """Ленивая догрузка интерфейса роли при старте."""
         from PySide6.QtCore import QTimer
 
+        if self._initial_role_ui_ready:
+            return
+
         if not self.container:
             QTimer.singleShot(50, self._load_role_ui)
             return
@@ -263,9 +268,14 @@ class MainWindow(QMainWindow):
         elif self._initial_role == 'nurse':
             QTimer.singleShot(10, self._activate_initial_nurse_role)
 
-    def _activate_initial_doctor_role(self):
+    def _activate_initial_doctor_role(self, *, start_refresh: bool = True):
         from PySide6.QtCore import QTimer
         from .doctor_view.doctor_main_widget import DoctorMainWidget
+
+        if self._initial_role_ui_ready and self.doctor_main is not None:
+            if start_refresh:
+                QTimer.singleShot(0, self.start_initial_role_refresh)
+            return
 
         if not self.container:
             QTimer.singleShot(50, self._activate_initial_doctor_role)
@@ -281,13 +291,20 @@ class MainWindow(QMainWindow):
         self.doctor_main.remcard_widget.admission_id = None
         self.doctor_main.remcard_widget.layout_manager.set_patient_selection_mode("beds")
 
+        self._initial_role_ui_ready = True
         QTimer.singleShot(1500, lambda: _apply_role_icon("doctor"))
         self._schedule_maintenance()
-        QTimer.singleShot(0, self.doctor_main.start_auto_refresh)
+        if start_refresh:
+            QTimer.singleShot(0, self.start_initial_role_refresh)
 
-    def _activate_initial_nurse_role(self):
+    def _activate_initial_nurse_role(self, *, start_refresh: bool = True):
         from PySide6.QtCore import QTimer
         from .nurse_view.nurse_main_widget import NurseMainWidget
+
+        if self._initial_role_ui_ready and self.nurse_main is not None:
+            if start_refresh:
+                QTimer.singleShot(0, self.start_initial_role_refresh)
+            return
 
         if not self.container:
             QTimer.singleShot(50, self._activate_initial_nurse_role)
@@ -304,9 +321,47 @@ class MainWindow(QMainWindow):
             self.nurse_main.layout_manager.current_admission_id = None
             self.nurse_main.layout_manager.set_patient_selection_mode("beds")
 
+        self._initial_role_ui_ready = True
         QTimer.singleShot(1500, lambda: _apply_role_icon("nurse"))
         self._schedule_maintenance()
-        QTimer.singleShot(0, self.nurse_main.start_auto_refresh)
+        if start_refresh:
+            QTimer.singleShot(0, self.start_initial_role_refresh)
+
+    def prepare_initial_role_ui_for_startup(self) -> bool:
+        """Синхронно строит стартовую роль до первого показа окна."""
+        if self._initial_role_ui_ready:
+            return True
+        if not self.container or self._initial_role not in ("doctor", "nurse"):
+            return False
+        if self._initial_role == "doctor":
+            self._activate_initial_doctor_role(start_refresh=False)
+        elif self._initial_role == "nurse":
+            self._activate_initial_nurse_role(start_refresh=False)
+        return bool(self._initial_role_ui_ready)
+
+    def start_initial_role_refresh(self):
+        if self._initial_role_auto_refresh_started:
+            return
+        role_widget = None
+        if self._initial_role == "doctor":
+            role_widget = self.doctor_main
+        elif self._initial_role == "nurse":
+            role_widget = self.nurse_main
+        if role_widget is None or not hasattr(role_widget, "start_auto_refresh"):
+            return
+        self._initial_role_auto_refresh_started = True
+        role_widget.start_auto_refresh(wake_monitor=False)
+
+    def wake_initial_role_monitor(self):
+        role_widget = None
+        if self._initial_role == "doctor":
+            role_widget = self.doctor_main
+        elif self._initial_role == "nurse":
+            role_widget = self.nurse_main
+        service = getattr(role_widget, "remcard_service", None)
+        data_service = getattr(service, "data_service", None)
+        if data_service:
+            data_service.request_immediate_refresh(force_emit=False)
 
     def on_role_selected(self, role):
         from PySide6.QtCore import QTimer

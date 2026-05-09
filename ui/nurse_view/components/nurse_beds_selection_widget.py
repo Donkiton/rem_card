@@ -73,8 +73,9 @@ class NurseBedsSelectionWidget(QWidget):
         self._refresh_worker = None
         self._refresh_pending = False
         self._is_closing = False
+        self._refresh_apply_count = 0
         self.init_ui()
-        QTimer.singleShot(0, self.refresh)
+        QTimer.singleShot(0, lambda: self.refresh(queue_if_running=False))
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -172,6 +173,7 @@ class NurseBedsSelectionWidget(QWidget):
     def _apply_beds_snapshot(self, snapshot):
         if self._is_closing:
             return
+        self._refresh_apply_count += 1
         active_patients = list(snapshot.get("patients") or [])
         now = snapshot.get("now") or datetime.datetime.now()
         yesterday = snapshot.get("yesterday") or (now - datetime.timedelta(days=1))

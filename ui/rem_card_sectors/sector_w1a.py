@@ -67,6 +67,7 @@ class SectorW1a(BaseSectorWidget):
         self._group_pin_pending = False
         self._group_pin_rerun_requested = False
         self._last_render_signature = None
+        self._refresh_apply_count = 0
 
         self._time_timer = QTimer(self)
         self._time_timer.setSingleShot(True)
@@ -242,7 +243,8 @@ class SectorW1a(BaseSectorWidget):
             return
         # force is accepted for API compatibility; content hash still gates rendering.
         if self._refresh_worker is not None and self._refresh_worker.isRunning():
-            self._refresh_pending = True
+            if force:
+                self._refresh_pending = True
             return
 
         loader = getattr(self.service, "build_w1a_upcoming_orders_snapshot", None)
@@ -293,6 +295,7 @@ class SectorW1a(BaseSectorWidget):
         sender = self.sender()
         if sender is not None and sender is not self._refresh_worker:
             return
+        self._refresh_apply_count += 1
         snapshot = dict(snapshot or {})
         content_hash = str(snapshot.get("content_hash") or "")
         self._last_change_id = int(snapshot.get("change_id") or self._last_change_id or 0)

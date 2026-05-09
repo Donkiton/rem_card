@@ -1033,7 +1033,7 @@ class NurseMainWidget(QWidget):
             self._refresh_ivl_from_db()
 
     def _on_data_changes(self, payload: dict):
-        if self._is_closing:
+        if self._is_closing or not self.isVisible():
             return
         sync_actions = payload.get("sync_actions") or {}
         full_refresh_required = bool(sync_actions.get("full_refresh_required"))
@@ -1125,13 +1125,13 @@ class NurseMainWidget(QWidget):
             and hasattr(self.layout_manager, 'orders_widget')
         )
 
-    def start_auto_refresh(self):
+    def start_auto_refresh(self, *, wake_monitor: bool = True):
         self._ensure_monitor_subscription()
         if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
             self.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
         self._refresh_w1a()
         data_service = self._get_data_service()
-        if data_service:
+        if data_service and wake_monitor:
             data_service.request_immediate_refresh(force_emit=False)
 
     def stop_auto_refresh(self):

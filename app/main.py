@@ -3,6 +3,7 @@ import ctypes
 import os
 import socket
 import sys
+import time
 from typing import Optional
 
 from rem_card.app.runtime_paths import (
@@ -16,11 +17,154 @@ from rem_card.app.runtime_paths import (
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 
 
+STARTUP_TRACE_ENV = "REMCARD_STARTUP_TRACE"
+STARTUP_W1_WAIT_MS_ENV = "REMCARD_STARTUP_W1_WAIT_MS"
+STARTUP_W1_WAIT_DEFAULT_MS = 300
+
+
 def _show_native_warning(title: str, message: str):
     try:
         ctypes.windll.user32.MessageBoxW(0, message, title, 0x10)
     except Exception:
         print(f"{title}: {message}")
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _startup_w1_wait_ms() -> int:
+    raw = str(os.environ.get(STARTUP_W1_WAIT_MS_ENV, STARTUP_W1_WAIT_DEFAULT_MS)).strip()
+    try:
+        value = int(float(raw))
+    except Exception:
+        value = STARTUP_W1_WAIT_DEFAULT_MS
+    return max(0, min(value, 3000))
+
+
+def _startup_trace(logger, started_at: float, phase: str, **fields):
+    if not logger or not _env_flag_enabled(STARTUP_TRACE_ENV):
+        return
+    elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+    details = " ".join(f"{key}={value}" for key, value in fields.items())
+    suffix = f" {details}" if details else ""
+    logger.info("[StartupTrace] phase=%s t_ms=%.1f%s", phase, elapsed_ms, suffix)
+
+
+def _install_startup_trace_hooks(container, logger, started_at: float):
+    if not _env_flag_enabled(STARTUP_TRACE_ENV):
+        return
+    service = getattr(container, "remcard_service", None)
+    if service is None:
+        return
+
+    def _wrap(name: str):
+        original = getattr(service, name, None)
+        if not callable(original) or getattr(original, "_startup_trace_wrapped", False):
+            return
+
+        def wrapped(*args, **kwargs):
+            load_started = time.perf_counter()
+            result = None
+            error = None
+            try:
+                result = original(*args, **kwargs)
+                return result
+            except Exception as exc:
+                error = exc
+                raise
+            finally:
+                fields = {
+                    "loader": name,
+                    "elapsed_ms": f"{(time.perf_counter() - load_started) * 1000.0:.1f}",
+                }
+                if isinstance(result, dict):
+                    if "patients" in result:
+                        fields["patients"] = len(result.get("patients") or [])
+                    if "rows" in result:
+                        fields["rows"] = len(result.get("rows") or [])
+                    if result.get("content_hash"):
+                        fields["content_hash"] = str(result.get("content_hash"))[:12]
+                if error is not None:
+                    fields["error"] = repr(error)
+                _startup_trace(logger, started_at, "loader_done", **fields)
+
+        setattr(wrapped, "_startup_trace_wrapped", True)
+        setattr(service, name, wrapped)
+
+    _wrap("build_beds_snapshot")
+    _wrap("build_w1a_upcoming_orders_snapshot")
+
+
+def _initial_role_layout(window):
+    role = getattr(window, "_initial_role", None)
+    role_widget = None
+    if role == "doctor":
+        role_widget = getattr(window, "doctor_main", None)
+    elif role == "nurse":
+        role_widget = getattr(window, "nurse_main", None)
+    if role_widget is None:
+        return None
+    layout = getattr(role_widget, "layout_manager", None)
+    if layout is not None:
+        return layout
+    remcard_widget = getattr(role_widget, "remcard_widget", None)
+    return getattr(remcard_widget, "layout_manager", None)
+
+
+def _initial_w1_state(window) -> dict:
+    layout = _initial_role_layout(window)
+    if layout is None:
+        return {"ready": False, "role_ui": False}
+
+    beds_widget = getattr(layout, "beds_selection_widget", None)
+    beds_apply_count = int(getattr(beds_widget, "_refresh_apply_count", 0) or 0) if beds_widget is not None else 0
+    beds_ready = beds_widget is None or beds_apply_count > 0
+    beds_rows = len(getattr(beds_widget, "_rows_by_admission_id", {}) or {}) if beds_widget is not None else 0
+
+    w1a = getattr(layout, "sector_w1a", None)
+    w1a_enabled = bool(getattr(w1a, "_display_enabled", True)) if w1a is not None else False
+    w1a_apply_count = int(getattr(w1a, "_refresh_apply_count", 0) or 0) if w1a is not None else 0
+    w1a_ready = w1a is None or not w1a_enabled or w1a_apply_count > 0
+    w1a_rows = len(getattr(w1a, "_all_data", []) or []) if w1a is not None else 0
+
+    return {
+        "ready": bool(beds_ready and w1a_ready),
+        "role_ui": True,
+        "beds_ready": bool(beds_ready),
+        "beds_apply_count": beds_apply_count,
+        "beds_rows": beds_rows,
+        "w1a_ready": bool(w1a_ready),
+        "w1a_enabled": bool(w1a_enabled),
+        "w1a_apply_count": w1a_apply_count,
+        "w1a_rows": w1a_rows,
+    }
+
+
+def _wait_for_initial_w1(app, window, logger, started_at: float, timeout_ms: int) -> dict:
+    if timeout_ms <= 0:
+        state = _initial_w1_state(window)
+        _startup_trace(logger, started_at, "initial_w1_wait_skipped", **state)
+        return state
+
+    wait_started = time.perf_counter()
+    deadline = wait_started + (timeout_ms / 1000.0)
+    state = _initial_w1_state(window)
+    _startup_trace(logger, started_at, "initial_w1_wait_start", timeout_ms=timeout_ms, **state)
+    while time.perf_counter() < deadline:
+        try:
+            app.processEvents()
+        except Exception:
+            break
+        state = _initial_w1_state(window)
+        if state.get("ready"):
+            break
+        time.sleep(0.005)
+
+    state = _initial_w1_state(window)
+    state["waited_ms"] = f"{(time.perf_counter() - wait_started) * 1000.0:.1f}"
+    _startup_trace(logger, started_at, "initial_w1_wait_done", timeout_ms=timeout_ms, **state)
+    return state
 
 
 def _apply_app_theme(app, role: Optional[str] = None):
@@ -354,6 +498,7 @@ def main(forced_role: Optional[str] = None, path_setup: bool = False):
 
 
 def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
+    startup_started_at = time.perf_counter()
     parser = argparse.ArgumentParser(description=APP_DISPLAY_TITLE)
     parser.add_argument("--role", choices=["doctor", "nurse"], help="Начальная роль пользователя")
     parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
@@ -374,7 +519,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     from PySide6.QtNetwork import QLocalSocket, QLocalServer
     from PySide6.QtWidgets import QApplication
     from PySide6.QtGui import QPixmap
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
 
     role_suffix = args.role if args.role else "default"
     server_name = f"rem_card_single_instance_server_{role_suffix}"
@@ -425,24 +570,75 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         sys.excepthook = log_exception
         init_crash_handler()
         _apply_app_theme(app, args.role or "system")
+        _startup_trace(logger, startup_started_at, "qt_ready", role=args.role or "default")
 
         server = QLocalServer()
         server.listen(server_name)
 
+        container = None
+        if args.role in ("doctor", "nurse"):
+            bootstrap_started = time.perf_counter()
+            container = bootstrap()
+            _startup_trace(
+                logger,
+                startup_started_at,
+                "bootstrap_done",
+                elapsed_ms=f"{(time.perf_counter() - bootstrap_started) * 1000.0:.1f}",
+            )
+
         window = MainWindow(
-            container=None,
+            container=container,
             role=args.role,
             role_session_lock=role_lock,
             role_key=args.role if role_lock else None,
         )
+        _startup_trace(logger, startup_started_at, "main_window_constructed", role=args.role or "default")
 
-        container = bootstrap()
-        window.container = container
+        if container is None:
+            bootstrap_started = time.perf_counter()
+            container = bootstrap()
+            window.container = container
+            _startup_trace(
+                logger,
+                startup_started_at,
+                "bootstrap_done",
+                elapsed_ms=f"{(time.perf_counter() - bootstrap_started) * 1000.0:.1f}",
+            )
+        else:
+            window.container = container
         logger.info("Bootstrap completed")
+        _install_startup_trace_hooks(container, logger, startup_started_at)
+
+        initial_role_prepared = False
+        if args.role in ("doctor", "nurse") and hasattr(window, "prepare_initial_role_ui_for_startup"):
+            role_ui_started = time.perf_counter()
+            prepared = bool(window.prepare_initial_role_ui_for_startup())
+            initial_role_prepared = prepared
+            _startup_trace(
+                logger,
+                startup_started_at,
+                "initial_role_ui_prepared",
+                role=args.role,
+                prepared=int(prepared),
+                elapsed_ms=f"{(time.perf_counter() - role_ui_started) * 1000.0:.1f}",
+            )
+            if prepared:
+                if hasattr(window, "start_initial_role_refresh"):
+                    window.start_initial_role_refresh()
+                _wait_for_initial_w1(
+                    app,
+                    window,
+                    logger,
+                    startup_started_at,
+                    _startup_w1_wait_ms(),
+                )
 
         if splash is not None:
             splash.finish(window)
         window.show()
+        if initial_role_prepared and hasattr(window, "wake_initial_role_monitor"):
+            QTimer.singleShot(250, window.wake_initial_role_monitor)
+        _startup_trace(logger, startup_started_at, "window_shown", role=args.role or "default")
 
         def on_new_connection():
             client = server.nextPendingConnection()

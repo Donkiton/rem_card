@@ -73,12 +73,13 @@ class BedsSelectionWidget(QWidget):
         self._refresh_worker = None
         self._refresh_pending = False
         self._is_closing = False
+        self._refresh_apply_count = 0
         self.init_ui()
         self._last_shift_start = self._current_shift_start()
         self._shift_boundary_timer = QTimer(self)
         self._shift_boundary_timer.timeout.connect(self._refresh_on_shift_boundary)
         self._shift_boundary_timer.start(30000)
-        QTimer.singleShot(0, self.refresh)
+        QTimer.singleShot(0, lambda: self.refresh(queue_if_running=False))
 
     def _current_shift_start(self):
         now = datetime.datetime.now()
@@ -202,6 +203,7 @@ class BedsSelectionWidget(QWidget):
     def _apply_beds_snapshot(self, snapshot):
         if self._is_closing:
             return
+        self._refresh_apply_count += 1
         active_patients = list(snapshot.get("patients") or [])
         now = snapshot.get("now") or datetime.datetime.now()
         if self.remcard_service and hasattr(self.remcard_service, "get_day_period"):
