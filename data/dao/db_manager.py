@@ -7,6 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY, maybe_rotate_database_if_due
@@ -1041,39 +1042,41 @@ class DatabaseManager:
                 self._thread_state.remcard_tx_depth = depth
 
     def _open_readonly_central_connection(self) -> sqlite3.Connection:
-        uri = f"file:{self.db_path}?mode=ro"
+        if self._closed or self._remcard_conn is None:
+            raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
+        try:
+            path_uri = Path(self.db_path).as_uri()
+        except ValueError:
+            path_uri = Path(os.path.abspath(self.db_path)).as_uri()
+        uri = f"{path_uri}?mode=ro"
         conn = sqlite3.connect(
             uri,
             uri=True,
-            check_same_thread=True,
+            check_same_thread=False,
             isolation_level=None,
             timeout=5.0,
         )
         configure_connection(conn, readonly=True, profile="network")
         return conn
 
+    def _get_central_connection_for_read(self, context: str) -> sqlite3.Connection:
+        if self._closed or self._remcard_conn is None:
+            raise DatabaseClosedError(f"RemCard database connection is closed for {context}")
+        return self._remcard_conn
+
     def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
-        # Обычные фоновые чтения открывают отдельный read-only connection, чтобы
-        # QThread-снимки не делили один sqlite3.Connection с очередью записи.
-        # Central IO gate не дает network SQLite открывать read-only connection
-        # одновременно с локальной write-транзакцией.
+        # Обычные фоновые чтения идут через единое соединение под central IO gate:
+        # на сетевом SQLite частые sqlite3.connect()/close() из разных фоновых
+        # потоков уже приводили к native access violation на Windows.
         try:
-            if use_write_connection or self._in_current_thread_remcard_transaction():
-                with self._central_io_lock:
-                    with self.write_controller.connection_guard(self._remcard_conn):
-                        cursor = self._remcard_conn.cursor()
-                        cursor.execute(query, params)
-                        return cursor.fetchall()
-
+            del use_write_connection
             with self._central_io_lock:
-                conn = self._open_readonly_central_connection()
-                try:
+                conn = self._get_central_connection_for_read("remcard_read_all")
+                with self.write_controller.connection_guard(conn):
                     cursor = conn.cursor()
                     cursor.execute(query, params)
                     return cursor.fetchall()
-                finally:
-                    conn.close()
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger) from exc
@@ -1081,21 +1084,13 @@ class DatabaseManager:
 
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
         try:
-            if use_write_connection or self._in_current_thread_remcard_transaction():
-                with self._central_io_lock:
-                    with self.write_controller.connection_guard(self._remcard_conn):
-                        cursor = self._remcard_conn.cursor()
-                        cursor.execute(query, params)
-                        return cursor.fetchone()
-
+            del use_write_connection
             with self._central_io_lock:
-                conn = self._open_readonly_central_connection()
-                try:
+                conn = self._get_central_connection_for_read("remcard_read_one")
+                with self.write_controller.connection_guard(conn):
                     cursor = conn.cursor()
                     cursor.execute(query, params)
                     return cursor.fetchone()
-                finally:
-                    conn.close()
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger) from exc
