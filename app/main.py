@@ -20,6 +20,7 @@ from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 STARTUP_TRACE_ENV = "REMCARD_STARTUP_TRACE"
 STARTUP_W1_WAIT_MS_ENV = "REMCARD_STARTUP_W1_WAIT_MS"
 STARTUP_W1_WAIT_DEFAULT_MS = 300
+FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
 
 
 def _show_native_warning(title: str, message: str):
@@ -167,7 +168,42 @@ def _wait_for_initial_w1(app, window, logger, started_at: float, timeout_ms: int
     return state
 
 
+def _apply_basic_app_theme(app):
+    """Cheap baseline styling for startup without global QSS repolish costs."""
+    if app is None:
+        return
+    try:
+        from PySide6.QtGui import QColor, QFont, QPalette
+
+        app.setFont(QFont("Segoe UI", 10))
+        palette = app.palette()
+        colors = {
+            QPalette.ColorRole.Window: "#f8f9fa",
+            QPalette.ColorRole.WindowText: "#2c3e50",
+            QPalette.ColorRole.Base: "#ffffff",
+            QPalette.ColorRole.AlternateBase: "#fdfdfd",
+            QPalette.ColorRole.Text: "#2c3e50",
+            QPalette.ColorRole.Button: "#e9ecef",
+            QPalette.ColorRole.ButtonText: "#2c3e50",
+            QPalette.ColorRole.ToolTipBase: "#ffffff",
+            QPalette.ColorRole.ToolTipText: "#000000",
+        }
+        for group in (
+            QPalette.ColorGroup.Active,
+            QPalette.ColorGroup.Inactive,
+            QPalette.ColorGroup.Disabled,
+        ):
+            for role, color in colors.items():
+                palette.setColor(group, role, QColor(color))
+        app.setPalette(palette)
+    except Exception:
+        pass
+
+
 def _apply_app_theme(app, role: Optional[str] = None):
+    if not _env_flag_enabled(FULL_RUNTIME_THEME_ENV):
+        _apply_basic_app_theme(app)
+        return
     try:
         from rem_card.ui.styles.theme_manager import get_theme_manager
 
@@ -569,7 +605,6 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         logger = _logger
         sys.excepthook = log_exception
         init_crash_handler()
-        _apply_app_theme(app, args.role or "system")
         _startup_trace(logger, startup_started_at, "qt_ready", role=args.role or "default")
 
         server = QLocalServer()
@@ -585,6 +620,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 "bootstrap_done",
                 elapsed_ms=f"{(time.perf_counter() - bootstrap_started) * 1000.0:.1f}",
             )
+            _install_startup_trace_hooks(container, logger, startup_started_at)
 
         window = MainWindow(
             container=container,
@@ -604,10 +640,10 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 "bootstrap_done",
                 elapsed_ms=f"{(time.perf_counter() - bootstrap_started) * 1000.0:.1f}",
             )
+            _install_startup_trace_hooks(container, logger, startup_started_at)
         else:
             window.container = container
         logger.info("Bootstrap completed")
-        _install_startup_trace_hooks(container, logger, startup_started_at)
 
         initial_role_prepared = False
         if args.role in ("doctor", "nurse") and hasattr(window, "prepare_initial_role_ui_for_startup"):

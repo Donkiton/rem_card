@@ -160,6 +160,8 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
         close_btn = QPushButton("×")
         close_btn.setObjectName("DialogCloseBtn")
         close_btn.setFixedSize(34, 30)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setToolTip("Закрыть")
         close_btn.clicked.connect(self.reject)
         title_layout.addWidget(close_btn)
         container_layout.addWidget(title_bar)
@@ -985,6 +987,13 @@ class ThemeSettingsDialog(SavedFramelessDialogMixin, QDialog):
                 border: none;
                 font-size: 18px;
                 font-weight: 800;
+                padding: 0px;
+                margin: 0px;
+                min-width: 34px;
+                min-height: 30px;
+                max-width: 34px;
+                max-height: 30px;
+                border-top-right-radius: {tokens.get("radius.dialog")};
             }}
             QPushButton#DialogCloseBtn:hover {{
                 background: {tokens.get("state.danger")};
