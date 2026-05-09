@@ -1,7 +1,7 @@
 import pathlib
 
 from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout, QPdfWriter
-from PySide6.QtCore import QMarginsF
+from PySide6.QtCore import QMarginsF, QSizeF
 
 from .header import render_header
 from .vitals import render_vitals
@@ -15,6 +15,9 @@ class ReportBuilder:
     HORIZONTAL_MARGIN_MM = 7
     VERTICAL_MARGIN_MM = 15
     TABLE_WIDTH_GUARD_PT = 0
+    SECTION_GAP_HTML = '<div class="section-gap">&nbsp;</div>'
+    PAGE_BREAK_HTML = '<div style="page-break-before: always; height: 0; line-height: 0; font-size: 0;">&nbsp;</div>'
+    PAGE_BREAK_TOLERANCE_PT = 2.0
 
     @staticmethod
     def build_pdf(data, config, output_path):
@@ -39,10 +42,10 @@ class ReportBuilder:
 
         if isinstance(data, list):
             # Общий отчет за несколько дней
-            html_content = ReportBuilder._build_multiple_days_html(data, config, table_width_pt)
+            html_content = ReportBuilder._build_multiple_days_html(data, config, table_width_pt, rect_pts.height())
         else:
             # Отчет за одни сутки
-            html_content = ReportBuilder._build_single_day_html(data, config, table_width_pt)
+            html_content = ReportBuilder._build_single_day_html(data, config, table_width_pt, rect_pts.height())
             
         doc = QTextDocument()
         doc.setDocumentMargin(0)
@@ -287,51 +290,117 @@ class ReportBuilder:
         return css.replace("__TABLE_WIDTH__", table_width)
 
     @staticmethod
-    def _build_day_body(data, config, hours, table_width_pt):
+    def _join_sections(sections):
+        visible_sections = [section for section in sections if section]
+        return ReportBuilder.SECTION_GAP_HTML.join(visible_sections)
+
+    @staticmethod
+    def _measure_html_height(body_html, table_width_pt, page_height_pt):
+        if not body_html or not page_height_pt:
+            return 0.0
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setTextWidth(float(table_width_pt))
+        doc.setPageSize(QSizeF(float(table_width_pt), float(page_height_pt)))
+        doc.setHtml(
+            f'<html><head>{ReportBuilder._get_css(table_width_pt)}</head>'
+            f'<body><div class="report-page">{body_html}</div></body></html>'
+        )
+        return float(doc.size().height())
+
+    @staticmethod
+    def _last_page_used_height(body_html, table_width_pt, page_height_pt):
+        total_height = ReportBuilder._measure_html_height(body_html, table_width_pt, page_height_pt)
+        if total_height <= 0 or not page_height_pt:
+            return 0.0
+        used_height = total_height % float(page_height_pt)
+        if used_height < ReportBuilder.PAGE_BREAK_TOLERANCE_PT:
+            return 0.0
+        return used_height
+
+    @staticmethod
+    def _needs_page_break_before_protocol(header_html, sections_before_protocol, protocol_html, table_width_pt, page_height_pt):
+        if not protocol_html or not page_height_pt:
+            return False
+        body_before = header_html + ReportBuilder._join_sections(sections_before_protocol)
+        if body_before.strip():
+            body_before += ReportBuilder.SECTION_GAP_HTML
+        used_height = ReportBuilder._last_page_used_height(body_before, table_width_pt, page_height_pt)
+        protocol_height = ReportBuilder._measure_html_height(protocol_html, table_width_pt, page_height_pt)
+        if used_height <= 0 or protocol_height <= 0:
+            return False
+        return used_height + protocol_height > float(page_height_pt) - ReportBuilder.PAGE_BREAK_TOLERANCE_PT
+
+    @staticmethod
+    def _build_day_body(data, config, hours, table_width_pt, page_height_pt=None, header_html=""):
         sections = []
         if config.get("vitals", True): sections.append(render_vitals(data, hours, table_width_pt))
         if config.get("prescriptions", True): sections.append(render_prescriptions(data, hours, table_width_pt))
         if config.get("balance", True): sections.append(render_balance(data, hours, table_width_pt))
         if config.get("ventilation", False): sections.append(render_ventilation(data, table_width_pt))
-        if config.get("events", True): sections.append(render_events(data, table_width_pt))
-        if config.get("death_outcome", False) or config.get("death_protocol", config.get("death_outcome", False)):
+        if config.get("events", True) and not data.get("hide_events_section", False):
+            sections.append(render_events(data, table_width_pt))
+        include_death_outcome = config.get("death_outcome", False)
+        include_death_protocol = config.get("death_protocol", include_death_outcome)
+        if include_death_outcome:
             sections.append(
-                render_death_outcome(
-                    data,
-                    table_width_pt,
-                    include_outcome=config.get("death_outcome", False),
-                    include_protocol=config.get("death_protocol", config.get("death_outcome", False)),
-                )
+                render_death_outcome(data, table_width_pt, include_outcome=True, include_protocol=False)
             )
-        visible_sections = [section for section in sections if section]
-        return '<div class="section-gap">&nbsp;</div>'.join(visible_sections)
+        if include_death_protocol:
+            protocol_html = render_death_outcome(data, table_width_pt, include_outcome=False, include_protocol=True)
+            if ReportBuilder._needs_page_break_before_protocol(
+                header_html,
+                sections,
+                protocol_html,
+                table_width_pt,
+                page_height_pt,
+            ):
+                protocol_html = ReportBuilder.PAGE_BREAK_HTML + protocol_html
+            sections.append(protocol_html)
+        return ReportBuilder._join_sections(sections)
 
     @staticmethod
-    def _build_single_day_html(data, config, table_width_pt):
+    def _build_single_day_html(data, config, table_width_pt, page_height_pt=None):
         hours = [str((8+i)%24) for i in range(24)]
         start_str = data["start_dt"].strftime("%d.%m.%Y %H:%M")
         end_str = data["end_dt"].strftime("%d.%m.%Y %H:%M")
+        header_html = render_header(data, start_str, end_str, config.get("balance", True))
 
-        html_body = ReportBuilder._build_day_body(data, config, hours, table_width_pt)
+        html_body = ReportBuilder._build_day_body(
+            data,
+            config,
+            hours,
+            table_width_pt,
+            page_height_pt,
+            header_html,
+        )
 
         return f"""<html><head>{ReportBuilder._get_css(table_width_pt)}</head><body>
         <div class="report-page">
-            {render_header(data, start_str, end_str, config.get("balance", True))}
+            {header_html}
             {html_body}
         </div>
         </body></html>
         """
 
     @staticmethod
-    def _build_multiple_days_html(results, config, table_width_pt):
+    def _build_multiple_days_html(results, config, table_width_pt, page_height_pt=None):
         hours = [str((8+i)%24) for i in range(24)]
 
         days_html = []
         for i, data in enumerate(results):
             start_str = data["start_dt"].strftime("%d.%m.%Y %H:%M")
             end_str = data["end_dt"].strftime("%d.%m.%Y %H:%M")
+            header_html = render_header(data, start_str, end_str, config.get("balance", True))
 
-            html_body = ReportBuilder._build_day_body(data, config, hours, table_width_pt)
+            html_body = ReportBuilder._build_day_body(
+                data,
+                config,
+                hours,
+                table_width_pt,
+                page_height_pt,
+                header_html,
+            )
 
             # Добавляем разрыв страницы ПЕРЕД каждым днем, кроме первого
             page_style = 'style="page-break-before: always;"' if i > 0 else ""
@@ -339,7 +408,7 @@ class ReportBuilder:
             day_content = f"""
             <div class="day-container" {page_style}>
                 <div class="report-page">
-                    {render_header(data, start_str, end_str, config.get("balance", True))}
+                    {header_html}
                     {html_body}
                 </div>
             </div>

@@ -19,13 +19,16 @@ from rem_card.services.report_vitals_slotting import select_latest_vitals_by_rep
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
+from rem_card.ui.rem_card_sectors.s_print.movement import (
+    build_changed_day_movement_struct,
+    build_full_movement_struct,
+    movement_comment_text,
+    movement_summary_date as resolve_movement_summary_date,
+)
 
 
 def _movement_comment_text(status_value, reason_text):
-    text = str(reason_text or "").strip()
-    if str(status_value) == "DEAD" and text.startswith("Биологическая смерть:"):
-        return ""
-    return text
+    return movement_comment_text(status_value, reason_text)
 
 
 class PrintConfig:
@@ -80,8 +83,19 @@ class FullReportWorker(QThread):
     def run(self):
         try:
             results = []
-            for dt in self.dates:
-                start_dt, end_dt = self.remcard_service.get_day_period(dt)
+            periods = [(dt, *self.remcard_service.get_day_period(dt)) for dt in self.dates]
+            movement_events = []
+            movement_struct = []
+            movement_summary_date = periods[-1][0] if periods else None
+
+            if self.config.get("events", True):
+                status_service = getattr(self.remcard_service, "status_service", None)
+                if status_service and hasattr(status_service, "get_events"):
+                    movement_events = status_service.get_events(self.admission_id)
+                    movement_struct = build_full_movement_struct(movement_events)
+                    movement_summary_date = resolve_movement_summary_date(periods, movement_events)
+
+            for dt, start_dt, end_dt in periods:
                 
                 patient = self.remcard_service.get_patient(self.admission_id)
                 if patient:
@@ -120,8 +134,15 @@ class FullReportWorker(QThread):
                         day_data["fluids_raw"] = self.remcard_service.get_fluids(self.admission_id, dt)
 
                 if self.config.get("events", True):
-                    if hasattr(self.remcard_service, 'status_service') and self.remcard_service.status_service:
-                        day_data["events"] = self.remcard_service.status_service.get_events_in_range(self.admission_id, start_dt, end_dt)
+                    if dt == movement_summary_date and movement_struct:
+                        day_data["events_struct_override"] = movement_struct
+                    else:
+                        day_movement_struct = build_changed_day_movement_struct(movement_events, start_dt, end_dt)
+                        if day_movement_struct:
+                            day_data["events_struct_override"] = day_movement_struct
+                        else:
+                            day_data["events_struct_override"] = []
+                            day_data["hide_events_section"] = True
                 if self.config.get("ventilation", False):
                     day_data["ventilation_events"] = DataCollectorWorker.collect_ventilation_events(
                         self.remcard_service,
@@ -437,6 +458,11 @@ class DataCollectorWorker(QThread):
 
     @staticmethod
     def _attach_events_section(data: dict):
+        if "events_struct_override" in data:
+            data["events_struct"] = data.pop("events_struct_override") or []
+            if not data["events_struct"]:
+                data["hide_events_section"] = True
+            return
         data["events_struct"] = DataCollectorWorker._build_events_struct(data.get("events", []))
 
     @staticmethod

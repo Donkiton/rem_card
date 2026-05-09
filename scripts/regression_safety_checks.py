@@ -3753,6 +3753,173 @@ def _check_sector_print_transform_snapshot(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_full_report_movement_summary(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
+    from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
+    from rem_card.ui.rem_card_sectors.s_print.movement import (
+        build_changed_day_movement_struct,
+        build_full_movement_struct,
+        first_terminal_movement_time,
+        movement_summary_date,
+    )
+
+    start = datetime(2026, 4, 24, 8, 0)
+    events = [
+        PatientStatusEventDTO(
+            id=1,
+            admission_id=7,
+            status=PatientStatus.ACTIVE,
+            reason_text="Поступил",
+            start_time=start + timedelta(hours=2),
+            end_time=start + timedelta(days=1),
+        ),
+        PatientStatusEventDTO(
+            id=2,
+            admission_id=7,
+            status=PatientStatus.ACTIVE,
+            reason_text="Начало смены",
+            start_time=start + timedelta(days=1),
+            end_time=start + timedelta(days=1, hours=10),
+            created_by="SYSTEM",
+        ),
+        PatientStatusEventDTO(
+            id=3,
+            admission_id=7,
+            status=PatientStatus.OR,
+            reason_text="Операция",
+            start_time=start + timedelta(days=1, hours=10),
+            end_time=start + timedelta(days=1, hours=11),
+        ),
+        PatientStatusEventDTO(
+            id=4,
+            admission_id=7,
+            status=PatientStatus.ACTIVE,
+            reason_text=None,
+            start_time=start + timedelta(days=1, hours=11),
+            end_time=start + timedelta(days=4, hours=5, minutes=30),
+        ),
+        PatientStatusEventDTO(
+            id=5,
+            admission_id=7,
+            status=PatientStatus.TRANSFERRED,
+            reason_text="Перевод в профильное отделение",
+            start_time=start + timedelta(days=4, hours=5, minutes=30),
+            end_time=None,
+        ),
+    ]
+
+    movement = build_full_movement_struct(events)
+    expected = [
+        {"time": "24.04 10:00 - 25.04 18:00", "status": "В отделении", "desc": "Поступил"},
+        {"time": "25.04.2026 18:00 - 19:00", "status": "Оперблок", "desc": "Операция"},
+        {"time": "25.04 19:00 - 28.04 13:30", "status": "В отделении", "desc": "—"},
+        {"time": "28.04.2026 13:30", "status": "Переведен", "desc": "Перевод в профильное отделение"},
+    ]
+    if movement != expected:
+        return False, f"unexpected full movement summary: {movement}"
+
+    if first_terminal_movement_time(events) != start + timedelta(days=4, hours=5, minutes=30):
+        return False, "terminal movement time was not detected"
+
+    periods = [(start.date() + timedelta(days=index), start + timedelta(days=index), start + timedelta(days=index + 1)) for index in range(5)]
+    if movement_summary_date(periods, events) != (start + timedelta(days=4)).date():
+        return False, "movement summary was not assigned to the terminal day"
+
+    first_day_movement = build_changed_day_movement_struct(events, start, start + timedelta(days=1))
+    if first_day_movement != [
+        {"time": "24.04.2026 10:00 - ...", "status": "В отделении", "desc": "Поступил"}
+    ]:
+        return False, f"unexpected first day movement: {first_day_movement}"
+
+    second_day_movement = build_changed_day_movement_struct(
+        events,
+        start + timedelta(days=1),
+        start + timedelta(days=2),
+    )
+    expected_second_day = [
+        {"time": "... - 18:00", "status": "В отделении", "desc": "Поступил"},
+        {"time": "25.04.2026 18:00 - 19:00", "status": "Оперблок", "desc": "Операция"},
+        {"time": "25.04.2026 19:00 - ...", "status": "В отделении", "desc": "—"},
+    ]
+    if second_day_movement != expected_second_day:
+        return False, f"unexpected second day movement: {second_day_movement}"
+
+    unchanged_day_movement = build_changed_day_movement_struct(
+        events,
+        start + timedelta(days=2),
+        start + timedelta(days=3),
+    )
+    if unchanged_day_movement:
+        return False, f"unchanged day should not render movement: {unchanged_day_movement}"
+
+    results = []
+    for index in range(5):
+        day_start = start + timedelta(days=index)
+        if index == 4:
+            events_struct = movement
+        else:
+            events_struct = build_changed_day_movement_struct(events, day_start, day_start + timedelta(days=1))
+        data = {
+            "patient_name": "Тест Пациент",
+            "diagnosis": "Тест",
+            "icu_day": str(index + 1),
+            "start_dt": day_start,
+            "end_dt": day_start + timedelta(days=1),
+            "events_struct": events_struct,
+        }
+        if not events_struct:
+            data["hide_events_section"] = True
+        results.append(data)
+
+    html = ReportBuilder._build_multiple_days_html(
+        results,
+        {
+            "vitals": False,
+            "prescriptions": False,
+            "balance": False,
+            "ventilation": False,
+            "events": True,
+            "death_outcome": False,
+            "death_protocol": False,
+        },
+        500,
+        800,
+    )
+    if html.count("ДВИЖЕНИЕ") != 3:
+        return False, "movement section should be printed on changed days and on the final summary day"
+    if "24.04.2026 10:00 - ..." not in html:
+        return False, "first day admission movement was not rendered"
+    if "... - 18:00" not in html or "25.04.2026 19:00 - ..." not in html:
+        return False, "changed movement day was not rendered with period bounds"
+    if "24.04 10:00 - 25.04 18:00" not in html or "28.04.2026 13:30" not in html:
+        return False, "full movement summary was not rendered on the final day"
+
+    current_events = [
+        PatientStatusEventDTO(
+            id=1,
+            admission_id=8,
+            status=PatientStatus.ACTIVE,
+            reason_text="Поступил",
+            start_time=start + timedelta(hours=2),
+            end_time=None,
+        )
+    ]
+    current_periods = [
+        (start.date() + timedelta(days=index), start + timedelta(days=index), start + timedelta(days=index + 1))
+        for index in range(3)
+    ]
+    if movement_summary_date(current_periods, current_events) != (start + timedelta(days=2)).date():
+        return False, "active patient movement summary should be assigned to the last generated day"
+    if not build_changed_day_movement_struct(current_events, start, start + timedelta(days=1)):
+        return False, "active patient first day admission movement should be rendered"
+    if build_changed_day_movement_struct(current_events, start + timedelta(days=1), start + timedelta(days=2)):
+        return False, "active patient unchanged middle day should not render movement"
+
+    return True, "ok"
+
+
 def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -7665,6 +7832,7 @@ def main():
         ("print_balance_tables_input_before_output", _check_print_balance_tables_input_before_output),
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
+        ("full_report_movement_summary", _check_full_report_movement_summary),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),

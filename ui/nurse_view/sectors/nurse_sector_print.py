@@ -19,13 +19,16 @@ from rem_card.services.report_vitals_slotting import select_latest_vitals_by_rep
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
+from rem_card.ui.rem_card_sectors.s_print.movement import (
+    build_changed_day_movement_struct,
+    build_full_movement_struct,
+    movement_comment_text,
+    movement_summary_date as resolve_movement_summary_date,
+)
 
 
 def _movement_comment_text(status_value, reason_text):
-    text = str(reason_text or "").strip()
-    if str(status_value) == "DEAD" and text.startswith("Биологическая смерть:"):
-        return ""
-    return text
+    return movement_comment_text(status_value, reason_text)
 
 
 class NursePrintConfig:
@@ -60,8 +63,19 @@ class FullReportWorker(QThread):
     def run(self):
         try:
             results = []
-            for dt in self.dates:
-                start_dt, end_dt = self.remcard_service.get_day_period(dt)
+            periods = [(dt, *self.remcard_service.get_day_period(dt)) for dt in self.dates]
+            movement_events = []
+            movement_struct = []
+            movement_summary_date = periods[-1][0] if periods else None
+
+            if self.config.get("events", True):
+                status_service = getattr(self.remcard_service, "status_service", None)
+                if status_service and hasattr(status_service, "get_events"):
+                    movement_events = status_service.get_events(self.admission_id)
+                    movement_struct = build_full_movement_struct(movement_events)
+                    movement_summary_date = resolve_movement_summary_date(periods, movement_events)
+
+            for dt, start_dt, end_dt in periods:
                 patient = self.remcard_service.get_patient(self.admission_id)
                 day_data = {
                     "admission_id": self.admission_id,
@@ -74,8 +88,16 @@ class FullReportWorker(QThread):
                 day_data["prescriptions"] = self.remcard_service.get_orders(self.admission_id, dt, only_committed=True)
                 if self.config.get("balance", True) and hasattr(self.remcard_service, 'get_fluids'):
                     day_data["fluids_raw"] = self.remcard_service.get_fluids(self.admission_id, dt)
-                if self.config.get("events", True) and hasattr(self.remcard_service, 'status_service'):
-                    day_data["events"] = self.remcard_service.status_service.get_events_in_range(self.admission_id, start_dt, end_dt)
+                if self.config.get("events", True):
+                    if dt == movement_summary_date and movement_struct:
+                        day_data["events_struct_override"] = movement_struct
+                    else:
+                        day_movement_struct = build_changed_day_movement_struct(movement_events, start_dt, end_dt)
+                        if day_movement_struct:
+                            day_data["events_struct_override"] = day_movement_struct
+                        else:
+                            day_data["events_struct_override"] = []
+                            day_data["hide_events_section"] = True
 
                 processed_day = DataCollectorWorker.transform_data_static(day_data, self.remcard_service, self.config)
                 results.append(processed_day)
@@ -180,6 +202,18 @@ class DataCollectorWorker(QThread):
             current_time=current_time,
             end_dt=end_dt,
         )
+
+        if "events_struct_override" in data:
+            data["events_struct"] = data.pop("events_struct_override") or []
+            if not data["events_struct"]:
+                data["hide_events_section"] = True
+            data["death_outcome"] = build_death_outcome_struct(
+                remcard_service,
+                data.get("admission_id") or data.get("id"),
+                start_dt,
+                end_dt,
+            )
+            return data
 
         status_map = {"ACTIVE": "В отделении", "OUT": "Вне отд.", "OR": "Оперблок", "TRANSFERRED": "Переведен", "DEAD": "Умер"}
         events_struct = []
