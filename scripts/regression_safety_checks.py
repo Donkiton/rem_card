@@ -5292,6 +5292,31 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
     return True, "ok"
 
 
+def _check_async_call_worker_avoids_qthread(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    path = PROJECT_ROOT / "ui" / "shared" / "async_call.py"
+    source_text = path.read_text(encoding="utf-8")
+    if "QThread" in source_text:
+        return False, "AsyncCallThread must not use Qt QThread for snapshot workers"
+    if "threading.Thread" not in source_text:
+        return False, "AsyncCallThread must use a Python worker thread"
+    for marker in ("succeeded = Signal(object)", "failed = Signal(object)", "finished = Signal()"):
+        if marker not in source_text:
+            return False, f"AsyncCallThread signal API changed: missing {marker}"
+    for marker in ("def start(", "def isRunning(", "def quit(", "def wait("):
+        if marker not in source_text:
+            return False, f"AsyncCallThread compatibility API missing: {marker}"
+
+    tree = ast.parse(source_text)
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AsyncCallThread"]
+    if not class_defs:
+        return False, "AsyncCallThread class not found"
+    bases = [getattr(base, "id", getattr(base, "attr", "")) for base in class_defs[0].bases]
+    if "QObject" not in bases:
+        return False, "AsyncCallThread should stay a QObject signal emitter"
+    return True, "ok"
+
+
 def _check_patient_open_cache_snapshot_bypasses_worker_request_id(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     cases = [
@@ -7657,6 +7682,7 @@ def main():
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
         ),
         ("targeted_async_workers_are_parentless_and_guarded", _check_targeted_async_workers_are_parentless_and_guarded),
+        ("async_call_worker_avoids_qthread", _check_async_call_worker_avoids_qthread),
         ("patient_open_cache_snapshot_bypasses_worker_request_id", _check_patient_open_cache_snapshot_bypasses_worker_request_id),
         ("patient_form_open_is_deferred_from_callback", _check_patient_form_open_is_deferred_from_callback),
         ("shutdown_queue_db_ordering_guards", _check_shutdown_queue_db_ordering_guards),

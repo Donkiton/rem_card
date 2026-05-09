@@ -73,7 +73,7 @@
           "add_patient": true,
           "calc": false,
           "bonus": true,
-          "settings": true,
+          "settings": false,
           "back": true,
           "exit": true
         }
