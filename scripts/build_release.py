@@ -37,6 +37,9 @@ CHANGELOG_SUBJECT_TRANSLATIONS = {
     "fix: stabilize end-of-day infusion clicks": (
         "Стабилизированы клики по длительной инфузии до конца суток"
     ),
+    "Optimize PDF report generation": (
+        "Оптимизировано формирование PDF-отчетов"
+    ),
 }
 
 
