@@ -44,6 +44,12 @@ def _benchmark_remcard(role: str) -> dict:
     role_widget = None
 
     t = _now()
+    from rem_card.app.main import _apply_app_theme
+    _apply_app_theme(app, role)
+    theme_ui_init_ms = _ms(t)
+    steps.append(StepResult("theme_ui_init", theme_ui_init_ms))
+
+    t = _now()
     from rem_card.ui.main_window import MainWindow
     steps.append(StepResult("import_ui_main_window", _ms(t)))
 
@@ -56,6 +62,7 @@ def _benchmark_remcard(role: str) -> dict:
     bootstrap_ms = _ms(t)
     steps.append(StepResult("bootstrap", bootstrap_ms))
     startup_phases = dict(getattr(getattr(container, "db_manager", None), "startup_metrics", {}) or {})
+    startup_phases["theme_ui_init_ms"] = theme_ui_init_ms
     startup_phases["total_bootstrap_ms"] = bootstrap_ms
 
     t = _now()
@@ -111,6 +118,12 @@ def _benchmark_patient_bed_management() -> dict:
     window = None
 
     t = _now()
+    from rem_card.app.main import _apply_app_theme
+    _apply_app_theme(app, "system")
+    theme_ui_init_ms = _ms(t)
+    steps.append(StepResult("theme_ui_init", theme_ui_init_ms))
+
+    t = _now()
     from rem_card.ui.patient_bed_management.management_widget import PatientBedManagementWidget
     steps.append(StepResult("import_patient_bed_management_widget", _ms(t)))
 
@@ -123,6 +136,7 @@ def _benchmark_patient_bed_management() -> dict:
     bootstrap_ms = _ms(t)
     steps.append(StepResult("bootstrap", bootstrap_ms))
     startup_phases = dict(getattr(getattr(container, "db_manager", None), "startup_metrics", {}) or {})
+    startup_phases["theme_ui_init_ms"] = theme_ui_init_ms
     startup_phases["total_bootstrap_ms"] = bootstrap_ms
 
     t = _now()

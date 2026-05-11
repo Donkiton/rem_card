@@ -99,6 +99,25 @@ def _install_startup_trace_hooks(container, logger, started_at: float):
     _wrap("build_w1a_upcoming_orders_snapshot")
 
 
+def _log_startup_phase_metrics(
+    container,
+    logger,
+    started_at: float,
+    *,
+    theme_ui_init_ms: float,
+    total_bootstrap_ms: float,
+):
+    metrics = dict(getattr(getattr(container, "db_manager", None), "startup_metrics", {}) or {})
+    metrics["theme_ui_init_ms"] = round(float(theme_ui_init_ms), 3)
+    metrics["total_bootstrap_ms"] = round(float(total_bootstrap_ms), 3)
+    _startup_trace(
+        logger,
+        started_at,
+        "startup_phases",
+        **{key: f"{float(value):.1f}" for key, value in sorted(metrics.items())},
+    )
+
+
 def _initial_role_layout(window):
     role = getattr(window, "_initial_role", None)
     role_widget = None
@@ -544,8 +563,10 @@ def _create_startup_qt_context(role: Optional[str]):
 
     app = QApplication.instance() or QApplication(sys.argv)
     splash = _show_compiled_startup_splash(app, QPixmap, QSplashScreen, Qt)
+    theme_started = time.perf_counter()
     _apply_app_theme(app, role or "system")
-    return app, splash, QLocalSocket, QLocalServer, Qt, QTimer
+    theme_ui_init_ms = (time.perf_counter() - theme_started) * 1000.0
+    return app, splash, QLocalSocket, QLocalServer, Qt, QTimer, theme_ui_init_ms
 
 
 def _close_startup_splash(app, splash):
@@ -652,7 +673,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if path_setup:
         sys.exit(_run_path_setup())
 
-    app, splash, QLocalSocket, QLocalServer, Qt, QTimer = _create_startup_qt_context(args.role)
+    app, splash, QLocalSocket, QLocalServer, Qt, QTimer, theme_ui_init_ms = _create_startup_qt_context(args.role)
 
     def close_startup_splash():
         nonlocal splash
@@ -704,11 +725,19 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         if args.role in ("doctor", "nurse"):
             bootstrap_started = time.perf_counter()
             container = bootstrap()
+            bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
             _startup_trace(
                 logger,
                 startup_started_at,
                 "bootstrap_done",
-                elapsed_ms=f"{(time.perf_counter() - bootstrap_started) * 1000.0:.1f}",
+                elapsed_ms=f"{bootstrap_elapsed_ms:.1f}",
+            )
+            _log_startup_phase_metrics(
+                container,
+                logger,
+                startup_started_at,
+                theme_ui_init_ms=theme_ui_init_ms,
+                total_bootstrap_ms=bootstrap_elapsed_ms,
             )
             _install_startup_trace_hooks(container, logger, startup_started_at)
 
@@ -723,12 +752,20 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         if container is None:
             bootstrap_started = time.perf_counter()
             container = bootstrap()
+            bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
             window.container = container
             _startup_trace(
                 logger,
                 startup_started_at,
                 "bootstrap_done",
-                elapsed_ms=f"{(time.perf_counter() - bootstrap_started) * 1000.0:.1f}",
+                elapsed_ms=f"{bootstrap_elapsed_ms:.1f}",
+            )
+            _log_startup_phase_metrics(
+                container,
+                logger,
+                startup_started_at,
+                theme_ui_init_ms=theme_ui_init_ms,
+                total_bootstrap_ms=bootstrap_elapsed_ms,
             )
             _install_startup_trace_hooks(container, logger, startup_started_at)
         else:

@@ -39,7 +39,7 @@ class StartupPolicyError(RuntimeError):
 
 
 @dataclass
-class StartupDbGuardResult:
+class StartupGuardResult:
     ok: bool
     recovered: bool = False
     user_message: str = ""
@@ -47,6 +47,9 @@ class StartupDbGuardResult:
     restored_from: str = ""
     quarantine_path: str = ""
     baza_dir: str = ""
+
+
+StartupDbGuardResult = StartupGuardResult
 
 
 class _LockHeartbeat:
@@ -779,7 +782,7 @@ def _recover_shared_db(
     db_path: str,
     role: Optional[str],
     failure_reason: str,
-) -> StartupDbGuardResult:
+) -> StartupGuardResult:
     owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
     db_lock_path = os.path.join(baza_dir, "archiv", "db.lock")
     db_lock = None
@@ -813,7 +816,7 @@ def _recover_shared_db(
                     **profile,
                 },
             )
-            return StartupDbGuardResult(ok=True, baza_dir=baza_dir)
+            return StartupGuardResult(ok=True, baza_dir=baza_dir)
 
         failure_reason = check_after_lock or failure_reason
         if not confirmed_after_lock and not _is_missing_db_file(failure_reason):
@@ -826,7 +829,7 @@ def _recover_shared_db(
                     "classification": "availability_or_lock",
                 },
             )
-            return StartupDbGuardResult(
+            return StartupGuardResult(
                 ok=False,
                 user_message=_availability_user_message(failure_reason),
                 technical_reason=failure_reason,
@@ -845,7 +848,7 @@ def _recover_shared_db(
                     "initial_failure": failure_reason,
                 },
             )
-            return StartupDbGuardResult(
+            return StartupGuardResult(
                 ok=False,
                 user_message="Автовосстановление базы заблокировано: другое рабочее место активно. Закройте второй клиент или выполните ручное восстановление ответственным.",
                 technical_reason="active client lock present",
@@ -860,7 +863,7 @@ def _recover_shared_db(
                 role=role,
                 details={"reason": select_reason, "initial_failure": failure_reason},
             )
-            return StartupDbGuardResult(
+            return StartupGuardResult(
                 ok=False,
                 user_message="Не найдена рабочая копия базы. Работа временно недоступна. Сообщите ответственному.",
                 technical_reason=select_reason,
@@ -900,7 +903,7 @@ def _recover_shared_db(
                 **profile,
             },
         )
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=True,
             recovered=True,
             user_message="База восстановлена из последней рабочей копии. Работа продолжена.",
@@ -915,7 +918,7 @@ def _recover_shared_db(
             role=role,
             details={"reason": str(exc), "initial_failure": failure_reason},
         )
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message="Не удалось автоматически восстановить базу. Работа временно недоступна. Сообщите ответственному.",
             technical_reason=str(exc),
@@ -931,7 +934,7 @@ def recover_shared_db_with_locks(
     db_path: str,
     role: Optional[str],
     failure_reason: str,
-) -> StartupDbGuardResult:
+) -> StartupGuardResult:
     recovery_lock = None
     recovery_heartbeat = None
     owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
@@ -959,7 +962,7 @@ def recover_shared_db_with_locks(
             role=role,
             details={"reason": "recovery_lock_busy", "lock_path": recovery_lock_path, "error": str(exc)},
         )
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message=_lock_timeout_user_message(str(exc)),
             technical_reason=str(exc),
@@ -969,20 +972,20 @@ def recover_shared_db_with_locks(
         _release_lock(recovery_lock, recovery_heartbeat)
 
 
-def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
+def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
     try:
         baza_dir = resolve_baza_dir()
     except DataPathConfigurationError as exc:
-        return StartupDbGuardResult(ok=False, user_message=str(exc), technical_reason=str(exc))
+        return StartupGuardResult(ok=False, user_message=str(exc), technical_reason=str(exc))
     except Exception as exc:
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message="Путь к папке базы недоступен. Запустите RemCardPathSetup.exe.",
             technical_reason=str(exc),
         )
 
     if not os.path.isdir(baza_dir):
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message=f"Папка базы недоступна: {baza_dir}",
             technical_reason=f"baza dir does not exist: {baza_dir}",
@@ -1001,13 +1004,13 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
             details={"stage": "policy_or_dirs", "reason": str(exc)},
         )
         if isinstance(exc, StartupPolicyError):
-            return StartupDbGuardResult(
+            return StartupGuardResult(
                 ok=False,
                 user_message=str(exc),
                 technical_reason=str(exc),
                 baza_dir=baza_dir,
             )
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message="Не удалось подготовить защитный контур базы. Проверьте доступ к сетевой папке.",
             technical_reason=str(exc),
@@ -1048,7 +1051,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
                 role=role,
                 details={"db_path": db_path, "quick_check": "ok", **profile},
             )
-            return StartupDbGuardResult(ok=True, baza_dir=baza_dir)
+            return StartupGuardResult(ok=True, baza_dir=baza_dir)
 
         if _is_missing_db_file(result):
             write_audit_event(
@@ -1072,7 +1075,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
                 role=role,
                 details={"db_path": db_path, "reason": result},
             )
-            return StartupDbGuardResult(
+            return StartupGuardResult(
                 ok=False,
                 user_message=_availability_user_message(result),
                 technical_reason=result,
@@ -1099,7 +1102,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
             role=role,
             details={"stage": "lock", "reason": str(exc)},
         )
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message=_lock_timeout_user_message(str(exc)),
             technical_reason=str(exc),
@@ -1112,7 +1115,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupDbGuardResult:
             role=role,
             details={"stage": "check_or_recovery", "reason": str(exc)},
         )
-        return StartupDbGuardResult(
+        return StartupGuardResult(
             ok=False,
             user_message="Не удалось проверить базу данных. Работа временно недоступна. Сообщите ответственному.",
             technical_reason=str(exc),
