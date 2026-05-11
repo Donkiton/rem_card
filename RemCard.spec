@@ -5,7 +5,7 @@ import shutil
 import json
 import sys
 from datetime import datetime
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 
@@ -17,7 +17,7 @@ DISPLAY_SETTINGS_TARGET = os.path.join("rem_card", "settings", "display_settings
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-HIDDEN_IMPORTS = collect_submodules("rem_card")
+HIDDEN_IMPORTS = collect_submodules("rem_card") + collect_submodules("reportlab")
 
 
 def _data_dir(relative_path):
@@ -90,6 +90,9 @@ a = Analysis(
 		# активные ресурсы управления пациентами и МКБ
 		_data_dir('data/mkb'),
 		_data_dir('data/patient_assets'),
+
+		# шрифты и служебные данные ReportLab для прямого PDF-рендера
+		*collect_data_files('reportlab'),
 ],
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],

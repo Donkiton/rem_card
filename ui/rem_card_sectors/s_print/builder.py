@@ -1,4 +1,5 @@
 import pathlib
+import os
 
 from PySide6.QtGui import QTextDocument, QPageSize, QPageLayout, QPdfWriter
 from PySide6.QtCore import QMarginsF, QSizeF
@@ -21,6 +22,16 @@ class ReportBuilder:
 
     @staticmethod
     def build_pdf(data, config, output_path):
+        backend = str(os.environ.get("REMCARD_PDF_BACKEND") or "reportlab").strip().lower()
+        if backend in {"qtext", "qt", "legacy"}:
+            return ReportBuilder._build_pdf_qtext(data, config, output_path)
+
+        from .reportlab_builder import ReportLabReportBuilder
+
+        return ReportLabReportBuilder.build_pdf(data, config, output_path)
+
+    @staticmethod
+    def _build_pdf_qtext(data, config, output_path):
         output_path = pathlib.Path(output_path)
         writer = QPdfWriter(str(output_path))
         writer.setResolution(300)

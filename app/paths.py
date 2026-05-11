@@ -107,9 +107,13 @@ def get_icon_dir() -> str:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "icon"))
 
 def get_mkb_dir() -> str:
+    if not is_compiled():
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "mkb"))
     return os.path.join(get_resources_dir(), "rem_card", "data", "mkb")
 
 def get_patient_assets_dir() -> str:
+    if not is_compiled():
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "patient_assets"))
     return os.path.join(get_resources_dir(), "rem_card", "data", "patient_assets")
 
 def get_user_dict_dir() -> str:

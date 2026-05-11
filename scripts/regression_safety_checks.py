@@ -549,8 +549,11 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
         outside_row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
         if not outside_row or int(outside_row[0]) != 1:
             return False, "outside transaction read returned wrong value"
-        if readonly_open_count != 1:
-            return False, f"outside transaction did not use readonly central connection: {readonly_open_count}"
+        # Central reads intentionally use the shared central connection under
+        # the central IO gate. Reopening readonly SQLite connections from
+        # background threads caused native Windows crashes on network paths.
+        if readonly_open_count != 0:
+            return False, f"central read unexpectedly opened readonly connection: {readonly_open_count}"
 
         with manager.remcard_transaction(source="regression_read_split_tx"):
             manager.execute_remcard(
@@ -561,7 +564,7 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             if not inside_row or int(inside_row[0]) != 2:
                 return False, "inside transaction did not see uncommitted write"
 
-        if readonly_open_count != 1:
+        if readonly_open_count != 0:
             return False, "inside transaction unexpectedly opened readonly central connection"
 
         read_started = threading.Event()
@@ -1966,6 +1969,8 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
             return {
                 "history_number": "REG-PAT-001",
                 "full_name": "Иванов Иван",
+                "birth_date": datetime(1986, 5, 3).date(),
+                "birth_date_text": "03.05.1986",
                 "admission_datetime": datetime(2026, 5, 3, 8, 0),
                 "age_value": 40,
                 "months": None,
@@ -3917,6 +3922,116 @@ def _check_full_report_movement_summary(temp_root: str) -> tuple[bool, str]:
     if build_changed_day_movement_struct(current_events, start + timedelta(days=1), start + timedelta(days=2)):
         return False, "active patient unchanged middle day should not render movement"
 
+    return True, "ok"
+
+
+def _check_reportlab_pdf_builder_smoke(temp_root: str) -> tuple[bool, str]:
+    import os
+    from datetime import datetime
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import QSize
+    from PySide6.QtPdf import QPdfDocument, QPdfDocumentRenderOptions
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
+    from rem_card.ui.rem_card_sectors.s_print.builder import ReportBuilder
+
+    app = QApplication.instance() or QApplication([])
+    start = datetime(2026, 4, 24, 8, 0)
+    marks = [None] * 24
+    marks[1] = {
+        "role": "single",
+        "nurse_mark": NURSE_MARK_EXECUTED,
+        "planned_time": start.replace(hour=9),
+    }
+    data = {
+        "patient_name": "Тест Пациент",
+        "diagnosis": "Тестовый диагноз",
+        "icu_day": "1",
+        "start_dt": start,
+        "end_dt": datetime(2026, 4, 25, 8, 0),
+        "vitals_matrix": {1: {"sys": 120, "dia": 80, "hr": 75, "temp": 36.6, "spo2": 98}},
+        "vital_settings": {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0},
+        "prescriptions_matrix": [{"name": ["S. Testini 1 г", "S. NaCl 0.9% - 100 мл"], "marks": marks}],
+        "balance_final": {
+            "current": {"total": 100.0},
+            "in_cur": {"total": 100.0},
+            "out_cur": {"urine": 50.0, "drain": 0, "ng": 0, "stool": 0, "other": 0},
+            "in_hourly": {1: {"infusion": 100.0, "preparats": 0, "blood": 0, "plasma": 0, "oral": 0}},
+            "out_hourly": {2: {"urine": 50.0, "drain": 0, "ng": 0, "stool": 0, "other": 0}},
+        },
+        "events_struct": [{"time": "24.04.2026 08:00 - ...", "status": "В отделении", "desc": "Поступил"}],
+        "ventilation_struct": [
+            {
+                "time": "24.04.2026 09:00",
+                "event": "Старт ИВЛ",
+                "mode": "PSV",
+                "params": "FiO2=40",
+                "indications": "Тест",
+            }
+        ],
+        "death_outcome": {},
+    }
+    config = {
+        "vitals": True,
+        "balance": True,
+        "prescriptions": True,
+        "events": True,
+        "ventilation": True,
+        "death_outcome": True,
+        "death_protocol": True,
+    }
+    pdf_path = os.path.join(temp_root, "reportlab_smoke.pdf")
+    previous_backend = os.environ.get("REMCARD_PDF_BACKEND")
+    os.environ["REMCARD_PDF_BACKEND"] = "reportlab"
+    try:
+        ReportBuilder.build_pdf(data, config, pdf_path)
+    finally:
+        if previous_backend is None:
+            os.environ.pop("REMCARD_PDF_BACKEND", None)
+        else:
+            os.environ["REMCARD_PDF_BACKEND"] = previous_backend
+
+    if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) <= 0:
+        return False, "ReportLab PDF was not created"
+
+    doc = QPdfDocument(None)
+    status = doc.load(pdf_path)
+    if str(status) != "Error.None_" or doc.pageCount() < 1:
+        return False, f"QtPdf failed to load ReportLab PDF: status={status} pages={doc.pageCount()}"
+
+    image = doc.render(0, QSize(800, 566), QPdfDocumentRenderOptions())
+    if image.isNull():
+        return False, "QtPdf rendered a null image"
+    non_white = 0
+    for x in range(0, image.width(), 40):
+        for y in range(0, image.height(), 40):
+            color = image.pixelColor(x, y)
+            if min(color.red(), color.green(), color.blue()) < 245:
+                non_white += 1
+    if non_white < 3:
+        return False, "rendered PDF page looks blank"
+
+    try:
+        from pypdf import PdfReader
+    except Exception:
+        app.processEvents()
+        return True, "ok"
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf_path).pages)
+    for needle in (
+        "РЕАНИМАЦИОННАЯ КАРТА",
+        "ТАБЛИЦА ПОКАЗАТЕЛЕЙ",
+        "ЛИСТ НАЗНАЧЕНИЙ",
+        "ПОЧАСОВОЕ ВВЕДЕНИЕ",
+        "ДВИЖЕНИЕ",
+        "ИСТОРИЯ СОБЫТИЙ ИВЛ",
+    ):
+        if needle not in text:
+            return False, f"ReportLab PDF text missing section: {needle}"
+    app.processEvents()
     return True, "ok"
 
 
@@ -8022,6 +8137,7 @@ def main():
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("full_report_movement_summary", _check_full_report_movement_summary),
+        ("reportlab_pdf_builder_smoke", _check_reportlab_pdf_builder_smoke),
         ("full_report_bulk_collector_prefetches_once", _check_full_report_bulk_collector_prefetches_once),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
