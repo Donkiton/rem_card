@@ -207,6 +207,7 @@ class DatabaseManager:
 
         self._journal_conn: Optional[sqlite3.Connection] = None
         self._remcard_conn: Optional[sqlite3.Connection] = None
+        self._central_read_conn: Optional[sqlite3.Connection] = None
 
         self._measure_startup_phase("connection_profile_ms", self._init_connections)
         self._verify_quick_integrity_or_restore()
@@ -340,6 +341,7 @@ class DatabaseManager:
 
     def _reconnect(self):
         with self._central_io_lock:
+            self._close_central_read_connection()
             if self._remcard_conn:
                 with self.write_controller.connection_guard(self._remcard_conn):
                     self._remcard_conn.close()
@@ -681,6 +683,7 @@ class DatabaseManager:
             raise RuntimeError(f"Database restore failed integrity_check: {result}")
 
     def _close_connections_for_restore(self):
+        self._close_central_read_connection()
         if self._remcard_conn:
             try:
                 self._remcard_conn.close()
@@ -1082,11 +1085,17 @@ class DatabaseManager:
     def _open_readonly_central_connection(self) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:
             raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
-        try:
-            path_uri = Path(self.db_path).as_uri()
-        except ValueError:
-            path_uri = Path(os.path.abspath(self.db_path)).as_uri()
-        uri = f"{path_uri}?mode=ro"
+        db_path = str(self.db_path)
+        if db_path.startswith("\\\\"):
+            # sqlite3 on Windows rejects Path.as_uri() UNC authorities
+            # (file://server/share/...), while file:\\server\share works.
+            uri = f"file:{db_path}?mode=ro"
+        else:
+            try:
+                path_uri = Path(db_path).as_uri()
+            except ValueError:
+                path_uri = Path(os.path.abspath(db_path)).as_uri()
+            uri = f"{path_uri}?mode=ro"
         conn = sqlite3.connect(
             uri,
             uri=True,
@@ -1097,20 +1106,40 @@ class DatabaseManager:
         configure_connection(conn, readonly=True, profile="network")
         return conn
 
-    def _get_central_connection_for_read(self, context: str) -> sqlite3.Connection:
+    def _get_central_write_connection_for_read(self, context: str) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:
             raise DatabaseClosedError(f"RemCard database connection is closed for {context}")
         return self._remcard_conn
 
+    def _get_central_read_connection(self, context: str) -> sqlite3.Connection:
+        if self._closed or self._remcard_conn is None:
+            raise DatabaseClosedError(f"RemCard database connection is closed for {context}")
+        if self._central_read_conn is None:
+            self._central_read_conn = self._open_readonly_central_connection()
+        return self._central_read_conn
+
+    def _close_central_read_connection(self):
+        conn = self._central_read_conn
+        self._central_read_conn = None
+        if conn is None:
+            return
+        try:
+            with self.write_controller.connection_guard(conn):
+                conn.close()
+        except Exception as exc:
+            logger.debug("Failed to close central read connection: %s", exc)
+
     def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
-        # Обычные фоновые чтения идут через единое соединение под central IO gate:
-        # на сетевом SQLite частые sqlite3.connect()/close() из разных фоновых
-        # потоков уже приводили к native access violation на Windows.
+        # Обычные фоновые чтения идут через постоянный read-only connection:
+        # это не дергает sqlite3.connect()/close() на каждый polling и не делит
+        # основной write-connection с QThread/Python worker потоками.
         try:
-            del use_write_connection
             with self._central_io_lock:
-                conn = self._get_central_connection_for_read("remcard_read_all")
+                if use_write_connection or self._in_current_thread_remcard_transaction():
+                    conn = self._get_central_write_connection_for_read("remcard_read_all")
+                else:
+                    conn = self._get_central_read_connection("remcard_read_all")
                 with self.write_controller.connection_guard(conn):
                     cursor = conn.cursor()
                     cursor.execute(query, params)
@@ -1122,9 +1151,11 @@ class DatabaseManager:
 
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
         try:
-            del use_write_connection
             with self._central_io_lock:
-                conn = self._get_central_connection_for_read("remcard_read_one")
+                if use_write_connection or self._in_current_thread_remcard_transaction():
+                    conn = self._get_central_write_connection_for_read("remcard_read_one")
+                else:
+                    conn = self._get_central_read_connection("remcard_read_one")
                 with self.write_controller.connection_guard(conn):
                     cursor = conn.cursor()
                     cursor.execute(query, params)
@@ -1635,8 +1666,9 @@ class DatabaseManager:
         self._stop_outbox_replay()
         self._stop_local_replica_sync()
 
-        if self._remcard_conn:
-            with self._central_io_lock:
+        with self._central_io_lock:
+            self._close_central_read_connection()
+            if self._remcard_conn:
                 conn = self._remcard_conn
                 if conn is not None:
                     with self.write_controller.connection_guard(conn):
@@ -1649,5 +1681,5 @@ class DatabaseManager:
                     quickcheck_state_ts = quickcheck_ok_ts if quickcheck_ok_ts is not None else quickcheck_skipped_ts
                     if quickcheck_state_ts is not None:
                         self._write_startup_quickcheck_state(int(quickcheck_state_ts), result="ok")
-        else:
-            self._journal_conn = None
+            else:
+                self._journal_conn = None

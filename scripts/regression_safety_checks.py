@@ -549,11 +549,11 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
         outside_row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
         if not outside_row or int(outside_row[0]) != 1:
             return False, "outside transaction read returned wrong value"
-        # Central reads intentionally use the shared central connection under
-        # the central IO gate. Reopening readonly SQLite connections from
-        # background threads caused native Windows crashes on network paths.
-        if readonly_open_count != 0:
-            return False, f"central read unexpectedly opened readonly connection: {readonly_open_count}"
+        # Central reads reuse one readonly connection under the central IO
+        # gate. This avoids per-poll sqlite3.connect()/close() on network paths
+        # and keeps background reads off the write connection.
+        if readonly_open_count != 1:
+            return False, f"central read did not open exactly one readonly connection: {readonly_open_count}"
 
         with manager.remcard_transaction(source="regression_read_split_tx"):
             manager.execute_remcard(
@@ -564,8 +564,8 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             if not inside_row or int(inside_row[0]) != 2:
                 return False, "inside transaction did not see uncommitted write"
 
-        if readonly_open_count != 0:
-            return False, "inside transaction unexpectedly opened readonly central connection"
+        if readonly_open_count != 1:
+            return False, "inside transaction unexpectedly opened another readonly central connection"
 
         read_started = threading.Event()
         read_finished = threading.Event()
@@ -598,6 +598,8 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             return False, "background read stayed blocked after central IO gate released"
         if read_errors:
             return False, read_errors[0]
+        if readonly_open_count != 1:
+            return False, "background read did not reuse readonly central connection"
         return True, "ok"
     finally:
         manager.close()
