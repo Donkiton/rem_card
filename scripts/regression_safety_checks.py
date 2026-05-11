@@ -3542,6 +3542,161 @@ def _check_report_night_admission_shift_dates(temp_root: str) -> tuple[bool, str
         manager.close()
 
 
+def _check_outcome_datetime_resolution(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime
+
+    from rem_card.services.shift_service import ShiftService
+
+    now = datetime(2026, 5, 12, 7, 50)
+    night_admission = ShiftService.resolve_outcome_datetime(
+        "08:00",
+        now,
+        reference_dt=now,
+        not_before=datetime(2026, 5, 12, 2, 40),
+    )
+    if night_admission != datetime(2026, 5, 12, 8, 0):
+        return False, f"night admission 08:00 resolved incorrectly: {night_admission}"
+
+    long_stay = ShiftService.resolve_outcome_datetime(
+        "08:00",
+        now,
+        reference_dt=now,
+        not_before=datetime(2026, 5, 7, 9, 43),
+        latest_activity_dt=datetime(2026, 5, 12, 7, 0),
+    )
+    if long_stay != datetime(2026, 5, 12, 8, 0):
+        return False, f"long-stay 08:00 resolved incorrectly: {long_stay}"
+
+    next_shift_0810 = ShiftService.resolve_outcome_datetime(
+        "08:10",
+        now,
+        reference_dt=now,
+        not_before=datetime(2026, 5, 12, 6, 0),
+    )
+    if next_shift_0810 != datetime(2026, 5, 12, 8, 10):
+        return False, f"next-shift 08:10 resolved incorrectly: {next_shift_0810}"
+
+    current_shift_night = ShiftService.resolve_outcome_datetime(
+        "07:40",
+        now,
+        reference_dt=now,
+        not_before=datetime(2026, 5, 7, 9, 43),
+    )
+    if current_shift_night != datetime(2026, 5, 12, 7, 40):
+        return False, f"current-shift night time resolved incorrectly: {current_shift_night}"
+
+    previous_evening = ShiftService.resolve_outcome_datetime(
+        "20:00",
+        now,
+        reference_dt=now,
+        not_before=datetime(2026, 5, 7, 9, 43),
+        latest_activity_dt=datetime(2026, 5, 11, 19, 0),
+    )
+    if previous_evening != datetime(2026, 5, 11, 20, 0):
+        return False, f"after-fact previous evening time resolved incorrectly: {previous_evening}"
+
+    return True, "ok"
+
+
+def _check_outcome_guard_rejects_time_before_latest_activity(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.patient_status_dao import PatientStatusDAO
+    from rem_card.data.dto.remcard_dto import PatientStatus
+
+    db_path = os.path.join(temp_root, "outcome_latest_activity_guard.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        admission_dt = datetime(2026, 5, 7, 9, 43)
+        latest_vital_dt = datetime(2026, 5, 12, 7, 0)
+        bad_outcome_dt = datetime(2026, 5, 11, 8, 0)
+        good_outcome_dt = datetime(2026, 5, 12, 8, 0)
+
+        with manager.remcard_transaction(source="regression_seed_outcome_latest_activity_guard") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Косырев Тест",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, 1, 'REG-OUTCOME-LATEST', ?)
+                """,
+                (patient_id, admission_dt.isoformat()),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO patient_status_events(
+                    admission_id, status, start_time, created_by, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'REGRESSION', ?, ?)
+                """,
+                (
+                    admission_id,
+                    PatientStatus.ACTIVE.value,
+                    admission_dt.isoformat(),
+                    admission_dt.isoformat(),
+                    admission_dt.isoformat(),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO vitals(admission_id, datetime, pulse, last_modified_by, updated_at)
+                VALUES (?, ?, 80, 'doctor', ?)
+                """,
+                (
+                    admission_id,
+                    latest_vital_dt.isoformat(),
+                    latest_vital_dt.isoformat(),
+                ),
+            )
+
+        status_dao = PatientStatusDAO(manager)
+        context = status_dao.get_admission_outcome_context(admission_id)
+        if context.get("latest_activity_datetime") != latest_vital_dt.isoformat():
+            return False, f"latest activity missing from outcome context: {context.get('latest_activity_datetime')}"
+
+        rejected = status_dao.change_status_with_outcome_details(
+            admission_id,
+            PatientStatus.TRANSFERRED,
+            bad_outcome_dt,
+            reason_text="Куда переведен: Терапия",
+            user_id="REGRESSION",
+            admission_details={"transfer_department": "Терапия"},
+        )
+        if rejected:
+            return False, "outcome before latest patient activity was accepted"
+
+        current = status_dao.get_active_event(admission_id)
+        if not current or current.status != PatientStatus.ACTIVE:
+            return False, f"bad outcome changed current status: {current}"
+
+        accepted = status_dao.change_status_with_outcome_details(
+            admission_id,
+            PatientStatus.TRANSFERRED,
+            good_outcome_dt,
+            reason_text="Куда переведен: Терапия",
+            user_id="REGRESSION",
+            admission_details={"transfer_department": "Терапия"},
+        )
+        if not accepted:
+            return False, "valid outcome after latest patient activity was rejected"
+
+        admission = manager.fetch_one_remcard(
+            "SELECT transfer_datetime, outcome FROM admissions WHERE id = ?",
+            (admission_id,),
+        )
+        if not admission or admission["transfer_datetime"] != good_outcome_dt.isoformat():
+            return False, f"valid outcome wrote wrong transfer datetime: {dict(admission) if admission else None}"
+        if admission["outcome"] != "переведен":
+            return False, f"valid outcome wrote wrong outcome: {dict(admission)}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_sector_print_transform_snapshot(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
     from types import SimpleNamespace
@@ -8135,6 +8290,8 @@ def main():
         ("print_hourly_input_planned_time", _check_print_hourly_input_planned_time),
         ("print_balance_tables_input_before_output", _check_print_balance_tables_input_before_output),
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
+        ("outcome_datetime_resolution", _check_outcome_datetime_resolution),
+        ("outcome_guard_rejects_time_before_latest_activity", _check_outcome_guard_rejects_time_before_latest_activity),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("full_report_movement_summary", _check_full_report_movement_summary),
         ("reportlab_pdf_builder_smoke", _check_reportlab_pdf_builder_smoke),

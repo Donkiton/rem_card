@@ -73,8 +73,117 @@ class PatientStatusDAO:
             return {}
 
         context = dict(row)
+        active = self._fetch_one_optional(
+            """
+            SELECT id, status, start_time, COALESCE(revision, 0) AS revision
+            FROM patient_status_events
+            WHERE admission_id = ?
+              AND end_time IS NULL
+            LIMIT 1
+            """,
+            (admission_id,),
+            "active status for outcome context",
+        )
+        if active:
+            context["current_status_id"] = active["id"]
+            context["current_status"] = active["status"]
+            context["current_status_start_time"] = active["start_time"]
+            context["current_status_revision"] = active["revision"]
+
+        latest_activity = self.get_latest_patient_activity_datetime(admission_id)
+        context["latest_activity_datetime"] = latest_activity.isoformat() if latest_activity else None
         context["active_ventilation"] = self._get_active_ventilation_context(admission_id)
         return context
+
+    def get_latest_patient_activity_datetime(self, admission_id: int, cursor=None) -> Optional[datetime]:
+        """Возвращает последнюю фактическую запись пациента, которая не должна быть позже исхода."""
+        queries = [
+            (
+                "latest vital",
+                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM vitals WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest fluid",
+                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM fluids WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest oral intake",
+                "SELECT MAX(DATETIME(event_time)) AS latest_dt FROM oral_intake_events WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest actual administration",
+                """
+                SELECT MAX(DATETIME(a.actual_time)) AS latest_dt
+                FROM administrations a
+                JOIN orders o ON o.id = a.order_id
+                WHERE o.admission_id = ?
+                  AND a.actual_time IS NOT NULL
+                  AND COALESCE(a.is_committed, 0) = 1
+                  AND COALESCE(a.status, '') != 'deleted'
+                """,
+                (admission_id,),
+            ),
+            (
+                "latest transfusion",
+                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM transfusions WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest clinical event",
+                "SELECT MAX(DATETIME(timestamp)) AS latest_dt FROM clinical_events WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest respiratory support",
+                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM respiratory_support WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest lab data",
+                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM lab_data WHERE admission_id = ?",
+                (admission_id,),
+            ),
+            (
+                "latest ivl boundary",
+                """
+                SELECT MAX(dt) AS latest_dt
+                FROM (
+                    SELECT DATETIME(start_time) AS dt FROM ivl_episodes WHERE admission_id = ? AND start_time IS NOT NULL
+                    UNION ALL
+                    SELECT DATETIME(end_time) AS dt FROM ivl_episodes WHERE admission_id = ? AND end_time IS NOT NULL
+                )
+                """,
+                (admission_id, admission_id),
+            ),
+            (
+                "latest device boundary",
+                """
+                SELECT MAX(dt) AS latest_dt
+                FROM (
+                    SELECT DATETIME(insertion_date) AS dt FROM devices WHERE admission_id = ? AND insertion_date IS NOT NULL
+                    UNION ALL
+                    SELECT DATETIME(removal_date) AS dt FROM devices WHERE admission_id = ? AND removal_date IS NOT NULL
+                )
+                """,
+                (admission_id, admission_id),
+            ),
+        ]
+
+        latest: Optional[datetime] = None
+        for label, query, params in queries:
+            try:
+                row = cursor.execute(query, params).fetchone() if cursor is not None else self.db.fetch_one_remcard(query, params)
+            except Exception as exc:
+                logger.debug("[StatusDAO] Optional latest activity query failed (%s): %s", label, exc)
+                continue
+            value = row["latest_dt"] if row and row["latest_dt"] else None
+            parsed = self._parse_sqlite_dt(str(value)) if value else None
+            if parsed and (latest is None or parsed > latest):
+                latest = parsed
+        return latest
 
     def _get_active_ventilation_context(self, admission_id: int) -> Optional[Dict[str, Any]]:
         """Возвращает текущий режим/параметры активного случая ИВЛ для окна исхода смерти."""
@@ -520,6 +629,16 @@ class PatientStatusDAO:
                             "[StatusDAO] Outcome time %s is earlier than current status start %s for admission %s",
                             event_dt,
                             current_start,
+                            admission_id,
+                        )
+                        return False
+
+                    latest_activity = self.get_latest_patient_activity_datetime(admission_id, cursor=cursor)
+                    if latest_activity and event_dt < latest_activity.replace(second=0, microsecond=0):
+                        logger.warning(
+                            "[StatusDAO] Outcome time %s is earlier than latest patient activity %s for admission %s",
+                            event_dt,
+                            latest_activity,
                             admission_id,
                         )
                         return False

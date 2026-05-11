@@ -113,9 +113,17 @@ CARDIAC_ARREST_TEMPLATES: Dict[str, List[Tuple[str, str]]] = {
 class _OutcomeDialogBase(BaseStyledDialog):
     SETTINGS_POS_KEY = "outcome_dialog/last_pos"
 
-    def __init__(self, title: str, shift_date: Optional[datetime], base_comment: str = "", parent=None):
+    def __init__(
+        self,
+        title: str,
+        shift_date: Optional[datetime],
+        base_comment: str = "",
+        parent=None,
+        admission_context: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(title, parent)
         self.shift_date = shift_date or datetime.now()
+        self.admission_context = dict(admission_context or {})
         self.base_comment = str(base_comment or "").strip()
         self.result_data: Dict[str, Any] = {}
         self.setModal(True)
@@ -266,8 +274,57 @@ class _OutcomeDialogBase(BaseStyledDialog):
             """
         )
 
-    def _resolve_picker_datetime(self, picker: HybridShiftTimePicker) -> datetime:
-        return ShiftService.resolve_datetime(picker.value_str(), self.shift_date).replace(second=0, microsecond=0)
+    @staticmethod
+    def _parse_context_datetime(value) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            return value.replace(second=0, microsecond=0)
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            raw = text.replace(" ", "T")
+            if "." in raw:
+                parts = raw.split(".", 1)
+                raw = parts[0] + "." + parts[1][:6]
+            return datetime.fromisoformat(raw).replace(second=0, microsecond=0)
+        except Exception:
+            return None
+
+    def _context_datetime(self, *keys: str) -> Optional[datetime]:
+        for key in keys:
+            value = self._parse_context_datetime(self.admission_context.get(key))
+            if value is not None:
+                return value
+        return None
+
+    def _outcome_not_before(self) -> Optional[datetime]:
+        values = [
+            self._context_datetime("admission_datetime"),
+            self._context_datetime("current_status_start_time"),
+        ]
+        values = [value for value in values if value is not None]
+        return max(values) if values else None
+
+    def _resolve_picker_datetime(
+        self,
+        picker: HybridShiftTimePicker,
+        *,
+        enforce_latest_activity: bool = True,
+    ) -> datetime:
+        latest_activity = (
+            self._context_datetime("latest_activity_datetime")
+            if enforce_latest_activity
+            else None
+        )
+        return ShiftService.resolve_outcome_datetime(
+            picker.value_str(),
+            self.shift_date,
+            reference_dt=datetime.now(),
+            not_before=self._outcome_not_before(),
+            latest_activity_dt=latest_activity,
+        ).replace(second=0, microsecond=0)
 
     def _comment_line(self) -> QLineEdit:
         edit = QLineEdit()
@@ -287,8 +344,7 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         base_comment: str = "",
         parent=None,
     ):
-        super().__init__("Перевод пациента", shift_date, base_comment, parent)
-        self.admission_context = dict(admission_context or {})
+        super().__init__("Перевод пациента", shift_date, base_comment, parent, admission_context)
         self.setFixedWidth(860)
         self._init_ui()
 
@@ -406,8 +462,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         base_comment: str = "",
         parent=None,
     ):
-        super().__init__("Исход: смерть", shift_date, base_comment, parent)
-        self.admission_context = dict(admission_context or {})
+        super().__init__("Исход: смерть", shift_date, base_comment, parent, admission_context)
         self.airway_text = self._resolve_airway_text()
         self.measure_edits: List[Tuple[str, QPlainTextEdit]] = []
         self.doctor_store = DoctorListStore()
@@ -729,7 +784,10 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self._comment_manually_changed = text.strip() != self._last_auto_comment.strip()
 
     def _auto_comment_text(self) -> str:
-        clinical_dt = self._resolve_picker_datetime(self.clinical_time_picker)
+        clinical_dt = self._resolve_picker_datetime(
+            self.clinical_time_picker,
+            enforce_latest_activity=False,
+        )
         biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
         minutes = max(0, int((biological_dt - clinical_dt).total_seconds() // 60))
         return (
@@ -755,7 +813,10 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self._comment_manually_changed = False
 
     def _on_accept(self):
-        clinical_dt = self._resolve_picker_datetime(self.clinical_time_picker)
+        clinical_dt = self._resolve_picker_datetime(
+            self.clinical_time_picker,
+            enforce_latest_activity=False,
+        )
         biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
         if clinical_dt > biological_dt:
             CustomMessageBox.warning(

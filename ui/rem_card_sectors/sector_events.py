@@ -590,12 +590,19 @@ class SectorEvents(BaseSectorWidget):
         return current_ev
 
     def _update_refresh_controls(self, current_ev, events, is_archive):
-        if current_ev:
-            self._update_buttons_state(current_ev.status, is_archive)
-            self.btn_rollback.setEnabled(len(events) > 1 and not is_archive)
-        else:
-            self._update_buttons_state(None, is_archive)
-            self.btn_rollback.setEnabled(False)
+        current_status = current_ev.status if current_ev else None
+        total_events = len(events)
+        if not is_archive and self.status_service and self.admission_id:
+            try:
+                active_event = self.status_service.get_current_status(self.admission_id)
+                if active_event is not None:
+                    current_status = active_event.status
+                total_events = len(self.status_service.get_events(self.admission_id))
+            except Exception:
+                total_events = len(events)
+
+        self._update_buttons_state(current_status, is_archive)
+        self.btn_rollback.setEnabled(total_events > 1 and not is_archive)
 
     def refresh(self, force=False):
         if self._should_skip_refresh(force):
@@ -775,7 +782,7 @@ class SectorEvents(BaseSectorWidget):
                 CustomMessageBox.warning(
                     self,
                     "Ошибка",
-                    "Не удалось зафиксировать исход. Проверьте время: оно не должно быть раньше начала текущего статуса.",
+                    "Не удалось зафиксировать исход. Проверьте время: оно не должно быть раньше начала текущего статуса или последних записей пациента.",
                 )
 
         def on_error(exc):

@@ -6,6 +6,7 @@ class ShiftService:
     """Сервис для управления временными интервалами смен (8:00 - 8:00)."""
     SHIFT_START_HOUR = 8
     MINUTES_PER_SHIFT = 24 * 60
+    OUTCOME_ROLLOVER_WINDOW_MINUTES = 4 * 60
 
     @staticmethod
     def _shift_start(date: datetime) -> datetime:
@@ -69,6 +70,60 @@ class ShiftService:
         if hour < ShiftService.SHIFT_START_HOUR:
             target_date = target_date + timedelta(days=1)
         return datetime.combine(target_date, datetime.min.time()).replace(hour=hour, minute=minute)
+
+    @staticmethod
+    def resolve_outcome_datetime(
+        time: str,
+        shift_date: datetime,
+        *,
+        reference_dt: Optional[datetime] = None,
+        not_before: Optional[datetime] = None,
+        latest_activity_dt: Optional[datetime] = None,
+    ) -> datetime:
+        """
+        Преобразует HH:mm для исхода/перевода.
+
+        Обычные записи живут строго внутри выбранной смены 08:00-08:00, но исход
+        часто вводят перед 08:00 на ближайшее будущее. В этом случае время
+        08:00/08:10 должно попасть в следующую смену, а не в прошлое утро.
+        """
+        normalized = ShiftService.normalize_time(time)
+        hour, _minute = map(int, normalized.split(":"))
+        base_dt = ShiftService.resolve_datetime(normalized, shift_date).replace(second=0, microsecond=0)
+        ref_dt = (reference_dt or datetime.now()).replace(second=0, microsecond=0)
+
+        lower_bounds = [
+            value.replace(second=0, microsecond=0)
+            for value in (not_before, latest_activity_dt)
+            if value is not None
+        ]
+        min_allowed = max(lower_bounds) if lower_bounds else None
+
+        candidates = sorted({base_dt + timedelta(days=offset) for offset in (-1, 0, 1)})
+        valid_candidates = [
+            candidate
+            for candidate in candidates
+            if min_allowed is None or candidate >= min_allowed
+        ]
+        if not valid_candidates:
+            return base_dt
+
+        if base_dt not in valid_candidates:
+            return valid_candidates[0]
+
+        _shift_start, shift_end = ShiftService.get_day_period(shift_date)
+        next_candidate = base_dt + timedelta(days=1)
+        should_roll_to_near_future = (
+            ref_dt < shift_end
+            and base_dt < ref_dt <= next_candidate
+            and hour >= ShiftService.SHIFT_START_HOUR
+            and (next_candidate - ref_dt).total_seconds() <= ShiftService.OUTCOME_ROLLOVER_WINDOW_MINUTES * 60
+            and (min_allowed is None or next_candidate >= min_allowed)
+        )
+        if should_roll_to_near_future:
+            return next_candidate
+
+        return base_dt
 
     @staticmethod
     def apply_offset(time: str, shift_date: datetime, delta_minutes: int) -> str:
