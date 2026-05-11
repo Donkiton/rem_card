@@ -833,6 +833,8 @@ class LocalWriteQueue:
         self._queue: queue.Queue[QueuedWriteTask] = queue.Queue()
         self._accepting = True
         self._accepting_lock = threading.Lock()
+        self._active_lock = threading.Lock()
+        self._active_count = 0
         self._thread = threading.Thread(target=self._worker, name="SQLiteLocalWriteQueue", daemon=True)
         self._thread.start()
 
@@ -886,12 +888,21 @@ class LocalWriteQueue:
             return False
         return True
 
+    def is_idle(self) -> bool:
+        with self._active_lock:
+            active_count = int(self._active_count)
+        return active_count <= 0 and self._queue.empty()
+
     def _worker(self):
         while True:
             task = self._queue.get()
+            active_marked = False
             try:
                 if task.description == self._SHUTDOWN_TASK_DESCRIPTION:
                     return
+                with self._active_lock:
+                    self._active_count += 1
+                    active_marked = True
                 record_metric(
                     "write_queue_wait_ms",
                     round((time.perf_counter() - task.enqueued_at) * 1000.0, 3),
@@ -921,6 +932,9 @@ class LocalWriteQueue:
                             self.logger.error("Queued SQLite write failed for %s: %s", task.description, exc)
                         break
             finally:
+                if active_marked:
+                    with self._active_lock:
+                        self._active_count = max(0, self._active_count - 1)
                 self._queue.task_done()
 
     @staticmethod

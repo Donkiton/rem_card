@@ -46,6 +46,11 @@ from rem_card.app.startup_db_guard import (
     is_retryable_db_availability_reason,
     recover_shared_db_with_locks,
 )
+from rem_card.app.unified_db_schema import (
+    SCHEMA_FASTPATH_META_KEY,
+    SCHEMA_FASTPATH_REV,
+    SCHEMA_MIN_MIGRATION_VERSION,
+)
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
     NETWORK_SAFE_DB_PROFILE,
@@ -106,8 +111,20 @@ STARTUP_QUICKCHECK_TTL_SEC = max(
 STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC = 10 * 60
 STARTUP_QUICKCHECK_META_KEY = "startup_last_quick_check_ts"
-STARTUP_QUICKCHECK_STATE_VERSION = 2
+STARTUP_QUICKCHECK_STATE_VERSION = 3
 STARTUP_QUICKCHECK_STATE_PATH = os.path.join(BACKUP_HEALTH_DIR, "startup_quick_check_state.json")
+STARTUP_QUICKCHECK_BACKGROUND_DELAY_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_BACKGROUND_DELAY_SEC", "20")),
+)
+STARTUP_QUICKCHECK_BACKGROUND_INTERVAL_SEC = max(
+    60.0,
+    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_BACKGROUND_INTERVAL_SEC", str(STARTUP_QUICKCHECK_TTL_SEC))),
+)
+STARTUP_QUICKCHECK_IDLE_GRACE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_IDLE_GRACE_SEC", "3")),
+)
 SHUTDOWN_BACKUP_MIN_INTERVAL_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_SHUTDOWN_BACKUP_MIN_INTERVAL_SEC", str(6 * 60 * 60))),
@@ -164,6 +181,8 @@ class DatabaseManager:
         self._last_backup_ts = time.time()
         self._integrity_stop_evt = threading.Event()
         self._integrity_thread: Optional[threading.Thread] = None
+        self._startup_quickcheck_stop_evt = threading.Event()
+        self._startup_quickcheck_thread: Optional[threading.Thread] = None
         self._local_first_enabled = os.environ.get("REMCARD_LOCAL_FIRST_SYNC", "0") == "1"
         self._local_sync_interval_sec = max(1.0, float(os.environ.get("REMCARD_LOCAL_SYNC_INTERVAL_SEC", "5")))
         self._local_replica: Optional[LocalReplicaSync] = None
@@ -194,6 +213,10 @@ class DatabaseManager:
         self._startup_pre_connect_fingerprint: Optional[dict[str, Any]] = self._startup_db_fingerprint()
         self._startup_quickcheck_ok_ts: Optional[int] = None
         self._startup_quickcheck_skipped_ts: Optional[int] = None
+        self._write_activity_lock = threading.Lock()
+        self._active_write_count = 0
+        self._last_write_activity_ts = 0.0
+        self._write_queue_idle_probe: Optional[Callable[[], bool]] = None
 
         self._maybe_rotate_db_lifecycle()
 
@@ -217,6 +240,7 @@ class DatabaseManager:
         self._start_outbox_replay()
         self._start_local_replica_sync()
         self._start_integrity_monitor()
+        self._start_startup_quickcheck_updater()
         if CHANGELOG_LIVE_TRIM_ON_STARTUP:
             self._maybe_trim_change_log_live(force=True)
 
@@ -232,6 +256,49 @@ class DatabaseManager:
             return func()
         finally:
             self._record_startup_metric(name, (time.perf_counter() - started) * 1000.0)
+
+    def set_write_queue_idle_probe(self, probe: Optional[Callable[[], bool]]):
+        self._write_queue_idle_probe = probe
+
+    @contextmanager
+    def _mark_write_activity(self):
+        lock = getattr(self, "_write_activity_lock", None)
+        if lock is None:
+            yield
+            return
+        with lock:
+            self._active_write_count = int(getattr(self, "_active_write_count", 0) or 0) + 1
+            self._last_write_activity_ts = time.time()
+        try:
+            yield
+        finally:
+            with lock:
+                self._active_write_count = max(0, int(getattr(self, "_active_write_count", 0) or 0) - 1)
+                self._last_write_activity_ts = time.time()
+
+    def _is_startup_quickcheck_idle(self) -> bool:
+        if getattr(self, "_closed", False):
+            return False
+        stop_evt = getattr(self, "_startup_quickcheck_stop_evt", None)
+        if stop_evt is not None and stop_evt.is_set():
+            return False
+        lock = getattr(self, "_write_activity_lock", None)
+        if lock is not None:
+            with lock:
+                if int(getattr(self, "_active_write_count", 0) or 0) > 0:
+                    return False
+                last_write_ts = float(getattr(self, "_last_write_activity_ts", 0.0) or 0.0)
+            if last_write_ts and (time.time() - last_write_ts) < STARTUP_QUICKCHECK_IDLE_GRACE_SEC:
+                return False
+        probe = getattr(self, "_write_queue_idle_probe", None)
+        if probe is not None:
+            try:
+                if not bool(probe()):
+                    return False
+            except Exception as exc:
+                logger.debug("Startup quick_check idle probe failed: %s", exc)
+                return False
+        return True
 
     def _maybe_rotate_db_lifecycle(self):
         result = maybe_rotate_database_if_due(
@@ -466,17 +533,6 @@ class DatabaseManager:
 
     def _write_startup_quickcheck_ts(self, ts: Optional[int] = None):
         value = int(time.time()) if ts is None else int(ts)
-        if not self._remcard_conn or not self._meta_table_exists():
-            return
-        try:
-            self._remcard_conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                (STARTUP_QUICKCHECK_META_KEY, value),
-            )
-            self._remcard_conn.commit()
-        except Exception as exc:
-            logger.debug("Failed to update startup quick_check marker: %s", exc)
-            return
         self._startup_quickcheck_ok_ts = value
         self._startup_quickcheck_skipped_ts = None
         self._write_startup_quickcheck_state(value, result="ok")
@@ -497,6 +553,70 @@ class DatabaseManager:
             "db_profile": NETWORK_SAFE_DB_PROFILE,
             "state_version": STARTUP_QUICKCHECK_STATE_VERSION,
         }
+
+    def _startup_schema_migration_state(self) -> Optional[dict[str, Any]]:
+        conn = None
+        try:
+            conn = sqlite3.connect(
+                self._readonly_db_uri(),
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5.0,
+            )
+            configure_connection(conn, readonly=True, profile="network")
+            schema_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+            ).fetchone()
+            if schema_table:
+                migration_row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()
+                max_migration_version = int(migration_row[0] or 0) if migration_row else 0
+            else:
+                max_migration_version = 0
+
+            fastpath_value = None
+            meta_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+            ).fetchone()
+            if meta_table:
+                fastpath_row = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    (SCHEMA_FASTPATH_META_KEY,),
+                ).fetchone()
+                if fastpath_row and fastpath_row[0] is not None:
+                    try:
+                        fastpath_value = int(fastpath_row[0])
+                    except Exception:
+                        fastpath_value = str(fastpath_row[0])
+
+            return {
+                "required_min_migration_version": int(SCHEMA_MIN_MIGRATION_VERSION),
+                "required_fastpath_rev": int(SCHEMA_FASTPATH_REV),
+                "max_migration_version": int(max_migration_version),
+                "fastpath_meta_value": fastpath_value,
+            }
+        except Exception as exc:
+            logger.debug("Failed to read startup schema migration state: %s", exc)
+            return None
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def _startup_quickcheck_fingerprint(self, *, prefer_pre_connect: bool = False) -> Optional[dict[str, Any]]:
+        base = None
+        if prefer_pre_connect:
+            base = getattr(self, "_startup_pre_connect_fingerprint", None)
+        fingerprint = dict(base or self._startup_db_fingerprint() or {})
+        if not fingerprint:
+            return None
+        schema_state = self._startup_schema_migration_state()
+        if schema_state is None:
+            return None
+        fingerprint["schema_migration_state"] = schema_state
+        return fingerprint
 
     @staticmethod
     def _latest_mtime_ns_under(path: str) -> int:
@@ -534,7 +654,7 @@ class DatabaseManager:
         return payload if isinstance(payload, dict) else None
 
     def _write_startup_quickcheck_state(self, checked_at_epoch: int, *, result: str):
-        fingerprint = self._startup_db_fingerprint()
+        fingerprint = self._startup_quickcheck_fingerprint(prefer_pre_connect=False)
         if not fingerprint:
             return
         payload = {
@@ -561,7 +681,7 @@ class DatabaseManager:
             return False
         if str(state.get("result") or "") != "ok":
             return False
-        for key in ("db_path_norm", "size_bytes", "mtime_ns", "db_profile"):
+        for key in ("db_path_norm", "size_bytes", "mtime_ns", "db_profile", "schema_migration_state"):
             if state.get(key) != fingerprint.get(key):
                 return False
         try:
@@ -600,12 +720,17 @@ class DatabaseManager:
         self._startup_quickcheck_skipped_ts = int(checked_at)
         return True, age_sec
 
-    def _should_run_startup_quickcheck(self) -> tuple[bool, Optional[float]]:
+    def _should_run_startup_quickcheck(
+        self,
+        *,
+        allow_startup_guard: bool = True,
+        prefer_pre_connect: bool = True,
+    ) -> tuple[bool, Optional[float]]:
         if STARTUP_QUICKCHECK_TTL_SEC <= 0:
             return True, None
 
-        fingerprint = getattr(self, "_startup_pre_connect_fingerprint", None) or self._startup_db_fingerprint()
-        if fingerprint:
+        fingerprint = self._startup_quickcheck_fingerprint(prefer_pre_connect=prefer_pre_connect)
+        if allow_startup_guard and fingerprint:
             guard_matches, guard_age_sec = self._startup_guard_quickcheck_matches(fingerprint)
             if guard_matches:
                 return False, guard_age_sec
@@ -759,6 +884,89 @@ class DatabaseManager:
                 logger.warning("Failed to stop local replica sync: %s", exc)
         self._local_replica = None
 
+    def _start_startup_quickcheck_updater(self):
+        if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
+            return
+        self._startup_quickcheck_stop_evt.clear()
+        self._startup_quickcheck_thread = threading.Thread(
+            target=self._startup_quickcheck_updater_worker,
+            name="RemCardStartupQuickCheckUpdater",
+            daemon=True,
+        )
+        self._startup_quickcheck_thread.start()
+
+    def _startup_quickcheck_updater_worker(self):
+        if self._startup_quickcheck_stop_evt.wait(STARTUP_QUICKCHECK_BACKGROUND_DELAY_SEC):
+            return
+
+        while not self._startup_quickcheck_stop_evt.is_set():
+            try:
+                self._run_startup_quickcheck_background_once()
+            except Exception as exc:
+                logger.debug("Background startup quick_check updater failed: %s", exc, exc_info=True)
+            if self._startup_quickcheck_stop_evt.wait(STARTUP_QUICKCHECK_BACKGROUND_INTERVAL_SEC):
+                return
+
+    def _run_startup_quickcheck_background_once(self) -> bool:
+        if not self._is_startup_quickcheck_idle():
+            return False
+
+        should_run, _age_sec = self._should_run_startup_quickcheck(
+            allow_startup_guard=False,
+            prefer_pre_connect=False,
+        )
+        if not should_run:
+            return False
+        if not self._is_startup_quickcheck_idle():
+            return False
+
+        conn = None
+        cancelled = False
+
+        def cancel_if_not_idle():
+            nonlocal cancelled
+            if self._is_startup_quickcheck_idle():
+                return 0
+            cancelled = True
+            return 1
+
+        try:
+            conn = sqlite3.connect(
+                self._readonly_db_uri(),
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5.0,
+            )
+            configure_connection(conn, readonly=True, profile="network")
+            conn.set_progress_handler(cancel_if_not_idle, 1000)
+            ok, result = run_quick_check(conn)
+            if ok:
+                self._write_startup_quickcheck_state(int(time.time()), result="ok")
+                logger.info("Background startup quick_check state updated for %s", self.db_path)
+                return True
+            if cancelled:
+                logger.info("Background startup quick_check cancelled because writes became active")
+                return False
+            logger.warning("Background startup quick_check failed for %s: %s", self.db_path, result)
+            return False
+        except sqlite3.OperationalError as exc:
+            if cancelled or "interrupted" in str(exc).lower():
+                logger.info("Background startup quick_check cancelled because writes became active")
+                return False
+            logger.warning("Background startup quick_check could not run: %s", exc)
+            return False
+        except Exception as exc:
+            logger.warning("Background startup quick_check could not run: %s", exc)
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.set_progress_handler(None, 0)
+                    conn.close()
+                except Exception:
+                    pass
+
     def _start_outbox_replay(self):
         if not self._outbox_enabled:
             logger.info("Local outbox sync is disabled by env REMCARD_LOCAL_OUTBOX_SYNC=0")
@@ -865,23 +1073,24 @@ class DatabaseManager:
         if not self._remcard_conn:
             self._init_connections()
 
-        with self._central_io_lock:
-            with self.write_controller.transaction(self._remcard_conn, source=f"outbox_replay:{operation.source}") as cursor:
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO sync_applied_ops (op_id, source, node_id)
-                    VALUES (?, ?, ?)
-                    """,
-                    (operation.op_id, operation.source, self._node_id),
-                )
-                if cursor.rowcount == 0:
-                    return True
+        with self._mark_write_activity():
+            with self._central_io_lock:
+                with self.write_controller.transaction(self._remcard_conn, source=f"outbox_replay:{operation.source}") as cursor:
+                    cursor.execute(
+                        """
+                        INSERT OR IGNORE INTO sync_applied_ops (op_id, source, node_id)
+                        VALUES (?, ?, ?)
+                        """,
+                        (operation.op_id, operation.source, self._node_id),
+                    )
+                    if cursor.rowcount == 0:
+                        return True
 
-                for statement in operation.statements:
-                    cursor.execute(statement.sql, tuple(statement.params))
+                    for statement in operation.statements:
+                        cursor.execute(statement.sql, tuple(statement.params))
 
-            self._maybe_create_periodic_backup(source=f"outbox_replay:{operation.source}")
-            self._after_write_committed()
+                self._maybe_create_periodic_backup(source=f"outbox_replay:{operation.source}")
+                self._after_write_committed()
         return True
 
     def _enqueue_outbox_fallback(self, statements: list[tuple[str, tuple]], source: str, exc: Exception) -> Optional[str]:
@@ -1082,22 +1291,23 @@ class DatabaseManager:
             else:
                 self._thread_state.remcard_tx_depth = depth
 
-    def _open_readonly_central_connection(self) -> sqlite3.Connection:
-        if self._closed or self._remcard_conn is None:
-            raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
+    def _readonly_db_uri(self) -> str:
         db_path = str(self.db_path)
         if db_path.startswith("\\\\"):
             # sqlite3 on Windows rejects Path.as_uri() UNC authorities
             # (file://server/share/...), while file:\\server\share works.
-            uri = f"file:{db_path}?mode=ro"
-        else:
-            try:
-                path_uri = Path(db_path).as_uri()
-            except ValueError:
-                path_uri = Path(os.path.abspath(db_path)).as_uri()
-            uri = f"{path_uri}?mode=ro"
+            return f"file:{db_path}?mode=ro"
+        try:
+            path_uri = Path(db_path).as_uri()
+        except ValueError:
+            path_uri = Path(os.path.abspath(db_path)).as_uri()
+        return f"{path_uri}?mode=ro"
+
+    def _open_readonly_central_connection(self) -> sqlite3.Connection:
+        if self._closed or self._remcard_conn is None:
+            raise DatabaseClosedError("RemCard database connection is closed for readonly connection")
         conn = sqlite3.connect(
-            uri,
+            self._readonly_db_uri(),
             uri=True,
             check_same_thread=False,
             isolation_level=None,
@@ -1372,17 +1582,18 @@ class DatabaseManager:
         statement_sink: list[tuple[str, tuple]] = []
         outer_transaction = not self._in_current_thread_remcard_transaction()
         try:
-            with self._central_io_lock:
-                if self._closed or self._remcard_conn is None:
-                    raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
-                conn = self._remcard_conn
-                with self.write_controller.transaction(conn, source=source) as cursor:
-                    with self._mark_current_thread_remcard_transaction():
-                        wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
-                        yield wrapped_cursor
-                if conn and not self._closed and outer_transaction:
-                    self._maybe_create_periodic_backup(source=source)
-                    self._after_write_committed()
+            with self._mark_write_activity():
+                with self._central_io_lock:
+                    if self._closed or self._remcard_conn is None:
+                        raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
+                    conn = self._remcard_conn
+                    with self.write_controller.transaction(conn, source=source) as cursor:
+                        with self._mark_current_thread_remcard_transaction():
+                            wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
+                            yield wrapped_cursor
+                    if conn and not self._closed and outer_transaction:
+                        self._maybe_create_periodic_backup(source=source)
+                        self._after_write_committed()
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context=f"remcard_transaction:{source}", logger=logger) from exc
@@ -1402,14 +1613,15 @@ class DatabaseManager:
     def execute_remcard(self, query, params=(), source: str = "execute_remcard"):
         logger.debug("SQL RemCard Exec: %s | Params: %s", query, params)
         try:
-            with self._central_io_lock:
-                if self._closed or self._remcard_conn is None:
-                    raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
-                conn = self._remcard_conn
-                cursor = self.write_controller.execute(conn, query, params, source=source)
-                if conn and not self._closed and not self._in_current_thread_remcard_transaction():
-                    self._maybe_create_periodic_backup(source=source)
-                    self._after_write_committed()
+            with self._mark_write_activity():
+                with self._central_io_lock:
+                    if self._closed or self._remcard_conn is None:
+                        raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
+                    conn = self._remcard_conn
+                    cursor = self.write_controller.execute(conn, query, params, source=source)
+                    if conn and not self._closed and not self._in_current_thread_remcard_transaction():
+                        self._maybe_create_periodic_backup(source=source)
+                        self._after_write_committed()
             return cursor
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError, OSError) as exc:
             if is_database_unavailable_error(exc):
@@ -1419,11 +1631,12 @@ class DatabaseManager:
             if is_retryable_write_error(exc):
                 try:
                     self._reconnect()
-                    with self._central_io_lock:
-                        cursor = self.write_controller.execute(self._remcard_conn, query, params, source=f"{source}:reconnect")
-                        if self._remcard_conn and not self._in_current_thread_remcard_transaction():
-                            self._maybe_create_periodic_backup(source=f"{source}:reconnect")
-                            self._after_write_committed()
+                    with self._mark_write_activity():
+                        with self._central_io_lock:
+                            cursor = self.write_controller.execute(self._remcard_conn, query, params, source=f"{source}:reconnect")
+                            if self._remcard_conn and not self._in_current_thread_remcard_transaction():
+                                self._maybe_create_periodic_backup(source=f"{source}:reconnect")
+                                self._after_write_committed()
                     return cursor
                 except Exception:
                     pass
@@ -1659,6 +1872,10 @@ class DatabaseManager:
     def close(self):
         logger.info("Closing unified database connection")
         self._closed = True
+        self._startup_quickcheck_stop_evt.set()
+        if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
+            self._startup_quickcheck_thread.join(timeout=1.5)
+        self._startup_quickcheck_thread = None
         self._integrity_stop_evt.set()
         if self._integrity_thread and self._integrity_thread.is_alive():
             self._integrity_thread.join(timeout=1.5)
@@ -1676,10 +1893,5 @@ class DatabaseManager:
                         conn.close()
                     self._remcard_conn = None
                     self._journal_conn = None
-                    quickcheck_ok_ts = getattr(self, "_startup_quickcheck_ok_ts", None)
-                    quickcheck_skipped_ts = getattr(self, "_startup_quickcheck_skipped_ts", None)
-                    quickcheck_state_ts = quickcheck_ok_ts if quickcheck_ok_ts is not None else quickcheck_skipped_ts
-                    if quickcheck_state_ts is not None:
-                        self._write_startup_quickcheck_state(int(quickcheck_state_ts), result="ok")
             else:
                 self._journal_conn = None

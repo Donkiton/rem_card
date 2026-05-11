@@ -70,6 +70,9 @@ class DataService(QObject):
         self.request_immediate_refresh(force_emit=True, source=description)
         return result
 
+    def is_write_queue_idle(self) -> bool:
+        return bool(self._queue.is_idle())
+
     def enqueue_write(
         self,
         description: str,

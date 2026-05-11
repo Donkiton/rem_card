@@ -635,9 +635,50 @@ def _check_startup_metrics_are_reported(temp_root: str) -> tuple[bool, str]:
         manager.close()
 
     benchmark_source = (PROJECT_ROOT / "scripts" / "startup_benchmark.py").read_text(encoding="utf-8")
-    for needle in ("startup_phases", "total_bootstrap_ms"):
+    for needle in ("startup_phases", "theme_ui_init_ms", "total_bootstrap_ms"):
         if needle not in benchmark_source:
             return False, f"startup_benchmark.py must report {needle}"
+    main_source = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    for needle in ("_show_compiled_startup_splash", "_validate_compiled_role_startup", "startup_phases"):
+        if needle not in main_source:
+            return False, f"app/main.py must keep startup phase hook {needle}"
+    return True, "ok"
+
+
+def _check_splash_before_startup_guard(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    main_start = source.find("def _main_impl")
+    if main_start < 0:
+        return False, "app/main.py must define _main_impl"
+    body = source[main_start:]
+    create_idx = body.find("_create_startup_qt_context(args.role)")
+    guard_idx = body.find("_validate_compiled_role_startup(")
+    if create_idx < 0 or guard_idx < 0:
+        return False, "startup must create Qt/splash context and run StartupDbGuard"
+    if create_idx > guard_idx:
+        return False, "splash must be created before StartupDbGuard"
+    guard_block = body[guard_idx:body.find("role_suffix =", guard_idx)]
+    if "before_user_message=close_startup_splash" not in guard_block:
+        return False, "StartupDbGuard user messages must close splash first"
+    return True, "ok"
+
+
+def _check_main_ui_waits_for_startup_gate(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    main_start = source.find("def _main_impl")
+    if main_start < 0:
+        return False, "app/main.py must define _main_impl"
+    body = source[main_start:]
+    guard_idx = body.find("_validate_compiled_role_startup(")
+    bootstrap_idx = body.find("container = bootstrap()")
+    window_idx = body.find("window = MainWindow(")
+    show_idx = body.find("window.show()")
+    if min(guard_idx, bootstrap_idx, window_idx, show_idx) < 0:
+        return False, "startup sequence must include guard, bootstrap, MainWindow and show"
+    if not (guard_idx < bootstrap_idx < window_idx < show_idx):
+        return False, "main UI must not be constructed or shown before green startup gate"
     return True, "ok"
 
 
@@ -749,10 +790,10 @@ def _check_connection_profile_lock_waits_and_times_out(temp_root: str) -> tuple[
                 pass
 
 
-def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
+def _check_startup_quickcheck_state_v3(temp_root: str) -> tuple[bool, str]:
     import rem_card.data.dao.db_manager as dbm
 
-    root = Path(temp_root) / "startup_quickcheck_state_v2"
+    root = Path(temp_root) / "startup_quickcheck_state_v3"
     state_path = root / "backup_health" / "startup_quick_check_state.json"
     invalid_dir = root / "invalid_backups"
     quarantine_dir = root / "quarantine"
@@ -775,6 +816,15 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
     manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
     manager.db_path = str(db_path)
     manager.startup_metrics = {}
+    manager._closed = False
+    manager._startup_pre_connect_fingerprint = None
+    schema_state = {
+        "required_min_migration_version": 11,
+        "required_fastpath_rev": 11,
+        "max_migration_version": 11,
+        "fastpath_meta_value": 11,
+    }
+    manager._startup_schema_migration_state = lambda: dict(schema_state)
 
     def write_db(payload: bytes):
         db_path.write_bytes(payload)
@@ -847,6 +897,12 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
         if not should_run():
             return False, "changed DB profile must run quick_check"
 
+        write_db(b"fingerprint-schema-state")
+        write_valid_state()
+        mutate_state("schema_migration_state", {**schema_state, "max_migration_version": 10})
+        if not should_run():
+            return False, "changed schema/migration state must run quick_check"
+
         write_db(b"fingerprint-corrupt-state")
         write_valid_state()
         state_path.write_text("{not-json", encoding="utf-8")
@@ -911,6 +967,26 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
         if not recovery_calls:
             return False, "confirmed quick_check failure did not enter recovery path"
 
+        marker_db = root / "central_marker.db"
+        conn = sqlite3.connect(marker_db)
+        try:
+            conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+            marker_manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+            marker_manager.db_path = str(marker_db)
+            marker_manager._remcard_conn = conn
+            marker_manager._closed = False
+            marker_manager._startup_pre_connect_fingerprint = None
+            marker_manager._startup_schema_migration_state = lambda: dict(schema_state)
+            marker_manager._write_startup_quickcheck_ts(123456)
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (dbm.STARTUP_QUICKCHECK_META_KEY,),
+            ).fetchone()
+            if row is not None:
+                return False, "startup quick_check marker was written to central DB"
+        finally:
+            conn.close()
+
         return True, "ok"
     finally:
         dbm.STARTUP_QUICKCHECK_STATE_PATH = original_values["state_path"]
@@ -924,6 +1000,103 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
             os.environ.pop(dbm.STARTUP_GUARD_QUICKCHECK_ENV, None)
         else:
             os.environ[dbm.STARTUP_GUARD_QUICKCHECK_ENV] = original_values["guard_env"]
+
+
+def _check_startup_quickcheck_background_updater(temp_root: str) -> tuple[bool, str]:
+    import rem_card.data.dao.db_manager as dbm
+
+    root = Path(temp_root) / "startup_quickcheck_background"
+    state_path = root / "backup_health" / "startup_quick_check_state.json"
+    invalid_dir = root / "invalid_backups"
+    quarantine_dir = root / "quarantine"
+    db_path = root / "remcard.db"
+    root.mkdir(parents=True, exist_ok=True)
+    invalid_dir.mkdir(parents=True, exist_ok=True)
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("CREATE TABLE probe (id INTEGER PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO probe(value) VALUES ('ok')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_values = {
+        "state_path": dbm.STARTUP_QUICKCHECK_STATE_PATH,
+        "invalid_dir": dbm.INVALID_BACKUPS_DIR,
+        "quarantine_dir": dbm.QUARANTINE_DIR,
+        "ttl": dbm.STARTUP_QUICKCHECK_TTL_SEC,
+        "quick": dbm.run_quick_check,
+    }
+    schema_state = {
+        "required_min_migration_version": 11,
+        "required_fastpath_rev": 11,
+        "max_migration_version": 11,
+        "fastpath_meta_value": 11,
+    }
+
+    def make_manager():
+        manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+        manager.db_path = str(db_path)
+        manager._closed = False
+        manager._startup_quickcheck_stop_evt = threading.Event()
+        manager._write_activity_lock = threading.Lock()
+        manager._active_write_count = 0
+        manager._last_write_activity_ts = 0.0
+        manager._write_queue_idle_probe = lambda: True
+        manager._startup_pre_connect_fingerprint = None
+        manager._startup_schema_migration_state = lambda: dict(schema_state)
+        return manager
+
+    try:
+        dbm.STARTUP_QUICKCHECK_STATE_PATH = str(state_path)
+        dbm.INVALID_BACKUPS_DIR = str(invalid_dir)
+        dbm.QUARANTINE_DIR = str(quarantine_dir)
+        dbm.STARTUP_QUICKCHECK_TTL_SEC = 60.0
+
+        manager = make_manager()
+        if not manager._run_startup_quickcheck_background_once():
+            return False, "background idle quick_check did not update state after successful quick_check"
+        if not state_path.exists():
+            return False, "background idle quick_check did not write sidecar state"
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+        if payload.get("result") != "ok":
+            return False, f"background sidecar result is not ok: {payload}"
+
+        state_path.unlink()
+        dbm.run_quick_check = lambda conn: (False, "database disk image is malformed")
+        if manager._run_startup_quickcheck_background_once():
+            return False, "background updater reported success after failed quick_check"
+        if state_path.exists():
+            return False, "background updater wrote sidecar after failed quick_check"
+
+        called = {"quick": False}
+
+        def quick_called(conn):
+            called["quick"] = True
+            return True, "ok"
+
+        dbm.run_quick_check = quick_called
+        busy_manager = make_manager()
+        busy_manager._write_queue_idle_probe = lambda: False
+        if busy_manager._run_startup_quickcheck_background_once():
+            return False, "background updater ran while write queue was non-idle"
+        if called["quick"]:
+            return False, "background updater did not cancel before quick_check on non-idle write queue"
+
+        source = (PROJECT_ROOT / "data" / "dao" / "db_manager.py").read_text(encoding="utf-8")
+        if "set_progress_handler(cancel_if_not_idle" not in source:
+            return False, "background quick_check must install a progress handler for cancellation"
+        if "self._is_startup_quickcheck_idle()" not in source:
+            return False, "background quick_check cancellation must check write queue idle state"
+        return True, "ok"
+    finally:
+        dbm.STARTUP_QUICKCHECK_STATE_PATH = original_values["state_path"]
+        dbm.INVALID_BACKUPS_DIR = original_values["invalid_dir"]
+        dbm.QUARANTINE_DIR = original_values["quarantine_dir"]
+        dbm.STARTUP_QUICKCHECK_TTL_SEC = original_values["ttl"]
+        dbm.run_quick_check = original_values["quick"]
 
 
 def _check_blood_plasma_key_ru_prescription_parse(temp_root: str) -> tuple[bool, str]:
@@ -8275,8 +8448,11 @@ def main():
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
         ("central_reads_split_from_write_connection", _check_central_reads_split_from_write_connection),
         ("startup_metrics_are_reported", _check_startup_metrics_are_reported),
+        ("splash_before_startup_guard", _check_splash_before_startup_guard),
+        ("main_ui_waits_for_startup_gate", _check_main_ui_waits_for_startup_gate),
         ("connection_profile_lock_waits_and_times_out", _check_connection_profile_lock_waits_and_times_out),
-        ("startup_quickcheck_state_v2", _check_startup_quickcheck_state_v2),
+        ("startup_quickcheck_state_v3", _check_startup_quickcheck_state_v3),
+        ("startup_quickcheck_background_updater", _check_startup_quickcheck_background_updater),
         ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),

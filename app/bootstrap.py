@@ -31,6 +31,8 @@ class Container:
 
         self.db_manager = db_manager
         self.data_service = DataService(db_manager)
+        if hasattr(self.db_manager, "set_write_queue_idle_probe"):
+            self.db_manager.set_write_queue_idle_probe(self.data_service.is_write_queue_idle)
 
         # DAOs
         self.patient_dao = PatientDAO(db_manager)
