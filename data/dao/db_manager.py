@@ -103,6 +103,8 @@ STARTUP_QUICKCHECK_TTL_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_TTL_SEC", "120")),
 )
+STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
+STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC = 10 * 60
 STARTUP_QUICKCHECK_META_KEY = "startup_last_quick_check_ts"
 STARTUP_QUICKCHECK_STATE_VERSION = 2
 STARTUP_QUICKCHECK_STATE_PATH = os.path.join(BACKUP_HEALTH_DIR, "startup_quick_check_state.json")
@@ -566,13 +568,49 @@ class DatabaseManager:
             return False
         return self._startup_failure_marker_mtime_ns() <= stored_marker
 
+    def _startup_guard_quickcheck_matches(self, fingerprint: dict[str, Any]) -> tuple[bool, Optional[float]]:
+        raw = os.environ.get(STARTUP_GUARD_QUICKCHECK_ENV)
+        if not raw:
+            return False, None
+        try:
+            state = json.loads(raw)
+        except Exception:
+            return False, None
+        if not isinstance(state, dict):
+            return False, None
+        if str(state.get("result") or "") != "ok":
+            return False, None
+        try:
+            if int(state.get("pid") or -1) != os.getpid():
+                return False, None
+        except Exception:
+            return False, None
+        for key in ("db_path_norm", "size_bytes", "mtime_ns", "db_profile"):
+            if state.get(key) != fingerprint.get(key):
+                return False, None
+        try:
+            checked_at = float(state.get("checked_at_epoch"))
+        except Exception:
+            return False, None
+        age_sec = max(0.0, time.time() - checked_at)
+        if age_sec > STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC:
+            return False, age_sec
+        self._startup_quickcheck_skipped_ts = int(checked_at)
+        return True, age_sec
+
     def _should_run_startup_quickcheck(self) -> tuple[bool, Optional[float]]:
         if STARTUP_QUICKCHECK_TTL_SEC <= 0:
             return True, None
+
+        fingerprint = getattr(self, "_startup_pre_connect_fingerprint", None) or self._startup_db_fingerprint()
+        if fingerprint:
+            guard_matches, guard_age_sec = self._startup_guard_quickcheck_matches(fingerprint)
+            if guard_matches:
+                return False, guard_age_sec
+
         state = self._read_startup_quickcheck_state()
         if not state:
             return True, None
-        fingerprint = getattr(self, "_startup_pre_connect_fingerprint", None) or self._startup_db_fingerprint()
         if not fingerprint or not self._startup_quickcheck_state_matches(state, fingerprint):
             return True, None
         try:

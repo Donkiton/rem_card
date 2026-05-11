@@ -1,10 +1,11 @@
 import argparse
 import ctypes
+import json
 import os
 import socket
 import sys
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from rem_card.app.runtime_paths import (
     DataPathConfigurationError,
@@ -21,6 +22,7 @@ STARTUP_TRACE_ENV = "REMCARD_STARTUP_TRACE"
 STARTUP_W1_WAIT_MS_ENV = "REMCARD_STARTUP_W1_WAIT_MS"
 STARTUP_W1_WAIT_DEFAULT_MS = 300
 FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
+STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 
 
 def _show_native_warning(title: str, message: str):
@@ -425,7 +427,47 @@ def _run_path_setup():
         return 0
 
 
-def _validate_compiled_role_startup(role: Optional[str]) -> bool:
+def _remember_startup_guard_quickcheck_ok(result):
+    try:
+        if not result or not result.ok or not result.baza_dir:
+            os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
+            return
+
+        from rem_card.app.runtime_paths import get_journal_db_path
+        from rem_card.app.sqlite_shared import NETWORK_SAFE_DB_PROFILE
+
+        db_path = get_journal_db_path(result.baza_dir)
+        stat_result = os.stat(db_path)
+        payload = {
+            "result": "ok",
+            "source": "startup_db_guard",
+            "pid": os.getpid(),
+            "checked_at_epoch": int(time.time()),
+            "db_path_norm": os.path.normcase(os.path.abspath(str(db_path))),
+            "size_bytes": int(stat_result.st_size),
+            "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+            "db_profile": NETWORK_SAFE_DB_PROFILE,
+        }
+        os.environ[STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+    except Exception:
+        os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
+
+
+def _call_startup_message_callback(callback: Optional[Callable[[], None]]):
+    if not callback:
+        return
+    try:
+        callback()
+    except Exception:
+        pass
+
+
+def _validate_compiled_role_startup(
+    role: Optional[str],
+    *,
+    before_user_message: Optional[Callable[[], None]] = None,
+    on_success: Optional[Callable[[object], None]] = None,
+) -> bool:
     if not is_compiled() or role not in ("doctor", "nurse"):
         return True
 
@@ -435,6 +477,7 @@ def _validate_compiled_role_startup(role: Optional[str]) -> bool:
         result = run_startup_db_guard(role=role)
     except Exception as exc:
         _write_startup_local_log(f"startup db guard crashed for role={role}: {exc}")
+        _call_startup_message_callback(before_user_message)
         _show_custom_warning(
             "База данных недоступна",
             "Не удалось проверить базу данных. Работа временно недоступна. Сообщите ответственному.",
@@ -442,11 +485,17 @@ def _validate_compiled_role_startup(role: Optional[str]) -> bool:
         return False
 
     if result.ok:
+        if on_success:
+            try:
+                on_success(result)
+            except Exception:
+                pass
         if result.recovered:
             _write_startup_local_log(
                 f"startup db auto-recovered for role={role}: "
                 f"restored_from={result.restored_from}; quarantine={result.quarantine_path}"
             )
+            _call_startup_message_callback(before_user_message)
             _show_custom_info("База восстановлена", result.user_message)
         return True
 
@@ -462,11 +511,64 @@ def _validate_compiled_role_startup(role: Optional[str]) -> bool:
             f"{result.user_message}\n\n"
             f"После нажатия \"Понятно\" будет запущено обновление до версии {update_candidate.version}."
         )
+        _call_startup_message_callback(before_user_message)
         _show_custom_warning("Требуется обновление", message)
         _launch_startup_update(update_candidate, role=role, reason=result.technical_reason)
     else:
+        _call_startup_message_callback(before_user_message)
         _show_custom_warning("База данных недоступна", result.user_message)
     return False
+
+
+def _show_compiled_startup_splash(app, QPixmap, QSplashScreen, Qt):
+    if not is_compiled():
+        return None
+    try:
+        from rem_card.app.paths import get_icon_dir
+
+        icon_path = os.path.join(get_icon_dir(), "remcardicon.ico")
+        splash_pix = QPixmap(icon_path).scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
+        splash.show()
+        app.processEvents()
+        return splash
+    except Exception:
+        return None
+
+
+def _create_startup_qt_context(role: Optional[str]):
+    from PySide6.QtNetwork import QLocalSocket, QLocalServer
+    from PySide6.QtWidgets import QApplication, QSplashScreen
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtCore import Qt, QTimer
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    splash = _show_compiled_startup_splash(app, QPixmap, QSplashScreen, Qt)
+    _apply_app_theme(app, role or "system")
+    return app, splash, QLocalSocket, QLocalServer, Qt, QTimer
+
+
+def _close_startup_splash(app, splash):
+    if splash is None:
+        return None
+    try:
+        splash.close()
+        app.processEvents()
+    except Exception:
+        pass
+    return None
+
+
+def _notify_existing_instance(QLocalSocket, server_name: str, role_suffix: str) -> bool:
+    socket_client = QLocalSocket()
+    socket_client.connectToServer(server_name)
+    if not socket_client.waitForConnected(500):
+        return False
+    socket_client.write(b"SHOW")
+    if not socket_client.waitForBytesWritten(500):
+        return False
+    print(f"Приложение с ролью '{role_suffix}' уже запущено. Окно будет развернуто.")
+    return True
 
 
 def _acquire_initial_role_lock(role: Optional[str]):
@@ -542,6 +644,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if forced_role:
         args.role = forced_role
     path_setup = bool(path_setup or args.path_setup)
+    os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
 
     if _show_update_in_progress_if_needed():
         sys.exit(0)
@@ -549,25 +652,26 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if path_setup:
         sys.exit(_run_path_setup())
 
-    if not _validate_compiled_role_startup(args.role):
-        sys.exit(1)
+    app, splash, QLocalSocket, QLocalServer, Qt, QTimer = _create_startup_qt_context(args.role)
 
-    from PySide6.QtNetwork import QLocalSocket, QLocalServer
-    from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QPixmap
-    from PySide6.QtCore import Qt, QTimer
+    def close_startup_splash():
+        nonlocal splash
+        splash = _close_startup_splash(app, splash)
+
+    if not _validate_compiled_role_startup(
+        args.role,
+        before_user_message=close_startup_splash,
+        on_success=_remember_startup_guard_quickcheck_ok,
+    ):
+        close_startup_splash()
+        sys.exit(1)
 
     role_suffix = args.role if args.role else "default"
     server_name = f"rem_card_single_instance_server_{role_suffix}"
 
-    socket_client = QLocalSocket()
-    socket_client.connectToServer(server_name)
-
-    if socket_client.waitForConnected(500):
-        socket_client.write(b"SHOW")
-        if socket_client.waitForBytesWritten(500):
-            print(f"Приложение с ролью '{role_suffix}' уже запущено. Окно будет развернуто.")
-            sys.exit(0)
+    if _notify_existing_instance(QLocalSocket, server_name, role_suffix):
+        close_startup_splash()
+        sys.exit(0)
 
     QLocalServer.removeServer(server_name)
 
@@ -577,27 +681,13 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
     role_lock = _acquire_initial_role_lock(args.role)
     if args.role in ("doctor", "nurse") and role_lock is None:
+        close_startup_splash()
         sys.exit(0)
 
-    app = QApplication(sys.argv)
     window = None
     logger = None
     exit_code = 1
     try:
-        from rem_card.app.paths import get_icon_dir
-
-        icon_path = os.path.join(get_icon_dir(), "remcardicon.ico")
-        splash = None
-        if is_compiled():
-            from PySide6.QtWidgets import QSplashScreen
-
-            splash_pix = QPixmap(icon_path).scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
-            splash.show()
-            app.processEvents()
-
-        _apply_app_theme(app, args.role or "system")
-
         from rem_card.app.logger import log_exception, logger as _logger, init_crash_handler
         from rem_card.app.bootstrap import bootstrap
         from rem_card.ui.main_window import MainWindow
@@ -693,6 +783,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         exit_code = app.exec()
         logger.info("Application exiting with code %s", exit_code)
     except Exception as exc:
+        close_startup_splash()
         if logger:
             logger.critical("Critical error during startup/runtime: %s", exc, exc_info=True)
         else:

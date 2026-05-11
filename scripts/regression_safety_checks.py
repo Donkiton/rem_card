@@ -767,6 +767,7 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
         "profile": dbm.NETWORK_SAFE_DB_PROFILE,
         "quick": dbm.run_quick_check,
         "recover": dbm.recover_shared_db_with_locks,
+        "guard_env": os.environ.get(dbm.STARTUP_GUARD_QUICKCHECK_ENV),
     }
 
     manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
@@ -794,6 +795,7 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
         dbm.QUARANTINE_DIR = str(quarantine_dir)
         dbm.STARTUP_QUICKCHECK_TTL_SEC = 60.0
         dbm.NETWORK_SAFE_DB_PROFILE = "network"
+        os.environ.pop(dbm.STARTUP_GUARD_QUICKCHECK_ENV, None)
 
         write_db(b"fingerprint-v1")
         if not should_run():
@@ -861,6 +863,28 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
         if not should_run():
             return False, "newer recovery/migration failure marker must run quick_check"
 
+        write_db(b"fingerprint-startup-guard")
+        try:
+            state_path.unlink()
+        except FileNotFoundError:
+            pass
+        guard_payload = {
+            "result": "ok",
+            "source": "startup_db_guard",
+            "pid": os.getpid(),
+            "checked_at_epoch": int(time.time()),
+            **manager._startup_db_fingerprint(),
+        }
+        os.environ[dbm.STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(guard_payload, ensure_ascii=True)
+        if should_run():
+            return False, "matching startup guard quick_check result must skip duplicate quick_check"
+
+        guard_payload["pid"] = os.getpid() + 100000
+        os.environ[dbm.STARTUP_GUARD_QUICKCHECK_ENV] = json.dumps(guard_payload, ensure_ascii=True)
+        if not should_run():
+            return False, "startup guard quick_check result from another process must not skip"
+        os.environ.pop(dbm.STARTUP_GUARD_QUICKCHECK_ENV, None)
+
         write_db(b"fingerprint-quick-failure")
         write_valid_state(age_sec=120)
         manager._remcard_conn = object()
@@ -894,6 +918,10 @@ def _check_startup_quickcheck_state_v2(temp_root: str) -> tuple[bool, str]:
         dbm.NETWORK_SAFE_DB_PROFILE = original_values["profile"]
         dbm.run_quick_check = original_values["quick"]
         dbm.recover_shared_db_with_locks = original_values["recover"]
+        if original_values["guard_env"] is None:
+            os.environ.pop(dbm.STARTUP_GUARD_QUICKCHECK_ENV, None)
+        else:
+            os.environ[dbm.STARTUP_GUARD_QUICKCHECK_ENV] = original_values["guard_env"]
 
 
 def _check_blood_plasma_key_ru_prescription_parse(temp_root: str) -> tuple[bool, str]:
