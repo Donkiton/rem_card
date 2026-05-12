@@ -32,6 +32,38 @@
       "start": "05-31",
       "end": "05-31",
       "locked": false
+    },
+    {
+      "id": "background_20260512_131906",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_131912_17maya.png",
+      "start": "05-17",
+      "end": "05-17",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131921",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_131924_19maya.png",
+      "start": "05-19",
+      "end": "05-19",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131929",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_131931_20maya.png",
+      "start": "05-20",
+      "end": "05-20",
+      "locked": false
+    },
+    {
+      "id": "background_20260512_131939",
+      "name": "Фон 12.05-12.05",
+      "file": "fon_20260512_132013_1iunya.png",
+      "start": "06-01",
+      "end": "06-01",
+      "locked": false
     }
   ]
 }

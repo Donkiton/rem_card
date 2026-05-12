@@ -256,6 +256,19 @@ def _write_startup_local_log(message: str):
         pass
 
 
+def _sync_release_settings_if_needed() -> None:
+    if not is_compiled():
+        return
+    try:
+        from rem_card.app.runtime_paths import sync_external_settings_from_bundle
+
+        copied = sync_external_settings_from_bundle()
+        if copied:
+            _write_startup_local_log(f"release settings synced: files={copied}")
+    except Exception as exc:
+        _write_startup_local_log(f"release settings sync failed: {exc}")
+
+
 def _show_custom_warning(title: str, message: str):
     try:
         from PySide6.QtWidgets import QApplication
@@ -669,6 +682,8 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
     if _show_update_in_progress_if_needed():
         sys.exit(0)
+
+    _sync_release_settings_if_needed()
 
     if path_setup:
         sys.exit(_run_path_setup())

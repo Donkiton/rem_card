@@ -12,7 +12,7 @@ block_cipher = None
 APP_ROOT = os.path.abspath(SPECPATH)
 PROJECT_ROOT = os.path.dirname(APP_ROOT)
 DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
-DISPLAY_SETTINGS_TARGET = os.path.join("rem_card", "settings", "display_settings")
+SETTINGS_TARGET = os.path.join("rem_card", "settings")
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -47,18 +47,28 @@ def _dictionary_json_datas():
     return result
 
 
-def _display_settings_datas():
-    source_dir = os.path.join(APP_ROOT, "settings", "display_settings")
+def _settings_datas():
+    source_dir = os.path.join(APP_ROOT, "settings")
     if not os.path.isdir(source_dir):
-        raise RuntimeError(f"Display settings directory not found: {source_dir}")
+        raise RuntimeError(f"Settings directory not found: {source_dir}")
 
     result = []
-    for name in sorted(os.listdir(source_dir)):
-        source_path = os.path.join(source_dir, name)
-        if os.path.isfile(source_path) and name.lower().endswith(".json"):
-            result.append((source_path, DISPLAY_SETTINGS_TARGET))
-    if not any(os.path.basename(source) == "display_settings.json" for source, _target in result):
-        raise RuntimeError(f"Display settings file not found: {os.path.join(source_dir, 'display_settings.json')}")
+    for current_dir, _dir_names, file_names in os.walk(source_dir):
+        relative_dir = os.path.relpath(current_dir, source_dir)
+        target_dir = SETTINGS_TARGET if relative_dir == "." else os.path.join(SETTINGS_TARGET, relative_dir)
+        for name in sorted(file_names):
+            source_path = os.path.join(current_dir, name)
+            if os.path.isfile(source_path) and name.lower().endswith(".json"):
+                result.append((source_path, target_dir))
+
+    required_files = (
+        os.path.join(source_dir, "display_settings", "display_settings.json"),
+        os.path.join(source_dir, "display_settings", "background_settings.json"),
+        os.path.join(source_dir, "color_scheme", "style_settings.json"),
+    )
+    for required_file in required_files:
+        if not any(os.path.normcase(source) == os.path.normcase(required_file) for source, _target in result):
+            raise RuntimeError(f"Settings file not found: {required_file}")
     return result
 
 a = Analysis(
@@ -83,9 +93,9 @@ a = Analysis(
 		# при запуске приложения недостающие файлы копируются наружу рядом с exe.
 		*_dictionary_json_datas(),
 
-		# настройки отображения: dev-настройки попадают в _internal как базовый
-		# набор для compiled-версии и первого запуска после обновления.
-		*_display_settings_datas(),
+		# settings: dev-настройки попадают в _internal как управляемый
+		# эталон для compiled-версии и перезаписывают локальные settings при запуске.
+		*_settings_datas(),
 
 		# активные ресурсы управления пациентами и МКБ
 		_data_dir('data/mkb'),

@@ -5,8 +5,8 @@
       "sector8_buttons": {
         "order": [
           "add_patient",
-          "archive",
           "refresh",
+          "archive",
           "bars",
           "calc",
           "bonus",
@@ -16,7 +16,7 @@
         ],
         "visible": {
           "archive": true,
-          "refresh": false,
+          "refresh": true,
           "add_patient": true,
           "bars": false,
           "calc": true,
@@ -69,7 +69,7 @@
         ],
         "visible": {
           "archive": false,
-          "refresh": false,
+          "refresh": true,
           "add_patient": true,
           "calc": false,
           "bonus": true,

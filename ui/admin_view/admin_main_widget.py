@@ -80,10 +80,8 @@ class AdminMainWidget(QWidget):
         if self.role != "nurse":
             template_buttons.append(self.btn_diet_templates)
 
-        program_buttons = []
-        if self.role in ("doctor", "nurse"):
-            program_buttons.append(self.btn_style)
-        program_buttons.extend([self.btn_print, self.btn_display_settings, self.btn_background_settings])
+        self.btn_style.setVisible(False)
+        program_buttons = [self.btn_print, self.btn_display_settings, self.btn_background_settings]
 
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(22)
@@ -129,7 +127,6 @@ class AdminMainWidget(QWidget):
         self.btn_doctor_list.clicked.connect(self.open_doctor_list)
         self.btn_diet_templates.clicked.connect(self.open_diet_templates)
         self.btn_print.clicked.connect(self.open_print)
-        self.btn_style.clicked.connect(self.open_style)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
 

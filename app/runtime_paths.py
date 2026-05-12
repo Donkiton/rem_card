@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -56,6 +57,75 @@ def get_executable_dir() -> str:
     if is_compiled():
         return os.path.dirname(os.path.abspath(sys.executable))
     return get_project_root()
+
+
+def get_resources_dir() -> str:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return str(sys._MEIPASS)
+    if is_compiled():
+        base = get_executable_dir()
+        internal = os.path.join(base, "_internal")
+        if os.path.isdir(internal):
+            return internal
+        return base
+    return get_project_root()
+
+
+def _copy_file_atomic(source_path: str, target_path: str) -> None:
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    tmp_path = f"{target_path}.{os.getpid()}.tmp"
+    try:
+        shutil.copy2(source_path, tmp_path)
+        os.replace(tmp_path, target_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def sync_external_settings_from_bundle() -> int:
+    """
+    В compiled-режиме settings являются управляемыми настройками релиза.
+    Dev-настройки из сборки перезаписывают локальные файлы рядом с exe.
+    """
+    if not is_compiled():
+        return 0
+
+    source_root = os.path.join(get_resources_dir(), "rem_card", "settings")
+    if not os.path.isdir(source_root):
+        return 0
+
+    target_root = os.path.join(get_executable_dir(), "settings")
+    copied = 0
+    bundled_rel_paths: set[str] = set()
+    for current_dir, _dir_names, file_names in os.walk(source_root):
+        for file_name in file_names:
+            source_path = os.path.join(current_dir, file_name)
+            if not os.path.isfile(source_path):
+                continue
+            rel_path = os.path.relpath(source_path, source_root)
+            bundled_rel_paths.add(os.path.normcase(rel_path))
+            target_path = os.path.join(target_root, rel_path)
+            _copy_file_atomic(source_path, target_path)
+            copied += 1
+
+    if os.path.isdir(target_root):
+        for current_dir, _dir_names, file_names in os.walk(target_root):
+            for file_name in file_names:
+                if not file_name.lower().endswith(".json"):
+                    continue
+                target_path = os.path.join(current_dir, file_name)
+                rel_path = os.path.relpath(target_path, target_root)
+                if os.path.normcase(rel_path) in bundled_rel_paths:
+                    continue
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
+
+    return copied
 
 
 def get_data_path_config_path() -> str:
