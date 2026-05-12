@@ -673,13 +673,13 @@ class DetailedStatisticsReportBuilder:
 
         if section_key == "s1":
             return [
-                ("1.1 Уникальные пациенты", "N", self._fmt_num(s["N_unique"], 0)),
-                ("1.2 Госпитализации", "N", self._fmt_num(total_n, 0)),
-                ("1.3 Койко-дни", "Койко-дни = Σ LOS", self._fmt_num(s["bed_days"])),
-                ("1.4 Средняя длительность (ALOS)", "Средняя длительность = Σ LOS / N", self._fmt_num(s["alos"])),
-                ("1.5 Медиана LOS", "Медиана (LOS)", self._fmt_num(s["los_median"])),
-                ("1.6 Минимум LOS", "LOSмин", self._fmt_num(s["los_min"])),
-                ("1.7 Максимум LOS", "LOSмакс", self._fmt_num(s["los_max"])),
+                ("1.1 Уникальные пациенты", "Число уникальных пациентов", self._fmt_num(s["N_unique"], 0)),
+                ("1.2 Госпитализации", "Число госпитализаций", self._fmt_num(total_n, 0)),
+                ("1.3 Койко-дни", "Сумма дней пребывания всех госпитализаций", self._fmt_num(s["bed_days"])),
+                ("1.4 Средняя длительность лечения", "Средняя длительность = Койко-дни / Госпитализации", self._fmt_num(s["alos"])),
+                ("1.5 Медиана длительности лечения", "Медиана длительности лечения", self._fmt_num(s["los_median"])),
+                ("1.6 Минимальная длительность лечения", "Минимальная длительность лечения", self._fmt_num(s["los_min"])),
+                ("1.7 Максимальная длительность лечения", "Максимальная длительность лечения", self._fmt_num(s["los_max"])),
             ]
 
         if section_key == "s2":
@@ -688,8 +688,8 @@ class DetailedStatisticsReportBuilder:
                 ("2.2 Коечный фонд", "Коечный фонд = Койки × Дни", self._fmt_num(s["bed_fund"])),
                 ("2.3 Занятость (%)", "Занятость = Койко-дни / Коечный фонд × 100%", f"{self._fmt_num(s['occupancy'])}%"),
                 ("2.4 Средняя занятость койки", "Средняя занятость койки (дни) = Койко-дни / Койки", self._fmt_num(s["bed_utilization_days"])),
-                ("2.5 Оборот койки", "Оборот койки = N / Койки", self._fmt_num(s["turnover"])),
-                ("2.6 Простой койки", "Простой койки = (Коечный фонд − Койко-дни) / N", self._fmt_num(s["bti"])),
+                ("2.5 Оборот койки", "Оборот койки = Госпитализации / Койки", self._fmt_num(s["turnover"])),
+                ("2.6 Простой койки", "Простой койки = (Коечный фонд − Койко-дни) / Госпитализации", self._fmt_num(s["bti"])),
             ]
 
         if section_key == "s3":
@@ -700,10 +700,10 @@ class DetailedStatisticsReportBuilder:
             )
             gender_lines = self._distribution_lines(s["genders"], total_n)
             return [
-                ("3.1 Средний возраст", "Средний возраст = Σ возраст / N", self._fmt_num(s["mean_age"])),
+                ("3.1 Средний возраст", "Средний возраст = Сумма возрастов / Госпитализации", self._fmt_num(s["mean_age"])),
                 ("3.2 Медианный возраст", "Медианный возраст", self._fmt_num(s["median_age"])),
-                ("3.3 Возрастные группы", "Доля = n / N × 100%", age_lines),
-                ("3.4 Пол", "Доля = n / N × 100%", gender_lines),
+                ("3.3 Возрастные группы", "Доля = Число пациентов в группе / Госпитализации × 100%", age_lines),
+                ("3.4 Пол", "Доля = Число пациентов в группе / Госпитализации × 100%", gender_lines),
             ]
 
         if section_key == "s4":
@@ -717,96 +717,96 @@ class DetailedStatisticsReportBuilder:
                 "Воскресенье",
             ]
             return [
-                ("4.1 По месяцам", "Доля = n / N × 100%", self._distribution_lines(s["months"], total_n)),
-                ("4.2 По дням недели", "Доля = n / N × 100%", self._distribution_lines(s["weekdays"], total_n, forced_order=weekday_order)),
-                ("4.3 По источнику", "Доля = n / N × 100%", self._distribution_lines(s["sources"], total_n)),
+                ("4.1 По месяцам", "Доля = Число госпитализаций в группе / Госпитализации × 100%", self._distribution_lines(s["months"], total_n)),
+                ("4.2 По дням недели", "Доля = Число госпитализаций в группе / Госпитализации × 100%", self._distribution_lines(s["weekdays"], total_n, forced_order=weekday_order)),
+                ("4.3 По источнику", "Доля = Число госпитализаций в группе / Госпитализации × 100%", self._distribution_lines(s["sources"], total_n)),
             ]
 
         if section_key == "s5":
             return [
-                ("5.1 Частота диагнозов", "Частота = n / N × 100%", self._distribution_lines(s["diagnoses"], total_n)),
-                ("5.2 По классам МКБ", "Частота = n / N × 100%", self._distribution_lines(s["mkb_classes"], total_n)),
+                ("5.1 Частота диагнозов", "Частота = Число диагнозов в группе / Госпитализации × 100%", self._distribution_lines(s["diagnoses"], total_n)),
+                ("5.2 По классам МКБ", "Частота = Число диагнозов в группе / Госпитализации × 100%", self._distribution_lines(s["mkb_classes"], total_n)),
             ]
 
         if section_key == "s6":
             return [
                 ("6.1 Абсолютная летальность", "Умершие", self._fmt_num(deaths, 0)),
-                ("6.2 Летальность (%)", "Летальность = Умершие / N × 100%", f"{self._fmt_num(s['mortality_pct'])}%"),
+                ("6.2 Летальность (%)", "Летальность = Умершие / Госпитализации × 100%", f"{self._fmt_num(s['mortality_pct'])}%"),
                 ("6.3 На 1000 койко-дней", "Летальность = Умершие / Койко-дни × 1000", self._fmt_num(s["mortality_per_1000_bed_days"])),
-                ("6.4 Исходы", "Доля = n / N × 100%", self._distribution_lines(s["outcomes"], total_n)),
+                ("6.4 Исходы", "Доля = Число исходов в группе / Госпитализации × 100%", self._distribution_lines(s["outcomes"], total_n)),
             ]
 
         if section_key == "s7":
             return [
-                ("7.1 Среднее время до смерти", "Среднее время = Σ время / Умершие", self._fmt_num(s["mean_time_to_death_days"])),
+                ("7.1 Среднее время до смерти", "Среднее время = Сумма времени до смерти / Умершие", self._fmt_num(s["mean_time_to_death_days"])),
                 ("7.2 Медиана времени до смерти", "Медиана времени", self._fmt_num(s["median_time_to_death_days"])),
                 ("7.3 Ранняя летальность", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
-                ("7.4 1–3 суток", "Доля = n / Умершие × 100%", self._fmt_pct(s["deaths_1_3_days"], deaths)),
-                ("7.5 3–7 суток", "Доля = n / Умершие × 100%", self._fmt_pct(s["deaths_3_7_days"], deaths)),
-                ("7.6 ≥7 суток", "Доля = n / Умершие × 100%", self._fmt_pct(s["deaths_ge_7_days"], deaths)),
+                ("7.4 1–3 суток", "Доля = Число смертей в интервале / Умершие × 100%", self._fmt_pct(s["deaths_1_3_days"], deaths)),
+                ("7.5 3–7 суток", "Доля = Число смертей в интервале / Умершие × 100%", self._fmt_pct(s["deaths_3_7_days"], deaths)),
+                ("7.6 ≥7 суток", "Доля = Число смертей в интервале / Умершие × 100%", self._fmt_pct(s["deaths_ge_7_days"], deaths)),
             ]
 
         if section_key == "s8":
             lines = self._distribution_mortality_lines(s["age_groups"], s["age_groups_deaths"])
             return [
-                ("8. Летальность по группам", "Летальность группы = Умершие_группы / N_группы × 100%", lines),
+                ("8. Летальность по группам", "Летальность группы = Умершие в группе / Пациенты в группе × 100%", lines),
             ]
 
         if section_key == "s9":
             return [
-                ("9.1 Пациенты на ИВЛ", "N_IVL", self._fmt_num(s["N_IVL"], 0)),
-                ("9.2 Доля пациентов на ИВЛ", "Доля ИВЛ = N_IVL / N × 100%", self._fmt_pct(s["N_IVL"], total_n)),
+                ("9.1 Пациенты на ИВЛ", "Пациенты с ИВЛ", self._fmt_num(s["N_IVL"], 0)),
+                ("9.2 Доля пациентов на ИВЛ", "Доля ИВЛ = Пациенты с ИВЛ / Госпитализации × 100%", self._fmt_pct(s["N_IVL"], total_n)),
                 ("9.3 Эпизоды ИВЛ", "Эпизоды", self._fmt_num(s["ivl_episodes_count"], 0)),
-                ("9.4 Средняя длительность ИВЛ", "Средняя ИВЛ = ИВЛ-дни / N_IVL", self._fmt_num(self._safe_div(s["ivl_days"], s["N_IVL"]))),
+                ("9.4 Средняя длительность ИВЛ", "Средняя ИВЛ = ИВЛ-дни / Пациенты с ИВЛ", self._fmt_num(self._safe_div(s["ivl_days"], s["N_IVL"]))),
                 ("9.5 ИВЛ-дни", "ИВЛ-дни", self._fmt_num(s["ivl_days"])),
-                ("9.6 Летальность на ИВЛ", "Летальность ИВЛ = Умершие_ИВЛ / N_IVL × 100%", self._fmt_pct(s["deaths_ivl"], s["N_IVL"])),
+                ("9.6 Летальность на ИВЛ", "Летальность ИВЛ = Умершие на ИВЛ / Пациенты с ИВЛ × 100%", self._fmt_pct(s["deaths_ivl"], s["N_IVL"])),
             ]
 
         if section_key == "s10":
             return [
-                ("10.1 Пациенты с операциями", "N_surg", self._fmt_num(s["N_surg"], 0)),
+                ("10.1 Пациенты с операциями", "Пациенты с операциями", self._fmt_num(s["N_surg"], 0)),
                 ("10.2 Операции", "Операции", self._fmt_num(s["operations_count"], 0)),
-                ("10.3 Частота операций", "Частота = N_surg / N", self._fmt_num(self._safe_div(s["N_surg"], total_n))),
-                ("10.4 Летальность у оперированных", "Летальность = Умершие_опер / N_surg × 100%", self._fmt_pct(s["deaths_surg"], s["N_surg"])),
+                ("10.3 Частота операций", "Частота = Пациенты с операциями / Госпитализации", self._fmt_num(self._safe_div(s["N_surg"], total_n))),
+                ("10.4 Летальность у оперированных", "Летальность = Умершие после операций / Пациенты с операциями × 100%", self._fmt_pct(s["deaths_surg"], s["N_surg"])),
             ]
 
         if section_key == "s11":
             return [
                 ("11.1 Число переливаний", "Переливания", self._fmt_num(s["transfusion_units"], 0)),
-                ("11.2 Пациенты с переливаниями", "N_transf", self._fmt_num(s["N_transf"], 0)),
-                ("11.3 Общий объем, мл", "Объем_общий", self._fmt_num(s["volume_total"])),
-                ("11.4 Средний объем дозы, мл", "Средняя доза = Объем_общий / Дозы", self._fmt_num(self._safe_div(s["volume_total"], s["transfusion_units"]))),
-                ("11.5 Летальность при переливаниях", "Летальность = Умершие_переливания / N_transf × 100%", self._fmt_pct(s["deaths_transf"], s["N_transf"])),
-                ("11.6 По типам", "Доля = n / Дозы × 100%", self._distribution_lines(s["transf_by_type"], s["transfusion_units"])),
+                ("11.2 Пациенты с переливаниями", "Пациенты с переливаниями", self._fmt_num(s["N_transf"], 0)),
+                ("11.3 Общий объем, мл", "Общий объем переливаний", self._fmt_num(s["volume_total"])),
+                ("11.4 Средний объем дозы, мл", "Средняя доза = Общий объем переливаний / Число доз", self._fmt_num(self._safe_div(s["volume_total"], s["transfusion_units"]))),
+                ("11.5 Летальность при переливаниях", "Летальность = Умершие после переливаний / Пациенты с переливаниями × 100%", self._fmt_pct(s["deaths_transf"], s["N_transf"])),
+                ("11.6 По типам", "Доля = Число доз данного типа / Число доз × 100%", self._distribution_lines(s["transf_by_type"], s["transfusion_units"])),
             ]
 
         if section_key == "s16":
             return [
-                ("16.1 ИВЛ на пациента", "Индекс ИВЛ = N_IVL / N", self._fmt_num(s["IVL_index"])),
-                ("16.2 Операции на пациента", "Индекс операций = N_surg / N", self._fmt_num(s["Surgery_index"])),
-                ("16.3 Переливания на пациента", "Индекс переливаний = N_transf / N", self._fmt_num(s["Transfusion_index"])),
+                ("16.1 ИВЛ на пациента", "Индекс ИВЛ = Пациенты с ИВЛ / Госпитализации", self._fmt_num(s["IVL_index"])),
+                ("16.2 Операции на пациента", "Индекс операций = Пациенты с операциями / Госпитализации", self._fmt_num(s["Surgery_index"])),
+                ("16.3 Переливания на пациента", "Индекс переливаний = Пациенты с переливаниями / Госпитализации", self._fmt_num(s["Transfusion_index"])),
             ]
 
         if section_key == "s17":
             return [
-                ("17.1 Оборот койки", "Оборот койки = N / Койки", self._fmt_num(s["turnover"])),
-                ("17.2 Койко-дни на пациента", "ALOS", self._fmt_num(s["alos"])),
+                ("17.1 Оборот койки", "Оборот койки = Госпитализации / Койки", self._fmt_num(s["turnover"])),
+                ("17.2 Койко-дни на пациента", "Средняя длительность лечения", self._fmt_num(s["alos"])),
             ]
 
         if section_key == "s18":
             return [
                 ("18.1 Доля ранней летальности", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
-                ("18.2 Индекс интенсивности лечения", "Индекс интенсивности = (N_IVL + N_surg + N_transf) / N", self._fmt_num(s["intensity_index"])),
+                ("18.2 Индекс интенсивности лечения", "Индекс интенсивности = (Пациенты с ИВЛ + Пациенты с операциями + Пациенты с переливаниями) / Госпитализации", self._fmt_num(s["intensity_index"])),
                 ("18.3 Индекс тяжести потока", "Индекс тяжести = Ранние смерти / Умершие", self._fmt_num(s["severity_index"])),
-                ("18.4 Длительное пребывание", "Длительное пребывание = N(>7 суток) / N × 100%", f"{self._fmt_num(s['long_stay_pct'])}%"),
-                ("18.5 Индекс технологичности", "Индекс технологичности = N_с вмешательствами / N × 100%", f"{self._fmt_num(s['technology_index'])}%"),
+                ("18.4 Длительное пребывание", "Длительное пребывание = Госпитализации дольше 7 суток / Госпитализации × 100%", f"{self._fmt_num(s['long_stay_pct'])}%"),
+                ("18.5 Индекс технологичности", "Индекс технологичности = Госпитализации с вмешательствами / Госпитализации × 100%", f"{self._fmt_num(s['technology_index'])}%"),
             ]
 
         if section_key == "s19":
             return [
-                ("19.1 Среднесуточная занятость", "Средние пациенты = Койко-дни / Дни", self._fmt_num(s["mean_patients"])),
-                ("19.2 Использование коек", "Использование коек = Средние пациенты / Койки", self._fmt_num(s["utilization"])),
-                ("19.3 Максимальная загрузка", "Макс. пациенты", self._fmt_num(s["max_patients"], 0)),
+                ("19.1 Среднесуточная занятость", "Среднее число пациентов в отделении за сутки = Койко-дни / Дни периода", self._fmt_num(s["mean_patients"])),
+                ("19.2 Использование коек", "Использование коек = Среднесуточная занятость / Количество коек", self._fmt_num(s["utilization"])),
+                ("19.3 Максимальная загрузка", "Максимум пациентов одновременно", self._fmt_num(s["max_patients"], 0)),
                 (
                     "19.4 Высокая нагрузка",
                     "Время высокой нагрузки = Время ≥ порог / Общее время × 100%",
@@ -816,10 +816,10 @@ class DetailedStatisticsReportBuilder:
 
         if section_key == "sx":
             return [
-                ("Resource use index", "(ИВЛ-дни + Операции + Переливания) / Койко-дни", self._fmt_num(s["resource_use_index"])),
-                ("Throughput", "N / Дни", self._fmt_num(s["throughput"])),
-                ("Case severity proxy", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
-                ("Load coefficient", "Пик пациентов / Койки", self._fmt_num(s["load_coefficient"])),
+                ("Индекс использования ресурсов", "(ИВЛ-дни + Операции + Переливания) / Койко-дни", self._fmt_num(s["resource_use_index"])),
+                ("Пропускная способность", "Госпитализации / Дни периода", self._fmt_num(s["throughput"])),
+                ("Косвенный показатель тяжести", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
+                ("Коэффициент пиковой нагрузки", "Пик пациентов / Койки", self._fmt_num(s["load_coefficient"])),
             ]
 
         return []
