@@ -6753,6 +6753,63 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
             if match_pos < 0 or assign_pos < 0 or match_pos > assign_pos:
                 return False, "doctor: chart context must be checked before assigning the new admission_id"
 
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime, timedelta
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.shared.chart_widget import ChartWidget
+
+    class Vital:
+        def __init__(self, idx: int, timestamp: datetime, sys_value: int, dia_value: int):
+            self.id = idx
+            self.timestamp = timestamp
+            self.sys = sys_value
+            self.dia = dia_value
+            self.pulse = 70 + idx
+            self.temp = 36.5
+            self.spo2 = 98
+            self.rr = None
+            self.cvp = None
+            self.updated_at = f"2026-01-01T00:00:{idx:02d}"
+
+    app = QApplication.instance() or QApplication([])
+    chart = ChartWidget()
+    start = datetime(2026, 1, 1, 8, 0, 0)
+    vitals = [
+        Vital(1, start + timedelta(hours=1), 120, 70),
+        Vital(2, start + timedelta(hours=2), 125, 75),
+        Vital(3, start + timedelta(hours=3), 118, 68),
+    ]
+    try:
+        chart.update_data(vitals, start, active_intervals=[])
+        app.processEvents()
+        fill = chart.fill_items[0]
+        if fill.path().isEmpty():
+            return False, "chart fill path was not created for blood-pressure data"
+
+        chart.clear_for_context(admission_id=999, start_time=start + timedelta(days=1))
+        app.processEvents()
+        if not fill.path().isEmpty():
+            return False, (
+                "ChartWidget.clear_for_context must clear stale blood-pressure fill path, "
+                f"elements={fill.path().elementCount()} bounds={fill.boundingRect()}"
+            )
+
+        chart.update_data(vitals, start, active_intervals=[])
+        app.processEvents()
+        chart.update_data([], start + timedelta(days=1), active_intervals=[])
+        app.processEvents()
+        if not fill.path().isEmpty():
+            return False, (
+                "ChartWidget.update_data must clear stale blood-pressure fill path for empty vitals, "
+                f"elements={fill.path().elementCount()} bounds={fill.boundingRect()}"
+            )
+    finally:
+        chart.deleteLater()
+        app.processEvents()
+
     return True, "ok"
 
 

@@ -3,7 +3,7 @@ import pyqtgraph as pg
 import warnings
 from PySide6.QtWidgets import QWidget, QVBoxLayout
 from PySide6.QtCore import Qt, Signal, QEvent, QRect, QTimeLine
-from PySide6.QtGui import QPainter, QFont, QColor, QBrush
+from PySide6.QtGui import QPainter, QFont, QColor, QBrush, QPainterPath
 from datetime import datetime, timedelta
 from .chart_data_processor import ChartDataProcessor
 from ..styles.theme import (BG_MAIN, BG_LIGHT, TEXT_PRIMARY, BORDER_COLOR, 
@@ -504,6 +504,7 @@ class ChartWidget(QWidget):
 
         for item in getattr(self, "_curve_by_key", {}).values():
             item.setData([], [])
+        self._clear_fill_paths()
         self.scatter_vitals.setData([])
         for key, item in getattr(self, "_scatter_items", {}).items():
             if key != "ad":
@@ -514,6 +515,11 @@ class ChartWidget(QWidget):
         self.tooltip.setOpacity(0)
         self.header_spacer.update()
         self.plot_widget.viewport().update()
+
+    def _clear_fill_paths(self):
+        for item in getattr(self, "fill_items", []):
+            item.setPath(QPainterPath())
+            item.update()
 
     @staticmethod
     def _normalize_key_dt(value):
@@ -606,6 +612,8 @@ class ChartWidget(QWidget):
 
         for key, curve in self._curve_by_key.items():
             curve.setData(d[f'{key}_x'], d[f'{key}_y'])
+        if not len(d.get("sys_x", ())) or not len(d.get("dia_x", ())):
+            self._clear_fill_paths()
 
         scatter_data = {
             "ad": {"x": [], "y": []},
