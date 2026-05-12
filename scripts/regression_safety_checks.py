@@ -3590,18 +3590,110 @@ def _check_print_hourly_input_planned_time(temp_root: str) -> tuple[bool, str]:
     if (chain_hourly[1]["infusion"], chain_hourly[2]["infusion"], chain_hourly[3]["infusion"]) != (120.0, 120.0, 0.0):
         return False, f"chain infusion used actual start instead of planned start: {[chain_hourly[i]['infusion'] for i in (1, 2, 3)]}"
 
+    terminal_chain_id = "terminal-chain"
+    terminal_long_infusion = OrderDTO(
+        id=10,
+        admission_id=1,
+        drug_key="ruchnoivvod",
+        latin="Manual continuous",
+        type=OrderType.INFUSION_CONTINUOUS,
+        status=OrderStatus.ACTIVE,
+        dose_value=24,
+        dose_unit="ml",
+        duration_min=-1,
+        is_committed=1,
+        comment="",
+        administrations=[
+            executed_admin(10, planned_hour=0, actual_hour=0, role="start", chain_id=terminal_chain_id),
+            *[
+                AdministrationDTO(
+                    id=10000 + planned_hour,
+                    order_id=10,
+                    big_chain_id=terminal_chain_id,
+                    cell_role="end" if planned_hour == 23 else "body",
+                    planned_time=start + timedelta(hours=planned_hour),
+                    status="planned",
+                    is_committed=1,
+                    comment="",
+                )
+                for planned_hour in range(1, 24)
+            ],
+        ],
+    )
+
+    class TerminalStatusService:
+        def get_admission_outcome_context(self, _admission_id):
+            return {
+                "current_status": "TRANSFERRED",
+                "current_status_start_time": (start + timedelta(hours=4)).isoformat(),
+                "transfer_datetime": (start + timedelta(hours=4)).isoformat(),
+                "outcome": "переведен",
+            }
+
+    class TerminalPrintService:
+        status_service = TerminalStatusService()
+
+    terminal_balance = build_print_balance_final(
+        orders=[terminal_long_infusion],
+        fluids=[],
+        remcard_service=TerminalPrintService(),
+        config={"balance": True},
+        admission_id=1,
+        start_dt=start,
+        current_time=end,
+        end_dt=end,
+    )
+    terminal_hourly = terminal_balance["in_hourly"]
+    if [terminal_hourly[i]["preparats"] for i in range(5)] != [1.0, 1.0, 1.0, 1.0, 0.0]:
+        return False, f"terminal transfer did not stop long infusion at movement time: {[terminal_hourly[i]['preparats'] for i in range(5)]}"
+    if any(terminal_hourly[i]["preparats"] for i in range(4, 24)):
+        return False, "terminal transfer allowed long infusion after movement"
+    if terminal_balance["current"]["preparats"] != 4.0 or terminal_balance["full"]["preparats"] != 4.0:
+        return False, f"terminal transfer redistributed long infusion volume: {terminal_balance['current']} / {terminal_balance['full']}"
+
+    class DeathStatusService:
+        def get_admission_outcome_context(self, _admission_id):
+            return {
+                "current_status": "DEAD",
+                "current_status_start_time": (start + timedelta(hours=4)).isoformat(),
+                "death_datetime": (start + timedelta(hours=4)).isoformat(),
+                "outcome": "умер",
+            }
+
+    class DeathPrintService:
+        status_service = DeathStatusService()
+
+    death_balance = build_print_balance_final(
+        orders=[terminal_long_infusion],
+        fluids=[],
+        remcard_service=DeathPrintService(),
+        config={"balance": True},
+        admission_id=1,
+        start_dt=start,
+        current_time=end,
+        end_dt=end,
+    )
+    death_hourly = death_balance["in_hourly"]
+    if [death_hourly[i]["preparats"] for i in range(5)] != [1.0, 1.0, 1.0, 1.0, 0.0]:
+        return False, f"terminal death did not stop long infusion at movement time: {[death_hourly[i]['preparats'] for i in range(5)]}"
+    if any(death_hourly[i]["preparats"] for i in range(4, 24)):
+        return False, "terminal death allowed long infusion after movement"
+
     return True, "ok"
 
 
 def _check_print_balance_tables_input_before_output(temp_root: str) -> tuple[bool, str]:
     from rem_card.ui.rem_card_sectors.s_print.balance import render_balance
+    from rem_card.ui.rem_card_sectors.s_print.reportlab_builder import ReportLabReportBuilder
 
     hours = [str((8 + i) % 24) for i in range(24)]
     html = render_balance(
         {
             "balance_final": {
-                "in_hourly": {0: {"infusion": 100}},
-                "out_hourly": {0: {"urine": 50}},
+                "in_hourly": {
+                    0: {"infusion": 100, "preparats": "0", "blood": "2700", "plasma": 0, "oral": "0.0"}
+                },
+                "out_hourly": {0: {"urine": 50, "drain": "0", "ng": 0, "stool": "0.0", "other": ""}},
                 "in_cur": {"total": 100},
                 "out_cur": {"urine": 50, "drain": 0, "ng": 0, "stool": 0, "other": 0},
             }
@@ -3615,6 +3707,16 @@ def _check_print_balance_tables_input_before_output(temp_root: str) -> tuple[boo
         return False, "balance report table titles were not rendered"
     if input_idx > output_idx:
         return False, "balance report renders output before input"
+    if ">0</td>" in html or ">0.0</td>" in html:
+        return False, "balance report hourly tables render zero cells"
+    if ">2700</td>" not in html:
+        return False, "balance report hid a non-zero value containing zero digits"
+    if ">0</th>" not in html:
+        return False, "balance report hid the midnight hour header"
+    if ReportLabReportBuilder._format_hourly_value("0") != "" or ReportLabReportBuilder._format_hourly_value("0.0") != "":
+        return False, "reportlab balance formatter renders zero strings"
+    if ReportLabReportBuilder._format_hourly_value("2700") != "2700":
+        return False, "reportlab balance formatter hid a non-zero value containing zero digits"
     return True, "ok"
 
 

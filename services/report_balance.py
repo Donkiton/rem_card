@@ -66,6 +66,62 @@ def _sum_input_hourly(hourly: Dict[int, Dict[str, float]]) -> Dict[str, float]:
     return totals
 
 
+def _as_datetime(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace(" ", "T"))
+    except Exception:
+        return None
+
+
+def _resolve_terminal_times(remcard_service, admission_id: Optional[int]) -> tuple[Optional[datetime], Optional[datetime]]:
+    if not admission_id:
+        return None, None
+
+    transfer_time = None
+    outcome_time = None
+    context = {}
+    status_service = getattr(remcard_service, "status_service", None)
+    if status_service and hasattr(status_service, "get_admission_outcome_context"):
+        try:
+            context = status_service.get_admission_outcome_context(int(admission_id)) or {}
+        except Exception as exc:
+            logger.warning("Failed to load outcome context for print balance: %s", exc)
+
+    if context:
+        current_status = str(context.get("current_status") or "").upper()
+        outcome = str(context.get("outcome") or "").lower()
+        status_start = _as_datetime(context.get("current_status_start_time"))
+        transfer_dt = _as_datetime(context.get("transfer_datetime"))
+        death_dt = _as_datetime(context.get("death_datetime"))
+
+        if current_status == "DEAD":
+            outcome_time = status_start or death_dt or transfer_dt
+        elif current_status == "TRANSFERRED":
+            transfer_time = status_start or transfer_dt
+        elif death_dt and ("умер" in outcome or outcome == "dead"):
+            outcome_time = death_dt
+        elif transfer_dt:
+            transfer_time = transfer_dt
+        elif death_dt:
+            outcome_time = death_dt
+
+    if transfer_time or outcome_time:
+        return transfer_time, outcome_time
+
+    if hasattr(remcard_service, "get_patient"):
+        try:
+            patient = remcard_service.get_patient(int(admission_id))
+            transfer_time = _as_datetime(getattr(patient, "transfer_datetime", None))
+        except Exception as exc:
+            logger.warning("Failed to load patient terminal time for print balance: %s", exc)
+
+    return transfer_time, outcome_time
+
+
 def build_print_balance_final(
     *,
     orders,
@@ -77,10 +133,24 @@ def build_print_balance_final(
     current_time: datetime,
     end_dt: datetime,
 ) -> dict:
-    balance_res = BalanceCalculator.calculate(orders, current_time, end_dt)
+    transfer_time, outcome_time = _resolve_terminal_times(remcard_service, admission_id)
+    balance_res = BalanceCalculator.calculate(
+        orders,
+        current_time,
+        end_dt,
+        transfer_time=transfer_time,
+        outcome_time=outcome_time,
+    )
     in_hourly = _empty_input_hourly()
     input_cutoff_time = min(current_time + timedelta(hours=1), end_dt)
-    order_hourly = BalanceCalculator.calculate_hourly_actual_input(orders, start_dt, input_cutoff_time, end_dt)
+    order_hourly = BalanceCalculator.calculate_hourly_actual_input(
+        orders,
+        start_dt,
+        input_cutoff_time,
+        end_dt,
+        transfer_time=transfer_time,
+        outcome_time=outcome_time,
+    )
     _merge_input_hourly(in_hourly, order_hourly)
 
     oral_cur = 0

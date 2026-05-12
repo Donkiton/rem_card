@@ -29,7 +29,7 @@ from rem_card.services.order_domain_service import (
     NURSE_MARK_NOT_EXECUTED,
 )
 
-from .balance import format_signed_ml, get_current_balance_totals
+from .balance import format_hourly_balance_value, format_signed_ml, get_current_balance_totals
 
 
 class _PrescriptionMarkFlowable(Flowable):
@@ -614,9 +614,7 @@ class ReportLabReportBuilder:
 
     @staticmethod
     def _format_hourly_value(value):
-        if value:
-            return str(int(round(float(value))))
-        return ""
+        return format_hourly_balance_value(value)
 
     @classmethod
     def _hourly_balance_table(cls, title: str, row_specs, hourly_data: dict, hours: list[str], table_width: float):

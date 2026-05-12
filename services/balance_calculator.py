@@ -199,6 +199,22 @@ class BalanceCalculator:
                 pass
 
     @classmethod
+    def _resolve_terminal_limit(
+        cls,
+        end_of_card: datetime,
+        transfer_time: Optional[datetime] = None,
+        outcome_time: Optional[datetime] = None,
+    ) -> datetime:
+        daily_limit = end_of_card
+        valid_transfer = transfer_time and transfer_time.year > 2020
+        terminal_time = outcome_time if outcome_time else (transfer_time if valid_transfer else None)
+        # Автоматическое введение останавливается ровно в момент исхода.
+        # Часовая отсрочка после исхода относится только к ручному выведению жидкости.
+        if terminal_time and terminal_time < daily_limit:
+            daily_limit = terminal_time
+        return daily_limit
+
+    @classmethod
     def calculate(cls, orders: List[OrderDTO], current_time: datetime, end_of_card: datetime, 
                   transfer_time: Optional[datetime] = None, active_intervals: List[Tuple[datetime, datetime]] = None,
                   outcome_time: Optional[datetime] = None) -> Dict[str, Dict[str, float]]:
@@ -212,12 +228,7 @@ class BalanceCalculator:
             "daily": {"infusion": 0.0, "preparats": 0.0, "blood": 0.0, "plasma": 0.0, "total": 0.0}
         }
 
-        daily_limit = end_of_card
-        valid_transfer = transfer_time and transfer_time.year > 2020
-        terminal_time = outcome_time if outcome_time else (transfer_time if valid_transfer else None)
-        if terminal_time:
-            terminal_time = terminal_time + timedelta(hours=1)
-        if terminal_time and terminal_time < daily_limit: daily_limit = terminal_time
+        daily_limit = cls._resolve_terminal_limit(end_of_card, transfer_time, outcome_time)
 
         cls._maybe_reload_engine()
 
@@ -247,7 +258,7 @@ class BalanceCalculator:
             
             for chain_id, admins in chains.items():
                 admins.sort(key=lambda x: x.planned_time)
-                cls._process_chain_daily(res, order, admins, inf_v, prep_v, total_v_order, cat, daily_limit, is_draft)
+                cls._process_chain_daily(res, order, admins, inf_v, prep_v, total_v_order, cat, daily_limit, end_of_card, is_draft)
 
             # 2. Р РђРЎР§Р•Рў CURRENT (РќР° С‚РµРєСѓС‰РёР№ РјРѕРјРµРЅС‚)
             # РўРѕР»СЊРєРѕ РїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹Р№ С„Р°РєС‚ (executed) РёР»Рё РЅРёС‡РµРіРѕ РµСЃР»Рё С‡РµСЂРЅРѕРІРёРє/РїР»Р°РЅ.
@@ -257,7 +268,7 @@ class BalanceCalculator:
                 
                 for chain_id, admins in chains.items():
                     admins.sort(key=lambda x: x.planned_time)
-                    cls._process_chain_current(res, order, admins, inf_v, prep_v, total_v_order, cat, current_time, daily_limit)
+                    cls._process_chain_current(res, order, admins, inf_v, prep_v, total_v_order, cat, current_time, daily_limit, end_of_card)
 
         for p in ("current", "daily"):
             for k in ["infusion", "preparats", "blood", "plasma"]: res[p][k] = round(res[p][k], 1)
@@ -283,13 +294,7 @@ class BalanceCalculator:
         if current_time < start_time:
             return hourly
 
-        daily_limit = end_of_card
-        valid_transfer = transfer_time and transfer_time.year > 2020
-        terminal_time = outcome_time if outcome_time else (transfer_time if valid_transfer else None)
-        if terminal_time:
-            terminal_time = terminal_time + timedelta(hours=1)
-        if terminal_time and terminal_time < daily_limit:
-            daily_limit = terminal_time
+        daily_limit = cls._resolve_terminal_limit(end_of_card, transfer_time, outcome_time)
 
         period_end = min(current_time, daily_limit, start_time + timedelta(hours=24))
         if period_end <= start_time:
@@ -327,7 +332,7 @@ class BalanceCalculator:
             for admins in chains.values():
                 admins.sort(key=lambda item: item.planned_time)
                 cls._add_chain_actual_to_hourly(
-                    hourly, start_time, period_end, daily_limit, order, admins, inf_v, prep_v, cat
+                    hourly, start_time, period_end, daily_limit, end_of_card, order, admins, inf_v, prep_v, cat
                 )
 
         for bucket in hourly.values():
@@ -349,8 +354,8 @@ class BalanceCalculator:
             cls._add_point_to_hourly(hourly, start_time, planned_time, inf_v, prep_v, cat)
             return
 
-        interval_end = min(planned_time + timedelta(minutes=dur), daily_limit)
-        visible_end = min(interval_end, period_end)
+        interval_end = planned_time + timedelta(minutes=dur)
+        visible_end = min(interval_end, period_end, daily_limit)
         cls._add_interval_to_hourly(
             hourly,
             start_time,
@@ -363,13 +368,13 @@ class BalanceCalculator:
         )
 
     @classmethod
-    def _add_chain_actual_to_hourly(cls, hourly, start_time, period_end, daily_limit, order, admins, inf_v, prep_v, cat):
+    def _add_chain_actual_to_hourly(cls, hourly, start_time, period_end, daily_limit, end_of_card, order, admins, inf_v, prep_v, cat):
         if not admins:
             return
 
         if cls._chain_has_segment_marks(admins):
             cls._add_segmented_chain_actual_to_hourly(
-                hourly, start_time, period_end, daily_limit, order, admins, inf_v, prep_v, cat
+                hourly, start_time, period_end, daily_limit, end_of_card, order, admins, inf_v, prep_v, cat
             )
             return
 
@@ -380,14 +385,14 @@ class BalanceCalculator:
         start_of_chain = admins[0].planned_time
         dur_val = float(getattr(order, "duration_min", 0) or 0)
         if dur_val > 0:
-            chain_end = min(start_of_chain + timedelta(minutes=dur_val), daily_limit)
+            chain_end = start_of_chain + timedelta(minutes=dur_val)
         else:
-            chain_end = daily_limit
+            chain_end = end_of_card
 
         if chain_end <= start_of_chain:
             return
 
-        visible_end = min(period_end, chain_end)
+        visible_end = min(period_end, daily_limit, chain_end)
         cls._add_interval_to_hourly(
             hourly,
             start_time,
@@ -400,8 +405,8 @@ class BalanceCalculator:
         )
 
     @classmethod
-    def _add_segmented_chain_actual_to_hourly(cls, hourly, start_time, period_end, daily_limit, order, admins, inf_v, prep_v, cat):
-        start_of_chain, chain_end = cls._chain_bounds(order, admins, daily_limit)
+    def _add_segmented_chain_actual_to_hourly(cls, hourly, start_time, period_end, daily_limit, end_of_card, order, admins, inf_v, prep_v, cat):
+        start_of_chain, chain_end, planned_chain_end = cls._chain_bounds(order, admins, daily_limit, end_of_card)
         if chain_end <= start_of_chain or period_end <= start_of_chain:
             return
 
@@ -446,7 +451,7 @@ class BalanceCalculator:
 
         active_end = stop_time if stop_time is not None and stop_time <= effective_period_end else effective_period_end
         cls._add_segment_partial_to_hourly(
-            hourly, start_time, segment_start, active_end, chain_end, inf_v, prep_v, cat
+            hourly, start_time, segment_start, active_end, planned_chain_end, inf_v, prep_v, cat
         )
 
     @classmethod
@@ -545,12 +550,12 @@ class BalanceCalculator:
             cls._add_vol_to_res(res, "daily", inf_v * ratio, prep_v * ratio, cat)
 
     @classmethod
-    def _process_chain_daily(cls, res, order, admins, inf_v, prep_v, total_v, cat, daily_limit, is_draft):
+    def _process_chain_daily(cls, res, order, admins, inf_v, prep_v, total_v, cat, daily_limit, end_of_card, is_draft):
         """Считает объем цепочки в суточный баланс."""
         if not admins: return
 
         if is_draft or not cls._chain_has_segment_marks(admins):
-            cls._process_chain_linear_daily(res, order, admins, inf_v, prep_v, total_v, cat, daily_limit, is_draft)
+            cls._process_chain_linear_daily(res, order, admins, inf_v, prep_v, total_v, cat, daily_limit, end_of_card, is_draft)
             return
 
         cls._process_chain_segmented(
@@ -563,11 +568,12 @@ class BalanceCalculator:
             cat=cat,
             period_end=daily_limit,
             daily_limit=daily_limit,
+            end_of_card=end_of_card,
             require_fact=False,
         )
 
     @classmethod
-    def _process_chain_linear_daily(cls, res, order, admins, inf_v, prep_v, total_v, cat, daily_limit, is_draft):
+    def _process_chain_linear_daily(cls, res, order, admins, inf_v, prep_v, total_v, cat, daily_limit, end_of_card, is_draft):
         """Считает цепочку по исходной равномерной скорости без смен шприца."""
         if not admins: return
 
@@ -577,8 +583,8 @@ class BalanceCalculator:
             total_dur_min = dur_val
             chain_end = min(start_of_chain + timedelta(minutes=dur_val), daily_limit)
         else:
-            total_dur_min = (daily_limit - start_of_chain).total_seconds() / 60.0
-            chain_end = daily_limit
+            total_dur_min = (end_of_card - start_of_chain).total_seconds() / 60.0
+            chain_end = min(end_of_card, daily_limit)
 
         if total_dur_min <= 0: total_dur_min = 1.0
 
@@ -625,7 +631,7 @@ class BalanceCalculator:
                 cls._add_vol_to_res(res, "current", inf_v * ratio, prep_v * ratio, cat)
 
     @classmethod
-    def _process_chain_current(cls, res, order, admins, inf_v, prep_v, total_v, cat, current_time, daily_limit):
+    def _process_chain_current(cls, res, order, admins, inf_v, prep_v, total_v, cat, current_time, daily_limit, end_of_card):
         """Считает объем цепочки в текущий баланс."""
         if not admins: return
 
@@ -640,14 +646,15 @@ class BalanceCalculator:
                 cat=cat,
                 period_end=min(current_time, daily_limit),
                 daily_limit=daily_limit,
+                end_of_card=end_of_card,
                 require_fact=True,
             )
             return
 
-        cls._process_chain_linear_current(res, order, admins, inf_v, prep_v, total_v, cat, current_time, daily_limit)
+        cls._process_chain_linear_current(res, order, admins, inf_v, prep_v, total_v, cat, current_time, daily_limit, end_of_card)
 
     @classmethod
-    def _process_chain_linear_current(cls, res, order, admins, inf_v, prep_v, total_v, cat, current_time, daily_limit):
+    def _process_chain_linear_current(cls, res, order, admins, inf_v, prep_v, total_v, cat, current_time, daily_limit, end_of_card):
         """Считает текущий баланс цепочки по исходной равномерной скорости."""
         if not admins: return
 
@@ -657,8 +664,8 @@ class BalanceCalculator:
             total_dur_min = dur_val
             chain_end = min(start_of_chain + timedelta(minutes=dur_val), daily_limit)
         else:
-            total_dur_min = (daily_limit - start_of_chain).total_seconds() / 60.0
-            chain_end = daily_limit
+            total_dur_min = (end_of_card - start_of_chain).total_seconds() / 60.0
+            chain_end = min(end_of_card, daily_limit)
 
         if total_dur_min <= 0: total_dur_min = 1.0
 
@@ -704,19 +711,22 @@ class BalanceCalculator:
         return False
 
     @classmethod
-    def _chain_bounds(cls, order, admins, daily_limit):
+    def _chain_bounds(cls, order, admins, daily_limit, end_of_card=None):
         start_of_chain = admins[0].planned_time
         dur_val = float(order.duration_min or 0)
         if dur_val > 0:
             planned_end = start_of_chain + timedelta(minutes=dur_val)
         else:
-            planned_end = daily_limit
+            planned_end = end_of_card or daily_limit
 
         last_slot_end = admins[-1].planned_time + timedelta(hours=1)
-        visible_end = min(planned_end, daily_limit, last_slot_end)
+        planned_chain_end = min(planned_end, last_slot_end)
+        visible_end = min(planned_chain_end, daily_limit)
         if visible_end <= start_of_chain:
             visible_end = start_of_chain
-        return start_of_chain, visible_end
+        if planned_chain_end <= start_of_chain:
+            planned_chain_end = start_of_chain
+        return start_of_chain, visible_end, planned_chain_end
 
     @classmethod
     def _add_segment_ratio(cls, res, period, inf_v, prep_v, cat, segment_start, active_end, segment_end):
@@ -744,6 +754,7 @@ class BalanceCalculator:
         cat,
         period_end,
         daily_limit,
+        end_of_card,
         require_fact: bool,
     ):
         """
@@ -753,7 +764,7 @@ class BalanceCalculator:
         if not admins:
             return
 
-        start_of_chain, chain_end = cls._chain_bounds(order, admins, daily_limit)
+        start_of_chain, chain_end, planned_chain_end = cls._chain_bounds(order, admins, daily_limit, end_of_card)
         if chain_end <= start_of_chain or period_end <= start_of_chain:
             return
 
@@ -813,7 +824,7 @@ class BalanceCalculator:
                 cat,
                 segment_start,
                 stop_time,
-                chain_end,
+                planned_chain_end,
             )
             return
 
@@ -825,7 +836,7 @@ class BalanceCalculator:
             cat,
             segment_start,
             effective_period_end,
-            chain_end,
+            planned_chain_end,
         )
 
     @staticmethod

@@ -10,9 +10,22 @@ from .table_layout import (
 BALANCE_NAME_WIDTH_PT = 120.0
 
 
+def format_hourly_balance_value(value):
+    if value in (None, ""):
+        return ""
+    try:
+        rounded = int(round(float(value)))
+    except (TypeError, ValueError):
+        return str(value)
+    if rounded == 0:
+        return ""
+    return str(rounded)
+
+
 def _format_hourly_value(value):
+    value = format_hourly_balance_value(value)
     if value:
-        return str(int(round(float(value))))
+        return value
     return ""
 
 
