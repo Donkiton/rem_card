@@ -43,7 +43,7 @@
           "balance": true,
           "events": true,
           "ivl": true,
-          "procedures": false,
+          "procedures": true,
           "labs": false,
           "print": false
         }

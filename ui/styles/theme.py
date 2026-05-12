@@ -279,7 +279,7 @@ STYLE_ANALYTICS_GROUP_LABEL = (
 )
 STYLE_ANALYTICS_CHECKBOX = (
     f"QCheckBox {{ color: {TEXT_PRIMARY}; font-weight: 500; "
-    "font-size: 11px; background: transparent; }}"
+    "font-size: 11px; background: transparent; }"
 )
 STYLE_ANALYTICS_PREVIEW_BUTTON = f"""
     QPushButton {{
