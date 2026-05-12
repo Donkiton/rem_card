@@ -229,7 +229,11 @@ class RemCardLayoutManager(QWidget):
             # Передаем оба сервиса в BedsSelectionWidget
             # remcard_service может прийти как аргумент init или быть установлен позже
             from ..doctor_view.components.beds_selection_widget import BedsSelectionWidget
-            self.beds_selection_widget = BedsSelectionWidget(self.patient_service, self.remcard_service)
+            self.beds_selection_widget = BedsSelectionWidget(
+                self.patient_service,
+                self.remcard_service,
+                auto_initial_refresh=False,
+            )
             beds_layout.addWidget(self.beds_selection_widget)
         else:
             logger.warning("RemCardLayoutManager init_ui: NO patient_service PROVIDED!")
@@ -266,13 +270,11 @@ class RemCardLayoutManager(QWidget):
         # Контейнер для 1а / W1а (как у медсестры)
         self.sector_1a_stack = CurrentPageStack()
         from ..rem_card_sectors.sector_w1a import SectorW1a
-        from ..rem_card_sectors.sector_w1c import SectorW1c
-        self.sector_w1a = SectorW1a(self.remcard_service, role="doctor")
-        self.sector_w1c = SectorW1c()
+        self.sector_w1a = SectorW1a(self.remcard_service, role="doctor", auto_initial_refresh=False)
+        self.sector_w1c = None
         
         self.sector_1a_stack.addWidget(self.sector_1a)  # index 0: 1а (карта)
         self.sector_1a_stack.addWidget(self.sector_w1a) # index 1: W1а (койки)
-        self.sector_1a_stack.addWidget(self.sector_w1c) # index 2: W1c (пустая рамка)
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         
@@ -298,7 +300,6 @@ class RemCardLayoutManager(QWidget):
         self.current_mode = "beds"
         self._apply_w1_beds_sector_visibility(refresh_w1a=False)
         QTimer.singleShot(0, lambda: self.selection_mode_changed.emit("beds"))
-        QTimer.singleShot(0, self._refresh_beds_async)
 
         # Ленивая инициализация менеджера 1а/5 только при открытии карты.
         self.nurse_orders_manager = None
@@ -548,6 +549,14 @@ class RemCardLayoutManager(QWidget):
         except Exception:
             return True, True
 
+    def _ensure_sector_w1c(self):
+        if getattr(self, "sector_w1c", None) is None:
+            from ..rem_card_sectors.sector_w1c import SectorW1c
+
+            self.sector_w1c = SectorW1c()
+            self.sector_1a_stack.addWidget(self.sector_w1c)
+        return self.sector_w1c
+
     def _apply_w1_beds_sector_visibility(self, *, refresh_w1a: bool = True):
         if not hasattr(self, "sector_1a_stack") or not hasattr(self, "sector_1b_stack"):
             return
@@ -560,8 +569,8 @@ class RemCardLayoutManager(QWidget):
         if hasattr(self, "sector_w1b"):
             self.sector_w1b.apply_display_settings()
 
-        if use_w1c and hasattr(self, "sector_w1c"):
-            self.sector_1a_stack.setCurrentWidget(self.sector_w1c)
+        if use_w1c:
+            self.sector_1a_stack.setCurrentWidget(self._ensure_sector_w1c())
         else:
             self.sector_1a_stack.setCurrentWidget(self.sector_w1a)
             if refresh_w1a and w1a_enabled:
@@ -580,6 +589,11 @@ class RemCardLayoutManager(QWidget):
         if not hasattr(self, 'selection_stack'): return
         
         if mode == "beds":
+            already_beds = (
+                getattr(self, "current_mode", None) == "beds"
+                and hasattr(self, "selection_stack")
+                and self.selection_stack.currentIndex() == 1
+            )
             from ...app.logger import logger
             logger.debug(f"Switching to 'beds' mode, remcard_service exists: {self.remcard_service is not None}")
             self.selection_stack.setCurrentIndex(1)
@@ -589,9 +603,9 @@ class RemCardLayoutManager(QWidget):
             if hasattr(self, 'l_layout'):
                 self.l_layout.setContentsMargins(0, 0, 0, 0)
             
-            self._apply_w1_beds_sector_visibility()
+            self._apply_w1_beds_sector_visibility(refresh_w1a=not already_beds)
             
-            if hasattr(self, 'beds_selection_widget'):
+            if not already_beds and hasattr(self, 'beds_selection_widget'):
                 logger.debug("Scheduling beds_selection_widget.refresh()")
                 QTimer.singleShot(0, self._refresh_beds_async)
             else:
@@ -603,7 +617,13 @@ class RemCardLayoutManager(QWidget):
             if self.archive_widget is None and self.patient_service:
                 from ..doctor_view.archive_widget import ArchiveWidget
 
-                self.archive_widget = ArchiveWidget(self.patient_service, remcard_service=self.remcard_service)
+                role_text = str(getattr(self, "role", "") or "").lower()
+                allow_archive_edit = "врач" in role_text or "doctor" in role_text
+                self.archive_widget = ArchiveWidget(
+                    self.patient_service,
+                    remcard_service=self.remcard_service,
+                    allow_edit=allow_archive_edit,
+                )
                 self._archive_layout.addWidget(self.archive_widget)
             self.selection_stack.setCurrentIndex(2)
             self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)

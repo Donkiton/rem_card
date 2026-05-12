@@ -44,10 +44,18 @@ W1A_REFRESH_SOURCE_PREFIXES = (
 class SectorW1a(BaseSectorWidget):
     """Сектор W1a со списком ближайших назначений по активным пациентам."""
 
-    def __init__(self, service=None, parent=None, role: str | None = "doctor"):
+    def __init__(
+        self,
+        service=None,
+        parent=None,
+        role: str | None = "doctor",
+        *,
+        auto_initial_refresh: bool = True,
+    ):
         super().__init__("W1a", parent)
         self.service = service
         self.role = normalize_display_role(role)
+        self._auto_initial_refresh = bool(auto_initial_refresh)
         self._display_enabled = self._read_display_enabled()
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
@@ -78,7 +86,7 @@ class SectorW1a(BaseSectorWidget):
         self._refresh_timer.timeout.connect(lambda: self.refresh_data(force=True))
 
         self.init_ui()
-        if self._display_enabled:
+        if self._display_enabled and self._auto_initial_refresh:
             QTimer.singleShot(0, self.refresh_data)
 
     def init_ui(self):

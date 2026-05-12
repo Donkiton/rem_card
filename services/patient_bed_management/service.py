@@ -99,6 +99,26 @@ class PatientBedManagementService:
             """,
             (int(bed_number),),
         )
+        return self._records_from_admission_row(row)
+
+    def get_patient_with_admission(self, admission_id: int) -> tuple[Optional[PatientRecord], Optional[AdmissionRecord]]:
+        row = self.db.fetch_one_remcard(
+            """
+            SELECT
+                p.id AS p_id,
+                p.full_name,
+                p.admission_uid,
+                p.birth_date,
+                a.*
+            FROM admissions a
+            JOIN patients p ON p.id = a.patient_id
+            WHERE a.id = ?
+            """,
+            (int(admission_id),),
+        )
+        return self._records_from_admission_row(row)
+
+    def _records_from_admission_row(self, row) -> tuple[Optional[PatientRecord], Optional[AdmissionRecord]]:
         if not row:
             return None, None
         data = dict(row)

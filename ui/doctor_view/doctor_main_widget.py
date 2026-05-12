@@ -1,5 +1,7 @@
+import os
+
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QStackedWidget)
-from PySide6.QtCore import Qt, QCoreApplication
+from PySide6.QtCore import Qt, QCoreApplication, QTimer
 
 try:
     import shiboken6  # type: ignore
@@ -7,6 +9,7 @@ except Exception:
     shiboken6 = None
 
 DOCTOR_BEDS_POLL_INTERVAL_MS = 7000
+W1A_STARTUP_IDLE_DELAY_MS = max(0, int(os.environ.get("REMCARD_W1A_STARTUP_IDLE_DELAY_MS", "500")))
 W1A_PANEL_REFRESH_ENTITIES = {
     "orders",
     "administrations",
@@ -66,6 +69,8 @@ class DoctorMainWidget(QWidget):
         self._last_global_change_id = 0
         self._monitor_connected = False
         self._is_closing = False
+        self._initial_beds_refresh_requested = False
+        self._initial_w1a_refresh_requested = False
         
         self.init_ui()
 
@@ -76,8 +81,10 @@ class DoctorMainWidget(QWidget):
         if data_service and not self._monitor_connected:
             data_service.changes_detected.connect(self._on_data_changes, Qt.QueuedConnection)
             self._monitor_connected = True
-        self._refresh_beds_if_available(queue_if_running=False, allow_hidden=True)
-        self._refresh_w1a()
+        if not self._initial_beds_refresh_requested:
+            self._initial_beds_refresh_requested = True
+            self._refresh_beds_if_available(queue_if_running=False, allow_hidden=True)
+        self._schedule_initial_w1a_refresh()
         if data_service and wake_monitor:
             data_service.request_immediate_refresh(force_emit=False)
 
@@ -128,6 +135,21 @@ class DoctorMainWidget(QWidget):
             sector.handle_data_changes(payload)
         elif hasattr(sector, "refresh_data"):
             sector.refresh_data()
+
+    def _schedule_initial_w1a_refresh(self):
+        if self._initial_w1a_refresh_requested:
+            return
+        self._initial_w1a_refresh_requested = True
+        QTimer.singleShot(W1A_STARTUP_IDLE_DELAY_MS, self._run_initial_w1a_refresh)
+
+    def _run_initial_w1a_refresh(self):
+        if self._is_closing or _app_is_closing():
+            return
+        remcard_widget = getattr(self, "remcard_widget", None)
+        layout = getattr(remcard_widget, "layout_manager", None) if _qt_is_valid(remcard_widget) else None
+        if layout is not None and getattr(layout, "current_mode", "beds") != "beds":
+            return
+        self._refresh_w1a()
 
     def _refresh_beds_if_available(self, *, queue_if_running: bool = True, allow_hidden: bool = False):
         if self._is_closing or _app_is_closing() or (not allow_hidden and not self.isVisible()):

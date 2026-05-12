@@ -28,6 +28,8 @@ class CurrentNurseOrdersWidget(QWidget):
         self.shift_date = None
         
         self.cards_1a = {}
+        self._card_signatures_1a = {}
+        self._last_render_signature_1a = None
         self._last_lock_warning_ts = 0.0
         self._pending_marks = {}
         self._all_data = []
@@ -139,6 +141,8 @@ class CurrentNurseOrdersWidget(QWidget):
             self._time_timer.stop()
         self.sector_1a.set_content(None)
         self.cards_1a.clear()
+        self._card_signatures_1a.clear()
+        self._last_render_signature_1a = None
         self._clear_sector_5()
 
     def _clear_sector_5(self):
@@ -205,11 +209,18 @@ class CurrentNurseOrdersWidget(QWidget):
         ]
         list_1a_data.sort(key=self._sort_key_1a)
 
-        self._sync_sector_widgets(self.sector_1a, self.cards_1a, list_1a_data)
+        render_signature = self._visible_render_signature(list_1a_data)
+        if render_signature == self._last_render_signature_1a:
+            self._refresh_visible_card_signals(render_signature[0])
+            self._schedule_next_time_boundary(now)
+            return
+
+        self._last_render_signature_1a = render_signature
+        changed = self._sync_sector_widgets(self.sector_1a, self.cards_1a, list_1a_data)
         self._clear_sector_5()
         self._schedule_next_time_boundary(now)
         
-        if self.sector_1a:
+        if changed and self.sector_1a:
             self.sector_1a.update()
             if hasattr(self.sector_1a, 'scroll_area'):
                 self.sector_1a.scroll_area.viewport().update()
@@ -217,36 +228,74 @@ class CurrentNurseOrdersWidget(QWidget):
     def _sync_sector_widgets(self, sector, cache, data_list):
         """Синхронизирует виджеты в лейауте с данными без мерцания."""
         if sector is None:
-            return
+            return False
+        changed = False
         new_ids = {item['id'] for item in data_list}
         
         # 1. Удаляем виджеты, которых больше нет в данных
         for admin_id in list(cache.keys()):
             if admin_id not in new_ids:
                 card = cache.pop(admin_id)
+                self._card_signatures_1a.pop(admin_id, None)
                 card.setParent(None)
                 card.deleteLater()
+                changed = True
 
         # 2. Обновляем или создаем виджеты
         layout = sector.content_layout
         
         for i, item in enumerate(data_list):
             admin_id = item['id']
+            card_signature = self._card_data_signature(item)
             if admin_id in cache:
                 # Обновляем данные существующего виджета
                 card = cache[admin_id]
-                card.update_data(item)
+                if self._card_signatures_1a.get(admin_id) != card_signature:
+                    card.update_data(item)
+                    self._card_signatures_1a[admin_id] = card_signature
+                    changed = True
             else:
                 # Создаем новый виджет
                 card = NurseOrderCard(item)
                 card.statusChanged.connect(self.handle_status_change)
                 cache[admin_id] = card
+                self._card_signatures_1a[admin_id] = card_signature
+                changed = True
             
             # 3. Переупорядочиваем в лейауте перед Stretch сектора 1а.
             current_idx = layout.indexOf(card)
             if current_idx != i:
                 layout.insertWidget(i, card)
                 card.raise_() # Принудительно на передний план
+                changed = True
+        return changed
+
+    def _visible_render_signature(self, data_list):
+        return (
+            tuple(int(item["id"]) for item in data_list if item.get("id") is not None),
+            tuple(self._card_data_signature(item) for item in data_list),
+        )
+
+    def _refresh_visible_card_signals(self, visible_ids):
+        for admin_id in visible_ids or ():
+            card = self.cards_1a.get(int(admin_id))
+            if card is not None and hasattr(card, "refresh_time_state"):
+                card.refresh_time_state()
+
+    @staticmethod
+    def _stable_signature_value(value):
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return str(value)
+
+    @classmethod
+    def _card_data_signature(cls, item):
+        volatile_keys = {"signal_state"}
+        return tuple(
+            (str(key), cls._stable_signature_value(value))
+            for key, value in sorted(dict(item or {}).items())
+            if key not in volatile_keys
+        )
 
     def _sort_key_1a(self, item):
         planned_dt = datetime.fromisoformat(item['planned_time'])

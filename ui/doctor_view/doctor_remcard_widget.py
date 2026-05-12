@@ -18,9 +18,10 @@ from rem_card.ui.shared.orders_balance_adapter import (
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
 PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
-CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
+CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "0") == "1"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
+CARD_OPEN_HYDRATE_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_OPEN_HYDRATE_DELAY_MS", "250")))
 CHART_LAZY_INIT_DELAY_MS = max(0, int(os.environ.get("REMCARD_CHART_LAZY_INIT_DELAY_MS", "0")))
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
 JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
@@ -89,6 +90,8 @@ class DoctorRemCardWidget(QWidget):
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
         self._selection_mode = "beds"
+        self._card_return_mode = None
+        self._card_opened_from_global_archive = False
         self._archive_read_only_mode = False
         self._archive_source_db_path = None
         self._archive_readonly_db_manager = None
@@ -470,6 +473,55 @@ class DoctorRemCardWidget(QWidget):
             context_hash,
         )
 
+    def _schedule_card_hydration_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        ensure_initial_status: bool,
+    ):
+        context_key = self._current_snapshot_context_key(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            load_scope="patient_open_card",
+        )
+        QTimer.singleShot(
+            CARD_OPEN_HYDRATE_DELAY_MS,
+            lambda: self._request_card_hydration_if_current(
+                admission_id,
+                shift_date,
+                context_key,
+                ensure_initial_status=ensure_initial_status,
+            ),
+        )
+
+    def _request_card_hydration_if_current(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        context_key,
+        *,
+        ensure_initial_status: bool,
+    ):
+        if int(admission_id or 0) != int(self.admission_id or 0):
+            return
+        if shift_date != self._current_date:
+            return
+        if context_key != self._current_snapshot_context_key(load_scope="patient_open_card"):
+            return
+
+        snapshot = self._card_snapshot_cache or {}
+        if snapshot.get("scope") == "patient_card" and (
+            "balance_runtime" in snapshot or "fluids" in snapshot
+        ):
+            return
+
+        self._request_card_snapshot(
+            ensure_initial_status=ensure_initial_status,
+            show_empty_message=False,
+            load_scope="patient_open_card",
+        )
+
     def _ensure_monitor_subscription(self):
         data_service = self._get_data_service()
         if not data_service or self._monitor_connected:
@@ -539,6 +591,14 @@ class DoctorRemCardWidget(QWidget):
         if not self.admission_id:
             return
 
+        if self._snapshot_worker is not None:
+            self._snapshot_pending = {
+                "ensure_initial_status": bool(ensure_initial_status),
+                "show_empty_message": bool(show_empty_message),
+                "load_scope": str(load_scope or "full"),
+            }
+            return
+
         self._snapshot_request_id += 1
         request = {
             "request_id": self._snapshot_request_id,
@@ -549,9 +609,6 @@ class DoctorRemCardWidget(QWidget):
             "load_scope": str(load_scope or "full"),
             "context_key": self._current_snapshot_context_key(load_scope=load_scope),
         }
-        if self._snapshot_worker and self._snapshot_worker.isRunning():
-            self._snapshot_pending = request
-            return
 
         worker = AsyncCallThread(self._build_card_snapshot_job, request)
         self._snapshot_worker = worker
@@ -1368,17 +1425,30 @@ class DoctorRemCardWidget(QWidget):
             s4v.btn_daily_print.setEnabled(True)
             s4v.btn_all_print.setEnabled(True)
 
-    def _resolve_archive_open_date(self, admission_id: int, fallback_patient=None) -> datetime:
+    def _latest_created_card_date(self, admission_id: int):
         try:
             card_dates = self.service.get_all_card_dates(admission_id)
             if card_dates:
                 return max(card_dates)
         except Exception as exc:
             logger.warning("Failed to resolve latest card date in archive DB: %s", exc)
+        return None
 
+    def _resolve_archive_open_date(self, admission_id: int, fallback_patient=None) -> datetime:
+        latest_date = self._latest_created_card_date(admission_id)
+        if latest_date:
+            return latest_date
         if fallback_patient and getattr(fallback_patient, "admission_datetime", None):
             return fallback_patient.admission_datetime
         return datetime.now()
+
+    def _is_same_medical_day(self, left: datetime, right: datetime) -> bool:
+        try:
+            left_start, _ = self.service.get_day_period(left)
+            right_start, _ = self.service.get_day_period(right)
+            return left_start == right_start
+        except Exception:
+            return left == right
 
     def load_patient_card(
         self,
@@ -1483,10 +1553,10 @@ class DoctorRemCardWidget(QWidget):
                 else bool(ensure_initial_status)
             )
             if cached_vitals_snapshot:
-                self._request_card_snapshot(
+                self._schedule_card_hydration_snapshot(
+                    admission_id,
+                    date,
                     ensure_initial_status=should_ensure_initial_status,
-                    show_empty_message=False,
-                    load_scope="patient_open_card",
                 )
             else:
                 self._request_card_snapshot(
@@ -1494,13 +1564,10 @@ class DoctorRemCardWidget(QWidget):
                     show_empty_message=False,
                     load_scope="patient_open_vitals",
                 )
-                QTimer.singleShot(
-                    0,
-                    lambda: self._request_card_snapshot(
-                        ensure_initial_status=should_ensure_initial_status,
-                        show_empty_message=False,
-                        load_scope="patient_open_card",
-                    ),
+                self._schedule_card_hydration_snapshot(
+                    admission_id,
+                    date,
+                    ensure_initial_status=should_ensure_initial_status,
                 )
         
         if hasattr(self, 'layout_manager'):
@@ -1728,6 +1795,7 @@ class DoctorRemCardWidget(QWidget):
         if archive_widget and not self._archive_signals_bound:
             archive_widget.back_requested.connect(lambda: self.on_back_clicked())
             archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
+            archive_widget.edit_requested.connect(self.on_patient_edit_requested_from_archive)
             self._archive_signals_bound = True
 
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
@@ -1983,6 +2051,19 @@ class DoctorRemCardWidget(QWidget):
         now = datetime.now()
         start, end = self.service.get_day_period(now)
         if not (start <= self._current_date < end):
+            if self._card_opened_from_global_archive:
+                latest_date = self._latest_created_card_date(self.admission_id)
+                if not latest_date:
+                    CustomMessageBox.information(self, "Пусто", "У пациента нет сохраненных карт.")
+                    return
+                if self._is_same_medical_day(latest_date, self._current_date):
+                    self.refresh_data(show_empty_message=True)
+                    return
+                self.safe_load_archived_card(
+                    latest_date,
+                    balance_patient_period_manual_mode=True,
+                )
+                return
             if self.service.has_card(self.admission_id, now):
                 self.safe_load_archived_card(now)
             else:
@@ -2004,7 +2085,7 @@ class DoctorRemCardWidget(QWidget):
             return
         if self._create_card_write_pending:
             return
-        if self._snapshot_worker and self._snapshot_worker.isRunning():
+        if self._snapshot_worker is not None:
             if not self._create_card_after_snapshot:
                 logger.info(
                     "DoctorRemCardWidget defers create-card write until snapshot load finishes admission_id=%s",
@@ -2410,12 +2491,25 @@ class DoctorRemCardWidget(QWidget):
             if admin_widget is not None and hasattr(admin_widget, "go_back") and admin_widget.go_back():
                 return
 
-        if current_idx == 0:
+        if current_idx == 0 and self._card_return_mode == "archive":
             if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
                 self.layout_manager.orders_widget.clear_drafts()
             self.admission_id = None
             self._release_add_patient_lock()
             self._exit_archive_read_only_mode()
+            self._card_return_mode = None
+            self._card_opened_from_global_archive = False
+            self.layout_manager.set_patient_selection_mode("archive")
+            self._wire_dynamic_views()
+            self.layout_manager.bottom_row.hide()
+        elif current_idx == 0:
+            if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
+                self.layout_manager.orders_widget.clear_drafts()
+            self.admission_id = None
+            self._release_add_patient_lock()
+            self._exit_archive_read_only_mode()
+            self._card_return_mode = None
+            self._card_opened_from_global_archive = False
             self.layout_manager.set_patient_selection_mode("beds")
             self.layout_manager.bottom_row.show()
             if was_journal_mode:
@@ -2424,6 +2518,8 @@ class DoctorRemCardWidget(QWidget):
             # Явно снимаем lock перед выходом из журнала/режимов выбора.
             self._release_add_patient_lock()
             self._exit_archive_read_only_mode()
+            self._card_return_mode = None
+            self._card_opened_from_global_archive = False
             self.layout_manager.set_patient_selection_mode("beds")
             self.layout_manager.bottom_row.show()
             if was_journal_mode:
@@ -2431,6 +2527,8 @@ class DoctorRemCardWidget(QWidget):
         else:
             self._release_add_patient_lock()
             self._exit_archive_read_only_mode()
+            self._card_return_mode = None
+            self._card_opened_from_global_archive = False
             self.back_to_roles_requested.emit()
 
     def on_settings_clicked(self):
@@ -2571,11 +2669,93 @@ class DoctorRemCardWidget(QWidget):
 
     def on_global_archive_clicked(self):
         self._exit_archive_read_only_mode()
+        self._card_return_mode = None
+        self._card_opened_from_global_archive = False
         self.layout_manager.set_patient_selection_mode("archive")
         self._wire_dynamic_views()
         self.layout_manager.bottom_row.hide()
 
+    def _archive_patient_edit_service(self):
+        db_manager = getattr(getattr(self._primary_service, "orders_dao", None), "db", None)
+        if db_manager is None:
+            raise RuntimeError("Сервис базы данных недоступен.")
+        from rem_card.services.patient_bed_management import PatientBedManagementService
+
+        return PatientBedManagementService(
+            db_manager,
+            data_service=getattr(self._primary_service, "data_service", None),
+        )
+
+    def on_patient_edit_requested_from_archive(self, patient):
+        if getattr(patient, "is_external_archive", False):
+            db_name = getattr(patient, "source_db_name", None) or "архивная БД"
+            CustomMessageBox.information(
+                self,
+                "Архивный цикл",
+                f"Запись находится в ротационной базе ({db_name}).\n"
+                "Редактирование таких архивных записей недоступно.",
+            )
+            return
+
+        try:
+            admission_id = int(getattr(patient, "source_admission_id", None) or patient.id)
+        except Exception:
+            CustomMessageBox.warning(self, "Ошибка", "Не удалось определить госпитализацию пациента.")
+            return
+
+        try:
+            edit_service = self._archive_patient_edit_service()
+            patient_record, admission_record = edit_service.get_patient_with_admission(admission_id)
+            if not patient_record or not admission_record:
+                CustomMessageBox.warning(self, "Ошибка", "Карточка пациента не найдена.")
+                return
+
+            bed_number = getattr(admission_record, "bed_number", None)
+            if bed_number is None:
+                CustomMessageBox.warning(self, "Ошибка", "У карточки пациента не указан номер койки.")
+                return
+
+            from rem_card.ui.patient_bed_management.patient_form import PatientForm
+
+            dialog = PatientForm(
+                edit_service,
+                int(bed_number),
+                patient_record,
+                admission_record,
+                self,
+            )
+            try:
+                result = dialog.exec()
+            finally:
+                dialog.deleteLater()
+
+            if int(result) == int(QDialog.Accepted):
+                self._refresh_after_archive_patient_edit(admission_id)
+        except Exception as exc:
+            logger.error("Failed to edit archived patient card: %s", exc, exc_info=True)
+            CustomMessageBox.warning(self, "Ошибка", f"Не удалось открыть редактирование карточки:\n{exc}")
+
+    def _refresh_after_archive_patient_edit(self, admission_id: int):
+        archive_widget = getattr(self.layout_manager, "archive_widget", None)
+        if archive_widget is not None:
+            archive_widget.load_data()
+
+        data_service = getattr(self._primary_service, "data_service", None)
+        if data_service:
+            try:
+                data_service.request_immediate_refresh(force_emit=True)
+            except Exception as exc:
+                logger.warning("Failed to request refresh after archive patient edit: %s", exc)
+
+        if self.admission_id and int(self.admission_id) == int(admission_id) and not self._archive_read_only_mode:
+            try:
+                self.force_reload_all()
+            except Exception as exc:
+                logger.warning("Failed to refresh opened card after archive patient edit: %s", exc, exc_info=True)
+
     def on_patient_selected_from_archive(self, patient):
+        self._card_return_mode = "archive"
+        self._card_opened_from_global_archive = True
         if getattr(patient, "is_external_archive", False):
             source_db_path = getattr(patient, "source_db_path", None)
             source_admission_id = getattr(patient, "source_admission_id", None)
@@ -2598,6 +2778,8 @@ class DoctorRemCardWidget(QWidget):
                 logger.error("Failed to open external archived card: %s", exc, exc_info=True)
                 CustomMessageBox.warning(self, "Ошибка", f"Не удалось открыть архивную карту:\n{exc}")
                 self._exit_archive_read_only_mode()
+                self._card_return_mode = None
+                self._card_opened_from_global_archive = False
             return
         self._exit_archive_read_only_mode()
         target_date = self._resolve_archive_open_date(patient.id, fallback_patient=patient)
@@ -2608,6 +2790,8 @@ class DoctorRemCardWidget(QWidget):
 
     def on_patient_selected_from_list(self, patient, action_type):
         self._exit_archive_read_only_mode()
+        self._card_return_mode = None
+        self._card_opened_from_global_archive = False
         logger.info(
             "[DOCTOR_VIEW] W1 action requested admission_id=%s action=%s",
             getattr(patient, "id", None),

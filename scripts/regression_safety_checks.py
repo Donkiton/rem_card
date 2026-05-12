@@ -6069,8 +6069,8 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     if create_method is None:
         return False, "on_create_card_clicked not found"
     create_source = ast.get_source_segment(source_text, create_method) or ""
-    if "_create_card_after_snapshot" not in create_source or ".isRunning()" not in create_source:
-        return False, "create-card write is not deferred while snapshot worker is running"
+    if "_create_card_after_snapshot" not in create_source or "_snapshot_worker is not None" not in create_source:
+        return False, "create-card write is not deferred while snapshot worker is pending"
 
     return True, "ok"
 
@@ -7201,11 +7201,13 @@ def _check_w1c_source_markers(root: Path, layout_cases: list[tuple[str, Path]]) 
             marker
             for marker in (
                 "SectorW1c",
+                "def _ensure_sector_w1c",
+                "self.sector_w1c = None",
                 "self.sector_w1c = SectorW1c()",
                 "self.sector_1a_stack.addWidget(self.sector_w1c)",
                 "def _apply_w1_beds_sector_visibility",
                 "use_w1c = not w1a_enabled and not w1b_enabled",
-                "self.sector_1a_stack.setCurrentWidget(self.sector_w1c)",
+                "self.sector_1a_stack.setCurrentWidget(self._ensure_sector_w1c())",
             )
             if marker not in source
         ]
@@ -7236,12 +7238,12 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         if "self.sector_1b_stack = CurrentPageStack()" not in source:
             return False, f"{role}: sector_1b_stack still uses max-size QStackedWidget behavior"
         expected_w1a_ctor = (
-            'SectorW1a(self.remcard_service, role="doctor")'
+            'SectorW1a(self.remcard_service, role="doctor", auto_initial_refresh=False)'
             if role == "doctor"
-            else 'SectorW1a(self.remcard_service, role="nurse")'
+            else 'SectorW1a(self.remcard_service, role="nurse", auto_initial_refresh=False)'
         )
         if expected_w1a_ctor not in source:
-            return False, f"{role}: W1a must receive remcard_service and role for targeted refresh"
+            return False, f"{role}: W1a must receive remcard_service and role, and layout must not auto-start W1a"
         if "self.l_layout.setContentsMargins(3, 5, 5, 4)" in source:
             return False, f"{role}: W1 mode must not add column margins on top of W1a/1a sector margins"
 

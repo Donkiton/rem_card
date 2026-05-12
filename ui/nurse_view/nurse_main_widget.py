@@ -16,10 +16,12 @@ from rem_card.ui.shared.orders_balance_adapter import (
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
 PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
-CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") != "0"
+CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "0") == "1"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
+CARD_OPEN_HYDRATE_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_OPEN_HYDRATE_DELAY_MS", "250")))
 CHART_LAZY_INIT_DELAY_MS = max(0, int(os.environ.get("REMCARD_CHART_LAZY_INIT_DELAY_MS", "0")))
+W1A_STARTUP_IDLE_DELAY_MS = max(0, int(os.environ.get("REMCARD_W1A_STARTUP_IDLE_DELAY_MS", "500")))
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
 JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
 JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
@@ -107,6 +109,8 @@ class NurseMainWidget(QWidget):
         self._last_applied_chart_signature = None
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
+        self._initial_beds_refresh_requested = False
+        self._initial_w1a_refresh_requested = False
         self._selection_mode = "beds"
         self._add_patient_lock = self._build_add_patient_lock()
         self._add_patient_lock_held = False
@@ -524,6 +528,13 @@ class NurseMainWidget(QWidget):
         if not adm_id:
             return
 
+        if self._snapshot_worker is not None:
+            self._snapshot_pending = {
+                "ensure_initial_status": bool(ensure_initial_status),
+                "load_scope": str(load_scope or "full"),
+            }
+            return
+
         self._snapshot_request_id += 1
         request = {
             "request_id": self._snapshot_request_id,
@@ -533,9 +544,6 @@ class NurseMainWidget(QWidget):
             "load_scope": str(load_scope or "full"),
             "context_key": self._current_snapshot_context_key(load_scope=load_scope),
         }
-        if self._snapshot_worker and self._snapshot_worker.isRunning():
-            self._snapshot_pending = request
-            return
 
         worker = AsyncCallThread(self._build_card_snapshot_job, request)
         self._snapshot_worker = worker
@@ -548,31 +556,54 @@ class NurseMainWidget(QWidget):
         if data_service:
             data_service.request_immediate_refresh(force_emit=force_emit)
 
-    def _schedule_balance_prefetch(self, admission_id: int, shift_date: datetime):
+    def _schedule_card_hydration_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        ensure_initial_status: bool,
+    ):
         context_key = self._current_snapshot_context_key(
             admission_id=admission_id,
             shift_date=shift_date,
-            load_scope="full",
+            load_scope="patient_open_card",
         )
         QTimer.singleShot(
-            0,
-            lambda: self._prefetch_balance_if_current(admission_id, shift_date, context_key),
+            CARD_OPEN_HYDRATE_DELAY_MS,
+            lambda: self._request_card_hydration_if_current(
+                admission_id,
+                shift_date,
+                context_key,
+                ensure_initial_status=ensure_initial_status,
+            ),
         )
 
-    def _prefetch_balance_if_current(self, admission_id: int, shift_date: datetime, context_key):
+    def _request_card_hydration_if_current(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        context_key,
+        *,
+        ensure_initial_status: bool,
+    ):
         current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
         if int(admission_id or 0) != int(current_admission_id or 0):
             return
         if shift_date != self._current_date:
             return
-        if context_key != self._current_snapshot_context_key(load_scope="full"):
+        if context_key != self._current_snapshot_context_key(load_scope="patient_open_card"):
             return
 
         snapshot = self._card_snapshot_cache or {}
-        if "fluids" in snapshot and "balance_runtime" in snapshot:
+        if snapshot.get("scope") == "patient_card" and (
+            "fluids" in snapshot or "balance_runtime" in snapshot
+        ):
             return
 
-        self._request_card_snapshot(load_scope="full")
+        self._request_card_snapshot(
+            ensure_initial_status=ensure_initial_status,
+            load_scope="patient_open_card",
+        )
 
     def _build_card_snapshot_job(self, request: dict):
         load_scope = str(request.get("load_scope") or "full")
@@ -1127,9 +1158,14 @@ class NurseMainWidget(QWidget):
 
     def start_auto_refresh(self, *, wake_monitor: bool = True):
         self._ensure_monitor_subscription()
-        if hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
+        if (
+            not self._initial_beds_refresh_requested
+            and hasattr(self.layout_manager, "beds_selection_widget")
+            and self.layout_manager.beds_selection_widget
+        ):
+            self._initial_beds_refresh_requested = True
             self.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
-        self._refresh_w1a()
+        self._schedule_initial_w1a_refresh()
         data_service = self._get_data_service()
         if data_service and wake_monitor:
             data_service.request_immediate_refresh(force_emit=False)
@@ -1205,6 +1241,19 @@ class NurseMainWidget(QWidget):
             sector.handle_data_changes(payload)
         elif hasattr(sector, "refresh_data"):
             sector.refresh_data()
+
+    def _schedule_initial_w1a_refresh(self):
+        if self._initial_w1a_refresh_requested:
+            return
+        self._initial_w1a_refresh_requested = True
+        QTimer.singleShot(W1A_STARTUP_IDLE_DELAY_MS, self._run_initial_w1a_refresh)
+
+    def _run_initial_w1a_refresh(self):
+        if self._is_closing:
+            return
+        if getattr(self, "_selection_mode", "beds") != "beds":
+            return
+        self._refresh_w1a()
 
     def _wire_dynamic_views(self):
         archive_widget = getattr(self.layout_manager, "archive_widget", None)
@@ -1623,16 +1672,21 @@ class NurseMainWidget(QWidget):
         if cached_vitals_snapshot:
             self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
         if cached_vitals_snapshot:
-            self._request_card_snapshot(
+            self._schedule_card_hydration_snapshot(
+                admission_id,
+                date,
                 ensure_initial_status=True,
-                load_scope="patient_open_card",
             )
         else:
             self._request_card_snapshot(
                 ensure_initial_status=True,
                 load_scope="patient_open_vitals",
             )
-            self._schedule_balance_prefetch(admission_id, date)
+            self._schedule_card_hydration_snapshot(
+                admission_id,
+                date,
+                ensure_initial_status=True,
+            )
         if hasattr(self, 'layout_manager'):
             active_tab = self.layout_manager.set_active_tab("Витальные функции") or "Витальные функции"
             if hasattr(self.layout_manager, 'sector_2b'):

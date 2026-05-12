@@ -8,6 +8,7 @@ import os
 from rem_card.app.logger import logger
 from rem_card.ui.shared.background_settings import get_active_background_path
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
+from rem_card.ui.shared.w1_beds_signature import build_w1_bed_row_signature
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 import pathlib
 import datetime
@@ -66,10 +67,11 @@ class NurseBedsSelectionWidget(QWidget):
     """Р’РёРґР¶РµС‚ РІС‹Р±РѕСЂР° РїР°С†РёРµРЅС‚Р° РґР»СЏ РјРµРґСЃРµСЃС‚СЂС‹ (СЃРїРёСЃРѕРє РєРѕРµРє W1)."""
     patient_selected = Signal(object, str)
 
-    def __init__(self, patient_service, remcard_service=None, parent=None):
+    def __init__(self, patient_service, remcard_service=None, parent=None, *, auto_initial_refresh: bool = True):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self._auto_initial_refresh = bool(auto_initial_refresh)
         self.report_worker = None
         self.daily_worker = None
         self.daily_pdf_worker = None
@@ -81,8 +83,11 @@ class NurseBedsSelectionWidget(QWidget):
         self._refresh_pending = False
         self._is_closing = False
         self._refresh_apply_count = 0
+        self._last_ordered_row_ids = ()
+        self._last_ordered_row_signatures = ()
         self.init_ui()
-        QTimer.singleShot(0, lambda: self.refresh(queue_if_running=False))
+        if self._auto_initial_refresh:
+            QTimer.singleShot(0, lambda: self.refresh(queue_if_running=False))
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -198,6 +203,20 @@ class NurseBedsSelectionWidget(QWidget):
                 continue
             ordered_ids.append(int(adm_id))
 
+        ordered_signatures = tuple(
+            (adm_id, build_w1_bed_row_signature(patient, runtime_snapshot.get(adm_id)))
+            for adm_id, patient in (
+                (int(getattr(patient, "id")), patient)
+                for patient in active_patients
+                if getattr(patient, "id", None) is not None
+            )
+        )
+        if ordered_signatures == self._last_ordered_row_signatures:
+            return
+
+        ordered_ids_tuple = tuple(ordered_ids)
+        layout_order_changed = ordered_ids_tuple != self._last_ordered_row_ids
+
         active_set = set(ordered_ids)
         for stale_id in list(self._rows_by_admission_id.keys()):
             if stale_id in active_set:
@@ -205,31 +224,47 @@ class NurseBedsSelectionWidget(QWidget):
             stale_row = self._rows_by_admission_id.pop(stale_id)
             self.list_layout.removeWidget(stale_row)
             stale_row.deleteLater()
+            layout_order_changed = True
 
-        self._remove_bottom_stretch()
+        if layout_order_changed:
+            self._remove_bottom_stretch()
         for i, patient in enumerate(active_patients):
             adm_id = getattr(patient, "id", None)
             if adm_id is None:
                 continue
             adm_id = int(adm_id)
+            row_signature = build_w1_bed_row_signature(patient, runtime_snapshot.get(adm_id))
             row = self._rows_by_admission_id.get(adm_id)
             if row is None:
                 row = self._create_row(patient)
                 self._rows_by_admission_id[adm_id] = row
+                layout_order_changed = True
 
-            row.update_patient(patient, now)
-            row.setContentsMargins(0, 5 if i == 0 else 0, 0, 0)
-            self._apply_runtime_state(
-                row=row,
-                patient=patient,
-                now=now,
-                yesterday=yesterday,
-                runtime_snapshot=runtime_snapshot.get(adm_id),
-            )
-            self.list_layout.insertWidget(i, row)
+            if getattr(row, "_w1_row_signature", None) != row_signature:
+                row.update_patient(patient, now)
+                self._apply_runtime_state(
+                    row=row,
+                    patient=patient,
+                    now=now,
+                    yesterday=yesterday,
+                    runtime_snapshot=runtime_snapshot.get(adm_id),
+                )
+                row._w1_row_signature = row_signature
 
-        self.list_layout.addStretch(1)
-        self.container.update()
+            top_margin = 5 if i == 0 else 0
+            margins = row.contentsMargins()
+            if margins.top() != top_margin:
+                row.setContentsMargins(0, top_margin, 0, 0)
+
+            if layout_order_changed and self.list_layout.indexOf(row) != i:
+                self.list_layout.insertWidget(i, row)
+
+        if layout_order_changed:
+            self.list_layout.addStretch(1)
+            self.container.update()
+
+        self._last_ordered_row_ids = ordered_ids_tuple
+        self._last_ordered_row_signatures = ordered_signatures
 
     def _on_refresh_failed(self, exc: Exception):
         if self._is_closing:

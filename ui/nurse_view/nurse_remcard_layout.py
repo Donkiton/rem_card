@@ -9,7 +9,6 @@ from rem_card.ui.shared.display_settings_storage import (
 from ..shared.layout_components import CurrentPageStack, SectorFactory, SplitterManager
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
-from ..rem_card_sectors.sector_w1c import SectorW1c
 
 class NurseRemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
@@ -232,7 +231,11 @@ class NurseRemCardLayoutManager(QWidget):
         self.beds_view = QWidget()
         beds_layout = QVBoxLayout(self.beds_view)
         beds_layout.setContentsMargins(0, 0, 0, 0)
-        self.beds_selection_widget = NurseBedsSelectionWidget(self.patient_service, self.remcard_service)
+        self.beds_selection_widget = NurseBedsSelectionWidget(
+            self.patient_service,
+            self.remcard_service,
+            auto_initial_refresh=False,
+        )
         beds_layout.addWidget(self.beds_selection_widget)
         self.selection_stack.addWidget(self.beds_view)
 
@@ -264,10 +267,9 @@ class NurseRemCardLayoutManager(QWidget):
         # Контейнер для 1а / W1а
         self.sector_1a_stack = CurrentPageStack()
         self.sector_1a_stack.addWidget(self.sector_1a)
-        self.sector_w1a = SectorW1a(self.remcard_service, role="nurse")
+        self.sector_w1a = SectorW1a(self.remcard_service, role="nurse", auto_initial_refresh=False)
         self.sector_1a_stack.addWidget(self.sector_w1a)
-        self.sector_w1c = SectorW1c()
-        self.sector_1a_stack.addWidget(self.sector_w1c)
+        self.sector_w1c = None
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         
@@ -296,7 +298,6 @@ class NurseRemCardLayoutManager(QWidget):
         self.current_mode = "beds"
         self._apply_w1_beds_sector_visibility(refresh_w1a=False)
         QTimer.singleShot(0, lambda: self.selection_mode_changed.emit("beds"))
-        QTimer.singleShot(0, self._refresh_beds_async)
 
         self.sector_2b.tab_changed.connect(self.set_active_tab)
         QTimer.singleShot(100, self._safe_init)
@@ -533,8 +534,8 @@ class NurseRemCardLayoutManager(QWidget):
         if hasattr(self, "sector_w1b_nurse"):
             self.sector_w1b_nurse.apply_display_settings()
 
-        if use_w1c and hasattr(self, "sector_w1c"):
-            self.sector_1a_stack.setCurrentWidget(self.sector_w1c)
+        if use_w1c:
+            self.sector_1a_stack.setCurrentWidget(self._ensure_sector_w1c())
         else:
             self.sector_1a_stack.setCurrentWidget(self.sector_w1a)
             if refresh_w1a and w1a_enabled:
@@ -548,8 +549,21 @@ class NurseRemCardLayoutManager(QWidget):
         if getattr(self, "current_mode", None) in ("beds", "patient_bed_management"):
             self._apply_w1_beds_sector_visibility(refresh_w1a=False)
 
+    def _ensure_sector_w1c(self):
+        if getattr(self, "sector_w1c", None) is None:
+            from ..rem_card_sectors.sector_w1c import SectorW1c
+
+            self.sector_w1c = SectorW1c()
+            self.sector_1a_stack.addWidget(self.sector_w1c)
+        return self.sector_w1c
+
     def set_patient_selection_mode(self, mode):
         if mode == "beds":
+            already_beds = (
+                getattr(self, "current_mode", None) == "beds"
+                and hasattr(self, "selection_stack")
+                and self.selection_stack.currentIndex() == 1
+            )
             self.selection_stack.setCurrentIndex(1)
 
             # W1a/W1b сами управляют рамками и внешними отступами.
@@ -557,8 +571,9 @@ class NurseRemCardLayoutManager(QWidget):
             if hasattr(self, 'l_layout'):
                 self.l_layout.setContentsMargins(0, 0, 0, 0)
 
-            self._apply_w1_beds_sector_visibility()
-            QTimer.singleShot(0, self._refresh_beds_async)
+            self._apply_w1_beds_sector_visibility(refresh_w1a=not already_beds)
+            if not already_beds:
+                QTimer.singleShot(0, self._refresh_beds_async)
             self.sector_1b.setEnabled(False)
             self.current_mode = "beds"
             self.selection_mode_changed.emit("beds")

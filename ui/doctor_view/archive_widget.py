@@ -18,13 +18,15 @@ from math import ceil
 
 class ArchiveWidget(QWidget):
     patient_selected = Signal(object) # передает PatientDTO
+    edit_requested = Signal(object) # передает PatientDTO
     delete_requested = Signal(object) # передает PatientDTO
     back_requested = Signal()
 
-    def __init__(self, patient_service, remcard_service=None, parent=None):
+    def __init__(self, patient_service, remcard_service=None, parent=None, *, allow_edit: bool = False):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.allow_edit = bool(allow_edit)
         self.all_archived_patients = []
         self.filtered_patients = []
         self.page_size = 50
@@ -163,6 +165,13 @@ class ArchiveWidget(QWidget):
         self.btn_open.setEnabled(False)
         self.btn_open.clicked.connect(self.on_open_clicked)
 
+        self.btn_edit = QPushButton(" Редактировать")
+        self.btn_edit.setStyleSheet(STYLE_NEUTRAL_BUTTON)
+        self.btn_edit.setFixedHeight(35)
+        self.btn_edit.setEnabled(False)
+        self.btn_edit.setVisible(self.allow_edit)
+        self.btn_edit.clicked.connect(self.on_edit_clicked)
+
         self.btn_report_stats = QPushButton(" Статистика")
         self.btn_report_stats.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_report_stats.setFixedHeight(35)
@@ -190,6 +199,7 @@ class ArchiveWidget(QWidget):
         buttons_layout.addWidget(self.btn_report_stats)
         buttons_layout.addWidget(self.btn_graphs)
         buttons_layout.addWidget(self.btn_open)
+        buttons_layout.addWidget(self.btn_edit)
         buttons_layout.addWidget(self.btn_delete_last)
         buttons_layout.addWidget(self.btn_delete)
         
@@ -289,6 +299,19 @@ class ArchiveWidget(QWidget):
             if not patient:
                 return
             self.patient_selected.emit(patient)
+
+    def on_edit_clicked(self):
+        if not self.allow_edit:
+            return
+        row = self.table.currentRow()
+        if row >= 0:
+            patient = self._patient_from_row(row)
+            if not patient:
+                return
+            if getattr(patient, "is_external_archive", False):
+                self._show_external_archive_info(patient)
+                return
+            self.edit_requested.emit(patient)
 
     def on_report_stats_clicked(self):
         try:
@@ -454,6 +477,7 @@ class ArchiveWidget(QWidget):
         self.table.setEnabled(enabled)
         for widget in (
             self.btn_open,
+            self.btn_edit,
             self.btn_report_stats,
             self.btn_graphs,
             self.btn_delete_last,
@@ -592,17 +616,20 @@ class ArchiveWidget(QWidget):
 
         if not patient:
             self.btn_open.setEnabled(False)
+            self.btn_edit.setEnabled(False)
             self.btn_delete_last.setEnabled(False)
             self.btn_delete.setEnabled(False)
             return
 
         if getattr(patient, "is_external_archive", False):
             self.btn_open.setEnabled(True)
+            self.btn_edit.setEnabled(False)
             self.btn_delete_last.setEnabled(False)
             self.btn_delete.setEnabled(False)
             return
 
         self.btn_open.setEnabled(True)
+        self.btn_edit.setEnabled(self.allow_edit)
         self.btn_delete_last.setEnabled(True)
         self.btn_delete.setEnabled(True)
 
