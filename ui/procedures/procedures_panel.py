@@ -116,8 +116,7 @@ class ProceduresPanel(QWidget):
         self.add_cvc_btn = self._create_procedure_button("ЦВК", icon_name="cvk.png", primary=True)
         self.add_cvc_btn.clicked.connect(self._create_cvc)
         self.add_lp_btn = self._create_procedure_button("+ Люмбальная пункция", icon_name="lumbpunk.png")
-        self.add_lp_btn.setToolTip("Форма будет добавлена следующим changeset-ом.")
-        self.add_lp_btn.clicked.connect(lambda: self._show_not_implemented("Люмбальная пункция"))
+        self.add_lp_btn.clicked.connect(self._create_lumbar_puncture)
         self.add_transfusion_btn = self._create_procedure_button("+ Гемотрансфузия", icon_name="balans_blood.png")
         self.add_transfusion_btn.setToolTip("Форма будет добавлена следующим changeset-ом.")
         self.add_transfusion_btn.clicked.connect(lambda: self._show_not_implemented("Гемотрансфузия"))
@@ -186,6 +185,11 @@ class ProceduresPanel(QWidget):
             return
         self._open_editor(procedure_id=None, procedure_type=ProcedureType.CVC.value)
 
+    def _create_lumbar_puncture(self):
+        if not self._ensure_context():
+            return
+        self._open_editor(procedure_id=None, procedure_type=ProcedureType.LUMBAR_PUNCTURE.value)
+
     def _show_not_implemented(self, procedure_name: str):
         self.status_label.setText(f"{procedure_name}: форма пока не реализована.")
 
@@ -210,7 +214,13 @@ class ProceduresPanel(QWidget):
             self.refresh()
 
     def _print_protocol_from_list(self, procedure_id: int):
-        self._print_document(int(procedure_id), "cvc_protocol")
+        try:
+            bundle = self.remcard_service.get_procedure_bundle(int(procedure_id))
+            procedure_type = bundle.procedure.procedure_type if bundle else ProcedureType.CVC.value
+        except Exception:
+            procedure_type = ProcedureType.CVC.value
+        document_kind = "lp_protocol" if procedure_type == ProcedureType.LUMBAR_PUNCTURE.value else "cvc_protocol"
+        self._print_document(int(procedure_id), document_kind)
 
     def _print_document(self, procedure_id: int, document_kind: str):
         if self._pdf_worker is not None and self._pdf_worker.isRunning():

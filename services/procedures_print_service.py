@@ -131,6 +131,65 @@ CVC_CONFIRMATION_LABELS = {
     "ct": "РКТ",
 }
 
+LP_INDICATION_LABELS = {
+    "cns_infection": "Подозрение на инфекционное поражение ЦНС",
+    "subarachnoid_hemorrhage": "Подозрение на субарахноидальное кровоизлияние",
+    "cns_autoimmune": "Подозрение на воспалительные и аутоиммунные заболевания ЦНС",
+    "pns_demyelinating": "Диагностика демиелинизирующих и воспалительных заболеваний периферической нервной системы",
+    "cns_neoplastic": "Подозрение на неопластическое поражение ЦНС и мозговых оболочек",
+    "csf_pressure": "Оценка ликворного давления и ликвородинамики",
+    "metabolic_degenerative_prion": "Диагностика метаболических, дегенеративных и прионных заболеваний ЦНС",
+    "paraneoplastic_autoantibody": "Подозрение на паранеопластическое или аутоантительное поражение нервной системы",
+    "unclear_cns_lesion": "Уточнение характера поражения ЦНС неясной этиологии",
+    "therapeutic": "Лечебные и процедурные показания",
+}
+
+LP_INDICATION_CODES = {
+    "cns_infection": "1",
+    "subarachnoid_hemorrhage": "2",
+    "cns_autoimmune": "3",
+    "pns_demyelinating": "4",
+    "cns_neoplastic": "5",
+    "csf_pressure": "6",
+    "metabolic_degenerative_prion": "7",
+    "paraneoplastic_autoantibody": "8",
+    "unclear_cns_lesion": "9",
+    "therapeutic": "10",
+}
+
+LP_ACCESS_LABELS = {
+    "midline": "Срединный доступ",
+    "paramedian": "Парамедианный доступ",
+    "taylor": "Доступ Тейлора",
+}
+
+LP_ACCESS_CODES = {
+    "midline": "1",
+    "paramedian": "2",
+    "taylor": "3",
+}
+
+LP_LEVEL_LABELS = {
+    "L1-L2": "L1–L2",
+    "L2-L3": "L2–L3",
+    "L3-L4": "L3–L4",
+    "L4-L5": "L4–L5",
+    "L5-S1": "L5–S1",
+}
+
+LP_LEVEL_CODES = {
+    "L1-L2": "1",
+    "L2-L3": "2",
+    "L3-L4": "3",
+    "L4-L5": "4",
+    "L5-S1": "5",
+}
+
+LP_RESULT_LABELS = {
+    "csf_not_obtained": "Ликвор не получен",
+    "csf_obtained": "Ликвор получен",
+}
+
 
 class ProceduresPrintService:
     def __init__(self, dao: ProceduresDAO):
@@ -148,6 +207,10 @@ class ProceduresPrintService:
             return self._render_cvc_removal(bundle)
         if kind == "cvc_consent":
             return self._render_cvc_consent(bundle)
+        if kind == "lp_protocol":
+            return self._render_lp_protocol(bundle)
+        if kind == "lp_consent":
+            return self._render_lp_consent(bundle)
         raise ValueError(f"Неизвестный тип печати процедуры: {kind}")
 
     def build_pdf(self, procedure_id: int, document_kind: str, pdf_path) -> Path:
@@ -161,6 +224,10 @@ class ProceduresPrintService:
             context = self._cvc_protocol_context(bundle)
         elif kind == "cvc_consent":
             context = self._cvc_consent_context(bundle)
+        elif kind == "lp_protocol":
+            context = self._lp_protocol_context(bundle)
+        elif kind == "lp_consent":
+            context = self._lp_consent_context(bundle)
         else:
             raise ValueError(f"Неизвестный тип печати процедуры: {kind}")
         output_path = Path(pdf_path)
@@ -189,6 +256,28 @@ class ProceduresPrintService:
     def _render_cvc_consent(self, bundle: ProcedureBundle) -> str:
         template = self._load_template("cvc_consent_v1.html")
         return self._fill(template, self._cvc_consent_context(bundle))
+
+    def _render_lp_protocol(self, bundle: ProcedureBundle) -> str:
+        context = self._lp_protocol_context(bundle)
+        return (
+            "<html><body>"
+            f"<h1>Протокол люмбальной пункции</h1>"
+            f"<p>Пациент: {context.get('patient_name', '')}</p>"
+            f"<p>Показания: {context.get('indications_text', '')}</p>"
+            f"<p>Доступ: {context.get('access_text', '')}; уровень: {context.get('level_text', '')}</p>"
+            f"<p>Результат: {context.get('result_text', '')}</p>"
+            "</body></html>"
+        )
+
+    def _render_lp_consent(self, bundle: ProcedureBundle) -> str:
+        context = self._lp_consent_context(bundle)
+        return (
+            "<html><body>"
+            f"<h1>Добровольное информированное согласие пациента на выполнение люмбальной пункции</h1>"
+            f"<p>ИБ № {context.get('history_number', '')}</p>"
+            f"<p>{context.get('patient_name', '')}</p>"
+            "</body></html>"
+        )
 
     def _render_cvc_removal(self, bundle: ProcedureBundle) -> str:
         context = self._cvc_protocol_context(bundle)
@@ -262,6 +351,72 @@ class ProceduresPrintService:
         return context
 
     def _cvc_consent_context(self, bundle: ProcedureBundle) -> dict[str, str]:
+        context = self._base_context(bundle)
+        consent = bundle.consent
+        consilium = self._consilium_dict(getattr(consent, "consilium_json", "") if consent else "")
+        print_dt = datetime.now().replace(second=0, microsecond=0)
+        created_at = getattr(consent, "created_at", None) if consent else None
+        if not created_at:
+            created_at = bundle.procedure.started_at
+        context.update(
+            {
+                "doctor": self._plain(bundle.procedure.doctor_name_snapshot),
+                "consent_mode": self._plain(getattr(consent, "consent_mode", "patient") if consent else "patient"),
+                "representative_name": self._plain(getattr(consent, "representative_name", "") if consent else ""),
+                "representative_details": self._plain(getattr(consent, "representative_details", "") if consent else ""),
+                "emergency_reason": self._plain(getattr(consent, "emergency_reason", "") if consent else ""),
+                "consent_date": self._format_date(created_at),
+                "consent_time": self._format_time(created_at),
+                "print_datetime": self._format_dt(print_dt),
+                "consilium_doctor_1": self._plain(consilium.get("doctor_1")),
+                "consilium_doctor_2": self._plain(consilium.get("doctor_2")),
+                "consilium_doctor_3": self._plain(consilium.get("doctor_3")),
+                "consilium_notes": self._plain(consilium.get("notes")),
+            }
+        )
+        return context
+
+    def _lp_protocol_context(self, bundle: ProcedureBundle) -> dict[str, str]:
+        procedure = bundle.procedure
+        lp = bundle.lumbar_puncture
+        if lp is None:
+            raise ValueError("Данные люмбальной пункции не найдены.")
+        context = self._base_context(bundle)
+        context.update(
+            {
+                "procedure_date": self._format_date(procedure.started_at),
+                "start_time": self._format_time(procedure.started_at),
+                "finish_time": self._format_time(procedure.finished_at),
+                "duration": self._plain(procedure.duration_minutes),
+                "doctor": self._plain(procedure.doctor_name_snapshot),
+                "notes": self._plain(procedure.notes),
+                "indications_codes": self._codes(lp.indications, LP_INDICATION_CODES, "11" if lp.indications_other else ""),
+                "indications_text": self._list_labels(lp.indications, LP_INDICATION_LABELS, lp.indications_other),
+                "indications_other": self._plain(lp.indications_other),
+                "place_code": self._code(lp.procedure_place_code, CVC_PLACE_CODES),
+                "place_text": self._choice_label(lp.procedure_place_code, CVC_PLACE_LABELS, lp.procedure_place_other),
+                "place_other": self._plain(lp.procedure_place_other),
+                "anesthesia_code": self._code(lp.anesthesia_code, CVC_ANESTHESIA_CODES),
+                "anesthesia_text": self._choice_label(lp.anesthesia_code, CVC_ANESTHESIA_LABELS, lp.anesthesia_other),
+                "anesthesia_other": self._plain(lp.anesthesia_other),
+                "access_code": self._code(lp.access_code, LP_ACCESS_CODES),
+                "access_text": self._choice_label(lp.access_code, LP_ACCESS_LABELS, lp.access_other),
+                "access_other": self._plain(lp.access_other),
+                "level_code": self._code(lp.level_code, LP_LEVEL_CODES),
+                "level_text": self._choice_label(lp.level_code, LP_LEVEL_LABELS, lp.level_other),
+                "level_other": self._plain(lp.level_other),
+                "difficulty_code": "2" if lp.technical_difficulty_code == "complications" else "1",
+                "difficulty_text": self._lp_difficulty_text(lp),
+                "difficulty_description": self._plain(lp.technical_difficulty_description),
+                "actions_taken": self._plain(lp.actions_taken),
+                "result_text": self._plain(LP_RESULT_LABELS.get(lp.result_code, lp.result_code or "")),
+                "csf_characteristics": self._plain(lp.csf_characteristics),
+                "result_notes": self._plain(lp.result_notes),
+            }
+        )
+        return context
+
+    def _lp_consent_context(self, bundle: ProcedureBundle) -> dict[str, str]:
         context = self._base_context(bundle)
         consent = bundle.consent
         consilium = self._consilium_dict(getattr(consent, "consilium_json", "") if consent else "")
@@ -429,6 +584,16 @@ class ProceduresPrintService:
             return self._plain(text)
         if cvc.technical_difficulty_description:
             return self._plain(cvc.technical_difficulty_description)
+        return "Не выявлено"
+
+    def _lp_difficulty_text(self, lp) -> str:
+        if lp.technical_difficulty_code == "complications":
+            text = "Сложности / осложнения"
+            if lp.technical_difficulty_description:
+                text = f"{text}: {lp.technical_difficulty_description}"
+            return self._plain(text)
+        if lp.technical_difficulty_description:
+            return self._plain(lp.technical_difficulty_description)
         return "Не выявлено"
 
     def _format_number(self, value: Any) -> str:

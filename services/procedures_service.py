@@ -11,6 +11,7 @@ from rem_card.data.dto.procedures_dto import (
     ProcedureConsentDTO,
     ProcedureCvcDTO,
     ProcedureDTO,
+    ProcedureLumbarPunctureDTO,
     ProcedureStatus,
     ProcedureType,
 )
@@ -55,6 +56,39 @@ class ProceduresService:
         )
         return ProcedureBundle(procedure=procedure, cvc=cvc, consent=consent, patient_snapshot=snapshot)
 
+    def create_empty_lumbar_puncture(self, admission_id: int, *, doctor_name: str = "") -> ProcedureBundle:
+        snapshot = self._build_patient_snapshot(admission_id)
+        now = datetime.now().replace(second=0, microsecond=0)
+        procedure = ProcedureDTO(
+            admission_id=int(admission_id),
+            patient_id=snapshot.get("patient_id"),
+            procedure_type=ProcedureType.LUMBAR_PUNCTURE.value,
+            status=ProcedureStatus.DRAFT.value,
+            started_at=now,
+            finished_at=now,
+            duration_minutes=0,
+            doctor_name_snapshot=doctor_name or "",
+            department_snapshot=snapshot.get("department") or "",
+            patient_snapshot_json=json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+            diagnosis_snapshot=snapshot.get("diagnosis") or "",
+            created_by="doctor",
+            updated_by="doctor",
+        )
+        lumbar_puncture = ProcedureLumbarPunctureDTO(operator_doctor_name=doctor_name or "")
+        consent = ProcedureConsentDTO(
+            consent_kind=ConsentKind.LUMBAR_PUNCTURE_CONSENT.value,
+            consent_mode="patient",
+            patient_signed=1,
+            diagnosis_snapshot=procedure.diagnosis_snapshot,
+            doctor_name_snapshot=doctor_name or "",
+        )
+        return ProcedureBundle(
+            procedure=procedure,
+            lumbar_puncture=lumbar_puncture,
+            consent=consent,
+            patient_snapshot=snapshot,
+        )
+
     def save_cvc_procedure(
         self,
         procedure: ProcedureDTO,
@@ -88,6 +122,40 @@ class ProceduresService:
             return procedure_id
 
         return int(self._run_write(f"procedure_cvc_save:{procedure.admission_id}", operation))
+
+    def save_lumbar_puncture_procedure(
+        self,
+        procedure: ProcedureDTO,
+        lumbar_puncture: ProcedureLumbarPunctureDTO,
+        consent: ProcedureConsentDTO,
+    ) -> int:
+        if procedure.procedure_type != ProcedureType.LUMBAR_PUNCTURE.value:
+            raise ValueError("Через этот метод можно сохранить только люмбальную пункцию.")
+        if not procedure.admission_id:
+            raise ValueError("Не указана госпитализация пациента.")
+
+        if not procedure.patient_snapshot_json or procedure.patient_snapshot_json == "{}":
+            snapshot = self._build_patient_snapshot(procedure.admission_id)
+            procedure.patient_id = snapshot.get("patient_id")
+            procedure.department_snapshot = procedure.department_snapshot or snapshot.get("department") or ""
+            procedure.diagnosis_snapshot = procedure.diagnosis_snapshot or snapshot.get("diagnosis") or ""
+            procedure.patient_snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+
+        self._normalize_duration(procedure)
+        lumbar_puncture.operator_doctor_name = lumbar_puncture.operator_doctor_name or procedure.doctor_name_snapshot
+        consent.consent_kind = ConsentKind.LUMBAR_PUNCTURE_CONSENT.value
+        consent.diagnosis_snapshot = consent.diagnosis_snapshot or procedure.diagnosis_snapshot
+        consent.doctor_name_snapshot = consent.doctor_name_snapshot or procedure.doctor_name_snapshot
+
+        def operation(cursor):
+            procedure_id = self.dao.save_procedure(cursor, procedure)
+            lumbar_puncture.procedure_id = procedure_id
+            consent.procedure_id = procedure_id
+            self.dao.save_lumbar_puncture(cursor, lumbar_puncture)
+            self.dao.save_consent(cursor, consent)
+            return procedure_id
+
+        return int(self._run_write(f"procedure_lumbar_puncture_save:{procedure.admission_id}", operation))
 
     def cancel_procedure(self, procedure_id: int, *, updated_by: str = "doctor"):
         def operation(cursor):

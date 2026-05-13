@@ -10,6 +10,7 @@ from rem_card.data.dto.procedures_dto import (
     ProcedureConsentDTO,
     ProcedureCvcDTO,
     ProcedureDTO,
+    ProcedureLumbarPunctureDTO,
     ProcedureStatus,
     ProcedureType,
 )
@@ -108,12 +109,22 @@ class ProceduresDAO:
         if not procedure:
             return None
         cvc = None
+        lumbar_puncture = None
         consent = None
         if procedure.procedure_type == ProcedureType.CVC.value:
             cvc = self.get_cvc(procedure_id)
             consent = self.get_consent(procedure_id, ConsentKind.CVC_CONSENT.value)
+        elif procedure.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            lumbar_puncture = self.get_lumbar_puncture(procedure_id)
+            consent = self.get_consent(procedure_id, ConsentKind.LUMBAR_PUNCTURE_CONSENT.value)
         snapshot = self._json_load(procedure.patient_snapshot_json, {})
-        return ProcedureBundle(procedure=procedure, cvc=cvc, consent=consent, patient_snapshot=snapshot)
+        return ProcedureBundle(
+            procedure=procedure,
+            cvc=cvc,
+            lumbar_puncture=lumbar_puncture,
+            consent=consent,
+            patient_snapshot=snapshot,
+        )
 
     def save_procedure(self, cursor, dto: ProcedureDTO) -> int:
         if dto.id is None:
@@ -281,6 +292,65 @@ class ProceduresDAO:
         )
         return self._map_cvc(row) if row else None
 
+    def save_lumbar_puncture(self, cursor, dto: ProcedureLumbarPunctureDTO):
+        cursor.execute(
+            """
+            INSERT INTO procedure_lumbar_puncture (
+                procedure_id, indications_json, procedure_place_code,
+                procedure_place_other, anesthesia_code, anesthesia_other,
+                access_code, access_other, level_code, level_other,
+                technical_difficulty_code, technical_difficulty_description,
+                actions_taken, result_code, csf_characteristics, result_notes,
+                operator_doctor_name, revision
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(procedure_id) DO UPDATE SET
+                indications_json = excluded.indications_json,
+                procedure_place_code = excluded.procedure_place_code,
+                procedure_place_other = excluded.procedure_place_other,
+                anesthesia_code = excluded.anesthesia_code,
+                anesthesia_other = excluded.anesthesia_other,
+                access_code = excluded.access_code,
+                access_other = excluded.access_other,
+                level_code = excluded.level_code,
+                level_other = excluded.level_other,
+                technical_difficulty_code = excluded.technical_difficulty_code,
+                technical_difficulty_description = excluded.technical_difficulty_description,
+                actions_taken = excluded.actions_taken,
+                result_code = excluded.result_code,
+                csf_characteristics = excluded.csf_characteristics,
+                result_notes = excluded.result_notes,
+                operator_doctor_name = excluded.operator_doctor_name,
+                revision = COALESCE(procedure_lumbar_puncture.revision, 0) + 1
+            """,
+            (
+                int(dto.procedure_id),
+                self._json_dump({"selected": dto.indications, "other": dto.indications_other}),
+                dto.procedure_place_code,
+                dto.procedure_place_other,
+                dto.anesthesia_code,
+                dto.anesthesia_other,
+                dto.access_code,
+                dto.access_other,
+                dto.level_code,
+                dto.level_other,
+                dto.technical_difficulty_code,
+                dto.technical_difficulty_description,
+                dto.actions_taken,
+                dto.result_code,
+                dto.csf_characteristics,
+                dto.result_notes,
+                dto.operator_doctor_name,
+            ),
+        )
+
+    def get_lumbar_puncture(self, procedure_id: int) -> Optional[ProcedureLumbarPunctureDTO]:
+        row = self.db.fetch_one_remcard(
+            "SELECT * FROM procedure_lumbar_puncture WHERE procedure_id = ?",
+            (int(procedure_id),),
+        )
+        return self._map_lumbar_puncture(row) if row else None
+
     def save_consent(self, cursor, dto: ProcedureConsentDTO):
         if dto.id is None:
             cursor.execute(
@@ -365,6 +435,7 @@ class ProceduresDAO:
     def cancel_procedure(self, cursor, procedure_id: int, *, updated_by: str = "doctor"):
         del updated_by
         cursor.execute("DELETE FROM procedure_cvc WHERE procedure_id = ?", (int(procedure_id),))
+        cursor.execute("DELETE FROM procedure_lumbar_puncture WHERE procedure_id = ?", (int(procedure_id),))
         cursor.execute("DELETE FROM procedure_consents WHERE procedure_id = ?", (int(procedure_id),))
         cursor.execute("DELETE FROM procedures WHERE id = ?", (int(procedure_id),))
 
@@ -451,5 +522,30 @@ class ProceduresDAO:
             additional_treatment=r.get("additional_treatment") or "",
             operator_doctor_name=r.get("operator_doctor_name") or "",
             removal_doctor_name=r.get("removal_doctor_name") or "",
+            revision=int(r.get("revision") or 0),
+        )
+
+    def _map_lumbar_puncture(self, row) -> ProcedureLumbarPunctureDTO:
+        r = self._row_dict(row)
+        indications = self._json_load(r.get("indications_json"), {})
+        return ProcedureLumbarPunctureDTO(
+            procedure_id=int(r.get("procedure_id") or 0),
+            indications=list(indications.get("selected") or []),
+            indications_other=str(indications.get("other") or ""),
+            procedure_place_code=r.get("procedure_place_code") or "",
+            procedure_place_other=r.get("procedure_place_other") or "",
+            anesthesia_code=r.get("anesthesia_code") or "",
+            anesthesia_other=r.get("anesthesia_other") or "",
+            access_code=r.get("access_code") or "",
+            access_other=r.get("access_other") or "",
+            level_code=r.get("level_code") or "",
+            level_other=r.get("level_other") or "",
+            technical_difficulty_code=r.get("technical_difficulty_code") or "none",
+            technical_difficulty_description=r.get("technical_difficulty_description") or "",
+            actions_taken=r.get("actions_taken") or "",
+            result_code=r.get("result_code") or "csf_obtained",
+            csf_characteristics=r.get("csf_characteristics") or "",
+            result_notes=r.get("result_notes") or "",
+            operator_doctor_name=r.get("operator_doctor_name") or "",
             revision=int(r.get("revision") or 0),
         )

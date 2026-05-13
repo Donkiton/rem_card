@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 12
-SCHEMA_MIN_MIGRATION_VERSION = 12
+SCHEMA_FASTPATH_REV = 13
+SCHEMA_MIN_MIGRATION_VERSION = 13
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -38,6 +38,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "procedures",
     "procedure_consents",
     "procedure_cvc",
+    "procedure_lumbar_puncture",
 )
 
 _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
@@ -103,6 +104,7 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     "procedures": {"patient_id", "admission_id", "procedure_type", "status", "patient_snapshot_json", "diagnosis_snapshot", "revision", "is_deleted"},
     "procedure_consents": {"procedure_id", "consent_kind", "consent_mode", "patient_signed", "consilium_json", "revision"},
     "procedure_cvc": {"procedure_id", "indications_json", "access_code", "catheter_status", "removed_or_replaced", "revision"},
+    "procedure_lumbar_puncture": {"procedure_id", "indications_json", "access_code", "level_code", "result_code", "revision"},
 }
 
 _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
@@ -162,6 +164,7 @@ _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
     "procedures",
     "procedure_consents",
     "procedure_cvc",
+    "procedure_lumbar_puncture",
 )
 
 _MEDICAL_AUDIT_TABLES: tuple[str, ...] = (
@@ -1022,6 +1025,32 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS procedure_lumbar_puncture (
+            procedure_id INTEGER PRIMARY KEY,
+            indications_json TEXT,
+            procedure_place_code TEXT,
+            procedure_place_other TEXT,
+            anesthesia_code TEXT,
+            anesthesia_other TEXT,
+            access_code TEXT,
+            access_other TEXT,
+            level_code TEXT,
+            level_other TEXT,
+            technical_difficulty_code TEXT,
+            technical_difficulty_description TEXT,
+            actions_taken TEXT,
+            result_code TEXT,
+            csf_characteristics TEXT,
+            result_notes TEXT,
+            operator_doctor_name TEXT,
+            revision INTEGER DEFAULT 0,
+            FOREIGN KEY (procedure_id) REFERENCES procedures(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS medical_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             operation_id TEXT NOT NULL,
@@ -1312,6 +1341,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 10, "optimistic lock revisions for clinical domains")
     _mark_schema_migration(conn, 11, "patients.birth_date for calculated age")
     _mark_schema_migration(conn, 12, "patient medical procedures prototype")
+    _mark_schema_migration(conn, 13, "lumbar puncture procedure")
 
     for table in (
         "vitals",
@@ -1458,6 +1488,17 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "(SELECT admission_id FROM procedures WHERE id = OLD.procedure_id)",
         "COALESCE(NEW.operator_doctor_name, NEW.removal_doctor_name, 'doctor')",
         "COALESCE(OLD.operator_doctor_name, OLD.removal_doctor_name, 'doctor')",
+        use_updated_at_gate=False,
+    )
+    _create_change_triggers(
+        conn,
+        "procedure_lumbar_puncture",
+        "NEW.procedure_id",
+        "OLD.procedure_id",
+        "(SELECT admission_id FROM procedures WHERE id = NEW.procedure_id)",
+        "(SELECT admission_id FROM procedures WHERE id = OLD.procedure_id)",
+        "COALESCE(NEW.operator_doctor_name, 'doctor')",
+        "COALESCE(OLD.operator_doctor_name, 'doctor')",
         use_updated_at_gate=False,
     )
 

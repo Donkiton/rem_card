@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QTabWidget,
     QTextEdit,
@@ -33,6 +32,9 @@ from rem_card.services.doctor_list_service import DoctorListStore
 from rem_card.ui.procedures.cvc_consent_widget import CvcConsentWidget
 from rem_card.ui.procedures.cvc_procedure_widget import CvcProcedureWidget
 from rem_card.ui.procedures.cvc_removal_widget import CvcRemovalWidget
+from rem_card.ui.procedures.lumbar_puncture_consent_widget import LumbarPunctureConsentWidget
+from rem_card.ui.procedures.lumbar_puncture_outcome_widget import LumbarPunctureOutcomeWidget
+from rem_card.ui.procedures.lumbar_puncture_widget import LumbarPunctureWidget
 from rem_card.ui.procedures.procedure_datetime_edit import ProcedureDateTimeEdit
 from rem_card.ui.procedures.procedure_styles import (
     PROCEDURE_DIALOG_STYLE,
@@ -64,6 +66,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.bundle: Optional[ProcedureBundle] = None
         self._write_pending = False
         self._pdf_worker = None
+        self._print_buttons: list[QPushButton] = []
 
         self.setWindowTitle("Процедура пациента")
         self.setMinimumSize(860, 620)
@@ -82,10 +85,15 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self.bundle = self.remcard_service.get_procedure_bundle(int(self.procedure_id))
             if not self.bundle:
                 raise ValueError("Процедура не найдена.")
+            self.procedure_type = self.bundle.procedure.procedure_type
             return
-        if self.procedure_type != ProcedureType.CVC.value:
-            raise ValueError("В этом changeset доступен только прототип ЦВК.")
-        self.bundle = self.remcard_service.create_empty_cvc_procedure(self.admission_id)
+        if self.procedure_type == ProcedureType.CVC.value:
+            self.bundle = self.remcard_service.create_empty_cvc_procedure(self.admission_id)
+            return
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            self.bundle = self.remcard_service.create_empty_lumbar_puncture_procedure(self.admission_id)
+            return
+        raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _build_ui(self):
         self.setStyleSheet(PROCEDURE_DIALOG_STYLE)
@@ -110,7 +118,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         content.setSpacing(8)
 
         self.title_bar = CustomTitleBar(self)
-        self.title_bar.title_label.setText("Процедура пациента")
+        self.title_bar.title_label.setText(self._dialog_title())
         self.title_bar.btn_minimize.hide()
         self.title_bar.btn_maximize.hide()
         content.addWidget(self.title_bar)
@@ -149,14 +157,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self._build_general_tab()
         self.tabs.addTab(self.general_tab, "Основные данные")
 
-        self.cvc_widget = CvcProcedureWidget()
-        self.tabs.addTab(self.cvc_widget, "Медицинская часть")
-
-        self.consent_widget = CvcConsentWidget()
-        self.tabs.addTab(self.consent_widget, "Согласие ЦВК")
-
-        self.removal_widget = CvcRemovalWidget()
-        self.tabs.addTab(self.removal_widget, "Удаление/переустановка")
+        self._build_procedure_tabs()
 
         self.print_tab = QWidget()
         self.print_tab.setObjectName("ProcedureTabPage")
@@ -178,6 +179,36 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         body_layout.addLayout(footer)
         apply_procedure_combo_style(self)
         apply_procedure_datetime_style(self)
+
+    def _build_procedure_tabs(self):
+        self.cvc_widget = None
+        self.removal_widget = None
+        self.lp_widget = None
+        self.lp_outcome_widget = None
+
+        if self.procedure_type == ProcedureType.CVC.value:
+            self.cvc_widget = CvcProcedureWidget()
+            self.tabs.addTab(self.cvc_widget, "Медицинская часть")
+
+            self.consent_widget = CvcConsentWidget()
+            self.tabs.addTab(self.consent_widget, "Согласие ЦВК")
+
+            self.removal_widget = CvcRemovalWidget()
+            self.tabs.addTab(self.removal_widget, "Удаление/переустановка")
+            return
+
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            self.lp_widget = LumbarPunctureWidget()
+            self.tabs.addTab(self.lp_widget, "Медицинская часть")
+
+            self.consent_widget = LumbarPunctureConsentWidget()
+            self.tabs.addTab(self.consent_widget, "Согласие на пункцию")
+
+            self.lp_outcome_widget = LumbarPunctureOutcomeWidget()
+            self.tabs.addTab(self.lp_outcome_widget, "Итог")
+            return
+
+        raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _build_general_tab(self):
         layout = QVBoxLayout(self.general_tab)
@@ -206,8 +237,6 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.doctor_combo = QComboBox()
         self.doctor_combo.setEditable(True)
         self._fill_doctors()
-        self.assistant_edit = QLineEdit()
-        self.assistant_edit.setPlaceholderText("Ассистент/медсестра")
         self.notes_edit = QTextEdit()
         self.notes_edit.setFixedHeight(90)
         self.notes_edit.setPlaceholderText("Примечание")
@@ -217,7 +246,6 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         form.addRow("Окончание:", self.finish_edit)
         form.addRow("Длительность, мин:", self.duration_label)
         form.addRow("Врач-исполнитель:", self.doctor_combo)
-        form.addRow("Ассистент/медсестра:", self.assistant_edit)
         form.addRow("Примечание:", self.notes_edit)
         layout.addWidget(box)
         layout.addStretch(1)
@@ -226,17 +254,33 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         layout = QVBoxLayout(self.print_tab)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
-        box = QGroupBox("Печатные формы ЦВК")
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            box_title = "Печатные формы люмбальной пункции"
+            protocol_title = "Печать протокола люмбальной пункции"
+            protocol_kind = "lp_protocol"
+            consent_kind = "lp_consent"
+            removal_kind = ""
+        else:
+            box_title = "Печатные формы ЦВК"
+            protocol_title = "Печать протокола ЦВК"
+            protocol_kind = "cvc_protocol"
+            consent_kind = "cvc_consent"
+            removal_kind = "cvc_removal"
+
+        box = QGroupBox(box_title)
         row = QHBoxLayout(box)
-        self.print_protocol_btn = QPushButton("Печать протокола ЦВК")
-        self.print_protocol_btn.clicked.connect(lambda: self._print_document("cvc_protocol"))
+        self.print_protocol_btn = QPushButton(protocol_title)
+        self.print_protocol_btn.clicked.connect(lambda: self._print_document(protocol_kind))
         self.print_consent_btn = QPushButton("Печать согласия")
-        self.print_consent_btn.clicked.connect(lambda: self._print_document("cvc_consent"))
-        self.print_removal_btn = QPushButton("Печать удаления катетера")
-        self.print_removal_btn.clicked.connect(lambda: self._print_document("cvc_removal"))
+        self.print_consent_btn.clicked.connect(lambda: self._print_document(consent_kind))
+        self._print_buttons = [self.print_protocol_btn, self.print_consent_btn]
         row.addWidget(self.print_protocol_btn)
         row.addWidget(self.print_consent_btn)
-        row.addWidget(self.print_removal_btn)
+        if removal_kind:
+            self.print_removal_btn = QPushButton("Печать удаления катетера")
+            self.print_removal_btn.clicked.connect(lambda: self._print_document(removal_kind))
+            self._print_buttons.append(self.print_removal_btn)
+            row.addWidget(self.print_removal_btn)
         row.addStretch(1)
         layout.addWidget(box)
 
@@ -254,6 +298,20 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.doctor_combo.addItem("", "")
         self.doctor_combo.addItems(doctors)
 
+    def _dialog_title(self) -> str:
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            return "Люмбальная пункция"
+        if self.procedure_type == ProcedureType.CVC.value:
+            return "ЦВК"
+        return "Процедура пациента"
+
+    def _header_title(self) -> str:
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            return "Люмбальная пункция"
+        if self.procedure_type == ProcedureType.CVC.value:
+            return "Постановка ЦВК"
+        return "Процедура пациента"
+
     def _apply_bundle(self):
         if not self.bundle:
             return
@@ -261,7 +319,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         snapshot = self.bundle.patient_snapshot
         self._apply_datetime_bounds(snapshot)
         self.header_label.setText(
-            "Постановка ЦВК: "
+            f"{self._header_title()}: "
             f"{snapshot.get('full_name') or 'Неизвестно'} | "
             f"ИБ № {snapshot.get('history_number') or ''} | "
             f"возраст {snapshot.get('age') or ''} | "
@@ -276,9 +334,14 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         if procedure.doctor_name_snapshot:
             self.doctor_combo.setEditText(procedure.doctor_name_snapshot)
         self.notes_edit.setPlainText(procedure.notes)
-        self.cvc_widget.load(self.bundle.cvc)
-        self.consent_widget.load(self.bundle.consent)
-        self.removal_widget.load(self.bundle.cvc)
+        if self.procedure_type == ProcedureType.CVC.value:
+            self.cvc_widget.load(self.bundle.cvc)
+            self.consent_widget.load(self.bundle.consent)
+            self.removal_widget.load(self.bundle.cvc)
+        elif self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            self.lp_widget.load(self.bundle.lumbar_puncture)
+            self.consent_widget.load(self.bundle.consent)
+            self.lp_outcome_widget.load(self.bundle.lumbar_puncture)
         self._update_print_enabled()
 
     def _collect_procedure(self) -> ProcedureDTO:
@@ -312,14 +375,30 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
     def _collect_bundle(self):
         procedure = self._collect_procedure()
-        cvc = self.cvc_widget.collect(procedure_id=procedure.id or 0, doctor_name=procedure.doctor_name_snapshot)
-        self.removal_widget.apply_to(cvc)
-        consent = self.consent_widget.collect(
-            procedure_id=procedure.id or 0,
-            doctor_name=procedure.doctor_name_snapshot,
-            diagnosis=procedure.diagnosis_snapshot,
-        )
-        return procedure, cvc, consent
+        if self.procedure_type == ProcedureType.CVC.value:
+            cvc = self.cvc_widget.collect(procedure_id=procedure.id or 0, doctor_name=procedure.doctor_name_snapshot)
+            self.removal_widget.apply_to(cvc)
+            consent = self.consent_widget.collect(
+                procedure_id=procedure.id or 0,
+                doctor_name=procedure.doctor_name_snapshot,
+                diagnosis=procedure.diagnosis_snapshot,
+            )
+            return procedure, cvc, consent
+
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            lumbar_puncture = self.lp_widget.collect(
+                procedure_id=procedure.id or 0,
+                doctor_name=procedure.doctor_name_snapshot,
+            )
+            self.lp_outcome_widget.apply_to(lumbar_puncture)
+            consent = self.consent_widget.collect(
+                procedure_id=procedure.id or 0,
+                doctor_name=procedure.doctor_name_snapshot,
+                diagnosis=procedure.diagnosis_snapshot,
+            )
+            return procedure, lumbar_puncture, consent
+
+        raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _on_save_clicked(self):
         if self._write_pending:
@@ -332,12 +411,20 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
         self._set_write_pending(True, "Сохранение...")
         service = self.remcard_service
+        if procedure.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            description = f"procedure_lumbar_puncture_save_ui:{self.admission_id}"
 
-        def operation():
-            return service.save_cvc_procedure(procedure, cvc, consent)
+            def operation():
+                return service.save_lumbar_puncture_procedure(procedure, cvc, consent)
+
+        else:
+            description = f"procedure_cvc_save_ui:{self.admission_id}"
+
+            def operation():
+                return service.save_cvc_procedure(procedure, cvc, consent)
 
         service.enqueue_write(
-            description=f"procedure_cvc_save_ui:{self.admission_id}",
+            description=description,
             operation=operation,
             on_success=self._on_save_success,
             on_error=self._on_save_error,
@@ -399,9 +486,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
     def _update_print_enabled(self):
         enabled = bool(self.procedure_id)
-        self.print_protocol_btn.setEnabled(enabled)
-        self.print_consent_btn.setEnabled(enabled)
-        self.print_removal_btn.setEnabled(enabled)
+        for button in self._print_buttons:
+            button.setEnabled(enabled)
 
     def _recalculate_duration(self):
         start = self.start_edit.dateTime().toPython()

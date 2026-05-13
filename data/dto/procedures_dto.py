@@ -132,8 +132,32 @@ class ProcedureCvcDTO:
 
 
 @dataclass
+class ProcedureLumbarPunctureDTO:
+    procedure_id: int = 0
+    indications: list[str] = field(default_factory=list)
+    indications_other: str = ""
+    procedure_place_code: str = ""
+    procedure_place_other: str = ""
+    anesthesia_code: str = ""
+    anesthesia_other: str = ""
+    access_code: str = ""
+    access_other: str = ""
+    level_code: str = ""
+    level_other: str = ""
+    technical_difficulty_code: str = "none"
+    technical_difficulty_description: str = ""
+    actions_taken: str = ""
+    result_code: str = "csf_obtained"
+    csf_characteristics: str = ""
+    result_notes: str = ""
+    operator_doctor_name: str = ""
+    revision: int = 0
+
+
+@dataclass
 class ProcedureBundle:
     procedure: ProcedureDTO
     cvc: Optional[ProcedureCvcDTO] = None
+    lumbar_puncture: Optional[ProcedureLumbarPunctureDTO] = None
     consent: Optional[ProcedureConsentDTO] = None
     patient_snapshot: dict[str, Any] = field(default_factory=dict)

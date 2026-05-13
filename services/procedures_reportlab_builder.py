@@ -33,6 +33,12 @@ class ProcedureReportLabBuilder:
         if kind == "cvc_consent":
             cls.build_cvc_consent(context, output_path)
             return
+        if kind == "lp_protocol":
+            cls.build_lp_protocol(context, output_path)
+            return
+        if kind == "lp_consent":
+            cls.build_lp_consent(context, output_path)
+            return
         raise ValueError(f"Неизвестная печатная форма процедуры: {kind}")
 
     @classmethod
@@ -127,6 +133,109 @@ class ProcedureReportLabBuilder:
         story.extend(cls._cvc_consent_note(context))
         if is_consilium:
             story.extend(cls._cvc_consent_consilium(context))
+        cls._build(story, output_path, framed=True)
+
+    @classmethod
+    def build_lp_protocol(cls, context: dict[str, str], output_path) -> None:
+        cls._ensure_fonts()
+        story = [
+            cls._p("ПРОТОКОЛ", "protocol_title"),
+            cls._p("люмбальная пункция", "procedure_title"),
+            cls._spacer(12),
+            *cls._lp_protocol_body(context),
+        ]
+        cls._build(story, output_path, framed=True)
+
+    @classmethod
+    def build_lp_consent(cls, context: dict[str, str], output_path) -> None:
+        cls._ensure_fonts()
+        consent_mode = context.get("consent_mode") or "patient"
+        story = [
+            cls._p("Добровольное информированное согласие пациента на выполнение люмбальной пункции", "consent_title"),
+            cls._spacer(10),
+            cls._p(f"ИБ № {context.get('history_number', '')}", "consent_normal"),
+            cls._underlined_line(context.get("patient_name", "")),
+            cls._p("(ФИО пациента и/или его законного представителя)", "consent_footnote"),
+        ]
+        if consent_mode == "consilium":
+            story.extend(cls._lp_consent_consilium(context))
+            cls._build(story, output_path, framed=True)
+            return
+
+        story.extend(
+            [
+                cls._p(
+                    "Мне подробно разъяснены моим лечащим врачом состояние моего здоровья, цели, характер и объем планируемого обследования и лечения.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Я согласен(а) на выполнение инвазивной манипуляции: люмбальной пункции и знаю обо всех возможных осложнениях, связанных с этой манипуляцией.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Я добровольно выбрал(а) метод обследования: люмбальная пункция с диагностической и/или лечебной целью.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Мой лечащий врач проинформировал меня и моих родственников об осложнениях, их частоте в ходе и после манипуляции: "
+                    "непосредственная травма тканей при проколе; повреждение образований, располагающихся в непосредственной близости от укола; "
+                    "постпункционный синдром, проявляющийся головной болью, тошнотой, рвотой; геморрагические осложнения в виде гематом; "
+                    "ликвородинамические нарушения, дислокация головного мозга; тератогенные осложнения: развитие холестеатомы позвоночного канала; "
+                    "инфицирование мягких тканей, мозговых оболочек, менингеальная реакция и т.д.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Я осознаю процентную вероятность этих осложнений и их последствий, и не буду иметь претензий при их возникновении.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Я понимаю, что в ходе выполнения указанной выше манипуляции может возникнуть необходимость выполнения другого или дополнительного вмешательства, "
+                    "исследования или операции. Я доверяю врачу и его коллегам принять решение в соответствии с их профессиональным суждением и согласен на выполнение "
+                    "любых медицинских действий, которые врач сочтет необходимыми для улучшения моего состояния.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Я ознакомлен(а) со всеми возможными способами обезболивания, необходимого для выполнения манипуляции, а также с их возможными осложнениями "
+                    "(общими - анафилактический шок, острые нарушения со стороны сердечно-сосудистой, дыхательной, гепатолиенальной систем, местными - гематома, "
+                    "инфицирование) и согласен(а) на метод анестезии, выбранный совместно с моим врачом.",
+                    "consent_normal",
+                ),
+                cls._p("Со мною подробно обсуждены последствия отказа от обследования и лечения.", "consent_normal"),
+                cls._p(
+                    "Я получил(а) исчерпывающие и понятные мне ответы на все поставленные мною вопросы и имел(а) достаточно времени на обдумывание решения "
+                    "о согласии на предложенное обследование и лечение.",
+                    "consent_normal",
+                ),
+                cls._p(
+                    "Я согласен(а) с предложенным мне методом (способом) обследования и/или видом лечения, а также на обработку моих персональных данных "
+                    "в установленном законом порядке.",
+                    "consent_normal",
+                ),
+                cls._spacer(8),
+            ]
+        )
+        if consent_mode == "representative":
+            story.extend(
+                [
+                    cls._p(
+                        "Если пациент не может подписать документ самостоятельно вследствие тяжести состояния или по другим причинам "
+                        "(является несовершеннолетним, недееспособным):",
+                        "consent_normal",
+                    ),
+                    cls._p("Дата ____ 20__ г. Ф.И.О. и подпись законного представителя ______________________________", "consent_normal"),
+                    cls._p("Дата ____ 20__ г. Ф.И.О. и подпись врача ______________________________", "consent_normal"),
+                ]
+            )
+        else:
+            story.extend(
+                [
+                    cls._p("Дата ____ 20__ г. Ф.И.О. и подпись пациента ______________________________", "consent_normal"),
+                    cls._p(
+                        f"Дата ____ 20__ г. Ф.И.О. и подпись врача {context.get('doctor', '')} ______________________________",
+                        "consent_normal",
+                    ),
+                ]
+            )
         cls._build(story, output_path, framed=True)
 
     @classmethod
@@ -405,6 +514,34 @@ class ProcedureReportLabBuilder:
         return flowables
 
     @classmethod
+    def _lp_consent_consilium(cls, context: dict[str, str]) -> list:
+        doctor_1 = context.get("consilium_doctor_1", "") or "ФИО врача, должность"
+        doctor_2 = context.get("consilium_doctor_2", "") or "ФИО врача, должность"
+        doctor_3 = context.get("consilium_doctor_3", "") or "ФИО врача, должность"
+        flowables = [
+            cls._spacer(8),
+            cls._p(
+                "Учитывая не возможность пациентом выразить свою волю, а так же отсутствия законных представителей, "
+                "решение о проведении люмбальной пункции принято консилиумом в составе:",
+                "consent_normal",
+            ),
+            cls._p(f"1. {doctor_1}, подпись __________________________________________________", "consent_normal"),
+            cls._p(f"2. {doctor_2}, подпись __________________________________________________", "consent_normal"),
+            cls._p(f"3. {doctor_3}, подпись __________________________________________________", "consent_normal"),
+        ]
+        if context.get("consilium_notes"):
+            flowables.append(cls._p(context.get("consilium_notes", ""), "consent_normal"))
+        flowables.append(
+            cls._p(
+                "В случае если собрать консилиум или провести его по телефону невозможно, решение принимается непосредственно "
+                "лечащим (дежурным) врачом с внесением такого решения в медицинскую документацию пациента и последующим уведомлением "
+                "должностных лиц медицинской организации (руководителя медицинской организации или руководителя отделения медицинской организации).",
+                "consent_normal",
+            )
+        )
+        return flowables
+
+    @classmethod
     def _cvc_protocol_body(cls, context: dict[str, str]) -> list:
         flowables = [
             cls._point(1, "ФИО пациента", context.get("patient_name", "")),
@@ -429,6 +566,35 @@ class ProcedureReportLabBuilder:
         ]
         if context.get("actions_taken"):
             flowables.append(cls._p(f"Предпринятые действия: {context.get('actions_taken', '')}", "left"))
+        flowables.append(cls._p(f"ФИО врача: {context.get('doctor', '')}    Подпись ____________________", "left"))
+        return flowables
+
+    @classmethod
+    def _lp_protocol_body(cls, context: dict[str, str]) -> list:
+        flowables = [
+            cls._point(1, "ФИО пациента", context.get("patient_name", "")),
+            cls._point(2, "Номер истории болезни", context.get("history_number", "")),
+            cls._point(3, "ФИО врача", context.get("doctor", "")),
+            cls._point(4, "Отделение", context.get("department", "")),
+            cls._point(5, "Дата процедуры", cls._procedure_time_text(context)),
+            cls._point(6, "Показания к люмбальной пункции", context.get("indications_text", "")),
+            cls._point(7, "Место проведения", context.get("place_text", "")),
+            cls._point(8, "Вид анестезии", context.get("anesthesia_text", "")),
+            cls._point(9, "Доступ", context.get("access_text", "")),
+            cls._point(10, "Уровень", context.get("level_text", "")),
+            cls._point(
+                11,
+                "Технические трудности/осложнения во время выполнения и предпринятые действия",
+                context.get("difficulty_text", ""),
+            ),
+            cls._point(12, "Результат", context.get("result_text", "")),
+            cls._point(13, "Характеристики ликвора", context.get("csf_characteristics", "")),
+            cls._point(14, "Примечания", context.get("result_notes", "")),
+        ]
+        if context.get("actions_taken"):
+            flowables.append(cls._p(f"Предпринятые действия: {context.get('actions_taken', '')}", "left"))
+        if context.get("notes"):
+            flowables.append(cls._p(f"Общее примечание: {context.get('notes', '')}", "left"))
         flowables.append(cls._p(f"ФИО врача: {context.get('doctor', '')}    Подпись ____________________", "left"))
         return flowables
 

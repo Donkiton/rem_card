@@ -32,6 +32,7 @@ class SyncCoordinator:
         "procedures": {"procedures"},
         "procedure_consents": {"procedures"},
         "procedure_cvc": {"procedures"},
+        "procedure_lumbar_puncture": {"procedures"},
         "operations": {"patient_header"},
         "transfusions": {"balance"},
     }
