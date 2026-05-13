@@ -65,8 +65,7 @@ class ProceduresPanel(QWidget):
                 border-bottom-left-radius: 5px;
                 border-bottom-right-radius: 5px;
             }
-            QPushButton#ProcedureCreateButton,
-            QPushButton#ProcedureCreatePrimaryButton {
+            QPushButton#ProcedureCreateButton {
                 background: #eef3f8;
                 color: #172033;
                 border: 1px solid #aebccd;
@@ -75,20 +74,14 @@ class ProceduresPanel(QWidget):
                 min-height: 34px;
                 font-weight: 700;
             }
-            QPushButton#ProcedureCreateButton:hover,
-            QPushButton#ProcedureCreatePrimaryButton:hover {
+            QPushButton#ProcedureCreateButton:hover {
                 background: #e2ebf5;
                 border-color: #7aa6d8;
             }
-            QPushButton#ProcedureCreateButton:pressed,
-            QPushButton#ProcedureCreatePrimaryButton:pressed {
+            QPushButton#ProcedureCreateButton:pressed {
                 background: #d5e2ef;
                 padding-top: 7px;
                 padding-bottom: 5px;
-            }
-            QPushButton#ProcedureCreatePrimaryButton {
-                background: #eaf4ff;
-                border-color: #7faedc;
             }
             """
         )
@@ -113,20 +106,16 @@ class ProceduresPanel(QWidget):
         layout.addWidget(body, 1)
 
         buttons = QHBoxLayout()
-        self.add_cvc_btn = self._create_procedure_button("ЦВК", icon_name="cvk.png", primary=True)
+        self.add_cvc_btn = self._create_procedure_button("ЦВК", icon_name="cvk.png")
         self.add_cvc_btn.clicked.connect(self._create_cvc)
-        self.add_lp_btn = self._create_procedure_button("+ Люмбальная пункция", icon_name="lumbpunk.png")
+        self.add_lp_btn = self._create_procedure_button("Люмбальная пункция", icon_name="lumbpunk.png")
         self.add_lp_btn.clicked.connect(self._create_lumbar_puncture)
-        self.add_transfusion_btn = self._create_procedure_button("+ Гемотрансфузия", icon_name="balans_blood.png")
-        self.add_transfusion_btn.setToolTip("Форма будет добавлена следующим changeset-ом.")
+        self.add_transfusion_btn = self._create_procedure_button("Гемотрансфузия", icon_name="balans_blood.png")
         self.add_transfusion_btn.clicked.connect(lambda: self._show_not_implemented("Гемотрансфузия"))
-        self.refresh_btn = QPushButton("Обновить")
-        self.refresh_btn.clicked.connect(self.refresh)
         buttons.addWidget(self.add_cvc_btn)
         buttons.addWidget(self.add_lp_btn)
         buttons.addWidget(self.add_transfusion_btn)
         buttons.addStretch(1)
-        buttons.addWidget(self.refresh_btn)
         body_layout.addLayout(buttons)
 
         self.list_widget = ProceduresListWidget()
@@ -138,11 +127,10 @@ class ProceduresPanel(QWidget):
         self.status_label = QLabel("")
         body_layout.addWidget(self.status_label)
 
-    def _create_procedure_button(self, text: str, *, icon_name: str = "", primary: bool = False) -> QPushButton:
+    def _create_procedure_button(self, text: str, *, icon_name: str = "") -> QPushButton:
         button = QPushButton(text)
-        button.setObjectName("ProcedureCreatePrimaryButton" if primary else "ProcedureCreateButton")
+        button.setObjectName("ProcedureCreateButton")
         button.setMinimumHeight(36)
-        button.setMinimumWidth(128 if primary else 178)
         if icon_name:
             icon_path = Path(__file__).resolve().parents[2] / "icon" / icon_name
             if icon_path.exists():

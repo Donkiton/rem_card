@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
 )
 
-from rem_card.data.dto.procedures_dto import PROCEDURE_STATUS_LABELS, PROCEDURE_TYPE_LABELS
+from rem_card.data.dto.procedures_dto import PROCEDURE_STATUS_LABELS, PROCEDURE_TYPE_LABELS, ProcedureStatus, ProcedureType
 
 
 class ProceduresListWidget(QTableWidget):
@@ -90,7 +90,7 @@ class ProceduresListWidget(QTableWidget):
             self.setItem(
                 row_idx,
                 2,
-                QTableWidgetItem(PROCEDURE_STATUS_LABELS.get(procedure.status, procedure.status)),
+                QTableWidgetItem(self._status_label(procedure)),
             )
             self.setItem(row_idx, 3, QTableWidgetItem(procedure.doctor_name_snapshot or ""))
             self.setCellWidget(row_idx, 4, self._actions_widget(procedure_id))
@@ -151,10 +151,17 @@ class ProceduresListWidget(QTableWidget):
         if column == 1:
             return PROCEDURE_TYPE_LABELS.get(procedure.procedure_type, procedure.procedure_type).lower()
         if column == 2:
-            return PROCEDURE_STATUS_LABELS.get(procedure.status, procedure.status).lower()
+            return self._status_label(procedure).lower()
         if column == 3:
             return (procedure.doctor_name_snapshot or "").lower()
         return ""
+
+    @staticmethod
+    def _status_label(procedure) -> str:
+        if procedure.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            if procedure.status in {ProcedureStatus.ACTIVE.value, ProcedureStatus.COMPLETED.value}:
+                return "Выполнено"
+        return PROCEDURE_STATUS_LABELS.get(procedure.status, procedure.status)
 
     def _apply_default_widths(self):
         defaults = (135, 160, 120, 170, 285)

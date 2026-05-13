@@ -386,8 +386,8 @@ class ProceduresPrintService:
             {
                 "procedure_date": self._format_date(procedure.started_at),
                 "start_time": self._format_time(procedure.started_at),
-                "finish_time": self._format_time(procedure.finished_at),
-                "duration": self._plain(procedure.duration_minutes),
+                "finish_time": "",
+                "duration": "",
                 "doctor": self._plain(procedure.doctor_name_snapshot),
                 "notes": self._plain(procedure.notes),
                 "indications_codes": self._codes(lp.indications, LP_INDICATION_CODES, "11" if lp.indications_other else ""),

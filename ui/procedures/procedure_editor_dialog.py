@@ -65,6 +65,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.procedure_type = procedure_type
         self.bundle: Optional[ProcedureBundle] = None
         self._write_pending = False
+        self._close_after_save = False
+        self._syncing_time_bounds = False
         self._pdf_worker = None
         self._print_buttons: list[QPushButton] = []
 
@@ -167,6 +169,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
         footer = QHBoxLayout()
         self.status_label = QLabel("")
+        self.apply_btn = QPushButton("Применить")
+        self.apply_btn.setObjectName("DialogOkBtn")
+        self.apply_btn.clicked.connect(self._on_apply_clicked)
         self.save_btn = QPushButton("Сохранить")
         self.save_btn.setObjectName("DialogOkBtn")
         self.save_btn.clicked.connect(self._on_save_clicked)
@@ -174,6 +179,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.close_btn.setObjectName("DialogCancelBtn")
         self.close_btn.clicked.connect(self.reject)
         footer.addWidget(self.status_label, 1)
+        footer.addWidget(self.apply_btn)
         footer.addWidget(self.save_btn)
         footer.addWidget(self.close_btn)
         body_layout.addLayout(footer)
@@ -218,8 +224,12 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         box = QGroupBox("Общие поля процедуры")
         form = QFormLayout(box)
         self.status_combo = QComboBox()
-        self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
-        self.status_combo.addItem("Активна", ProcedureStatus.ACTIVE.value)
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
+            self.status_combo.addItem("Выполнено", ProcedureStatus.COMPLETED.value)
+        else:
+            self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
+            self.status_combo.addItem("Активна", ProcedureStatus.ACTIVE.value)
 
         now = datetime.now().replace(second=0, microsecond=0)
         self.start_edit = ProcedureDateTimeEdit()
@@ -231,8 +241,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.finish_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
         self.finish_edit.setDateTime(QDateTime(now))
         self.duration_label = QLabel("0")
-        self.start_edit.dateTimeChanged.connect(self._recalculate_duration)
-        self.finish_edit.dateTimeChanged.connect(self._recalculate_duration)
+        if self.procedure_type != ProcedureType.LUMBAR_PUNCTURE.value:
+            self.start_edit.dateTimeChanged.connect(self._on_general_time_changed)
+            self.finish_edit.dateTimeChanged.connect(self._on_general_time_changed)
 
         self.doctor_combo = QComboBox()
         self.doctor_combo.setEditable(True)
@@ -242,9 +253,12 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.notes_edit.setPlaceholderText("Примечание")
 
         form.addRow("Статус:", self.status_combo)
-        form.addRow("Начало:", self.start_edit)
-        form.addRow("Окончание:", self.finish_edit)
-        form.addRow("Длительность, мин:", self.duration_label)
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            form.addRow("Дата/время:", self.start_edit)
+        else:
+            form.addRow("Начало:", self.start_edit)
+            form.addRow("Окончание:", self.finish_edit)
+            form.addRow("Длительность, мин:", self.duration_label)
         form.addRow("Врач-исполнитель:", self.doctor_combo)
         form.addRow("Примечание:", self.notes_edit)
         layout.addWidget(box)
@@ -322,15 +336,22 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             f"{self._header_title()}: "
             f"{snapshot.get('full_name') or 'Неизвестно'} | "
             f"ИБ № {snapshot.get('history_number') or ''} | "
-            f"возраст {snapshot.get('age') or ''} | "
-            f"пол {snapshot.get('sex') or ''}"
+            f"возраст {snapshot.get('age') or ''}"
         )
-        self._set_combo_data(self.status_combo, procedure.status)
-        if procedure.started_at:
-            self.start_edit.setDateTime(QDateTime(procedure.started_at))
-        if procedure.finished_at:
-            self.finish_edit.setDateTime(QDateTime(procedure.finished_at))
-        self.duration_label.setText(str(procedure.duration_minutes or 0))
+        self._set_combo_data(self.status_combo, self._status_for_ui(procedure.status))
+        was_syncing = self._syncing_time_bounds
+        self._syncing_time_bounds = True
+        try:
+            if procedure.started_at:
+                self.start_edit.setDateTime(QDateTime(procedure.started_at))
+            if procedure.finished_at:
+                self.finish_edit.setDateTime(QDateTime(procedure.finished_at))
+            self.duration_label.setText(str(procedure.duration_minutes or 0))
+        finally:
+            self._syncing_time_bounds = was_syncing
+        if self.procedure_type != ProcedureType.LUMBAR_PUNCTURE.value:
+            self._sync_general_time_bounds()
+            self._recalculate_duration()
         if procedure.doctor_name_snapshot:
             self.doctor_combo.setEditText(procedure.doctor_name_snapshot)
         self.notes_edit.setPlainText(procedure.notes)
@@ -349,6 +370,15 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             raise ValueError("Данные процедуры не загружены.")
         base = self.bundle.procedure
         doctor_name = self.doctor_combo.currentText().strip()
+        started_at = self.start_edit.dateTime().toPython()
+        if base.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            finished_at = started_at
+            duration_minutes = 0
+        else:
+            finished_at = self.finish_edit.dateTime().toPython()
+            if started_at > finished_at:
+                raise ValueError("Начало процедуры не может быть позже окончания.")
+            duration_minutes = int(self.duration_label.text() or 0)
         procedure = ProcedureDTO(
             id=base.id,
             patient_id=base.patient_id,
@@ -357,9 +387,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             status=str(self.status_combo.currentData() or ProcedureStatus.DRAFT.value),
             created_at=base.created_at,
             updated_at=base.updated_at,
-            started_at=self.start_edit.dateTime().toPython(),
-            finished_at=self.finish_edit.dateTime().toPython(),
-            duration_minutes=int(self.duration_label.text() or 0),
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_minutes=duration_minutes,
             doctor_id=base.doctor_id,
             doctor_name_snapshot=doctor_name,
             department_snapshot=base.department_snapshot,
@@ -372,6 +402,11 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             is_deleted=base.is_deleted,
         )
         return procedure
+
+    def _status_for_ui(self, status: str) -> str:
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value and status == ProcedureStatus.ACTIVE.value:
+            return ProcedureStatus.COMPLETED.value
+        return status
 
     def _collect_bundle(self):
         procedure = self._collect_procedure()
@@ -401,6 +436,12 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _on_save_clicked(self):
+        self._save_procedure(close_after_success=True)
+
+    def _on_apply_clicked(self):
+        self._save_procedure(close_after_success=False)
+
+    def _save_procedure(self, *, close_after_success: bool):
         if self._write_pending:
             return
         try:
@@ -409,6 +450,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             CustomMessageBox.warning(self, "Процедуры", str(exc))
             return
 
+        self._close_after_save = bool(close_after_success)
         self._set_write_pending(True, "Сохранение...")
         service = self.remcard_service
         if procedure.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
@@ -438,14 +480,20 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self._apply_bundle()
         except Exception:
             pass
+        close_after_save = self._close_after_save
+        self._close_after_save = False
+        if close_after_save:
+            self.accept()
 
     def _on_save_error(self, exc: Exception):
+        self._close_after_save = False
         self._set_write_pending(False, "Ошибка сохранения.")
         CustomMessageBox.warning(self, "Ошибка сохранения процедуры", str(exc))
 
     def _set_write_pending(self, pending: bool, text: str):
         self._write_pending = bool(pending)
         self.status_label.setText(text)
+        self.apply_btn.setEnabled(not pending)
         self.save_btn.setEnabled(not pending)
         self.close_btn.setEnabled(not pending)
 
@@ -488,6 +536,30 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         enabled = bool(self.procedure_id)
         for button in self._print_buttons:
             button.setEnabled(enabled)
+
+    def _on_general_time_changed(self):
+        self._sync_general_time_bounds()
+        self._recalculate_duration()
+
+    def _sync_general_time_bounds(self):
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value or self._syncing_time_bounds:
+            return
+        self._syncing_time_bounds = True
+        try:
+            start = self.start_edit.dateTime()
+            finish = self.finish_edit.dateTime()
+            sender = self.sender()
+            if start > finish:
+                if sender is self.finish_edit:
+                    self.finish_edit.setDateTime(start)
+                    finish = start
+                else:
+                    self.start_edit.setDateTime(finish)
+                    start = finish
+            self.start_edit.setMaximumDateTime(finish)
+            self.finish_edit.setMinimumDateTime(start)
+        finally:
+            self._syncing_time_bounds = False
 
     def _recalculate_duration(self):
         start = self.start_edit.dateTime().toPython()
