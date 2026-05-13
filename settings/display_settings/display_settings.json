@@ -32,8 +32,8 @@
           "orders",
           "balance",
           "ivl",
-          "events",
           "procedures",
+          "events",
           "labs",
           "print"
         ],
