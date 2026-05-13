@@ -656,6 +656,11 @@ class MainWindow(QMainWindow):
             self.settings.sync()
             
             from PySide6.QtCore import QThread, QTimer
+            from rem_card.ui.shared.async_call import AsyncCallThread
+
+            if not AsyncCallThread.shutdown_all(timeout_ms=2500):
+                logger.warning("Some async UI workers did not stop before application shutdown")
+
             for child in self.findChildren(QThread):
                 if child.isRunning():
                     child.quit()

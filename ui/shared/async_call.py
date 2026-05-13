@@ -1,4 +1,5 @@
 import threading
+import time
 from typing import Any, Callable, ClassVar
 
 from PySide6.QtCore import QObject, Signal
@@ -60,7 +61,10 @@ class AsyncCallThread(QObject):
             return True
         timeout = None if timeout_ms is None else max(0.0, timeout_ms / 1000.0)
         thread.join(timeout)
-        return not thread.is_alive()
+        stopped = not thread.is_alive()
+        if stopped:
+            self._release_keepalive()
+        return stopped
 
     def terminate(self):
         self.quit()
@@ -68,6 +72,37 @@ class AsyncCallThread(QObject):
     def _release_keepalive(self):
         with self._keepalive_lock:
             self._keepalive_threads.discard(self)
+
+    @classmethod
+    def shutdown_all(cls, timeout_ms: int | None = 2500) -> bool:
+        with cls._keepalive_lock:
+            workers = list(cls._keepalive_threads)
+
+        if not workers:
+            return True
+
+        for worker in workers:
+            try:
+                worker.quit()
+            except Exception:
+                pass
+
+        deadline = None if timeout_ms is None else time.monotonic() + max(0.0, timeout_ms / 1000.0)
+        all_stopped = True
+        for worker in workers:
+            if deadline is None:
+                remaining_ms = None
+            else:
+                remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+            try:
+                stopped = worker.wait(remaining_ms)
+            except Exception:
+                stopped = False
+            if stopped:
+                worker._release_keepalive()
+            else:
+                all_stopped = False
+        return all_stopped
 
     def _run_wrapper(self):
         try:
