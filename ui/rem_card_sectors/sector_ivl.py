@@ -73,13 +73,36 @@ class SectorIvl(BaseSectorWidget):
         main_frame.setStyleSheet(
             """
             QFrame#ivl_main_frame {
-                border: 1.5px solid #bdc3c7;
-                border-radius: 5px;
-                background-color: #f8f9fa;
+                border: none;
+                background-color: transparent;
+            }
+            QLabel#ivl_sector_header {
+                font-weight: bold;
+                font-size: 14px;
+                color: #2c3e50;
+                background-color: #e9ecef;
+                border-top: 1.5px solid #bdc3c7;
+                border-left: 1.5px solid #bdc3c7;
+                border-right: 1.5px solid #bdc3c7;
+                border-bottom: 0.5px solid #bdc3c7;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
             }
             QWidget#ivl_body {
                 background-color: #f8f9fa;
-                border: none;
+                border-left: 1.5px solid #bdc3c7;
+                border-right: 1.5px solid #bdc3c7;
+                border-top: none;
+                border-bottom: none;
+            }
+            QWidget#ivl_footer {
+                background-color: #f8f9fa;
+                border-left: 1.5px solid #bdc3c7;
+                border-right: 1.5px solid #bdc3c7;
+                border-bottom: 1.5px solid #bdc3c7;
+                border-top: none;
+                border-bottom-left-radius: 5px;
+                border-bottom-right-radius: 5px;
             }
             QComboBox, QDateTimeEdit, QLineEdit {
                 background-color: #ffffff;
@@ -198,19 +221,9 @@ class SectorIvl(BaseSectorWidget):
         root.setSpacing(0)
 
         header_label = QLabel("Искусственная вентиляция легких")
+        header_label.setObjectName("ivl_sector_header")
         header_label.setFixedHeight(30)
         header_label.setAlignment(Qt.AlignCenter)
-        header_label.setStyleSheet(
-            """
-            font-weight: bold;
-            color: #495057;
-            background: #e9ecef;
-            border: none;
-            border-bottom: 0.5px solid #bdc3c7;
-            border-top-left-radius: 3px;
-            border-top-right-radius: 3px;
-            """
-        )
         root.addWidget(header_label)
 
         body = QWidget()
@@ -444,8 +457,9 @@ class SectorIvl(BaseSectorWidget):
         body_layout.addWidget(history_frame, 1)
 
         footer = QWidget()
+        footer.setObjectName("ivl_footer")
+        footer.setAttribute(Qt.WA_StyledBackground, True)
         footer.setFixedHeight(15)
-        footer.setStyleSheet("background: transparent; border: none;")
         root.addWidget(footer)
 
         self.set_content(main_frame)

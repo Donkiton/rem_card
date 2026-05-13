@@ -29,6 +29,9 @@ class SyncCoordinator:
         "clinical_events": {"ivl"},
         "devices": {"ivl"},
         "respiratory_support": {"ivl"},
+        "procedures": {"procedures"},
+        "procedure_consents": {"procedures"},
+        "procedure_cvc": {"procedures"},
         "operations": {"patient_header"},
         "transfusions": {"balance"},
     }
@@ -46,6 +49,7 @@ class SyncCoordinator:
         "doctor_create_empty_card:": {"vitals", "patient_header"},
         "ivl": {"ivl"},
         "vent": {"ivl"},
+        "procedure": {"procedures"},
         "patient_bed": {"beds", "patient_header"},
         "archive_": {"beds", "patient_header"},
     }
@@ -92,6 +96,7 @@ class SyncCoordinator:
             "patient_header_refresh": bool(full_refresh_required or "patient_header" in scopes),
             "status_refresh": bool(full_refresh_required or "patient_status" in scopes),
             "ivl_refresh": bool(full_refresh_required or "ivl" in scopes),
+            "procedures_refresh": bool(full_refresh_required or "procedures" in scopes),
         }
         return result
 

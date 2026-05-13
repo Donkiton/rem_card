@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 11
-SCHEMA_MIN_MIGRATION_VERSION = 11
+SCHEMA_FASTPATH_REV = 12
+SCHEMA_MIN_MIGRATION_VERSION = 12
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -35,6 +35,9 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "diet_templates",
     "diet_plan",
     "oral_intake_events",
+    "procedures",
+    "procedure_consents",
+    "procedure_cvc",
 )
 
 _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
@@ -97,6 +100,9 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     "diet_templates": {"name", "diet_text", "schedule_json", "is_default", "created_at", "version", "last_modified_by", "updated_at"},
     "diet_plan": {"admission_id", "shift_start", "template_id", "diet_text", "schedule_json", "created_at", "version", "last_modified_by", "updated_at"},
     "oral_intake_events": {"admission_id", "shift_start", "event_time", "amount_ml", "created_at", "version", "last_modified_by", "updated_at"},
+    "procedures": {"patient_id", "admission_id", "procedure_type", "status", "patient_snapshot_json", "diagnosis_snapshot", "revision", "is_deleted"},
+    "procedure_consents": {"procedure_id", "consent_kind", "consent_mode", "patient_signed", "consilium_json", "revision"},
+    "procedure_cvc": {"procedure_id", "indications_json", "access_code", "catheter_status", "removed_or_replaced", "revision"},
 }
 
 _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
@@ -116,6 +122,9 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_medical_audit_admission_changed",
     "idx_medical_audit_table_row",
     "idx_medical_audit_operation",
+    "idx_procedures_admission_type_time",
+    "idx_procedure_consents_procedure",
+    "idx_procedure_cvc_catheter_status",
 )
 
 _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
@@ -128,6 +137,7 @@ _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
     "diet_templates",
     "diet_plan",
     "oral_intake_events",
+    "procedures",
 )
 
 _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
@@ -149,6 +159,9 @@ _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
     "diet_templates",
     "diet_plan",
     "oral_intake_events",
+    "procedures",
+    "procedure_consents",
+    "procedure_cvc",
 )
 
 _MEDICAL_AUDIT_TABLES: tuple[str, ...] = (
@@ -917,6 +930,98 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS procedures (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER,
+            admission_id INTEGER NOT NULL,
+            procedure_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            started_at DATETIME,
+            finished_at DATETIME,
+            duration_minutes INTEGER,
+            doctor_id INTEGER,
+            doctor_name_snapshot TEXT,
+            department_snapshot TEXT,
+            patient_snapshot_json TEXT,
+            diagnosis_snapshot TEXT,
+            notes TEXT,
+            created_by TEXT,
+            updated_by TEXT,
+            revision INTEGER DEFAULT 0,
+            is_deleted INTEGER DEFAULT 0,
+            FOREIGN KEY (patient_id) REFERENCES patients(id),
+            FOREIGN KEY (admission_id) REFERENCES admissions(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procedure_consents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            procedure_id INTEGER NOT NULL,
+            consent_kind TEXT NOT NULL,
+            consent_mode TEXT NOT NULL DEFAULT 'patient',
+            patient_signed INTEGER DEFAULT 1,
+            representative_name TEXT,
+            representative_details TEXT,
+            diagnosis_snapshot TEXT,
+            doctor_name_snapshot TEXT,
+            consilium_json TEXT,
+            emergency_reason TEXT,
+            created_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            printed_at DATETIME,
+            revision INTEGER DEFAULT 0,
+            FOREIGN KEY (procedure_id) REFERENCES procedures(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS procedure_cvc (
+            procedure_id INTEGER PRIMARY KEY,
+            cvc_code_main_selected INTEGER DEFAULT 1,
+            cvc_code_tunneled_selected INTEGER DEFAULT 0,
+            indications_json TEXT,
+            procedure_place_code TEXT,
+            procedure_place_other TEXT,
+            anesthesia_code TEXT,
+            anesthesia_other TEXT,
+            access_code TEXT,
+            access_other TEXT,
+            method_code TEXT,
+            method_other TEXT,
+            ultrasound_control_json TEXT,
+            attempts_count INTEGER,
+            diameter_f REAL,
+            length_cm REAL,
+            lumens_count INTEGER,
+            fixation_json TEXT,
+            fixation_other TEXT,
+            position_confirmed_at DATETIME,
+            position_confirmation_json TEXT,
+            technical_difficulty_code TEXT,
+            technical_difficulty_description TEXT,
+            actions_taken TEXT,
+            catheter_status TEXT,
+            removed_or_replaced TEXT,
+            removed_at DATETIME,
+            usage_complications_code TEXT,
+            usage_complications_description TEXT,
+            additional_treatment TEXT,
+            operator_doctor_name TEXT,
+            removal_doctor_name TEXT,
+            revision INTEGER DEFAULT 0,
+            FOREIGN KEY (procedure_id) REFERENCES procedures(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS medical_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             operation_id TEXT NOT NULL,
@@ -1191,6 +1296,9 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_operation ON medical_audit_log(operation_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_applied_ops_applied_at ON sync_applied_ops(applied_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_schema_migrations_applied_at ON schema_migrations(applied_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_procedures_admission_type_time ON procedures(admission_id, procedure_type, started_at, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_consents_procedure ON procedure_consents(procedure_id, consent_kind)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_cvc_catheter_status ON procedure_cvc(catheter_status)")
 
     _mark_schema_migration(conn, 1, "unified schema baseline")
     _mark_schema_migration(conn, 2, "admissions.intake_extra_json for extensible intake fields")
@@ -1203,6 +1311,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 9, "medical audit log foundation")
     _mark_schema_migration(conn, 10, "optimistic lock revisions for clinical domains")
     _mark_schema_migration(conn, 11, "patients.birth_date for calculated age")
+    _mark_schema_migration(conn, 12, "patient medical procedures prototype")
 
     for table in (
         "vitals",
@@ -1214,6 +1323,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "diet_templates",
         "diet_plan",
         "oral_intake_events",
+        "procedures",
     ):
         _create_updated_at_trigger(conn, table)
 
@@ -1315,6 +1425,39 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.last_modified_by, 'nurse')",
         "COALESCE(OLD.last_modified_by, 'nurse')",
+        use_updated_at_gate=False,
+    )
+    _create_change_triggers(
+        conn,
+        "procedures",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.updated_by, NEW.created_by, 'doctor')",
+        "COALESCE(OLD.updated_by, OLD.created_by, 'doctor')",
+        use_updated_at_gate=False,
+    )
+    _create_change_triggers(
+        conn,
+        "procedure_consents",
+        "NEW.id",
+        "OLD.id",
+        "(SELECT admission_id FROM procedures WHERE id = NEW.procedure_id)",
+        "(SELECT admission_id FROM procedures WHERE id = OLD.procedure_id)",
+        "COALESCE(NEW.doctor_name_snapshot, 'doctor')",
+        "COALESCE(OLD.doctor_name_snapshot, 'doctor')",
+        use_updated_at_gate=False,
+    )
+    _create_change_triggers(
+        conn,
+        "procedure_cvc",
+        "NEW.procedure_id",
+        "OLD.procedure_id",
+        "(SELECT admission_id FROM procedures WHERE id = NEW.procedure_id)",
+        "(SELECT admission_id FROM procedures WHERE id = OLD.procedure_id)",
+        "COALESCE(NEW.operator_doctor_name, NEW.removal_doctor_name, 'doctor')",
+        "COALESCE(OLD.operator_doctor_name, OLD.removal_doctor_name, 'doctor')",
         use_updated_at_gate=False,
     )
 

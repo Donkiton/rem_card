@@ -88,6 +88,14 @@ class RemCardService(QObject):
         self._diet_plan = DietPlanService(self.diet_plan_dao, self._diet_templates)
         self._oral_intake = OralIntakeService(self.oral_intake_dao, self._vitals, self._diet_plan)
 
+        from rem_card.data.dao.procedures_dao import ProceduresDAO
+        from rem_card.services.procedures_print_service import ProceduresPrintService
+        from rem_card.services.procedures_service import ProceduresService
+
+        self.procedures_dao = ProceduresDAO(self.orders_dao.db)
+        self._procedures = ProceduresService(self.procedures_dao, data_service=data_service)
+        self._procedures_print = ProceduresPrintService(self.procedures_dao)
+
     def has_card(self, admission_id: int, date: datetime) -> bool:
         """
         РџСЂРѕРІРµСЂСЏРµС‚ СЃСѓС‰РµСЃС‚РІРѕРІР°РЅРёРµ РєР°СЂС‚С‹ Р·Р° СѓРєР°Р·Р°РЅРЅСѓСЋ РґР°С‚Сѓ.
@@ -1404,5 +1412,30 @@ class RemCardService(QObject):
 
     def get_ventilation_summary(self, admission_id: int):
         return self._require_ventilation().get_active_case_summary(admission_id)
+
+    # --- Procedures ---
+    def list_procedures(self, admission_id: int):
+        return self._procedures.list_procedures(admission_id)
+
+    def get_procedure_bundle(self, procedure_id: int):
+        return self._procedures.get_procedure_bundle(procedure_id)
+
+    def create_empty_cvc_procedure(self, admission_id: int, *, doctor_name: str = ""):
+        return self._procedures.create_empty_cvc(admission_id, doctor_name=doctor_name)
+
+    def save_cvc_procedure(self, procedure, cvc, consent):
+        return self._procedures.save_cvc_procedure(procedure, cvc, consent)
+
+    def cancel_procedure(self, procedure_id: int, *, updated_by: str = "doctor"):
+        return self._procedures.cancel_procedure(procedure_id, updated_by=updated_by)
+
+    def render_procedure_document(self, procedure_id: int, document_kind: str) -> str:
+        return self._procedures_print.render_document(procedure_id, document_kind)
+
+    def build_procedure_pdf_path(self, procedure_id: int, document_kind: str):
+        return self._procedures_print.build_pdf_path(procedure_id, document_kind)
+
+    def build_procedure_pdf(self, procedure_id: int, document_kind: str, pdf_path):
+        return self._procedures_print.build_pdf(procedure_id, document_kind, pdf_path)
 
 

@@ -1032,6 +1032,14 @@ class DoctorRemCardWidget(QWidget):
         except Exception:
             logger.exception("Doctor IVL partial refresh failed")
 
+    def _refresh_procedures_from_db(self) -> None:
+        try:
+            sector_proc = getattr(self.layout_manager, "sector_proc", None)
+            if sector_proc is not None and hasattr(sector_proc, "refresh"):
+                sector_proc.refresh()
+        except Exception:
+            logger.exception("Doctor procedures partial refresh failed")
+
     @staticmethod
     def _changed_entities_from_payload(payload: dict) -> set[str]:
         changed_entities = {
@@ -1106,6 +1114,8 @@ class DoctorRemCardWidget(QWidget):
             self._refresh_status_from_db()
         if sync_actions.get("ivl_refresh"):
             self._refresh_ivl_from_db()
+        if sync_actions.get("procedures_refresh"):
+            self._refresh_procedures_from_db()
 
     def _on_data_changes(self, payload: dict):
         if self._is_closing or not self.admission_id:

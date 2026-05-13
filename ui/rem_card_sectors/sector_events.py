@@ -166,13 +166,13 @@ class SectorEvents(BaseSectorWidget):
                 border-top-left-radius: 5px !important; border-top-right-radius: 5px !important;
             }
             QWidget#sector_content_area {
-                background-color: white !important;
+                background-color: #f8f9fa !important;
                 border-left: 1.5px solid #bdc3c7 !important;
                 border-right: 1.5px solid #bdc3c7 !important;
                 border-top: none !important; border-bottom: none !important;
             }
             QWidget#sector_footer {
-                background-color: white !important;
+                background-color: #f8f9fa !important;
                 border-left: 1.5px solid #bdc3c7 !important;
                 border-right: 1.5px solid #bdc3c7 !important;
                 border-bottom: 1.5px solid #bdc3c7 !important;

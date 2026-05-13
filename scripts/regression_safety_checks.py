@@ -4911,7 +4911,7 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "8926eca22b054d6c2a0d4d0212da6fc2eafbb0b7ee94b33afe1427dcc348795f"
+    expected_digest = "9d8bcf842bd8711b44212755aacd4e6b2ee8f790924a101ad8df783c3fda0a23"
     if digest != expected_digest:
         return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:

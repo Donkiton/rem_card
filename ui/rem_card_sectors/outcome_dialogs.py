@@ -126,6 +126,8 @@ class _OutcomeDialogBase(BaseStyledDialog):
         self.admission_context = dict(admission_context or {})
         self.base_comment = str(base_comment or "").strip()
         self.result_data: Dict[str, Any] = {}
+        self.content_widget.setObjectName("outcome_content")
+        self.content_widget.setAttribute(Qt.WA_StyledBackground, True)
         self.setModal(True)
 
     def _restore_last_position(self) -> None:
@@ -149,9 +151,18 @@ class _OutcomeDialogBase(BaseStyledDialog):
         self._save_last_position()
         super().done(result)
 
-    def _apply_content_style(self):
-        self.content_widget.setStyleSheet(
+    def _content_style_sheet(self) -> str:
+        return (
             """
+            QFrame#outcome_content {
+                background-color: #f8f9fa;
+                border-bottom: 1px solid #bdc3c7;
+                border-bottom-left-radius: 5px;
+                border-bottom-right-radius: 5px;
+            }
+            QWidget#outcome_scroll_body {
+                background: transparent;
+            }
             QLabel {
                 background: transparent;
                 color: #2c3e50;
@@ -163,7 +174,7 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 color: #2c3e50;
             }
             QFrame#outcome_section {
-                background: #ffffff;
+                background-color: #ffffff;
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
             }
@@ -201,9 +212,13 @@ class _OutcomeDialogBase(BaseStyledDialog):
             """
         )
 
+    def _apply_content_style(self):
+        self.content_widget.setStyleSheet(self._content_style_sheet())
+
     def _section(self, title: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("outcome_section")
+        frame.setAttribute(Qt.WA_StyledBackground, True)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(8)
@@ -337,6 +352,8 @@ class _OutcomeDialogBase(BaseStyledDialog):
 
 
 class TransferOutcomeDialog(_OutcomeDialogBase):
+    SETTINGS_POS_KEY = "outcome_dialog/transfer_last_pos"
+
     def __init__(
         self,
         admission_context: Optional[Dict[str, Any]],
@@ -455,6 +472,8 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
 
 
 class DeathOutcomeDialog(_OutcomeDialogBase):
+    SETTINGS_POS_KEY = "outcome_dialog/death_last_pos"
+
     def __init__(
         self,
         admission_context: Optional[Dict[str, Any]],
@@ -482,12 +501,31 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setObjectName("outcome_scroll")
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; } QScrollBar { width: 0px; height: 0px; }")
+        scroll.setStyleSheet(
+            """
+            QScrollArea#outcome_scroll {
+                border: none;
+                background: transparent;
+            }
+            QScrollArea#outcome_scroll > QWidget {
+                background: transparent;
+            }
+            QScrollBar {
+                width: 0px;
+                height: 0px;
+                background: transparent;
+            }
+            """
+        )
+        scroll.viewport().setStyleSheet("background: transparent;")
 
         body = QWidget()
+        body.setObjectName("outcome_scroll_body")
+        body.setStyleSheet(self._content_style_sheet())
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(14)
@@ -498,25 +536,24 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         clinical_default_time = ShiftService.apply_offset(biological_default_time, self.shift_date, -30)
 
         clinical_frame, clinical_layout = self._section("Клиническая смерть")
-        clinical_frame.setFixedWidth(DEATH_TIME_SECTION_WIDTH)
+        self._make_death_section_expanding(clinical_frame, DEATH_TIME_SECTION_WIDTH)
         self.clinical_time_picker = self._make_time_picker()
         self.clinical_time_picker.set_time(clinical_default_time)
         clinical_layout.addWidget(self.clinical_time_picker, 0, Qt.AlignLeft)
-        time_row.addWidget(clinical_frame, 0)
+        time_row.addWidget(clinical_frame, 1)
 
         biological_frame, biological_layout = self._section("Биологическая смерть")
-        biological_frame.setFixedWidth(DEATH_TIME_SECTION_WIDTH)
+        self._make_death_section_expanding(biological_frame, DEATH_TIME_SECTION_WIDTH)
         self.biological_time_picker = self._make_time_picker()
         self.biological_time_picker.set_time(biological_default_time)
         biological_layout.addWidget(self.biological_time_picker, 0, Qt.AlignLeft)
-        time_row.addWidget(biological_frame, 0)
-        time_row.addStretch(1)
+        time_row.addWidget(biological_frame, 1)
         body_layout.addLayout(time_row)
         self.clinical_time_picker.timeChanged.connect(self._update_auto_comment)
         self.biological_time_picker.timeChanged.connect(self._update_auto_comment)
 
         cause_frame, cause_layout = self._section("Причина остановки сердца")
-        cause_frame.setFixedWidth(DEATH_WIDE_SECTION_WIDTH)
+        self._make_death_section_expanding(cause_frame, DEATH_WIDE_SECTION_WIDTH)
         cause_grid = QGridLayout()
         cause_grid.setHorizontalSpacing(10)
         cause_grid.setVerticalSpacing(8)
@@ -542,12 +579,12 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         body_layout.addWidget(cause_frame)
 
         self.measures_frame, self.measures_layout = self._section("Мероприятия")
-        self.measures_frame.setFixedWidth(DEATH_WIDE_SECTION_WIDTH)
+        self._make_death_section_expanding(self.measures_frame, DEATH_WIDE_SECTION_WIDTH)
         body_layout.addWidget(self.measures_frame)
         self._rebuild_measures()
 
         self.protocol_frame, self.protocol_layout = self._section("Протокол установления смерти человека")
-        self.protocol_frame.setFixedWidth(DEATH_WIDE_SECTION_WIDTH)
+        self._make_death_section_expanding(self.protocol_frame, DEATH_WIDE_SECTION_WIDTH)
         self._build_protocol_fields()
         body_layout.addWidget(self.protocol_frame)
 
@@ -556,6 +593,10 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self.content_layout.addLayout(self._buttons())
         self._update_auto_comment()
         self._restore_last_position()
+
+    def _make_death_section_expanding(self, frame: QFrame, minimum_width: int):
+        frame.setMinimumWidth(minimum_width)
+        frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
     def _rebuild_measures(self):
         while self.measures_layout.count() > 1:

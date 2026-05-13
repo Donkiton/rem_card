@@ -20,6 +20,8 @@ except Exception:
 
 _FON_PIXMAP_CACHE = None
 _FON_PIXMAP_CACHE_PATH = None
+_FON_SCALED_CACHE = None
+_FON_SCALED_CACHE_KEY = None
 
 
 def _qt_is_valid(obj) -> bool:
@@ -57,10 +59,28 @@ def _get_cached_fon_pixmap():
 
 
 def _clear_fon_pixmap_cache():
-    global _FON_PIXMAP_CACHE, _FON_PIXMAP_CACHE_PATH
+    global _FON_PIXMAP_CACHE, _FON_PIXMAP_CACHE_PATH, _FON_SCALED_CACHE, _FON_SCALED_CACHE_KEY
 
     _FON_PIXMAP_CACHE = None
     _FON_PIXMAP_CACHE_PATH = None
+    _FON_SCALED_CACHE = None
+    _FON_SCALED_CACHE_KEY = None
+
+
+def _get_scaled_fon_pixmap(size):
+    global _FON_SCALED_CACHE, _FON_SCALED_CACHE_KEY
+
+    pixmap = _get_cached_fon_pixmap()
+    if pixmap.isNull() or size.isEmpty():
+        return QPixmap()
+
+    key = (_FON_PIXMAP_CACHE_PATH, size.width(), size.height())
+    if _FON_SCALED_CACHE is not None and _FON_SCALED_CACHE_KEY == key:
+        return _FON_SCALED_CACHE
+
+    _FON_SCALED_CACHE = pixmap.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    _FON_SCALED_CACHE_KEY = key
+    return _FON_SCALED_CACHE
 
 
 class NurseBedsSelectionWidget(QWidget):
@@ -129,7 +149,7 @@ class NurseBedsSelectionWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
 
-        pixmap = _get_cached_fon_pixmap()
+        pixmap = _get_scaled_fon_pixmap(self.size())
         if not pixmap.isNull():
             painter.setOpacity(0.2)
             x = (self.width() - pixmap.width()) // 2

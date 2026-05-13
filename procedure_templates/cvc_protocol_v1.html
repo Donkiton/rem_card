@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: "Times New Roman", serif; font-size: 8pt; color: #000; line-height: 1.04; }
+    p { margin: 1px 0; }
+    .center { text-align: center; }
+    .title { font-size: 8.5pt; font-weight: bold; }
+    .sub { font-size: 7pt; font-style: italic; }
+    table { width: 100%; border-collapse: collapse; }
+    td { padding: 1px 5px; vertical-align: top; }
+    .patient td { width: 50%; }
+    .line { display: inline-block; min-width: 120px; border-bottom: 1px solid #000; font-weight: bold; }
+    .longline { display: inline-block; min-width: 360px; border-bottom: 1px solid #000; font-weight: bold; }
+    .selected { border: 1px solid #000; padding: 0 4px; font-weight: bold; }
+    .dash { border-top: 1px dashed #000; margin: 4px 0 2px 0; }
+  </style>
+</head>
+<body>
+  <p class="center title">Клинические рекомендации по проведению</p>
+  <p class="center">
+    <b>ПРОТОКОЛ катетеризации подключичной и других центральных вен</b>
+    (кодовый номер А11.12.001),
+    <b>катетеризации подключичной и других центральных вен с использованием туннельного катетера</b>
+    (кодовый номер A11.12.001.001)
+  </p>
+  <p class="center sub">(нужное подчеркнуть, возможен выбор нескольких пунктов)</p>
+
+  <table class="patient">
+    <tr><td>Пациент <span class="longline">{{patient_name}}</span></td><td>&nbsp;</td></tr>
+    <tr><td>Пол <span class="line">{{sex}}</span></td><td>Возраст <span class="line">{{age}}</span></td></tr>
+    <tr><td>ИБ № <span class="line">{{history_number}}</span></td><td>Диагноз <span class="line">{{diagnosis}}</span></td></tr>
+  </table>
+
+  <p><b>3. ФИО врача (ей)</b> <span class="longline">{{doctor}}</span></p>
+  <p><b>4. Название отделения</b> <span class="longline">{{department}}</span></p>
+  <p>
+    <b>5. Дата, время:</b> <span class="line">{{procedure_date}}</span>.
+    <b>Начало</b> <span class="line">{{start_time}}</span>.
+    <b>Окончание</b> <span class="line">{{finish_time}}</span>.
+    <b>Длительность</b> <span class="line">{{duration}}</span> мин.
+  </p>
+  <p>Вид процедуры: <span class="selected">{{procedure_code_mark}}</span> {{procedure_code_text}}</p>
+
+  <p><b>6. Показания к катетеризации:</b>
+    Потребность во введении инфузионных сред или лекарственных препаратов при невозможности обеспечения требуемого объема, скорости, эффективности и безопасности инфузионной и/или медикаментозной терапии за счет катетеризации периферических вен и/или внутрикостного введения - <b>1</b>;
+    контроль центрального венозного давления и прочие виды гемодинамического мониторинга (установка катетера Свана-Ганца, транспульмональная термодилюция и др.) - <b>2</b>;
+    проведение вазопрессорной терапии - <b>3</b>;
+    проведение заместительной почечной терапии - <b>4</b>;
+    проведение экстракорпоральных методов поддержки кровообращения и дыхания - <b>5</b>;
+    эндокардиальная кардиостимуляция - <b>6</b>;
+    парентеральное питание - <b>7</b>;
+    введение гиперосмолярных и/или обладающих раздражающим действием на интиму кровеносных сосудов растворов - <b>8</b>;
+    замена катетера - <b>9</b>;
+    прочее - <b>10</b> (указать) <span class="line">{{indications_other}}</span>.
+    Выбрано: <span class="selected">{{indications_codes}}</span>
+  </p>
+
+  <p><b>7. Место проведения операции:</b> операционная - <b>1</b>; палата реанимации и интенсивной терапии - <b>2</b>; блок (палата) интенсивной терапии - <b>3</b>; прочее <span class="line">{{place_other}}</span>. Выбрано: <span class="selected">{{place_code}}</span></p>
+  <p><b>8. Вид анестезии:</b> 1 - местная, 2 - общая; 3 - прочее <span class="line">{{anesthesia_other}}</span>. Выбрано: <span class="selected">{{anesthesia_code}}</span></p>
+  <p><b>9. Локализация доступа:</b> внутренняя яремная вена правая - <b>1</b>; внутренняя яремная вена левая - <b>2</b>; подключичная вена правая - <b>3</b>; подключичная вена левая - <b>4</b>; бедренная вена правая - <b>5</b>; бедренная вена левая - <b>6</b>; прочие локализации - <b>7</b> (доступ: <span class="line">{{access_other}}</span>). Выбрано: <span class="selected">{{access_code}}</span></p>
+  <p><b>10. Методика катетеризации:</b> 1 - по Сельдингеру, 2 - прочие методы (описать): <span class="line">{{method_other}}</span>. Выбрано: <span class="selected">{{method_code}}</span></p>
+  <p><b>11. УЗ-контроль:</b> 1 - разметка под УЗ-контролем; 2 - динамический УЗ-контроль; 3 - УЗ-контроль не доступен и/или отсутствует опыт. Выбрано: <span class="selected">{{ultrasound_codes}}</span></p>
+  <p><b>12. Количество попыток:</b> <span class="line">{{attempts}}</span>. <b>Диаметр</b> <span class="line">{{diameter}}</span> (F). <b>Длина</b> <span class="line">{{length}}</span> см. <b>Количество просветов</b> <span class="line">{{lumens}}</span>.</p>
+  <p><b>13. Катетер фиксирован:</b> лигатурой, лейкопластырем, бесшовным устройством, др. <span class="line">{{fixation_other}}</span>. Выбрано: <span class="selected">{{fixation_codes}}</span></p>
+  <p><b>14. Корректное (надлежащее) положение катетера подтверждено</b> <span class="line">{{confirmation_time}}</span> следующим способом: свободный обратный ток венозной крови - <b>1</b>, обзорная рентгенография - <b>2</b>; УЗ-контроль - <b>3</b>, РКТ - <b>4</b>. Выбрано: <span class="selected">{{confirmation_codes}}</span>. Комментарий: <span class="line">{{confirmation_comment}}</span></p>
+  <p><b>15. Технические трудности / осложнения во время выполнения и предпринятые действия:</b> 1 - не выявлено. 2 - сложности / осложнения (описать): <span class="line">{{difficulty_description}}</span> Выбрано: <span class="selected">{{difficulty_code}}</span>. Предприняты следующие действия: <span class="line">{{actions_taken}}</span></p>
+  <p>ФИО врача <span class="line">{{doctor}}</span> подпись ____________________</p>
+
+  <div class="dash"></div>
+  <p><b>15. Катетер удален / переустановлен:</b> <span class="selected">{{removal_action}}</span> Дата <span class="line">{{removal_date}}</span> Время <span class="line">{{removal_time}}</span></p>
+  <p><b>16. Осложнения во время использования катетера:</b> не отмечались - <b>1</b>; отмечались - <b>2</b>. Выбрано: <span class="selected">{{usage_complications_code}}</span></p>
+  <p><b>17. Отмеченные осложнения в виде</b> <span class="line">{{usage_complications_description}}</span> требовали дополнительных лечебных мероприятий (перечислить): <span class="line">{{additional_treatment}}</span></p>
+  <p>ФИО врача <span class="line">{{removal_doctor}}</span> подпись ____________________</p>
+</body>
+</html>

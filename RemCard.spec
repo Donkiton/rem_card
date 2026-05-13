@@ -100,6 +100,7 @@ a = Analysis(
 		# активные ресурсы управления пациентами и МКБ
 		_data_dir('data/mkb'),
 		_data_dir('data/patient_assets'),
+		_data_dir('procedure_templates'),
 
 		# шрифты и служебные данные ReportLab для прямого PDF-рендера
 		*collect_data_files('reportlab'),

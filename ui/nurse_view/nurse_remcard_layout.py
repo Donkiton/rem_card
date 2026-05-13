@@ -335,8 +335,8 @@ class NurseRemCardLayoutManager(QWidget):
     def _ensure_proc_tab_initialized(self):
         if self._proc_initialized:
             return
-        from .sectors.nurse_sector_dev import NurseSectorProc
-        self.sector_proc = NurseSectorProc()
+        from rem_card.ui.rem_card_sectors.sector_proc import SectorProc
+        self.sector_proc = SectorProc()
         self._proc_layout.addWidget(self.sector_proc)
         self._proc_initialized = True
 
