@@ -22,6 +22,7 @@ _FON_PIXMAP_CACHE = None
 _FON_PIXMAP_CACHE_PATH = None
 _FON_SCALED_CACHE = None
 _FON_SCALED_CACHE_KEY = None
+_FON_SCALE_FACTOR = 0.7
 
 
 def _qt_is_valid(obj) -> bool:
@@ -74,11 +75,13 @@ def _get_scaled_fon_pixmap(size):
     if pixmap.isNull() or size.isEmpty():
         return QPixmap()
 
-    key = (_FON_PIXMAP_CACHE_PATH, size.width(), size.height())
+    target_width = max(1, int(size.width() * _FON_SCALE_FACTOR))
+    target_height = max(1, int(size.height() * _FON_SCALE_FACTOR))
+    key = (_FON_PIXMAP_CACHE_PATH, target_width, target_height)
     if _FON_SCALED_CACHE is not None and _FON_SCALED_CACHE_KEY == key:
         return _FON_SCALED_CACHE
 
-    _FON_SCALED_CACHE = pixmap.scaled(size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    _FON_SCALED_CACHE = pixmap.scaled(target_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     _FON_SCALED_CACHE_KEY = key
     return _FON_SCALED_CACHE
 
