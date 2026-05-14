@@ -40,8 +40,8 @@ class ProceduresService:
             end_dt=end_dt,
         )
         rows = [self._transfusion_registration_row(row) for row in raw_rows]
-        recipient_abo = self._first_non_empty(row.get("recipient_abo") for row in raw_rows)
-        recipient_rh = self._first_non_empty(row.get("recipient_rh") for row in raw_rows)
+        recipient_abo = self._registration_abo_label(self._first_non_empty(row.get("recipient_abo") for row in raw_rows))
+        recipient_rh = self._registration_rh_label(self._first_non_empty(row.get("recipient_rh") for row in raw_rows))
         return {
             "patient_name": snapshot.get("full_name") or "",
             "history_number": snapshot.get("history_number") or "",
@@ -309,8 +309,8 @@ class ProceduresService:
             "method": "в/в капельно",
             "volume_ml": cls._plain_registration_value(row.get("volume_ml")),
             "component": cls._registration_component_name(component),
-            "donor_abo": cls._plain_registration_value(row.get("donor_abo")),
-            "donor_rh": cls._plain_registration_value(row.get("donor_rh")),
+            "donor_abo": cls._registration_abo_label(row.get("donor_abo")),
+            "donor_rh": cls._registration_rh_label(row.get("donor_rh")),
             "unit_number": cls._plain_registration_value(row.get("unit_number")),
             "collection_date": cls._plain_registration_value(row.get("collection_date")),
             "donor_code": cls._plain_registration_value(row.get("donor_code")),
@@ -353,6 +353,30 @@ class ProceduresService:
         if normalized == "vpfs":
             return "ВПФС"
         return str(indication_code or "").strip()
+
+    @staticmethod
+    def _registration_abo_label(value: Any) -> str:
+        text = str(value or "").strip()
+        normalized = text.upper().replace(" ", "")
+        if normalized.startswith(("O(I)", "0(I)", "О(I)")):
+            return "O(I) первая"
+        if normalized.startswith("A(II)"):
+            return "A(II) вторая"
+        if normalized.startswith("B(III)"):
+            return "B(III) третья"
+        if normalized.startswith("AB(IV)"):
+            return "AB(IV) четвертая"
+        return text
+
+    @staticmethod
+    def _registration_rh_label(value: Any) -> str:
+        text = str(value or "").strip()
+        normalized = text.upper().replace(" ", "")
+        if "RH(+)" in normalized or "RH+" in normalized or "ПОЛОЖ" in normalized:
+            return "Rh(+) пол."
+        if "RH(-)" in normalized or "RH-" in normalized or "ОТРИЦ" in normalized or "ОТР." in normalized:
+            return "Rh(-) отр."
+        return text
 
     @staticmethod
     def _registration_component_name(component: str) -> str:
