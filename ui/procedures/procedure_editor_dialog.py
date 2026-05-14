@@ -495,6 +495,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
                 observation_json=self.transfusion_observation_widget.collect_json(),
             )
             transfusion.request_at = self.request_edit.dateTime().toPython() if self.request_edit is not None else None
+            self._validate_transfusion_datetime_values(procedure, transfusion)
             consent = self.consent_widget.collect(
                 procedure_id=procedure.id or 0,
                 doctor_name=procedure.doctor_name_snapshot,
@@ -573,9 +574,6 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.close_btn.setEnabled(not pending)
 
     def _print_document(self, document_kind: str):
-        if document_kind == "transfusion_consent":
-            CustomMessageBox.information(self, "Печать согласия", "Шаблон согласия на гемотрансфузию будет добавлен позже.")
-            return
         if not self.procedure_id:
             CustomMessageBox.warning(self, "Печать", "Сначала сохраните процедуру.")
             return
@@ -653,6 +651,15 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         if admission_dt and self.procedure_type != ProcedureType.TRANSFUSION.value:
             for edit in self.findChildren(ProcedureDateTimeEdit):
                 edit.set_minimum_datetime_from_python(admission_dt)
+
+    def _validate_transfusion_datetime_values(self, procedure: ProcedureDTO, transfusion) -> None:
+        now = datetime.now().replace(second=59, microsecond=999999)
+        for label, value in (
+            ("Время подачи заявки", getattr(transfusion, "request_at", None)),
+            ("Начало трансфузии", procedure.started_at),
+        ):
+            if value and value > now:
+                raise ValueError(f"{label} не может быть в будущем.")
 
     def _set_transfusion_observation_context(self):
         if self.procedure_type != ProcedureType.TRANSFUSION.value or self.transfusion_observation_widget is None:

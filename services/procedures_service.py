@@ -93,6 +93,7 @@ class ProceduresService:
     def create_empty_transfusion(self, admission_id: int, *, doctor_name: str = "") -> ProcedureBundle:
         snapshot = self._build_patient_snapshot(admission_id)
         now = datetime.now().replace(second=0, microsecond=0)
+        reagent_expirations = self._default_reagent_expirations(now.date())
         procedure = ProcedureDTO(
             admission_id=int(admission_id),
             patient_id=snapshot.get("patient_id"),
@@ -110,9 +111,9 @@ class ProceduresService:
         )
         transfusion = ProcedureTransfusionDTO(
             request_at=now,
-            reagent_anti_a_expiration=self._format_date(self._add_months(now.date(), 3) + timedelta(days=7)),
-            reagent_anti_b_expiration=self._format_date(self._add_months(now.date(), 3) + timedelta(days=7)),
-            reagent_anti_d_expiration=self._format_date(self._add_months(now.date(), 2) + timedelta(days=9)),
+            reagent_anti_a_expiration=reagent_expirations["anti_a"],
+            reagent_anti_b_expiration=reagent_expirations["anti_b"],
+            reagent_anti_d_expiration=reagent_expirations["anti_d"],
             observation_json=self.default_transfusion_observation_json(),
             operator_doctor_name=doctor_name or "",
         )
@@ -123,6 +124,7 @@ class ProceduresService:
             diagnosis_snapshot=procedure.diagnosis_snapshot,
             doctor_name_snapshot=doctor_name or "",
         )
+        self._apply_previous_transfusion_defaults(procedure, transfusion, consent)
         return ProcedureBundle(
             procedure=procedure,
             transfusion=transfusion,
@@ -301,14 +303,84 @@ class ProceduresService:
         }
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
+    def _apply_previous_transfusion_defaults(
+        self,
+        procedure: ProcedureDTO,
+        transfusion: ProcedureTransfusionDTO,
+        consent: ProcedureConsentDTO,
+    ) -> None:
+        previous = self.dao.get_latest_completed_transfusion_bundle(
+            patient_id=procedure.patient_id,
+            admission_id=procedure.admission_id,
+        )
+        if not previous or not previous.transfusion:
+            return
+
+        previous_transfusion = previous.transfusion
+        transfusion.recipient_abo = previous_transfusion.recipient_abo
+        transfusion.recipient_rh = previous_transfusion.recipient_rh
+        transfusion.recipient_antigens = previous_transfusion.recipient_antigens
+        transfusion.alloimmune_antibodies = previous_transfusion.alloimmune_antibodies
+        transfusion.transfusions_history = previous_transfusion.transfusions_history
+        transfusion.reactions_history = previous_transfusion.reactions_history
+        transfusion.reactions_history_details = (
+            previous_transfusion.reactions_history_details
+            if previous_transfusion.reactions_history == "yes"
+            else ""
+        )
+        transfusion.individual_selection_history = previous_transfusion.individual_selection_history
+        transfusion.donor_abo = previous_transfusion.donor_abo
+        transfusion.donor_rh = previous_transfusion.donor_rh
+        transfusion.donor_antigens = previous_transfusion.donor_antigens
+        transfusion.reagent_anti_a_series = previous_transfusion.reagent_anti_a_series or "069F"
+        transfusion.reagent_anti_b_series = previous_transfusion.reagent_anti_b_series or "070R"
+        transfusion.reagent_anti_d_series = previous_transfusion.reagent_anti_d_series or "080"
+
+        defaults = self._default_reagent_expirations(date.today())
+        transfusion.reagent_anti_a_expiration = self._current_or_default_reagent_expiration(
+            previous_transfusion.reagent_anti_a_expiration,
+            defaults["anti_a"],
+        )
+        transfusion.reagent_anti_b_expiration = self._current_or_default_reagent_expiration(
+            previous_transfusion.reagent_anti_b_expiration,
+            defaults["anti_b"],
+        )
+        transfusion.reagent_anti_d_expiration = self._current_or_default_reagent_expiration(
+            previous_transfusion.reagent_anti_d_expiration,
+            defaults["anti_d"],
+        )
+
+        if previous.consent:
+            consent.consent_kind = ConsentKind.TRANSFUSION_CONSENT.value
+            consent.consent_mode = previous.consent.consent_mode or "patient"
+            consent.patient_signed = int(previous.consent.patient_signed or 0)
+            consent.representative_name = previous.consent.representative_name
+            consent.representative_details = previous.consent.representative_details
+            consent.consilium_json = previous.consent.consilium_json or "{}"
+            consent.emergency_reason = previous.consent.emergency_reason
+
+    @classmethod
+    def _default_reagent_expirations(cls, reference_date: date) -> dict[str, str]:
+        return {
+            "anti_a": cls._format_date(cls._add_months(reference_date, 3) + timedelta(days=7)),
+            "anti_b": cls._format_date(cls._add_months(reference_date, 3) + timedelta(days=7)),
+            "anti_d": cls._format_date(cls._add_months(reference_date, 2) + timedelta(days=9)),
+        }
+
+    @classmethod
+    def _current_or_default_reagent_expiration(cls, previous_value: str, default_value: str) -> str:
+        previous_date = cls._parse_date(previous_value)
+        if previous_date and previous_date >= date.today():
+            return cls._format_date(previous_date)
+        return default_value
+
     def _validate_transfusion_times(self, procedure: ProcedureDTO, transfusion: ProcedureTransfusionDTO) -> None:
         now = datetime.now().replace(second=59, microsecond=999999)
-        times = [
+        future_limited_times = [
             ("время подачи заявки", transfusion.request_at),
             ("начало трансфузии", procedure.started_at),
-            ("окончание трансфузии", procedure.finished_at),
         ]
-        for label, value in times:
+        for label, value in future_limited_times:
             if value and value > now:
                 raise ValueError(f"{label.capitalize()} не может быть в будущем.")
 
@@ -323,7 +395,12 @@ class ProceduresService:
         admission_dt = self._parse_snapshot_datetime(snapshot.get("admission_datetime"))
         if not admission_dt:
             return
-        for label, value in times:
+        admission_limited_times = [
+            ("время подачи заявки", transfusion.request_at),
+            ("начало трансфузии", procedure.started_at),
+            ("окончание трансфузии", procedure.finished_at),
+        ]
+        for label, value in admission_limited_times:
             if value and value < admission_dt.replace(second=0, microsecond=0):
                 raise ValueError(
                     f"{label.capitalize()} не может быть раньше поступления пациента "

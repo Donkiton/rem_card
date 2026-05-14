@@ -173,6 +173,7 @@ class ProcedureTransfusionDTO:
     donor_abo: str = ""
     donor_rh: str = ""
     donor_antigens: str = ""
+    donor_code: str = ""
     unit_number: str = ""
     volume_ml: Optional[int] = None
     collection_date: str = ""

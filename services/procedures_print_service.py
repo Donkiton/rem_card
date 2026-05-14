@@ -192,12 +192,12 @@ LP_RESULT_LABELS = {
 
 TRANSFUSION_INDICATION_LABELS = {
     "voce": "ВОЦЭ - восполнение объема циркулирующих эритроцитов",
-    "vpfs": "ВПФС - восполнение факторов свертываемости крови",
+    "vpfs": "ВПФС - восполнение плазменных факторов свёртывания крови",
 }
 
 TRANSFUSION_INDICATION_PRINT_LABELS = {
     "voce": "Восполнение объема циркулирующих эритроцитов",
-    "vpfs": "Восполнение факторов свертываемости крови",
+    "vpfs": "Восполнение плазменных факторов свёртывания крови",
 }
 
 TRANSFUSION_SCENARIO_SUFFIX = {
@@ -253,7 +253,7 @@ class ProceduresPrintService:
         if kind == "transfusion_protocol":
             return self._render_transfusion_protocol(bundle)
         if kind == "transfusion_consent":
-            raise ValueError("Шаблон согласия на гемотрансфузию будет добавлен позже.")
+            return self._render_transfusion_consent(bundle)
         raise ValueError(f"Неизвестный тип печати процедуры: {kind}")
 
     def build_pdf(self, procedure_id: int, document_kind: str, pdf_path) -> Path:
@@ -274,7 +274,7 @@ class ProceduresPrintService:
         elif kind == "transfusion_protocol":
             context = self._transfusion_protocol_context(bundle)
         elif kind == "transfusion_consent":
-            raise ValueError("Шаблон согласия на гемотрансфузию будет добавлен позже.")
+            context = self._transfusion_consent_context(bundle)
         else:
             raise ValueError(f"Неизвестный тип печати процедуры: {kind}")
         output_path = Path(pdf_path)
@@ -351,6 +351,15 @@ class ProceduresPrintService:
             f"<p>Пациент: {context.get('patient_name', '')}</p>"
             f"<p>Показание: {context.get('indication_print', '')}</p>"
             f"<p>Компонент: {context.get('donor_component_name', '')}</p>"
+            "</body></html>"
+        )
+
+    def _render_transfusion_consent(self, bundle: ProcedureBundle) -> str:
+        context = self._transfusion_consent_context(bundle)
+        return (
+            "<html><body>"
+            f"<h1>Информированное добровольное согласие на трансфузию</h1>"
+            f"<p>{context.get('patient_name', '')}</p>"
             "</body></html>"
         )
 
@@ -551,6 +560,7 @@ class ProceduresPrintService:
                 "donor_abo": self._plain(transfusion.donor_abo),
                 "donor_rh": self._plain(transfusion.donor_rh),
                 "donor_antigens": self._plain(transfusion.donor_antigens),
+                "donor_code": self._plain(transfusion.donor_code),
                 "unit_number": self._plain(transfusion.unit_number),
                 "volume_ml": self._plain(transfusion.volume_ml),
                 "collection_date": self._plain(transfusion.collection_date),
@@ -587,6 +597,26 @@ class ProceduresPrintService:
                 "obs_hour2_pulse": self._plain(observation.get("hour2", {}).get("pulse")),
                 "obs_hour2_temp": self._plain(observation.get("hour2", {}).get("temp")),
                 "obs_hour2_diuresis": self._plain(observation.get("hour2", {}).get("diuresis")),
+            }
+        )
+        return context
+
+    def _transfusion_consent_context(self, bundle: ProcedureBundle) -> dict[str, str]:
+        context = self._base_context(bundle)
+        consent = bundle.consent
+        consilium = self._consilium_dict(getattr(consent, "consilium_json", "") if consent else "")
+        procedure = bundle.procedure
+        context.update(
+            {
+                "doctor": self._plain(procedure.doctor_name_snapshot),
+                "consent_mode": self._plain(getattr(consent, "consent_mode", "patient") if consent else "patient"),
+                "representative_name": self._plain(getattr(consent, "representative_name", "") if consent else ""),
+                "representative_details": self._plain(getattr(consent, "representative_details", "") if consent else ""),
+                "transfusion_consent_date": self._format_date_words(procedure.started_at),
+                "birth_year": self._format_birth_year(context.get("birth_date", "")),
+                "consilium_doctor_1": self._plain(consilium.get("doctor_1")),
+                "consilium_doctor_2": self._plain(consilium.get("doctor_2")),
+                "consilium_doctor_3": self._plain(consilium.get("doctor_3")),
             }
         )
         return context
@@ -689,6 +719,39 @@ class ProceduresPrintService:
             12: "декабря",
         }
         return escape(f"{value.day} {months[value.month]} {value.year} г.")
+
+    @staticmethod
+    def _format_date_words(value: Any) -> str:
+        if not isinstance(value, datetime):
+            return ""
+        months = {
+            1: "января",
+            2: "февраля",
+            3: "марта",
+            4: "апреля",
+            5: "мая",
+            6: "июня",
+            7: "июля",
+            8: "августа",
+            9: "сентября",
+            10: "октября",
+            11: "ноября",
+            12: "декабря",
+        }
+        return escape(f"{value.day:02d} {months[value.month]} {value.year} года")
+
+    @staticmethod
+    def _format_birth_year(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y"):
+            try:
+                return escape(str(datetime.strptime(text[:10], fmt).year))
+            except ValueError:
+                continue
+        match = re.search(r"(19|20)\d{2}", text)
+        return escape(match.group(0) if match else "")
 
     @staticmethod
     def _format_time(value: Any) -> str:

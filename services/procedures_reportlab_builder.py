@@ -11,6 +11,7 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfgen import canvas as reportlab_canvas
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from rem_card.ui.rem_card_sectors.s_print.reportlab_builder import ReportLabReportBuilder
@@ -20,6 +21,7 @@ class ProcedureReportLabBuilder:
     FONT_REGULAR = ReportLabReportBuilder.FONT_REGULAR
     FONT_BOLD = ReportLabReportBuilder.FONT_BOLD
     FONT_ITALIC = "RemCardArial-Italic"
+    FONT_MONO = "RemCardCourierNew"
 
     @classmethod
     def build_pdf(cls, document_kind: str, context: dict[str, str], output_path) -> None:
@@ -41,6 +43,9 @@ class ProcedureReportLabBuilder:
             return
         if kind == "transfusion_protocol":
             cls.build_transfusion_protocol(context, output_path)
+            return
+        if kind == "transfusion_consent":
+            cls.build_transfusion_consent(context, output_path)
             return
         raise ValueError(f"Неизвестная печатная форма процедуры: {kind}")
 
@@ -154,6 +159,22 @@ class ProcedureReportLabBuilder:
         cls._ensure_fonts()
         story = [cls._transfusion_table(context)]
         cls._build(story, output_path, framed=False)
+
+    @classmethod
+    def build_transfusion_consent(cls, context: dict[str, str], output_path) -> None:
+        cls._ensure_fonts()
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pages = cls._transfusion_consent_pages(context)
+        pdf = reportlab_canvas.Canvas(str(output_path), pagesize=A4, pageCompression=1)
+        doc_proxy = type("DocProxy", (), {"pagesize": A4})()
+        for page_lines in pages:
+            cls._draw_page_background(pdf, doc_proxy)
+            cls._draw_mono_page(pdf, page_lines)
+            pdf.showPage()
+        pdf.save()
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            raise OSError(f"PDF file was not created: {output_path}")
 
     @classmethod
     def build_lp_consent(cls, context: dict[str, str], output_path) -> None:
@@ -520,6 +541,224 @@ class ProcedureReportLabBuilder:
         return table
 
     @classmethod
+    def _draw_mono_page(cls, pdf, lines: list[str]) -> None:
+        pdf.saveState()
+        try:
+            pdf.setFont(cls.FONT_MONO, 10)
+            pdf.setFillColor(colors.black)
+            x = 30 * mm
+            y = A4[1] - 38
+            line_height = 12
+            for line in lines:
+                pdf.drawString(x, y, cls._plain_pdf_text(line))
+                y -= line_height
+            if any("Этот  раздел  бланка" in line for line in lines):
+                box_top = A4[1] - 38 - (15 - 1) * line_height + 4
+                box_bottom = A4[1] - 38 - (24 - 1) * line_height - 4
+                pdf.setLineWidth(0.8)
+                pdf.rect(x + 3, box_bottom, 66 * 6, box_top - box_bottom, stroke=1, fill=0)
+        finally:
+            pdf.restoreState()
+
+    @classmethod
+    def _transfusion_consent_pages(cls, context: dict[str, str]) -> list[list[str]]:
+        lines = cls._transfusion_consent_lines(context)
+        page_1 = lines[:67]
+        page_2 = lines[67:]
+        return [page_1, page_2]
+
+    @classmethod
+    def _transfusion_consent_lines(cls, context: dict[str, str]) -> list[str]:
+        patient_name = cls._plain_pdf_text(context.get("patient_name", ""))
+        birth_year = cls._plain_pdf_text(context.get("birth_year", ""))
+        doctor = cls._plain_pdf_text(context.get("doctor", ""))
+        consent_date = cls._plain_pdf_text(context.get("transfusion_consent_date", ""))
+        consent_mode = cls._plain_pdf_text(context.get("consent_mode", "patient"))
+        show_consilium = consent_mode == "consilium"
+
+        lines = [
+            "    ",
+            "            ФЕДЕРАЛЬНОЕ МЕДИКО-БИОЛОГИЧЕСКОЕ АГЕНТСТВО",
+            "           ЦМСЧ/МСЧ/КБ/ИНСТИТУТ _______________________",
+            "",
+            " ",
+            "              Информированное добровольное согласие",
+            "      на оперативное вмешательство, в т.ч. переливание крови",
+            "                         и ее компонентов",
+            "",
+            cls._field_line("Я ", patient_name, 66),
+            "               (фамилия, имя, отчество - полностью)",
+            f"{cls._birth_year_field(birth_year)} года рождения, проживающий(ая) по адресу: ___________",
+            "__________________________________________________________________",
+            "",
+            "",
+            " Этот  раздел  бланка  заполняется  только  на  лиц, не достигших",
+            " возраста 15 лет, или недееспособных граждан: Я, паспорт: ______,",
+            " выдан: _________________________________________________________",
+            " являюсь  законным   представителем  (мать,   отец,  усыновитель,",
+            " опекун,    попечитель)    ребенка    или    лица,    признанного",
+            " недееспособным: ________________________________________________",
+            "                 (Ф.И.О. ребенка или недееспособного гражданина -",
+            "                             полностью, год рождения)            ",
+            "",
+            "",
+            "находясь на лечении  (обследовании,  родоразрешении)  в  отделении",
+            "________________________ОАРИТ №3__________________________________",
+            "                (название отделения, номер палаты)",
+            "__________________________________________________________________",
+            "добровольно даю свое согласие на проведение мне (представляемому):",
+            "операции: ______гемотрансфузия (плазмотрансфузия)_________________",
+            "__________________________________________________________________",
+            "__________________________________________________________________",
+            "              (название медицинского вмешательства)",
+            "и прошу персонал медицинского учреждения о ее проведении.",
+            "Подтверждаю,   что   я   ознакомлен   (ознакомлена)  с  характером",
+            "предстоящей мне (представляемому) операции. Мне  разъяснены,  и  я",
+            "понимаю особенности и ход предстоящего оперативного лечения.",
+            "-  Мне  разъяснено  и  я  осознаю,  что  во  время  операции могут",
+            "возникнуть  непредвиденные  обстоятельства  и  осложнения. В таком",
+            "случае  я  согласен  (согласна) на то, что ход операции может быть",
+            "изменен врачами по их усмотрению.",
+            "-  Я  предупрежден (предупреждена) о факторах риска и понимаю, что",
+            "проведение  операции сопряжено с риском потери крови, возможностью",
+            "инфекционных  осложнений, нарушений со стороны сердечно-сосудистой",
+            "и  других  систем  жизнедеятельности  организма, непреднамеренного",
+            "причинения вреда здоровью и даже неблагоприятного исхода.",
+            "-  Я  предупрежден  (предупреждена),  что  в  ряде  случаев  могут",
+            "потребоваться  повторные  операции,  в  т.ч.  в связи с возможными",
+            "послеоперационными   осложнениями   или  с  особенностями  течения",
+            "заболевания, и даю свое согласие на это.",
+            "-  Я  поставил (поставила) в известность врача обо всех проблемах,",
+            "связанных  со  здоровьем, в том числе об аллергических проявлениях",
+            "или  индивидуальной  непереносимости лекарственных препаратов, обо",
+            "всех  перенесенных  мною (представляемым) и известных мне травмах,",
+            "операциях,   заболеваниях,   в   т.ч.  носительстве  ВИЧ-инфекции,",
+            "вирусных  гепатитах,  туберкулезе, инфекциях, передаваемых половым",
+            "путем,  об  экологических  и производственных факторах физической,",
+            "химической  или  биологической  природы,  воздействующих  на  меня",
+            "(представляемого)    во   время   жизнедеятельности,   принимаемых",
+            "лекарственных  средствах, проводившихся ранее переливаниях крови и",
+            "ее   компонентов.   Сообщил   (сообщила)   правдивые   сведения  о",
+            "наследственности,  а также об употреблении алкоголя, наркотических",
+            "и токсических средств.",
+            "-  Я  знаю, что во время операции возможна потеря крови и ________",
+            "даю согласие на переливание донорской или ауто (собственной) крови",
+            "и ее компонентов.",
+            "- Я _______________ согласен (согласна) на запись хода операции на",
+            "информационные   носители   и  демонстрацию  лицам  с  медицинским",
+            "образованием исключительно в медицинских,  научных  или  обучающих",
+            "целях с учетом сохранения врачебной тайны.",
+            "-  Мне  была  предоставлена  возможность  задать вопросы о степени",
+            "риска  и  пользе  оперативного  вмешательства,  в т.ч. переливаний",
+            "донорской или ауто (собственной) крови и/или ее компонентов и врач",
+            "дал понятные мне исчерпывающие ответы.",
+            "- Я ознакомлен  (ознакомлена)  и  согласен   (согласна)  со  всеми",
+            "пунктами настоящего  документа, положения которого мне разъяснены,",
+            "мною поняты и добровольно даю свое согласие на ___________________",
+            "__________________________________________________________________",
+            "__________________________________________________________________",
+            "",
+            "                                                             ----",
+            cls._patient_signature_date_line(consent_date),
+            "                                 представителя               ----",
+            "",
+            "Расписался в моем присутствии:                               ----",
+            cls._doctor_consent_line(doctor),
+            "              (должность, И.О. Фамилия)                      ----                     ",
+            "",
+            "ПРИМЕЧАНИЕ:",
+            "    Согласие  на  медицинское  вмешательство  в  отношении лиц, не",
+            "достигших  возраста  15 лет, и граждан, признанных в установленном",
+            "законом  порядке  недееспособными,  дают их законные представители",
+            "(родители,   усыновители,  опекуны  или  попечители)  с  указанием",
+            "Ф.И.О.,  паспортных  данных, родственных отношений после сообщения",
+            "им  сведений  о результатах обследования, наличии заболевания, его",
+            "диагнозе  и  прогнозе,  методах  лечения,  связанном с ними риске,",
+            "возможных  вариантах медицинского вмешательства, их последствиях и",
+            "результатах проведенного лечения.",
+            "    При  отсутствии  законных представителей решение о медицинском",
+            "вмешательстве  принимает  консилиум,  а  при невозможности собрать",
+            "консилиум  - непосредственно лечащий (дежурный) врач с последующим",
+            "уведомлением  главного врача/начальника ЦМСЧ/МСЧ/КБ/Института, а в",
+            "выходные,   праздничные   дни,   вечернее   и   ночное   время   -",
+            "ответственного дежурного врача и законных представителей.",
+            "    В   случаях,  когда  состояние  гражданина  не  позволяет  ему",
+            "выразить  свою волю, а медицинское вмешательство неотложно, вопрос",
+            "о  его  проведении  в интересах гражданина решает консилиум, а при",
+            "невозможности   собрать   консилиум   -   непосредственно  лечащий",
+            "(дежурный)    врач    с    последующим    уведомлением    главного",
+            "врача/начальника ЦМСЧ/МСЧ/КБ/Института,  а в выходные, праздничные",
+            "дни, вечернее и ночное время - ответственного дежурного врача.",
+            "",
+            "Дополнительная информация:",
+            "__________________________________________________________________",
+            "__________________________________________________________________",
+            "__________________________________________________________________",
+            "",
+            "                                                             ----",
+            cls._patient_signature_date_line(consent_date),
+            "                                 представителя               ----",
+            "",
+            "Расписался в моем присутствии:                               ----",
+            cls._doctor_consent_line(doctor),
+            "              (должность, И.О. Фамилия)                      ----",
+        ]
+        if show_consilium:
+            lines.extend(
+                [
+                    "",
+                    "Консилиум врачей в составе:",
+                    cls._consilium_line(context.get("consilium_doctor_1", "")),
+                    cls._consilium_line(context.get("consilium_doctor_2", "")),
+                    cls._consilium_line(context.get("consilium_doctor_3", "")),
+                    "",
+                    cls._plain_pdf_text(consent_date) or '"__" ___________ 20__ года',
+                ]
+            )
+        return lines
+
+    @staticmethod
+    def _field_value(value: str, width: int) -> str:
+        text = str(value or "").strip().replace("\n", " ")
+        if not text:
+            return "_" * width
+        return (text + "_" * width)[:width]
+
+    @staticmethod
+    def _birth_year_field(value: str) -> str:
+        text = str(value or "").strip().replace("\n", " ")
+        if not text:
+            return "_" * 12
+        return text[:12].ljust(12)
+
+    @classmethod
+    def _field_line(cls, prefix: str, value: str, width: int, suffix: str = "") -> str:
+        text = cls._plain_pdf_text(value).strip().replace("\n", " ")
+        available = max(0, width - len(prefix) - len(suffix))
+        if text:
+            field = (text + " " + "_" * available)[:available]
+        else:
+            field = "_" * available
+        return f"{prefix}{field}{suffix}"
+
+    @classmethod
+    def _patient_signature_date_line(cls, date_text: str) -> str:
+        date_value = cls._plain_pdf_text(date_text) or '"__" ___________ 20__ года'
+        return f"{date_value:<29}      Подпись пациента/законного "
+
+    @classmethod
+    def _doctor_consent_line(cls, doctor_name: str) -> str:
+        return cls._field_line("Врач ", doctor_name, 66, " (подпись)")
+
+    @classmethod
+    def _consilium_line(cls, doctor_name: str) -> str:
+        return cls._field_line("Должность, Ф.И.О. и подпись ", doctor_name, 66)
+
+    @staticmethod
+    def _plain_pdf_text(value) -> str:
+        return html.unescape(str(value or "")).replace("\r", " ").replace("\n", " ")
+
+    @classmethod
     def _cvc_consent_note(cls, context: dict[str, str]) -> list:
         reason = context.get("emergency_reason", "") or "______________________________________________"
         return [
@@ -600,8 +839,14 @@ class ProcedureReportLabBuilder:
         def cell(text: str, style: str = "transfusion_cell") -> Paragraph:
             return Paragraph(cls._text(text).replace("\n", "<br/>"), styles[style])
 
+        def rich_cell(text: str, style: str = "transfusion_cell") -> Paragraph:
+            return Paragraph(str(text or "").replace("\n", "<br/>"), styles[style])
+
         def put(row: int, col: int, text: str, style: str = "transfusion_cell"):
             data[row - 1][col - 1] = cell(text, style)
+
+        def put_rich(row: int, col: int, text: str, style: str = "transfusion_cell"):
+            data[row - 1][col - 1] = rich_cell(text, style)
 
         put(1, 1, "ПРОТОКОЛ ТРАНСФУЗИИ", "transfusion_title")
         put(2, 1, "ФИО реципиента:", "transfusion_cell_bold")
@@ -610,7 +855,8 @@ class ProcedureReportLabBuilder:
         put(3, 1, context.get("patient_name", ""))
         put(3, 4, context.get("request_datetime", ""))
         put(3, 7, context.get("transfusion_date", ""))
-        put(5, 1, f"Отделение {context.get('department', '')}", "transfusion_cell_bold")
+        profile_text = cls._text(context.get("department", ""))
+        put_rich(5, 1, f'<font name="{cls.FONT_BOLD}">Профиль:</font> {profile_text}')
         put(5, 4, "№:", "transfusion_cell_bold")
         put(5, 5, context.get("history_number", ""))
         put(5, 7, "Время начала трансфузии:", "transfusion_cell_bold")
@@ -626,8 +872,12 @@ class ProcedureReportLabBuilder:
         put(9, 2, context.get("recipient_antigens", ""))
         put(9, 7, "Аллоиммунные антитела:", "transfusion_cell_bold")
         put(9, 10, context.get("alloimmune_antibodies", ""), "transfusion_cell_center")
-        indication_text = context.get("indication_print", "")
-        put(10, 1, f"Показания к трансфузии: {indication_text}".strip(), "transfusion_cell_bold")
+        indication_text = cls._text(context.get("indication_print", ""))
+        put_rich(
+            10,
+            1,
+            f'<font name="{cls.FONT_BOLD}">Показания к трансфузии:</font> {indication_text}'.strip(),
+        )
         put(12, 1, "Трансфузии компонентов крови в анамнезе:", "transfusion_cell_bold")
         put(12, 4, "Реакции и осложнения на трансфузии в анамнезе:", "transfusion_cell_bold")
         put(12, 8, "Трансфузии по индивидуальному подбору:", "transfusion_cell_bold")
@@ -888,6 +1138,19 @@ class ProcedureReportLabBuilder:
         ReportLabReportBuilder._ensure_fonts_registered()
         cls.FONT_REGULAR = ReportLabReportBuilder.FONT_REGULAR
         cls.FONT_BOLD = ReportLabReportBuilder.FONT_BOLD
+        if cls.FONT_MONO not in pdfmetrics.getRegisteredFontNames():
+            windir = os.environ.get("WINDIR", r"C:\Windows")
+            mono_candidates = [
+                os.path.join(windir, "Fonts", "cour.ttf"),
+                os.path.join(windir, "Fonts", "consola.ttf"),
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            ]
+            for mono_path in mono_candidates:
+                if os.path.exists(mono_path):
+                    pdfmetrics.registerFont(TTFont(cls.FONT_MONO, mono_path))
+                    break
+            else:
+                cls.FONT_MONO = cls.FONT_REGULAR
         if cls.FONT_ITALIC in pdfmetrics.getRegisteredFontNames():
             return
 

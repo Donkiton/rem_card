@@ -158,9 +158,17 @@ class ProceduresListWidget(QTableWidget):
 
     @staticmethod
     def _status_label(procedure) -> str:
-        if procedure.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
-            if procedure.status in {ProcedureStatus.ACTIVE.value, ProcedureStatus.COMPLETED.value}:
-                return "Выполнено"
+        status = str(getattr(procedure, "status", "") or "")
+        if status == ProcedureStatus.DRAFT.value:
+            return "Черновик"
+        performed_statuses = {ProcedureStatus.COMPLETED.value}
+        if procedure.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value}:
+            performed_statuses.add(ProcedureStatus.ACTIVE.value)
+        if status in performed_statuses:
+            finished_at = getattr(procedure, "finished_at", None)
+            if finished_at and finished_at > datetime.now():
+                return "В процессе"
+            return "Завершена"
         return PROCEDURE_STATUS_LABELS.get(procedure.status, procedure.status)
 
     @staticmethod

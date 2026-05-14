@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 14
-SCHEMA_MIN_MIGRATION_VERSION = 14
+SCHEMA_FASTPATH_REV = 15
+SCHEMA_MIN_MIGRATION_VERSION = 15
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -106,7 +106,7 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     "procedure_consents": {"procedure_id", "consent_kind", "consent_mode", "patient_signed", "consilium_json", "revision"},
     "procedure_cvc": {"procedure_id", "indications_json", "access_code", "catheter_status", "removed_or_replaced", "revision"},
     "procedure_lumbar_puncture": {"procedure_id", "indications_json", "access_code", "level_code", "result_code", "revision"},
-    "procedure_transfusion": {"procedure_id", "indication_code", "request_at", "observation_json", "revision"},
+    "procedure_transfusion": {"procedure_id", "indication_code", "request_at", "donor_code", "observation_json", "revision"},
 }
 
 _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
@@ -1072,6 +1072,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             donor_abo TEXT,
             donor_rh TEXT,
             donor_antigens TEXT,
+            donor_code TEXT,
             unit_number TEXT,
             volume_ml INTEGER,
             collection_date TEXT,
@@ -1289,6 +1290,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "patient_status_events", "revision", "INTEGER DEFAULT 0", logger)
     _ensure_column(conn, "procedure_transfusion", "request_at", "DATETIME", logger)
     _ensure_column(conn, "procedure_transfusion", "indication_code", "TEXT", logger)
+    _ensure_column(conn, "procedure_transfusion", "donor_code", "TEXT", logger)
     _ensure_column(conn, "procedure_transfusion", "observation_json", "TEXT", logger)
     _ensure_column(conn, "procedure_transfusion", "revision", "INTEGER DEFAULT 0", logger)
 

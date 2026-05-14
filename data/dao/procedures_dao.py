@@ -133,6 +133,55 @@ class ProceduresDAO:
             patient_snapshot=snapshot,
         )
 
+    def get_latest_completed_transfusion_bundle(
+        self,
+        *,
+        patient_id: Optional[int],
+        admission_id: Optional[int],
+    ) -> Optional[ProcedureBundle]:
+        params: list[Any] = [
+            ProcedureType.TRANSFUSION.value,
+            ProcedureStatus.COMPLETED.value,
+            ProcedureStatus.ACTIVE.value,
+        ]
+        where = [
+            "p.procedure_type = ?",
+            "p.status IN (?, ?)",
+            "COALESCE(p.is_deleted, 0) = 0",
+        ]
+        if patient_id:
+            where.append("p.patient_id = ?")
+            params.append(int(patient_id))
+        elif admission_id:
+            where.append("p.admission_id = ?")
+            params.append(int(admission_id))
+        else:
+            return None
+        row = self.db.fetch_one_remcard(
+            f"""
+            SELECT p.*, t.indication_code AS procedure_subtype
+            FROM procedures p
+            JOIN procedure_transfusion t ON t.procedure_id = p.id
+            WHERE {" AND ".join(where)}
+            ORDER BY COALESCE(p.started_at, p.created_at) DESC, p.id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+        procedure = self._map_procedure(row) if row else None
+        if not procedure or not procedure.id:
+            return None
+        transfusion = self.get_transfusion(int(procedure.id))
+        if transfusion is None:
+            return None
+        consent = self.get_consent(int(procedure.id), ConsentKind.TRANSFUSION_CONSENT.value)
+        return ProcedureBundle(
+            procedure=procedure,
+            transfusion=transfusion,
+            consent=consent,
+            patient_snapshot=self._json_load(procedure.patient_snapshot_json, {}),
+        )
+
     def save_procedure(self, cursor, dto: ProcedureDTO) -> int:
         if dto.id is None:
             cursor.execute(
@@ -366,14 +415,14 @@ class ProceduresDAO:
                 recipient_antigens, alloimmune_antibodies, transfusions_history,
                 reactions_history, reactions_history_details, individual_selection_history,
                 donor_component_name, procurement_org, donor_abo, donor_rh, donor_antigens,
-                unit_number, volume_ml, collection_date, expiration_date, selection_medical_org,
+                donor_code, unit_number, volume_ml, collection_date, expiration_date, selection_medical_org,
                 selection_study_date, selection_responsible_name, selection_conclusion,
                 reagent_anti_a_series, reagent_anti_a_expiration, reagent_anti_b_series,
                 reagent_anti_b_expiration, reagent_anti_d_series, reagent_anti_d_expiration,
                 plane_compatibility, biological_test, reaction_symptoms, reaction_severity,
                 observation_json, operator_doctor_name, revision
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             ON CONFLICT(procedure_id) DO UPDATE SET
                 request_at = excluded.request_at,
                 indication_code = excluded.indication_code,
@@ -390,6 +439,7 @@ class ProceduresDAO:
                 donor_abo = excluded.donor_abo,
                 donor_rh = excluded.donor_rh,
                 donor_antigens = excluded.donor_antigens,
+                donor_code = excluded.donor_code,
                 unit_number = excluded.unit_number,
                 volume_ml = excluded.volume_ml,
                 collection_date = excluded.collection_date,
@@ -429,6 +479,7 @@ class ProceduresDAO:
                 dto.donor_abo,
                 dto.donor_rh,
                 dto.donor_antigens,
+                dto.donor_code,
                 dto.unit_number,
                 dto.volume_ml,
                 dto.collection_date,
@@ -679,6 +730,7 @@ class ProceduresDAO:
             donor_abo=r.get("donor_abo") or "",
             donor_rh=r.get("donor_rh") or "",
             donor_antigens=r.get("donor_antigens") or "",
+            donor_code=r.get("donor_code") or "",
             unit_number=r.get("unit_number") or "",
             volume_ml=r.get("volume_ml"),
             collection_date=r.get("collection_date") or "",

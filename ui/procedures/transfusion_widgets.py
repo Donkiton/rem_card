@@ -39,7 +39,7 @@ RH_ITEMS = (
 
 INDICATION_LABELS = {
     "voce": "ВОЦЭ - восполнение объема циркулирующих эритроцитов",
-    "vpfs": "ВПФС - восполнение факторов свертываемости крови",
+    "vpfs": "ВПФС - восполнение плазменных факторов свёртывания крови",
 }
 
 ALLOIMMUNE_LABELS = {
@@ -52,6 +52,24 @@ ALLOIMMUNE_LABELS = {
 }
 
 DEFAULT_PROCUREMENT_ORG = "КГБУЗ 'КСПК', г.Комсомолькс-на-Амуре ."
+COMPONENT_OPTIONS = {
+    "voce": ("Эритроцитарная взвесь", "Эритроцитарная масса"),
+    "vpfs": ("СЗП",),
+}
+COMPONENT_PRESETS = {value for values in COMPONENT_OPTIONS.values() for value in values}
+
+
+class ComponentNameComboBox(QComboBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._popup_enabled = True
+
+    def set_popup_enabled(self, enabled: bool):
+        self._popup_enabled = bool(enabled)
+
+    def showPopup(self):
+        if self._popup_enabled:
+            super().showPopup()
 
 
 class TransfusionMedicalWidget(QWidget):
@@ -105,7 +123,7 @@ class TransfusionMedicalWidget(QWidget):
         self.alloimmune_combo = QComboBox()
         for code, label in ALLOIMMUNE_LABELS.items():
             self.alloimmune_combo.addItem(label, code)
-        form.addRow("Группа крови пациента:", self.recipient_abo_combo)
+        form.addRow("Группа крови реципиента:", self.recipient_abo_combo)
         form.addRow("Резус-фактор реципиента:", self.recipient_rh_combo)
         form.addRow("Антигены реципиента:", self.recipient_antigens_edit)
         form.addRow("Аллоиммунные антитела:", self.alloimmune_combo)
@@ -136,12 +154,13 @@ class TransfusionMedicalWidget(QWidget):
     def _build_donor_group(self) -> QGroupBox:
         box = self._section("Данные о донорской крови и ее компоненте")
         form = QFormLayout(box)
-        self.component_combo = QComboBox()
+        self.component_combo = ComponentNameComboBox()
         self.component_combo.setEditable(True)
         self.procurement_org_edit = QLineEdit(DEFAULT_PROCUREMENT_ORG)
         self.donor_abo_combo = self._blood_group_combo()
         self.donor_rh_combo = self._rh_combo()
         self.donor_antigens_edit = QLineEdit()
+        self.donor_code_edit = QLineEdit()
         self.unit_number_edit = QLineEdit()
         self.unit_number_edit.setPlaceholderText("270226 002248 00")
         self.unit_number_edit.textEdited.connect(self._format_unit_number)
@@ -158,6 +177,7 @@ class TransfusionMedicalWidget(QWidget):
         form.addRow("Группа крови донора:", self.donor_abo_combo)
         form.addRow("Резус-фактор донора:", self.donor_rh_combo)
         form.addRow("Антигены донора:", self.donor_antigens_edit)
+        form.addRow("Код донора:", self.donor_code_edit)
         form.addRow("№ единицы компонента крови:", self.unit_number_edit)
         form.addRow("Количество, мл:", self.volume_edit)
         form.addRow("Дата заготовки:", self.collection_date_edit)
@@ -245,13 +265,18 @@ class TransfusionMedicalWidget(QWidget):
             alloimmune_antibodies=str(self.alloimmune_combo.currentData() or "negative"),
             transfusions_history=str(self.transfusions_history_combo.currentData() or "no"),
             reactions_history=str(self.reactions_history_combo.currentData() or "no"),
-            reactions_history_details=self.reactions_history_details_edit.text().strip(),
+            reactions_history_details=(
+                self.reactions_history_details_edit.text().strip()
+                if str(self.reactions_history_combo.currentData() or "no") == "yes"
+                else ""
+            ),
             individual_selection_history=str(self.individual_selection_history_combo.currentData() or "no"),
             donor_component_name=self.component_combo.currentText().strip(),
             procurement_org=self.procurement_org_edit.text().strip(),
             donor_abo=str(self.donor_abo_combo.currentData() or ""),
             donor_rh=str(self.donor_rh_combo.currentData() or ""),
             donor_antigens=self.donor_antigens_edit.text().strip(),
+            donor_code=self.donor_code_edit.text().strip(),
             unit_number=self.unit_number_edit.text().strip(),
             volume_ml=int(volume_text) if volume_text else None,
             collection_date=self.collection_date_edit.text().strip(),
@@ -291,6 +316,7 @@ class TransfusionMedicalWidget(QWidget):
         self._set_combo_data(self.donor_abo_combo, dto.donor_abo)
         self._set_combo_data(self.donor_rh_combo, dto.donor_rh)
         self.donor_antigens_edit.setText(dto.donor_antigens)
+        self.donor_code_edit.setText(dto.donor_code)
         self.unit_number_edit.setText(dto.unit_number)
         self.volume_edit.setText(str(dto.volume_ml or ""))
         self.collection_date_edit.setText(dto.collection_date)
@@ -318,19 +344,25 @@ class TransfusionMedicalWidget(QWidget):
             return
         scenario = str(self.indication_combo.currentData() or "")
         current_text = self.component_combo.currentText().strip()
+        options = COMPONENT_OPTIONS.get(scenario, ())
+        reset_to_empty = current_text in COMPONENT_PRESETS and current_text not in options
         self.component_combo.blockSignals(True)
         try:
             self.component_combo.clear()
-            if scenario == "vpfs":
-                self.component_combo.addItem("СЗП")
-            else:
-                self.component_combo.addItem("Эритроцитарная масса")
-                self.component_combo.addItem("эритроцитарная взвесь")
             self.component_combo.setEditable(True)
-            if current_text:
+            self.component_combo.set_popup_enabled(bool(options))
+            if options:
+                self.component_combo.addItem("")
+                for option in options:
+                    self.component_combo.addItem(option)
+            if reset_to_empty:
+                self.component_combo.setCurrentIndex(0 if options else -1)
+                self.component_combo.setEditText("")
+            elif current_text:
                 self.component_combo.setEditText(current_text)
             else:
-                self.component_combo.setCurrentIndex(-1)
+                self.component_combo.setCurrentIndex(0 if options else -1)
+                self.component_combo.setEditText("")
         finally:
             self.component_combo.blockSignals(False)
         self.plane_row.setVisible(scenario != "vpfs")
@@ -339,7 +371,12 @@ class TransfusionMedicalWidget(QWidget):
 
     def _apply_reactions_history(self):
         if hasattr(self, "reactions_history_details_edit"):
-            self.reactions_history_details_edit.setVisible(str(self.reactions_history_combo.currentData() or "no") == "yes")
+            has_reactions = str(self.reactions_history_combo.currentData() or "no") == "yes"
+            self.reactions_history_details_edit.setReadOnly(not has_reactions)
+            if has_reactions:
+                self.reactions_history_details_edit.setPlaceholderText("Какие осложнения")
+            else:
+                self.reactions_history_details_edit.setPlaceholderText("Недоступно при ответе «нет»")
 
     def _on_collection_date_finished(self):
         self._normalize_date_edit(self.collection_date_edit)
@@ -615,14 +652,21 @@ class TransfusionConsentWidget(QWidget):
         self.mode_combo.addItem("Консилиум", "consilium")
         self.mode_combo.currentIndexChanged.connect(self._apply_mode)
         self.representative_name_edit = QLineEdit()
+        self.representative_name_edit.setPlaceholderText("ФИО законного представителя")
         self.representative_details_edit = QLineEdit()
+        self.representative_details_edit.setPlaceholderText("Реквизиты документа представителя")
         self.emergency_reason_edit = QTextEdit()
         self.emergency_reason_edit.setFixedHeight(70)
+        self.emergency_reason_edit.setPlaceholderText("Причина невозможности получить согласие")
         self.consilium_1_edit = QLineEdit()
+        self.consilium_1_edit.setPlaceholderText("ФИО врача и должность")
         self.consilium_2_edit = QLineEdit()
+        self.consilium_2_edit.setPlaceholderText("ФИО врача и должность")
         self.consilium_3_edit = QLineEdit()
+        self.consilium_3_edit.setPlaceholderText("ФИО врача и должность")
         self.consilium_notes_edit = QTextEdit()
         self.consilium_notes_edit.setFixedHeight(70)
+        self.consilium_notes_edit.setPlaceholderText("Особое мнение / примечание")
         form.addRow("Тип согласия:", self.mode_combo)
         form.addRow("Представитель:", self.representative_name_edit)
         form.addRow("Документ:", self.representative_details_edit)
