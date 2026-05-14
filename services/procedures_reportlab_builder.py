@@ -550,7 +550,9 @@ class ProcedureReportLabBuilder:
             y = A4[1] - 38
             line_height = 12
             for line in lines:
-                pdf.drawString(x, y, cls._plain_pdf_text(line))
+                text = cls._plain_pdf_text(line)
+                pdf.drawString(x, y, text)
+                cls._draw_transfusion_consent_underlines(pdf, text, x, y)
                 y -= line_height
             if any("Этот  раздел  бланка" in line for line in lines):
                 box_top = A4[1] - 38 - (15 - 1) * line_height + 4
@@ -641,10 +643,10 @@ class ProcedureReportLabBuilder:
             "ее   компонентов.   Сообщил   (сообщила)   правдивые   сведения  о",
             "наследственности,  а также об употреблении алкоголя, наркотических",
             "и токсических средств.",
-            "-  Я  знаю, что во время операции возможна потеря крови и ________",
+            "-  Я  знаю, что во время операции возможна потеря крови и",
             "даю согласие на переливание донорской или ауто (собственной) крови",
             "и ее компонентов.",
-            "- Я _______________ согласен (согласна) на запись хода операции на",
+            f"- Я {cls._field_value(patient_name, 30)} согласен (согласна) на запись хода операции на",
             "информационные   носители   и  демонстрацию  лицам  с  медицинским",
             "образованием исключительно в медицинских,  научных  или  обучающих",
             "целях с учетом сохранения врачебной тайны.",
@@ -654,8 +656,8 @@ class ProcedureReportLabBuilder:
             "дал понятные мне исчерпывающие ответы.",
             "- Я ознакомлен  (ознакомлена)  и  согласен   (согласна)  со  всеми",
             "пунктами настоящего  документа, положения которого мне разъяснены,",
-            "мною поняты и добровольно даю свое согласие на ___________________",
-            "__________________________________________________________________",
+            "мною поняты и добровольно даю свое согласие на гемотрансфузию",
+            "(плазмотрансфузию)._______________________________________________",
             "__________________________________________________________________",
             "",
             "                                                             ----",
@@ -723,6 +725,21 @@ class ProcedureReportLabBuilder:
         if not text:
             return "_" * width
         return (text + "_" * width)[:width]
+
+    @classmethod
+    def _draw_transfusion_consent_underlines(cls, pdf, text: str, x: float, y: float) -> None:
+        phrases = (
+            "гемотрансфузия (плазмотрансфузия)",
+            "гемотрансфузию",
+            "(плазмотрансфузию).",
+        )
+        char_width = pdf.stringWidth("0", cls.FONT_MONO, 10)
+        for phrase in phrases:
+            start = text.find(phrase)
+            while start >= 0:
+                end = start + len(phrase)
+                pdf.line(x + start * char_width, y - 1.4, x + end * char_width, y - 1.4)
+                start = text.find(phrase, end)
 
     @staticmethod
     def _birth_year_field(value: str) -> str:
