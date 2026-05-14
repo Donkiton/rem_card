@@ -639,19 +639,23 @@ def _shutdown_window_resources(window, logger):
     if not container:
         return
 
+    data_service_shutdown_ok = True
     data_service = getattr(container, "data_service", None)
     if data_service:
         try:
-            data_service.shutdown()
+            data_service_shutdown_ok = bool(data_service.shutdown())
         except Exception as exc:
+            data_service_shutdown_ok = False
             logger.warning("DataService shutdown failed: %s", exc)
 
     db_manager = getattr(container, "db_manager", None)
-    if db_manager:
+    if db_manager and data_service_shutdown_ok:
         try:
             db_manager.close()
         except Exception as exc:
             logger.warning("DB manager close failed: %s", exc)
+    elif db_manager:
+        logger.warning("DB manager close skipped because DataService shutdown did not complete cleanly")
 
 
 def main(forced_role: Optional[str] = None, path_setup: bool = False):

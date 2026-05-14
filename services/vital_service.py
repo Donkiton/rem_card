@@ -152,6 +152,27 @@ class VitalService:
             result.setdefault(int(adm_id), dict(default_values))
         return result
 
+    def get_transfusion_observation_values(self, admission_id: int, started_at, finished_at) -> Dict[str, Dict[str, str]]:
+        started = self._coerce_datetime(started_at) or datetime.now().replace(second=0, microsecond=0)
+        finished = self._coerce_datetime(finished_at) or started
+        now = datetime.now()
+        slots = {
+            "before": self.vitals_dao.get_latest_vital_values_before(int(admission_id), started),
+            "hour1": self.vitals_dao.get_transfusion_followup_vital_values(
+                int(admission_id),
+                finished + timedelta(hours=1),
+                now,
+                before_window_minutes=10,
+            ),
+            "hour2": self.vitals_dao.get_transfusion_followup_vital_values(
+                int(admission_id),
+                finished + timedelta(hours=2),
+                now,
+                before_window_minutes=10,
+            ),
+        }
+        return {slot: self._format_transfusion_vitals(values) for slot, values in slots.items()}
+
     def get_vital_settings_cached_bulk(self, admission_ids: Sequence[int], date: datetime) -> Dict[int, Dict[str, Any]]:
         if self._settings_cache is None:
             self._settings_cache = {}
@@ -193,6 +214,30 @@ class VitalService:
 
     def get_all_vital_dates(self, admission_id: int) -> List[datetime]:
         return self.vitals_dao.get_all_vital_dates(admission_id)
+
+    @staticmethod
+    def _coerce_datetime(value) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace(" ", "T"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_transfusion_vitals(values: Dict[str, Any]) -> Dict[str, str]:
+        sys_value = values.get("sys")
+        dia_value = values.get("dia")
+        pulse = values.get("pulse")
+        temp = values.get("temp")
+        result = {
+            "bp": f"{int(sys_value)}/{int(dia_value)}" if sys_value is not None and dia_value is not None else "",
+            "pulse": f"{int(pulse)}" if pulse is not None else "",
+            "temp": f"{float(temp):.1f}" if temp is not None else "",
+        }
+        return result
 
     @staticmethod
     def _minute_floor(value: datetime) -> datetime:

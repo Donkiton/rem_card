@@ -12,6 +12,7 @@ from rem_card.data.dto.procedures_dto import (
     ProcedureDTO,
     ProcedureLumbarPunctureDTO,
     ProcedureStatus,
+    ProcedureTransfusionDTO,
     ProcedureType,
 )
 
@@ -90,11 +91,12 @@ class ProceduresDAO:
     def list_by_admission(self, admission_id: int) -> list[ProcedureDTO]:
         rows = self.db.fetch_all_remcard(
             """
-            SELECT *
-            FROM procedures
-            WHERE admission_id = ?
-              AND COALESCE(is_deleted, 0) = 0
-            ORDER BY COALESCE(started_at, created_at) DESC, id DESC
+            SELECT p.*, t.indication_code AS procedure_subtype
+            FROM procedures p
+            LEFT JOIN procedure_transfusion t ON t.procedure_id = p.id
+            WHERE p.admission_id = ?
+              AND COALESCE(p.is_deleted, 0) = 0
+            ORDER BY COALESCE(p.started_at, p.created_at) DESC, p.id DESC
             """,
             (int(admission_id),),
         )
@@ -110,6 +112,7 @@ class ProceduresDAO:
             return None
         cvc = None
         lumbar_puncture = None
+        transfusion = None
         consent = None
         if procedure.procedure_type == ProcedureType.CVC.value:
             cvc = self.get_cvc(procedure_id)
@@ -117,11 +120,15 @@ class ProceduresDAO:
         elif procedure.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
             lumbar_puncture = self.get_lumbar_puncture(procedure_id)
             consent = self.get_consent(procedure_id, ConsentKind.LUMBAR_PUNCTURE_CONSENT.value)
+        elif procedure.procedure_type == ProcedureType.TRANSFUSION.value:
+            transfusion = self.get_transfusion(procedure_id)
+            consent = self.get_consent(procedure_id, ConsentKind.TRANSFUSION_CONSENT.value)
         snapshot = self._json_load(procedure.patient_snapshot_json, {})
         return ProcedureBundle(
             procedure=procedure,
             cvc=cvc,
             lumbar_puncture=lumbar_puncture,
+            transfusion=transfusion if procedure.procedure_type == ProcedureType.TRANSFUSION.value else None,
             consent=consent,
             patient_snapshot=snapshot,
         )
@@ -351,6 +358,107 @@ class ProceduresDAO:
         )
         return self._map_lumbar_puncture(row) if row else None
 
+    def save_transfusion(self, cursor, dto: ProcedureTransfusionDTO):
+        cursor.execute(
+            """
+            INSERT INTO procedure_transfusion (
+                procedure_id, request_at, indication_code, recipient_abo, recipient_rh,
+                recipient_antigens, alloimmune_antibodies, transfusions_history,
+                reactions_history, reactions_history_details, individual_selection_history,
+                donor_component_name, procurement_org, donor_abo, donor_rh, donor_antigens,
+                unit_number, volume_ml, collection_date, expiration_date, selection_medical_org,
+                selection_study_date, selection_responsible_name, selection_conclusion,
+                reagent_anti_a_series, reagent_anti_a_expiration, reagent_anti_b_series,
+                reagent_anti_b_expiration, reagent_anti_d_series, reagent_anti_d_expiration,
+                plane_compatibility, biological_test, reaction_symptoms, reaction_severity,
+                observation_json, operator_doctor_name, revision
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(procedure_id) DO UPDATE SET
+                request_at = excluded.request_at,
+                indication_code = excluded.indication_code,
+                recipient_abo = excluded.recipient_abo,
+                recipient_rh = excluded.recipient_rh,
+                recipient_antigens = excluded.recipient_antigens,
+                alloimmune_antibodies = excluded.alloimmune_antibodies,
+                transfusions_history = excluded.transfusions_history,
+                reactions_history = excluded.reactions_history,
+                reactions_history_details = excluded.reactions_history_details,
+                individual_selection_history = excluded.individual_selection_history,
+                donor_component_name = excluded.donor_component_name,
+                procurement_org = excluded.procurement_org,
+                donor_abo = excluded.donor_abo,
+                donor_rh = excluded.donor_rh,
+                donor_antigens = excluded.donor_antigens,
+                unit_number = excluded.unit_number,
+                volume_ml = excluded.volume_ml,
+                collection_date = excluded.collection_date,
+                expiration_date = excluded.expiration_date,
+                selection_medical_org = excluded.selection_medical_org,
+                selection_study_date = excluded.selection_study_date,
+                selection_responsible_name = excluded.selection_responsible_name,
+                selection_conclusion = excluded.selection_conclusion,
+                reagent_anti_a_series = excluded.reagent_anti_a_series,
+                reagent_anti_a_expiration = excluded.reagent_anti_a_expiration,
+                reagent_anti_b_series = excluded.reagent_anti_b_series,
+                reagent_anti_b_expiration = excluded.reagent_anti_b_expiration,
+                reagent_anti_d_series = excluded.reagent_anti_d_series,
+                reagent_anti_d_expiration = excluded.reagent_anti_d_expiration,
+                plane_compatibility = excluded.plane_compatibility,
+                biological_test = excluded.biological_test,
+                reaction_symptoms = excluded.reaction_symptoms,
+                reaction_severity = excluded.reaction_severity,
+                observation_json = excluded.observation_json,
+                operator_doctor_name = excluded.operator_doctor_name,
+                revision = COALESCE(procedure_transfusion.revision, 0) + 1
+            """,
+            (
+                int(dto.procedure_id),
+                self._dt_value(dto.request_at),
+                dto.indication_code,
+                dto.recipient_abo,
+                dto.recipient_rh,
+                dto.recipient_antigens,
+                dto.alloimmune_antibodies,
+                dto.transfusions_history,
+                dto.reactions_history,
+                dto.reactions_history_details,
+                dto.individual_selection_history,
+                dto.donor_component_name,
+                dto.procurement_org,
+                dto.donor_abo,
+                dto.donor_rh,
+                dto.donor_antigens,
+                dto.unit_number,
+                dto.volume_ml,
+                dto.collection_date,
+                dto.expiration_date,
+                dto.selection_medical_org,
+                dto.selection_study_date,
+                dto.selection_responsible_name,
+                dto.selection_conclusion,
+                dto.reagent_anti_a_series,
+                dto.reagent_anti_a_expiration,
+                dto.reagent_anti_b_series,
+                dto.reagent_anti_b_expiration,
+                dto.reagent_anti_d_series,
+                dto.reagent_anti_d_expiration,
+                dto.plane_compatibility,
+                dto.biological_test,
+                dto.reaction_symptoms,
+                dto.reaction_severity,
+                dto.observation_json,
+                dto.operator_doctor_name,
+            ),
+        )
+
+    def get_transfusion(self, procedure_id: int) -> Optional[ProcedureTransfusionDTO]:
+        row = self.db.fetch_one_remcard(
+            "SELECT * FROM procedure_transfusion WHERE procedure_id = ?",
+            (int(procedure_id),),
+        )
+        return self._map_transfusion(row) if row else None
+
     def save_consent(self, cursor, dto: ProcedureConsentDTO):
         if dto.id is None:
             cursor.execute(
@@ -436,6 +544,7 @@ class ProceduresDAO:
         del updated_by
         cursor.execute("DELETE FROM procedure_cvc WHERE procedure_id = ?", (int(procedure_id),))
         cursor.execute("DELETE FROM procedure_lumbar_puncture WHERE procedure_id = ?", (int(procedure_id),))
+        cursor.execute("DELETE FROM procedure_transfusion WHERE procedure_id = ?", (int(procedure_id),))
         cursor.execute("DELETE FROM procedure_consents WHERE procedure_id = ?", (int(procedure_id),))
         cursor.execute("DELETE FROM procedures WHERE id = ?", (int(procedure_id),))
 
@@ -462,6 +571,7 @@ class ProceduresDAO:
             updated_by=r.get("updated_by") or "doctor",
             revision=int(r.get("revision") or 0),
             is_deleted=int(r.get("is_deleted") or 0),
+            procedure_subtype=r.get("procedure_subtype") or "",
         )
 
     def _map_consent(self, row) -> ProcedureConsentDTO:
@@ -546,6 +656,48 @@ class ProceduresDAO:
             result_code=r.get("result_code") or "csf_obtained",
             csf_characteristics=r.get("csf_characteristics") or "",
             result_notes=r.get("result_notes") or "",
+            operator_doctor_name=r.get("operator_doctor_name") or "",
+            revision=int(r.get("revision") or 0),
+        )
+
+    def _map_transfusion(self, row) -> ProcedureTransfusionDTO:
+        r = self._row_dict(row)
+        return ProcedureTransfusionDTO(
+            procedure_id=int(r.get("procedure_id") or 0),
+            request_at=self._parse_dt(r.get("request_at")),
+            indication_code=r.get("indication_code") or "",
+            recipient_abo=r.get("recipient_abo") or "",
+            recipient_rh=r.get("recipient_rh") or "",
+            recipient_antigens=r.get("recipient_antigens") or "",
+            alloimmune_antibodies=r.get("alloimmune_antibodies") or "negative",
+            transfusions_history=r.get("transfusions_history") or "no",
+            reactions_history=r.get("reactions_history") or "no",
+            reactions_history_details=r.get("reactions_history_details") or "",
+            individual_selection_history=r.get("individual_selection_history") or "no",
+            donor_component_name=r.get("donor_component_name") or "",
+            procurement_org=r.get("procurement_org") or "КГБУЗ 'КСПК', г.Комсомолькс-на-Амуре .",
+            donor_abo=r.get("donor_abo") or "",
+            donor_rh=r.get("donor_rh") or "",
+            donor_antigens=r.get("donor_antigens") or "",
+            unit_number=r.get("unit_number") or "",
+            volume_ml=r.get("volume_ml"),
+            collection_date=r.get("collection_date") or "",
+            expiration_date=r.get("expiration_date") or "",
+            selection_medical_org=r.get("selection_medical_org") or "",
+            selection_study_date=r.get("selection_study_date") or "",
+            selection_responsible_name=r.get("selection_responsible_name") or "",
+            selection_conclusion=r.get("selection_conclusion") or "",
+            reagent_anti_a_series=r.get("reagent_anti_a_series") or "069F",
+            reagent_anti_a_expiration=r.get("reagent_anti_a_expiration") or "",
+            reagent_anti_b_series=r.get("reagent_anti_b_series") or "070R",
+            reagent_anti_b_expiration=r.get("reagent_anti_b_expiration") or "",
+            reagent_anti_d_series=r.get("reagent_anti_d_series") or "080",
+            reagent_anti_d_expiration=r.get("reagent_anti_d_expiration") or "",
+            plane_compatibility=r.get("plane_compatibility") or "совместимо",
+            biological_test=r.get("biological_test") or "совместимо",
+            reaction_symptoms=r.get("reaction_symptoms") or "",
+            reaction_severity=r.get("reaction_severity") or "",
+            observation_json=r.get("observation_json") or "{}",
             operator_doctor_name=r.get("operator_doctor_name") or "",
             revision=int(r.get("revision") or 0),
         )

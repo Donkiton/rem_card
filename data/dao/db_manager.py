@@ -230,7 +230,7 @@ class DatabaseManager:
 
         self._journal_conn: Optional[sqlite3.Connection] = None
         self._remcard_conn: Optional[sqlite3.Connection] = None
-        self._central_read_conn: Optional[sqlite3.Connection] = None
+        self._central_read_conns: dict[threading.Thread, sqlite3.Connection] = {}
 
         self._measure_startup_phase("connection_profile_ms", self._init_connections)
         self._verify_quick_integrity_or_restore()
@@ -1324,26 +1324,49 @@ class DatabaseManager:
     def _get_central_read_connection(self, context: str) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:
             raise DatabaseClosedError(f"RemCard database connection is closed for {context}")
-        if self._central_read_conn is None:
-            self._central_read_conn = self._open_readonly_central_connection()
-        return self._central_read_conn
+        self._close_finished_thread_read_connections_locked()
+        current_thread = threading.current_thread()
+        conn = self._central_read_conns.get(current_thread)
+        if conn is None:
+            conn = self._open_readonly_central_connection()
+            self._central_read_conns[current_thread] = conn
+        return conn
 
     def _close_central_read_connection(self):
-        conn = self._central_read_conn
-        self._central_read_conn = None
-        if conn is None:
-            return
-        try:
-            with self.write_controller.connection_guard(conn):
-                conn.close()
-        except Exception as exc:
-            logger.debug("Failed to close central read connection: %s", exc)
+        conns = list(self._central_read_conns.values())
+        self._central_read_conns.clear()
+        for conn in conns:
+            if conn is None:
+                continue
+            try:
+                with self.write_controller.connection_guard(conn):
+                    conn.close()
+            except Exception as exc:
+                logger.debug("Failed to close central read connection: %s", exc)
+
+    def _close_finished_thread_read_connections_locked(self):
+        current_thread = threading.current_thread()
+        finished_threads = [
+            thread
+            for thread in self._central_read_conns
+            if thread is not current_thread and not thread.is_alive()
+        ]
+        for thread in finished_threads:
+            conn = self._central_read_conns.pop(thread, None)
+            if conn is None:
+                continue
+            try:
+                with self.write_controller.connection_guard(conn):
+                    conn.close()
+            except Exception as exc:
+                logger.debug("Failed to close finished thread central read connection: %s", exc)
 
     def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
-        # Обычные фоновые чтения идут через постоянный read-only connection:
-        # это не дергает sqlite3.connect()/close() на каждый polling и не делит
-        # основной write-connection с QThread/Python worker потоками.
+        # Обычные фоновые чтения идут через read-only connection текущего потока:
+        # один sqlite3.Connection не должен переезжать между QThread/Python worker
+        # потоками, иначе sqlite/PySide иногда падают native crash без Python
+        # исключения. central_io_lock по-прежнему сериализует доступ к shared DB.
         try:
             with self._central_io_lock:
                 if use_write_connection or self._in_current_thread_remcard_transaction():

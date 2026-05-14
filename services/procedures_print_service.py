@@ -9,7 +9,7 @@ from typing import Any
 
 from rem_card.app.paths import REPORT_DIR
 from rem_card.data.dao.procedures_dao import ProceduresDAO
-from rem_card.data.dto.procedures_dto import ProcedureBundle, PROCEDURE_TYPE_LABELS
+from rem_card.data.dto.procedures_dto import ProcedureBundle, PROCEDURE_TYPE_LABELS, ProcedureType
 from rem_card.services.procedures_reportlab_builder import ProcedureReportLabBuilder
 
 
@@ -190,6 +190,45 @@ LP_RESULT_LABELS = {
     "csf_obtained": "Ликвор получен",
 }
 
+TRANSFUSION_INDICATION_LABELS = {
+    "voce": "ВОЦЭ - восполнение объема циркулирующих эритроцитов",
+    "vpfs": "ВПФС - восполнение факторов свертываемости крови",
+}
+
+TRANSFUSION_INDICATION_PRINT_LABELS = {
+    "voce": "Восполнение объема циркулирующих эритроцитов",
+    "vpfs": "Восполнение факторов свертываемости крови",
+}
+
+TRANSFUSION_SCENARIO_SUFFIX = {
+    "voce": "ВОЦЭ",
+    "vpfs": "ВПФС",
+}
+
+TRANSFUSION_ALLOIMMUNE_LABELS = {
+    "negative": "отрицательные",
+    "erythrocyte": "Эритроцитарные аллоантитела",
+    "leukocyte": "Лейкоцитарные аллоантитела",
+    "platelet": "Тромбоцитарные аллоантитела",
+    "plasma_protein": "Антитела против плазменных белков",
+    "other": "другие",
+}
+
+TRANSFUSION_YES_NO = {
+    "no": "нет",
+    "yes": "да",
+}
+
+TRANSFUSION_WERE_NOT_WERE = {
+    "no": "не были",
+    "yes": "были",
+}
+
+TRANSFUSION_WAS_NOT_WAS = {
+    "no": "не было",
+    "yes": "было",
+}
+
 
 class ProceduresPrintService:
     def __init__(self, dao: ProceduresDAO):
@@ -211,6 +250,10 @@ class ProceduresPrintService:
             return self._render_lp_protocol(bundle)
         if kind == "lp_consent":
             return self._render_lp_consent(bundle)
+        if kind == "transfusion_protocol":
+            return self._render_transfusion_protocol(bundle)
+        if kind == "transfusion_consent":
+            raise ValueError("Шаблон согласия на гемотрансфузию будет добавлен позже.")
         raise ValueError(f"Неизвестный тип печати процедуры: {kind}")
 
     def build_pdf(self, procedure_id: int, document_kind: str, pdf_path) -> Path:
@@ -228,6 +271,10 @@ class ProceduresPrintService:
             context = self._lp_protocol_context(bundle)
         elif kind == "lp_consent":
             context = self._lp_consent_context(bundle)
+        elif kind == "transfusion_protocol":
+            context = self._transfusion_protocol_context(bundle)
+        elif kind == "transfusion_consent":
+            raise ValueError("Шаблон согласия на гемотрансфузию будет добавлен позже.")
         else:
             raise ValueError(f"Неизвестный тип печати процедуры: {kind}")
         output_path = Path(pdf_path)
@@ -244,6 +291,11 @@ class ProceduresPrintService:
             snapshot = {}
         patient_name = self._safe_filename(snapshot.get("full_name") or "patient")
         proc_label = PROCEDURE_TYPE_LABELS.get(procedure.procedure_type, procedure.procedure_type)
+        if procedure.procedure_type == ProcedureType.TRANSFUSION.value:
+            transfusion = self.dao.get_transfusion(int(procedure_id))
+            suffix = TRANSFUSION_SCENARIO_SUFFIX.get(getattr(transfusion, "indication_code", "") if transfusion else "", "")
+            if suffix:
+                proc_label = f"{proc_label}_{suffix}"
         proc_safe = self._safe_filename(proc_label)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_dir = Path(REPORT_DIR) / "procedures"
@@ -288,6 +340,17 @@ class ProceduresPrintService:
             f"<p>3. Отмеченные осложнения в виде: {context.get('usage_complications_description', '')}. "
             f"Требовали дополнительных лечебных мероприятий: {context.get('additional_treatment', '')}</p>"
             f"<p>ФИО врача: {context.get('removal_doctor_or_operator', '')}. Подпись ____________________</p>"
+            "</body></html>"
+        )
+
+    def _render_transfusion_protocol(self, bundle: ProcedureBundle) -> str:
+        context = self._transfusion_protocol_context(bundle)
+        return (
+            "<html><body>"
+            f"<h1>Протокол трансфузии</h1>"
+            f"<p>Пациент: {context.get('patient_name', '')}</p>"
+            f"<p>Показание: {context.get('indication_print', '')}</p>"
+            f"<p>Компонент: {context.get('donor_component_name', '')}</p>"
             "</body></html>"
         )
 
@@ -442,6 +505,92 @@ class ProceduresPrintService:
         )
         return context
 
+    def _transfusion_protocol_context(self, bundle: ProcedureBundle) -> dict[str, str]:
+        procedure = bundle.procedure
+        transfusion = bundle.transfusion
+        if transfusion is None:
+            raise ValueError("Данные гемотрансфузии не найдены.")
+        context = self._base_context(bundle)
+        observation = self._observation_dict(transfusion.observation_json)
+        scenario = transfusion.indication_code or ""
+        context.update(
+            {
+                "print_datetime": self._format_dt(datetime.now().replace(second=0, microsecond=0)),
+                "request_datetime": self._format_dt(transfusion.request_at),
+                "transfusion_date": self._format_date_long(procedure.started_at),
+                "transfusion_date_short": self._format_date(procedure.started_at),
+                "start_time": self._format_time(procedure.started_at),
+                "finish_time": self._format_time(procedure.finished_at),
+                "duration": self._plain(procedure.duration_minutes),
+                "doctor": self._plain(procedure.doctor_name_snapshot),
+                "notes": self._plain(procedure.notes),
+                "scenario_suffix": self._plain(TRANSFUSION_SCENARIO_SUFFIX.get(scenario, "")),
+                "indication_text": self._plain(TRANSFUSION_INDICATION_LABELS.get(scenario, "")),
+                "indication_print": self._plain(TRANSFUSION_INDICATION_PRINT_LABELS.get(scenario, "")),
+                "recipient_abo": self._plain(transfusion.recipient_abo),
+                "recipient_rh": self._plain(transfusion.recipient_rh),
+                "recipient_antigens": self._plain(transfusion.recipient_antigens),
+                "alloimmune_antibodies": self._plain(
+                    TRANSFUSION_ALLOIMMUNE_LABELS.get(transfusion.alloimmune_antibodies, transfusion.alloimmune_antibodies)
+                ),
+                "transfusions_history": self._plain(
+                    TRANSFUSION_WERE_NOT_WERE.get(transfusion.transfusions_history, transfusion.transfusions_history)
+                ),
+                "reactions_history": self._plain(
+                    TRANSFUSION_YES_NO.get(transfusion.reactions_history, transfusion.reactions_history)
+                ),
+                "reactions_history_details": self._plain(transfusion.reactions_history_details),
+                "individual_selection_history": self._plain(
+                    TRANSFUSION_WAS_NOT_WAS.get(
+                        transfusion.individual_selection_history,
+                        transfusion.individual_selection_history,
+                    )
+                ),
+                "donor_component_name": self._plain(transfusion.donor_component_name),
+                "procurement_org": self._plain(transfusion.procurement_org),
+                "donor_abo": self._plain(transfusion.donor_abo),
+                "donor_rh": self._plain(transfusion.donor_rh),
+                "donor_antigens": self._plain(transfusion.donor_antigens),
+                "unit_number": self._plain(transfusion.unit_number),
+                "volume_ml": self._plain(transfusion.volume_ml),
+                "collection_date": self._plain(transfusion.collection_date),
+                "expiration_date": self._plain(transfusion.expiration_date),
+                "selection_medical_org": self._plain(transfusion.selection_medical_org),
+                "selection_study_date": self._plain(transfusion.selection_study_date),
+                "selection_responsible_name": self._plain(transfusion.selection_responsible_name),
+                "selection_conclusion": self._plain(transfusion.selection_conclusion),
+                "reagent_series_text": self._plain(
+                    "N серии реагента "
+                    f"Анти-А:{transfusion.reagent_anti_a_series}, "
+                    f"Анти-B:{transfusion.reagent_anti_b_series}, "
+                    f"Анти-D:{transfusion.reagent_anti_d_series}"
+                ),
+                "reagent_expiration_text": self._plain(
+                    "Срок годности "
+                    f"Анти-А до {transfusion.reagent_anti_a_expiration}, "
+                    f"Анти-B до {transfusion.reagent_anti_b_expiration}, "
+                    f"Анти-D до {transfusion.reagent_anti_d_expiration}"
+                ),
+                "plane_compatibility": self._plain(transfusion.plane_compatibility if scenario != "vpfs" else "не применяется"),
+                "biological_test": self._plain(transfusion.biological_test),
+                "reaction_symptoms": self._plain(transfusion.reaction_symptoms),
+                "reaction_severity": self._plain(transfusion.reaction_severity),
+                "obs_before_bp": self._plain(observation.get("before", {}).get("bp")),
+                "obs_before_pulse": self._plain(observation.get("before", {}).get("pulse")),
+                "obs_before_temp": self._plain(observation.get("before", {}).get("temp")),
+                "obs_before_diuresis": self._plain(observation.get("before", {}).get("diuresis")),
+                "obs_hour1_bp": self._plain(observation.get("hour1", {}).get("bp")),
+                "obs_hour1_pulse": self._plain(observation.get("hour1", {}).get("pulse")),
+                "obs_hour1_temp": self._plain(observation.get("hour1", {}).get("temp")),
+                "obs_hour1_diuresis": self._plain(observation.get("hour1", {}).get("diuresis")),
+                "obs_hour2_bp": self._plain(observation.get("hour2", {}).get("bp")),
+                "obs_hour2_pulse": self._plain(observation.get("hour2", {}).get("pulse")),
+                "obs_hour2_temp": self._plain(observation.get("hour2", {}).get("temp")),
+                "obs_hour2_diuresis": self._plain(observation.get("hour2", {}).get("diuresis")),
+            }
+        )
+        return context
+
     def _base_context(self, bundle: ProcedureBundle) -> dict[str, str]:
         snapshot = bundle.patient_snapshot or {}
         procedure = bundle.procedure
@@ -520,6 +669,26 @@ class ProceduresPrintService:
         if isinstance(value, datetime):
             return escape(value.strftime("%d.%m.%Y"))
         return ""
+
+    @staticmethod
+    def _format_date_long(value: Any) -> str:
+        if not isinstance(value, datetime):
+            return ""
+        months = {
+            1: "января",
+            2: "февраля",
+            3: "марта",
+            4: "апреля",
+            5: "мая",
+            6: "июня",
+            7: "июля",
+            8: "августа",
+            9: "сентября",
+            10: "октября",
+            11: "ноября",
+            12: "декабря",
+        }
+        return escape(f"{value.day} {months[value.month]} {value.year} г.")
 
     @staticmethod
     def _format_time(value: Any) -> str:
@@ -610,6 +779,25 @@ class ProceduresPrintService:
         except Exception:
             return {}
         return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _observation_dict(raw: str) -> dict[str, dict[str, str]]:
+        default = {
+            "before": {"bp": "", "pulse": "", "temp": "", "diuresis": "сохранен, желтая"},
+            "hour1": {"bp": "", "pulse": "", "temp": "", "diuresis": "сохранен, желтая"},
+            "hour2": {"bp": "", "pulse": "", "temp": "", "diuresis": "сохранен, желтая"},
+        }
+        try:
+            data = json.loads(raw or "{}")
+        except Exception:
+            return default
+        if not isinstance(data, dict):
+            return default
+        for slot, values in default.items():
+            incoming = data.get(slot)
+            if isinstance(incoming, dict):
+                values.update({key: str(incoming.get(key) or "") for key in ("bp", "pulse", "temp", "diuresis")})
+        return default
 
     @staticmethod
     def _safe_filename(value: str) -> str:

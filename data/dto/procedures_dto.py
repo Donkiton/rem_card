@@ -72,6 +72,7 @@ class ProcedureDTO:
     updated_by: str = "doctor"
     revision: int = 0
     is_deleted: int = 0
+    procedure_subtype: str = ""
 
 
 @dataclass
@@ -155,9 +156,51 @@ class ProcedureLumbarPunctureDTO:
 
 
 @dataclass
+class ProcedureTransfusionDTO:
+    procedure_id: int = 0
+    request_at: Optional[datetime] = None
+    indication_code: str = ""
+    recipient_abo: str = ""
+    recipient_rh: str = ""
+    recipient_antigens: str = ""
+    alloimmune_antibodies: str = "negative"
+    transfusions_history: str = "no"
+    reactions_history: str = "no"
+    reactions_history_details: str = ""
+    individual_selection_history: str = "no"
+    donor_component_name: str = ""
+    procurement_org: str = "КГБУЗ 'КСПК', г.Комсомолькс-на-Амуре ."
+    donor_abo: str = ""
+    donor_rh: str = ""
+    donor_antigens: str = ""
+    unit_number: str = ""
+    volume_ml: Optional[int] = None
+    collection_date: str = ""
+    expiration_date: str = ""
+    selection_medical_org: str = ""
+    selection_study_date: str = ""
+    selection_responsible_name: str = ""
+    selection_conclusion: str = ""
+    reagent_anti_a_series: str = "069F"
+    reagent_anti_a_expiration: str = ""
+    reagent_anti_b_series: str = "070R"
+    reagent_anti_b_expiration: str = ""
+    reagent_anti_d_series: str = "080"
+    reagent_anti_d_expiration: str = ""
+    plane_compatibility: str = "совместимо"
+    biological_test: str = "совместимо"
+    reaction_symptoms: str = ""
+    reaction_severity: str = ""
+    observation_json: str = "{}"
+    operator_doctor_name: str = ""
+    revision: int = 0
+
+
+@dataclass
 class ProcedureBundle:
     procedure: ProcedureDTO
     cvc: Optional[ProcedureCvcDTO] = None
     lumbar_puncture: Optional[ProcedureLumbarPunctureDTO] = None
+    transfusion: Optional[ProcedureTransfusionDTO] = None
     consent: Optional[ProcedureConsentDTO] = None
     patient_snapshot: dict[str, Any] = field(default_factory=dict)

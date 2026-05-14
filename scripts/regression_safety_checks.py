@@ -549,11 +549,17 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
         outside_row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
         if not outside_row or int(outside_row[0]) != 1:
             return False, "outside transaction read returned wrong value"
-        # Central reads reuse one readonly connection under the central IO
-        # gate. This avoids per-poll sqlite3.connect()/close() on network paths
-        # and keeps background reads off the write connection.
+        # Central reads reuse one readonly connection per Python/QThread thread
+        # under the central IO gate. This keeps background reads off the write
+        # connection without moving one sqlite3.Connection between threads.
         if readonly_open_count != 1:
             return False, f"central read did not open exactly one readonly connection: {readonly_open_count}"
+
+        outside_row_again = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
+        if not outside_row_again or int(outside_row_again[0]) != 1:
+            return False, "outside transaction second read returned wrong value"
+        if readonly_open_count != 1:
+            return False, "same-thread central read did not reuse readonly connection"
 
         with manager.remcard_transaction(source="regression_read_split_tx"):
             manager.execute_remcard(
@@ -598,8 +604,8 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             return False, "background read stayed blocked after central IO gate released"
         if read_errors:
             return False, read_errors[0]
-        if readonly_open_count != 1:
-            return False, "background read did not reuse readonly central connection"
+        if readonly_open_count != 2:
+            return False, f"background read did not use its own readonly central connection: {readonly_open_count}"
         return True, "ok"
     finally:
         manager.close()

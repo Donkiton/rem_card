@@ -39,6 +39,9 @@ class ProcedureReportLabBuilder:
         if kind == "lp_consent":
             cls.build_lp_consent(context, output_path)
             return
+        if kind == "transfusion_protocol":
+            cls.build_transfusion_protocol(context, output_path)
+            return
         raise ValueError(f"Неизвестная печатная форма процедуры: {kind}")
 
     @classmethod
@@ -145,6 +148,12 @@ class ProcedureReportLabBuilder:
             *cls._lp_protocol_body(context),
         ]
         cls._build(story, output_path, framed=True)
+
+    @classmethod
+    def build_transfusion_protocol(cls, context: dict[str, str], output_path) -> None:
+        cls._ensure_fonts()
+        story = [cls._transfusion_table(context)]
+        cls._build(story, output_path, framed=False)
 
     @classmethod
     def build_lp_consent(cls, context: dict[str, str], output_path) -> None:
@@ -378,6 +387,46 @@ class ProcedureReportLabBuilder:
                 alignment=TA_CENTER,
                 spaceAfter=5,
             ),
+            "transfusion_title": ParagraphStyle(
+                "ProcedureTransfusionTitle",
+                fontName=cls.FONT_BOLD,
+                fontSize=12,
+                leading=13,
+                alignment=TA_CENTER,
+                spaceAfter=0,
+            ),
+            "transfusion_cell": ParagraphStyle(
+                "ProcedureTransfusionCell",
+                fontName=cls.FONT_REGULAR,
+                fontSize=6.6,
+                leading=7.2,
+                alignment=TA_LEFT,
+                spaceAfter=0,
+            ),
+            "transfusion_cell_center": ParagraphStyle(
+                "ProcedureTransfusionCellCenter",
+                fontName=cls.FONT_REGULAR,
+                fontSize=6.6,
+                leading=7.2,
+                alignment=TA_CENTER,
+                spaceAfter=0,
+            ),
+            "transfusion_cell_bold": ParagraphStyle(
+                "ProcedureTransfusionCellBold",
+                fontName=cls.FONT_BOLD,
+                fontSize=6.8,
+                leading=7.4,
+                alignment=TA_LEFT,
+                spaceAfter=0,
+            ),
+            "transfusion_section": ParagraphStyle(
+                "ProcedureTransfusionSection",
+                fontName=cls.FONT_BOLD,
+                fontSize=7.2,
+                leading=7.8,
+                alignment=TA_CENTER,
+                spaceAfter=0,
+            ),
         }
 
     @classmethod
@@ -540,6 +589,187 @@ class ProcedureReportLabBuilder:
             )
         )
         return flowables
+
+    @classmethod
+    def _transfusion_table(cls, context: dict[str, str]) -> Table:
+        styles = cls._styles()
+        rows = 41
+        cols = 11
+        data = [["" for _ in range(cols)] for _ in range(rows)]
+
+        def cell(text: str, style: str = "transfusion_cell") -> Paragraph:
+            return Paragraph(cls._text(text).replace("\n", "<br/>"), styles[style])
+
+        def put(row: int, col: int, text: str, style: str = "transfusion_cell"):
+            data[row - 1][col - 1] = cell(text, style)
+
+        put(1, 1, "ПРОТОКОЛ ТРАНСФУЗИИ", "transfusion_title")
+        put(2, 1, "ФИО реципиента:", "transfusion_cell_bold")
+        put(2, 4, "Дата и время подачи заявки:", "transfusion_cell_bold")
+        put(2, 7, "Дата трансфузии:", "transfusion_cell_bold")
+        put(3, 1, context.get("patient_name", ""))
+        put(3, 4, context.get("request_datetime", ""))
+        put(3, 7, context.get("transfusion_date", ""))
+        put(5, 1, f"Отделение {context.get('department', '')}", "transfusion_cell_bold")
+        put(5, 4, "№:", "transfusion_cell_bold")
+        put(5, 5, context.get("history_number", ""))
+        put(5, 7, "Время начала трансфузии:", "transfusion_cell_bold")
+        put(5, 10, context.get("start_time", ""), "transfusion_cell_center")
+        put(6, 7, "Время окончания трансфузии:", "transfusion_cell_bold")
+        put(6, 10, context.get("finish_time", ""), "transfusion_cell_center")
+        put(7, 1, "Данные медицинского обследования реципиента", "transfusion_section")
+        put(8, 1, "Группа крови реципиента ABO:", "transfusion_cell_bold")
+        put(8, 4, context.get("recipient_abo", ""), "transfusion_cell_center")
+        put(8, 7, "Резус-принадлежность:", "transfusion_cell_bold")
+        put(8, 10, context.get("recipient_rh", ""), "transfusion_cell_center")
+        put(9, 1, "Антигены:", "transfusion_cell_bold")
+        put(9, 2, context.get("recipient_antigens", ""))
+        put(9, 7, "Аллоиммунные антитела:", "transfusion_cell_bold")
+        put(9, 10, context.get("alloimmune_antibodies", ""), "transfusion_cell_center")
+        indication_text = context.get("indication_print", "")
+        put(10, 1, f"Показания к трансфузии: {indication_text}".strip(), "transfusion_cell_bold")
+        put(12, 1, "Трансфузии компонентов крови в анамнезе:", "transfusion_cell_bold")
+        put(12, 4, "Реакции и осложнения на трансфузии в анамнезе:", "transfusion_cell_bold")
+        put(12, 8, "Трансфузии по индивидуальному подбору:", "transfusion_cell_bold")
+        put(14, 1, context.get("transfusions_history", ""), "transfusion_cell_center")
+        reactions_text = context.get("reactions_history", "")
+        if context.get("reactions_history_details"):
+            reactions_text = f"{reactions_text}; {context.get('reactions_history_details')}"
+        put(14, 4, reactions_text, "transfusion_cell_center")
+        put(14, 8, context.get("individual_selection_history", ""), "transfusion_cell_center")
+        put(15, 1, "Данные о донорской крови и ее компоненте", "transfusion_section")
+        put(16, 1, "Наименование компонента донорской крови:", "transfusion_cell_bold")
+        put(16, 6, f"Наименование организации осуществившей заготовку: {context.get('procurement_org', '')}")
+        put(17, 1, context.get("donor_component_name", ""))
+        put(18, 1, "Группа крови донора ABO, Rh фактор:", "transfusion_cell_bold")
+        put(18, 6, "Антигены эритроцитов донора :", "transfusion_cell_bold")
+        put(19, 1, context.get("donor_abo", ""), "transfusion_cell_center")
+        put(19, 3, context.get("donor_rh", ""), "transfusion_cell_center")
+        put(19, 6, context.get("donor_antigens", ""))
+        put(20, 1, "№ единицы компонента крови:", "transfusion_cell_bold")
+        put(20, 4, "Количество, мл:", "transfusion_cell_bold")
+        put(21, 1, context.get("unit_number", ""))
+        put(21, 4, context.get("volume_ml", ""), "transfusion_cell_center")
+        put(22, 1, "Дата заготовки:", "transfusion_cell_bold")
+        put(22, 3, context.get("collection_date", ""), "transfusion_cell_center")
+        put(22, 6, "Срок годности до:", "transfusion_cell_bold")
+        put(22, 9, context.get("expiration_date", ""), "transfusion_cell_center")
+        put(23, 1, "Результаты индивидуального подбора", "transfusion_section")
+        put(24, 1, "Наименование МО", "transfusion_cell_bold")
+        put(24, 6, context.get("selection_medical_org", ""))
+        put(25, 1, "Дата исследования", "transfusion_cell_bold")
+        put(25, 6, context.get("selection_study_date", ""))
+        put(26, 1, "ФИО ответственного лица:", "transfusion_cell_bold")
+        put(26, 6, "Заключение :", "transfusion_cell_bold")
+        put(27, 1, context.get("selection_responsible_name", ""))
+        put(27, 6, context.get("selection_conclusion", ""))
+        put(28, 1, "Пробы на индивидуальную совместимость в отделении", "transfusion_section")
+        put(29, 1, "Наименования реагентов:", "transfusion_cell_bold")
+        put(29, 7, "Цоликлоны", "transfusion_cell_center")
+        put(30, 1, context.get("reagent_series_text", ""))
+        put(30, 7, context.get("reagent_expiration_text", ""))
+        put(32, 1, "На плоскости :", "transfusion_cell_bold")
+        put(32, 6, "Биологическая проба:", "transfusion_cell_bold")
+        put(33, 1, context.get("plane_compatibility", ""), "transfusion_cell_center")
+        put(33, 6, context.get("biological_test", ""), "transfusion_cell_center")
+        put(34, 1, "Реакции и осложнения", "transfusion_section")
+        put(35, 1, "Основные симптомы:", "transfusion_cell_bold")
+        put(35, 2, context.get("reaction_symptoms", ""))
+        put(35, 6, "Степень тяжести:", "transfusion_cell_bold")
+        put(35, 8, context.get("reaction_severity", ""))
+        put(36, 1, "Наблюдение за состоянием реципиента", "transfusion_section")
+        put(37, 1, "Время", "transfusion_cell_bold")
+        put(37, 4, "АД(мм.рт.ст)", "transfusion_cell_bold")
+        put(37, 6, "ЧСС(уд/мин)", "transfusion_cell_bold")
+        put(37, 8, "Температура(С)", "transfusion_cell_bold")
+        put(37, 10, "Диурез,цвет мочи", "transfusion_cell_bold")
+        for row, prefix, label in (
+            (38, "before", "Перед началом переливания"),
+            (39, "hour1", "Через 1 час"),
+            (40, "hour2", "Через 2 часа"),
+        ):
+            put(row, 1, label)
+            put(row, 4, context.get(f"obs_{prefix}_bp", ""), "transfusion_cell_center")
+            put(row, 6, context.get(f"obs_{prefix}_pulse", ""), "transfusion_cell_center")
+            put(row, 8, context.get(f"obs_{prefix}_temp", ""), "transfusion_cell_center")
+            put(row, 10, context.get(f"obs_{prefix}_diuresis", ""), "transfusion_cell_center")
+        put(41, 1, "Врач, осуществивший трансфузию:", "transfusion_cell_bold")
+        put(41, 7, context.get("doctor", ""))
+
+        spans = [
+            ("SPAN", (0, 0), (0, 10)),
+            ("SPAN", (1, 0), (1, 2)), ("SPAN", (1, 3), (1, 5)), ("SPAN", (1, 6), (1, 10)),
+            ("SPAN", (2, 0), (3, 2)), ("SPAN", (2, 3), (3, 5)), ("SPAN", (2, 6), (3, 10)),
+            ("SPAN", (4, 0), (5, 2)), ("SPAN", (4, 3), (5, 3)), ("SPAN", (4, 4), (5, 5)),
+            ("SPAN", (4, 6), (4, 8)), ("SPAN", (4, 9), (4, 10)),
+            ("SPAN", (5, 6), (5, 8)), ("SPAN", (5, 9), (5, 10)),
+            ("SPAN", (6, 0), (6, 10)),
+            ("SPAN", (7, 0), (7, 2)), ("SPAN", (7, 3), (7, 5)), ("SPAN", (7, 6), (7, 8)), ("SPAN", (7, 9), (7, 10)),
+            ("SPAN", (8, 1), (8, 5)), ("SPAN", (8, 6), (8, 8)), ("SPAN", (8, 9), (8, 10)),
+            ("SPAN", (9, 0), (10, 10)),
+            ("SPAN", (11, 0), (12, 2)), ("SPAN", (11, 3), (12, 6)), ("SPAN", (11, 7), (12, 10)),
+            ("SPAN", (13, 0), (13, 2)), ("SPAN", (13, 3), (13, 6)), ("SPAN", (13, 7), (13, 10)),
+            ("SPAN", (14, 0), (14, 10)),
+            ("SPAN", (15, 0), (15, 4)), ("SPAN", (15, 5), (16, 10)), ("SPAN", (16, 0), (16, 4)),
+            ("SPAN", (17, 0), (17, 4)), ("SPAN", (17, 5), (17, 10)),
+            ("SPAN", (18, 0), (18, 1)), ("SPAN", (18, 2), (18, 4)), ("SPAN", (18, 5), (20, 10)),
+            ("SPAN", (19, 0), (19, 2)), ("SPAN", (19, 3), (19, 4)),
+            ("SPAN", (20, 0), (20, 2)), ("SPAN", (20, 3), (20, 4)),
+            ("SPAN", (21, 0), (21, 1)), ("SPAN", (21, 2), (21, 4)), ("SPAN", (21, 5), (21, 7)), ("SPAN", (21, 8), (21, 10)),
+            ("SPAN", (22, 0), (22, 10)),
+            ("SPAN", (23, 0), (23, 4)), ("SPAN", (23, 5), (23, 10)),
+            ("SPAN", (24, 0), (24, 4)), ("SPAN", (24, 5), (24, 10)),
+            ("SPAN", (25, 0), (25, 4)), ("SPAN", (25, 5), (26, 10)), ("SPAN", (26, 0), (26, 4)),
+            ("SPAN", (27, 0), (27, 10)),
+            ("SPAN", (28, 0), (28, 5)), ("SPAN", (28, 6), (28, 10)),
+            ("SPAN", (29, 0), (30, 5)), ("SPAN", (29, 6), (30, 10)),
+            ("SPAN", (31, 0), (31, 4)), ("SPAN", (31, 5), (31, 10)),
+            ("SPAN", (32, 0), (32, 4)), ("SPAN", (32, 5), (32, 10)),
+            ("SPAN", (33, 0), (33, 10)),
+            ("SPAN", (34, 0), (34, 4)), ("SPAN", (34, 5), (34, 6)), ("SPAN", (34, 7), (34, 10)),
+            ("SPAN", (35, 0), (35, 10)),
+            ("SPAN", (36, 0), (36, 2)), ("SPAN", (36, 3), (36, 4)), ("SPAN", (36, 5), (36, 6)),
+            ("SPAN", (36, 7), (36, 8)), ("SPAN", (36, 9), (36, 10)),
+            ("SPAN", (37, 0), (37, 2)), ("SPAN", (37, 3), (37, 4)), ("SPAN", (37, 5), (37, 6)),
+            ("SPAN", (37, 7), (37, 8)), ("SPAN", (37, 9), (37, 10)),
+            ("SPAN", (38, 0), (38, 2)), ("SPAN", (38, 3), (38, 4)), ("SPAN", (38, 5), (38, 6)),
+            ("SPAN", (38, 7), (38, 8)), ("SPAN", (38, 9), (38, 10)),
+            ("SPAN", (39, 0), (39, 2)), ("SPAN", (39, 3), (39, 4)), ("SPAN", (39, 5), (39, 6)),
+            ("SPAN", (39, 7), (39, 8)), ("SPAN", (39, 9), (39, 10)),
+            ("SPAN", (40, 0), (40, 5)), ("SPAN", (40, 6), (40, 8)), ("SPAN", (40, 9), (40, 10)),
+        ]
+        span_commands = [
+            ("SPAN", (start[1], start[0]), (end[1], end[0]))
+            for _command, start, end in spans
+        ]
+        section_background = colors.Color(0.93, 0.93, 0.93)
+        table = Table(
+            data,
+            colWidths=[16.35 * mm] * cols,
+            rowHeights=[6.35 * mm] * rows,
+            repeatRows=0,
+            hAlign="CENTER",
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.35, colors.black),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 2),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 1),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                    ("BACKGROUND", (0, 6), (10, 6), section_background),
+                    ("BACKGROUND", (0, 14), (10, 14), section_background),
+                    ("BACKGROUND", (0, 22), (10, 22), section_background),
+                    ("BACKGROUND", (0, 27), (10, 27), section_background),
+                    ("BACKGROUND", (0, 33), (10, 33), section_background),
+                    ("BACKGROUND", (0, 35), (10, 35), section_background),
+                    *span_commands,
+                ]
+            )
+        )
+        return table
 
     @classmethod
     def _cvc_protocol_body(cls, context: dict[str, str]) -> list:

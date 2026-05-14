@@ -1426,11 +1426,20 @@ class RemCardService(QObject):
     def create_empty_lumbar_puncture_procedure(self, admission_id: int, *, doctor_name: str = ""):
         return self._procedures.create_empty_lumbar_puncture(admission_id, doctor_name=doctor_name)
 
+    def create_empty_transfusion_procedure(self, admission_id: int, *, doctor_name: str = ""):
+        return self._procedures.create_empty_transfusion(admission_id, doctor_name=doctor_name)
+
     def save_cvc_procedure(self, procedure, cvc, consent):
         return self._procedures.save_cvc_procedure(procedure, cvc, consent)
 
     def save_lumbar_puncture_procedure(self, procedure, lumbar_puncture, consent):
         return self._procedures.save_lumbar_puncture_procedure(procedure, lumbar_puncture, consent)
+
+    def save_transfusion_procedure(self, procedure, transfusion, consent):
+        return self._procedures.save_transfusion_procedure(procedure, transfusion, consent)
+
+    def get_transfusion_observation_values(self, admission_id: int, started_at, finished_at):
+        return self._vitals.get_transfusion_observation_values(admission_id, started_at, finished_at)
 
     def cancel_procedure(self, procedure_id: int, *, updated_by: str = "doctor"):
         return self._procedures.cancel_procedure(procedure_id, updated_by=updated_by)

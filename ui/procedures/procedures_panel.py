@@ -111,7 +111,7 @@ class ProceduresPanel(QWidget):
         self.add_lp_btn = self._create_procedure_button("Люмбальная пункция", icon_name="lumbpunk.png")
         self.add_lp_btn.clicked.connect(self._create_lumbar_puncture)
         self.add_transfusion_btn = self._create_procedure_button("Гемотрансфузия", icon_name="balans_blood.png")
-        self.add_transfusion_btn.clicked.connect(lambda: self._show_not_implemented("Гемотрансфузия"))
+        self.add_transfusion_btn.clicked.connect(self._create_transfusion)
         buttons.addWidget(self.add_cvc_btn)
         buttons.addWidget(self.add_lp_btn)
         buttons.addWidget(self.add_transfusion_btn)
@@ -178,8 +178,10 @@ class ProceduresPanel(QWidget):
             return
         self._open_editor(procedure_id=None, procedure_type=ProcedureType.LUMBAR_PUNCTURE.value)
 
-    def _show_not_implemented(self, procedure_name: str):
-        self.status_label.setText(f"{procedure_name}: форма пока не реализована.")
+    def _create_transfusion(self):
+        if not self._ensure_context():
+            return
+        self._open_editor(procedure_id=None, procedure_type=ProcedureType.TRANSFUSION.value)
 
     def _open_procedure(self, procedure_id: int):
         if not self._ensure_context():
@@ -207,7 +209,12 @@ class ProceduresPanel(QWidget):
             procedure_type = bundle.procedure.procedure_type if bundle else ProcedureType.CVC.value
         except Exception:
             procedure_type = ProcedureType.CVC.value
-        document_kind = "lp_protocol" if procedure_type == ProcedureType.LUMBAR_PUNCTURE.value else "cvc_protocol"
+        if procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+            document_kind = "lp_protocol"
+        elif procedure_type == ProcedureType.TRANSFUSION.value:
+            document_kind = "transfusion_protocol"
+        else:
+            document_kind = "cvc_protocol"
         self._print_document(int(procedure_id), document_kind)
 
     def _print_document(self, procedure_id: int, document_kind: str):

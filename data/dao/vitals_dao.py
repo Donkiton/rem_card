@@ -1,5 +1,5 @@
 from typing import Any, Dict, List, Optional, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..dto.remcard_dto import VitalDTO
 from rem_card.app.logger import logger
@@ -319,6 +319,190 @@ class VitalsDAO:
                 "cvp": None,
             }
         return dict(row)
+
+    def get_latest_vital_values_before(self, admission_id: int, target: datetime) -> Dict[str, Any]:
+        """Return latest non-null AD/pulse/temp values not later than target."""
+        target_value = target.isoformat()
+        query = """
+            SELECT
+                (
+                    SELECT v.sys
+                    FROM vitals v
+                    WHERE v.admission_id = ?
+                      AND v.sys IS NOT NULL
+                      AND v.dia IS NOT NULL
+                      AND CAST(STRFTIME('%s', v.datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    LIMIT 1
+                ) AS sys,
+                (
+                    SELECT v.dia
+                    FROM vitals v
+                    WHERE v.admission_id = ?
+                      AND v.sys IS NOT NULL
+                      AND v.dia IS NOT NULL
+                      AND CAST(STRFTIME('%s', v.datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    LIMIT 1
+                ) AS dia,
+                (
+                    SELECT v.pulse
+                    FROM vitals v
+                    WHERE v.admission_id = ?
+                      AND v.pulse IS NOT NULL
+                      AND CAST(STRFTIME('%s', v.datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    LIMIT 1
+                ) AS pulse,
+                (
+                    SELECT v.temp
+                    FROM vitals v
+                    WHERE v.admission_id = ?
+                      AND v.temp IS NOT NULL
+                      AND CAST(STRFTIME('%s', v.datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    LIMIT 1
+                ) AS temp
+        """
+        row = self.db.fetch_one_remcard(
+            query,
+            (
+                admission_id,
+                target_value,
+                admission_id,
+                target_value,
+                admission_id,
+                target_value,
+                admission_id,
+                target_value,
+            ),
+        )
+        return dict(row) if row else {"sys": None, "dia": None, "pulse": None, "temp": None}
+
+    def get_nearest_vital_values_window(
+        self,
+        admission_id: int,
+        target: datetime,
+        *,
+        window_minutes: int = 10,
+    ) -> Dict[str, Any]:
+        """Return nearest AD/pulse/temp values in a symmetric time window around target."""
+        start = (target - timedelta(minutes=window_minutes)).isoformat()
+        end = (target + timedelta(minutes=window_minutes)).isoformat()
+        target_value = target.isoformat()
+
+        def one_value(expression: str, where_extra: str):
+            row = self.db.fetch_one_remcard(
+                f"""
+                SELECT {expression} AS value
+                FROM vitals
+                WHERE admission_id = ?
+                  AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+                  AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                  AND {where_extra}
+                ORDER BY ABS(
+                             CAST(STRFTIME('%s', datetime) AS INTEGER)
+                             - CAST(STRFTIME('%s', ?) AS INTEGER)
+                         ) ASC,
+                         CAST(STRFTIME('%s', datetime) AS INTEGER) DESC,
+                         id DESC
+                LIMIT 1
+                """,
+                (admission_id, start, end, target_value),
+            )
+            return row["value"] if row else None
+
+        bp_row = self.db.fetch_one_remcard(
+            """
+            SELECT sys, dia
+            FROM vitals
+            WHERE admission_id = ?
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND sys IS NOT NULL
+              AND dia IS NOT NULL
+            ORDER BY ABS(
+                         CAST(STRFTIME('%s', datetime) AS INTEGER)
+                         - CAST(STRFTIME('%s', ?) AS INTEGER)
+                     ) ASC,
+                     CAST(STRFTIME('%s', datetime) AS INTEGER) DESC,
+                     id DESC
+            LIMIT 1
+            """,
+            (admission_id, start, end, target_value),
+        )
+        return {
+            "sys": bp_row["sys"] if bp_row else None,
+            "dia": bp_row["dia"] if bp_row else None,
+            "pulse": one_value("pulse", "pulse IS NOT NULL"),
+            "temp": one_value("temp", "temp IS NOT NULL"),
+        }
+
+    def get_transfusion_followup_vital_values(
+        self,
+        admission_id: int,
+        target: datetime,
+        now: datetime,
+        *,
+        before_window_minutes: int = 10,
+    ) -> Dict[str, Any]:
+        """Return nearest follow-up vitals once the target transfusion observation time has elapsed.
+
+        The observation accepts values from 10 minutes before the target time, and if none are
+        close enough before it, the nearest later value already entered in vitals is used.
+        """
+        if now < target:
+            return {"sys": None, "dia": None, "pulse": None, "temp": None}
+        start = (target - timedelta(minutes=before_window_minutes)).isoformat()
+        end = now.isoformat()
+        target_value = target.isoformat()
+
+        def one_value(expression: str, where_extra: str):
+            row = self.db.fetch_one_remcard(
+                f"""
+                SELECT {expression} AS value
+                FROM vitals
+                WHERE admission_id = ?
+                  AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+                  AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                  AND {where_extra}
+                ORDER BY ABS(
+                             CAST(STRFTIME('%s', datetime) AS INTEGER)
+                             - CAST(STRFTIME('%s', ?) AS INTEGER)
+                         ) ASC,
+                         CAST(STRFTIME('%s', datetime) AS INTEGER) DESC,
+                         id DESC
+                LIMIT 1
+                """,
+                (admission_id, start, end, target_value),
+            )
+            return row["value"] if row else None
+
+        bp_row = self.db.fetch_one_remcard(
+            """
+            SELECT sys, dia
+            FROM vitals
+            WHERE admission_id = ?
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND sys IS NOT NULL
+              AND dia IS NOT NULL
+            ORDER BY ABS(
+                         CAST(STRFTIME('%s', datetime) AS INTEGER)
+                         - CAST(STRFTIME('%s', ?) AS INTEGER)
+                     ) ASC,
+                     CAST(STRFTIME('%s', datetime) AS INTEGER) DESC,
+                     id DESC
+            LIMIT 1
+            """,
+            (admission_id, start, end, target_value),
+        )
+        return {
+            "sys": bp_row["sys"] if bp_row else None,
+            "dia": bp_row["dia"] if bp_row else None,
+            "pulse": one_value("pulse", "pulse IS NOT NULL"),
+            "temp": one_value("temp", "temp IS NOT NULL"),
+        }
 
     def get_latest_vital_values_bulk(self, admission_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
         ids = [int(adm_id) for adm_id in admission_ids if adm_id is not None]

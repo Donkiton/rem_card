@@ -247,6 +247,10 @@ class PatientDAO:
             (admission_id,),
         )
         cursor.execute(
+            "DELETE FROM procedure_transfusion WHERE procedure_id IN (SELECT id FROM procedures WHERE admission_id = ?)",
+            (admission_id,),
+        )
+        cursor.execute(
             "DELETE FROM procedure_consents WHERE procedure_id IN (SELECT id FROM procedures WHERE admission_id = ?)",
             (admission_id,),
         )

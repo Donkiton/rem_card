@@ -145,9 +145,12 @@ class DataService(QObject):
 
     def shutdown(self) -> bool:
         self.set_shutting_down()
+        monitor_stopped = True
         if self._monitor and self._monitor.isRunning():
             self._monitor.stop()
-            self._monitor.wait(1500)
+            monitor_stopped = bool(self._monitor.wait(5000))
+            if not monitor_stopped:
+                logger.warning("DataUpdateMonitor did not stop before DataService shutdown timeout")
         drained = self._queue.shutdown(timeout=5.0)
         try:
             from rem_card.app.local_metrics import flush_metrics
@@ -155,7 +158,7 @@ class DataService(QObject):
             flush_metrics(timeout=1.0)
         except Exception:
             pass
-        return bool(drained)
+        return bool(monitor_stopped and drained)
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
         if self._monitor and not self._shutting_down:

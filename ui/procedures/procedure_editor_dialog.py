@@ -41,6 +41,11 @@ from rem_card.ui.procedures.procedure_styles import (
     apply_procedure_combo_style,
     apply_procedure_datetime_style,
 )
+from rem_card.ui.procedures.transfusion_widgets import (
+    TransfusionConsentWidget,
+    TransfusionMedicalWidget,
+    TransfusionObservationWidget,
+)
 from rem_card.ui.procedures.procedure_pdf_worker import ProcedurePdfWorker
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.custom_title_bar import CustomTitleBar
@@ -94,6 +99,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             return
         if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
             self.bundle = self.remcard_service.create_empty_lumbar_puncture_procedure(self.admission_id)
+            return
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            self.bundle = self.remcard_service.create_empty_transfusion_procedure(self.admission_id)
             return
         raise ValueError("Этот тип процедуры пока не реализован.")
 
@@ -191,6 +199,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.removal_widget = None
         self.lp_widget = None
         self.lp_outcome_widget = None
+        self.transfusion_widget = None
+        self.transfusion_observation_widget = None
 
         if self.procedure_type == ProcedureType.CVC.value:
             self.cvc_widget = CvcProcedureWidget()
@@ -214,6 +224,17 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self.tabs.addTab(self.lp_outcome_widget, "Итог")
             return
 
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            self.transfusion_widget = TransfusionMedicalWidget()
+            self.tabs.addTab(self.transfusion_widget, "Медицинская часть")
+
+            self.transfusion_observation_widget = TransfusionObservationWidget()
+            self.tabs.addTab(self.transfusion_observation_widget, "Наблюдение")
+
+            self.consent_widget = TransfusionConsentWidget()
+            self.tabs.addTab(self.consent_widget, "Согласие")
+            return
+
         raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _build_general_tab(self):
@@ -224,7 +245,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         box = QGroupBox("Общие поля процедуры")
         form = QFormLayout(box)
         self.status_combo = QComboBox()
-        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
+        if self.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value}:
             self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
             self.status_combo.addItem("Выполнено", ProcedureStatus.COMPLETED.value)
         else:
@@ -232,6 +253,13 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self.status_combo.addItem("Активна", ProcedureStatus.ACTIVE.value)
 
         now = datetime.now().replace(second=0, microsecond=0)
+        self.request_edit = None
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            self.request_edit = ProcedureDateTimeEdit()
+            self.request_edit.setCalendarPopup(True)
+            self.request_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
+            self.request_edit.setDateTime(QDateTime(now))
+            self.request_edit.dateTimeChanged.connect(self._on_general_time_changed)
         self.start_edit = ProcedureDateTimeEdit()
         self.start_edit.setCalendarPopup(True)
         self.start_edit.setDisplayFormat("dd.MM.yyyy HH:mm")
@@ -255,6 +283,11 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         form.addRow("Статус:", self.status_combo)
         if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
             form.addRow("Дата/время:", self.start_edit)
+        elif self.procedure_type == ProcedureType.TRANSFUSION.value:
+            form.addRow("Время подачи заявки:", self.request_edit)
+            form.addRow("Начало трансфузии:", self.start_edit)
+            form.addRow("Окончание трансфузии:", self.finish_edit)
+            form.addRow("Длительность, мин:", self.duration_label)
         else:
             form.addRow("Начало:", self.start_edit)
             form.addRow("Окончание:", self.finish_edit)
@@ -273,6 +306,12 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             protocol_title = "Печать протокола люмбальной пункции"
             protocol_kind = "lp_protocol"
             consent_kind = "lp_consent"
+            removal_kind = ""
+        elif self.procedure_type == ProcedureType.TRANSFUSION.value:
+            box_title = "Печатные формы гемотрансфузии"
+            protocol_title = "Печать протокола гемотрансфузии"
+            protocol_kind = "transfusion_protocol"
+            consent_kind = "transfusion_consent"
             removal_kind = ""
         else:
             box_title = "Печатные формы ЦВК"
@@ -317,6 +356,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             return "Люмбальная пункция"
         if self.procedure_type == ProcedureType.CVC.value:
             return "ЦВК"
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            return "Гемотрансфузия"
         return "Процедура пациента"
 
     def _header_title(self) -> str:
@@ -324,6 +365,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             return "Люмбальная пункция"
         if self.procedure_type == ProcedureType.CVC.value:
             return "Постановка ЦВК"
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            return "Гемотрансфузия"
         return "Процедура пациента"
 
     def _apply_bundle(self):
@@ -342,6 +385,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         was_syncing = self._syncing_time_bounds
         self._syncing_time_bounds = True
         try:
+            if self.request_edit is not None and self.bundle.transfusion and self.bundle.transfusion.request_at:
+                self.request_edit.setDateTime(QDateTime(self.bundle.transfusion.request_at))
             if procedure.started_at:
                 self.start_edit.setDateTime(QDateTime(procedure.started_at))
             if procedure.finished_at:
@@ -349,8 +394,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self.duration_label.setText(str(procedure.duration_minutes or 0))
         finally:
             self._syncing_time_bounds = was_syncing
-        if self.procedure_type != ProcedureType.LUMBAR_PUNCTURE.value:
+        if self.procedure_type not in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value}:
             self._sync_general_time_bounds()
+        if self.procedure_type != ProcedureType.LUMBAR_PUNCTURE.value:
             self._recalculate_duration()
         if procedure.doctor_name_snapshot:
             self.doctor_combo.setEditText(procedure.doctor_name_snapshot)
@@ -363,6 +409,15 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self.lp_widget.load(self.bundle.lumbar_puncture)
             self.consent_widget.load(self.bundle.consent)
             self.lp_outcome_widget.load(self.bundle.lumbar_puncture)
+        elif self.procedure_type == ProcedureType.TRANSFUSION.value:
+            self.transfusion_widget.load(self.bundle.transfusion)
+            self.consent_widget.load(self.bundle.consent)
+            self.transfusion_observation_widget.load_json(
+                self.bundle.transfusion.observation_json if self.bundle.transfusion else "{}"
+            )
+            self._set_transfusion_observation_context()
+            if not procedure.id and not self.transfusion_observation_widget.has_measure_values():
+                self.transfusion_observation_widget.refresh_all()
         self._update_print_enabled()
 
     def _collect_procedure(self) -> ProcedureDTO:
@@ -404,7 +459,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         return procedure
 
     def _status_for_ui(self, status: str) -> str:
-        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value and status == ProcedureStatus.ACTIVE.value:
+        if self.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value} and status == ProcedureStatus.ACTIVE.value:
             return ProcedureStatus.COMPLETED.value
         return status
 
@@ -433,6 +488,20 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             )
             return procedure, lumbar_puncture, consent
 
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            transfusion = self.transfusion_widget.collect(
+                procedure_id=procedure.id or 0,
+                doctor_name=procedure.doctor_name_snapshot,
+                observation_json=self.transfusion_observation_widget.collect_json(),
+            )
+            transfusion.request_at = self.request_edit.dateTime().toPython() if self.request_edit is not None else None
+            consent = self.consent_widget.collect(
+                procedure_id=procedure.id or 0,
+                doctor_name=procedure.doctor_name_snapshot,
+                diagnosis=procedure.diagnosis_snapshot,
+            )
+            return procedure, transfusion, consent
+
         raise ValueError("Этот тип процедуры пока не реализован.")
 
     def _on_save_clicked(self):
@@ -458,6 +527,12 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
             def operation():
                 return service.save_lumbar_puncture_procedure(procedure, cvc, consent)
+
+        elif procedure.procedure_type == ProcedureType.TRANSFUSION.value:
+            description = f"procedure_transfusion_save_ui:{self.admission_id}"
+
+            def operation():
+                return service.save_transfusion_procedure(procedure, cvc, consent)
 
         else:
             description = f"procedure_cvc_save_ui:{self.admission_id}"
@@ -498,6 +573,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self.close_btn.setEnabled(not pending)
 
     def _print_document(self, document_kind: str):
+        if document_kind == "transfusion_consent":
+            CustomMessageBox.information(self, "Печать согласия", "Шаблон согласия на гемотрансфузию будет добавлен позже.")
+            return
         if not self.procedure_id:
             CustomMessageBox.warning(self, "Печать", "Сначала сохраните процедуру.")
             return
@@ -538,11 +616,14 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             button.setEnabled(enabled)
 
     def _on_general_time_changed(self):
-        self._sync_general_time_bounds()
+        if self.procedure_type != ProcedureType.TRANSFUSION.value:
+            self._sync_general_time_bounds()
         self._recalculate_duration()
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            self._set_transfusion_observation_context()
 
     def _sync_general_time_bounds(self):
-        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value or self._syncing_time_bounds:
+        if self.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value} or self._syncing_time_bounds:
             return
         self._syncing_time_bounds = True
         try:
@@ -569,10 +650,19 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
     def _apply_datetime_bounds(self, snapshot: dict):
         admission_dt = self._parse_snapshot_datetime(snapshot.get("admission_datetime"))
-        if not admission_dt:
+        if admission_dt and self.procedure_type != ProcedureType.TRANSFUSION.value:
+            for edit in self.findChildren(ProcedureDateTimeEdit):
+                edit.set_minimum_datetime_from_python(admission_dt)
+
+    def _set_transfusion_observation_context(self):
+        if self.procedure_type != ProcedureType.TRANSFUSION.value or self.transfusion_observation_widget is None:
             return
-        for edit in self.findChildren(ProcedureDateTimeEdit):
-            edit.set_minimum_datetime_from_python(admission_dt)
+        self.transfusion_observation_widget.set_context(
+            self.remcard_service,
+            self.admission_id,
+            self.start_edit.dateTime().toPython(),
+            self.finish_edit.dateTime().toPython(),
+        )
 
     @staticmethod
     def _parse_snapshot_datetime(value) -> Optional[datetime]:

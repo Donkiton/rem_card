@@ -85,7 +85,7 @@ class ProceduresListWidget(QTableWidget):
             self.setItem(
                 row_idx,
                 1,
-                QTableWidgetItem(PROCEDURE_TYPE_LABELS.get(procedure.procedure_type, procedure.procedure_type)),
+                QTableWidgetItem(self._type_label(procedure)),
             )
             self.setItem(
                 row_idx,
@@ -149,7 +149,7 @@ class ProceduresListWidget(QTableWidget):
         if column == 0:
             return procedure.started_at or procedure.created_at or datetime.min
         if column == 1:
-            return PROCEDURE_TYPE_LABELS.get(procedure.procedure_type, procedure.procedure_type).lower()
+            return self._type_label(procedure).lower()
         if column == 2:
             return self._status_label(procedure).lower()
         if column == 3:
@@ -162,6 +162,16 @@ class ProceduresListWidget(QTableWidget):
             if procedure.status in {ProcedureStatus.ACTIVE.value, ProcedureStatus.COMPLETED.value}:
                 return "Выполнено"
         return PROCEDURE_STATUS_LABELS.get(procedure.status, procedure.status)
+
+    @staticmethod
+    def _type_label(procedure) -> str:
+        if procedure.procedure_type == ProcedureType.TRANSFUSION.value:
+            suffix = {
+                "voce": "ВОЦЭ",
+                "vpfs": "ВПФС",
+            }.get(str(getattr(procedure, "procedure_subtype", "") or ""), "")
+            return f"Гемотрансфузия - {suffix}" if suffix else "Гемотрансфузия"
+        return PROCEDURE_TYPE_LABELS.get(procedure.procedure_type, procedure.procedure_type)
 
     def _apply_default_widths(self):
         defaults = (135, 160, 120, 170, 285)

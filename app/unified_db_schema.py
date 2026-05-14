@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 13
-SCHEMA_MIN_MIGRATION_VERSION = 13
+SCHEMA_FASTPATH_REV = 14
+SCHEMA_MIN_MIGRATION_VERSION = 14
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -39,6 +39,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "procedure_consents",
     "procedure_cvc",
     "procedure_lumbar_puncture",
+    "procedure_transfusion",
 )
 
 _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
@@ -105,6 +106,7 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     "procedure_consents": {"procedure_id", "consent_kind", "consent_mode", "patient_signed", "consilium_json", "revision"},
     "procedure_cvc": {"procedure_id", "indications_json", "access_code", "catheter_status", "removed_or_replaced", "revision"},
     "procedure_lumbar_puncture": {"procedure_id", "indications_json", "access_code", "level_code", "result_code", "revision"},
+    "procedure_transfusion": {"procedure_id", "indication_code", "request_at", "observation_json", "revision"},
 }
 
 _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
@@ -127,6 +129,7 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_procedures_admission_type_time",
     "idx_procedure_consents_procedure",
     "idx_procedure_cvc_catheter_status",
+    "idx_procedure_transfusion_indication",
 )
 
 _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
@@ -165,6 +168,7 @@ _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
     "procedure_consents",
     "procedure_cvc",
     "procedure_lumbar_puncture",
+    "procedure_transfusion",
 )
 
 _MEDICAL_AUDIT_TABLES: tuple[str, ...] = (
@@ -1051,6 +1055,51 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS procedure_transfusion (
+            procedure_id INTEGER PRIMARY KEY,
+            request_at DATETIME,
+            indication_code TEXT,
+            recipient_abo TEXT,
+            recipient_rh TEXT,
+            recipient_antigens TEXT,
+            alloimmune_antibodies TEXT,
+            transfusions_history TEXT,
+            reactions_history TEXT,
+            reactions_history_details TEXT,
+            individual_selection_history TEXT,
+            donor_component_name TEXT,
+            procurement_org TEXT,
+            donor_abo TEXT,
+            donor_rh TEXT,
+            donor_antigens TEXT,
+            unit_number TEXT,
+            volume_ml INTEGER,
+            collection_date TEXT,
+            expiration_date TEXT,
+            selection_medical_org TEXT,
+            selection_study_date TEXT,
+            selection_responsible_name TEXT,
+            selection_conclusion TEXT,
+            reagent_anti_a_series TEXT,
+            reagent_anti_a_expiration TEXT,
+            reagent_anti_b_series TEXT,
+            reagent_anti_b_expiration TEXT,
+            reagent_anti_d_series TEXT,
+            reagent_anti_d_expiration TEXT,
+            plane_compatibility TEXT,
+            biological_test TEXT,
+            reaction_symptoms TEXT,
+            reaction_severity TEXT,
+            observation_json TEXT,
+            operator_doctor_name TEXT,
+            revision INTEGER DEFAULT 0,
+            FOREIGN KEY (procedure_id) REFERENCES procedures(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS medical_audit_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             operation_id TEXT NOT NULL,
@@ -1238,6 +1287,10 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "patient_status_events", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "patient_status_events", "updated_at", "DATETIME", logger)
     _ensure_column(conn, "patient_status_events", "revision", "INTEGER DEFAULT 0", logger)
+    _ensure_column(conn, "procedure_transfusion", "request_at", "DATETIME", logger)
+    _ensure_column(conn, "procedure_transfusion", "indication_code", "TEXT", logger)
+    _ensure_column(conn, "procedure_transfusion", "observation_json", "TEXT", logger)
+    _ensure_column(conn, "procedure_transfusion", "revision", "INTEGER DEFAULT 0", logger)
 
     conn.execute("UPDATE orders SET latin = COALESCE(latin, text) WHERE latin IS NULL")
     conn.execute("UPDATE orders SET type = COALESCE(type, 'medication') WHERE type IS NULL")
@@ -1328,6 +1381,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedures_admission_type_time ON procedures(admission_id, procedure_type, started_at, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_consents_procedure ON procedure_consents(procedure_id, consent_kind)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_cvc_catheter_status ON procedure_cvc(catheter_status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_transfusion_indication ON procedure_transfusion(indication_code)")
 
     _mark_schema_migration(conn, 1, "unified schema baseline")
     _mark_schema_migration(conn, 2, "admissions.intake_extra_json for extensible intake fields")
@@ -1342,6 +1396,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 11, "patients.birth_date for calculated age")
     _mark_schema_migration(conn, 12, "patient medical procedures prototype")
     _mark_schema_migration(conn, 13, "lumbar puncture procedure")
+    _mark_schema_migration(conn, 14, "transfusion procedure")
 
     for table in (
         "vitals",
@@ -1493,6 +1548,17 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _create_change_triggers(
         conn,
         "procedure_lumbar_puncture",
+        "NEW.procedure_id",
+        "OLD.procedure_id",
+        "(SELECT admission_id FROM procedures WHERE id = NEW.procedure_id)",
+        "(SELECT admission_id FROM procedures WHERE id = OLD.procedure_id)",
+        "COALESCE(NEW.operator_doctor_name, 'doctor')",
+        "COALESCE(OLD.operator_doctor_name, 'doctor')",
+        use_updated_at_gate=False,
+    )
+    _create_change_triggers(
+        conn,
+        "procedure_transfusion",
         "NEW.procedure_id",
         "OLD.procedure_id",
         "(SELECT admission_id FROM procedures WHERE id = NEW.procedure_id)",
