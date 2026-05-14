@@ -1441,6 +1441,9 @@ class RemCardService(QObject):
     def get_transfusion_observation_values(self, admission_id: int, started_at, finished_at):
         return self._vitals.get_transfusion_observation_values(admission_id, started_at, finished_at)
 
+    def get_transfusion_registration_sheet(self, admission_id: int, *, start_dt=None, end_dt=None):
+        return self._procedures.get_transfusion_registration_sheet(admission_id, start_dt=start_dt, end_dt=end_dt)
+
     def cancel_procedure(self, procedure_id: int, *, updated_by: str = "doctor"):
         return self._procedures.cancel_procedure(procedure_id, updated_by=updated_by)
 

@@ -182,6 +182,51 @@ class ProceduresDAO:
             patient_snapshot=self._json_load(procedure.patient_snapshot_json, {}),
         )
 
+    def list_completed_transfusions_for_registration(
+        self,
+        admission_id: int,
+        *,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        params: list[Any] = [
+            ProcedureType.TRANSFUSION.value,
+            ProcedureStatus.COMPLETED.value,
+            int(admission_id),
+        ]
+        where = [
+            "p.procedure_type = ?",
+            "p.status = ?",
+            "p.admission_id = ?",
+            "COALESCE(p.is_deleted, 0) = 0",
+        ]
+        if start_dt is not None:
+            where.append("DATETIME(p.started_at) >= DATETIME(?)")
+            params.append(self._dt_value(start_dt))
+        if end_dt is not None:
+            where.append("DATETIME(p.started_at) < DATETIME(?)")
+            params.append(self._dt_value(end_dt))
+
+        rows = self.db.fetch_all_remcard(
+            f"""
+            SELECT
+                p.id AS procedure_id,
+                p.patient_id,
+                p.admission_id,
+                p.started_at,
+                p.finished_at,
+                p.doctor_name_snapshot,
+                p.patient_snapshot_json,
+                t.*
+            FROM procedures p
+            JOIN procedure_transfusion t ON t.procedure_id = p.id
+            WHERE {" AND ".join(where)}
+            ORDER BY DATETIME(p.started_at) ASC, p.id ASC
+            """,
+            tuple(params),
+        )
+        return [self._row_dict(row) for row in rows]
+
     def save_procedure(self, cursor, dto: ProcedureDTO) -> int:
         if dto.id is None:
             cursor.execute(

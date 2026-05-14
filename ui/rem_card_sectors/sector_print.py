@@ -32,13 +32,16 @@ class PrintConfig:
         self.settings = QSettings("SectorPrint", "Config")
         self.version = "1.0"
         
-    def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool, 
-             ventilation: bool, labs: bool, procedures: bool, death_outcome: bool = None, death_protocol: bool = None):
+    def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool,
+             ventilation: bool, labs: bool, procedures: bool, death_outcome: bool = None,
+             death_protocol: bool = None, transfusion_registration: bool = None):
         current = self.load()
         if death_outcome is None:
             death_outcome = current.get("death_outcome", True)
         if death_protocol is None:
             death_protocol = current.get("death_protocol", death_outcome)
+        if transfusion_registration is None:
+            transfusion_registration = current.get("transfusion_registration", True)
         self.settings.setValue("sector_print/version", self.version)
         self.settings.setValue("sector_print/sections/vitals", vitals)
         self.settings.setValue("sector_print/sections/balance", balance)
@@ -49,6 +52,7 @@ class PrintConfig:
         self.settings.setValue("sector_print/sections/procedures", procedures)
         self.settings.setValue("sector_print/sections/death_outcome", death_outcome)
         self.settings.setValue("sector_print/sections/death_protocol", death_protocol)
+        self.settings.setValue("sector_print/sections/transfusion_registration", transfusion_registration)
         self.settings.sync()
         
     def load(self):
@@ -63,6 +67,7 @@ class PrintConfig:
             "procedures": self.settings.value("sector_print/sections/procedures", False, type=bool),
             "death_outcome": death_outcome,
             "death_protocol": self.settings.value("sector_print/sections/death_protocol", death_outcome, type=bool),
+            "transfusion_registration": self.settings.value("sector_print/sections/transfusion_registration", True, type=bool),
         }
 
 class FullReportWorker(QThread):
@@ -89,6 +94,10 @@ class FullReportWorker(QThread):
                 unknown_icu_day="?",
                 missing_admission_icu_day="Неизвестно",
             )
+            if results and self.config.get("transfusion_registration", True):
+                results[0]["transfusion_registration_all"] = self.remcard_service.get_transfusion_registration_sheet(
+                    self.admission_id
+                )
 
             self.finished.emit(results)
         except Exception as e:
@@ -470,6 +479,12 @@ class DataCollectorWorker(QThread):
                 )
 
             data = self.transform_data_static(data, self.remcard_service, self.config)
+            if self.config.get("transfusion_registration", True):
+                data["transfusion_registration"] = self.remcard_service.get_transfusion_registration_sheet(
+                    self.admission_id,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                )
             self.finished.emit(data)
         except Exception as e:
             logger.error(f"Error in Print DataCollector: {str(e)}")
@@ -514,8 +529,18 @@ class SectorPrint(BaseSectorWidget):
         self.cb_labs.setEnabled(False)
         self.cb_procedures = QCheckBox("Процедуры")
         self.cb_procedures.setEnabled(False)
+        self.cb_transfusion_registration = QCheckBox("Лист регистрации трансфузий")
         
-        for cb in [self.cb_vitals, self.cb_prescriptions, self.cb_balance, self.cb_ventilation, self.cb_events, self.cb_labs, self.cb_procedures]:
+        for cb in [
+            self.cb_vitals,
+            self.cb_prescriptions,
+            self.cb_balance,
+            self.cb_ventilation,
+            self.cb_events,
+            self.cb_transfusion_registration,
+            self.cb_labs,
+            self.cb_procedures,
+        ]:
             body_layout.addWidget(cb)
             
         self.status_label = QLabel("")
@@ -569,6 +594,7 @@ class SectorPrint(BaseSectorWidget):
         self.cb_prescriptions.setChecked(cfg["prescriptions"])
         self.cb_events.setChecked(cfg["events"])
         self.cb_ventilation.setChecked(cfg.get("ventilation", False))
+        self.cb_transfusion_registration.setChecked(cfg.get("transfusion_registration", True))
 
     def save_settings(self):
         self.config.save(
@@ -579,6 +605,7 @@ class SectorPrint(BaseSectorWidget):
             self.cb_ventilation.isChecked(),
             False,
             False,
+            transfusion_registration=self.cb_transfusion_registration.isChecked(),
         )
 
     def _get_context_from_parents(self):

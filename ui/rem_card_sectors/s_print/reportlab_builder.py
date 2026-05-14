@@ -113,6 +113,248 @@ class _PrescriptionMarkFlowable(Flowable):
             canvas.line(x - radius * 0.40, y + radius * 0.40, x + radius * 0.40, y - radius * 0.40)
 
 
+class _TransfusionRegistrationSheetFlowable(Flowable):
+    ROWS_PER_PAGE = 17
+    HEADER_BG = colors.HexColor("#ccffff")
+    NUMBER_BG = colors.HexColor("#ffffcc")
+
+    def __init__(self, sheet: dict[str, Any], rows: list[dict[str, str]], *, font_regular: str, font_bold: str, font_narrow: str):
+        super().__init__()
+        self.sheet = dict(sheet or {})
+        self.rows = list(rows or [])
+        self.font_regular = font_regular
+        self.font_bold = font_bold
+        self.font_narrow = font_narrow
+        self.width, self.height = landscape(A4)
+
+    def wrap(self, availWidth, availHeight):
+        return min(float(availWidth or self.width), self.width), min(float(availHeight or self.height), self.height)
+
+    def drawOn(self, canvas, x, y, _sW=0):
+        del x, y, _sW
+        self.canv = canvas
+        self.draw()
+
+    def draw(self):
+        canvas = self.canv
+        canvas.saveState()
+        try:
+            self._draw_page_text(canvas)
+            self._draw_table(canvas)
+            self._draw_footer(canvas)
+        finally:
+            canvas.restoreState()
+
+    def _style(self, *, size: float, bold: bool = False, alignment: int = TA_CENTER, leading: float | None = None):
+        return ParagraphStyle(
+            name=f"TransfusionRegistration-{size}-{bold}-{alignment}",
+            fontName=self.font_bold if bold else self.font_narrow,
+            fontSize=size,
+            leading=leading if leading is not None else size + 1,
+            alignment=alignment,
+            splitLongWords=1,
+            wordWrap="CJK",
+            spaceBefore=0,
+            spaceAfter=0,
+        )
+
+    def _paragraph(self, text: Any, *, size: float, bold: bool = False, alignment: int = TA_CENTER, leading: float | None = None):
+        value = html.escape(str(text or ""))
+        value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
+        return Paragraph(value, self._style(size=size, bold=bold, alignment=alignment, leading=leading))
+
+    def _draw_paragraph(self, canvas, text: Any, x1: float, y1: float, x2: float, y2: float, *, size: float, bold: bool = False, alignment: int = TA_CENTER, leading: float | None = None):
+        paragraph = self._paragraph(text, size=size, bold=bold, alignment=alignment, leading=leading)
+        width = max(1.0, x2 - x1 - 2.0)
+        height = max(1.0, y2 - y1 - 1.0)
+        _wrapped_w, wrapped_h = paragraph.wrap(width, height)
+        draw_y = y1 + max(0.8, (height - wrapped_h) / 2.0)
+        paragraph.drawOn(canvas, x1 + 1.0, draw_y)
+
+    def _draw_line_value(self, canvas, label: str, value: str, x_label: float, x1: float, x2: float, y: float, *, bold_value: bool = False):
+        canvas.setFont(self.font_regular, 7.0)
+        canvas.drawString(x_label, y + 2.0, label)
+        canvas.line(x1, y, x2, y)
+        font = self.font_bold if bold_value else self.font_regular
+        canvas.setFont(font, 7.0)
+        canvas.drawCentredString((x1 + x2) / 2.0, y + 2.0, str(value or ""))
+
+    def _draw_page_text(self, canvas):
+        patient_name = str(self.sheet.get("patient_name") or "")
+        history_number = str(self.sheet.get("history_number") or "")
+        recipient_abo = str(self.sheet.get("recipient_abo") or "")
+        recipient_rh = str(self.sheet.get("recipient_rh") or "")
+
+        canvas.setFillColor(colors.black)
+        canvas.setFont(self.font_regular, 7.5)
+        canvas.drawString(682, 552, "Учетная медицинская документация")
+        canvas.drawString(682, 540, "форма № 005/у-04 приказ № 1030")
+
+        canvas.setFont(self.font_bold, 8.5)
+        canvas.drawCentredString(421, 468, "ЛИСТ РЕГИСТРАЦИИ ПЕРЕЛИВАНИЯ ТРАНСФУЗИОННЫХ СРЕДСТВ")
+
+        self._draw_line_value(canvas, "Фамилия, имя, отчество больного", patient_name, 44, 190, 545, 430, bold_value=True)
+        self._draw_line_value(canvas, "Группа крови больного", recipient_abo, 44, 145, 545, 419)
+        canvas.setFont(self.font_regular, 7.0)
+        canvas.drawString(44, 408, "Медицинская карта №")
+        canvas.line(145, 406, 265, 406)
+        canvas.drawCentredString(205, 408, history_number)
+        canvas.drawString(276, 408, "Резус-принадлежность")
+        canvas.line(365, 406, 545, 406)
+        canvas.drawCentredString(455, 408, recipient_rh)
+
+        note = (
+            "(каждое переливание крови производится только после\n"
+            "подтверждения групп крови донора и реципиента двумя\n"
+            "сериями стандартных изогемагглютинирующих сывороток,\n"
+            "проведения пробы на индивидуальную совместимость и\n"
+            "биологической пробы)"
+        )
+        self._draw_paragraph(canvas, note, 194, 354, 545, 405, size=7.5, leading=9)
+
+    @staticmethod
+    def _column_widths(total_width: float) -> list[float]:
+        weights = [
+            4.0, 6.57, 8.29, 5.97, 4.0, 6.0, 8.0, 11.0,
+            11.43, 7.86, 8.29, 5.14, 5.43, 5.14, 6.88, 6.0,
+        ]
+        total = sum(weights)
+        widths = [total_width * weight / total for weight in weights]
+        widths[-1] += total_width - sum(widths)
+        return widths
+
+    @staticmethod
+    def _row_chunks(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+        visible = list(rows or [])[: _TransfusionRegistrationSheetFlowable.ROWS_PER_PAGE]
+        while len(visible) < _TransfusionRegistrationSheetFlowable.ROWS_PER_PAGE:
+            visible.append({})
+        return visible
+
+    def _draw_table(self, canvas):
+        x0 = 42.0
+        table_top = 350.0
+        table_width = 770.0
+        h_group = 22.0
+        h_sub = 55.0
+        h_numbers = 12.0
+        row_h = 11.2
+        data_top = table_top - h_group - h_sub - h_numbers
+        table_bottom = data_top - self.ROWS_PER_PAGE * row_h
+
+        widths = self._column_widths(table_width)
+        xs = [x0]
+        for width in widths:
+            xs.append(xs[-1] + width)
+
+        canvas.setFillColor(self.HEADER_BG)
+        canvas.rect(x0, table_top - h_group - h_sub, table_width, h_group + h_sub, stroke=0, fill=1)
+        canvas.setFillColor(self.NUMBER_BG)
+        canvas.rect(x0, data_top, table_width, h_numbers, stroke=0, fill=1)
+
+        canvas.setStrokeColor(colors.black)
+        canvas.setLineWidth(0.65)
+        canvas.rect(x0, table_bottom, table_width, table_top - table_bottom, stroke=1, fill=0)
+        for x in xs[1:-1]:
+            canvas.line(x, table_bottom, x, table_top)
+
+        y_group_bottom = table_top - h_group
+        y_sub_bottom = table_top - h_group - h_sub
+        canvas.line(xs[5], y_group_bottom, xs[14], y_group_bottom)
+        canvas.line(xs[11], table_top - h_group - 24.0, xs[13], table_top - h_group - 24.0)
+        canvas.line(x0, y_sub_bottom, xs[-1], y_sub_bottom)
+        canvas.line(x0, data_top, xs[-1], data_top)
+        for row_index in range(self.ROWS_PER_PAGE + 1):
+            y = data_top - row_index * row_h
+            canvas.line(x0, y, xs[-1], y)
+
+        self._draw_table_headers(canvas, xs, table_top, y_group_bottom, y_sub_bottom, data_top)
+        self._draw_table_rows(canvas, xs, data_top, row_h)
+
+    def _draw_table_headers(self, canvas, xs, table_top, y_group_bottom, y_sub_bottom, data_top):
+        h_group = table_top - y_group_bottom
+        full_header_labels = {
+            0: "№\nп/п",
+            1: "Дата",
+            2: "Показания к\nпереливанию",
+            3: "Способ\nпереливания",
+            4: "Количество,\nмл",
+            14: "Реакция, Т,\nосложнения\n(какие именно),\nколичество\nмочи и ее\nанализ",
+            15: "Подпись\nврача\n(разборчиво)",
+        }
+        for col, label in full_header_labels.items():
+            self._draw_paragraph(canvas, label, xs[col], y_sub_bottom, xs[col + 1], table_top, size=6.0, leading=6.8)
+
+        self._draw_paragraph(canvas, "Паспорт трансфузионной среды", xs[5], y_group_bottom, xs[11], table_top, size=7.0)
+        self._draw_paragraph(canvas, "Пробы", xs[11], y_group_bottom, xs[14], table_top, size=7.0)
+
+        sublabels = {
+            5: "трансфузионная\nсреда",
+            6: "групповая\nпринадлежность",
+            7: "резус-\nпринадлежность",
+            8: "№ этикетки, серия\nпрепарата",
+            9: "дата\nзаготовки",
+            10: "фамилия, имя,\nотчество",
+            13: "Биологическая",
+        }
+        for col, label in sublabels.items():
+            self._draw_paragraph(canvas, label, xs[col], y_sub_bottom, xs[col + 1], y_group_bottom, size=6.0, leading=6.8)
+        self._draw_paragraph(canvas, "Индивидуальная\nсовместимость", xs[11], table_top - h_group - 24.0, xs[13], y_group_bottom, size=6.0, leading=6.8)
+        self._draw_paragraph(canvas, "группа", xs[11], y_sub_bottom, xs[12], table_top - h_group - 24.0, size=6.0)
+        self._draw_paragraph(canvas, "резус", xs[12], y_sub_bottom, xs[13], table_top - h_group - 24.0, size=6.0)
+
+        for col in range(16):
+            self._draw_paragraph(canvas, str(col + 1), xs[col], data_top, xs[col + 1], y_sub_bottom, size=5.8)
+
+    @staticmethod
+    def _short_doctor(value: str) -> str:
+        parts = str(value or "").strip().split()
+        if len(parts) >= 3:
+            return f"{parts[0]} {parts[1][:1]}.{parts[2][:1]}."
+        if len(parts) == 2:
+            return f"{parts[0]} {parts[1][:1]}."
+        return str(value or "").strip()
+
+    @staticmethod
+    def _cell_value(row: dict[str, str], key: str) -> str:
+        return str((row or {}).get(key) or "")
+
+    def _draw_table_rows(self, canvas, xs, data_top, row_h):
+        keys = [
+            None,
+            "date",
+            "indication",
+            "method",
+            "volume_ml",
+            "component",
+            "donor_abo",
+            "donor_rh",
+            "unit_number",
+            "collection_date",
+            "donor_code",
+            "compat_group",
+            "compat_rh",
+            "biological_test",
+            "reaction",
+            "doctor",
+        ]
+        for row_index, row in enumerate(self._row_chunks(self.rows)):
+            y1 = data_top - (row_index + 1) * row_h
+            y2 = data_top - row_index * row_h
+            for col, key in enumerate(keys):
+                value = str(row_index + 1) if key is None else self._cell_value(row, key)
+                if key == "doctor":
+                    value = self._short_doctor(value)
+                font_size = 4.8 if col in (8, 10, 15) else 5.1
+                self._draw_paragraph(canvas, value, xs[col], y1, xs[col + 1], y2, size=font_size, leading=5.3)
+
+    def _draw_footer(self, canvas):
+        canvas.setFillColor(colors.black)
+        canvas.setFont(self.font_regular, 5.6)
+        canvas.drawString(55, 20, "© ИПС ЭКСПЕРТ")
+        canvas.drawCentredString(421, 20, "(017) 254 78 51, 254 78 61")
+        canvas.drawRightString(805, 20, "www.expert.by")
+
+
 class ReportLabReportBuilder:
     HORIZONTAL_MARGIN_MM = 7
     VERTICAL_MARGIN_MM = 15
@@ -171,8 +413,11 @@ class ReportLabReportBuilder:
                 if index:
                     story.append(PageBreak())
                 story.extend(cls._build_day(day_data, config, table_width))
+            story.extend(cls._transfusion_registration_flowables(data, config))
             return story
-        return cls._build_day(data, config, table_width)
+        story = cls._build_day(data, config, table_width)
+        story.extend(cls._transfusion_registration_flowables(data, config))
+        return story
 
     @classmethod
     def _build_day(cls, data: dict, config: dict, table_width: float):
@@ -251,6 +496,45 @@ class ReportLabReportBuilder:
         cls.FONT_REGULAR = "Helvetica"
         cls.FONT_BOLD = "Helvetica-Bold"
         cls.FONT_NARROW = "Helvetica"
+
+    @classmethod
+    def _transfusion_registration_flowables(cls, data, config: dict) -> list:
+        if not config.get("transfusion_registration", True):
+            return []
+        sheet = cls._resolve_transfusion_registration_sheet(data)
+        rows = list((sheet or {}).get("rows") or [])
+        if not rows:
+            return []
+        flowables = []
+        for start in range(0, len(rows), _TransfusionRegistrationSheetFlowable.ROWS_PER_PAGE):
+            flowables.append(PageBreak())
+            flowables.append(
+                _TransfusionRegistrationSheetFlowable(
+                    sheet,
+                    rows[start:start + _TransfusionRegistrationSheetFlowable.ROWS_PER_PAGE],
+                    font_regular=cls.FONT_REGULAR,
+                    font_bold=cls.FONT_BOLD,
+                    font_narrow=cls.FONT_NARROW,
+                )
+            )
+        return flowables
+
+    @staticmethod
+    def _resolve_transfusion_registration_sheet(data) -> dict:
+        if isinstance(data, list):
+            if data and data[0].get("transfusion_registration_all"):
+                return dict(data[0]["transfusion_registration_all"])
+            rows = []
+            sheet = {}
+            for day in data:
+                current = day.get("transfusion_registration") or {}
+                if current and not sheet:
+                    sheet = dict(current)
+                rows.extend(list(current.get("rows") or []))
+            if sheet:
+                sheet["rows"] = rows
+            return sheet
+        return dict(data.get("transfusion_registration") or {})
 
     @classmethod
     def _style(

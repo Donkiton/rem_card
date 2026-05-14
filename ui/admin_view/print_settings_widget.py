@@ -21,6 +21,7 @@ REPORT_SECTIONS = [
     ("ventilation", "ИВЛ", True),
     ("death_outcome", "Отчет о смерти", True),
     ("death_protocol", "Протокол смерти", True),
+    ("transfusion_registration", "Лист регистрации трансфузий", True),
     ("procedures", "Процедуры", False),
     ("labs", "Анализы", False),
 ]
@@ -141,6 +142,7 @@ class PrintSettingsWidget(QWidget):
             cfg["procedures"],
             cfg["death_outcome"],
             cfg["death_protocol"],
+            cfg["transfusion_registration"],
         )
 
 

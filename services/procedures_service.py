@@ -26,6 +26,30 @@ class ProceduresService:
     def list_procedures(self, admission_id: int) -> list[ProcedureDTO]:
         return self.dao.list_by_admission(int(admission_id))
 
+    def get_transfusion_registration_sheet(
+        self,
+        admission_id: int,
+        *,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        snapshot = self._build_patient_snapshot(int(admission_id))
+        raw_rows = self.dao.list_completed_transfusions_for_registration(
+            int(admission_id),
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        rows = [self._transfusion_registration_row(row) for row in raw_rows]
+        recipient_abo = self._first_non_empty(row.get("recipient_abo") for row in raw_rows)
+        recipient_rh = self._first_non_empty(row.get("recipient_rh") for row in raw_rows)
+        return {
+            "patient_name": snapshot.get("full_name") or "",
+            "history_number": snapshot.get("history_number") or "",
+            "recipient_abo": recipient_abo,
+            "recipient_rh": recipient_rh,
+            "rows": rows,
+        }
+
     def get_procedure_bundle(self, procedure_id: int) -> Optional[ProcedureBundle]:
         return self.dao.get_bundle(int(procedure_id))
 
@@ -273,6 +297,92 @@ class ProceduresService:
             "diagnosis": row.get("diagnosis_text") or "",
             "diagnosis_code": row.get("diagnosis_code") or "",
         }
+
+    @classmethod
+    def _transfusion_registration_row(cls, row: dict[str, Any]) -> dict[str, str]:
+        indication_code = str(row.get("indication_code") or "").strip()
+        component = str(row.get("donor_component_name") or "").strip()
+        is_plasma = cls._registration_is_plasma(indication_code, component)
+        return {
+            "date": cls._format_registration_date(row.get("started_at")),
+            "indication": cls._registration_indication(indication_code),
+            "method": "в/в капельно",
+            "volume_ml": cls._plain_registration_value(row.get("volume_ml")),
+            "component": cls._registration_component_name(component),
+            "donor_abo": cls._plain_registration_value(row.get("donor_abo")),
+            "donor_rh": cls._plain_registration_value(row.get("donor_rh")),
+            "unit_number": cls._plain_registration_value(row.get("unit_number")),
+            "collection_date": cls._plain_registration_value(row.get("collection_date")),
+            "donor_code": cls._plain_registration_value(row.get("donor_code")),
+            "compat_group": "" if is_plasma else cls._compatibility_short(row.get("plane_compatibility")),
+            "compat_rh": "" if is_plasma else cls._compatibility_short(row.get("plane_compatibility")),
+            "biological_test": "совм.",
+            "reaction": cls._registration_reaction(row),
+            "doctor": cls._plain_registration_value(row.get("operator_doctor_name") or row.get("doctor_name_snapshot")),
+        }
+
+    @staticmethod
+    def _first_non_empty(values) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _plain_registration_value(value: Any) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _format_registration_date(value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.strftime("%d.%m.%Y")
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return datetime.fromisoformat(text.replace(" ", "T")).strftime("%d.%m.%Y")
+        except ValueError:
+            return text[:10]
+
+    @staticmethod
+    def _registration_indication(indication_code: str) -> str:
+        normalized = str(indication_code or "").strip().lower()
+        if normalized == "voce":
+            return "ВОЦЭ"
+        if normalized == "vpfs":
+            return "ВПФС"
+        return str(indication_code or "").strip()
+
+    @staticmethod
+    def _registration_component_name(component: str) -> str:
+        text = str(component or "").strip()
+        normalized = text.lower().replace("ё", "е")
+        if "сзп" in normalized or "плазм" in normalized:
+            return "СЗП"
+        if "взвес" in normalized:
+            return "эр. взвесь"
+        if "масс" in normalized:
+            return "эр. масса"
+        return text.replace("Эритроцитарная", "эр.").replace("эритроцитарная", "эр.").strip()
+
+    @staticmethod
+    def _registration_is_plasma(indication_code: str, component: str) -> bool:
+        normalized_component = str(component or "").lower().replace("ё", "е")
+        return str(indication_code or "").strip().lower() == "vpfs" or "сзп" in normalized_component or "плазм" in normalized_component
+
+    @staticmethod
+    def _compatibility_short(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "совм."
+        return "совм." if "совмест" in text.lower() else text
+
+    @staticmethod
+    def _registration_reaction(row: dict[str, Any]) -> str:
+        symptoms = str(row.get("reaction_symptoms") or "").strip()
+        severity = str(row.get("reaction_severity") or "").strip()
+        return "да" if symptoms or severity else "нет"
 
     @staticmethod
     def _normalize_duration(procedure: ProcedureDTO):
