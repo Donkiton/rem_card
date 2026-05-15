@@ -671,11 +671,15 @@ class ReportLabReportBuilder:
             totals = get_current_balance_totals(data)
             if totals is not None:
                 hydrobalance = f' &nbsp;&nbsp; <b>Гидробаланс</b> = {html.escape(format_signed_ml(totals["net_balance"]))} мл'
+        notice_number = html.escape(str(data.get("emergency_notice_number") or "").strip())
+        notice = ""
+        if notice_number:
+            notice = f' &nbsp;&nbsp; <b>Экстренное извещение</b> N {notice_number}'
 
         details = (
             f"<b>Пациент:</b> {patient_name} &nbsp;&nbsp; <b>Диагноз:</b> {diagnosis}<br/>"
             f"<b>Сутки в РАО:</b> {icu_day} &nbsp;&nbsp; "
-            f"<b>Период:</b> {html.escape(start_str)} - {html.escape(end_str)}{hydrobalance}"
+            f"<b>Период:</b> {html.escape(start_str)} - {html.escape(end_str)}{hydrobalance}{notice}"
         )
         table = Table(
             [

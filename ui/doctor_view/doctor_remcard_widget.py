@@ -35,6 +35,7 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "nurse_order_mark:",
     "nurse_order_panel_mark:",
 )
+EMERGENCY_NOTICE_FORCE_PREFIX = "emergency_notice_save:"
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
 VITALS_CACHE_CHANGE_ENTITIES = {
     "patients",
@@ -783,6 +784,7 @@ class DoctorRemCardWidget(QWidget):
             )
 
         self.update_patient_info()
+        self._update_emergency_notice_sector(snapshot)
         self.update_latest_indicators()
         self.update_balance_data()
 
@@ -921,6 +923,14 @@ class DoctorRemCardWidget(QWidget):
             for prefix in LOCAL_ORDER_FORCE_PREFIXES
         )
 
+    def _is_local_emergency_notice_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not any(source.startswith(EMERGENCY_NOTICE_FORCE_PREFIX) for source in sources):
+            return False
+        return set(changed_entities).issubset({"admissions"})
+
     def _invalidate_vitals_cache_from_payload(self, payload: dict, changed_entities: set[str]) -> None:
         if self._archive_read_only_mode:
             return
@@ -1040,6 +1050,19 @@ class DoctorRemCardWidget(QWidget):
         except Exception:
             logger.exception("Doctor procedures partial refresh failed")
 
+    def _refresh_emergency_notice_from_db(self) -> None:
+        try:
+            layout = getattr(self, "layout_manager", None)
+            sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
+            if sector is None:
+                return
+            if hasattr(sector, "set_context") and self.admission_id:
+                sector.set_context(self.service, self.admission_id, self._current_date)
+            if hasattr(sector, "refresh"):
+                sector.refresh()
+        except Exception:
+            logger.exception("Doctor emergency notice partial refresh failed")
+
     @staticmethod
     def _changed_entities_from_payload(payload: dict) -> set[str]:
         changed_entities = {
@@ -1145,6 +1168,13 @@ class DoctorRemCardWidget(QWidget):
             and self.layout_manager.selection_stack.currentIndex() != 0
         ):
             return
+        if self._is_local_emergency_notice_payload(payload, changed_entities):
+            logger.info(
+                "DoctorRemCardWidget skipped card snapshot after local emergency notice save admission_id=%s sources=%s",
+                self.admission_id,
+                self._payload_force_sources(payload),
+            )
+            return
         if self._is_local_orders_force_payload(payload, changed_entities):
             if hasattr(self.layout_manager, 'orders_widget'):
                 try:
@@ -1162,6 +1192,9 @@ class DoctorRemCardWidget(QWidget):
             )
             self._schedule_balance_update()
             return
+
+        if "admissions" in changed_entities and sync_actions.get("patient_header_refresh"):
+            self._refresh_emergency_notice_from_db()
 
         if self._handle_diet_sync(
             payload,
@@ -1367,6 +1400,7 @@ class DoctorRemCardWidget(QWidget):
         layout = getattr(self, "layout_manager", None)
         ow = getattr(layout, "orders_widget", None) if layout is not None else None
         events_sector = getattr(layout, "sector_events", None) if layout is not None else None
+        emergency_sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
         diet_widget = getattr(self, "diet_intake_widget", None)
         widget_signature = (
             int(self.admission_id or 0),
@@ -1377,6 +1411,7 @@ class DoctorRemCardWidget(QWidget):
             id(getattr(self, "vitals_input", None)) if hasattr(self, "vitals_input") else None,
             id(ow) if ow else None,
             id(events_sector) if events_sector else None,
+            id(emergency_sector) if emergency_sector else None,
             id(diet_widget) if diet_widget else None,
         )
         apply_widget_state = widget_signature != self._read_only_widget_signature
@@ -1395,6 +1430,8 @@ class DoctorRemCardWidget(QWidget):
 
         if apply_widget_state and events_sector:
             events_sector.setEnabled(not read_only)
+        if apply_widget_state and emergency_sector and hasattr(emergency_sector, "set_forced_read_only"):
+            emergency_sector.set_forced_read_only(read_only)
         if apply_widget_state and diet_widget:
             diet_widget.set_read_only(read_only)
         if apply_widget_state:
@@ -1506,6 +1543,7 @@ class DoctorRemCardWidget(QWidget):
 
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
+        self._update_emergency_notice_sector()
         chart_matches_target = False
         if hasattr(self, 'chart'):
             chart_matches_target = self._chart_matches_context(admission_id, card_start_dt)
@@ -1707,6 +1745,7 @@ class DoctorRemCardWidget(QWidget):
                 shift_start=s_start,
                 shift_end=s_end,
             )
+        self._update_emergency_notice_sector()
         diet_widget = self._ensure_diet_widget()
         if diet_widget and self.admission_id:
             diet_widget.set_context(self.admission_id, self._current_date)
@@ -2903,6 +2942,27 @@ class DoctorRemCardWidget(QWidget):
         except Exception as e:
             from ...app.logger import logger
             logger.error(f"Error updating patient info in sector 4b/4v: {e}")
+
+    def _update_emergency_notice_sector(self, snapshot=None):
+        layout = getattr(self, "layout_manager", None)
+        sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
+        if sector is None:
+            return
+        try:
+            loaded_from_service = False
+            if hasattr(sector, "set_context") and self.admission_id:
+                sector.set_context(self.service, self.admission_id, self._current_date)
+                loaded_from_service = True
+            patient = (snapshot or self._card_snapshot_cache or {}).get("patient")
+            if not loaded_from_service and patient and hasattr(sector, "set_notice_data"):
+                sector.set_notice_data(
+                    getattr(patient, "emergency_notice_number", "") or "",
+                    getattr(patient, "emergency_notice_entered_at", None),
+                )
+            if hasattr(sector, "set_forced_read_only"):
+                sector.set_forced_read_only(bool(self._archive_read_only_mode))
+        except Exception as exc:
+            logger.warning("Failed to update emergency notice sector (doctor): %s", exc, exc_info=True)
 
     def refresh_data(self, show_empty_message=False):
         self._ensure_card_widgets_initialized()

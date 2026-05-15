@@ -689,6 +689,94 @@ class RemCardService(QObject):
     def get_patient(self, admission_id: int) -> Optional[PatientDTO]:
         return self._patients.get_patient(admission_id)
 
+    @staticmethod
+    def _row_value(row, key: str, index: int = 0):
+        if row is None:
+            return None
+        try:
+            return row[key]
+        except Exception:
+            try:
+                return row[index]
+            except Exception:
+                return None
+
+    def get_emergency_notice(self, admission_id: int) -> Dict[str, Any]:
+        try:
+            row = self.orders_dao.db.fetch_one_remcard(
+                """
+                SELECT emergency_notice_number, emergency_notice_entered_at
+                FROM admissions
+                WHERE id = ?
+                """,
+                (int(admission_id),),
+            )
+        except Exception as exc:
+            if "emergency_notice_" not in str(exc).lower():
+                raise
+            return {"number": "", "entered_at": None}
+        if not row:
+            return {"number": "", "entered_at": None}
+        return {
+            "number": str(self._row_value(row, "emergency_notice_number", 0) or "").strip(),
+            "entered_at": self._row_value(row, "emergency_notice_entered_at", 1),
+        }
+
+    def save_emergency_notice(
+        self,
+        admission_id: int,
+        number: str,
+        shift_date: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        admission_id = int(admission_id)
+        normalized = str(number or "").strip()
+        shift_start, _shift_end = self.get_day_period(shift_date or datetime.now())
+        default_entered_at = shift_start.replace(microsecond=0).isoformat()
+        now_text = datetime.now().replace(microsecond=0).isoformat()
+
+        def operation(cursor):
+            cursor.execute(
+                """
+                SELECT emergency_notice_number, emergency_notice_entered_at
+                FROM admissions
+                WHERE id = ?
+                """,
+                (admission_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("Госпитализация пациента не найдена.")
+
+            old_number = str(self._row_value(row, "emergency_notice_number", 0) or "").strip()
+            old_entered_at = self._row_value(row, "emergency_notice_entered_at", 1)
+
+            if normalized:
+                entered_at = str(old_entered_at or "").strip() if old_number else default_entered_at
+                if not entered_at:
+                    entered_at = default_entered_at
+            else:
+                entered_at = None
+
+            stored_number = normalized or None
+            if old_number == normalized and (old_entered_at or None) == (entered_at or None):
+                return {"number": normalized, "entered_at": entered_at}
+
+            cursor.execute(
+                """
+                UPDATE admissions
+                SET emergency_notice_number = ?,
+                    emergency_notice_entered_at = ?,
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (stored_number, entered_at, now_text, admission_id),
+            )
+            return {"number": normalized, "entered_at": entered_at}
+
+        result = self.run_write(f"emergency_notice_save:{admission_id}", operation)
+        return dict(result or {"number": normalized, "entered_at": None})
+
     def delete_patient(self, patient_id: int):
         self._patients.delete_patient(patient_id)
 
@@ -1190,11 +1278,14 @@ class RemCardService(QObject):
                 SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM diet_plan WHERE admission_id = ?
                 UNION ALL
                 SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM oral_intake_events WHERE admission_id = ?
+                UNION ALL
+                SELECT MAX(STRFTIME('%Y-%m-%d %H:%M:%f', updated_at)) as ts FROM admissions WHERE id = ?
             )
         """
         res = self.orders_dao.db.fetch_one_remcard(
             query,
             (
+                admission_id,
                 admission_id,
                 admission_id,
                 admission_id,

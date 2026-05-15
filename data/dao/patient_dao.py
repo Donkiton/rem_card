@@ -29,6 +29,8 @@ class PatientDAO:
                 a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
                 a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit,
                 a.diagnosis_code as mkb_code,
+                a.emergency_notice_number,
+                a.emergency_notice_entered_at,
                 COALESCE(
                     a.operation_description,
                     (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)
@@ -76,37 +78,54 @@ class PatientDAO:
         return patients
 
     def get_patient_by_id(self, admission_id: int) -> Optional[PatientDTO]:
-        query = """
+        def build_query(*, include_operations: bool = True, include_emergency_notice: bool = True) -> str:
+            operation_expr = (
+                "COALESCE("
+                "a.operation_description,"
+                "(SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)"
+                ")"
+                if include_operations
+                else "a.operation_description"
+            )
+            emergency_number_expr = "a.emergency_notice_number" if include_emergency_notice else "NULL"
+            emergency_entered_expr = "a.emergency_notice_entered_at" if include_emergency_notice else "NULL"
+            return f"""
             SELECT 
                 a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name, p.birth_date,
                 a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
                 a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit,
                 a.diagnosis_code as mkb_code,
-                COALESCE(
-                    a.operation_description,
-                    (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)
-                ) as operation_info
+                {emergency_number_expr} as emergency_notice_number,
+                {emergency_entered_expr} as emergency_notice_entered_at,
+                {operation_expr} as operation_info
             FROM admissions a
             JOIN patients p ON a.patient_id = p.id
             WHERE a.id = ?
-        """
-        try:
-            rows = self.db.fetch_all_remcard(query, (admission_id,))
-        except sqlite3.OperationalError as exc:
-            if "no such table: operations" not in str(exc).lower():
-                raise
-            fallback_query = """
-                SELECT 
-                    a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name, p.birth_date,
-                    a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
-                    a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit,
-                    a.diagnosis_code as mkb_code,
-                    a.operation_description as operation_info
-                FROM admissions a
-                JOIN patients p ON a.patient_id = p.id
-                WHERE a.id = ?
             """
-            rows = self.db.fetch_all_remcard(fallback_query, (admission_id,))
+
+        include_operations = True
+        include_emergency_notice = True
+        for _attempt in range(3):
+            try:
+                rows = self.db.fetch_all_remcard(
+                    build_query(
+                        include_operations=include_operations,
+                        include_emergency_notice=include_emergency_notice,
+                    ),
+                    (admission_id,),
+                )
+                break
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if "no such table: operations" in text and include_operations:
+                    include_operations = False
+                    continue
+                if "emergency_notice_" in text and include_emergency_notice:
+                    include_emergency_notice = False
+                    continue
+                raise
+        else:
+            rows = []
         if not rows: return None
         patients = self._map_patients(rows)
         return patients[0] if patients else None
@@ -320,6 +339,8 @@ class PatientDAO:
                 birth_date=parse_date_value(_row_get(r, "birth_date")),
                 mkb_code=_row_get(r, "mkb_code"),
                 operation_info=_row_get(r, "operation_info"),
+                emergency_notice_number=_row_get(r, "emergency_notice_number"),
+                emergency_notice_entered_at=_safe_parse_dt(_row_get(r, "emergency_notice_entered_at")),
                 full_name=full_name,
                 source_db_path=source_db_path,
                 source_db_name=source_db_name,
@@ -347,6 +368,8 @@ class PatientDAO:
             "patient_age_unit",
             "diagnosis_code",
             "operation_description",
+            "emergency_notice_number",
+            "emergency_notice_entered_at",
         }
 
         def p_col(name: str) -> str:
@@ -395,6 +418,8 @@ class PatientDAO:
                 {a_col('patient_months')} as patient_months,
                 {a_col('patient_age_unit')} as patient_age_unit,
                 {a_col('diagnosis_code')} as mkb_code,
+                {a_col('emergency_notice_number')} as emergency_notice_number,
+                {a_col('emergency_notice_entered_at')} as emergency_notice_entered_at,
                 {operation_expr} as operation_info
             FROM admissions a
             JOIN patients p ON a.patient_id = p.id

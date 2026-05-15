@@ -19,6 +19,7 @@ from rem_card.services.report_vitals_slotting import select_latest_vitals_by_rep
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
+from rem_card.ui.rem_card_sectors.s_print.emergency_notice import attach_notice_for_period
 from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_full_report_data
 from rem_card.ui.rem_card_sectors.s_print.movement import movement_comment_text
 
@@ -220,6 +221,7 @@ class DataCollectorWorker(QThread):
                 "icu_day": str(ShiftService.calculate_icu_day(patient.admission_datetime, start_dt)) if patient and patient.admission_datetime else "?",
                 "start_dt": start_dt, "end_dt": end_dt, "vitals": [], "prescriptions": [], "events": [], "fluids_raw": []
             }
+            attach_notice_for_period(data, patient, start_dt, end_dt)
             if self.config.get("vitals", True): data["vitals"] = self.remcard_service.get_vitals(self.admission_id, self.date)
             data["prescriptions"] = self.remcard_service.get_orders(self.admission_id, self.date, only_committed=True)
             if self.config.get("balance", True) and hasattr(self.remcard_service, 'get_fluids'): data["fluids_raw"] = self.remcard_service.get_fluids(self.admission_id, self.date)

@@ -54,6 +54,7 @@ class SyncCoordinator:
         "procedure": {"procedures"},
         "patient_bed": {"beds", "patient_header"},
         "archive_": {"beds", "patient_header"},
+        "emergency_notice": {"emergency_notice"},
     }
 
     VITALS_SNAPSHOT_SCOPES = {
@@ -96,6 +97,7 @@ class SyncCoordinator:
             "balance_refresh": bool(full_refresh_required or "balance" in scopes),
             "beds_refresh": bool(full_refresh_required or "beds" in scopes),
             "patient_header_refresh": bool(full_refresh_required or "patient_header" in scopes),
+            "emergency_notice_refresh": bool(full_refresh_required or "emergency_notice" in scopes),
             "status_refresh": bool(full_refresh_required or "patient_status" in scopes),
             "ivl_refresh": bool(full_refresh_required or "ivl" in scopes),
             "procedures_refresh": bool(full_refresh_required or "procedures" in scopes),

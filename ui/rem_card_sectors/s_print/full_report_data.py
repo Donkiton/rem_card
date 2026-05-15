@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable, Optional
 
 from rem_card.services.shift_service import ShiftService
+from .emergency_notice import attach_notice_for_period
 
 from .movement import (
     build_changed_day_movement_struct,
@@ -249,6 +250,7 @@ class FullReportDataCollector:
             "events": [],
             "fluids_raw": [],
         }
+        attach_notice_for_period(data, patient, start_dt, end_dt)
         if self.include_ventilation:
             data["ventilation_events"] = []
         return data

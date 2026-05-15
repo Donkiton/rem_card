@@ -117,7 +117,7 @@ class SectorFactory:
         sectors['sector_7na_b'].setMinimumHeight(120)
         
         sectors['sector_7vit_a'] = Sector7vit_a()
-        sectors['sector_7vit_b'] = Sector7vit_b()
+        sectors['sector_7vit_b'] = Sector7vit_b(role=normalized_role)
         sectors['sector_7bal_a'] = Sector7bal_a()
         sectors['sector_7bal_b'] = Sector7bal_b()
 

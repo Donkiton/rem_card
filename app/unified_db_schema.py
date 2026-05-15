@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 15
-SCHEMA_MIN_MIGRATION_VERSION = 15
+SCHEMA_FASTPATH_REV = 16
+SCHEMA_MIN_MIGRATION_VERSION = 16
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -53,6 +53,8 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
         "clinical_death_datetime",
         "cardiac_arrest_cause",
         "cardiac_arrest_measures_json",
+        "emergency_notice_number",
+        "emergency_notice_entered_at",
         "revision",
     },
     "beds": {"revision"},
@@ -593,6 +595,8 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             clinical_death_datetime DATETIME,
             cardiac_arrest_cause TEXT,
             cardiac_arrest_measures_json TEXT,
+            emergency_notice_number TEXT,
+            emergency_notice_entered_at DATETIME,
             revision INTEGER DEFAULT 0,
             FOREIGN KEY (patient_id) REFERENCES patients(id)
         )
@@ -1184,6 +1188,8 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "admissions", "clinical_death_datetime", "DATETIME", logger)
     _ensure_column(conn, "admissions", "cardiac_arrest_cause", "TEXT", logger)
     _ensure_column(conn, "admissions", "cardiac_arrest_measures_json", "TEXT", logger)
+    _ensure_column(conn, "admissions", "emergency_notice_number", "TEXT", logger)
+    _ensure_column(conn, "admissions", "emergency_notice_entered_at", "DATETIME", logger)
     _ensure_column(conn, "admissions", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "beds", "revision", "INTEGER DEFAULT 0", logger)
@@ -1399,6 +1405,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 12, "patient medical procedures prototype")
     _mark_schema_migration(conn, 13, "lumbar puncture procedure")
     _mark_schema_migration(conn, 14, "transfusion procedure")
+    _mark_schema_migration(conn, 15, "schema contract satisfied")
 
     for table in (
         "vitals",
@@ -1718,7 +1725,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.id",
         "'journal'",
         "'journal'",
-        ("id", "patient_id", "bed_number", "history_number", "admission_datetime", "outcome", "transfer_datetime", "death_datetime", "revision", "updated_at"),
+        ("id", "patient_id", "bed_number", "history_number", "admission_datetime", "outcome", "transfer_datetime", "death_datetime", "emergency_notice_number", "emergency_notice_entered_at", "revision", "updated_at"),
         use_updated_at_gate=True,
     )
     _create_medical_audit_triggers(
@@ -1790,5 +1797,5 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         ("id", "admission_id", "shift_start", "event_time", "amount_ml", "version", "updated_at", "last_modified_by"),
         use_updated_at_gate=True,
     )
-    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "schema contract satisfied")
+    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "admissions emergency notice fields")
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

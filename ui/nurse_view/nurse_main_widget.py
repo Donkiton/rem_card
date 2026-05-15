@@ -33,6 +33,7 @@ LOCAL_ORDER_FORCE_PREFIXES = (
     "nurse_order_mark:",
     "nurse_order_panel_mark:",
 )
+EMERGENCY_NOTICE_FORCE_PREFIX = "emergency_notice_save:"
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
 W1A_PANEL_REFRESH_ENTITIES = {
     "orders",
@@ -878,6 +879,14 @@ class NurseMainWidget(QWidget):
             for prefix in LOCAL_ORDER_FORCE_PREFIXES
         )
 
+    def _is_local_emergency_notice_payload(self, payload: dict, changed_entities: set[str]) -> bool:
+        if not payload.get("forced"):
+            return False
+        sources = self._payload_force_sources(payload)
+        if not any(source.startswith(EMERGENCY_NOTICE_FORCE_PREFIX) for source in sources):
+            return False
+        return set(changed_entities).issubset({"admissions"})
+
     def _invalidate_vitals_cache_from_payload(self, payload: dict, changed_entities: set[str]) -> None:
         force_sources = self._payload_force_sources(payload)
         vitals_entities = changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES)
@@ -996,6 +1005,20 @@ class NurseMainWidget(QWidget):
         except Exception:
             logger.exception("Nurse procedures partial refresh failed")
 
+    def _refresh_emergency_notice_from_db(self) -> None:
+        try:
+            layout = getattr(self, "layout_manager", None)
+            sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
+            admission_id = getattr(layout, "current_admission_id", None) if layout is not None else None
+            if sector is None:
+                return
+            if hasattr(sector, "set_context") and admission_id:
+                sector.set_context(self.remcard_service, admission_id, self._current_date)
+            if hasattr(sector, "refresh"):
+                sector.refresh()
+        except Exception:
+            logger.exception("Nurse emergency notice partial refresh failed")
+
     @staticmethod
     def _changed_entities_from_payload(payload: dict) -> set[str]:
         changed_entities = {
@@ -1084,6 +1107,8 @@ class NurseMainWidget(QWidget):
         self._invalidate_vitals_cache_from_payload(payload, changed_entities)
         orders_entities = {"orders", "administrations"}
         has_w1_changes = bool(changed_entities.intersection(W1_REFRESH_ENTITIES))
+        if self._selection_mode != "card" and self._is_local_emergency_notice_payload(payload, changed_entities):
+            return
         if self._selection_mode == "beds" and (full_refresh_required or has_w1_changes or payload.get("forced")):
             force_sources = self._payload_force_sources(payload)
             beds_refresh_needed = (
@@ -1112,6 +1137,15 @@ class NurseMainWidget(QWidget):
         if self._selection_mode != "card" or not self._payload_is_relevant(payload):
             return
 
+        if self._is_local_emergency_notice_payload(payload, changed_entities):
+            self._refresh_emergency_notice_from_db()
+            logger.info(
+                "NurseMainWidget refreshed emergency notice only admission_id=%s sources=%s",
+                getattr(self.layout_manager, "current_admission_id", None),
+                self._payload_force_sources(payload),
+            )
+            return
+
         if self._is_local_orders_force_payload(payload, changed_entities):
             if hasattr(self.layout_manager, 'orders_widget'):
                 try:
@@ -1129,6 +1163,9 @@ class NurseMainWidget(QWidget):
             )
             self._schedule_balance_update()
             return
+
+        if "admissions" in changed_entities and sync_actions.get("patient_header_refresh"):
+            self._refresh_emergency_notice_from_db()
 
         if self._handle_diet_sync(
             payload,
@@ -1584,6 +1621,7 @@ class NurseMainWidget(QWidget):
         diet_widget = self._ensure_diet_widget()
         if diet_widget and getattr(self.layout_manager, 'current_admission_id', None):
             diet_widget.set_context(self.layout_manager.current_admission_id, self._current_date)
+        self._update_emergency_notice_sector()
         self._configure_balance_quick_oral_input()
         # Держим сектор 5 в синхроне с датой открытой карты.
         if (
@@ -1608,6 +1646,7 @@ class NurseMainWidget(QWidget):
         self.current_date = date
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
+        self._update_emergency_notice_sector()
         
         # Рассчитываем мед. сутки для правильной инициализации
         start_dt, end_dt = self.remcard_service.get_day_period(date)
@@ -1760,6 +1799,7 @@ class NurseMainWidget(QWidget):
         adm_id = self.layout_manager.current_admission_id
         if not adm_id: return
         snapshot = self._card_snapshot_cache or {}
+        self._update_emergency_notice_sector(snapshot)
         if hasattr(self, 'layout_manager') and hasattr(self.layout_manager, 'sector_4b'):
             patient = snapshot.get("patient")
             if patient:
@@ -1781,6 +1821,28 @@ class NurseMainWidget(QWidget):
         self._bind_orders_balance_signals()
         self._bind_nurse_orders_balance_signals()
         self._update_balance_calculations()
+
+    def _update_emergency_notice_sector(self, snapshot=None):
+        layout = getattr(self, "layout_manager", None)
+        sector = getattr(layout, "sector_7vit_b", None) if layout is not None else None
+        admission_id = getattr(layout, "current_admission_id", None) if layout is not None else None
+        if sector is None:
+            return
+        try:
+            loaded_from_service = False
+            if hasattr(sector, "set_context") and admission_id:
+                sector.set_context(self.remcard_service, admission_id, self._current_date)
+                loaded_from_service = True
+            patient = (snapshot or self._card_snapshot_cache or {}).get("patient")
+            if not loaded_from_service and patient and hasattr(sector, "set_notice_data"):
+                sector.set_notice_data(
+                    getattr(patient, "emergency_notice_number", "") or "",
+                    getattr(patient, "emergency_notice_entered_at", None),
+                )
+            if hasattr(sector, "set_forced_read_only"):
+                sector.set_forced_read_only(True)
+        except Exception as exc:
+            logger.warning("Failed to update emergency notice sector (nurse): %s", exc, exc_info=True)
 
     def on_tab_changed(self, tab_name):
         tab_name = self.layout_manager.set_active_tab(tab_name) or tab_name

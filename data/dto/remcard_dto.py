@@ -95,6 +95,8 @@ class PatientDTO:
     birth_date: Optional[date] = None
     mkb_code: Optional[str] = None
     operation_info: Optional[str] = None
+    emergency_notice_number: Optional[str] = None
+    emergency_notice_entered_at: Optional[datetime] = None
     full_name: Optional[str] = None
     source_db_path: Optional[str] = None
     source_db_name: Optional[str] = None
