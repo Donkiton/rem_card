@@ -33,6 +33,16 @@ class NurseRemCardLayoutManager(QWidget):
         
         self.init_ui()
 
+    def _align_nurse_7b_chrome(self):
+        margins = self.sector_7na_b_nurse.main_layout_v.contentsMargins()
+        for sector in (self.sector_7vit_b, self.sector_7bal_b):
+            sector.main_layout_v.setContentsMargins(
+                margins.left(),
+                margins.top(),
+                margins.right(),
+                margins.bottom(),
+            )
+
     def init_ui(self):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 2, 0, 0)
@@ -70,6 +80,8 @@ class NurseRemCardLayoutManager(QWidget):
         for name, instance in sectors.items():
             setattr(self, name, instance)
 
+        self._align_nurse_7b_chrome()
+
         # Для медсестры держим верхний сектор с правым отступом 3px от границы окна.
         self.sector_8.setStyleSheet("""
             QFrame#sector_8_frame {
@@ -99,8 +111,6 @@ class NurseRemCardLayoutManager(QWidget):
         wrapper_layout.addWidget(self.sector_3_4_spacer)
         if hasattr(self, 'sector_7na_b'):
             self.sector_7na_b.hide()
-        self.sector_7na_b_nurse.hide()
-        wrapper_layout.addWidget(self.sector_7na_b_nurse)
 
         # Центр: Стек для разных вкладок
         self.vitals_stack = QStackedWidget()
@@ -151,41 +161,47 @@ class NurseRemCardLayoutManager(QWidget):
 
         # Сборка рядов
         self.mid_row = SplitterManager.create_splitter(Qt.Horizontal)
-        self.mid_row.addWidget(self.vitals_stack)
-        self.mid_row.addWidget(self.sector_3_4_wrapper) 
-        self.mid_row.setStretchFactor(0, 1)
-        self.mid_row.setStretchFactor(1, 0)
+        self.left_content_splitter = SplitterManager.create_splitter(Qt.Vertical)
 
-        target_h = 160
+        self._nurse_7b_min_height = 160
+        target_h = self._nurse_7b_min_height
         self.sector_5.setFixedHeight(target_h)
         self.sector_6.setFixedHeight(target_h)
         self.sector_7vit_a.setFixedHeight(target_h)
         self.sector_7vit_b.setFixedHeight(target_h)
         self.sector_7bal_a.setFixedHeight(target_h)
         self.sector_7bal_b.setFixedHeight(target_h)
+        self.sector_7na_b_nurse.setFixedHeight(target_h)
         
         self.sector_7a_stack = QStackedWidget()
         self.sector_7a_stack.addWidget(self.sector_7vit_a)
         self.sector_7a_stack.addWidget(self.sector_7bal_a)
         self.sector_7b_stack = QStackedWidget()
-        self.sector_7b_stack.setFixedWidth(230) 
         self.sector_7b_stack.addWidget(self.sector_7vit_b)
         self.sector_7b_stack.addWidget(self.sector_7bal_b)
+        self.sector_7b_mode_stack = QStackedWidget()
+        self.sector_7b_mode_stack.addWidget(self.sector_7na_b_nurse)
+        self.sector_7b_mode_stack.addWidget(self.sector_7b_stack)
+        self.sector_7b_mode_stack.setCurrentIndex(1)
+        wrapper_layout.addWidget(self.sector_7b_mode_stack)
         
         self.bottom_row = SplitterManager.create_splitter(Qt.Horizontal)
         self.bottom_row.setFixedHeight(target_h)
         self.bottom_row.addWidget(self.sector_5)
         self.bottom_row.addWidget(self.sector_6)
         self.bottom_row.addWidget(self.sector_7a_stack)
-        self.bottom_row.addWidget(self.sector_7b_stack)
         self.bottom_row.setStretchFactor(0, 1)
         self.bottom_row.setStretchFactor(1, 1)
         self.bottom_row.setStretchFactor(2, 1)
-        self.bottom_row.setStretchFactor(3, 0)
 
-        self.content_splitter = SplitterManager.create_splitter(Qt.Vertical)
-        self.content_splitter.addWidget(self.mid_row)
-        self.content_splitter.addWidget(self.bottom_row)
+        self.left_content_splitter.addWidget(self.vitals_stack)
+        self.left_content_splitter.addWidget(self.bottom_row)
+        self.mid_row.addWidget(self.left_content_splitter)
+        self.mid_row.addWidget(self.sector_3_4_wrapper)
+        self.mid_row.setStretchFactor(0, 1)
+        self.mid_row.setStretchFactor(1, 0)
+
+        self.content_splitter = self.mid_row
 
         # Собираем 4б+4в так же, как W1-строку: простой VBox без splitter-pass.
         self.sector_4b.main_layout_v.setContentsMargins(0, 0, 0, 0)
@@ -314,19 +330,70 @@ class NurseRemCardLayoutManager(QWidget):
     def apply_splitter_locking(self):
         SplitterManager.apply_locking(self)
 
+    def _nurse_7b_target_height(self):
+        min_h = int(getattr(self, "_nurse_7b_min_height", 160))
+        if not hasattr(self, "content_splitter"):
+            return min_h
+
+        content_h = int(self.content_splitter.height() or 0)
+        if content_h <= 0:
+            return min_h
+
+        top_h = int(self.sector_3_4_container.height() or 0)
+        if top_h <= 0:
+            top_h = int(
+                self.sector_3_4_container.minimumHeight()
+                or self.sector_3_4_container.sizeHint().height()
+                or 0
+            )
+
+        wrapper_layout = self.sector_3_4_wrapper.layout()
+        vertical_margins = 0
+        if wrapper_layout is not None:
+            margins = wrapper_layout.contentsMargins()
+            vertical_margins = margins.top() + margins.bottom()
+
+        return max(min_h, content_h - top_h - vertical_margins)
+
+    def _apply_nurse_7b_height_lock(self):
+        target_h = self._nurse_7b_target_height()
+        for widget in (
+            self.sector_7vit_b,
+            self.sector_7bal_b,
+            self.sector_7na_b_nurse,
+            self.sector_7b_stack,
+            self.sector_7b_mode_stack,
+        ):
+            widget.setFixedHeight(target_h)
+        return target_h
+
     def _post_restore_fix(self):
         try:
             if self.selection_stack.currentIndex() == 0:
-                self.mid_row.setSizes([self.width() - 230, 230])
+                self._apply_nurse_7b_height_lock()
+                content_w = max(1, int(self.content_splitter.width() or self.width()))
+                left_w = max(1, content_w - 230)
+                self.mid_row.setSizes([left_w, 230])
                 self.sector_3_4_container.setSizes([186, 204, 65])
-                self.content_splitter.setSizes([self.height() - 160, 160])
-                bottom_available = max(0, self.width() - 230)
-                bottom_equal = max(1, bottom_available // 3)
-                self.bottom_row.setSizes([bottom_equal, bottom_equal, bottom_equal, 230])
+                left_h = max(
+                    1,
+                    int(
+                        self.left_content_splitter.height()
+                        or self.content_splitter.height()
+                        or self.height()
+                    ),
+                )
+                self.left_content_splitter.setSizes([
+                    max(1, left_h - self._nurse_7b_min_height),
+                    self._nurse_7b_min_height,
+                ])
+                bottom_w = max(1, int(self.bottom_row.width() or left_w))
+                bottom_equal = max(1, bottom_w // 3)
+                self.bottom_row.setSizes([bottom_equal, bottom_equal, bottom_equal])
 
                 # Принудительное выравнивание ширины 2b_g и 2b_v во вкладке баланса
                 if self.balance_top_splitter is not None:
-                    available_w = self.width() - 230
+                    available_w = left_w
                     w2b = int(available_w * 0.4)
                     w2d = available_w - (w2b * 2)
                     self.balance_top_splitter.setSizes([w2b, w2b, w2d])
@@ -697,43 +764,53 @@ class NurseRemCardLayoutManager(QWidget):
             if tab_name in tab_map:
                 idx = tab_map[tab_name]
                 is_orders = (tab_name == "Назначения")
-                if is_orders:
-                    self.ensure_orders_widget()
-                self.vitals_stack.setCurrentIndex(idx)
-                
-                self.bottom_row.setVisible(not is_orders)
-                self.sector_7na_b_nurse.setVisible(is_orders)
+                updates_enabled = self.updatesEnabled()
+                if updates_enabled:
+                    self.setUpdatesEnabled(False)
+                try:
+                    if is_orders:
+                        self.ensure_orders_widget()
+                    self.vitals_stack.setCurrentIndex(idx)
 
-                # Мгновенно подтягиваем данные листа назначений при открытии вкладки,
-                # чтобы не ждать следующий тик автообновления (2с).
-                if is_orders and hasattr(self, 'orders_widget'):
-                    self.orders_widget.ensure_ready_for_show()
-                
-                if tab_name == "Баланс жидкости":
-                    self.ensure_balance_tab_initialized()
-                    self.sector_7a_stack.setCurrentIndex(1)
-                    self.sector_7b_stack.setCurrentIndex(1)
-                elif tab_name in ("Движение", "События"):
-                    self.ensure_events_sector()
-                    self.sector_7a_stack.setCurrentIndex(0)
-                    self.sector_7b_stack.setCurrentIndex(0)
-                elif tab_name == "Процедуры":
-                    self._ensure_proc_tab_initialized()
-                    if hasattr(self, 'sector_proc') and hasattr(self.sector_proc, 'refresh'):
-                        self.sector_proc.refresh()
-                elif tab_name == "Анализы":
-                    self._ensure_anal_tab_initialized()
-                    if hasattr(self, 'sector_anal') and hasattr(self.sector_anal, 'refresh'):
-                        self.sector_anal.refresh()
-                elif tab_name == "Печать":
-                    self._ensure_print_tab_initialized()
-                    if hasattr(self, 'sector_print') and hasattr(self.sector_print, 'refresh'):
-                        self.sector_print.refresh()
-                else:
-                    self.sector_7a_stack.setCurrentIndex(0)
-                    self.sector_7b_stack.setCurrentIndex(0)
-                    
-            self._fix_timer.start(0)
+                    self.bottom_row.setVisible(not is_orders)
+                    self.sector_7b_mode_stack.setCurrentIndex(0 if is_orders else 1)
+
+                    # Мгновенно подтягиваем данные листа назначений при открытии вкладки,
+                    # чтобы не ждать следующий тик автообновления (2с).
+                    if is_orders and hasattr(self, 'orders_widget'):
+                        self.orders_widget.ensure_ready_for_show()
+
+                    if tab_name == "Баланс жидкости":
+                        self.ensure_balance_tab_initialized()
+                        self.sector_7a_stack.setCurrentIndex(1)
+                        self.sector_7b_stack.setCurrentIndex(1)
+                    elif tab_name in ("Движение", "События"):
+                        self.ensure_events_sector()
+                        self.sector_7a_stack.setCurrentIndex(0)
+                        self.sector_7b_stack.setCurrentIndex(0)
+                    elif tab_name == "Процедуры":
+                        self._ensure_proc_tab_initialized()
+                        if hasattr(self, 'sector_proc') and hasattr(self.sector_proc, 'refresh'):
+                            self.sector_proc.refresh()
+                    elif tab_name == "Анализы":
+                        self._ensure_anal_tab_initialized()
+                        if hasattr(self, 'sector_anal') and hasattr(self.sector_anal, 'refresh'):
+                            self.sector_anal.refresh()
+                    elif tab_name == "Печать":
+                        self._ensure_print_tab_initialized()
+                        if hasattr(self, 'sector_print') and hasattr(self.sector_print, 'refresh'):
+                            self.sector_print.refresh()
+                    else:
+                        self.sector_7a_stack.setCurrentIndex(0)
+                        self.sector_7b_stack.setCurrentIndex(0)
+
+                    self._fix_timer.stop()
+                    self._post_restore_fix()
+                finally:
+                    if updates_enabled:
+                        self.setUpdatesEnabled(True)
+                        self.updateGeometry()
+                        self.update()
             return tab_name
         except Exception as exc:
             logger.warning("Не удалось переключить вкладку РЕМ карты медсестры на %s: %s", tab_name, exc, exc_info=True)
