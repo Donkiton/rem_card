@@ -595,12 +595,6 @@ class NurseMainWidget(QWidget):
         if context_key != self._current_snapshot_context_key(load_scope="patient_open_card"):
             return
 
-        snapshot = self._card_snapshot_cache or {}
-        if snapshot.get("scope") == "patient_card" and (
-            "fluids" in snapshot or "balance_runtime" in snapshot
-        ):
-            return
-
         self._request_card_snapshot(
             ensure_initial_status=ensure_initial_status,
             load_scope="patient_open_card",
@@ -917,11 +911,26 @@ class NurseMainWidget(QWidget):
             if current_admission_id:
                 admission_ids.add(int(current_admission_id))
 
+        reason = f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}"
         for admission_id in admission_ids:
+            vitals_removed = 0
+            card_removed = 0
+            if hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+                vitals_removed = coordinator.invalidate_patient_vitals_for_admission(
+                    admission_id,
+                    reason=reason,
+                )
+            if hasattr(coordinator, "invalidate_patient_card_for_admission"):
+                card_removed = coordinator.invalidate_patient_card_for_admission(
+                    admission_id,
+                    reason=reason,
+                )
             logger.info(
-                "NurseMainWidget preserves patient snapshot cache for stale-while-revalidate admission_id=%s reason=%s",
+                "NurseMainWidget invalidated patient snapshot cache admission_id=%s vitals_entries=%s card_entries=%s reason=%s",
                 admission_id,
-                f"data_changes:{','.join(sorted(changed_entities)) or ','.join(force_sources) or 'forced'}",
+                vitals_removed,
+                card_removed,
+                reason,
             )
 
     def _refresh_balance_from_db(self) -> None:

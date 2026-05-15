@@ -7880,6 +7880,149 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_patient_open_cached_card_always_rehydrates(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+    from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget
+
+    shift_date = datetime(2026, 5, 15, 8, 0, 0)
+
+    def context_key(*, admission_id=20, shift_date=shift_date, load_scope="patient_open_card"):
+        return (int(admission_id or 0), shift_date, str(load_scope or "full"))
+
+    doctor_calls = []
+    doctor = SimpleNamespace(
+        admission_id=20,
+        _current_date=shift_date,
+        _card_snapshot_cache={
+            "scope": "patient_card",
+            "version": 95066,
+            "balance_runtime": {"orders": []},
+            "fluids": [],
+        },
+        _current_snapshot_context_key=context_key,
+        _request_card_snapshot=lambda **kwargs: doctor_calls.append(dict(kwargs)),
+    )
+    DoctorRemCardWidget._request_card_hydration_if_current(
+        doctor,
+        20,
+        shift_date,
+        context_key(),
+        ensure_initial_status=True,
+    )
+    if len(doctor_calls) != 1:
+        return False, "doctor cached full patient_card skipped freshness hydration"
+    if doctor_calls[0].get("load_scope") != "patient_open_card":
+        return False, f"doctor hydration used wrong scope: {doctor_calls[0]}"
+
+    nurse_calls = []
+    nurse = SimpleNamespace(
+        layout_manager=SimpleNamespace(current_admission_id=20),
+        _current_date=shift_date,
+        _card_snapshot_cache={
+            "scope": "patient_card",
+            "version": 95066,
+            "balance_runtime": {"orders": []},
+            "fluids": [],
+        },
+        _current_snapshot_context_key=context_key,
+        _request_card_snapshot=lambda **kwargs: nurse_calls.append(dict(kwargs)),
+    )
+    NurseMainWidget._request_card_hydration_if_current(
+        nurse,
+        20,
+        shift_date,
+        context_key(),
+        ensure_initial_status=False,
+    )
+    if len(nurse_calls) != 1:
+        return False, "nurse cached full patient_card skipped freshness hydration"
+    if nurse_calls[0].get("load_scope") != "patient_open_card":
+        return False, f"nurse hydration used wrong scope: {nurse_calls[0]}"
+
+    stale_context_calls = []
+    stale_context_doctor = SimpleNamespace(
+        admission_id=21,
+        _current_date=shift_date,
+        _card_snapshot_cache={"scope": "patient_card", "balance_runtime": {}},
+        _current_snapshot_context_key=context_key,
+        _request_card_snapshot=lambda **kwargs: stale_context_calls.append(dict(kwargs)),
+    )
+    DoctorRemCardWidget._request_card_hydration_if_current(
+        stale_context_doctor,
+        20,
+        shift_date,
+        context_key(),
+        ensure_initial_status=True,
+    )
+    if stale_context_calls:
+        return False, "doctor stale hydration context should not request a card snapshot"
+
+    return True, "ok"
+
+
+def _check_patient_snapshot_cache_invalidates_on_vitals_change(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from types import SimpleNamespace
+
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+    from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget
+
+    class FakeCoordinator:
+        def __init__(self):
+            self.vitals_calls = []
+            self.card_calls = []
+
+        def invalidate_patient_vitals_for_admission(self, admission_id, *, reason=""):
+            self.vitals_calls.append((int(admission_id), reason))
+            return 1
+
+        def invalidate_patient_card_for_admission(self, admission_id, *, reason=""):
+            self.card_calls.append((int(admission_id), reason))
+            return 1
+
+    payload = {
+        "admission_ids": [20],
+        "changes": [
+            {
+                "entity_name": "vitals",
+                "admission_id": 20,
+            }
+        ],
+    }
+    changed_entities = {"vitals"}
+
+    doctor_coordinator = FakeCoordinator()
+    doctor = SimpleNamespace(
+        _archive_read_only_mode=False,
+        admission_id=20,
+        _payload_force_sources=DoctorRemCardWidget._payload_force_sources,
+        _get_read_coordinator=lambda: doctor_coordinator,
+    )
+    DoctorRemCardWidget._invalidate_vitals_cache_from_payload(doctor, payload, changed_entities)
+    if doctor_coordinator.vitals_calls != [(20, "data_changes:vitals")]:
+        return False, f"doctor vitals cache invalidation mismatch: {doctor_coordinator.vitals_calls}"
+    if doctor_coordinator.card_calls != [(20, "data_changes:vitals")]:
+        return False, f"doctor card cache invalidation mismatch: {doctor_coordinator.card_calls}"
+
+    nurse_coordinator = FakeCoordinator()
+    nurse = SimpleNamespace(
+        layout_manager=SimpleNamespace(current_admission_id=20),
+        _payload_force_sources=NurseMainWidget._payload_force_sources,
+        _get_read_coordinator=lambda: nurse_coordinator,
+    )
+    NurseMainWidget._invalidate_vitals_cache_from_payload(nurse, payload, changed_entities)
+    if nurse_coordinator.vitals_calls != [(20, "data_changes:vitals")]:
+        return False, f"nurse vitals cache invalidation mismatch: {nurse_coordinator.vitals_calls}"
+    if nurse_coordinator.card_calls != [(20, "data_changes:vitals")]:
+        return False, f"nurse card cache invalidation mismatch: {nurse_coordinator.card_calls}"
+
+    return True, "ok"
+
+
 def _check_read_coordinator_partial_snapshots(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime
@@ -8709,6 +8852,8 @@ def main():
         ("outcome_rollback_restores_released_w1_bed", _check_outcome_rollback_restores_released_w1_bed),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
+        ("patient_open_cached_card_always_rehydrates", _check_patient_open_cached_card_always_rehydrates),
+        ("patient_snapshot_cache_invalidates_on_vitals_change", _check_patient_snapshot_cache_invalidates_on_vitals_change),
         ("read_coordinator_partial_snapshots", _check_read_coordinator_partial_snapshots),
         ("visible_section_cache_keys_use_shift_context", _check_visible_section_cache_keys_use_shift_context),
         ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
