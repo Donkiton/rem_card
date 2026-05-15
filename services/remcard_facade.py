@@ -701,16 +701,20 @@ class RemCardService(QObject):
             except Exception:
                 return None
 
-    def get_emergency_notice(self, admission_id: int) -> Dict[str, Any]:
+    def get_emergency_notice(self, admission_id: int, *, force_central: bool = False) -> Dict[str, Any]:
+        query = """
+            SELECT emergency_notice_number, emergency_notice_entered_at
+            FROM admissions
+            WHERE id = ?
+        """
+        params = (int(admission_id),)
         try:
-            row = self.orders_dao.db.fetch_one_remcard(
-                """
-                SELECT emergency_notice_number, emergency_notice_entered_at
-                FROM admissions
-                WHERE id = ?
-                """,
-                (int(admission_id),),
-            )
+            db = self.orders_dao.db
+            central_fetch = getattr(db, "_fetch_one_central_with_retry", None)
+            if force_central and callable(central_fetch):
+                row = central_fetch(query, params)
+            else:
+                row = db.fetch_one_remcard(query, params)
         except Exception as exc:
             if "emergency_notice_" not in str(exc).lower():
                 raise

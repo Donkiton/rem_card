@@ -894,6 +894,8 @@ class DoctorRemCardWidget(QWidget):
             for entity in (payload.get("changed_entities") or [])
             if entity is not None
         }
+        if changed_entities.intersection(relevant_entities):
+            return True
         if changed_entities.intersection(orders_entities | {"diet_templates"}) and not payload.get("changes"):
             return True
         return False
@@ -1139,6 +1141,8 @@ class DoctorRemCardWidget(QWidget):
             self._refresh_ivl_from_db()
         if sync_actions.get("procedures_refresh"):
             self._refresh_procedures_from_db()
+        if sync_actions.get("emergency_notice_refresh"):
+            self._refresh_emergency_notice_from_db()
 
     def _on_data_changes(self, payload: dict):
         if self._is_closing or not self.admission_id:
@@ -2951,10 +2955,12 @@ class DoctorRemCardWidget(QWidget):
         try:
             loaded_from_service = False
             if hasattr(sector, "set_context") and self.admission_id:
-                sector.set_context(self.service, self.admission_id, self._current_date)
-                loaded_from_service = True
+                loaded_from_service = bool(sector.set_context(self.service, self.admission_id, self._current_date))
+                if not loaded_from_service and hasattr(sector, "refresh"):
+                    loaded_from_service = bool(sector.refresh())
             patient = (snapshot or self._card_snapshot_cache or {}).get("patient")
-            if not loaded_from_service and patient and hasattr(sector, "set_notice_data"):
+            has_draft = bool(getattr(sector, "has_unsaved_changes", lambda: False)())
+            if not loaded_from_service and not has_draft and patient and hasattr(sector, "set_notice_data"):
                 sector.set_notice_data(
                     getattr(patient, "emergency_notice_number", "") or "",
                     getattr(patient, "emergency_notice_entered_at", None),

@@ -169,6 +169,9 @@ class Sector7vit_b(BaseSectorWidget):
         if hasattr(self, "save_btn"):
             self.save_btn.setEnabled(can_edit and self.notice_edit.text().strip() != self._loaded_number)
 
+    def has_unsaved_changes(self) -> bool:
+        return bool(self.editable and self.notice_edit.text().strip() != self._loaded_number)
+
     def set_forced_read_only(self, read_only: bool):
         self._forced_read_only = bool(read_only)
         self._apply_enabled_state()
@@ -190,8 +193,7 @@ class Sector7vit_b(BaseSectorWidget):
             return False
         self._apply_enabled_state()
         if context_changed:
-            self.refresh()
-            return True
+            return self.refresh(force=True)
         return False
 
     def set_notice_data(self, number: str = "", entered_at=None):
@@ -222,17 +224,28 @@ class Sector7vit_b(BaseSectorWidget):
             )
         return f"№ извещения: {value or '—'}"
 
-    def refresh(self):
+    def refresh(self, *, force: bool = False):
         if not self.remcard_service or not self.admission_id:
             self.set_notice_data("")
-            return
+            return True
+        if self.has_unsaved_changes() and not force:
+            self._apply_enabled_state()
+            return False
         try:
-            data = self.remcard_service.get_emergency_notice(self.admission_id)
+            try:
+                data = self.remcard_service.get_emergency_notice(
+                    self.admission_id,
+                    force_central=True,
+                )
+            except TypeError:
+                data = self.remcard_service.get_emergency_notice(self.admission_id)
             self.set_notice_data(data.get("number", ""))
+            return True
         except Exception as exc:
             logger.warning("Не удалось загрузить номер экстренного извещения: %s", exc)
             self.status_label.setText("Не удалось загрузить")
             self._apply_enabled_state()
+            return False
 
     def _save_notice(self):
         if not self.editable or self._forced_read_only or not self.remcard_service or not self.admission_id:
