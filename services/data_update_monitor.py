@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from rem_card.app.db_availability import DatabaseClosedError
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 
@@ -43,6 +44,16 @@ class DataUpdateMonitor(QThread):
         self._stop_evt.set()
         self._wake_evt.set()
 
+    def _is_shutting_down(self) -> bool:
+        return self._stop_evt.is_set() or bool(getattr(self._data_service, "_shutting_down", False))
+
+    def _should_suppress_poll_error(self, exc: Exception) -> bool:
+        if not self._is_shutting_down():
+            return False
+        if isinstance(exc, DatabaseClosedError):
+            return True
+        return "database connection is closed" in str(exc).lower()
+
     def run(self):
         while not self._stop_evt.is_set():
             force_emit = False
@@ -56,6 +67,9 @@ class DataUpdateMonitor(QThread):
             try:
                 self._poll_once(force_emit=force_emit, force_sources=force_sources)
             except Exception as exc:
+                if self._should_suppress_poll_error(exc):
+                    logger.info("DataUpdateMonitor stopped during shutdown after database connection closed")
+                    return
                 logger.error("DataUpdateMonitor poll failed: %s", exc, exc_info=True)
                 self.monitor_error.emit(str(exc))
 
@@ -69,8 +83,14 @@ class DataUpdateMonitor(QThread):
         if callable(run_maintenance):
             run_maintenance()
 
+        if self._stop_evt.is_set():
+            return
+
         current_change_id = int(self._data_service.get_latest_change_id())
         previous_change_id = self._last_seen_id
+
+        if self._stop_evt.is_set():
+            return
 
         if previous_change_id is None:
             self._last_seen_id = current_change_id

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -106,6 +107,14 @@ UPDATE_DIR_NAME = "UPD"
 DEFAULT_TARGET_DIR_NAME = "Prog"
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
 DIRECT_TARGET_DIR_ENV = "REMCARD_UPDATE_TARGET_DIR"
+UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_")
+UPDATE_CLEANUP_ATTEMPTS = 60
+UPDATE_CLEANUP_DELAY_SEC = 0.5
+STALE_UPDATE_CLEANUP_ATTEMPTS = 10
+STALE_UPDATE_CLEANUP_DELAY_SEC = 0.2
+DEFERRED_CLEANUP_ARG = "--cleanup-leftovers"
+DEFERRED_CLEANUP_ATTEMPTS = 600
+DEFERRED_CLEANUP_DELAY_SEC = 1.0
 
 
 class UpdateAlreadyRunning(RuntimeError):
@@ -351,11 +360,25 @@ def _validate_source(source_dir: str) -> dict[str, Any]:
     return manifest
 
 
+def _make_path_writable_and_retry(func: Callable[[str], None], path: str, _exc_info):
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except Exception:
+        pass
+    func(path)
+
+
+def _remove_tree_once(path: str):
+    if not os.path.exists(path):
+        return
+    shutil.rmtree(path, onerror=_make_path_writable_and_retry)
+
+
 def _remove_path(path: str):
     if not os.path.exists(path):
         return
     if os.path.isdir(path) and not os.path.islink(path):
-        shutil.rmtree(path)
+        _remove_tree_once(path)
     else:
         os.remove(path)
 
@@ -369,6 +392,140 @@ def _remove_file_quietly(path: str):
         pass
     except Exception:
         pass
+
+
+def _log_cleanup_failure(log: Optional[Callable[[str], None]], description: str, path: str, exc: Optional[Exception]):
+    if log:
+        log(f"Не удалось удалить временную папку обновления ({description}): path={path}; error={exc}")
+
+
+def _is_update_temp_dir(path: str) -> bool:
+    name = os.path.basename(os.path.abspath(path))
+    return any(name.startswith(prefix) for prefix in UPDATE_TEMP_DIR_PREFIXES)
+
+
+def _remove_update_tree_with_retry(
+    path: str,
+    description: str,
+    *,
+    attempts: int = UPDATE_CLEANUP_ATTEMPTS,
+    delay_sec: float = UPDATE_CLEANUP_DELAY_SEC,
+    log: Optional[Callable[[str], None]] = None,
+) -> bool:
+    if not path or not os.path.exists(path):
+        return True
+
+    last_exc: Optional[Exception] = None
+    total_attempts = max(1, int(attempts))
+    for attempt in range(total_attempts):
+        try:
+            _remove_path(path)
+            if not os.path.exists(path):
+                return True
+            last_exc = RuntimeError("путь остался после удаления")
+        except Exception as exc:
+            last_exc = exc
+
+        if attempt < total_attempts - 1 and delay_sec > 0:
+            time.sleep(delay_sec)
+
+    _log_cleanup_failure(log, description, path, last_exc)
+    return False
+
+
+def _iter_update_temp_dirs(target_dir: str):
+    try:
+        names = os.listdir(target_dir)
+    except Exception:
+        return
+    for name in names:
+        path = os.path.join(target_dir, name)
+        if os.path.isdir(path) and _is_update_temp_dir(path):
+            yield path
+
+
+def _cleanup_stale_update_dirs(
+    target_dir: str,
+    *,
+    exclude: Optional[set[str]] = None,
+    log: Optional[Callable[[str], None]] = None,
+) -> list[str]:
+    excluded = {_path_key(path) for path in (exclude or set())}
+    failed: list[str] = []
+    for path in _iter_update_temp_dirs(target_dir):
+        if _path_key(path) in excluded:
+            continue
+        if not _remove_update_tree_with_retry(
+            path,
+            "старый остаток обновления",
+            attempts=STALE_UPDATE_CLEANUP_ATTEMPTS,
+            delay_sec=STALE_UPDATE_CLEANUP_DELAY_SEC,
+            log=log,
+        ):
+            failed.append(path)
+    return failed
+
+
+def _spawn_deferred_cleanup(paths: list[str], log: Optional[Callable[[str], None]] = None) -> bool:
+    pending = [os.path.abspath(path) for path in paths if path and os.path.exists(path) and _is_update_temp_dir(path)]
+    if not pending:
+        return False
+    if not (getattr(sys, "frozen", False) or "__compiled__" in globals()):
+        return False
+
+    args = [os.path.abspath(sys.executable), DEFERRED_CLEANUP_ARG, "--parent-pid", str(os.getpid())]
+    for path in pending:
+        args.extend(["--path", path])
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    try:
+        subprocess.Popen(
+            args,
+            cwd=os.path.dirname(os.path.abspath(sys.executable)),
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        if log:
+            log("Запущена отложенная очистка временных папок обновления: " + "; ".join(pending))
+        return True
+    except Exception as exc:
+        if log:
+            log(f"Не удалось запустить отложенную очистку временных папок обновления: {exc}")
+        return False
+
+
+def _run_cleanup_mode(args: argparse.Namespace) -> int:
+    try:
+        parent_pid = int(args.parent_pid or 0)
+    except Exception:
+        parent_pid = 0
+
+    while _is_pid_alive(parent_pid):
+        time.sleep(0.5)
+
+    failed = 0
+    for raw_path in args.path or []:
+        path = os.path.abspath(raw_path)
+        if not _is_update_temp_dir(path):
+            failed += 1
+            continue
+        if not _remove_update_tree_with_retry(
+            path,
+            "отложенная очистка",
+            attempts=DEFERRED_CLEANUP_ATTEMPTS,
+            delay_sec=DEFERRED_CLEANUP_DELAY_SEC,
+        ):
+            failed += 1
+    return 1 if failed else 0
+
+
+def _parse_cleanup_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="RemCard updater cleanup")
+    parser.add_argument("--path", action="append", default=[])
+    parser.add_argument("--parent-pid", default="0")
+    return parser.parse_args(argv)
 
 
 def _retry(action: Callable[[], None], description: str, attempts: int = 50, delay_sec: float = 0.5):
@@ -398,6 +555,7 @@ def _replace_program_dir(
     source_dir: str,
     target_dir: str,
     status: Callable[[str, int], None],
+    log: Optional[Callable[[str], None]] = None,
 ) -> tuple[str, str]:
     source = os.path.abspath(source_dir)
     target = os.path.abspath(target_dir)
@@ -461,14 +619,19 @@ def _replace_program_dir(
             installed_paths.append(target_path)
 
         status("Очистка временных файлов...", 92)
-        try:
-            shutil.rmtree(backup)
-        except Exception:
-            pass
-        try:
-            shutil.rmtree(staging)
-        except Exception:
-            pass
+        pending_cleanup: list[str] = []
+        if not _remove_update_tree_with_retry(backup, "резервная папка старой версии", log=log):
+            pending_cleanup.append(backup)
+        if not _remove_update_tree_with_retry(staging, "staging новой версии", log=log):
+            pending_cleanup.append(staging)
+        pending_cleanup.extend(
+            _cleanup_stale_update_dirs(
+                target,
+                exclude={backup, staging},
+                log=log,
+            )
+        )
+        _spawn_deferred_cleanup(pending_cleanup, log=log)
         return staging, backup
     except Exception:
         for path in reversed(installed_paths):
@@ -502,7 +665,7 @@ def _replace_program_dir(
                     pass
         try:
             if os.path.isdir(staging):
-                shutil.rmtree(staging)
+                _remove_update_tree_with_retry(staging, "staging после ошибки", log=log)
         except Exception:
             pass
         raise
@@ -553,7 +716,12 @@ class UpdateWorker(QObject):
 
             _wait_for_parent(int(self.args.parent_pid or 0), self._status)
             _wait_for_active_sessions(baza_dir, self._status)
-            _replace_program_dir(source_dir=source, target_dir=target, status=self._status)
+            _replace_program_dir(
+                source_dir=source,
+                target_dir=target,
+                status=self._status,
+                log=lambda message: _write_log(baza_dir, message),
+            )
 
             self._status("Обновление завершено.", 100)
             _write_log(baza_dir, f"update finished version={payload['target_version']}")
@@ -1030,6 +1198,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: Optional[list[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == DEFERRED_CLEANUP_ARG:
+        return _run_cleanup_mode(_parse_cleanup_args(raw_args[1:]))
     if raw_args:
         args = _parse_args(raw_args)
     else:

@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import sys
 import time
 import functools
@@ -44,6 +45,11 @@ logger = setup_logger()
 import threading
 import faulthandler
 
+
+_FAULT_LOCK = threading.Lock()
+_FAULT_FILE = None
+_FAULT_LOG_PATH = None
+
 def _extract_fault_payload(content: str) -> str:
     payload_lines = []
     for line in content.splitlines():
@@ -52,14 +58,17 @@ def _extract_fault_payload(content: str) -> str:
             continue
         if stripped.startswith("--- SESSION START:") and stripped.endswith("---"):
             continue
+        if stripped.startswith("--- SESSION END:") and stripped.endswith("---"):
+            continue
         payload_lines.append(line)
     if not payload_lines:
         return ""
     return "\n".join(payload_lines[-40:])
 
 
-def _archive_fault_log(fault_log_path: str, content: str) -> str:
-    archive_name = f"faults_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.log"
+def _archive_fault_log(fault_log_path: str, content: str, *, suffix: str = "") -> str:
+    suffix_part = f"_{suffix}" if suffix else ""
+    archive_name = f"faults_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}{suffix_part}.log"
     archive_path = os.path.join(os.path.dirname(fault_log_path), archive_name)
     with open(archive_path, "w", encoding="utf-8") as archive_file:
         archive_file.write(content)
@@ -68,6 +77,7 @@ def _archive_fault_log(fault_log_path: str, content: str) -> str:
 
 def init_crash_handler():
     """Инициализация расширенного перехватчика фатальных сбоев (C++ и Python)."""
+    global _FAULT_FILE, _FAULT_LOG_PATH
     ensure_directories()
         
     fault_log_path = os.path.join(LOGS_DIR, "faults.log")
@@ -93,13 +103,90 @@ def init_crash_handler():
             
     # 2. Настраиваем faulthandler (запись низкоуровневых ошибок Qt/C++)
     try:
-        fault_file = open(fault_log_path, "w" if reset_fault_log else "a", encoding="utf-8")
-        # Записываем разделитель сеанса
-        fault_file.write(f"\n--- SESSION START: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n")
-        fault_file.flush()
-        faulthandler.enable(file=fault_file)
+        with _FAULT_LOCK:
+            if _FAULT_FILE is not None:
+                try:
+                    faulthandler.disable()
+                except Exception:
+                    pass
+                try:
+                    _FAULT_FILE.close()
+                except Exception:
+                    pass
+                _FAULT_FILE = None
+            fault_file = open(fault_log_path, "w" if reset_fault_log else "a", encoding="utf-8")
+            # Записываем разделитель сеанса
+            fault_file.write(
+                "\n--- SESSION START: "
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                f"pid={os.getpid()} role={get_log_file_prefix()} host={socket.gethostname()} ---\n"
+            )
+            fault_file.flush()
+            faulthandler.enable(file=fault_file)
+            _FAULT_FILE = fault_file
+            _FAULT_LOG_PATH = fault_log_path
     except Exception as e:
         logger.error(f"Failed to enable faulthandler: {e}")
+
+
+def finalize_crash_handler(exit_code: int | None = None):
+    """
+    Завершает текущий faulthandler-сеанс.
+
+    Если Windows/PySide успел записать native fault, но приложение затем
+    завершилось штатно, переносим payload в архив и оставляем чистый marker.
+    Так `faults.log` не выглядит как новая ошибка на следующей проверке.
+    """
+    global _FAULT_FILE, _FAULT_LOG_PATH
+    with _FAULT_LOCK:
+        fault_log_path = _FAULT_LOG_PATH or os.path.join(LOGS_DIR, "faults.log")
+        fault_file = _FAULT_FILE
+        _FAULT_FILE = None
+        _FAULT_LOG_PATH = None
+
+        try:
+            faulthandler.disable()
+        except Exception:
+            pass
+        try:
+            if fault_file is not None:
+                fault_file.flush()
+                fault_file.close()
+        except Exception:
+            pass
+
+    try:
+        with open(fault_log_path, "r", encoding="utf-8") as fh:
+            content = fh.read()
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        logger.warning("Failed to finalize crash log %s: %s", fault_log_path, exc)
+        return
+
+    payload = _extract_fault_payload(content)
+    archived_to = ""
+    if payload:
+        try:
+            archived_to = _archive_fault_log(fault_log_path, content, suffix="graceful")
+            logger.warning(
+                "Fault handler captured native fault payload during a session that reached shutdown; archived to %s",
+                archived_to,
+            )
+        except Exception as exc:
+            logger.warning("Failed to archive finalized crash log %s: %s", fault_log_path, exc)
+
+    try:
+        with open(fault_log_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "\n--- SESSION END: "
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                f"pid={os.getpid()} exit_code={exit_code if exit_code is not None else 'unknown'} "
+                f"archived={archived_to or 'none'} ---\n"
+            )
+    except Exception as exc:
+        logger.warning("Failed to reset finalized crash log %s: %s", fault_log_path, exc)
+
 
 def log_exception(exc_type, exc_value, exc_traceback):
     """Глобальный перехватчик исключений (Python)."""

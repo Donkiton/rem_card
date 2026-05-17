@@ -124,6 +124,25 @@ class RoleSessionLock:
         except Exception:
             return None
 
+    @staticmethod
+    def _payload_age_sec(payload: Optional[dict[str, Any]]) -> Optional[float]:
+        if not isinstance(payload, dict):
+            return None
+        ts = payload.get("timestamp")
+        if not isinstance(ts, (int, float)):
+            return None
+        return max(0.0, time.time() - float(ts))
+
+    @staticmethod
+    def _payload_summary(payload: Optional[dict[str, Any]]) -> str:
+        if not isinstance(payload, dict):
+            return "empty"
+        host = payload.get("host", "?")
+        pid = payload.get("pid", "?")
+        owner_id = payload.get("owner_id", "?")
+        role = payload.get("role", "?")
+        return f"role={role}, host={host}, pid={pid}, owner_id={owner_id}"
+
     def _is_stale(self, payload: Optional[dict[str, Any]]) -> bool:
         if payload is _ROLE_LOCK_READ_UNAVAILABLE:
             return False
@@ -162,7 +181,13 @@ class RoleSessionLock:
             return False
         try:
             os.remove(self.lock_path)
-            self.logger.warning("Removed stale role lock: %s", self.lock_path)
+            self.logger.warning(
+                "Removed stale role lock: %s holder=(%s) age_sec=%.1f file_age_sec=%.1f",
+                self.lock_path,
+                self._payload_summary(payload),
+                self._payload_age_sec(payload) or -1.0,
+                self._lock_file_age() or -1.0,
+            )
             return True
         except FileNotFoundError:
             return True

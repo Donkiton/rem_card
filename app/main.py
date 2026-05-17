@@ -863,6 +863,13 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 role_lock.release()
         except Exception:
             pass
+        if logger:
+            try:
+                from rem_card.app.logger import finalize_crash_handler
+
+                finalize_crash_handler(exit_code=exit_code)
+            except Exception as exc:
+                logger.warning("Crash handler finalization failed: %s", exc)
         if exit_code == 0:
             _launch_exit_update_if_needed()
 

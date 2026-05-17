@@ -19,6 +19,8 @@ _METRICS_THREAD: threading.Thread | None = None
 _METRICS_STOP = threading.Event()
 _DROPPED_LOCK = threading.Lock()
 _DROPPED_METRICS = 0
+_LATEST_CHANGE_METRIC_LOCK = threading.Lock()
+_LATEST_CHANGE_METRIC_STATE: dict[tuple[Any, ...], tuple[Any, float]] = {}
 _CACHED_PATH_DAY: str | None = None
 _CACHED_PATH: str | None = None
 _HOSTNAME = socket.gethostname()
@@ -27,6 +29,7 @@ _PID = os.getpid()
 _DEFAULT_QUEUE_SIZE = 10000
 _DEFAULT_BATCH_SIZE = 250
 _DEFAULT_FLUSH_INTERVAL_SEC = 1.0
+_DEFAULT_LATEST_CHANGE_MIN_INTERVAL_SEC = 60.0
 
 
 def _enabled() -> bool:
@@ -56,6 +59,21 @@ def _flush_interval_sec() -> float:
         return max(0.1, float(os.environ.get("REMCARD_LOCAL_METRICS_FLUSH_SEC", str(_DEFAULT_FLUSH_INTERVAL_SEC))))
     except Exception:
         return _DEFAULT_FLUSH_INTERVAL_SEC
+
+
+def _latest_change_min_interval_sec() -> float:
+    try:
+        return max(
+            0.0,
+            float(
+                os.environ.get(
+                    "REMCARD_LATEST_CHANGE_METRIC_MIN_INTERVAL_SEC",
+                    str(_DEFAULT_LATEST_CHANGE_MIN_INTERVAL_SEC),
+                )
+            ),
+        )
+    except Exception:
+        return _DEFAULT_LATEST_CHANGE_MIN_INTERVAL_SEC
 
 
 def _now_iso() -> str:
@@ -166,8 +184,42 @@ def shutdown_metrics(timeout: float = 1.0) -> None:
     flush_metrics(timeout=timeout)
 
 
+def _should_record_metric(name: str, value: Any, fields: dict[str, Any]) -> bool:
+    if str(name) != "latest_change_id":
+        return True
+
+    # Fallback cursor reads are rare and diagnostically important: keep all of them.
+    if str(fields.get("source") or "") == "fallback":
+        return True
+
+    interval = _latest_change_min_interval_sec()
+    if interval <= 0:
+        return True
+
+    key = (
+        str(name),
+        fields.get("component"),
+        fields.get("admission_id"),
+        fields.get("include_global"),
+        fields.get("source"),
+    )
+    now = time.monotonic()
+    with _LATEST_CHANGE_METRIC_LOCK:
+        previous = _LATEST_CHANGE_METRIC_STATE.get(key)
+        if previous is None:
+            _LATEST_CHANGE_METRIC_STATE[key] = (value, now)
+            return True
+        previous_value, previous_ts = previous
+        if previous_value != value or (now - previous_ts) >= interval:
+            _LATEST_CHANGE_METRIC_STATE[key] = (value, now)
+            return True
+    return False
+
+
 def record_metric(name: str, value: Any = None, *, force_flush: bool = False, **fields: Any):
     if not _enabled():
+        return
+    if not _should_record_metric(str(name), value, fields):
         return
     payload = {
         "ts": _now_iso(),

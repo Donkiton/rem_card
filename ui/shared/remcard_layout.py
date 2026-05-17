@@ -710,7 +710,9 @@ class RemCardLayoutManager(QWidget):
             
             self._apply_w1_beds_sector_visibility(refresh_w1a=not already_beds)
             
-            if not already_beds and hasattr(self, 'beds_selection_widget'):
+            if already_beds:
+                logger.debug("Skipping beds_selection_widget.refresh(): beds mode is already active")
+            elif hasattr(self, 'beds_selection_widget') and self.beds_selection_widget is not None:
                 logger.debug("Scheduling beds_selection_widget.refresh()")
                 QTimer.singleShot(0, self._refresh_beds_async)
             else:

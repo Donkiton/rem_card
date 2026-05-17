@@ -239,6 +239,67 @@ def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[boo
                 os.environ[key] = value
 
 
+def _check_updater_cleanup_retries_old_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import updater_main
+
+    source_dir = os.path.join(temp_root, "UPD")
+    target_dir = os.path.join(temp_root, "Prog")
+    os.makedirs(target_dir, exist_ok=True)
+    _write_fake_update_package(source_dir, version="2.0.0")
+    Path(source_dir, "RemCard.exe").write_text("new RemCard.exe", encoding="utf-8")
+    Path(source_dir, "VERSION").write_text("2.0.0\n", encoding="utf-8")
+    Path(source_dir, "CHANGELOG.md").write_text("new changelog", encoding="utf-8")
+    Path(source_dir, "_internal", "new.txt").write_text("new internal", encoding="utf-8")
+
+    for name in updater_main.MANAGED_ROOT_FILES:
+        Path(target_dir, name).write_text(f"old {name}", encoding="utf-8")
+    os.makedirs(os.path.join(target_dir, "_internal"), exist_ok=True)
+    Path(target_dir, "_internal", "old.txt").write_text("old internal", encoding="utf-8")
+
+    stale_dir = os.path.join(target_dir, "__upd_old_20000101_000000_1")
+    os.makedirs(stale_dir, exist_ok=True)
+    Path(stale_dir, "leftover.txt").write_text("leftover", encoding="utf-8")
+
+    original_rmtree = updater_main.shutil.rmtree
+    state = {"backup_failures": 0}
+
+    def flaky_rmtree(path, *args, **kwargs):
+        name = os.path.basename(os.path.abspath(path))
+        if name.startswith("__upd_old_") and name != os.path.basename(stale_dir) and state["backup_failures"] == 0:
+            state["backup_failures"] += 1
+            raise PermissionError("simulated transient Windows file lock")
+        return original_rmtree(path, *args, **kwargs)
+
+    logs: list[str] = []
+    try:
+        updater_main.shutil.rmtree = flaky_rmtree
+        _staging, backup = updater_main._replace_program_dir(
+            source_dir=source_dir,
+            target_dir=target_dir,
+            status=lambda _text, _progress: None,
+            log=logs.append,
+        )
+    finally:
+        updater_main.shutil.rmtree = original_rmtree
+
+    if state["backup_failures"] != 1:
+        return False, "cleanup retry scenario was not exercised"
+    if os.path.exists(backup):
+        return False, f"current backup was left after transient rmtree failure: {backup}"
+    leftovers = [
+        path
+        for path in glob.glob(os.path.join(target_dir, "__upd_*"))
+        if os.path.isdir(path)
+    ]
+    if leftovers:
+        return False, f"update temp directories were left behind: {leftovers}"
+    if Path(target_dir, "VERSION").read_text(encoding="utf-8").strip() != "2.0.0":
+        return False, "new version was not installed"
+    if logs:
+        return False, f"cleanup logged unexpected failure: {logs}"
+    return True, "ok"
+
+
 def _check_update_locks_are_scoped_to_target(temp_root: str) -> tuple[bool, str]:
     from rem_card.app import update_launcher
     from rem_card.app.update_checker import get_update_lock_path
@@ -344,6 +405,45 @@ def _check_role_lock_read_unavailable_blocks_acquire(temp_root: str) -> tuple[bo
     finally:
         lock2.release()
         lock1.release()
+
+
+def _check_role_lock_stale_removal_logs_holder(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    class CaptureLogger:
+        def __init__(self):
+            self.messages: list[str] = []
+
+        def warning(self, message, *args):
+            self.messages.append(str(message) % args if args else str(message))
+
+    lock_path = os.path.join(temp_root, "role.lock")
+    stale_payload = {
+        "timestamp": time.time() - 3600.0,
+        "role": "doctor",
+        "pid": 999999,
+        "host": "old-host",
+        "owner_id": "old-owner",
+        "nonce": "stale",
+    }
+    Path(lock_path).write_text(json.dumps(stale_payload), encoding="utf-8")
+    capture = CaptureLogger()
+    lock = RoleSessionLock(
+        lock_path,
+        role="doctor",
+        owner_id="new-owner",
+        stale_timeout_sec=1.0,
+        logger=capture,  # type: ignore[arg-type]
+    )
+    if not lock._cleanup_if_stale(stale_payload):  # type: ignore[attr-defined]
+        return False, "stale role lock was not removed"
+    if os.path.exists(lock_path):
+        return False, "stale role lock file still exists"
+    joined = "\n".join(capture.messages)
+    for marker in ("holder=(", "role=doctor", "host=old-host", "owner_id=old-owner", "age_sec=", "file_age_sec="):
+        if marker not in joined:
+            return False, f"stale lock log missing {marker}: {joined}"
+    return True, "ok"
 
 
 def _check_local_write_queue_shutdown_drains(temp_root: str) -> tuple[bool, str]:
@@ -1797,6 +1897,119 @@ def _check_local_metrics_are_buffered(temp_root: str) -> tuple[bool, str]:
         return False, "local metrics background writer thread is missing"
 
     return True, "ok"
+
+
+def _check_latest_change_metric_throttles_unchanged_values(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app import local_metrics
+
+    saved_sync = os.environ.get("REMCARD_LOCAL_METRICS_SYNC")
+    saved_interval = os.environ.get("REMCARD_LATEST_CHANGE_METRIC_MIN_INTERVAL_SEC")
+    try:
+        os.environ["REMCARD_LOCAL_METRICS_SYNC"] = "1"
+        os.environ["REMCARD_LATEST_CHANGE_METRIC_MIN_INTERVAL_SEC"] = "999"
+        local_metrics._LATEST_CHANGE_METRIC_STATE.clear()  # type: ignore[attr-defined]
+        for _idx in range(5):
+            local_metrics.record_metric(
+                "latest_change_id",
+                100,
+                component="regression_throttle",
+                admission_id=None,
+                include_global=True,
+                source="central",
+            )
+        local_metrics.record_metric(
+            "latest_change_id",
+            101,
+            component="regression_throttle",
+            admission_id=None,
+            include_global=True,
+            source="central",
+        )
+        local_metrics.record_metric(
+            "latest_change_id",
+            101,
+            component="regression_throttle",
+            admission_id=None,
+            include_global=True,
+            source="fallback",
+        )
+        local_metrics.flush_metrics(timeout=1.0)
+
+        metrics_dir = os.environ["REMCARD_LOCAL_LOGS_DIR"]
+        files = [
+            os.path.join(metrics_dir, name)
+            for name in os.listdir(metrics_dir)
+            if name.startswith("metrics_") and name.endswith(".jsonl")
+        ]
+        if not files:
+            return False, "metrics file was not created for throttle check"
+        newest = max(files, key=os.path.getmtime)
+        records = []
+        with open(newest, "r", encoding="utf-8") as fh:
+            for line in fh:
+                if "regression_throttle" in line:
+                    records.append(json.loads(line))
+        if len(records) != 3:
+            return False, f"latest_change_id throttle wrote {len(records)} records instead of 3: {records}"
+        if [record.get("value") for record in records] != [100, 101, 101]:
+            return False, f"latest_change_id throttle preserved wrong values: {records}"
+        if records[-1].get("source") != "fallback":
+            return False, "fallback latest_change_id metric must bypass throttle"
+        return True, "ok"
+    finally:
+        if saved_sync is None:
+            os.environ.pop("REMCARD_LOCAL_METRICS_SYNC", None)
+        else:
+            os.environ["REMCARD_LOCAL_METRICS_SYNC"] = saved_sync
+        if saved_interval is None:
+            os.environ.pop("REMCARD_LATEST_CHANGE_METRIC_MIN_INTERVAL_SEC", None)
+        else:
+            os.environ["REMCARD_LATEST_CHANGE_METRIC_MIN_INTERVAL_SEC"] = saved_interval
+        local_metrics._LATEST_CHANGE_METRIC_STATE.clear()  # type: ignore[attr-defined]
+
+
+def _check_fault_log_finalize_archives_graceful_payload(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import logger as logger_module
+
+    fault_path = os.path.join(temp_root, "faults.log")
+    Path(fault_path).write_text(
+        "\n--- SESSION START: 2026-05-17 15:22:21 pid=1 role=nurse host=test ---\n"
+        "Windows fatal exception: code 0x8001010d\n"
+        "Current thread 0x00001c94 (most recent call first):\n",
+        encoding="utf-8",
+    )
+    saved_path = getattr(logger_module, "_FAULT_LOG_PATH", None)
+    saved_file = getattr(logger_module, "_FAULT_FILE", None)
+    try:
+        logger_module._FAULT_LOG_PATH = fault_path  # type: ignore[attr-defined]
+        logger_module._FAULT_FILE = open(fault_path, "a", encoding="utf-8")  # type: ignore[attr-defined]
+        logger_module.finalize_crash_handler(exit_code=0)
+        current = Path(fault_path).read_text(encoding="utf-8")
+        if "Windows fatal exception" in current:
+            return False, "faults.log still contains finalized native fault payload"
+        if "SESSION END" not in current or "archived=" not in current:
+            return False, f"faults.log final marker missing: {current}"
+        archives = [
+            name
+            for name in os.listdir(temp_root)
+            if name.startswith("faults_") and name.endswith("_graceful.log")
+        ]
+        if len(archives) != 1:
+            return False, f"expected one graceful fault archive, got {archives}"
+        archive_text = Path(temp_root, archives[0]).read_text(encoding="utf-8")
+        if "Windows fatal exception: code 0x8001010d" not in archive_text:
+            return False, "graceful fault archive lost native fault payload"
+        return True, "ok"
+    finally:
+        try:
+            current_file = getattr(logger_module, "_FAULT_FILE", None)
+            if current_file is not None and not current_file.closed:
+                current_file.close()
+        except Exception:
+            pass
+        logger_module._FAULT_LOG_PATH = saved_path  # type: ignore[attr-defined]
+        logger_module._FAULT_FILE = saved_file  # type: ignore[attr-defined]
 
 
 def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
@@ -7552,6 +7765,26 @@ def _check_w1_outcome_timer_ticks_without_beds_refresh(temp_root: str) -> tuple[
         widget.close()
 
 
+def _check_beds_mode_reentry_does_not_warn(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source_path = PROJECT_ROOT / "ui" / "shared" / "remcard_layout.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+    methods = {
+        node.name: ast.get_source_segment(source_text, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    method = methods.get("set_patient_selection_mode", "")
+    if "Skipping beds_selection_widget.refresh(): beds mode is already active" not in method:
+        return False, "beds reentry must skip refresh without warning"
+    if "if not already_beds and hasattr(self, 'beds_selection_widget')" in method:
+        return False, "beds reentry warning guard still treats already_beds as uninitialized widget"
+    if "elif hasattr(self, 'beds_selection_widget') and self.beds_selection_widget is not None" not in method:
+        return False, "beds widget refresh must require an initialized widget"
+    return True, "ok"
+
+
 def _check_w1_outcome_release_runs_from_change_monitor(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
 
@@ -7602,6 +7835,30 @@ def _check_w1_outcome_release_runs_from_change_monitor(temp_root: str) -> tuple[
     if "PatientService(patient_dao, data_service=data_service)" not in facade_source:
         return False, "RemCardService patient helper must receive DataService for coordinated releases"
 
+    return True, "ok"
+
+
+def _check_data_update_monitor_suppresses_shutdown_db_closed(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+
+    from rem_card.app.db_availability import DatabaseClosedError
+    from rem_card.services.data_update_monitor import DataUpdateMonitor
+
+    class FakeDataService:
+        _shutting_down = True
+
+    monitor = DataUpdateMonitor(FakeDataService())
+    if not monitor._should_suppress_poll_error(DatabaseClosedError("RemCard database connection is closed")):
+        return False, "monitor must suppress DatabaseClosedError during shutdown"
+    if not monitor._should_suppress_poll_error(RuntimeError("database connection is closed for remcard_read_one")):
+        return False, "monitor must suppress textual closed-connection errors during shutdown"
+
+    class RunningFakeDataService:
+        _shutting_down = False
+
+    running_monitor = DataUpdateMonitor(RunningFakeDataService())
+    if running_monitor._should_suppress_poll_error(DatabaseClosedError("closed")):
+        return False, "monitor must not suppress DatabaseClosedError while still running"
     return True, "ok"
 
 
@@ -8491,6 +8748,34 @@ def _check_sync_coordinator_classifies_targeted_refresh(temp_root: str) -> tuple
     return True, "ok"
 
 
+def _check_orders_delta_expected_fallbacks_are_info(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    import logging
+
+    from rem_card.services.read_coordinator import ReadCoordinator
+
+    expected_info = (
+        "empty_change_rows",
+        "empty_delta_rows",
+        "delta_no_effect",
+        "unsupported_entities:orders",
+    )
+    for reason in expected_info:
+        if ReadCoordinator._orders_delta_fallback_log_level(reason) != logging.INFO:
+            return False, f"expected orders delta fallback must log at INFO: {reason}"
+    expected_warning = (
+        "delta_unknown_order:12",
+        "version_violation_after_delta",
+    )
+    for reason in expected_warning:
+        if ReadCoordinator._orders_delta_fallback_log_level(reason) != logging.WARNING:
+            return False, f"unsafe orders delta fallback must stay WARNING: {reason}"
+    source_text = (PROJECT_ROOT / "services" / "read_coordinator.py").read_text(encoding="utf-8")
+    if "logger.log(" not in source_text or "_orders_delta_fallback_log_level(delta_failure_reason)" not in source_text:
+        return False, "orders delta fallback path must use reason-aware log level"
+    return True, "ok"
+
+
 def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime, timedelta
@@ -8750,6 +9035,7 @@ def main():
     checks = [
         ("lock_read_unavailable_not_stale", _check_lock_read_unavailable_not_stale),
         ("role_lock_read_unavailable_blocks_acquire", _check_role_lock_read_unavailable_blocks_acquire),
+        ("role_lock_stale_removal_logs_holder", _check_role_lock_stale_removal_logs_holder),
         ("local_write_queue_shutdown_drains", _check_local_write_queue_shutdown_drains),
         ("sync_cursor_normalizes_timestamp_formats", _check_sync_cursor_normalizes_timestamp_formats),
         ("change_log_lag_uses_utc_for_sqlite_timestamp", _check_change_log_lag_uses_utc_for_sqlite_timestamp),
@@ -8766,6 +9052,7 @@ def main():
         ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
+        ("updater_cleanup_retries_old_backup", _check_updater_cleanup_retries_old_backup),
         ("update_locks_are_scoped_to_target", _check_update_locks_are_scoped_to_target),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
         ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),
@@ -8779,6 +9066,8 @@ def main():
         ("recovery_selects_next_valid_backup", _check_recovery_selects_next_valid_backup),
         ("local_metrics_written_locally", _check_local_metrics_written_locally),
         ("local_metrics_are_buffered", _check_local_metrics_are_buffered),
+        ("latest_change_metric_throttles_unchanged_values", _check_latest_change_metric_throttles_unchanged_values),
+        ("fault_log_finalize_archives_graceful_payload", _check_fault_log_finalize_archives_graceful_payload),
         ("sector_ivl_enqueue_error_refreshes", _check_sector_ivl_enqueue_error_refreshes),
         ("balance_controller_enqueue_error_refreshes", _check_balance_controller_enqueue_error_refreshes),
         ("diet_intake_enqueue_error_refreshes", _check_diet_intake_enqueue_error_refreshes),
@@ -8848,7 +9137,9 @@ def main():
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
         ("w1a_w1b_targeted_layout_and_read_model", _check_w1a_w1b_targeted_layout_and_read_model),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
+        ("beds_mode_reentry_does_not_warn", _check_beds_mode_reentry_does_not_warn),
         ("w1_outcome_release_runs_from_change_monitor", _check_w1_outcome_release_runs_from_change_monitor),
+        ("data_update_monitor_suppresses_shutdown_db_closed", _check_data_update_monitor_suppresses_shutdown_db_closed),
         ("outcome_rollback_restores_released_w1_bed", _check_outcome_rollback_restores_released_w1_bed),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
@@ -8859,6 +9150,7 @@ def main():
         ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
         ("lazy_section_snapshot_caches", _check_lazy_section_snapshot_caches),
         ("sync_coordinator_classifies_targeted_refresh", _check_sync_coordinator_classifies_targeted_refresh),
+        ("orders_delta_expected_fallbacks_are_info", _check_orders_delta_expected_fallbacks_are_info),
         ("orders_balance_adapter_uses_local_state", _check_orders_balance_adapter_uses_local_state),
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]

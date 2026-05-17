@@ -1,5 +1,6 @@
 import heapq
 import json
+import logging
 import os
 import threading
 import time
@@ -954,7 +955,8 @@ class ReadCoordinator:
                 except Exception as exc:
                     delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
                     delta_failure_reason = str(exc) or exc.__class__.__name__
-                    logger.warning(
+                    logger.log(
+                        self._orders_delta_fallback_log_level(delta_failure_reason),
                         "[ReadCoordinator] orders_delta_applied=0 orders_delta_failed=%s orders_delta_time_ms=%.2f orders_fallback_after_delta=1 context_hash=%s trace_id=%s priority=%s base=%s",
                         delta_failure_reason,
                         delta_time_ms,
@@ -1462,6 +1464,19 @@ class ReadCoordinator:
         if context.mode == "live":
             self._store_orders_tab(context, delta_snapshot)
         return delta_snapshot
+
+    @staticmethod
+    def _orders_delta_fallback_log_level(reason: str) -> int:
+        normalized = str(reason or "")
+        expected_prefixes = (
+            "empty_change_rows",
+            "empty_delta_rows",
+            "delta_no_effect",
+            "unsupported_entities:",
+        )
+        if normalized in expected_prefixes or normalized.startswith(expected_prefixes):
+            return logging.INFO
+        return logging.WARNING
 
     def _store_patient_vitals(self, context: PatientSnapshotContext, snapshot) -> None:
         self._store_patient_vitals_by_key(context.cache_key(), snapshot, persist=True)
