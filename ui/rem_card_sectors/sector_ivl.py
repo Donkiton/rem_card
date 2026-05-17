@@ -2,7 +2,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional
 
-from PySide6.QtCore import Qt, QDateTime
+from PySide6.QtCore import Qt, QDateTime, QSettings, QTimer
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
     QFrame,
@@ -26,6 +26,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 class SectorIvl(BaseSectorWidget):
     SNAPSHOT_CACHE_LIMIT = 10
+    HISTORY_HEADER_SETTINGS_KEY = "ivl/history_header_state"
 
     EVENT_LABELS = {
         "START_VENT": "Старт ИВЛ",
@@ -63,6 +64,12 @@ class SectorIvl(BaseSectorWidget):
         self._latest_event_revision_by_case: dict[int, int] = {}
         self._snapshot_cache = OrderedDict()
         self._ivl_write_pending = False
+        self._history_events = []
+        self._history_sort_desc = True
+        self._restoring_history_header = False
+        self._save_history_header_timer = QTimer(self)
+        self._save_history_header_timer.setSingleShot(True)
+        self._save_history_header_timer.timeout.connect(self._save_history_header_state)
 
         self._build_ui()
         self.refresh()
@@ -159,58 +166,48 @@ class SectorIvl(BaseSectorWidget):
                 color: #212529;
             }
             QTableWidget {
-                background-color: #ffffff;
-                border: 1.5px solid #adb5bd;
-                border-radius: 4px;
-                gridline-color: #dee2e6;
+                background: #f3f6fa;
+                alternate-background-color: #e9eef5;
+                gridline-color: #cbd5e1;
+                selection-background-color: #dbeafe;
+                selection-color: #172033;
             }
             QHeaderView::section {
-                background-color: #eef1f4;
-                border: 1px solid #d4d9de;
-                padding: 4px;
-            }
-            QPushButton#ivl_btn_custom {
-                background-color: #e9ecef;
-                color: #2c3e50;
-                font-size: 13px;
+                background-color: #d9e2ec;
+                color: #243b53;
+                border: 1px solid #b8c4d3;
+                padding: 5px 7px;
                 font-weight: bold;
-                padding: 6px 14px;
-                border: 1px solid #bdc3c7;
-                border-radius: 5px;
-                min-height: 30px;
             }
-            QPushButton#ivl_btn_custom:hover {
-                background-color: #d8dde2;
+            QHeaderView::section:hover {
+                background-color: #cbd7e5;
             }
-            QPushButton#ivl_btn_custom:pressed {
-                background-color: #c9cfd5;
-            }
-            QPushButton#ivl_btn_custom:disabled {
-                background-color: #f8f9fa;
-                color: #adb5bd;
-                border: 1px solid #d7dbe0;
-                font-weight: normal;
-            }
+            QPushButton#ivl_btn_custom,
             QPushButton#ivl_btn_danger {
-                background-color: #fceceb;
-                color: #c0392b;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 6px 14px;
-                border: 1px solid #e5b2ac;
-                border-radius: 5px;
-                min-height: 30px;
+                background: #eef3f8;
+                color: #172033;
+                border: 1px solid #aebccd;
+                border-radius: 6px;
+                padding: 6px 12px;
+                min-height: 34px;
+                font-weight: 700;
             }
+            QPushButton#ivl_btn_custom:hover,
             QPushButton#ivl_btn_danger:hover {
-                background-color: #f8d9d6;
+                background: #e2ebf5;
+                border-color: #7aa6d8;
             }
+            QPushButton#ivl_btn_custom:pressed,
             QPushButton#ivl_btn_danger:pressed {
-                background-color: #f2c6c2;
+                background: #d5e2ef;
+                padding-top: 7px;
+                padding-bottom: 5px;
             }
+            QPushButton#ivl_btn_custom:disabled,
             QPushButton#ivl_btn_danger:disabled {
-                background-color: #f8f9fa;
-                color: #c7a7a3;
-                border: 1px solid #ead6d3;
+                background: #f1f5f9;
+                color: #8a96a6;
+                border: 1px solid #cfd8e3;
                 font-weight: normal;
             }
             """
@@ -436,10 +433,6 @@ class SectorIvl(BaseSectorWidget):
         history_layout.setContentsMargins(6, 6, 6, 6)
         history_layout.setSpacing(4)
 
-        history_title = QLabel("История событий ИВЛ")
-        history_title.setStyleSheet("border: none; font-weight: bold; color: #33414d;")
-        history_layout.addWidget(history_title)
-
         self.history_table = QTableWidget(0, 5)
         self.history_table.setHorizontalHeaderLabels(["Время", "Событие", "Режим", "Параметры", "Показания"])
         self.history_table.verticalHeader().setVisible(False)
@@ -447,11 +440,18 @@ class SectorIvl(BaseSectorWidget):
         self.history_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.history_table.setSelectionMode(QTableWidget.SingleSelection)
         self.history_table.setAlternatingRowColors(True)
-        self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.history_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.history_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.history_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.history_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self.history_table.horizontalHeader().setSectionsClickable(True)
+        self.history_table.horizontalHeader().sectionClicked.connect(self._on_history_header_clicked)
+        self.history_table.horizontalHeader().setSortIndicatorShown(True)
+        self.history_table.horizontalHeader().setSortIndicator(0, Qt.DescendingOrder)
+        self.history_table.horizontalHeader().setMinimumSectionSize(72)
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        for column in range(5):
+            self.history_table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Interactive)
+        self.history_table.horizontalHeader().sectionResized.connect(self._on_history_section_resized)
+        self.history_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._apply_history_default_widths()
+        self._restore_history_header_state()
         history_layout.addWidget(self.history_table, 1)
 
         body_layout.addWidget(history_frame, 1)
@@ -519,6 +519,7 @@ class SectorIvl(BaseSectorWidget):
         self.lbl_tube_alert.setText("Алерт трубки: --")
         self.lbl_tube_alert.setStyleSheet("border: none; color: #2f3c48;")
         self._set_actions_enabled(False, has_case_history=False)
+        self._history_events = []
         self.history_table.setRowCount(0)
 
     def _cache_key(self):
@@ -632,6 +633,7 @@ class SectorIvl(BaseSectorWidget):
             if timeline:
                 self._reload_history(timeline)
             else:
+                self._history_events = []
                 self.history_table.setRowCount(0)
 
         self.lbl_total_duration.setText(
@@ -735,11 +737,30 @@ class SectorIvl(BaseSectorWidget):
 
     def _reload_history(self, events=None):
         if not self.remcard_service or not self.admission_id:
+            self._history_events = []
             self.history_table.setRowCount(0)
             return
         if events is None:
             events = self.remcard_service.get_ventilation_timeline(self.admission_id)
-        events = list(reversed(events))
+        self._history_events = list(events or [])
+        self._populate_history_table(self._sorted_history_events())
+
+    def _on_history_header_clicked(self, column: int):
+        if column != 0:
+            return
+        self._history_sort_desc = not self._history_sort_desc
+        order = Qt.DescendingOrder if self._history_sort_desc else Qt.AscendingOrder
+        self.history_table.horizontalHeader().setSortIndicator(0, order)
+        self._populate_history_table(self._sorted_history_events())
+
+    def _sorted_history_events(self):
+        return sorted(
+            self._history_events,
+            key=lambda event: getattr(event, "timestamp", None) or datetime.min,
+            reverse=self._history_sort_desc,
+        )
+
+    def _populate_history_table(self, events):
         self.history_table.setRowCount(len(events))
         for row_idx, event in enumerate(events):
             event_type = getattr(event.event_type, "value", str(event.event_type))
@@ -752,11 +773,44 @@ class SectorIvl(BaseSectorWidget):
                 reason_o2.append(event.extubation_reason)
             if event.o2_flow is not None:
                 reason_o2.append(f"O2={event.o2_flow}")
-            self.history_table.setItem(row_idx, 0, QTableWidgetItem(event.timestamp.strftime("%d.%m %H:%M")))
+            timestamp = getattr(event, "timestamp", None)
+            timestamp_text = timestamp.strftime("%d.%m.%Y %H:%M") if timestamp else ""
+            self.history_table.setItem(row_idx, 0, QTableWidgetItem(timestamp_text))
             self.history_table.setItem(row_idx, 1, QTableWidgetItem(self.EVENT_LABELS.get(event_type, event_type)))
             self.history_table.setItem(row_idx, 2, QTableWidgetItem(self.MODE_LABELS.get(mode, mode)))
             self.history_table.setItem(row_idx, 3, QTableWidgetItem(params))
             self.history_table.setItem(row_idx, 4, QTableWidgetItem("; ".join(reason_o2) if reason_o2 else "-"))
+
+    def _apply_history_default_widths(self):
+        defaults = (110, 150, 135, 280, 260)
+        for column, width in enumerate(defaults):
+            self.history_table.horizontalHeader().resizeSection(column, width)
+
+    def _restore_history_header_state(self):
+        value = QSettings("MyHospital", "RemCard").value(self.HISTORY_HEADER_SETTINGS_KEY)
+        if value is None:
+            return
+        self._restoring_history_header = True
+        try:
+            self.history_table.horizontalHeader().restoreState(value)
+            self.history_table.horizontalHeader().setStretchLastSection(True)
+            order = Qt.DescendingOrder if self._history_sort_desc else Qt.AscendingOrder
+            self.history_table.horizontalHeader().setSortIndicator(0, order)
+        finally:
+            self._restoring_history_header = False
+
+    def _on_history_section_resized(self, logical_index: int, old_size: int, new_size: int):
+        del old_size, new_size
+        if self._restoring_history_header:
+            return
+        if logical_index == 4:
+            return
+        self._save_history_header_timer.start(500)
+
+    def _save_history_header_state(self):
+        settings = QSettings("MyHospital", "RemCard")
+        settings.setValue(self.HISTORY_HEADER_SETTINGS_KEY, self.history_table.horizontalHeader().saveState())
+        settings.sync()
 
     def _populate_event_types(self, codes: tuple[str, ...]):
         selected_code = self.event_type_combo.currentData()
