@@ -156,16 +156,15 @@ class RoleSessionLock:
         if self._is_local_host(holder_host) and not self._is_pid_alive_local(holder_pid):
             return True
 
-        now = time.time()
-        ts = payload.get("timestamp")
-        if isinstance(ts, (int, float)):
-            age = now - ts
-            # Timestamp в будущем (съехали часы) не должен блокировать вход навсегда.
-            if age >= 0 and age > self.stale_timeout_sec:
-                return True
-
-        # Fallback по mtime lock-файла на сетевом диске.
         file_age = self._lock_file_age()
+        if file_age is not None and file_age <= self.stale_timeout_sec:
+            return False
+
+        payload_age = self._payload_age_sec(payload)
+        if payload_age is not None and payload_age <= self.stale_timeout_sec:
+            return False
+        if payload_age is not None and payload_age > self.stale_timeout_sec:
+            return True
         if file_age is not None and file_age > self.stale_timeout_sec:
             return True
 
@@ -320,19 +319,16 @@ class RoleSessionLock:
                 return
 
             token["timestamp"] = time.time()
-            tmp_path = f"{self.lock_path}.{os.getpid()}.tmp"
             try:
-                with open(tmp_path, "w", encoding="utf-8") as fh:
-                    json.dump(token, fh, ensure_ascii=True)
-                os.replace(tmp_path, self.lock_path)
+                # На сетевых SMB-папках периодический os.replace() lock-файла
+                # может завершить процесс native access violation без Python
+                # исключения. Для heartbeat достаточно обновлять mtime: nonce и
+                # владелец остаются в исходном JSON, а stale-проверка учитывает
+                # свежий mtime файла.
+                os.utime(self.lock_path, None)
                 with self._mutex:
                     if self._token and self._token.get("nonce") == token.get("nonce"):
                         self._token = token
             except Exception as exc:
                 self.logger.warning("Role lock heartbeat update failed for %s: %s", self.lock_path, exc)
-                try:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
                 return

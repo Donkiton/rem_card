@@ -446,6 +446,45 @@ def _check_role_lock_stale_removal_logs_holder(temp_root: str) -> tuple[bool, st
     return True, "ok"
 
 
+def _check_role_lock_heartbeat_uses_mtime(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    for role in ("doctor", "nurse"):
+        lock_path = os.path.join(temp_root, f"{role}.lock")
+        lock = RoleSessionLock(
+            lock_path,
+            role=role,
+            owner_id=f"{role}-owner-1",
+            stale_timeout_sec=0.6,
+            heartbeat_sec=0.1,
+        )
+        if not lock.acquire():
+            return False, f"{role}: initial acquire failed"
+        first_mtime = os.path.getmtime(lock_path)
+        time.sleep(0.35)
+        second_mtime = os.path.getmtime(lock_path)
+        if second_mtime <= first_mtime:
+            lock.release()
+            return False, f"{role}: heartbeat did not refresh lock mtime"
+
+        other = RoleSessionLock(
+            lock_path,
+            role=role,
+            owner_id=f"{role}-owner-2",
+            stale_timeout_sec=0.6,
+            heartbeat_sec=0.1,
+        )
+        if other.acquire():
+            other.release()
+            lock.release()
+            return False, f"{role}: active heartbeat lock was acquired by another owner"
+        lock.release()
+        if os.path.exists(lock_path):
+            return False, f"{role}: lock file remained after release"
+
+    return True, "ok"
+
+
 def _check_local_write_queue_shutdown_drains(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from rem_card.app.sqlite_shared import LocalWriteQueue
@@ -9114,6 +9153,7 @@ def main():
         ("lock_read_unavailable_not_stale", _check_lock_read_unavailable_not_stale),
         ("role_lock_read_unavailable_blocks_acquire", _check_role_lock_read_unavailable_blocks_acquire),
         ("role_lock_stale_removal_logs_holder", _check_role_lock_stale_removal_logs_holder),
+        ("role_lock_heartbeat_uses_mtime", _check_role_lock_heartbeat_uses_mtime),
         ("local_write_queue_shutdown_drains", _check_local_write_queue_shutdown_drains),
         ("sync_cursor_normalizes_timestamp_formats", _check_sync_cursor_normalizes_timestamp_formats),
         ("change_log_lag_uses_utc_for_sqlite_timestamp", _check_change_log_lag_uses_utc_for_sqlite_timestamp),

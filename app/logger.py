@@ -93,9 +93,8 @@ def init_crash_handler():
                 if payload:
                     archive_path = _archive_fault_log(fault_log_path, content)
                     logger.warning(
-                        "!!! FOUND PREVIOUS CRASH LOG (archived to %s) !!!\nLast state:\n%s",
+                        "Обнаружен журнал аварийного завершения прошлого запуска; архив: %s",
                         archive_path,
-                        payload[-500:],
                     )
                 reset_fault_log = True
         except Exception as exc:

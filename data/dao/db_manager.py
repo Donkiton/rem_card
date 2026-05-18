@@ -1309,7 +1309,7 @@ class DatabaseManager:
         conn = sqlite3.connect(
             self._readonly_db_uri(),
             uri=True,
-            check_same_thread=False,
+            check_same_thread=True,
             isolation_level=None,
             timeout=5.0,
         )
@@ -1363,20 +1363,29 @@ class DatabaseManager:
 
     def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
-        # Обычные фоновые чтения идут через read-only connection текущего потока:
-        # один sqlite3.Connection не должен переезжать между QThread/Python worker
-        # потоками, иначе sqlite/PySide иногда падают native crash без Python
-        # исключения. central_io_lock по-прежнему сериализует доступ к shared DB.
+        # Обычные фоновые чтения открывают короткоживущее read-only connection
+        # на конкретный запрос. Worker-потоки здесь короткие, поэтому кэшировать
+        # sqlite3.Connection по Thread рискованно: соединение переживает поток и
+        # позже закрывается/переиспользуется уже из другого потока, что на Windows
+        # может завершиться native access violation без Python-исключения.
         try:
             with self._central_io_lock:
                 if use_write_connection or self._in_current_thread_remcard_transaction():
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
-                else:
-                    conn = self._get_central_read_connection("remcard_read_all")
-                with self.write_controller.connection_guard(conn):
+                    with self.write_controller.connection_guard(conn):
+                        cursor = conn.cursor()
+                        cursor.execute(query, params)
+                        return cursor.fetchall()
+                conn = self._open_readonly_central_connection()
+                try:
                     cursor = conn.cursor()
                     cursor.execute(query, params)
                     return cursor.fetchall()
+                finally:
+                    try:
+                        conn.close()
+                    except Exception as close_exc:
+                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger) from exc
@@ -1387,12 +1396,20 @@ class DatabaseManager:
             with self._central_io_lock:
                 if use_write_connection or self._in_current_thread_remcard_transaction():
                     conn = self._get_central_write_connection_for_read("remcard_read_one")
-                else:
-                    conn = self._get_central_read_connection("remcard_read_one")
-                with self.write_controller.connection_guard(conn):
+                    with self.write_controller.connection_guard(conn):
+                        cursor = conn.cursor()
+                        cursor.execute(query, params)
+                        return cursor.fetchone()
+                conn = self._open_readonly_central_connection()
+                try:
                     cursor = conn.cursor()
                     cursor.execute(query, params)
                     return cursor.fetchone()
+                finally:
+                    try:
+                        conn.close()
+                    except Exception as close_exc:
+                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger) from exc
