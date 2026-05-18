@@ -752,7 +752,7 @@ QFrame#MainTitleBar {{
 }}
 QLabel#MainTitleText {{
     color: {CUSTOM_DIALOG_TITLE_TEXT} !important;
-    font-weight: bold !important;
+    font-weight: 800 !important;
     font-size: 14px !important;
     background-color: transparent !important;
 }}

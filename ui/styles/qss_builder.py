@@ -205,7 +205,7 @@ QFrame#MainTitleBar {{
 
 QLabel#MainTitleText {{
     color: {t("titlebar.text")} !important;
-    font-weight: bold !important;
+    font-weight: 800 !important;
     font-size: 14px !important;
     background-color: transparent !important;
 }}

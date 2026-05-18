@@ -1,7 +1,7 @@
 import os
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QApplication
 from PySide6.QtCore import Qt, QPoint, Signal
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QFont, QIcon, QPixmap
 from rem_card.app.version import APP_DISPLAY_TITLE
 from rem_card.ui.styles.shared_styles import apply_main_frame_window_style
 
@@ -38,6 +38,10 @@ class CustomTitleBar(QFrame):
         # Заголовок
         self.title_label = QLabel(APP_DISPLAY_TITLE)
         self.title_label.setObjectName("MainTitleText")
+        title_font = self.title_label.font()
+        title_font.setWeight(QFont.Weight.Bold)
+        title_font.setBold(True)
+        self.title_label.setFont(title_font)
         
         # Кнопки управления
         self.btn_minimize = QPushButton("–")
