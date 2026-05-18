@@ -21,7 +21,8 @@ except ImportError:
 # Импортируем функцию save_plot из первого файла
 from rem_card.ui.analytics.graphs_generators_1 import save_plot
 # Импортируем вспомогательную функцию _calc_daily_counts
-from rem_card.ui.analytics.graphs_generators_1 import _calc_daily_counts
+from rem_card.ui.analytics.graphs_generators_1 import _calc_daily_counts, _patient_count_axis_limit
+from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
 
 
 def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html_content):
@@ -31,11 +32,13 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
     if "g46" in selected:
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) / (9.0 * 30.0) * 100 as intensity
+            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
             FROM admissions WHERE admission_datetime BETWEEN ? AND ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
+            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
+            df['intensity'] = df['bed_days'] / (STATISTICAL_BED_COUNT * 30.0) * 100
             df['intensity'] = pd.to_numeric(df['intensity'], errors='coerce').fillna(0)
             plt.figure(figsize=(10, 4))
             plt.plot(df['month'], df['intensity'], marker='o', color=chart_colors[2])
@@ -141,7 +144,7 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
             days = {0: 'Вс', 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб'}
             df['day'] = df['dow'].astype(int).map(days)
             # Рассчитываем среднюю загрузку для каждого дня недели
-            avg_load = df.groupby('day')['bed_days'].mean().reindex(days.values()) / 9.0 * 100 # 9 коек
+            avg_load = df.groupby('day')['bed_days'].mean().reindex(days.values()) / STATISTICAL_BED_COUNT * 100
             plt.figure(figsize=(8, 4))
             plt.bar(range(len(avg_load)), avg_load, color=chart_colors[6])
             plt.xticks(range(len(avg_load)), avg_load.index)
@@ -171,7 +174,7 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
         plt.figure(figsize=(12, 5))
         pd.Series(daily_counts, index=date_range).plot(kind='bar', color=chart_colors[0], width=1.0, ax=plt.gca())
         plt.title("53. Динамика занятости коек (столбчатый)")
-        plt.ylim(0, 12)
+        plt.ylim(0, _patient_count_axis_limit(daily_counts))
         if len(date_range) > 20:
             plt.gca().xaxis.set_major_locator(plt.MaxNLocator(10))
         plt.xticks(rotation=45, ha='right')

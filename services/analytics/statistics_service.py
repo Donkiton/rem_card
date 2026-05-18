@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from html import escape
 
+from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
 from rem_card.services.analytics.graphs_service import _thread_local_manager
 from rem_card.ui.styles.theme import (
     BG_LIGHT,
@@ -188,8 +188,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
         start_date = _parse_date(start_dt)
         end_date = _parse_date(end_dt)
         period_days = max(1, (end_date - start_date).days + 1) if start_date and end_date else 1
-        num_beds = int(os.environ.get("REMCARD_NUM_BEDS", "12"))
-        bed_capacity_days = num_beds * period_days
+        bed_capacity_days = STATISTICAL_BED_COUNT * period_days
         occupancy = (bed_days / bed_capacity_days * 100.0) if bed_capacity_days else 0.0
         mortality = (deaths / total_admissions * 100.0) if total_admissions else 0.0
 

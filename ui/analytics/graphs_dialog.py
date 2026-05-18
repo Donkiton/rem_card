@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 
+from rem_card.services.analytics.constants import STATISTICAL_HIGH_LOAD_THRESHOLD
 from rem_card.services.analytics.graphs_service import build_graphs_html, wrap_graphs_pdf_html
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
 from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
@@ -151,7 +152,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
                 "g13": "13. Индекс интенсивности по месяцам (%)"
             },
             "Пиковая нагрузка": {
-                "g14": "14. Периоды повышенной загрузки (≥4)",
+                "g14": f"14. Периоды повышенной загрузки (≥{STATISTICAL_HIGH_LOAD_THRESHOLD})",
                 "g15": "15. Длительность периодов пиковой загрузки",
                 "g16": "16. Макс. число пациентов одновременно",
                 "g17": "17. Доля времени повыш. загрузки",

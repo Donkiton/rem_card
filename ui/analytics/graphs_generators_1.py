@@ -20,6 +20,7 @@ except ImportError:
     plt = None
 
 from rem_card.ui.styles.theme import BG_CARD
+from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
 
 
 def save_plot(title, img_paths, chart_colors=None):
@@ -150,12 +151,13 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
     if "g7" in selected:
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) / (9.0 * 30.0) * 100 as load_pct
+            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
             FROM admissions WHERE admission_datetime BETWEEN ? AND ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
-            df['load_pct'] = pd.to_numeric(df['load_pct'], errors='coerce').fillna(0)
+            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
+            df['load_pct'] = df['bed_days'] / (STATISTICAL_BED_COUNT * 30.0) * 100
             plt.figure(figsize=(8, 4))
             plt.bar(range(len(df)), df['load_pct'], color=chart_colors[1])
             plt.xticks(range(len(df)), df['month'], rotation=45)
@@ -181,10 +183,12 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
     # 9. Оборот койки
     if "g9" in selected:
         df = pd.read_sql_query(
-            "SELECT strftime('%Y-%m', admission_datetime) as month, COUNT(id)/9.0 as turnover "
+            "SELECT strftime('%Y-%m', admission_datetime) as month, COUNT(id) as admissions_count "
             "FROM admissions WHERE admission_datetime BETWEEN ? AND ? GROUP BY month",
             conn, params=params)
         if not df.empty:
+            df['admissions_count'] = pd.to_numeric(df['admissions_count'], errors='coerce').fillna(0)
+            df['turnover'] = df['admissions_count'] / STATISTICAL_BED_COUNT
             df['turnover'] = pd.to_numeric(df['turnover'], errors='coerce').fillna(0)
             plt.figure(figsize=(8, 4))
             plt.plot(df['month'], df['turnover'], marker='s', color=chart_colors[5])
@@ -199,7 +203,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
         plt.plot(date_range, daily_counts, color=chart_colors[0], linewidth=2)
         plt.fill_between(date_range, daily_counts, alpha=0.3, color=chart_colors[0])
         plt.title("10. Среднесуточная занятость коек (чел.)")
-        plt.ylim(0, 12)
+        plt.ylim(0, _patient_count_axis_limit(daily_counts))
         html_content += save_plot("10. Среднесуточная занятость коек", img_paths)
 
     # 11. Занятость коек по дням (другое отображение — столбчатый)
@@ -209,7 +213,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
         # Используем pandas Series для построения, это надежнее в плане типов
         pd.Series(daily_counts, index=date_range).plot(kind='bar', color=chart_colors[4], width=1.0, ax=plt.gca())
         plt.title("11. Занятость коек по дням (столбчатый)")
-        plt.ylim(0, 12)
+        plt.ylim(0, _patient_count_axis_limit(daily_counts))
         # Уменьшаем количество тиков, если дней много
         if len(date_range) > 20:
             plt.gca().xaxis.set_major_locator(plt.MaxNLocator(10))
@@ -226,26 +230,29 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
             try:
                 start_dt = datetime.strptime(start_date_str.split(' ')[0], "%Y-%m-%d")
                 end_dt = datetime.strptime(end_date_str.split(' ')[0], "%Y-%m-%d")
-                period_days = max((end_dt - start_dt).days, 1)
+                period_days = max((end_dt - start_dt).days + 1, 1)
             except Exception:
                 period_days = 365
             total_bd = float(df['total_bed_days'].iloc[0])
-            intensity = total_bd / (9.0 * period_days) * 100
+            bed_fund = STATISTICAL_BED_COUNT * period_days
+            intensity = total_bd / bed_fund * 100 if bed_fund else 0
             html_content += (
                 f"<div style='text-align: center;'><h3>12. Индекс интенсивности использования коечного фонда</h3>"
                 f"<div style='font-size: 28px; font-weight: bold; color: {chart_colors[0]};'>{intensity:.1f}%</div>"
-                f"<p>Общий койко-день: {total_bd:.1f} из {9 * period_days} возможных</p></div><br>"
+                f"<p>Общий койко-день: {total_bd:.1f} из {bed_fund} возможных</p></div><br>"
             )
 
     # 13. Индекс интенсивности по месяцам
     if "g13" in selected:
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
-            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) / (9.0 * 30.0) * 100 as intensity
+            SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
             FROM admissions WHERE admission_datetime BETWEEN ? AND ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
+            df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
+            df['intensity'] = df['bed_days'] / (STATISTICAL_BED_COUNT * 30.0) * 100
             df['intensity'] = pd.to_numeric(df['intensity'], errors='coerce').fillna(0)
             plt.figure(figsize=(8, 4))
             plt.plot(df['month'], df['intensity'], marker='o', color=chart_colors[2])
@@ -265,17 +272,17 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
         return html_content
 
     daily_counts, date_range = _calc_daily_counts(adms, start_date_str, end_date_str)
-    high_load = [1 if c >= 4 else 0 for c in daily_counts]
+    high_load = [1 if c >= STATISTICAL_HIGH_LOAD_THRESHOLD else 0 for c in daily_counts]
 
     # 14. Периоды повышенной загрузки
     if "g14" in selected:
         plt.figure(figsize=(10, 2))
         pd.Series(high_load, index=date_range).plot(kind='bar', color=chart_colors[2], width=1.0, ax=plt.gca())
-        plt.title("14. Дни повышенной загрузки (≥4 пациентов)")
+        plt.title(f"14. Дни повышенной загрузки (≥{STATISTICAL_HIGH_LOAD_THRESHOLD} пациентов)")
         plt.yticks([0, 1], ["Норма", "ПИК"])
         if len(date_range) > 20:
             plt.gca().xaxis.set_major_locator(plt.MaxNLocator(10))
-        html_content += save_plot("14. Периоды повышенной загрузки (≥4)", img_paths)
+        html_content += save_plot(f"14. Периоды повышенной загрузки (≥{STATISTICAL_HIGH_LOAD_THRESHOLD})", img_paths)
 
     # 15. Длительность периодов пиковой загрузки (гистограмма длин непрерывных периодов)
     if "g15" in selected:
@@ -333,7 +340,7 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
             plt.figure(figsize=(10, 4))
             plt.step(times, counts_ev, where='post', color=chart_colors[1])
             plt.title(f"16. Динамика числа пациентов (Максимум: {max_p})")
-            plt.ylim(0, 12)
+            plt.ylim(0, _patient_count_axis_limit(counts_ev))
             html_content += save_plot("16. Максимальное число пациентов одновременно", img_paths)
 
     # 17. Доля времени повышенной загрузки
@@ -346,20 +353,20 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
         plt.pie([high_load_days, normal_days],
                 labels=[f'Пиковая нагрузка\n{high_load_days} дн.', f'Нормальная\n{normal_days} дн.'],
                 autopct='%1.1f%%', colors=[chart_colors[2], chart_colors[1]])
-        plt.title(f"17. Доля времени повышенной загрузки (≥4 пац.): {perc:.1f}%")
+        plt.title(f"17. Доля времени повышенной загрузки (≥{STATISTICAL_HIGH_LOAD_THRESHOLD} пац.): {perc:.1f}%")
         html_content += save_plot("17. Доля времени повышенной загрузки", img_paths)
 
     # 18. Динамика одновременно находящихся
     if "g18" in selected:
         plt.figure(figsize=(10, 4))
         plt.plot(date_range, daily_counts, color=chart_colors[3], linewidth=1.5)
-        plt.axhline(y=4, color='red', linestyle='--', alpha=0.7, label='Порог 4 пац.')
-        plt.fill_between(date_range, daily_counts, 4,
-                         where=[c >= 4 for c in daily_counts],
+        plt.axhline(y=STATISTICAL_HIGH_LOAD_THRESHOLD, color='red', linestyle='--', alpha=0.7, label=f'Порог {STATISTICAL_HIGH_LOAD_THRESHOLD} пац.')
+        plt.fill_between(date_range, daily_counts, STATISTICAL_HIGH_LOAD_THRESHOLD,
+                         where=[c >= STATISTICAL_HIGH_LOAD_THRESHOLD for c in daily_counts],
                          alpha=0.3, color='red', label='Пиковые дни')
         plt.legend()
         plt.title("18. Динамика одновременно находящихся пациентов")
-        plt.ylim(0, 12)
+        plt.ylim(0, _patient_count_axis_limit(daily_counts))
         html_content += save_plot("18. Динамика одновременно находящихся", img_paths)
 
     return html_content
@@ -461,3 +468,8 @@ def _calc_daily_counts(adms, start_date_str, end_date_str):
                 pass
         daily_counts.append(count)
     return daily_counts, date_range
+
+
+def _patient_count_axis_limit(counts):
+    max_count = max([STATISTICAL_BED_COUNT, *[int(c or 0) for c in counts]], default=STATISTICAL_BED_COUNT)
+    return max_count + 1

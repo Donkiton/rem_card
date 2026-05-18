@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta
 from html import escape
 from statistics import median
 from typing import Iterable
 
+from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
 from rem_card.services.analytics.graphs_service import _thread_local_manager
 from rem_card.ui.styles.theme import (
     BG_CARD,
@@ -516,7 +516,7 @@ class DetailedStatisticsReportBuilder:
         }
 
     def _statistics_beds(self):
-        return self._safe_int(os.environ.get("REMCARD_NUM_BEDS", "12"), default=12)
+        return STATISTICAL_BED_COUNT
 
     def _admission_active_on_day(self, admission, day_start, day_end):
         adm_start = admission["admission_dt"]
@@ -541,7 +541,7 @@ class DetailedStatisticsReportBuilder:
             daily_counts.append(count)
 
         max_patients = max(daily_counts) if daily_counts else 0
-        threshold = 4
+        threshold = STATISTICAL_HIGH_LOAD_THRESHOLD
         high_load_periods = sum(1 for c in daily_counts if c >= threshold)
         return {
             "mean_patients": mean_patients,
