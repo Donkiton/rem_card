@@ -933,9 +933,17 @@ class DoctorRemCardWidget(QWidget):
         force_sources = self._payload_force_sources(payload)
         vitals_entities = changed_entities.intersection(VITALS_CACHE_CHANGE_ENTITIES)
         card_entities = changed_entities.intersection(CARD_CACHE_CHANGE_ENTITIES)
-        has_relevant_entities = bool(vitals_entities or card_entities)
-        has_forced_source = bool(payload.get("forced") and force_sources)
-        if not (has_relevant_entities or has_forced_source):
+        invalidate_vitals = bool(vitals_entities)
+        invalidate_card = bool(card_entities)
+        if payload.get("forced") and force_sources:
+            if self._is_local_orders_force_payload(payload, changed_entities):
+                invalidate_card = True
+            elif self._is_local_emergency_notice_payload(payload, changed_entities):
+                invalidate_card = True
+            else:
+                invalidate_vitals = True
+                invalidate_card = True
+        if not (invalidate_vitals or invalidate_card):
             return
         coordinator = self._get_read_coordinator()
         if coordinator is None:
@@ -949,10 +957,13 @@ class DoctorRemCardWidget(QWidget):
         for change in payload.get("changes") or []:
             entity_name = str(change.get("entity_name") or "")
             admission_id = change.get("admission_id")
-            if entity_name in CARD_CACHE_CHANGE_ENTITIES and admission_id is not None:
+            if (
+                entity_name in (VITALS_CACHE_CHANGE_ENTITIES | CARD_CACHE_CHANGE_ENTITIES)
+                and admission_id is not None
+            ):
                 admission_ids.add(int(admission_id))
 
-        if not admission_ids and (has_relevant_entities or has_forced_source):
+        if not admission_ids and (invalidate_vitals or invalidate_card):
             current_admission_id = getattr(self, "admission_id", None)
             if current_admission_id:
                 admission_ids.add(int(current_admission_id))
@@ -961,12 +972,12 @@ class DoctorRemCardWidget(QWidget):
         for admission_id in admission_ids:
             vitals_removed = 0
             card_removed = 0
-            if hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
+            if invalidate_vitals and hasattr(coordinator, "invalidate_patient_vitals_for_admission"):
                 vitals_removed = coordinator.invalidate_patient_vitals_for_admission(
                     admission_id,
                     reason=reason,
                 )
-            if hasattr(coordinator, "invalidate_patient_card_for_admission"):
+            if invalidate_card and hasattr(coordinator, "invalidate_patient_card_for_admission"):
                 card_removed = coordinator.invalidate_patient_card_for_admission(
                     admission_id,
                     reason=reason,

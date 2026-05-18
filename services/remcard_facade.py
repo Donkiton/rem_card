@@ -455,6 +455,7 @@ class RemCardService(QObject):
                     only_committed=balance_only_committed,
                     start_dt=start_dt,
                     end_dt=end_dt,
+                    active_intervals=snapshot.get("chart_active_intervals"),
                 )
             )
 
@@ -553,6 +554,7 @@ class RemCardService(QObject):
         only_committed: bool,
         start_dt: datetime,
         end_dt: datetime,
+        active_intervals: Optional[Sequence[Tuple[datetime, datetime]]] = None,
     ) -> Dict[str, Any]:
         from ..data.dto.remcard_dto import AdministrationDTO
         from .balance_calculator import BalanceCalculator
@@ -575,13 +577,23 @@ class RemCardService(QObject):
             fluids = self.get_fluids(admission_id, shift_date)
         orders = self.get_orders(admission_id, shift_date, only_committed=only_committed)
 
-        admin_rows = self.get_latest_administrations(
-            admission_id=admission_id,
-            shift_date=shift_date,
-            only_committed=only_committed,
-            include_deleted=False,
-            include_cancelled=False,
-            include_deleted_orders=True,
+        order_ids = [
+            int(order.id)
+            for order in orders
+            if getattr(order, "id", None) is not None
+        ]
+        admin_rows = (
+            self.get_latest_administrations_for_order_ids(
+                order_ids=order_ids,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                only_committed=only_committed,
+                include_deleted=False,
+                include_cancelled=False,
+                include_deleted_orders=True,
+            )
+            if order_ids
+            else []
         )
         admin_map: Dict[int, list[AdministrationDTO]] = {}
         for row in admin_rows:
@@ -612,11 +624,14 @@ class RemCardService(QObject):
         for order in orders:
             order.administrations = admin_map.get(order.id, [])
 
-        active_intervals = (
-            self.status_service.get_active_intervals(admission_id, start_dt, end_dt)
-            if self.status_service and hasattr(self.status_service, "get_active_intervals")
-            else []
-        )
+        if active_intervals is not None:
+            active_intervals = self._clip_active_intervals(active_intervals, start_dt, end_dt)
+        else:
+            active_intervals = (
+                self.status_service.get_active_intervals(admission_id, start_dt, end_dt)
+                if self.status_service and hasattr(self.status_service, "get_active_intervals")
+                else []
+            )
 
         outcome_time = None
         if current_status and current_status.status.is_outcome():
@@ -672,6 +687,20 @@ class RemCardService(QObject):
             },
             "balance_calc": balance_calc,
         }
+
+    @staticmethod
+    def _clip_active_intervals(
+        intervals: Sequence[Tuple[datetime, datetime]],
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> List[Tuple[datetime, datetime]]:
+        clipped: List[Tuple[datetime, datetime]] = []
+        for interval_start, interval_end in intervals or []:
+            overlap_start = max(interval_start, start_dt)
+            overlap_end = min(interval_end, end_dt)
+            if overlap_start <= overlap_end:
+                clipped.append((overlap_start, overlap_end))
+        return clipped
 
     # --- Patient Service Methods ---
     def get_active_patients(self) -> List[PatientDTO]:
