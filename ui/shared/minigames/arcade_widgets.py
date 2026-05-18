@@ -696,12 +696,34 @@ class MinesweeperGameWidget(QWidget):
     ROWS = 9
     COLS = 9
     MINES = 10
+    CELL_SIZE = 34
+    GRID_SPACING = 2
 
     def __init__(self, parent: Optional[QWidget] = None, on_finished: Optional[Callable] = None):
         super().__init__(parent)
         self.on_finished = on_finished
         self.buttons: List[List[MineCellButton]] = []
         self.setFocusPolicy(STRONG_FOCUS)
+        cell_content_size = self.CELL_SIZE - 2
+        self.setStyleSheet(
+            f"""
+            QPushButton#mineCell {{
+                min-width: {cell_content_size}px;
+                max-width: {cell_content_size}px;
+                min-height: {cell_content_size}px;
+                max-height: {cell_content_size}px;
+                padding: 0px;
+                border: 1px solid #b7c6cf;
+                border-radius: 4px;
+                font-weight: 800;
+            }}
+            QPushButton#mineCell:disabled {{
+                background-color: #eef4f7;
+                color: #2c3e50;
+                border-color: #d8e3e8;
+            }}
+            """
+        )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -723,12 +745,15 @@ class MinesweeperGameWidget(QWidget):
 
         self.grid_widget = QWidget(self)
         self.grid_layout = QGridLayout(self.grid_widget)
-        self.grid_layout.setSpacing(2)
+        self.grid_layout.setSpacing(self.GRID_SPACING)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        board_size = self.COLS * self.CELL_SIZE + (self.COLS - 1) * self.GRID_SPACING
+        self.grid_widget.setFixedSize(board_size, board_size)
         for r in range(self.ROWS):
             row: List[MineCellButton] = []
             for c in range(self.COLS):
                 btn = MineCellButton(r, c, self.grid_widget)
+                btn.setFixedSize(self.CELL_SIZE, self.CELL_SIZE)
                 btn.left_clicked.connect(self._open_from_click)
                 btn.right_clicked.connect(self._toggle_flag)
                 self.grid_layout.addWidget(btn, r, c)
