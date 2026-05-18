@@ -24,14 +24,14 @@ class VentilationService:
     }
 
     MODE_FIELDS: dict[VentilationMode, list[str]] = {
-        VentilationMode.CONTROLLED_VCV: ["RR", "TV", "PEEP", "FiO2", "Flow"],
-        VentilationMode.CONTROLLED_PCV: ["RR", "Pinsp", "PEEP", "FiO2", "Flow"],
-        VentilationMode.SIMV_VC: ["RR", "TV", "PEEP", "FiO2", "Flow"],
-        VentilationMode.SIMV_PC: ["RR", "Pinsp", "PEEP", "FiO2", "Flow"],
+        VentilationMode.CONTROLLED_VCV: ["RR", "TV", "PEEP", "FiO2"],
+        VentilationMode.CONTROLLED_PCV: ["RR", "Pinsp", "PEEP", "FiO2"],
+        VentilationMode.SIMV_VC: ["RR", "TV", "PEEP", "FiO2"],
+        VentilationMode.SIMV_PC: ["RR", "Pinsp", "PEEP", "FiO2"],
         VentilationMode.PSV: ["PS", "PEEP", "FiO2"],
         VentilationMode.CPAP: ["PEEP", "FiO2"],
         VentilationMode.BIPAP: ["Phigh", "Plow", "Thigh", "Tlow", "FiO2"],
-        VentilationMode.SPONTANEOUS: ["FiO2", "Flow"],
+        VentilationMode.SPONTANEOUS: ["FiO2"],
     }
 
     PARAMETER_KEYS = {
@@ -41,7 +41,6 @@ class VentilationService:
         "PEEP",
         "FiO2",
         "PS",
-        "Flow",
         "Phigh",
         "Plow",
         "Thigh",
@@ -102,7 +101,7 @@ class VentilationService:
         if not initial_mode:
             raise ValueError("Для открытия случая ИВЛ необходимо выбрать стартовый режим.")
         if o2_flow is not None:
-            raise ValueError("Поток O2 задается только при экстубации.")
+            raise ValueError("Поток O₂ задается только при экстубации.")
 
         mode_enum = self._to_mode(initial_mode) if initial_mode else None
         normalized_parameters = self._normalize_parameters(mode_enum, initial_parameters or {})
@@ -549,7 +548,7 @@ class VentilationService:
             raise ValueError("Поле 'Показания' доступно только для старта ИВЛ, смены режима, экстубации и трахеостомии.")
 
         if event_type != VentilationEventType.EXTUBATION and o2_flow is not None:
-            raise ValueError("Поток O2 задается только при экстубации.")
+            raise ValueError("Поток O₂ задается только при экстубации.")
 
     def _normalize_parameters(
         self,
@@ -597,7 +596,6 @@ class VentilationService:
             "tv": "TV",
             "pinsp": "Pinsp",
             "ps": "PS",
-            "flow": "Flow",
             "phigh": "Phigh",
             "plow": "Plow",
             "thigh": "Thigh",

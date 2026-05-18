@@ -6070,14 +6070,14 @@ def _check_remaining_clinical_optimistic_lock_conflicts(temp_root: str) -> tuple
             admission_id,
             start_time=start_time,
             initial_mode=VentilationMode.CONTROLLED_VCV,
-            initial_parameters={"RR": 12, "TV": 500, "PEEP": 5, "FiO2": 50, "Flow": 40},
+            initial_parameters={"RR": 12, "TV": 500, "PEEP": 5, "FiO2": 50},
         )
         vent_service.add_event(
             case.id,
             event_time=start_time + timedelta(minutes=10),
             event_type=VentilationEventType.MODE_CHANGE,
             mode=VentilationMode.CONTROLLED_VCV,
-            parameters={"RR": 13, "TV": 500, "PEEP": 5, "FiO2": 50, "Flow": 40},
+            parameters={"RR": 13, "TV": 500, "PEEP": 5, "FiO2": 50},
             expected_case_revision=case.revision,
         )
         try:
@@ -6086,7 +6086,7 @@ def _check_remaining_clinical_optimistic_lock_conflicts(temp_root: str) -> tuple
                 event_time=start_time + timedelta(minutes=20),
                 event_type=VentilationEventType.MODE_CHANGE,
                 mode=VentilationMode.CONTROLLED_VCV,
-                parameters={"RR": 14, "TV": 500, "PEEP": 5, "FiO2": 50, "Flow": 40},
+                parameters={"RR": 14, "TV": 500, "PEEP": 5, "FiO2": 50},
                 expected_case_revision=case.revision,
             )
             return False, "stale ventilation event did not raise conflict"

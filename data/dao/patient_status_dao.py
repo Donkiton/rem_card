@@ -390,7 +390,7 @@ class PatientStatusDAO:
                 self._normalize_vent_parameter_key(key): value
                 for key, value in data.items()
                 if self._normalize_vent_parameter_key(key)
-                in {"RR", "TV", "Pinsp", "PEEP", "FiO2", "PS", "Flow", "Phigh", "Plow", "Thigh", "Tlow"}
+                in {"RR", "TV", "Pinsp", "PEEP", "FiO2", "PS", "Phigh", "Plow", "Thigh", "Tlow"}
             }
             parameters.update(known_from_data)
 
@@ -406,6 +406,8 @@ class PatientStatusDAO:
 
         normalized: Dict[str, Any] = {}
         for key, value in parameters.items():
+            if str(key).lower() == "flow":
+                continue
             normalized_key = self._normalize_vent_parameter_key(str(key))
             if value is None or str(value).strip() == "":
                 continue
@@ -433,7 +435,6 @@ class PatientStatusDAO:
             "tv": "TV",
             "pinsp": "Pinsp",
             "ps": "PS",
-            "flow": "Flow",
             "phigh": "Phigh",
             "plow": "Plow",
             "thigh": "Thigh",

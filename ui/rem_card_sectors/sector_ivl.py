@@ -22,11 +22,17 @@ from PySide6.QtWidgets import (
 
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.styles.theme import COLOR_DANGER
 
 
 class SectorIvl(BaseSectorWidget):
     SNAPSHOT_CACHE_LIMIT = 10
     HISTORY_HEADER_SETTINGS_KEY = "ivl/history_header_state"
+    DEFAULT_EXTUBATION_REASON = (
+        "Адекватное самостоятельное дыхание и успешный тест спонтанного дыхания. "
+        "Восстановление сознания и защитных рефлексов дыхательных путей. "
+        "Стабильная оксигенация и вентиляция при минимальной респираторной поддержке."
+    )
 
     EVENT_LABELS = {
         "START_VENT": "Старт ИВЛ",
@@ -47,7 +53,7 @@ class SectorIvl(BaseSectorWidget):
         "SPONTANEOUS": "Spontaneous",
     }
 
-    PARAMETER_ORDER = ["RR", "TV", "Pinsp", "PEEP", "FiO2", "PS", "Flow", "Phigh", "Plow", "Thigh", "Tlow"]
+    PARAMETER_ORDER = ["RR", "TV", "Pinsp", "PEEP", "FiO2", "PS", "Phigh", "Plow", "Thigh", "Tlow"]
     PRESTART_EVENT_CODES = ("START_VENT",)
     ACTIVE_EVENT_CODES = ("MODE_CHANGE", "TRACHEOSTOMY")
 
@@ -262,6 +268,16 @@ class SectorIvl(BaseSectorWidget):
         self.btn_create_case.setObjectName("ivl_btn_custom")
         self.btn_create_case.clicked.connect(self._on_create_case_clicked)
 
+        self.btn_close_case = QPushButton("Экстубировать")
+        self.btn_close_case.setObjectName("ivl_btn_danger")
+        self.btn_close_case.clicked.connect(self._on_close_case_clicked)
+        self.btn_replace_tube = QPushButton("Заменить трубку")
+        self.btn_replace_tube.setObjectName("ivl_btn_custom")
+        self.btn_replace_tube.clicked.connect(self._on_replace_tube_clicked)
+        self.btn_undo = QPushButton("Отменить последнее действие")
+        self.btn_undo.setObjectName("ivl_btn_custom")
+        self.btn_undo.clicked.connect(self._on_undo_last_clicked)
+
         case_row1.addWidget(QLabel("Тип начала:"))
         case_row1.addWidget(self.start_type_combo)
         case_row1.addWidget(QLabel("Доставка:"))
@@ -269,74 +285,43 @@ class SectorIvl(BaseSectorWidget):
         case_row1.addWidget(QLabel("Время начала:"))
         case_row1.addWidget(self.start_dt_edit)
         case_row1.addWidget(self.btn_create_case)
+        case_row1.addWidget(self.btn_close_case)
+        case_row1.addWidget(self.btn_replace_tube)
+        case_row1.addWidget(self.btn_undo)
         case_row1.addStretch(1)
         case_layout.addLayout(case_row1)
 
         self.lbl_case_status = QLabel("Случай: не открыт")
-        self.lbl_case_duration = QLabel("Длительность текущего случая: --")
+        self.lbl_case_duration = QLabel("Длительность случая: --")
         self.lbl_total_duration = QLabel("Суммарное время ИВЛ: --")
         self.lbl_tube_duration = QLabel("Длительность текущей трубки: --")
-        self.lbl_tube_alert = QLabel("Алерт трубки: нет")
+        self.lbl_tube_duration.setTextFormat(Qt.RichText)
         for lbl in (
             self.lbl_case_status,
             self.lbl_case_duration,
             self.lbl_total_duration,
             self.lbl_tube_duration,
-            self.lbl_tube_alert,
         ):
             lbl.setStyleSheet("border: none; color: #2f3c48;")
 
         status_row = QHBoxLayout()
         status_row.setContentsMargins(0, 0, 0, 0)
-        status_row.setSpacing(40)
-
-        status_col_1 = QVBoxLayout()
-        status_col_1.setContentsMargins(0, 0, 0, 0)
-        status_col_1.setSpacing(2)
-        status_col_1.addWidget(self.lbl_case_status)
-        status_col_1.addWidget(self.lbl_case_duration)
-
-        status_col_2 = QVBoxLayout()
-        status_col_2.setContentsMargins(0, 0, 0, 0)
-        status_col_2.setSpacing(2)
-        status_col_2.addWidget(self.lbl_total_duration)
-        status_col_2.addWidget(self.lbl_tube_duration)
-
-        status_col_3 = QVBoxLayout()
-        status_col_3.setContentsMargins(0, 0, 0, 0)
-        status_col_3.setSpacing(2)
-        status_col_3.addWidget(self.lbl_tube_alert)
-        status_col_3.addStretch(1)
-
-        status_row.addLayout(status_col_1)
-        status_row.addLayout(status_col_2)
-        status_row.addLayout(status_col_3)
+        status_row.setSpacing(28)
+        status_row.addWidget(self.lbl_case_status)
+        status_row.addWidget(self.lbl_case_duration)
+        status_row.addWidget(self.lbl_total_duration)
+        status_row.addWidget(self.lbl_tube_duration)
         status_row.addStretch(1)
         case_layout.addLayout(status_row)
-
-        case_row2 = QHBoxLayout()
-        case_row2.setSpacing(6)
-        self.btn_replace_tube = QPushButton("Заменить трубку")
-        self.btn_replace_tube.setObjectName("ivl_btn_custom")
-        self.btn_replace_tube.clicked.connect(self._on_replace_tube_clicked)
-        self.btn_undo = QPushButton("Отменить последнее действие")
-        self.btn_undo.setObjectName("ivl_btn_custom")
-        self.btn_undo.clicked.connect(self._on_undo_last_clicked)
-        self.btn_close_case = QPushButton("Экстубировать и закрыть")
-        self.btn_close_case.setObjectName("ivl_btn_danger")
-        self.btn_close_case.clicked.connect(self._on_close_case_clicked)
-        case_row2.addWidget(self.btn_replace_tube)
-        case_row2.addWidget(self.btn_undo)
-        case_row2.addWidget(self.btn_close_case)
-        case_row2.addStretch(1)
-        case_layout.addLayout(case_row2)
 
         extubation_row = QHBoxLayout()
         extubation_row.setSpacing(6)
         self.lbl_extubation_reason = QLabel("Показания к экстубации:")
         self.extubation_reason_edit = QLineEdit()
         self.extubation_reason_edit.setPlaceholderText("Показания к экстубации")
-        self.lbl_extubation_o2 = QLabel("Поток O2:")
+        self._set_default_extubation_reason()
+        self.lbl_extubation_o2 = QLabel("Поток O<sub>2</sub>:")
+        self.lbl_extubation_o2.setTextFormat(Qt.RichText)
         self.extubation_o2_flow_edit = QLineEdit()
         self.extubation_o2_flow_edit.setPlaceholderText("л/мин")
         self.extubation_o2_flow_edit.setValidator(QDoubleValidator(0.0, 100.0, 2, self))
@@ -513,11 +498,9 @@ class SectorIvl(BaseSectorWidget):
     def set_loading_state(self, status_text: str = "Случай: загрузка..."):
         self.active_case_id = None
         self.lbl_case_status.setText(status_text)
-        self.lbl_case_duration.setText("Длительность текущего случая: --")
+        self.lbl_case_duration.setText("Длительность случая: --")
         self.lbl_total_duration.setText("Суммарное время ИВЛ: --")
-        self.lbl_tube_duration.setText("Длительность текущей трубки: --")
-        self.lbl_tube_alert.setText("Алерт трубки: --")
-        self.lbl_tube_alert.setStyleSheet("border: none; color: #2f3c48;")
+        self._set_tube_duration_text("--", alert=False)
         self._set_actions_enabled(False, has_case_history=False)
         self._history_events = []
         self.history_table.setRowCount(0)
@@ -606,16 +589,10 @@ class SectorIvl(BaseSectorWidget):
                 f"Случай #{active_case.episode_number}: активен с {active_case.start_time.strftime('%d.%m.%Y %H:%M')}"
             )
             self.lbl_case_duration.setText(
-                f"Длительность текущего случая: {self._format_duration(summary.get('case_duration_seconds', 0.0))}"
-            )
-            self.lbl_tube_duration.setText(
-                f"Длительность текущей трубки: {self._format_duration(summary.get('tube_duration_seconds', 0.0))}"
+                f"Длительность случая: {self._format_duration(summary.get('case_duration_seconds', 0.0))}"
             )
             alert = bool(summary.get("tube_alert"))
-            self.lbl_tube_alert.setText("Алерт трубки: >72ч" if alert else "Алерт трубки: нет")
-            self.lbl_tube_alert.setStyleSheet(
-                "border: none; color: #c0392b; font-weight: bold;" if alert else "border: none; color: #2f3c48;"
-            )
+            self._set_tube_duration_text(self._format_duration(summary.get("tube_duration_seconds", 0.0)), alert)
             self._set_actions_enabled(True, has_case_history=bool(timeline))
             self._reload_history(timeline)
         else:
@@ -625,10 +602,8 @@ class SectorIvl(BaseSectorWidget):
                 )
             else:
                 self.lbl_case_status.setText("Случай: не открыт")
-            self.lbl_case_duration.setText("Длительность текущего случая: --")
-            self.lbl_tube_duration.setText("Длительность текущей трубки: --")
-            self.lbl_tube_alert.setText("Алерт трубки: нет")
-            self.lbl_tube_alert.setStyleSheet("border: none; color: #2f3c48;")
+            self.lbl_case_duration.setText("Длительность случая: --")
+            self._set_tube_duration_text("--", alert=False)
             self._set_actions_enabled(False, has_case_history=bool(timeline))
             if timeline:
                 self._reload_history(timeline)
@@ -765,14 +740,18 @@ class SectorIvl(BaseSectorWidget):
         for row_idx, event in enumerate(events):
             event_type = getattr(event.event_type, "value", str(event.event_type))
             mode = getattr(event.mode, "value", "-") if event.mode else "-"
-            params = ", ".join(f"{k}={v}" for k, v in sorted((event.parameters or {}).items()))
+            params = ", ".join(
+                f"{k}={v}"
+                for k, v in sorted((event.parameters or {}).items())
+                if str(k).lower() != "flow"
+            )
             if not params:
                 params = "-"
             reason_o2 = []
             if event.extubation_reason:
                 reason_o2.append(event.extubation_reason)
             if event.o2_flow is not None:
-                reason_o2.append(f"O2={event.o2_flow}")
+                reason_o2.append(self._format_o2_flow(event.o2_flow))
             timestamp = getattr(event, "timestamp", None)
             timestamp_text = timestamp.strftime("%d.%m.%Y %H:%M") if timestamp else ""
             self.history_table.setItem(row_idx, 0, QTableWidgetItem(timestamp_text))
@@ -1091,7 +1070,7 @@ class SectorIvl(BaseSectorWidget):
             answer = CustomMessageBox.question(
                 self,
                 "Подтверждение экстубации",
-                "Показания и поток O2 не заполнены. Экстубировать пациента без этих данных?",
+                "Показания и поток O₂ не заполнены. Экстубировать пациента без этих данных?",
             )
             if answer != CustomMessageBox.Yes:
                 return
@@ -1112,7 +1091,7 @@ class SectorIvl(BaseSectorWidget):
             )
 
         def on_success(_event):
-            self.extubation_reason_edit.clear()
+            self._set_default_extubation_reason()
             self.extubation_o2_flow_edit.clear()
 
         self._enqueue_ivl_write(
@@ -1174,6 +1153,23 @@ class SectorIvl(BaseSectorWidget):
             return None
         patient = self.remcard_service.get_patient(self.admission_id)
         return getattr(patient, "admission_datetime", None) if patient else None
+
+    def _set_tube_duration_text(self, duration_text: str, alert: bool):
+        if alert:
+            self.lbl_tube_duration.setText(
+                "Длительность текущей трубки: "
+                f'<span style="color: {COLOR_DANGER}; font-weight: bold;">{duration_text}</span>'
+            )
+            return
+        self.lbl_tube_duration.setText(f"Длительность текущей трубки: {duration_text}")
+
+    def _set_default_extubation_reason(self):
+        self.extubation_reason_edit.setText(self.DEFAULT_EXTUBATION_REASON)
+        self.extubation_reason_edit.setCursorPosition(0)
+
+    @staticmethod
+    def _format_o2_flow(value) -> str:
+        return f"O₂={value} л/мин"
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

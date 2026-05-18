@@ -995,7 +995,7 @@ class ReportLabReportBuilder:
                     cls._p(row.get("event", "—"), font_size=6.5),
                     cls._p(row.get("mode", "—"), font_size=6.5),
                     cls._p(row.get("params", "—"), font_size=6.5, alignment=TA_LEFT),
-                    cls._p(row.get("indications", "—"), font_size=6.5, alignment=TA_LEFT),
+                    cls._p(row.get("indications", "—"), font_size=6.5, alignment=TA_LEFT, allow_markup=True),
                 ]
             )
         style = cls._base_table_style(title_row=True, body_font_size=6.5, header_font_size=6.5, left_columns=(3, 4))

@@ -1,6 +1,7 @@
 import os
 import pathlib
 import datetime
+import html
 import re
 from typing import Optional, Tuple
 
@@ -132,6 +133,10 @@ class DataCollectorWorker(QThread):
         return result
 
     @staticmethod
+    def format_ventilation_o2_flow(value):
+        return f'O<sub rise="1.2" size="4.2">2</sub>={html.escape(str(value))} л/мин'
+
+    @staticmethod
     def build_ventilation_struct(events):
         items = []
         event_labels = {
@@ -158,14 +163,15 @@ class DataCollectorWorker(QThread):
             event_type_raw = getattr(getattr(ev, "event_type", None), "value", getattr(ev, "event_type", None))
             mode_raw = getattr(getattr(ev, "mode", None), "value", getattr(ev, "mode", None))
             params = getattr(ev, "parameters", None) or {}
-            params_text = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) if params else "—"
+            params_items = [(k, v) for k, v in params.items() if str(k).lower() != "flow"]
+            params_text = ", ".join(f"{k}={v}" for k, v in sorted(params_items)) if params_items else "—"
             indications_parts = []
             ext_reason = getattr(ev, "extubation_reason", None)
             if ext_reason:
-                indications_parts.append(str(ext_reason))
+                indications_parts.append(html.escape(str(ext_reason)))
             o2_flow = getattr(ev, "o2_flow", None)
             if o2_flow is not None:
-                indications_parts.append(f"O2={o2_flow}")
+                indications_parts.append(DataCollectorWorker.format_ventilation_o2_flow(o2_flow))
             indications = "; ".join(indications_parts) if indications_parts else "—"
             items.append(
                 {

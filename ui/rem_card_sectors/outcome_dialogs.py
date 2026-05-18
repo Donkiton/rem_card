@@ -74,7 +74,7 @@ VENTILATION_MODE_LABELS = {
     "SPONTANEOUS": "Spontaneous",
 }
 
-VENTILATION_PARAMETER_ORDER = ["RR", "TV", "Pinsp", "PEEP", "FiO2", "PS", "Flow", "Phigh", "Plow", "Thigh", "Tlow"]
+VENTILATION_PARAMETER_ORDER = ["RR", "TV", "Pinsp", "PEEP", "FiO2", "PS", "Phigh", "Plow", "Thigh", "Tlow"]
 
 CARDIAC_ARREST_TEMPLATES: Dict[str, List[Tuple[str, str]]] = {
     "Асистолия": [
@@ -773,12 +773,13 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         return " ".join(parts)
 
     def _format_ventilation_parameters(self, parameters: Dict[str, Any]) -> str:
-        ordered_keys = [key for key in VENTILATION_PARAMETER_ORDER if key in parameters]
-        ordered_keys.extend(sorted(key for key in parameters if key not in ordered_keys))
+        filtered_parameters = {key: value for key, value in parameters.items() if str(key).lower() != "flow"}
+        ordered_keys = [key for key in VENTILATION_PARAMETER_ORDER if key in filtered_parameters]
+        ordered_keys.extend(sorted(key for key in filtered_parameters if key not in ordered_keys))
         formatted = [
-            self._format_ventilation_parameter(key, parameters.get(key))
+            self._format_ventilation_parameter(key, filtered_parameters.get(key))
             for key in ordered_keys
-            if parameters.get(key) is not None and str(parameters.get(key)).strip() != ""
+            if filtered_parameters.get(key) is not None and str(filtered_parameters.get(key)).strip() != ""
         ]
         return ", ".join(item for item in formatted if item)
 
@@ -790,8 +791,6 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             return f"Vt (дыхательный объем): {raw} мл"
         if key in {"Pinsp", "PEEP", "PS", "Phigh", "Plow"}:
             return f"{key}: {raw} см H2O"
-        if key == "Flow":
-            return f"Flow: {raw} л/мин"
         if key in {"Thigh", "Tlow"}:
             return f"{key}: {raw} сек"
         if key == "FiO2":
