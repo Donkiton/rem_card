@@ -6,9 +6,6 @@
 - Другие графики (g61-g65)
 """
 
-import os
-import tempfile
-import uuid
 from datetime import datetime
 
 try:
@@ -23,6 +20,7 @@ from rem_card.ui.analytics.graphs_generators_1 import save_plot
 # Импортируем вспомогательную функцию _calc_daily_counts
 from rem_card.ui.analytics.graphs_generators_1 import _calc_daily_counts, _patient_count_axis_limit
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
+from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend
 
 
 def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html_content):
@@ -258,7 +256,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             if df['count'].sum() > 0:
                 plt.figure(figsize=(10, 6))
-                plt.pie(df['count'], labels=df['operation_type'], autopct='%1.1f%%', colors=chart_colors)
+                plot_pie_with_legend(df['count'], df['operation_type'], chart_colors, legend_title="Операция")
                 plt.title("57. Топ-5 операций")
                 html_content += save_plot("57. Топ-5 операций", img_paths)
 
@@ -288,7 +286,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             if df['count'].sum() > 0:
                 plt.figure(figsize=(10, 6))
-                plt.pie(df['count'], labels=df['transfusion_type'], autopct='%1.1f%%', colors=chart_colors)
+                plot_pie_with_legend(df['count'], df['transfusion_type'], chart_colors, legend_title="Тип")
                 plt.title("59. Топ-5 типов переливаний")
                 html_content += save_plot("59. Топ-5 типов переливаний", img_paths)
 
@@ -326,7 +324,7 @@ def generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_conte
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             if df['count'].sum() > 0:
                 plt.figure(figsize=(10, 6))
-                plt.pie(df['count'], labels=df['department'], autopct='%1.1f%%', colors=chart_colors)
+                plot_pie_with_legend(df['count'], df['department'], chart_colors, legend_title="Отделение")
                 plt.title("61. Распределение пациентов по отделениям")
                 html_content += save_plot("61. Распределение пациентов по отделениям", img_paths)
 
@@ -367,13 +365,7 @@ def generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_conte
                     plt.text(0.5, 0.5, "Нет данных", ha='center', va='center')
 
 
-            plt.tight_layout()
-            filename = f"graph_{uuid.uuid4().hex}.png"
-            path = os.path.join(tempfile.gettempdir(), filename)
-            plt.savefig(path, dpi=150, bbox_inches='tight')
-            plt.close()
-            img_paths.append(path)
-            html_content += f"<div style='text-align: center;'><h3>63. Распределение длительности пребывания по отделениям</h3><img src='{path}' width='600'></div><br><br>"
+            html_content += save_plot("63. Распределение длительности пребывания по отделениям", img_paths)
 
     # 65. Распределение пациентов по времени суток поступления
     # (График g65, так как g64 не определен или не используется)

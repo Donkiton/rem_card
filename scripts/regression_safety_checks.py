@@ -5130,13 +5130,91 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "9d8bcf842bd8711b44212755aacd4e6b2ee8f790924a101ad8df783c3fda0a23"
+    expected_digest = "46fac7594d11c64dedc6b12d3e39d0a4e35681ccd97465d82c5493206476fb79"
     if digest != expected_digest:
         return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
         return False, f"unexpected filled core stats: {result['filled']['stats']}"
     if result["empty"]["stats"]["N"] != 0 or result["empty"]["stats"]["bed_days"] != 0:
         return False, f"unexpected empty stats: {result['empty']['stats']}"
+    return True, "ok"
+
+
+def _check_graph_outcome_labels_hide_nan(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.ui.analytics import graphs_generators_2 as generators
+    from rem_card.ui.analytics.chart_renderer import configure_chart_style, plot_pie_with_legend
+
+    import matplotlib.pyplot as plt
+
+    colors = ["#0d7ff2", "#ef4444", "#22c55e", "#f59e0b"]
+    configure_chart_style(colors)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE admissions (
+            id INTEGER PRIMARY KEY,
+            admission_datetime TEXT,
+            transfer_datetime TEXT,
+            death_datetime TEXT,
+            outcome TEXT
+        )
+        """
+    )
+    base = datetime(2026, 1, 1, 8, 0, 0)
+    conn.executemany(
+        "INSERT INTO admissions VALUES (?, ?, ?, ?, ?)",
+        [
+            (1, base.isoformat(), (base + timedelta(days=30)).isoformat(), None, None),
+            (2, base.isoformat(), (base + timedelta(hours=2)).isoformat(), None, "умер"),
+            (3, base.isoformat(), (base + timedelta(hours=4)).isoformat(), None, ""),
+        ],
+    )
+    conn.commit()
+
+    captured_labels = []
+    original_save_plot = generators.save_plot
+
+    def inspect_save_plot(title, img_paths):
+        figure = plt.gcf()
+        captured_labels.extend(label.get_text() for ax in figure.axes for label in ax.get_yticklabels())
+        plt.close(figure)
+        return ""
+
+    generators.save_plot = inspect_save_plot
+    try:
+        generators.generate_g31_g35(
+            {"g33"},
+            conn,
+            (base.isoformat(), (base + timedelta(days=31)).isoformat()),
+            colors,
+            [],
+            "",
+        )
+    finally:
+        generators.save_plot = original_save_plot
+        conn.close()
+
+    if not captured_labels:
+        return False, "g33 labels were not captured"
+    if any("nan" in str(label).lower() for label in captured_labels):
+        return False, f"g33 outcome labels leaked nan: {captured_labels}"
+    if not any("Не указано" in str(label) for label in captured_labels):
+        return False, f"g33 missing normalized empty outcome label: {captured_labels}"
+
+    plt.figure(figsize=(8, 4))
+    try:
+        plot_pie_with_legend([1], [float("nan")], colors, legend_title="Исход")
+        renderer_labels = [label.get_text() for ax in plt.gcf().axes for label in ax.get_yticklabels()]
+    finally:
+        plt.close(plt.gcf())
+    if any("nan" in str(label).lower() for label in renderer_labels):
+        return False, f"chart renderer leaked nan label: {renderer_labels}"
+    if renderer_labels != ["Не указано"]:
+        return False, f"chart renderer did not normalize nan label: {renderer_labels}"
+
     return True, "ok"
 
 
@@ -9103,6 +9181,7 @@ def main():
         ("full_report_bulk_collector_prefetches_once", _check_full_report_bulk_collector_prefetches_once),
         ("sector_events_refresh_snapshot", _check_sector_events_refresh_snapshot),
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
+        ("graph_outcome_labels_hide_nan", _check_graph_outcome_labels_hide_nan),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),

@@ -16,15 +16,17 @@ class CustomMessageBox(QDialog):
     # Пользовательские роли для баланса
     SUM = 100
     REPLACE = 101
+    OpenFile = 102
 
-    def __init__(self, title, message, msg_type="warning", icon_file=None, parent=None):
+    def __init__(self, title, message, msg_type="warning", icon_file=None, parent=None, action_buttons=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        
+
         self.msg_type = msg_type
         self.icon_file = icon_file
-        
+        self.action_buttons = list(action_buttons or [])
+
         self._is_dragging = False
         self._drag_pos = QPoint()
 
@@ -136,10 +138,16 @@ class CustomMessageBox(QDialog):
             cancel_btn = QPushButton("Отмена")
             cancel_btn.setObjectName("DialogOkBtn")
             cancel_btn.clicked.connect(self.reject)
-            
+
             btn_layout.addWidget(sum_btn)
             btn_layout.addWidget(replace_btn)
             btn_layout.addWidget(cancel_btn)
+        elif self.action_buttons:
+            for button_text, result_code in self.action_buttons:
+                action_btn = QPushButton(str(button_text))
+                action_btn.setObjectName("DialogOkBtn")
+                action_btn.clicked.connect(lambda checked=False, code=result_code: self.done(code))
+                btn_layout.addWidget(action_btn)
         else:
             ok_btn = QPushButton("Понятно" if self.msg_type != "critical" else "Закрыть")
             ok_btn.setObjectName("DialogOkBtn")
@@ -189,6 +197,11 @@ class CustomMessageBox(QDialog):
         dialog = cls(title, message, "information", parent)
         dialog.exec()
         return cls.Ok
+
+    @classmethod
+    def information_with_actions(cls, parent, title, message, action_buttons):
+        dialog = cls(title, message, "information", None, parent, action_buttons)
+        return dialog.exec()
 
     @classmethod
     def question(cls, parent, title, message, buttons=None, defaultButton=None):

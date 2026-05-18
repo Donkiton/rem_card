@@ -6,10 +6,6 @@
 - Демографическая структура (g19-g22)
 """
 
-import os
-import tempfile
-import uuid
-import warnings
 from datetime import datetime
 
 try:
@@ -19,30 +15,12 @@ except ImportError:
     pd = None
     plt = None
 
-from rem_card.ui.styles.theme import BG_CARD
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
+from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend, save_plot as _save_plot
 
 
 def save_plot(title, img_paths, chart_colors=None):
-    figure = plt.gcf()
-    figure.patch.set_facecolor(BG_CARD)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            plt.tight_layout(pad=1.2)
-    except Exception:
-        pass
-    # Fallback: добавляем немного воздуха по краям для длинных подписей.
-    try:
-        figure.subplots_adjust(left=0.08, right=0.98, top=0.92, bottom=0.18)
-    except Exception:
-        pass
-    filename = f"graph_{uuid.uuid4().hex}.png"
-    path = os.path.join(tempfile.gettempdir(), filename)
-    plt.savefig(path, dpi=180, bbox_inches='tight', facecolor=BG_CARD)
-    plt.close()
-    img_paths.append(path)
-    return f"<div style='text-align: center;'><h3>{title}</h3><img src='{path}' width='600'></div><br><br>"
+    return _save_plot(title, img_paths)
 
 
 def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content):
@@ -102,7 +80,7 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             df['source_department'] = df['source_department'].fillna('Не указано')
             plt.figure(figsize=(8, 8))
-            plt.pie(df['count'], labels=df['source_department'], autopct='%1.1f%%', colors=chart_colors)
+            plot_pie_with_legend(df['count'], df['source_department'], chart_colors, legend_title="Источник")
             plt.title("4. Источники поступления пациентов")
             html_content += save_plot("4. Источники поступления пациентов", img_paths)
 
@@ -350,9 +328,13 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
         perc = (high_load_days / total_days * 100) if total_days > 0 else 0
         normal_days = total_days - high_load_days
         plt.figure(figsize=(6, 6))
-        plt.pie([high_load_days, normal_days],
-                labels=[f'Пиковая нагрузка\n{high_load_days} дн.', f'Нормальная\n{normal_days} дн.'],
-                autopct='%1.1f%%', colors=[chart_colors[2], chart_colors[1]])
+        plot_pie_with_legend(
+            [high_load_days, normal_days],
+            ["Пиковая нагрузка", "Нормальная нагрузка"],
+            [chart_colors[2], chart_colors[1]],
+            legend_title="Периоды",
+            value_formatter=lambda value: f"{int(value)} дн.",
+        )
         plt.title(f"17. Доля времени повышенной загрузки (≥{STATISTICAL_HIGH_LOAD_THRESHOLD} пац.): {perc:.1f}%")
         html_content += save_plot("17. Доля времени повышенной загрузки", img_paths)
 
@@ -395,7 +377,7 @@ def generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html
         f = sum(1 for r in adms if r['patient_gender'] == 'Женский')
         if (m + f) > 0:
             plt.figure(figsize=(6, 6))
-            plt.pie([m, f], labels=["Мужчины", "Женщины"], autopct='%1.1f%%', colors=[chart_colors[0], chart_colors[3]])
+            plot_pie_with_legend([m, f], ["Мужчины", "Женщины"], [chart_colors[0], chart_colors[3]], legend_title="Пол")
             plt.title("20. Распределение пациентов по полу")
             html_content += save_plot("20. Распределение пациентов по полу", img_paths)
 

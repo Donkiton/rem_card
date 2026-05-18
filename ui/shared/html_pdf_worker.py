@@ -18,17 +18,24 @@ class HtmlPdfWorker(QThread):
     def run(self):
         try:
             self.pdf_path.parent.mkdir(parents=True, exist_ok=True)
-            document = QTextDocument()
-            document.setHtml(self.html)
-
             writer = QPdfWriter(str(self.pdf_path))
+            writer.setResolution(300)
             writer.setPageLayout(
                 QPageLayout(
                     QPageSize(QPageSize.A4),
                     QPageLayout.Portrait,
                     QMarginsF(15, 15, 15, 15),
+                    QPageLayout.Millimeter,
                 )
             )
+            page_layout = writer.pageLayout()
+            page_rect = page_layout.paintRect(QPageLayout.Point)
+
+            document = QTextDocument()
+            document.setDocumentMargin(0)
+            document.setTextWidth(page_rect.width())
+            document.setPageSize(page_rect.size())
+            document.setHtml(self.html)
 
             if hasattr(document, "print_"):
                 document.print_(writer)

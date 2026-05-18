@@ -6,9 +6,6 @@
 - Смертность (g41-g45)
 """
 
-import os
-import tempfile
-import uuid
 from datetime import datetime
 
 try:
@@ -20,6 +17,7 @@ except ImportError:
 
 # Импортируем функцию save_plot из первого файла
 from rem_card.ui.analytics.graphs_generators_1 import save_plot
+from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend
 
 
 def generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_content):
@@ -63,7 +61,7 @@ def generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_conte
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             if df['count'].sum() > 0:
                 plt.figure(figsize=(10, 6))
-                plt.pie(df['count'], labels=df['mkb_group'], autopct='%1.1f%%', colors=chart_colors)
+                plot_pie_with_legend(df['count'], df['mkb_group'], chart_colors, legend_title="Группа МКБ")
                 plt.title("25. Распределение по группам МКБ-10 (первые 3 символа)")
                 html_content += save_plot("25. Группы МКБ-10", img_paths)
 
@@ -111,13 +109,7 @@ def generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_conte
             else:
                 axes[1].text(0.5, 0.5, "Нет данных", ha='center', va='center')
 
-            plt.tight_layout()
-            filename = f"graph_{uuid.uuid4().hex}.png"
-            path = os.path.join(tempfile.gettempdir(), filename)
-            plt.savefig(path, dpi=150, bbox_inches='tight')
-            plt.close()
-            img_paths.append(path)
-            html_content += f"<div style='text-align: center;'><h3>27. Диагнозы по полу (Топ-3)</h3><img src='{path}' width='600'></div><br><br>"
+            html_content += save_plot("27. Диагнозы по полу (Топ-3)", img_paths)
 
     # 28. Распределение диагнозов по возрасту (группы)
     if "g28" in selected:
@@ -153,13 +145,7 @@ def generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_conte
                 plt.title(f"28. {age_group}")
                 plt.ylabel("Количество")
 
-            plt.tight_layout()
-            filename = f"graph_{uuid.uuid4().hex}.png"
-            path = os.path.join(tempfile.gettempdir(), filename)
-            plt.savefig(path, dpi=150, bbox_inches='tight')
-            plt.close()
-            img_paths.append(path)
-            html_content += f"<div style='text-align: center;'><h3>28. Диагнозы по возрастным группам (Топ-3)</h3><img src='{path}' width='600'></div><br><br>"
+            html_content += save_plot("28. Диагнозы по возрастным группам (Топ-3)", img_paths)
 
     # 29. Частота повторных госпитализаций с тем же диагнозом
     if "g29" in selected:
@@ -193,31 +179,32 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
     # 31. Исход лечения (общая статистика)
     if "g31" in selected:
         df = pd.read_sql_query(
-            "SELECT outcome, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime BETWEEN ? AND ? GROUP BY outcome",
+            "SELECT COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome, COUNT(id) as count "
+            "FROM admissions WHERE admission_datetime BETWEEN ? AND ? "
+            "GROUP BY COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано')",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             if df['count'].sum() > 0:
                 plt.figure(figsize=(8, 8))
-                plt.pie(df['count'], labels=df['outcome'], autopct='%1.1f%%', colors=chart_colors[:4])
+                plot_pie_with_legend(df['count'], df['outcome'], chart_colors[:4], legend_title="Исход")
                 plt.title("31. Исход лечения пациентов")
                 html_content += save_plot("31. Исход лечения пациентов", img_paths)
 
     # 32. Исход лечения по месяцам
     if "g32" in selected:
         df = pd.read_sql_query("""
-            SELECT strftime('%Y-%m', admission_datetime) as month, outcome, COUNT(id) as count
+            SELECT
+                strftime('%Y-%m', admission_datetime) as month,
+                COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome,
+                COUNT(id) as count
             FROM admissions WHERE admission_datetime BETWEEN ? AND ?
-            GROUP BY month, outcome ORDER BY month
+            GROUP BY month, COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') ORDER BY month
         """, conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
             df['month_dt'] = pd.to_datetime(df['month']) # для сортировки
             df = df.sort_values('month_dt')
-
-            # Заполним пустые исходы 'Неизвестно', если они есть
-            df['outcome'] = df['outcome'].fillna('Неизвестно')
 
             # Создаем сводную таблицу
             pivot_df = df.pivot_table(index='month', columns='outcome', values='count', fill_value=0)
@@ -240,9 +227,11 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
     # 33. Соотношение койко-дней и исходов
     if "g33" in selected:
         df = pd.read_sql_query("""
-            SELECT outcome, SUM(MAX(0, julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime))) as bed_days
+            SELECT
+                COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome,
+                SUM(MAX(0, julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime))) as bed_days
             FROM admissions WHERE admission_datetime BETWEEN ? AND ?
-            GROUP BY outcome ORDER BY bed_days DESC
+            GROUP BY COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') ORDER BY bed_days DESC
         """, conn, params=params)
         if not df.empty:
             df['bed_days'] = pd.to_numeric(df['bed_days'], errors='coerce').fillna(0)
@@ -250,16 +239,24 @@ def generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_conte
             df = df[df['bed_days'] >= 0]
             if not df.empty and df['bed_days'].sum() > 0:
                 plt.figure(figsize=(8, 8))
-                plt.pie(df['bed_days'], labels=df['outcome'], autopct='%1.1f%%', colors=chart_colors[:4])
+                plot_pie_with_legend(
+                    df['bed_days'],
+                    df['outcome'],
+                    chart_colors[:4],
+                    legend_title="Исход",
+                    value_formatter=lambda value: f"{value:.1f} к-дн.",
+                )
             plt.title("33. Соотношение койко-дней по исходам")
             html_content += save_plot("33. Соотношение койко-дней по исходам", img_paths)
 
     # 34. Средняя длительность пребывания по исходам
     if "g34" in selected:
         df = pd.read_sql_query("""
-            SELECT outcome, AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
+            SELECT
+                COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') as outcome,
+                AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
             FROM admissions WHERE admission_datetime BETWEEN ? AND ?
-            GROUP BY outcome ORDER BY avg_duration DESC
+            GROUP BY COALESCE(NULLIF(TRIM(outcome), ''), 'Не указано') ORDER BY avg_duration DESC
         """, conn, params=params)
         if not df.empty:
             df['avg_duration'] = pd.to_numeric(df['avg_duration'], errors='coerce').fillna(0)
@@ -500,8 +497,10 @@ def generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_conte
             df['lethality'] = (df['deaths'] / df['total']) * 100
             if df['lethality'].sum() > 0:
                 plt.figure(figsize=(6, 6))
-                plt.pie(df['lethality'], labels=[f"{row['patient_gender']}\n{row['lethality']:.1f}%" for index, row in df.iterrows()],
-                        autopct='', colors=[chart_colors[0], chart_colors[3]]) # autopct не нужен, т.к. значения уже в label
+                plt.bar(range(len(df)), df['lethality'], color=[chart_colors[0], chart_colors[3]][: len(df)])
+                plt.xticks(range(len(df)), df['patient_gender'].fillna('Не указано'))
+                plt.ylabel("Летальность (%)")
+                plt.ylim(0, 100)
                 plt.title("44. Коэффициент летальности по полу (%)")
                 html_content += save_plot("44. Коэффициент летальности по полу", img_paths)
 

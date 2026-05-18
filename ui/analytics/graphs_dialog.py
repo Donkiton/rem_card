@@ -6,9 +6,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 
 from rem_card.services.analytics.constants import STATISTICAL_HIGH_LOAD_THRESHOLD
-from rem_card.services.analytics.graphs_service import build_graphs_html, wrap_graphs_pdf_html
+from rem_card.services.analytics.graphs_service import build_graphs_html, build_graphs_pdf
+from rem_card.ui.analytics.chart_renderer import fit_chart_images_to_width
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
-from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
@@ -315,7 +315,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         if self._closing:
             return
         html = getattr(result, "html", "")
-        self.report_text.setHtml(html)
+        self.report_text.setHtml(self._fit_graphs_preview_html(html))
         if save_pdf:
             self._start_graphs_pdf_worker(html)
             return
@@ -331,8 +331,8 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         os.makedirs(REPORT_DIR, exist_ok=True)
         filename = f"graphs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         pdf_path = os.path.join(REPORT_DIR, filename)
-        self.report_text.setHtml(html)
-        self._graphs_pdf_worker = HtmlPdfWorker(wrap_graphs_pdf_html(html), pdf_path, parent=self)
+        self.report_text.setHtml(self._fit_graphs_preview_html(html))
+        self._graphs_pdf_worker = AnalyticsWorker(lambda: build_graphs_pdf(html, pdf_path), parent=self)
         self._graphs_pdf_worker.completed.connect(self._on_graphs_pdf_ready)
         self._graphs_pdf_worker.failed.connect(self._on_graphs_pdf_failed)
         self._graphs_pdf_worker.finished.connect(self._clear_graphs_pdf_worker)
@@ -342,9 +342,20 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         if self._closing:
             return
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from rem_card.ui.shared.pdf_opener import open_pdf_file
 
         self._set_graphs_busy(False)
-        CustomMessageBox.information(self, "Успех", f"Графики успешно сохранены:\n{os.path.basename(pdf_path)}")
+        result = CustomMessageBox.information_with_actions(
+            self,
+            "Успех",
+            f"Графики успешно сохранены:\n{os.path.basename(pdf_path)}",
+            [
+                ("Открыть файл", CustomMessageBox.OpenFile),
+                ("Закрыть", CustomMessageBox.Ok),
+            ],
+        )
+        if result == CustomMessageBox.OpenFile:
+            open_pdf_file(pdf_path, parent=self)
 
     def _on_graphs_pdf_failed(self, message: str):
         if self._closing:
@@ -367,6 +378,11 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self.save_pdf_btn.setEnabled(not busy)
         if text:
             self.report_text.setHtml(f"<p>{text}</p>")
+
+    def _fit_graphs_preview_html(self, html: str) -> str:
+        viewport = self.report_text.viewport()
+        width = viewport.width() - 100 if viewport is not None else 760
+        return fit_chart_images_to_width(html, width, resize_images=True)
 
     def _clear_graphs_worker(self):
         self._graphs_worker = None
