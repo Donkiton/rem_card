@@ -5,6 +5,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.styles.context_menu_style import install_russian_line_edit_context_menu
 from rem_card.ui.styles.theme import COLOR_DANGER
 
 class Sector7vit_b(BaseSectorWidget):
@@ -134,6 +135,7 @@ class Sector7vit_b(BaseSectorWidget):
         self.notice_edit = QLineEdit()
         self.notice_edit.setObjectName("notice_edit")
         self.notice_edit.setPlaceholderText("Номер")
+        install_russian_line_edit_context_menu(self.notice_edit)
         self.notice_edit.textChanged.connect(self._on_text_changed)
 
         self.save_btn = QPushButton("Сохранить")

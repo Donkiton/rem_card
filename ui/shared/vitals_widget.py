@@ -5,6 +5,7 @@ from .custom_message_box import CustomMessageBox
 from PySide6.QtCore import QEvent, QLocale, QSize, Signal, Qt
 from PySide6.QtGui import QIntValidator, QDoubleValidator, QIcon
 from ...data.dto.remcard_dto import VitalDTO
+from rem_card.ui.styles.context_menu_style import install_russian_line_edit_context_menu
 from .hybrid_shift_time_picker import HybridShiftTimePicker
 
 
@@ -63,6 +64,9 @@ class VitalsWidget(QWidget):
         self.spo2 = QLineEdit(); self.spo2.setPlaceholderText("%"); self.spo2.setValidator(QIntValidator(0, 100))
         self.rr = QLineEdit(); self.rr.setPlaceholderText("в мин"); self.rr.setValidator(QIntValidator(0, 100))
         self.cvp = QLineEdit(); self.cvp.setPlaceholderText("см.вод.ст."); self.cvp.setValidator(QIntValidator(-1, 50))
+
+        for field in [self.time_edit.input, self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]:
+            install_russian_line_edit_context_menu(field)
         
         self.save_btn = QPushButton(" Добавить")
         import os

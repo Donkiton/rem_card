@@ -219,6 +219,12 @@ def _apply_basic_app_theme(app):
         app.setPalette(palette)
     except Exception:
         pass
+    try:
+        from rem_card.ui.styles.context_menu_style import install_global_text_edit_context_menus
+
+        install_global_text_edit_context_menus(app)
+    except Exception:
+        pass
 
 
 def _apply_app_theme(app, role: Optional[str] = None):
@@ -234,10 +240,12 @@ def _apply_app_theme(app, role: Optional[str] = None):
     except Exception:
         try:
             from rem_card.ui.styles.theme import GLOBAL_STYLE
+            from rem_card.ui.styles.context_menu_style import install_global_text_edit_context_menus
             from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
 
             app.setStyleSheet(GLOBAL_STYLE)
             apply_tooltip_palette(app)
+            install_global_text_edit_context_menus(app)
         except Exception:
             pass
 
@@ -639,11 +647,14 @@ def _shutdown_window_resources(window, logger):
     if not container:
         return
 
+    logger.info("Application resource shutdown started")
     data_service_shutdown_ok = True
     data_service = getattr(container, "data_service", None)
     if data_service:
         try:
+            logger.info("DataService shutdown started")
             data_service_shutdown_ok = bool(data_service.shutdown())
+            logger.info("DataService shutdown finished result=%s", "ok" if data_service_shutdown_ok else "incomplete")
         except Exception as exc:
             data_service_shutdown_ok = False
             logger.warning("DataService shutdown failed: %s", exc)
@@ -651,11 +662,14 @@ def _shutdown_window_resources(window, logger):
     db_manager = getattr(container, "db_manager", None)
     if db_manager and data_service_shutdown_ok:
         try:
-            db_manager.close()
+            db_shutdown_ok = bool(db_manager.close())
+            if not db_shutdown_ok:
+                logger.warning("DB manager close did not complete cleanly")
         except Exception as exc:
             logger.warning("DB manager close failed: %s", exc)
     elif db_manager:
         logger.warning("DB manager close skipped because DataService shutdown did not complete cleanly")
+    logger.info("Application resource shutdown finished")
 
 
 def main(forced_role: Optional[str] = None, path_setup: bool = False):

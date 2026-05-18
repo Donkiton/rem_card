@@ -130,6 +130,9 @@ class ThemeManager:
             tokens = self.tokens_for_role(self._active_role)
             target_app.setStyleSheet(build_global_style(tokens))
             apply_tooltip_palette(target_app)
+            from rem_card.ui.styles.context_menu_style import install_global_text_edit_context_menus
+
+            install_global_text_edit_context_menus(target_app)
             self._apply_runtime_container_styles(target_app, tokens)
 
     def _apply_runtime_container_styles(self, app: QApplication, tokens: dict[str, Any]) -> None:

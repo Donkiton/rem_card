@@ -418,8 +418,9 @@ def _check_role_lock_stale_removal_logs_holder(temp_root: str) -> tuple[bool, st
             self.messages.append(str(message) % args if args else str(message))
 
     lock_path = os.path.join(temp_root, "role.lock")
+    old_ts = time.time() - 3600.0
     stale_payload = {
-        "timestamp": time.time() - 3600.0,
+        "timestamp": old_ts,
         "role": "doctor",
         "pid": 999999,
         "host": "old-host",
@@ -427,6 +428,7 @@ def _check_role_lock_stale_removal_logs_holder(temp_root: str) -> tuple[bool, st
         "nonce": "stale",
     }
     Path(lock_path).write_text(json.dumps(stale_payload), encoding="utf-8")
+    os.utime(lock_path, (old_ts, old_ts))
     capture = CaptureLogger()
     lock = RoleSessionLock(
         lock_path,
@@ -688,17 +690,17 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
         outside_row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
         if not outside_row or int(outside_row[0]) != 1:
             return False, "outside transaction read returned wrong value"
-        # Central reads reuse one readonly connection per Python/QThread thread
-        # under the central IO gate. This keeps background reads off the write
-        # connection without moving one sqlite3.Connection between threads.
+        # Central reads use short-lived readonly connections under the central
+        # IO gate. This keeps background reads off the write connection without
+        # keeping sqlite3.Connection objects alive after worker threads finish.
         if readonly_open_count != 1:
             return False, f"central read did not open exactly one readonly connection: {readonly_open_count}"
 
         outside_row_again = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
         if not outside_row_again or int(outside_row_again[0]) != 1:
             return False, "outside transaction second read returned wrong value"
-        if readonly_open_count != 1:
-            return False, "same-thread central read did not reuse readonly connection"
+        if readonly_open_count != 2:
+            return False, "same-thread central read did not open a fresh readonly connection"
 
         with manager.remcard_transaction(source="regression_read_split_tx"):
             manager.execute_remcard(
@@ -709,7 +711,7 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             if not inside_row or int(inside_row[0]) != 2:
                 return False, "inside transaction did not see uncommitted write"
 
-        if readonly_open_count != 1:
+        if readonly_open_count != 2:
             return False, "inside transaction unexpectedly opened another readonly central connection"
 
         read_started = threading.Event()
@@ -743,7 +745,7 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             return False, "background read stayed blocked after central IO gate released"
         if read_errors:
             return False, read_errors[0]
-        if readonly_open_count != 2:
+        if readonly_open_count != 3:
             return False, f"background read did not use its own readonly central connection: {readonly_open_count}"
         return True, "ok"
     finally:
@@ -6679,10 +6681,33 @@ def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]
     close_source = ast.get_source_segment(main_window_text, close_method) or ""
     if "set_shutting_down" not in close_source:
         return False, "MainWindow.closeEvent must mark DataService shutting down before UI shutdown"
-    if "queue_drained" not in close_source or "db_manager.close()" not in close_source:
-        return False, "MainWindow.closeEvent must gate DB close on queue drain"
+    if "db_manager.close(" in close_source or "data_service.shutdown()" in close_source:
+        return False, "MainWindow.closeEvent must defer data resource shutdown until after Qt loop exits"
     if "clear_drafts()" in close_source:
         return False, "MainWindow.closeEvent must not enqueue clear_drafts during shutdown"
+
+    main_app_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    app_tree = ast.parse(main_app_text)
+    shutdown_func = next(
+        (
+            node
+            for node in app_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_shutdown_window_resources"
+        ),
+        None,
+    )
+    if shutdown_func is None:
+        return False, "app.main._shutdown_window_resources not found"
+    shutdown_source = ast.get_source_segment(main_app_text, shutdown_func) or ""
+    data_shutdown_idx = shutdown_source.find("data_service.shutdown()")
+    db_close_idx = shutdown_source.find("db_manager.close()")
+    if data_shutdown_idx < 0 or db_close_idx < 0:
+        return False, "_shutdown_window_resources must drain DataService and close DB"
+    if data_shutdown_idx > db_close_idx:
+        return False, "_shutdown_window_resources must drain DataService before DB close"
+    for marker in ("data_service_shutdown_ok", "DB manager close skipped", "DB manager close did not complete cleanly"):
+        if marker not in shutdown_source:
+            return False, f"_shutdown_window_resources missing shutdown ordering marker: {marker}"
 
     sqlite_text = (PROJECT_ROOT / "app" / "sqlite_shared.py").read_text(encoding="utf-8")
     for marker in ("DatabaseClosedError", "conn is None", "def shutdown(self, timeout: float = 1.0) -> bool"):

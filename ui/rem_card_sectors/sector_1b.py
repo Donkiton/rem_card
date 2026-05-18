@@ -2,6 +2,7 @@ import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame)
 from PySide6.QtCore import Qt
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.styles.context_menu_style import install_russian_context_menus
 
 class Sector1b(BaseSectorWidget):
     def __init__(self, parent=None):
@@ -103,3 +104,4 @@ class Sector1b(BaseSectorWidget):
         
         if widget:
             self.content_layout.addWidget(widget)
+            install_russian_context_menus(widget)

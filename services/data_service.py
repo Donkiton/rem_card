@@ -144,6 +144,7 @@ class DataService(QObject):
         self._shutting_down = True
 
     def shutdown(self) -> bool:
+        logger.info("DataService shutdown: stopping monitor and write queue")
         self.set_shutting_down()
         monitor_stopped = True
         if self._monitor and self._monitor.isRunning():
@@ -158,6 +159,11 @@ class DataService(QObject):
             flush_metrics(timeout=1.0)
         except Exception:
             pass
+        logger.info(
+            "DataService shutdown result monitor_stopped=%s queue_drained=%s",
+            monitor_stopped,
+            drained,
+        )
         return bool(monitor_stopped and drained)
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):

@@ -129,6 +129,10 @@ SHUTDOWN_BACKUP_MIN_INTERVAL_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_SHUTDOWN_BACKUP_MIN_INTERVAL_SEC", str(6 * 60 * 60))),
 )
+SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC = max(
+    0.1,
+    float(os.environ.get("REMCARD_SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC", "3.0")),
+)
 CHANGELOG_LIVE_TRIM_ENABLED = os.environ.get("REMCARD_CHANGELOG_LIVE_TRIM_ENABLED", "1") != "0"
 CHANGELOG_LIVE_CAP_ROWS = max(20_000, int(os.environ.get("REMCARD_CHANGELOG_LIVE_CAP_ROWS", "120000")))
 CHANGELOG_LIVE_TRIM_BATCH = max(1_000, int(os.environ.get("REMCARD_CHANGELOG_LIVE_TRIM_BATCH", "20000")))
@@ -217,6 +221,8 @@ class DatabaseManager:
         self._active_write_count = 0
         self._last_write_activity_ts = 0.0
         self._write_queue_idle_probe: Optional[Callable[[], bool]] = None
+        self._close_state_lock = threading.Lock()
+        self._closing = False
 
         self._maybe_rotate_db_lifecycle()
 
@@ -1909,29 +1915,70 @@ class DatabaseManager:
     def checkpoint_wal(self):
         logger.info("WAL checkpoint skipped because WAL mode is disabled")
 
-    def close(self):
-        logger.info("Closing unified database connection")
-        self._closed = True
-        self._startup_quickcheck_stop_evt.set()
-        if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
-            self._startup_quickcheck_thread.join(timeout=1.5)
-        self._startup_quickcheck_thread = None
-        self._integrity_stop_evt.set()
-        if self._integrity_thread and self._integrity_thread.is_alive():
-            self._integrity_thread.join(timeout=1.5)
-        self._integrity_thread = None
-        self._stop_outbox_replay()
-        self._stop_local_replica_sync()
+    def close(self, timeout_sec: Optional[float] = None) -> bool:
+        started = time.perf_counter()
+        with self._close_state_lock:
+            if self._closing:
+                logger.warning("Database close skipped because close is already in progress")
+                return False
+            if self._closed and self._remcard_conn is None:
+                logger.info("Database close skipped because connection is already closed")
+                return True
+            self._closing = True
+            self._closed = True
 
-        with self._central_io_lock:
+        io_lock_acquired = False
+        ok = False
+        io_timeout_sec = SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC if timeout_sec is None else max(0.1, float(timeout_sec))
+        logger.info("Database shutdown started")
+        try:
+            self._startup_quickcheck_stop_evt.set()
+            if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
+                self._startup_quickcheck_thread.join(timeout=1.5)
+                if self._startup_quickcheck_thread.is_alive():
+                    logger.warning("Startup quick_check thread did not stop before database shutdown timeout")
+            self._startup_quickcheck_thread = None
+
+            self._integrity_stop_evt.set()
+            if self._integrity_thread and self._integrity_thread.is_alive():
+                self._integrity_thread.join(timeout=1.5)
+                if self._integrity_thread.is_alive():
+                    logger.warning("Integrity monitor thread did not stop before database shutdown timeout")
+            self._integrity_thread = None
+
+            self._stop_outbox_replay()
+            self._stop_local_replica_sync()
+
+            logger.info("Database shutdown acquiring central IO lock timeout_sec=%.1f", io_timeout_sec)
+            io_lock_acquired = self._central_io_lock.acquire(timeout=io_timeout_sec)
+            if not io_lock_acquired:
+                logger.warning(
+                    "Database shutdown skipped SQLite connection close: central IO lock was busy for %.1fs",
+                    io_timeout_sec,
+                )
+                return False
+
+            logger.info("Database shutdown central IO lock acquired")
             self._close_central_read_connection()
             if self._remcard_conn:
                 conn = self._remcard_conn
                 if conn is not None:
                     with self.write_controller.connection_guard(conn):
+                        logger.info("Database shutdown backup step started")
                         self._create_shutdown_backup()
+                        logger.info("Database shutdown closing SQLite connection")
                         conn.close()
                     self._remcard_conn = None
                     self._journal_conn = None
             else:
                 self._journal_conn = None
+            ok = True
+            return True
+        finally:
+            if io_lock_acquired:
+                self._central_io_lock.release()
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            record_metric("database_shutdown_duration_ms", round(elapsed_ms, 3), result="ok" if ok else "incomplete")
+            logger.info("Database shutdown finished result=%s elapsed_ms=%.1f", "ok" if ok else "incomplete", elapsed_ms)
+            with self._close_state_lock:
+                self._closing = False

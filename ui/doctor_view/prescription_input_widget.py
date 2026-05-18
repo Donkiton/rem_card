@@ -8,6 +8,10 @@ from PySide6.QtWidgets import (
     QCheckBox
 )
 from PySide6.QtCore import Qt, Signal
+from rem_card.ui.styles.context_menu_style import (
+    build_line_edit_context_menu,
+    install_russian_line_edit_context_menu,
+)
 from ...services.prescription_engine import engine
 
 
@@ -58,10 +62,14 @@ class PrescriptionInputWidget(QWidget):
         # Подключения
         self.input_field.textChanged.connect(self.on_text_changed)
         self.input_field.returnPressed.connect(self.on_enter)
+        install_russian_line_edit_context_menu(self.input_field)
         self.list_widget.itemClicked.connect(self.on_item_clicked)
         
         # Переопределяем event filter для QLineEdit чтобы скрывать список при потере фокуса
         self.input_field.installEventFilter(self)
+
+    def _build_input_context_menu(self):
+        return build_line_edit_context_menu(self.input_field)
 
     def eventFilter(self, obj, event):
         from PySide6.QtCore import QEvent

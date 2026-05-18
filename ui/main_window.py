@@ -623,8 +623,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._is_closing = True
-        queue_drained = True
         try:
+            logger.info("MainWindow closeEvent started")
             if (
                 self.container
                 and hasattr(self.container, "data_service")
@@ -632,6 +632,7 @@ class MainWindow(QMainWindow):
                 and hasattr(self.container.data_service, "set_shutting_down")
             ):
                 self.container.data_service.set_shutting_down()
+            self.release_role_lock()
 
             if hasattr(self, 'doctor_main'):
                 if hasattr(self.doctor_main, 'shutdown'):
@@ -671,22 +672,7 @@ class MainWindow(QMainWindow):
             for child in self.findChildren(QTimer):
                 child.stop()
 
-            if self.container:
-                if hasattr(self.container, "data_service") and self.container.data_service:
-                    try:
-                        queue_drained = bool(self.container.data_service.shutdown())
-                    except Exception as exc:
-                        queue_drained = False
-                        logger.warning("DataService shutdown failed in MainWindow.closeEvent: %s", exc)
-
-                if hasattr(self.container, "db_manager") and self.container.db_manager:
-                    if queue_drained:
-                        try:
-                            self.container.db_manager.close()
-                        except Exception as exc:
-                            logger.warning("DB manager close failed in MainWindow.closeEvent: %s", exc)
-                    else:
-                        logger.warning("DB manager close skipped because queued writes did not drain")
+            logger.info("MainWindow UI shutdown finished; data resources will close after Qt loop exits")
 
         except Exception as e:
             print(f"Error during closeEvent: {e}")
