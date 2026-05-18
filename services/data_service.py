@@ -34,6 +34,11 @@ class DataService(QObject):
     def get_latest_change_id(self, admission_id: Optional[int] = None, include_global: bool = True) -> int:
         return self.db.get_latest_change_id(admission_id=admission_id, include_global=include_global)
 
+    def get_observed_change_state(self) -> Optional[dict[str, Any]]:
+        if not self._monitor:
+            return None
+        return self._monitor.get_change_state()
+
     def fetch_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):
         return self.db.fetch_changes_since(
             last_change_id=last_change_id,

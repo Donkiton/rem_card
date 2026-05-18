@@ -2325,6 +2325,76 @@ def _check_diet_intake_enqueue_error_refreshes(temp_root: str) -> tuple[bool, st
             pass
 
 
+def _check_diet_intake_cached_snapshot_refreshes_templates(temp_root: str) -> tuple[bool, str]:
+    from collections import OrderedDict
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import DietTemplateDTO
+    from rem_card.ui.shared.components.diet_intake_widget import DietIntakeWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+    _ = app
+
+    old_template = DietTemplateDTO(id=1, name="ОВД", schedule_json="[]", version=1)
+    new_template = DietTemplateDTO(id=5, name="Питье по требованию", schedule_json="[]", version=1)
+
+    class FakeDietService:
+        def __init__(self):
+            self.templates = [old_template]
+            self.template_reads = 0
+
+        def list_diet_templates(self):
+            self.template_reads += 1
+            return list(self.templates)
+
+        def get_diet_plan(self, admission_id, shift_date):
+            return None
+
+        def get_oral_intake_events(self, admission_id, shift_date):
+            return []
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            _ = admission_id, include_global
+            return 10
+
+    service = FakeDietService()
+    widget = DietIntakeWidget(service=service, role="doctor")
+    try:
+        widget.admission_id = 917001
+        widget.shift_date = datetime(2026, 5, 19, 8, 0)
+        cache_key = widget._cache_key()
+        widget._snapshot_cache = OrderedDict(
+            [
+                (
+                    cache_key,
+                    {
+                        "version": 10,
+                        "templates": [old_template],
+                        "plan": None,
+                        "events": [],
+                    },
+                )
+            ]
+        )
+
+        service.templates = [old_template, new_template]
+        widget.refresh_data(force=False)
+        names = [template.name for template in widget._templates]
+        if "Питье по требованию" not in names:
+            return False, f"diet templates stayed stale after cached snapshot hit: {names}"
+        if service.template_reads != 1:
+            return False, f"diet template list should be reread once on cache hit: {service.template_reads}"
+        return True, "ok"
+    finally:
+        try:
+            widget.close()
+        except Exception:
+            pass
+
+
 def _check_oral_intake_batch_rolls_back(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -8001,6 +8071,31 @@ def _check_data_update_monitor_suppresses_shutdown_db_closed(temp_root: str) -> 
     running_monitor = DataUpdateMonitor(RunningFakeDataService())
     if running_monitor._should_suppress_poll_error(DatabaseClosedError("closed")):
         return False, "monitor must not suppress DatabaseClosedError while still running"
+
+    class CursorFakeDataService:
+        _shutting_down = False
+
+        def __init__(self):
+            self.current_change_id = 5
+
+        def get_latest_change_id(self):
+            return int(self.current_change_id)
+
+    cursor_monitor = DataUpdateMonitor(CursorFakeDataService())
+    cursor_monitor._poll_once(force_emit=False, force_sources=[])
+    state = cursor_monitor.get_change_state() or {}
+    if int(state.get("change_id") or 0) != 5:
+        return False, f"monitor change state did not expose observed cursor: {state}"
+    if int(state.get("refresh_request_seq", -1)) != int(state.get("refresh_observed_seq", -2)):
+        return False, f"initial monitor state should have no pending refresh: {state}"
+    cursor_monitor.request_refresh(source="regression_probe")
+    pending_state = cursor_monitor.get_change_state() or {}
+    if int(pending_state.get("refresh_request_seq") or 0) == int(pending_state.get("refresh_observed_seq") or 0):
+        return False, f"requested refresh must be visible as pending: {pending_state}"
+    cursor_monitor._poll_once(force_emit=False, force_sources=[])
+    observed_state = cursor_monitor.get_change_state() or {}
+    if int(observed_state.get("refresh_request_seq", -1)) != int(observed_state.get("refresh_observed_seq", -2)):
+        return False, f"poll did not mark refresh request observed: {observed_state}"
     return True, "ok"
 
 
@@ -8563,6 +8658,160 @@ def _check_read_coordinator_partial_snapshots(temp_root: str) -> tuple[bool, str
                 break
         if "context_key" not in apply_snapshot or "_current_snapshot_context_key" not in apply_snapshot:
             return False, f"{widget_path.name}: snapshot stale guard does not use context key"
+
+    return True, "ok"
+
+
+def _check_read_coordinator_monitor_validated_cache_hits(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    import time
+    from datetime import datetime
+
+    from rem_card.services.read_coordinator import ReadCoordinator
+
+    class FakeDataService:
+        def __init__(self):
+            self.state = {
+                "change_id": 10,
+                "observed_monotonic": time.monotonic(),
+                "refresh_request_seq": 1,
+                "refresh_observed_seq": 1,
+                "state_epoch": 1,
+            }
+
+        def get_observed_change_state(self):
+            return dict(self.state)
+
+    class FakeRemCardService:
+        def __init__(self):
+            self.version = 10
+            self.latest_calls = []
+            self.data_service = FakeDataService()
+
+        def get_observed_change_state(self):
+            return self.data_service.get_observed_change_state()
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            self.latest_calls.append((admission_id, include_global))
+            return int(self.version)
+
+        def build_full_card_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            return {
+                "admission_id": int(admission_id),
+                "shift_date": shift_date,
+                "start_dt": shift_date,
+                "end_dt": shift_date,
+                "vitals": [],
+                "vitals_extended": [],
+                "fluids": [],
+                "effective_bounds": (shift_date, shift_date),
+                "balance_runtime": {"orders": [], "start_dt": shift_date, "end_dt": shift_date},
+                "change_id": int(self.version),
+            }
+
+        def build_vitals_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            return {
+                "admission_id": int(admission_id),
+                "shift_date": shift_date,
+                "start_dt": shift_date,
+                "end_dt": shift_date,
+                "vitals": [],
+                "vitals_extended": [],
+                "latest_values": {},
+                "effective_bounds": (shift_date, shift_date),
+                "change_id": int(self.version),
+            }
+
+        def build_balance_snapshot(self, admission_id, shift_date, **kwargs):
+            _ = kwargs
+            return {
+                "admission_id": int(admission_id),
+                "shift_date": shift_date,
+                "fluids": [],
+                "balance_runtime": {"orders": [], "start_dt": shift_date, "end_dt": shift_date},
+                "change_id": int(self.version),
+            }
+
+    shift_date = datetime(2026, 5, 3, 8, 0, 0)
+
+    scenarios = [
+        (
+            "card",
+            "card_full",
+            lambda coordinator: coordinator.load_patient_card_snapshot(
+                31,
+                shift_date,
+                role="doctor",
+                force_refresh=True,
+            ),
+            lambda coordinator, key: coordinator.get_current_cached_card(key),
+        ),
+        (
+            "vitals",
+            "vitals",
+            lambda coordinator: coordinator.load_patient_vitals_snapshot(
+                31,
+                shift_date,
+                role="doctor",
+                force_refresh=True,
+            ),
+            lambda coordinator, key: coordinator.get_current_cached_vitals(key),
+        ),
+        (
+            "balance",
+            "balance_full",
+            lambda coordinator: coordinator.load_balance_snapshot(
+                31,
+                shift_date,
+                role="doctor",
+                force_refresh=True,
+            ),
+            lambda coordinator, key: coordinator.get_current_cached_patient_scope(key),
+        ),
+    ]
+
+    for scope, variant, warm_cache, current_get in scenarios:
+        service = FakeRemCardService()
+        coordinator = ReadCoordinator(service)
+        context = coordinator.make_patient_snapshot_context(
+            source_db="live",
+            admission_id=31,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant=variant,
+        )
+        cache_key = context.cache_key()
+
+        warm_cache(coordinator)
+        service.latest_calls.clear()
+        for _ in range(5):
+            if current_get(coordinator, cache_key) is None:
+                return False, f"{scope}: monitor-validated cache hit returned stale"
+        if service.latest_calls:
+            return False, f"{scope}: monitor-validated cache hit still read DB: {service.latest_calls}"
+
+        service.data_service.state["refresh_request_seq"] = 2
+        if current_get(coordinator, cache_key) is None:
+            return False, f"{scope}: pending refresh should still allow DB-verified cache hit"
+        if len(service.latest_calls) != 1:
+            return False, f"{scope}: pending refresh must bypass monitor fast path, calls={service.latest_calls}"
+
+        service.latest_calls.clear()
+        service.data_service.state["refresh_observed_seq"] = 2
+        if current_get(coordinator, cache_key) is None:
+            return False, f"{scope}: observed refresh cache hit returned stale"
+        if service.latest_calls:
+            return False, f"{scope}: observed refresh should reuse validation, calls={service.latest_calls}"
+
+        service.version = 11
+        service.data_service.state["change_id"] = 11
+        if current_get(coordinator, cache_key) is not None:
+            return False, f"{scope}: newer monitor cursor must not hide stale cache"
+        if len(service.latest_calls) != 1:
+            return False, f"{scope}: newer monitor cursor must force one DB check, calls={service.latest_calls}"
 
     return True, "ok"
 
@@ -9273,6 +9522,7 @@ def main():
         ("bars_dialog_has_no_periodic_polling", _check_bars_dialog_has_no_periodic_polling),
         ("report_pdf_opening_uses_shared_helper", _check_report_pdf_opening_uses_shared_helper),
         ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),
+        ("diet_intake_cached_snapshot_refreshes_templates", _check_diet_intake_cached_snapshot_refreshes_templates),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
         ("chart_clears_on_card_context_change", _check_chart_clears_on_card_context_change),
         ("chart_heavy_redraw_performance", _check_chart_heavy_redraw_performance),
@@ -9290,6 +9540,7 @@ def main():
         ("patient_open_cached_card_always_rehydrates", _check_patient_open_cached_card_always_rehydrates),
         ("patient_snapshot_cache_invalidates_on_vitals_change", _check_patient_snapshot_cache_invalidates_on_vitals_change),
         ("read_coordinator_partial_snapshots", _check_read_coordinator_partial_snapshots),
+        ("read_coordinator_monitor_validated_cache_hits", _check_read_coordinator_monitor_validated_cache_hits),
         ("visible_section_cache_keys_use_shift_context", _check_visible_section_cache_keys_use_shift_context),
         ("balance_loading_state_uses_placeholders", _check_balance_loading_state_uses_placeholders),
         ("lazy_section_snapshot_caches", _check_lazy_section_snapshot_caches),

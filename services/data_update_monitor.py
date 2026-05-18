@@ -24,9 +24,14 @@ class DataUpdateMonitor(QThread):
         self._force_emit = False
         self._force_sources: list[str] = []
         self._last_seen_id: Optional[int] = None
+        self._last_seen_observed_monotonic: float = 0.0
+        self._refresh_request_seq: int = 0
+        self._last_observed_refresh_seq: int = 0
+        self._state_epoch: int = 0
 
     def request_refresh(self, *, force_emit: bool = False, source: str = ""):
         with self._state_lock:
+            self._refresh_request_seq += 1
             if force_emit:
                 self._force_emit = True
                 if source:
@@ -36,9 +41,37 @@ class DataUpdateMonitor(QThread):
     def reset(self):
         with self._state_lock:
             self._last_seen_id = None
+            self._last_seen_observed_monotonic = 0.0
             self._force_emit = False
             self._force_sources = []
+            self._refresh_request_seq += 1
+            self._state_epoch += 1
         self._wake_evt.set()
+
+    def get_change_state(self) -> Optional[dict[str, Any]]:
+        with self._state_lock:
+            if self._last_seen_id is None:
+                return None
+            return {
+                "change_id": int(self._last_seen_id),
+                "observed_monotonic": float(self._last_seen_observed_monotonic),
+                "refresh_request_seq": int(self._refresh_request_seq),
+                "refresh_observed_seq": int(self._last_observed_refresh_seq),
+                "state_epoch": int(self._state_epoch),
+            }
+
+    def _set_last_seen_id(self, change_id: int, *, observed_refresh_seq: int) -> None:
+        with self._state_lock:
+            self._last_seen_id = int(change_id)
+            self._last_seen_observed_monotonic = time.monotonic()
+            self._last_observed_refresh_seq = max(
+                self._last_observed_refresh_seq,
+                int(observed_refresh_seq),
+            )
+
+    def _increment_state_epoch(self) -> None:
+        with self._state_lock:
+            self._state_epoch += 1
 
     def stop(self):
         self._stop_evt.set()
@@ -86,14 +119,17 @@ class DataUpdateMonitor(QThread):
         if self._stop_evt.is_set():
             return
 
+        with self._state_lock:
+            previous_change_id = self._last_seen_id
+            observed_refresh_seq = int(self._refresh_request_seq)
+
         current_change_id = int(self._data_service.get_latest_change_id())
-        previous_change_id = self._last_seen_id
 
         if self._stop_evt.is_set():
             return
 
         if previous_change_id is None:
-            self._last_seen_id = current_change_id
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
             if force_emit:
                 self._emit_payload(
                     current_change_id=current_change_id,
@@ -110,7 +146,8 @@ class DataUpdateMonitor(QThread):
                 previous_change_id,
                 current_change_id,
             )
-            self._last_seen_id = current_change_id
+            self._increment_state_epoch()
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
             self._emit_payload(
                 current_change_id=current_change_id,
                 previous_change_id=previous_change_id,
@@ -125,7 +162,7 @@ class DataUpdateMonitor(QThread):
         if current_change_id > previous_change_id:
             rows = self._data_service.fetch_changes_since(previous_change_id)
             changes = [self._normalize_row(row) for row in rows]
-            self._last_seen_id = current_change_id
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
             if not changes:
                 logger.warning(
                     "Change-log gap suspected: previous=%s current=%s rows=0. Forcing full refresh.",
@@ -151,6 +188,7 @@ class DataUpdateMonitor(QThread):
             )
             return
 
+        self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
         if force_emit:
             self._emit_payload(
                 current_change_id=current_change_id,

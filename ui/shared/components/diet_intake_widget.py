@@ -344,6 +344,10 @@ class DietIntakeWidget(QWidget):
         self._snapshot_cache.move_to_end(key)
         self._templates = list(snapshot.get("templates") or [])
         self._templates_by_id = {int(t.id): t for t in self._templates if getattr(t, "id", None) is not None}
+        try:
+            self._reload_templates_from_service()
+        except Exception as exc:
+            logger.warning("DietIntakeWidget template refresh from cache failed: %s", exc, exc_info=True)
         self._plan = snapshot.get("plan")
         self._events = list(snapshot.get("events") or [])
         self._render()
@@ -404,8 +408,7 @@ class DietIntakeWidget(QWidget):
         if not force and self._apply_cached_snapshot_if_available() and self._is_cached_snapshot_current():
             return
         try:
-            self._templates = self.service.list_diet_templates()
-            self._templates_by_id = {int(t.id): t for t in self._templates if getattr(t, "id", None) is not None}
+            self._reload_templates_from_service()
             self._plan = self.service.get_diet_plan(self.admission_id, self.shift_date)
             self._events = self.service.get_oral_intake_events(self.admission_id, self.shift_date)
         except Exception as exc:
@@ -414,6 +417,19 @@ class DietIntakeWidget(QWidget):
             return
         self._store_snapshot_cache()
         self._render()
+
+    def _reload_templates_from_service(self):
+        if not self.service:
+            self._templates = []
+            self._templates_by_id = {}
+            return
+        templates = self.service.list_diet_templates()
+        self._templates = list(templates or [])
+        self._templates_by_id = {
+            int(t.id): t
+            for t in self._templates
+            if getattr(t, "id", None) is not None
+        }
 
     def _render_empty(self, text: str):
         self._clear_rows()

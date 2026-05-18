@@ -1421,6 +1421,11 @@ class RemCardService(QObject):
             return self.data_service.get_latest_change_id(admission_id=admission_id, include_global=include_global)
         return self.orders_dao.db.get_latest_change_id(admission_id=admission_id, include_global=include_global)
 
+    def get_observed_change_state(self):
+        if self.data_service and hasattr(self.data_service, "get_observed_change_state"):
+            return self.data_service.get_observed_change_state()
+        return None
+
     def get_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):
         if self.data_service:
             return self.data_service.fetch_changes_since(

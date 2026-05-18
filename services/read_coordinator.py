@@ -31,6 +31,10 @@ READ_ORDERS_TELEMETRY_LOG_INTERVAL_SEC = max(
     60.0,
     float(os.environ.get("REMCARD_ORDERS_TELEMETRY_LOG_INTERVAL_SEC", "300")),
 )
+READ_MONITOR_STATE_MAX_AGE_SEC = max(
+    2.0,
+    float(os.environ.get("REMCARD_READ_MONITOR_STATE_MAX_AGE_SEC", "5")),
+)
 
 _VALID_ROLES = {"doctor", "nurse"}
 _VALID_MODES = {"live", "archive"}
@@ -357,6 +361,7 @@ class ReadCoordinator:
         self._patient_card_cache_index: dict[int, OrderedDict[str, None]] = {}
         self._patient_scope_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._patient_scope_cache_index: dict[int, OrderedDict[str, None]] = {}
+        self._cache_version_validation: dict[tuple, Tuple[int, int]] = {}
 
         self._orders_tab_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._orders_cache_index: dict[int, OrderedDict[str, None]] = {}
@@ -506,6 +511,7 @@ class ReadCoordinator:
 
         if context.mode == "live":
             self._store_patient_vitals(context, frozen_snapshot)
+            self._mark_cache_validated_by_monitor(cache_key)
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -591,6 +597,7 @@ class ReadCoordinator:
 
         if context.mode == "live":
             self._store_patient_card(context, frozen_snapshot)
+            self._mark_cache_validated_by_monitor(cache_key)
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -820,6 +827,7 @@ class ReadCoordinator:
 
         if context.mode == "live":
             self._store_patient_scope(context, frozen_snapshot)
+            self._mark_cache_validated_by_monitor(cache_key)
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -1149,6 +1157,51 @@ class ReadCoordinator:
         with self._orders_telemetry_lock:
             return self._build_orders_telemetry_snapshot_locked()
 
+    def _get_observed_change_state(self) -> Optional[Tuple[int, int]]:
+        getter = getattr(self.remcard_service, "get_observed_change_state", None)
+        if not callable(getter):
+            return None
+        try:
+            state = getter()
+            if not state:
+                return None
+            change_id = int(state.get("change_id") or 0)
+            state_epoch = int(state.get("state_epoch") or 0)
+            refresh_request_seq = int(state.get("refresh_request_seq") or 0)
+            refresh_observed_seq = int(state.get("refresh_observed_seq") or 0)
+            observed_monotonic = float(state.get("observed_monotonic") or 0.0)
+        except Exception as exc:
+            logger.debug("[ReadCoordinator] observed_change_state_unavailable error=%s", exc)
+            return None
+        if observed_monotonic <= 0:
+            return None
+        if (time.monotonic() - observed_monotonic) > READ_MONITOR_STATE_MAX_AGE_SEC:
+            return None
+        if refresh_request_seq != refresh_observed_seq:
+            return None
+        return state_epoch, change_id
+
+    def _cache_validation_covers_monitor(self, cache_key) -> Tuple[bool, Optional[int]]:
+        observed = self._get_observed_change_state()
+        if observed is None:
+            return False, None
+        validated = self._cache_version_validation.get(cache_key)
+        if not validated:
+            return False, observed[1]
+        return (
+            int(validated[0]) == int(observed[0])
+            and int(validated[1]) >= int(observed[1]),
+            observed[1],
+        )
+
+    def _mark_cache_validated_by_monitor(self, cache_key) -> None:
+        observed = self._get_observed_change_state()
+        if observed is not None:
+            self._cache_version_validation[cache_key] = observed
+
+    def _drop_cache_validation(self, cache_key) -> None:
+        self._cache_version_validation.pop(cache_key, None)
+
     def get_cached_vitals(self, cache_key):
         snapshot = self._patient_vitals_cache.get(cache_key)
         if snapshot is None:
@@ -1174,6 +1227,15 @@ class ReadCoordinator:
         try:
             admission_id = int(cache_key[1])
             cached_version = int(snapshot.get("version") or 0)
+            monitor_current, observed_change_id = self._cache_validation_covers_monitor(cache_key)
+            if monitor_current:
+                logger.info(
+                    "[ReadCoordinator] patient_vitals cache_current=1 admission_id=%s version=%s source=monitor observed_change_id=%s",
+                    admission_id,
+                    cached_version,
+                    observed_change_id,
+                )
+                return snapshot
             current_version = int(
                 self.remcard_service.get_latest_change_id(admission_id=admission_id) or 0
             )
@@ -1186,13 +1248,15 @@ class ReadCoordinator:
             return None
 
         if current_version <= cached_version:
+            self._mark_cache_validated_by_monitor(cache_key)
             logger.info(
-                "[ReadCoordinator] patient_vitals cache_current=1 admission_id=%s version=%s",
+                "[ReadCoordinator] patient_vitals cache_current=1 admission_id=%s version=%s source=db",
                 admission_id,
                 cached_version,
             )
             return snapshot
 
+        self._drop_cache_validation(cache_key)
         logger.info(
             "[ReadCoordinator] patient_vitals cache_stale=1 admission_id=%s cached_version=%s current_version=%s action=preserve_for_swr",
             admission_id,
@@ -1226,6 +1290,15 @@ class ReadCoordinator:
         try:
             admission_id = int(cache_key[1])
             cached_version = int(snapshot.get("version") or 0)
+            monitor_current, observed_change_id = self._cache_validation_covers_monitor(cache_key)
+            if monitor_current:
+                logger.info(
+                    "[ReadCoordinator] patient_card cache_current=1 admission_id=%s version=%s source=monitor observed_change_id=%s",
+                    admission_id,
+                    cached_version,
+                    observed_change_id,
+                )
+                return snapshot
             current_version = int(
                 self.remcard_service.get_latest_change_id(admission_id=admission_id) or 0
             )
@@ -1238,13 +1311,15 @@ class ReadCoordinator:
             return None
 
         if current_version <= cached_version:
+            self._mark_cache_validated_by_monitor(cache_key)
             logger.info(
-                "[ReadCoordinator] patient_card cache_current=1 admission_id=%s version=%s",
+                "[ReadCoordinator] patient_card cache_current=1 admission_id=%s version=%s source=db",
                 admission_id,
                 cached_version,
             )
             return snapshot
 
+        self._drop_cache_validation(cache_key)
         logger.info(
             "[ReadCoordinator] patient_card cache_stale=1 admission_id=%s cached_version=%s current_version=%s action=preserve_for_swr",
             admission_id,
@@ -1279,6 +1354,16 @@ class ReadCoordinator:
         try:
             admission_id = int(cache_key[1])
             cached_version = int(snapshot.get("version") or 0)
+            monitor_current, observed_change_id = self._cache_validation_covers_monitor(cache_key)
+            if monitor_current:
+                logger.info(
+                    "[ReadCoordinator] patient_scope cache_current=1 admission_id=%s scope=%s version=%s source=monitor observed_change_id=%s",
+                    admission_id,
+                    snapshot.get("scope"),
+                    cached_version,
+                    observed_change_id,
+                )
+                return snapshot
             current_version = int(
                 self.remcard_service.get_latest_change_id(
                     admission_id=(admission_id if admission_id > 0 else None),
@@ -1295,14 +1380,16 @@ class ReadCoordinator:
             return None
 
         if current_version <= cached_version:
+            self._mark_cache_validated_by_monitor(cache_key)
             logger.info(
-                "[ReadCoordinator] patient_scope cache_current=1 admission_id=%s scope=%s version=%s",
+                "[ReadCoordinator] patient_scope cache_current=1 admission_id=%s scope=%s version=%s source=db",
                 admission_id,
                 snapshot.get("scope"),
                 cached_version,
             )
             return snapshot
 
+        self._drop_cache_validation(cache_key)
         logger.info(
             "[ReadCoordinator] patient_scope cache_stale=1 admission_id=%s scope=%s cached_version=%s current_version=%s action=preserve_for_swr",
             admission_id,
@@ -1332,6 +1419,7 @@ class ReadCoordinator:
         cache_key = context.cache_key()
         if cache_key in self._patient_vitals_cache:
             self._patient_vitals_cache.pop(cache_key, None)
+            self._drop_cache_validation(cache_key)
             self._drop_patient_cache_index(context)
             logger.info(
                 "[ReadCoordinator] invalidated patient_vitals cache key=%s context_hash=%s",
@@ -1348,6 +1436,7 @@ class ReadCoordinator:
             if int(cache_key[1]) != target_admission_id:
                 continue
             self._patient_vitals_cache.pop(cache_key, None)
+            self._drop_cache_validation(cache_key)
             self._drop_cache_index_by_key(self._patient_cache_index, cache_key)
             removed += 1
         if removed:
@@ -1368,6 +1457,7 @@ class ReadCoordinator:
             if int(cache_key[1]) != target_admission_id:
                 continue
             self._patient_card_cache.pop(cache_key, None)
+            self._drop_cache_validation(cache_key)
             self._drop_cache_index_by_key(self._patient_card_cache_index, cache_key)
             removed += 1
         if removed:
@@ -1494,6 +1584,7 @@ class ReadCoordinator:
             )
         while len(self._patient_vitals_cache) > self.max_cached_patients:
             evicted_key, _ = self._patient_vitals_cache.popitem(last=False)
+            self._drop_cache_validation(evicted_key)
             self._drop_cache_index_by_key(self._patient_cache_index, evicted_key)
             logger.info("[ReadCoordinator] evicted patient_vitals cache key=%s", evicted_key)
 
@@ -1513,6 +1604,7 @@ class ReadCoordinator:
             )
         while len(self._patient_card_cache) > self.max_cached_patients:
             evicted_key, _ = self._patient_card_cache.popitem(last=False)
+            self._drop_cache_validation(evicted_key)
             self._drop_cache_index_by_key(self._patient_card_cache_index, evicted_key)
             logger.info("[ReadCoordinator] evicted patient_card cache key=%s", evicted_key)
 
@@ -1532,6 +1624,7 @@ class ReadCoordinator:
             )
         while len(self._patient_scope_cache) > self.max_cached_patients * self.max_tabs_per_patient:
             evicted_key, _ = self._patient_scope_cache.popitem(last=False)
+            self._drop_cache_validation(evicted_key)
             self._drop_cache_index_by_key(self._patient_scope_cache_index, evicted_key)
             logger.info("[ReadCoordinator] evicted patient_scope cache key=%s", evicted_key)
 
@@ -1704,6 +1797,7 @@ class ReadCoordinator:
         for cache_key in list(target_cache.keys()):
             if int(cache_key[1]) == int(admission_id) and str(cache_key[-1]) == str(context_hash):
                 target_cache.pop(cache_key, None)
+                self._drop_cache_validation(cache_key)
                 self._orders_stale_versions.pop(cache_key, None)
                 self._orders_stale_snapshots.pop(cache_key, None)
                 logger.info(
