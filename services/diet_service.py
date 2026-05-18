@@ -111,7 +111,7 @@ class DietTemplateFileStore:
 
     def save_templates(self, templates: List[DietTemplateDTO], *, next_id: Optional[int] = None):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        ordered = self._sort_templates(templates)
+        ordered = list(templates or [])
         max_id = max((int(t.id or 0) for t in ordered), default=0)
         payload = {
             "next_id": int(next_id if next_id is not None else max_id + 1),
@@ -208,7 +208,7 @@ class DietTemplateFileStore:
                     last_modified_by=str(raw.get("last_modified_by") or "doctor"),
                 )
             )
-        return self._sort_templates(templates)
+        return templates
 
     @staticmethod
     def _coerce_id(value: Any, used_ids: set[int]) -> int:
@@ -227,17 +227,6 @@ class DietTemplateFileStore:
         except Exception:
             result = int(default)
         return max(1, result)
-
-    @staticmethod
-    def _sort_templates(templates: List[DietTemplateDTO]) -> List[DietTemplateDTO]:
-        return sorted(
-            templates,
-            key=lambda item: (
-                -int(item.is_default or 0),
-                str(item.name or "").lower(),
-                int(item.id or 0),
-            ),
-        )
 
     @staticmethod
     def _dto_to_json(template: DietTemplateDTO) -> dict[str, Any]:
@@ -326,6 +315,31 @@ class DietTemplateService:
             raise OptimisticLockError("Шаблон питания был изменен другим пользователем")
         remaining = [t for t in templates if int(t.id) != int(template_id)]
         self.file_store.save_templates(remaining, next_id=self.file_store.next_id(payload, templates))
+
+    def reorder_templates(self, ordered_template_ids: list[int]):
+        payload, templates = self.file_store.load()
+        templates_by_id = {int(t.id): t for t in templates if t.id is not None}
+        ordered_ids: list[int] = []
+        for raw_id in ordered_template_ids or []:
+            try:
+                template_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if template_id in templates_by_id and template_id not in ordered_ids:
+                ordered_ids.append(template_id)
+
+        missing_ids = [
+            int(t.id)
+            for t in templates
+            if t.id is not None and int(t.id) not in ordered_ids
+        ]
+        if not ordered_ids and templates:
+            raise ValueError("Не указан порядок шаблонов питания")
+
+        reordered = [templates_by_id[template_id] for template_id in ordered_ids + missing_ids]
+        if [int(t.id) for t in reordered if t.id is not None] == [int(t.id) for t in templates if t.id is not None]:
+            return
+        self.file_store.save_templates(reordered, next_id=self.file_store.next_id(payload, templates))
 
     @staticmethod
     def _normalize_name(name: str) -> str:

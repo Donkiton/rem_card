@@ -960,6 +960,9 @@ class RemCardService(QObject):
     def delete_diet_template(self, template_id: int, expected_version: Optional[int] = None):
         return self._diet_templates.delete_template(template_id, expected_version=expected_version)
 
+    def reorder_diet_templates(self, ordered_template_ids: list[int]):
+        return self._diet_templates.reorder_templates(ordered_template_ids)
+
     def get_diet_plan(self, admission_id: int, shift_date: datetime) -> Optional[DietPlanDTO]:
         return self._diet_plan.get_plan(admission_id, shift_date)
 

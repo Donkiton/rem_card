@@ -2395,6 +2395,106 @@ def _check_diet_intake_cached_snapshot_refreshes_templates(temp_root: str) -> tu
             pass
 
 
+def _check_diet_templates_manual_order_persists(temp_root: str) -> tuple[bool, str]:
+    from rem_card.services.diet_service import DietTemplateFileStore, DietTemplateService
+
+    path = os.path.join(temp_root, "diet_templates.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "next_id": 4,
+                "templates": [
+                    {"id": 1, "name": "Второй", "schedule": [], "version": 1},
+                    {"id": 2, "name": "Первый", "schedule": [], "version": 1},
+                    {"id": 3, "name": "Третий", "schedule": [], "version": 1},
+                ],
+            },
+            fh,
+            ensure_ascii=False,
+        )
+
+    service = DietTemplateService(DietTemplateFileStore(path=path))
+    if [int(t.id) for t in service.list_templates()] != [1, 2, 3]:
+        return False, "diet templates should preserve file order instead of sorting by name"
+
+    service.reorder_templates([3, 1, 2])
+    if [int(t.id) for t in service.list_templates()] != [3, 1, 2]:
+        return False, "diet template reorder did not persist requested order"
+
+    with open(path, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    if [int(item["id"]) for item in payload.get("templates", [])] != [3, 1, 2]:
+        return False, f"stored diet template order mismatch: {payload}"
+
+    current = service.get_template(1)
+    service.update_template(
+        1,
+        name="Второй измененный",
+        diet_text=current.diet_text,
+        schedule_json=current.schedule_json,
+        is_default=bool(current.is_default),
+        expected_version=current.version,
+    )
+    if [int(t.id) for t in service.list_templates()] != [3, 1, 2]:
+        return False, "diet template update changed manual order"
+
+    new_id = service.create_template("Новый", schedule_json=[])
+    if [int(t.id) for t in service.list_templates()] != [3, 1, 2, int(new_id)]:
+        return False, "new diet template should be appended after manual order"
+
+    return True, "ok"
+
+
+def _check_diet_templates_widget_reorder_updates_service(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import DietTemplateDTO
+    from rem_card.ui.admin_view.diet_templates_widget import DietTemplatesWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+    _ = app
+
+    class FakeDietTemplateService:
+        def __init__(self):
+            self.templates = [
+                DietTemplateDTO(id=1, name="Первый", schedule_json="[]"),
+                DietTemplateDTO(id=2, name="Второй", schedule_json="[]"),
+                DietTemplateDTO(id=3, name="Третий", schedule_json="[]"),
+            ]
+            self.reorder_calls = []
+
+        def list_diet_templates(self):
+            return list(self.templates)
+
+        def reorder_diet_templates(self, ordered_template_ids):
+            self.reorder_calls.append([int(item) for item in ordered_template_ids])
+            by_id = {int(template.id): template for template in self.templates}
+            self.templates = [by_id[int(template_id)] for template_id in ordered_template_ids]
+
+    service = FakeDietTemplateService()
+    widget = DietTemplatesWidget(service=service, role="admin")
+    try:
+        widget.table.setCurrentCell(1, 0)
+        widget.move_selected_template_up()
+        if service.reorder_calls != [[2, 1, 3]]:
+            return False, f"widget did not pass moved template order to service: {service.reorder_calls}"
+        if [int(widget.table.item(row, 0).data(Qt.UserRole)) for row in range(widget.table.rowCount())] != [2, 1, 3]:
+            return False, "widget table did not reload in reordered order"
+        if int(widget.current_template().id) != 2:
+            return False, "widget did not keep moved template selected"
+        return True, "ok"
+    finally:
+        try:
+            widget.close()
+        except Exception:
+            pass
+
+
 def _check_oral_intake_batch_rolls_back(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -9523,6 +9623,8 @@ def main():
         ("report_pdf_opening_uses_shared_helper", _check_report_pdf_opening_uses_shared_helper),
         ("analytics_runs_outside_ui_callbacks", _check_analytics_runs_outside_ui_callbacks),
         ("diet_intake_cached_snapshot_refreshes_templates", _check_diet_intake_cached_snapshot_refreshes_templates),
+        ("diet_templates_manual_order_persists", _check_diet_templates_manual_order_persists),
+        ("diet_templates_widget_reorder_updates_service", _check_diet_templates_widget_reorder_updates_service),
         ("w1_yesterday_card_skips_status_write_and_defers", _check_w1_yesterday_card_skips_status_write_and_defers),
         ("chart_clears_on_card_context_change", _check_chart_clears_on_card_context_change),
         ("chart_heavy_redraw_performance", _check_chart_heavy_redraw_performance),
