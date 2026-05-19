@@ -1,12 +1,14 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.ui.shared.display_settings_storage import (
     DisplaySettingsStorage,
     w1a_upcoming_orders_enabled,
     w1b_lower_sector_enabled,
 )
 from .layout_components import CurrentPageStack, SectorFactory, SplitterManager
+import time
 
 class RemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
@@ -829,8 +831,54 @@ class RemCardLayoutManager(QWidget):
         if hasattr(self, "sector_4b"):
             self.sector_4b.update_status(status_dto)
 
-    def set_active_tab(self, tab_name):
-        if not hasattr(self, 'vitals_stack'): return tab_name
+    def set_active_tab(self, tab_name, *, source: str = "click"):
+        started = time.perf_counter()
+        requested_tab_name = tab_name
+        admission_id = getattr(self, 'current_admission_id', None)
+        normalized_source = str(source or "click").strip().lower() or "click"
+        if normalized_source not in {"click", "cache", "refresh"}:
+            normalized_source = "refresh"
+
+        record_metric(
+            "set_active_tab_start",
+            1,
+            admission_id=admission_id,
+            tab_name=str(requested_tab_name or ""),
+            source=normalized_source,
+        )
+        logger.info(
+            "[TabPerf] set_active_tab_start admission_id=%s tab=%s source=%s",
+            admission_id,
+            requested_tab_name,
+            normalized_source,
+        )
+
+        def _record_set_active_tab_end(status: str, resolved_tab):
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            is_orders = int(str(resolved_tab or "") == "Назначения")
+            record_metric(
+                "set_active_tab_end",
+                round(elapsed_ms, 3),
+                admission_id=admission_id,
+                tab_name=str(resolved_tab or ""),
+                requested_tab_name=str(requested_tab_name or ""),
+                source=normalized_source,
+                status=str(status or "unknown"),
+                is_orders=is_orders,
+            )
+            logger.info(
+                "[TabPerf] set_active_tab_end admission_id=%s tab=%s requested_tab=%s source=%s status=%s elapsed_ms=%.2f",
+                admission_id,
+                resolved_tab,
+                requested_tab_name,
+                normalized_source,
+                status,
+                elapsed_ms,
+            )
+
+        if not hasattr(self, 'vitals_stack'):
+            _record_set_active_tab_end("missing_stack", tab_name)
+            return tab_name
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
             if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
@@ -901,7 +949,9 @@ class RemCardLayoutManager(QWidget):
                     self.setUpdatesEnabled(True)
                     self.updateGeometry()
                     self.update()
+            _record_set_active_tab_end("ok", tab_name)
             return tab_name
         except Exception as exc:
+            _record_set_active_tab_end("error", tab_name)
             logger.warning("Не удалось переключить вкладку РЕМ карты врача на %s: %s", tab_name, exc, exc_info=True)
             return tab_name

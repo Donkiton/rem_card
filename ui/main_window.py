@@ -13,6 +13,7 @@ import socket
 import time
 
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.app.version import APP_DISPLAY_TITLE
@@ -178,6 +179,9 @@ class MainWindow(QMainWindow):
         self._maintenance_scheduled = False
         self._maintenance_timer = None
         self._is_closing = False
+        self._event_loop_watchdog_timer = None
+        self._event_loop_watchdog_last_ts = 0.0
+        self._event_loop_watchdog_last_log_ts = 0.0
         self._focus_refresh_pending = False
         self._focus_refresh_in_progress = False
         self._last_focus_refresh_ts = 0.0
@@ -185,6 +189,69 @@ class MainWindow(QMainWindow):
         self._focus_refresh_timer.setSingleShot(True)
         self._focus_refresh_timer.setInterval(0)
         self._focus_refresh_timer.timeout.connect(self._run_focus_refresh)
+        self._start_event_loop_watchdog()
+
+    def _current_role_key(self) -> str:
+        if self.stack.currentWidget() == self.doctor_main:
+            return "doctor"
+        if self.stack.currentWidget() == self.nurse_main:
+            return "nurse"
+        if self.stack.currentWidget() == self.admin_main:
+            return "admin"
+        return str(self._role_lock_key or self._initial_role or "unknown")
+
+    def _start_event_loop_watchdog(self):
+        if os.environ.get("REMCARD_UI_WATCHDOG_ENABLED", "1") == "0":
+            return
+        if self._event_loop_watchdog_timer is not None:
+            return
+
+        interval_ms = max(100, int(float(os.environ.get("REMCARD_UI_WATCHDOG_INTERVAL_MS", "250"))))
+        self._event_loop_watchdog_threshold_ms = max(
+            500.0,
+            min(1000.0, float(os.environ.get("REMCARD_UI_WATCHDOG_THRESHOLD_MS", "750"))),
+        )
+        self._event_loop_watchdog_cooldown_sec = max(
+            0.0,
+            float(os.environ.get("REMCARD_UI_WATCHDOG_LOG_COOLDOWN_SEC", "5")),
+        )
+        self._event_loop_watchdog_last_ts = time.perf_counter()
+
+        timer = QTimer(self)
+        timer.setInterval(interval_ms)
+        timer.timeout.connect(lambda expected_interval_ms=interval_ms: self._poll_event_loop_watchdog(expected_interval_ms))
+        timer.start()
+        self._event_loop_watchdog_timer = timer
+
+    def _poll_event_loop_watchdog(self, expected_interval_ms: int):
+        now = time.perf_counter()
+        previous = float(self._event_loop_watchdog_last_ts or now)
+        self._event_loop_watchdog_last_ts = now
+        delta_ms = max(0.0, (now - previous) * 1000.0)
+        pause_ms = max(0.0, delta_ms - float(expected_interval_ms or 0))
+        if pause_ms < float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)):
+            return
+
+        cooldown_sec = float(getattr(self, "_event_loop_watchdog_cooldown_sec", 5.0))
+        if cooldown_sec > 0 and (now - float(self._event_loop_watchdog_last_log_ts or 0.0)) < cooldown_sec:
+            return
+        self._event_loop_watchdog_last_log_ts = now
+        role = self._current_role_key()
+        logger.warning(
+            "[UIWatchdog] event_loop_pause_ms=%.1f threshold_ms=%.1f role=%s interval_ms=%s",
+            pause_ms,
+            float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)),
+            role,
+            int(expected_interval_ms or 0),
+        )
+        record_metric(
+            "event_loop_pause_ms",
+            round(pause_ms, 3),
+            threshold_ms=round(float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)), 3),
+            interval_ms=int(expected_interval_ms or 0),
+            role=role,
+            source="refresh",
+        )
 
     def init_ui(self):
         self.welcome = WelcomeWidget()

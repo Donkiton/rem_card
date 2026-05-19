@@ -16,6 +16,7 @@ from ..shared.async_call import AsyncCallThread
 from .components.order_template_builder import build_orders_from_template
 from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, 
@@ -1071,6 +1072,19 @@ class OrdersWidget(QWidget):
                 snapshot.get("context_hash"),
                 snapshot.get("load_trace_id"),
                 snapshot.get("version"),
+            )
+            snapshot_source = str(snapshot.get("source") or "refresh").strip().lower()
+            metric_source = "click" if snapshot_source == "user" else ("cache" if snapshot_source == "cache" else "refresh")
+            record_metric(
+                "orders_snapshot_apply_skipped",
+                1,
+                admission_id=admission_id,
+                source=metric_source,
+                snapshot_source=snapshot_source,
+                reason="duplicate_snapshot",
+                context_hash=snapshot.get("context_hash"),
+                trace_id=snapshot.get("load_trace_id"),
+                version=snapshot.get("version"),
             )
             self._clear_soft_update_state()
             return True

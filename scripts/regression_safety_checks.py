@@ -5967,6 +5967,106 @@ def _check_orders_force_refresh_accepts_unchanged_version(temp_root: str) -> tup
     return True, "ok"
 
 
+def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    import rem_card.app.foreground_activity as foreground_activity
+    import rem_card.data.dao.db_manager as dbm
+    from rem_card.services.read_coordinator import ReadCoordinator
+
+    _ = temp_root
+    required_tokens = {
+        "ui/rem_card_sectors/sector_2b.py": ["tab_click_received"],
+        "ui/shared/remcard_layout.py": ["set_active_tab_start", "set_active_tab_end"],
+        "ui/doctor_view/doctor_remcard_widget.py": [
+            "orders_show_start",
+            "orders_show_end",
+            "card_hydration_deferred_for_foreground",
+        ],
+        "ui/main_window.py": ["event_loop_pause_ms", "REMCARD_UI_WATCHDOG_THRESHOLD_MS"],
+        "services/read_coordinator.py": ["foreground_read", "orders_load_time_ms", "build_orders_snapshot_time_ms"],
+        "services/remcard_facade.py": ["orders_snapshot_sql_step_ms", "orders_snapshot_build_total_ms"],
+        "data/dao/db_manager.py": ["periodic_backup_deferred_foreground_read", "PERIODIC_BACKUP_FOREGROUND_IDLE_SEC"],
+        "ui/doctor_view/orders_widget.py": ["orders_snapshot_apply_skipped"],
+    }
+    for rel_path, tokens in required_tokens.items():
+        text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        missing = [token for token in tokens if token not in text]
+        if missing:
+            return False, f"{rel_path} missing diagnostics tokens: {missing}"
+
+    manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+    manager._last_backup_ts = 0.0
+    manager._periodic_backup_interval_sec = 0.0
+    created_backups: list[tuple[str, str]] = []
+    manager._create_named_backup = lambda prefix, source: created_backups.append((prefix, source))
+    backup_deferral_seen: list[tuple[bool, str]] = []
+
+    class StaticOrdersService:
+        def __init__(self):
+            self.calls = 0
+
+        def build_orders_snapshot(self, admission_id, shift_date, *, only_committed=False, include_change_cursor=False):
+            self.calls += 1
+            should_defer, reason, _age_sec = foreground_activity.should_defer_background_io(
+                idle_window_sec=0.0,
+                names={"orders"},
+            )
+            backup_deferral_seen.append((should_defer, reason))
+            manager._maybe_create_periodic_backup(source="regression_periodic")
+            snapshot = {
+                "admission_id": admission_id,
+                "shift_date": shift_date,
+                "only_committed": bool(only_committed),
+                "orders": [],
+                "admin_rows": [],
+                "has_any_draft": False,
+                "has_any_administrations": False,
+                "has_any_orders": False,
+            }
+            if include_change_cursor:
+                snapshot["change_id"] = 42
+            return snapshot
+
+        def get_latest_change_id(self, admission_id=None, include_global=True):
+            return 42
+
+    foreground_activity._reset_foreground_activity_for_tests()
+    try:
+        service = StaticOrdersService()
+        coordinator = ReadCoordinator(service)
+        shift_date = datetime(2026, 5, 19, 8, 0, 0)
+        context = coordinator.make_orders_context(
+            source_db="live",
+            admission_id=123,
+            shift_date=shift_date,
+            role="doctor",
+            mode="live",
+            variant="full",
+        )
+        first = coordinator.load_orders_tab(context, source="user", priority="HIGH", force_refresh=True)
+        if not backup_deferral_seen or not backup_deferral_seen[0][0]:
+            return False, f"foreground orders read was not visible to backup deferral: {backup_deferral_seen}"
+        if created_backups:
+            return False, f"periodic backup started during foreground orders load: {created_backups}"
+        if int(first.get("version") or 0) != 42:
+            return False, f"unexpected first orders version: {first.get('version')}"
+
+        second = coordinator.load_orders_tab(context, source="user", priority="HIGH")
+        if int(second.get("version") or 0) != 42:
+            return False, f"unexpected cached orders version: {second.get('version')}"
+        if service.calls != 1:
+            return False, f"repeat orders open rebuilt snapshot instead of using cache, calls={service.calls}"
+
+        foreground_activity._reset_foreground_activity_for_tests()
+        manager._maybe_create_periodic_backup(source="after_idle")
+        if created_backups != [("periodic", "after_idle")]:
+            return False, f"periodic backup did not resume after foreground idle: {created_backups}"
+        return True, "ok"
+    finally:
+        foreground_activity._reset_foreground_activity_for_tests()
+
+
 def _check_doctor_orders_late_model_binding(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -10042,6 +10142,7 @@ def main():
         ("graph_outcome_labels_hide_nan", _check_graph_outcome_labels_hide_nan),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
+        ("orders_tab_targeted_diagnostics_performance", _check_orders_tab_targeted_diagnostics_performance),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),

@@ -23,6 +23,7 @@ from rem_card.app.db_availability import (
     is_database_unavailable_error,
     notify_database_unavailable,
 )
+from rem_card.app.foreground_activity import should_defer_background_io
 from rem_card.app.logger import logger
 from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_metrics import record_metric
@@ -74,6 +75,10 @@ RUNTIME_BACKUP_MAX_TOTAL_BYTES = max(
 )
 RUNTIME_BACKUP_RETENTION_DAYS = max(3, int(os.environ.get("REMCARD_RUNTIME_BACKUP_RETENTION_DAYS", "21")))
 PERIODIC_BACKUP_INTERVAL_SEC = 10 * 60
+PERIODIC_BACKUP_FOREGROUND_IDLE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_PERIODIC_BACKUP_FOREGROUND_IDLE_SEC", "5")),
+)
 INTEGRITY_CHECK_INTERVAL_SEC = 30 * 60
 INTEGRITY_START_DELAY_SEC = 45
 LOCAL_READ_AFTER_WRITE_GRACE_SEC = 1.5
@@ -1552,6 +1557,27 @@ class DatabaseManager:
     def _maybe_create_periodic_backup(self, source: str = "write"):
         now = time.time()
         if now - self._last_backup_ts < self._periodic_backup_interval_sec:
+            return
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+            names={"orders", "orders_show"},
+        )
+        if should_defer:
+            logger.info(
+                "Skipping periodic backup: foreground read is active/recent (source=%s reason=%s age_sec=%s idle_window_sec=%.1f)",
+                source,
+                reason,
+                None if age_sec is None else round(age_sec, 3),
+                PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+            )
+            record_metric(
+                "periodic_backup_deferred_foreground_read",
+                1,
+                source=str(source or "write"),
+                reason=reason,
+                age_sec=None if age_sec is None else round(age_sec, 3),
+                idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+            )
             return
         self._create_named_backup(prefix="periodic", source=source)
 

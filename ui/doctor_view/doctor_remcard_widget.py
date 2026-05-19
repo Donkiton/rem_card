@@ -1,11 +1,14 @@
 import os
 import socket
+import time
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QDialog
 from PySide6.QtCore import Signal, Qt, QTimer
 from datetime import datetime
+from rem_card.app.foreground_activity import mark_foreground_activity, should_defer_background_io
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.services.archive_readonly_service import create_archive_readonly_service
@@ -22,6 +25,14 @@ CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "0") == "1"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
 CARD_OPEN_HYDRATE_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_OPEN_HYDRATE_DELAY_MS", "250")))
+CARD_HYDRATION_FOREGROUND_IDLE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_CARD_HYDRATION_FOREGROUND_IDLE_SEC", "3")),
+)
+CARD_HYDRATION_MAX_DEFER_ATTEMPTS = max(
+    0,
+    int(os.environ.get("REMCARD_CARD_HYDRATION_MAX_DEFER_ATTEMPTS", "5")),
+)
 CHART_LAZY_INIT_DELAY_MS = max(0, int(os.environ.get("REMCARD_CHART_LAZY_INIT_DELAY_MS", "0")))
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
 JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
@@ -504,12 +515,48 @@ class DoctorRemCardWidget(QWidget):
         context_key,
         *,
         ensure_initial_status: bool,
+        defer_attempts: int = 0,
     ):
         if int(admission_id or 0) != int(self.admission_id or 0):
             return
         if shift_date != self._current_date:
             return
         if context_key != self._current_snapshot_context_key(load_scope="patient_open_card"):
+            return
+
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=CARD_HYDRATION_FOREGROUND_IDLE_SEC,
+            names={"orders", "orders_show"},
+        )
+        if should_defer and defer_attempts < CARD_HYDRATION_MAX_DEFER_ATTEMPTS:
+            delay_ms = max(1000, CARD_OPEN_HYDRATE_DELAY_MS)
+            logger.info(
+                "[DOCTOR_VIEW] card_hydration_deferred_for_foreground admission_id=%s reason=%s age_sec=%s attempt=%s delay_ms=%s",
+                admission_id,
+                reason,
+                None if age_sec is None else round(age_sec, 3),
+                defer_attempts + 1,
+                delay_ms,
+            )
+            record_metric(
+                "card_hydration_deferred_for_foreground",
+                1,
+                admission_id=admission_id,
+                reason=reason,
+                age_sec=None if age_sec is None else round(age_sec, 3),
+                attempt=defer_attempts + 1,
+                source="refresh",
+            )
+            QTimer.singleShot(
+                delay_ms,
+                lambda: self._request_card_hydration_if_current(
+                    admission_id,
+                    shift_date,
+                    context_key,
+                    ensure_initial_status=ensure_initial_status,
+                    defer_attempts=defer_attempts + 1,
+                ),
+            )
             return
 
         self._request_card_snapshot(
@@ -1644,7 +1691,7 @@ class DoctorRemCardWidget(QWidget):
                 )
         
         if hasattr(self, 'layout_manager'):
-            active_tab = self.layout_manager.set_active_tab("Витальные функции") or "Витальные функции"
+            active_tab = self.layout_manager.set_active_tab("Витальные функции", source="refresh") or "Витальные функции"
             if hasattr(self.layout_manager, 'sector_2b'):
                 self.layout_manager.sector_2b.select_tab(active_tab, emit=False)
             if active_tab != "Витальные функции":
@@ -2497,13 +2544,38 @@ class DoctorRemCardWidget(QWidget):
             sector_4a.update_balance(total_in_cur, total_out_cur, total_in_daily=total_in_day, total_out_daily=total_out_day)
 
     def on_tab_changed(self, tab_name):
-        tab_name = self.layout_manager.set_active_tab(tab_name) or tab_name
+        tab_name = self.layout_manager.set_active_tab(tab_name, source="click") or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":
+            show_started = time.perf_counter()
+            admission_id = self.admission_id
+            mark_foreground_activity(
+                "orders_show",
+                admission_id=admission_id,
+                source="click",
+                ttl_sec=CARD_HYDRATION_FOREGROUND_IDLE_SEC,
+            )
+            record_metric(
+                "orders_show_start",
+                1,
+                admission_id=admission_id,
+                source="click",
+            )
+            logger.info(
+                "[OrdersShow] orders_show_start admission_id=%s source=click",
+                admission_id,
+            )
             ow = self._ensure_orders_widget()
             if ow is None:
                 logger.warning("Doctor orders tab requested, but orders widget was not initialized")
+                record_metric(
+                    "orders_show_end",
+                    round((time.perf_counter() - show_started) * 1000.0, 3),
+                    admission_id=admission_id,
+                    source="click",
+                    status="widget_missing",
+                )
                 return
             self._bind_orders_widget_signals(ow)
             if hasattr(ow, "set_context"):
@@ -2516,7 +2588,14 @@ class DoctorRemCardWidget(QWidget):
                 ow.service = self.service
                 ow.admission_id = self.admission_id
                 ow.shift_date = self._current_date
+            had_ready_model = bool(
+                getattr(ow, "model", None) is not None
+                and getattr(ow.model, "admission_id", None) == ow.admission_id
+                and getattr(ow.model, "shift_date", None) == ow.shift_date
+                and not getattr(ow, "_snapshot_stale", False)
+            )
             ow.ensure_ready_for_show()
+            show_source = "cache" if had_ready_model and getattr(ow, "_snapshot_worker", None) is None else "refresh"
 
             is_draft = ow.has_drafts()
 
@@ -2525,6 +2604,22 @@ class DoctorRemCardWidget(QWidget):
             self.controls.set_rollback_active(is_draft)
             self.controls.set_clean_active(ow.has_administrations())
             self.controls.set_clear_active(ow.has_orders())
+            elapsed_ms = (time.perf_counter() - show_started) * 1000.0
+            record_metric(
+                "orders_show_end",
+                round(elapsed_ms, 3),
+                admission_id=admission_id,
+                source=show_source,
+                status="ok",
+                has_drafts=int(bool(is_draft)),
+            )
+            logger.info(
+                "[OrdersShow] orders_show_end admission_id=%s source=%s elapsed_ms=%.2f has_drafts=%s",
+                admission_id,
+                show_source,
+                elapsed_ms,
+                int(bool(is_draft)),
+            )
         self._apply_archive_read_only_state()
 
     def on_clean_sheet_clicked(self):

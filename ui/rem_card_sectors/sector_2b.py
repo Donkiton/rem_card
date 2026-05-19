@@ -5,6 +5,7 @@ from rem_card.ui.styles.theme_manager import get_theme_manager
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget, QLabel
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QPixmap
+from rem_card.app.local_metrics import record_metric
 import os
 
 class Sector2b(BaseSectorWidget):
@@ -170,6 +171,13 @@ class Sector2b(BaseSectorWidget):
             self.tab_changed.emit(tab_name)
 
     def on_tab_clicked(self, tab_name):
+        record_metric(
+            "tab_click_received",
+            1,
+            tab_name=str(tab_name or ""),
+            admission_id=None,
+            source="click",
+        )
         self.select_tab(tab_name, emit=True)
 
     def set_save_icon_visible(self, visible: bool):

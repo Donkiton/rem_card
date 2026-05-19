@@ -12,7 +12,9 @@ from itertools import count
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple
 
+from rem_card.app.foreground_activity import foreground_read
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.data.dao.sync_cursor import EPOCH_SYNC_TS, is_cursor_newer, make_sync_cursor
 from rem_card.services import persistent_snapshot_cache
 from rem_card.services.remcard_facade import orders_snapshot_caller
@@ -855,6 +857,33 @@ class ReadCoordinator:
         _retry: bool = False,
     ):
         context_hash = context.hash()
+        with foreground_read(
+            "orders",
+            admission_id=context.admission_id,
+            source=source,
+            context_hash=context_hash,
+            priority=self._normalize_priority(priority),
+        ):
+            return self._load_orders_tab_impl(
+                context,
+                source=source,
+                priority=priority,
+                force_refresh=force_refresh,
+                timeout_sec=timeout_sec,
+                _retry=_retry,
+            )
+
+    def _load_orders_tab_impl(
+        self,
+        context: OrdersContext,
+        *,
+        source: str = "refresh",
+        priority: str = "HIGH",
+        force_refresh: bool = False,
+        timeout_sec: float = READ_LOAD_TIMEOUT_SEC,
+        _retry: bool = False,
+    ):
+        context_hash = context.hash()
         trace_id = self._next_trace_id("orders", context_hash)
         started = time.perf_counter()
         cache_key = context.cache_key()
@@ -905,6 +934,13 @@ class ReadCoordinator:
                     delta_time_ms=0.0,
                     elapsed_ms=elapsed_ms,
                     fallback_after_delta=False,
+                    admission_id=context.admission_id,
+                    context_hash=context_hash,
+                    trace_id=base_snapshot.get("load_trace_id") or trace_id,
+                    priority=priority,
+                    fallback_used=0,
+                    base=delta_base,
+                    version=int(base_snapshot.get("version") or 0),
                 )
                 return base_snapshot
 
@@ -958,6 +994,13 @@ class ReadCoordinator:
                         delta_time_ms=delta_time_ms,
                         elapsed_ms=elapsed_ms,
                         fallback_after_delta=False,
+                        admission_id=context.admission_id,
+                        context_hash=context_hash,
+                        trace_id=delta_snapshot.get("load_trace_id") or trace_id,
+                        priority=priority,
+                        fallback_used=0,
+                        base=delta_base,
+                        version=int(delta_snapshot.get("version") or 0),
                     )
                     return delta_snapshot
                 except Exception as exc:
@@ -986,14 +1029,45 @@ class ReadCoordinator:
             trace_id=trace_id,
         ):
             try:
-                with orders_snapshot_caller("read_coordinator", context_hash=context_hash):
+                build_started = time.perf_counter()
+                with orders_snapshot_caller("read_coordinator", context_hash=context_hash, request_source=source):
                     snapshot = self.remcard_service.build_orders_snapshot(
                         context.admission_id,
                         context.shift_date,
                         only_committed=(context.variant == "committed"),
                         include_change_cursor=True,
                     )
+                build_elapsed_ms = (time.perf_counter() - build_started) * 1000.0
+                logger.info(
+                    "[ReadCoordinator] build_orders_snapshot_time_ms=%.2f path=read_coordinator admission_id=%s source=%s context_hash=%s trace_id=%s",
+                    build_elapsed_ms,
+                    context.admission_id,
+                    source,
+                    context_hash,
+                    trace_id,
+                )
+                record_metric(
+                    "build_orders_snapshot_time_ms",
+                    round(build_elapsed_ms, 3),
+                    admission_id=context.admission_id,
+                    source="click" if str(source or "").lower() == "user" else "refresh",
+                    path="read_coordinator",
+                    context_hash=context_hash,
+                    trace_id=trace_id,
+                    status="ok",
+                )
             except Exception:
+                failed_elapsed_ms = (time.perf_counter() - build_started) * 1000.0 if "build_started" in locals() else 0.0
+                record_metric(
+                    "build_orders_snapshot_time_ms",
+                    round(failed_elapsed_ms, 3),
+                    admission_id=context.admission_id,
+                    source="click" if str(source or "").lower() == "user" else "refresh",
+                    path="read_coordinator",
+                    context_hash=context_hash,
+                    trace_id=trace_id,
+                    status="error",
+                )
                 fallback_used = 1
                 logger.exception(
                     "[ReadCoordinator] coordinator_fail scope=orders admission_id=%s source=%s priority=%s context_hash=%s trace_id=%s reason=build_orders_snapshot_failed",
@@ -1003,13 +1077,25 @@ class ReadCoordinator:
                     context_hash,
                     trace_id,
                 )
-                with orders_snapshot_caller("legacy_fallback", context_hash=context_hash):
+                fallback_started = time.perf_counter()
+                with orders_snapshot_caller("legacy_fallback", context_hash=context_hash, request_source=source):
                     snapshot = self.remcard_service.build_orders_snapshot(
                         context.admission_id,
                         context.shift_date,
                         only_committed=(context.variant == "committed"),
                         include_change_cursor=True,
                     )
+                fallback_elapsed_ms = (time.perf_counter() - fallback_started) * 1000.0
+                record_metric(
+                    "build_orders_snapshot_time_ms",
+                    round(fallback_elapsed_ms, 3),
+                    admission_id=context.admission_id,
+                    source="refresh",
+                    path="legacy_fallback",
+                    context_hash=context_hash,
+                    trace_id=trace_id,
+                    status="ok",
+                )
                 logger.warning(
                     "[ReadCoordinator] fallback_to_legacy scope=orders admission_id=%s source=%s priority=%s context_hash=%s trace_id=%s reason=build_orders_snapshot_failed",
                     context.admission_id,
@@ -1085,6 +1171,13 @@ class ReadCoordinator:
             delta_time_ms=delta_time_ms,
             elapsed_ms=elapsed_ms,
             fallback_after_delta=bool(delta_attempted and not delta_applied),
+            admission_id=context.admission_id,
+            context_hash=context_hash,
+            trace_id=trace_id,
+            priority=priority,
+            fallback_used=fallback_used,
+            base="fresh",
+            version=int(frozen_snapshot.get("version") or 0),
         )
         return frozen_snapshot
 
@@ -1897,8 +1990,34 @@ class ReadCoordinator:
         delta_time_ms: float,
         elapsed_ms: float,
         fallback_after_delta: bool,
+        admission_id: Optional[int] = None,
+        context_hash: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        priority: Optional[str] = None,
+        fallback_used: Optional[int] = None,
+        base: Optional[str] = None,
+        version: Optional[int] = None,
     ) -> None:
         normalized_source = str(source or "refresh").strip().lower() or "refresh"
+        metric_source = "cache" if cache_hit else ("click" if normalized_source == "user" else "refresh")
+        record_metric(
+            "orders_load_time_ms",
+            round(float(elapsed_ms or 0.0), 3),
+            admission_id=admission_id,
+            source=metric_source,
+            request_source=normalized_source,
+            cache_hit=int(bool(cache_hit)),
+            delta_applied=int(bool(delta_applied)),
+            delta_failed=0 if str(delta_failure_reason or "0") in {"0", "", "none"} else 1,
+            delta_time_ms=round(float(delta_time_ms or 0.0), 3),
+            fallback_after_delta=int(bool(fallback_after_delta)),
+            fallback_used=None if fallback_used is None else int(bool(fallback_used)),
+            base=base,
+            version=version,
+            context_hash=context_hash,
+            trace_id=trace_id,
+            priority=self._normalize_priority(priority or "HIGH"),
+        )
         now = time.monotonic()
         with self._orders_telemetry_lock:
             state = self._orders_telemetry

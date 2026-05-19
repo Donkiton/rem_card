@@ -1,11 +1,13 @@
 import hashlib
 import json
+import time
 from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from PySide6.QtCore import QObject, Signal
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from ..data.dao.sync_cursor import is_cursor_newer, normalize_sync_cursor
 from ..data.dto.remcard_dto import (
     PatientDTO,
@@ -29,17 +31,20 @@ from .ventilation_service import VentilationService
 
 _ORDERS_SNAPSHOT_CALLER = ContextVar("remcard_orders_snapshot_caller", default="legacy")
 _ORDERS_SNAPSHOT_CONTEXT_HASH = ContextVar("remcard_orders_snapshot_context_hash", default="unknown")
+_ORDERS_SNAPSHOT_REQUEST_SOURCE = ContextVar("remcard_orders_snapshot_request_source", default="refresh")
 _DIRECT_ORDERS_BUILD_WARNED: set[tuple[str, int, str, str]] = set()
 _LEGACY_ORDERS_ACCESS_COUNT = 0
 
 
 @contextmanager
-def orders_snapshot_caller(source: str, *, context_hash: Optional[str] = None):
+def orders_snapshot_caller(source: str, *, context_hash: Optional[str] = None, request_source: Optional[str] = None):
     token = _ORDERS_SNAPSHOT_CALLER.set(str(source or "legacy"))
     context_token = _ORDERS_SNAPSHOT_CONTEXT_HASH.set(str(context_hash or "unknown"))
+    request_source_token = _ORDERS_SNAPSHOT_REQUEST_SOURCE.set(str(request_source or "refresh"))
     try:
         yield
     finally:
+        _ORDERS_SNAPSHOT_REQUEST_SOURCE.reset(request_source_token)
         _ORDERS_SNAPSHOT_CONTEXT_HASH.reset(context_token)
         _ORDERS_SNAPSHOT_CALLER.reset(token)
 
@@ -495,6 +500,34 @@ class RemCardService(QObject):
         global _LEGACY_ORDERS_ACCESS_COUNT
         caller = str(_ORDERS_SNAPSHOT_CALLER.get() or "legacy")
         context_hash = str(_ORDERS_SNAPSHOT_CONTEXT_HASH.get() or "unknown")
+        request_source = str(_ORDERS_SNAPSHOT_REQUEST_SOURCE.get() or "refresh").strip().lower()
+        metric_source = "click" if request_source == "user" else "refresh"
+        total_started = time.perf_counter()
+
+        def _record_orders_snapshot_step(step: str, started: float, *, row_count=None) -> None:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "[RemCardService] orders_snapshot_sql_step_ms=%.2f step=%s admission_id=%s caller=%s context_hash=%s row_count=%s",
+                elapsed_ms,
+                step,
+                admission_id,
+                caller,
+                context_hash,
+                row_count,
+            )
+            record_metric(
+                "orders_snapshot_sql_step_ms",
+                round(elapsed_ms, 3),
+                admission_id=admission_id,
+                source=metric_source,
+                step=step,
+                caller=caller,
+                request_source=request_source,
+                context_hash=context_hash,
+                row_count=row_count,
+                only_committed=int(bool(only_committed)),
+            )
+
         if caller != "read_coordinator":
             _LEGACY_ORDERS_ACCESS_COUNT += 1
             warn_key = (caller, int(admission_id), shift_date.isoformat(), context_hash)
@@ -509,12 +542,19 @@ class RemCardService(QObject):
                     context_hash,
                     _LEGACY_ORDERS_ACCESS_COUNT,
                 )
+        step_started = time.perf_counter()
         all_orders = self.get_orders(admission_id, shift_date, only_committed=only_committed)
+        _record_orders_snapshot_step("get_orders", step_started, row_count=len(all_orders or ()))
+
+        step_started = time.perf_counter()
         visible_orders = (
             [order for order in all_orders if order]
             if only_committed
             else [order for order in all_orders if order and order.status != OrderStatus.DELETED]
         )
+        _record_orders_snapshot_step("filter_visible_orders", step_started, row_count=len(visible_orders))
+
+        step_started = time.perf_counter()
         admin_rows = [
             dict(row)
             for row in self.get_latest_administrations(
@@ -526,6 +566,16 @@ class RemCardService(QObject):
                 include_deleted_orders=True,
             )
         ]
+        _record_orders_snapshot_step("get_latest_administrations", step_started, row_count=len(admin_rows))
+
+        step_started = time.perf_counter()
+        has_any_draft = self._orders.has_drafts(admission_id, shift_date=shift_date)
+        _record_orders_snapshot_step("has_drafts", step_started)
+
+        has_any_administrations = any(
+            str(row.get("status") or "") not in ("deleted", "cancelled")
+            for row in admin_rows
+        )
 
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
@@ -533,15 +583,27 @@ class RemCardService(QObject):
             "only_committed": bool(only_committed),
             "orders": visible_orders,
             "admin_rows": admin_rows,
-            "has_any_draft": self._orders.has_drafts(admission_id, shift_date=shift_date),
-            "has_any_administrations": any(
-                str(row.get("status") or "") not in ("deleted", "cancelled")
-                for row in admin_rows
-            ),
+            "has_any_draft": has_any_draft,
+            "has_any_administrations": has_any_administrations,
             "has_any_orders": bool(visible_orders),
         }
         if include_change_cursor:
+            step_started = time.perf_counter()
             snapshot["change_id"] = self.get_latest_change_id(admission_id, include_global=False)
+            _record_orders_snapshot_step("get_latest_change_id", step_started)
+        total_elapsed_ms = (time.perf_counter() - total_started) * 1000.0
+        record_metric(
+            "orders_snapshot_build_total_ms",
+            round(total_elapsed_ms, 3),
+            admission_id=admission_id,
+            source=metric_source,
+            caller=caller,
+            request_source=request_source,
+            context_hash=context_hash,
+            orders_count=len(visible_orders),
+            admin_rows_count=len(admin_rows),
+            has_change_cursor=int(bool(include_change_cursor)),
+        )
         return snapshot
 
     def _build_balance_snapshot(
