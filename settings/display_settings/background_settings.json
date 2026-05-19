@@ -64,6 +64,14 @@
       "start": "06-01",
       "end": "06-01",
       "locked": false
+    },
+    {
+      "id": "background_20260519_103128",
+      "name": "Фон 25.05-25.05",
+      "file": "fon_20260519_103154_25maya.png",
+      "start": "05-25",
+      "end": "05-25",
+      "locked": false
     }
   ]
 }
