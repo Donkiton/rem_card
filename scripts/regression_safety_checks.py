@@ -3174,6 +3174,105 @@ def _assert_committed_long_infusion_delete_marks_draft(doctor_widget, doctor_mod
     return True, "ok"
 
 
+def _assert_orders_same_cell_fast_click_guard(
+    *,
+    base_service_cls,
+    orders_widget_cls,
+    orders_model_cls,
+    order_dto_cls,
+    qt,
+    shift,
+) -> tuple[bool, str]:
+    import time
+
+    from rem_card.ui.doctor_view.orders_widget import ORDERS_CELL_REPEAT_GUARD_SEC
+
+    class DeferredOrdersService(base_service_cls):
+        def __init__(self):
+            super().__init__()
+            self.queued_writes = []
+            self.left_click_calls = []
+
+        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+            self.queued_writes.append(
+                {
+                    "description": description,
+                    "operation": operation,
+                    "on_success": on_success,
+                    "on_error": on_error,
+                }
+            )
+
+        def apply_order_left_click(self, order, admin, planned_time):
+            self.left_click_calls.append(
+                (
+                    int(getattr(order, "id", 0) or 0),
+                    planned_time.isoformat(),
+                    str(getattr(admin, "status", "") or ""),
+                )
+            )
+
+    deferred_service = DeferredOrdersService()
+    widget = orders_widget_cls(service=deferred_service, admission_id=1, shift_date=shift, defer_ui=True)
+    try:
+        model = orders_model_cls(deferred_service, admission_id=1, shift_date=shift)
+        order = order_dto_cls(id=71, admission_id=1, latin="Debounce", is_committed=1)
+        model.orders = [order]
+        widget.model = model
+        index = model.index(0, 1)
+        slot = model.time_slots[0]
+
+        widget._handle_cell_action(
+            index,
+            "orders_left_click",
+            deferred_service.apply_order_left_click,
+        )
+        pending_admin = model.data(index, qt.UserRole)
+        if len(deferred_service.queued_writes) != 1:
+            return False, f"first click should enqueue one write, got {len(deferred_service.queued_writes)}"
+        if pending_admin is None or pending_admin.status != "planned":
+            return False, f"first click did not leave planned optimistic cell: {pending_admin}"
+
+        widget._handle_cell_action(
+            index,
+            "orders_left_click",
+            deferred_service.apply_order_left_click,
+        )
+        if len(deferred_service.queued_writes) != 1:
+            return False, "second click on pending cell must not enqueue inverse write"
+        pending_admin = model.data(index, qt.UserRole)
+        if pending_admin is None or pending_admin.status != "planned":
+            return False, "second click on pending cell removed optimistic value"
+
+        write = deferred_service.queued_writes[0]
+        write["operation"]()
+        write["on_success"](None)
+        if len(deferred_service.left_click_calls) != 1:
+            return False, f"pending-cell guard called service unexpectedly: {deferred_service.left_click_calls}"
+
+        widget._handle_cell_action(
+            index,
+            "orders_left_click",
+            deferred_service.apply_order_left_click,
+        )
+        if len(deferred_service.queued_writes) != 1:
+            return False, "repeat-click debounce must suppress immediate post-success click"
+
+        cell_key = widget._admin_cell_write_key(order.id, slot)
+        widget._recent_admin_cell_clicks[cell_key] = time.monotonic() - ORDERS_CELL_REPEAT_GUARD_SEC - 0.05
+        widget._handle_cell_action(
+            index,
+            "orders_left_click",
+            deferred_service.apply_order_left_click,
+        )
+        if len(deferred_service.queued_writes) != 2:
+            return False, "same cell should accept a normal later click after debounce window"
+    finally:
+        widget.close()
+
+    return True, "ok"
+
+
 def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -3260,6 +3359,17 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_widget._restore_admin_cells(optimistic)
         if doctor_model.data(index, Qt.UserRole) is not None:
             return False, "doctor order optimistic state was not restored on error"
+
+        ok, details = _assert_orders_same_cell_fast_click_guard(
+            base_service_cls=FakeOrdersService,
+            orders_widget_cls=OrdersWidget,
+            orders_model_cls=OrdersModel,
+            order_dto_cls=OrderDTO,
+            qt=Qt,
+            shift=shift,
+        )
+        if not ok:
+            return False, details
 
         committed_admin = AdministrationDTO(
             id=10,

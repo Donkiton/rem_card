@@ -21,6 +21,12 @@ from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MA
 from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, 
                             BORDER_COLOR, BG_LIGHT)
 
+ORDERS_CELL_REPEAT_GUARD_SEC = max(
+    0.15,
+    float(os.getenv("REMCARD_ORDERS_CELL_REPEAT_GUARD_SEC", "0.45")),
+)
+
+
 class OrdersWidget(QWidget):
     draftStatusChanged = Signal(bool)
     administrationStatusChanged = Signal(bool)
@@ -81,6 +87,8 @@ class OrdersWidget(QWidget):
         self._admin_only_snapshot_until = 0.0
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
+        self._pending_admin_cell_write_keys = set()
+        self._recent_admin_cell_clicks = {}
         self._local_cell_draft_guard = False
         self._local_cell_draft_guard_signatures = {}
         self._legacy_direct_snapshot_warned = False
@@ -128,6 +136,8 @@ class OrdersWidget(QWidget):
         self._cached_has_administrations = False
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
+        self._pending_admin_cell_write_keys.clear()
+        self._recent_admin_cell_clicks.clear()
         self._clear_local_cell_draft_guard()
 
     def _reset_pending_snapshot_request(self):
@@ -1395,6 +1405,49 @@ class OrdersWidget(QWidget):
     def _finish_admin_write(self):
         self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
 
+    @staticmethod
+    def _admin_cell_write_key(order_id, planned_time):
+        if order_id is None or planned_time is None:
+            return None
+        try:
+            normalized_order_id = int(order_id)
+        except Exception:
+            normalized_order_id = order_id
+        planned_key = planned_time.isoformat() if hasattr(planned_time, "isoformat") else str(planned_time)
+        return (normalized_order_id, planned_key)
+
+    def _prune_recent_admin_cell_clicks(self):
+        if not self._recent_admin_cell_clicks:
+            return
+        cutoff = time.monotonic() - ORDERS_CELL_REPEAT_GUARD_SEC
+        for key, clicked_at in list(self._recent_admin_cell_clicks.items()):
+            if float(clicked_at or 0.0) < cutoff:
+                self._recent_admin_cell_clicks.pop(key, None)
+
+    def _skip_reason_for_admin_cell_click(self, key) -> str:
+        if key is None:
+            return ""
+        if key in self._pending_admin_cell_write_keys:
+            return "pending_write"
+        self._prune_recent_admin_cell_clicks()
+        clicked_at = self._recent_admin_cell_clicks.get(key)
+        if clicked_at is not None and (time.monotonic() - float(clicked_at or 0.0)) < ORDERS_CELL_REPEAT_GUARD_SEC:
+            return "repeat_click"
+        return ""
+
+    def _mark_admin_cell_click_accepted(self, key):
+        if key is not None:
+            self._recent_admin_cell_clicks[key] = time.monotonic()
+
+    def _mark_pending_admin_cell_writes(self, keys):
+        for key in keys or ():
+            if key is not None:
+                self._pending_admin_cell_write_keys.add(key)
+
+    def _clear_pending_admin_cell_writes(self, keys):
+        for key in keys or ():
+            self._pending_admin_cell_write_keys.discard(key)
+
     def _run_fast_sync(self):
         """
         После optimistic update делаем один отложенный тихий snapshot-refresh.
@@ -1846,8 +1899,11 @@ class OrdersWidget(QWidget):
         op_prefix: str,
         perf_click_id: int | None = None,
     ):
+        if self._is_closing or not self.service:
+            return
         target_admission_id = self.admission_id
         target_shift_date = self.shift_date
+        target_key = self._admin_cell_write_key(getattr(order, "id", None), planned_time)
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
         previous_by_key = self._apply_optimistic_cell(
@@ -1858,8 +1914,13 @@ class OrdersWidget(QWidget):
             op_prefix,
             perf_click_id=perf_click_id,
         )
+        pending_keys = set(previous_by_key.keys()) if previous_by_key else set()
+        if target_key is not None:
+            pending_keys.add(target_key)
+        self._mark_pending_admin_cell_writes(pending_keys)
 
         def on_success():
+            self._clear_pending_admin_cell_writes(pending_keys)
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
@@ -1867,6 +1928,7 @@ class OrdersWidget(QWidget):
             self._schedule_state_sync()
 
         def on_error(exc):
+            self._clear_pending_admin_cell_writes(pending_keys)
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
@@ -2548,6 +2610,21 @@ class OrdersWidget(QWidget):
         order = self.model.orders[row]
         admin = self.model.data(index, Qt.UserRole)
         planned_time = self.model.time_slots[time_slot_idx]
+        cell_key = self._admin_cell_write_key(getattr(order, "id", None), planned_time)
+        skip_reason = self._skip_reason_for_admin_cell_click(cell_key)
+        if skip_reason:
+            logger.info(
+                "[OrdersClick] click_skip role=doctor reason=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s",
+                skip_reason,
+                op_prefix,
+                self.admission_id,
+                row,
+                col,
+                getattr(order, "id", None),
+                planned_time.isoformat(),
+            )
+            return
+        self._mark_admin_cell_click_accepted(cell_key)
         click_seq = self._next_orders_click_seq()
         logger.info(
             "[OrdersClick] click_accept role=doctor seq=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s admin_id=%s admin_status=%s admin_role=%s admin_mark=%s",

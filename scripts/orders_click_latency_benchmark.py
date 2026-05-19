@@ -187,15 +187,25 @@ def run_benchmark(clicks: int, max_runtime_sec: float = 90.0) -> dict:
         col_idx = prepared["col_idx"]
         order_id = prepared["order_id"]
         planned_iso = prepared["planned_iso"]
+        cell_key = ow._admin_cell_write_key(order_id, datetime.fromisoformat(planned_iso))
 
         probe = DataChangedProbe(ow.model)
         samples = Samples(ui=[], db=[])
+        repeat_guard_waits: list[float] = []
 
         for _ in range(clicks):
             if (time.perf_counter() - started_at) > max_runtime_sec:
                 raise TimeoutError(f"Benchmark exceeded max runtime ({max_runtime_sec}s)")
             app.processEvents()
-            time.sleep(0.005)
+            if cell_key is not None:
+                guard_waited = _wait_for(
+                    lambda: not ow._skip_reason_for_admin_cell_click(cell_key),
+                    app,
+                    timeout_sec=2.0,
+                )
+                if guard_waited is None:
+                    raise TimeoutError("Orders cell repeat guard did not release before benchmark click")
+                repeat_guard_waits.append(guard_waited)
 
             prev_row = container.db_manager.fetch_one_remcard(
                 "SELECT id FROM administrations WHERE order_id = ? AND planned_time = ? ORDER BY id DESC LIMIT 1",
@@ -237,6 +247,8 @@ def run_benchmark(clicks: int, max_runtime_sec: float = 90.0) -> dict:
             "db_commit_ms_p95": round(_percentile(samples.db, 0.95), 3) if samples.db else None,
             "db_commit_ms_min": round(min(samples.db), 3) if samples.db else None,
             "db_commit_ms_max": round(max(samples.db), 3) if samples.db else None,
+            "repeat_guard_wait_ms_avg": round(statistics.mean(repeat_guard_waits), 3) if repeat_guard_waits else None,
+            "repeat_guard_wait_ms_max": round(max(repeat_guard_waits), 3) if repeat_guard_waits else None,
         }
         return result
     finally:
