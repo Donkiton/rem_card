@@ -2566,60 +2566,64 @@ class DoctorRemCardWidget(QWidget):
                 "[OrdersShow] orders_show_start admission_id=%s source=click",
                 admission_id,
             )
-            ow = self._ensure_orders_widget()
-            if ow is None:
-                logger.warning("Doctor orders tab requested, but orders widget was not initialized")
+            show_source = "click"
+            show_status = "started"
+            is_draft = None
+            try:
+                ow = self._ensure_orders_widget()
+                if ow is None:
+                    logger.warning("Doctor orders tab requested, but orders widget was not initialized")
+                    show_status = "widget_missing"
+                    return
+                self._bind_orders_widget_signals(ow)
+                if hasattr(ow, "set_context"):
+                    ow.set_context(
+                        service=self.service,
+                        admission_id=self.admission_id,
+                        shift_date=self._current_date,
+                    )
+                else:
+                    ow.service = self.service
+                    ow.admission_id = self.admission_id
+                    ow.shift_date = self._current_date
+                had_ready_model = bool(
+                    getattr(ow, "model", None) is not None
+                    and getattr(ow.model, "admission_id", None) == ow.admission_id
+                    and getattr(ow.model, "shift_date", None) == ow.shift_date
+                    and not getattr(ow, "_snapshot_stale", False)
+                )
+                ow.ensure_ready_for_show()
+                show_source = "cache" if had_ready_model and getattr(ow, "_snapshot_worker", None) is None else "refresh"
+
+                is_draft = ow.has_drafts()
+
+                # Проверяем статусы кнопок управления
+                self.controls.set_save_active(is_draft)
+                self.controls.set_rollback_active(is_draft)
+                self.controls.set_clean_active(ow.has_administrations())
+                self.controls.set_clear_active(ow.has_orders())
+                show_status = "ok"
+            except Exception:
+                show_status = "error"
+                raise
+            finally:
+                elapsed_ms = (time.perf_counter() - show_started) * 1000.0
                 record_metric(
                     "orders_show_end",
-                    round((time.perf_counter() - show_started) * 1000.0, 3),
+                    round(elapsed_ms, 3),
                     admission_id=admission_id,
-                    source="click",
-                    status="widget_missing",
+                    source=show_source,
+                    status=show_status,
+                    has_drafts=None if is_draft is None else int(bool(is_draft)),
                 )
-                return
-            self._bind_orders_widget_signals(ow)
-            if hasattr(ow, "set_context"):
-                ow.set_context(
-                    service=self.service,
-                    admission_id=self.admission_id,
-                    shift_date=self._current_date,
+                logger.info(
+                    "[OrdersShow] orders_show_end admission_id=%s source=%s status=%s elapsed_ms=%.2f has_drafts=%s",
+                    admission_id,
+                    show_source,
+                    show_status,
+                    elapsed_ms,
+                    None if is_draft is None else int(bool(is_draft)),
                 )
-            else:
-                ow.service = self.service
-                ow.admission_id = self.admission_id
-                ow.shift_date = self._current_date
-            had_ready_model = bool(
-                getattr(ow, "model", None) is not None
-                and getattr(ow.model, "admission_id", None) == ow.admission_id
-                and getattr(ow.model, "shift_date", None) == ow.shift_date
-                and not getattr(ow, "_snapshot_stale", False)
-            )
-            ow.ensure_ready_for_show()
-            show_source = "cache" if had_ready_model and getattr(ow, "_snapshot_worker", None) is None else "refresh"
-
-            is_draft = ow.has_drafts()
-
-            # Проверяем статусы кнопок управления
-            self.controls.set_save_active(is_draft)
-            self.controls.set_rollback_active(is_draft)
-            self.controls.set_clean_active(ow.has_administrations())
-            self.controls.set_clear_active(ow.has_orders())
-            elapsed_ms = (time.perf_counter() - show_started) * 1000.0
-            record_metric(
-                "orders_show_end",
-                round(elapsed_ms, 3),
-                admission_id=admission_id,
-                source=show_source,
-                status="ok",
-                has_drafts=int(bool(is_draft)),
-            )
-            logger.info(
-                "[OrdersShow] orders_show_end admission_id=%s source=%s elapsed_ms=%.2f has_drafts=%s",
-                admission_id,
-                show_source,
-                elapsed_ms,
-                int(bool(is_draft)),
-            )
         self._apply_archive_read_only_state()
 
     def on_clean_sheet_clicked(self):

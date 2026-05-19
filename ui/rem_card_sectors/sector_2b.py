@@ -170,12 +170,20 @@ class Sector2b(BaseSectorWidget):
         if emit:
             self.tab_changed.emit(tab_name)
 
+    def _current_admission_id_from_ui_tree(self):
+        widget = self.parentWidget()
+        while widget is not None:
+            if hasattr(widget, "current_admission_id"):
+                return getattr(widget, "current_admission_id", None)
+            widget = widget.parentWidget()
+        return None
+
     def on_tab_clicked(self, tab_name):
         record_metric(
             "tab_click_received",
             1,
             tab_name=str(tab_name or ""),
-            admission_id=None,
+            admission_id=self._current_admission_id_from_ui_tree(),
             source="click",
         )
         self.select_tab(tab_name, emit=True)
