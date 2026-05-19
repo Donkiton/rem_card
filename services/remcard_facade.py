@@ -1049,6 +1049,9 @@ class RemCardService(QObject):
     def add_order(self, dto: OrderDTO):
         return self._orders.add_order(dto)
 
+    def update_order(self, order_id: int, dto: OrderDTO, expected_revision: Optional[int] = None):
+        return self._orders.update_order(order_id, dto, expected_revision=expected_revision)
+
     def add_orders_batch(self, orders: List[OrderDTO]):
         self._orders.add_orders_batch(orders)
 

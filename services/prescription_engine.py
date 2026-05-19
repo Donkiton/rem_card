@@ -313,6 +313,13 @@ class PrescriptionEngine:
             return None
         return float(match.group(1))
 
+    @staticmethod
+    def component_dose_is_positive(value: Any) -> bool:
+        try:
+            return float(value) > 0
+        except (TypeError, ValueError):
+            return False
+
     def build_full_prescription(self, drug_key: str, data: Dict[str, Any]):
         """Формирует строку на основе данных из DrugAssignmentDialog"""
         drug = self.drugs.get(drug_key, {})
@@ -410,6 +417,8 @@ class PrescriptionEngine:
             for comp in drug.get("components", []):
                 c_key = comp.get("drug_key")
                 c_dose = comp.get("default_dose", 0)
+                if not self.component_dose_is_positive(c_dose):
+                    continue
                 c_drug = self.drugs.get(c_key, {})
                 c_lat = c_drug.get("latin", c_key)
                 c_unit = c_drug.get("unit", "")
@@ -417,6 +426,8 @@ class PrescriptionEngine:
                 # Используем общий префикс, так как форма задана для всего препарата
                 c_str = f"{prefix} {c_lat} - {c_dose:g} {c_unit}" if prefix else f"{c_lat} - {c_dose:g} {c_unit}"
                 comp_strs.append(c_str)
+            if not comp_strs:
+                return {"error": "Не указана дозировка компонентов многокомпонентного препарата"}
             base_presc = " + ".join(comp_strs)
         else:
             if prefix:

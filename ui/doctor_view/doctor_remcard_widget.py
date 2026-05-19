@@ -28,6 +28,7 @@ JOURNAL_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_PREWARM", "0") == "1"
 JOURNAL_WIDGET_PREWARM_ENABLED = os.environ.get("REMCARD_JOURNAL_WIDGET_PREWARM", "0") == "1"
 LOCAL_ORDER_FORCE_PREFIXES = (
     "orders_add_input:",
+    "orders_edit_input:",
     "orders_left_click:",
     "orders_middle_click:",
     "orders_right_click:",

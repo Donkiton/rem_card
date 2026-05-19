@@ -34,6 +34,7 @@ class OrdersWidget(QWidget):
     localBalanceChanged = Signal()
     _LOCAL_SILENT_FORCE_PREFIXES = (
         "orders_add_input:",
+        "orders_edit_input:",
         "orders_left_click:",
         "orders_middle_click:",
         "orders_right_click:",
@@ -2273,6 +2274,49 @@ class OrdersWidget(QWidget):
         self._schedule_fast_sync()
         self.localBalanceChanged.emit()
 
+    def _replace_local_order_after_edit(self, row: int, order_id: int, updated_order: OrderDTO):
+        self._ensure_model_initialized()
+        if self.model is None or updated_order is None:
+            self._schedule_fast_sync()
+            return
+
+        target_row = row
+        if target_row < 0 or target_row >= len(self.model.orders) or getattr(self.model.orders[target_row], "id", None) != order_id:
+            target_row = next(
+                (
+                    idx
+                    for idx, item in enumerate(self.model.orders)
+                    if item and getattr(item, "id", None) == order_id
+                ),
+                -1,
+            )
+        if target_row < 0:
+            self._schedule_fast_sync()
+            return
+
+        local_order = copy(updated_order)
+        local_order.id = order_id
+        local_order.admission_id = self.admission_id
+        local_order.is_committed = 0
+        self.model.orders[target_row] = local_order
+        if hasattr(self.model, "_recompute_draft_flag"):
+            self.model._recompute_draft_flag()
+        self._cached_has_drafts = True
+        self._cached_has_orders = any(
+            item and item.status != OrderStatus.DELETED
+            for item in self.model.orders
+        )
+        self._cached_has_administrations = self._model_has_administrations()
+        self._last_applied_snapshot_signature = None
+        idx_left = self.model.index(target_row, 0)
+        idx_right = self.model.index(target_row, max(0, self.model.columnCount() - 1))
+        self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
+        self.check_drafts()
+        if hasattr(self, "table_view"):
+            self.table_view.viewport().update()
+        self._schedule_fast_sync()
+        self.localBalanceChanged.emit()
+
     def on_prescription_input(self, text):
         if self._is_read_only(): return
         from .components.order_input_handler import OrderInputHandler
@@ -2293,6 +2337,91 @@ class OrdersWidget(QWidget):
                 if self._is_current_context(target_admission_id, target_shift_date)
                 else None
             ),
+        )
+
+    def _build_order_edit_dialog(self, order: OrderDTO):
+        from .administration_dialog import (
+            DrugCharacteristicsDialog,
+            ManualEntryDialog,
+            MultiCompCharacteristicsDialog,
+        )
+        from rem_card.services.prescription_engine import engine
+
+        drug_key = str(getattr(order, "drug_key", "") or "").strip()
+        drug_data = engine.drugs.get(drug_key, {}) if drug_key else {}
+        if drug_data.get("is_multicomp"):
+            dialog = MultiCompCharacteristicsDialog(drug_key, parent=self, initial_order=order)
+            dialog.title_bar.title_label.setText("Редактирование назначения")
+            return dialog
+        if drug_data and drug_key.lower() not in ("ruchnoivvod", "ruki"):
+            return DrugCharacteristicsDialog(
+                drug_key,
+                initial_dose=getattr(order, "dose_value", None),
+                parent=self,
+                initial_order=order,
+            )
+
+        dialog = ManualEntryDialog(self, title="Редактирование назначения", initial_order=order)
+        if drug_key:
+            dialog.drug_key = drug_key
+        return dialog
+
+    def _open_order_edit_dialog(self, index):
+        if self._is_read_only() or not index.isValid() or index.column() != 0 or not self.model:
+            return
+        row = index.row()
+        if row < 0 or row >= len(self.model.orders):
+            return
+        order = self.model.orders[row]
+        if not order or getattr(order, "_pending_delete", False):
+            return
+        order_id = getattr(order, "id", None)
+        if order_id is None:
+            self._show_warning("Назначение еще не сохранено. Обновите список и повторите редактирование.")
+            return
+
+        dialog = self._build_order_edit_dialog(order)
+        if not dialog.exec():
+            return
+
+        from .components.order_input_handler import OrderInputHandler
+
+        edited_order = OrderInputHandler.parse_input_to_dto(dialog.result_text, self.admission_id)
+        edited_order.id = int(order_id)
+        edited_order.is_committed = 0
+        edited_order.status = OrderStatus.ACTIVE
+        edited_order.sort_order = getattr(order, "sort_order", 0) or 0
+        edited_order.draft_sort_order = getattr(order, "draft_sort_order", None)
+        edited_order.created_at = getattr(order, "created_at", None) or datetime.now()
+        edited_order.revision = int(getattr(order, "revision", 0) or 0) + 1
+        edited_order.last_modified_by = "doctor"
+
+        expected_revision = getattr(order, "revision", None)
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        updated_holder = {}
+
+        def operation():
+            updated_holder["order"] = self.service.update_order(
+                int(order_id),
+                edited_order,
+                expected_revision=expected_revision,
+            )
+
+        def on_success():
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            self._replace_local_order_after_edit(
+                row,
+                int(order_id),
+                updated_holder.get("order") or edited_order,
+            )
+
+        self._enqueue_write(
+            f"orders_edit_input:{target_admission_id}:{order_id}",
+            operation=operation,
+            on_success=on_success,
+            on_error=lambda _exc: self.request_refresh(force=True),
         )
         
     def update_now_marker(self):
@@ -2445,6 +2574,9 @@ class OrdersWidget(QWidget):
                         "active": False,
                         "target_row": index.row(),
                     }
+                    return True
+                if index.column() == 0 and event.button() == Qt.RightButton:
+                    self._open_order_edit_dialog(index)
                     return True
                 if index.column() == 0 and event.button() == Qt.MiddleButton:
                     row = index.row()

@@ -343,10 +343,11 @@ class MultiCompDrugDialog(BaseStyledDialog):
         comps = []
         for combo, spin in self.components:
             d_key = combo.currentData()
-            if d_key:
+            dose = spin.value()
+            if d_key and engine.component_dose_is_positive(dose):
                 comps.append({
                     "drug_key": d_key,
-                    "default_dose": spin.value()
+                    "default_dose": dose
                 })
                 
         data = {

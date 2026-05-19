@@ -84,6 +84,69 @@ class OrderService:
             self._assign_next_sort_order_if_needed(dto)
             return self.dao.add_order(dto)
 
+    def update_order(self, order_id: int, dto: OrderDTO, expected_revision: Optional[int] = None) -> OrderDTO:
+        with self.dao.db.remcard_transaction() as cursor:
+            self._assert_order_revision(cursor, order_id, expected_revision)
+            cursor.execute(
+                """
+                SELECT *
+                FROM orders
+                WHERE id = ?
+                """,
+                (int(order_id),),
+            )
+            current = cursor.fetchone()
+            if current is None:
+                self._raise_order_conflict(order_id)
+
+            text_rep = f"{dto.latin} {float(dto.dose_value or 0):g} {dto.dose_unit or ''}".strip()
+            admission_id = int(current["admission_id"])
+            cursor.execute(
+                """
+                UPDATE orders
+                SET text = ?,
+                    drug_key = ?,
+                    latin = ?,
+                    type = ?,
+                    status = 'active',
+                    dose_value = ?,
+                    dose_unit = ?,
+                    is_per_kg = ?,
+                    frequency = ?,
+                    specific_times = ?,
+                    rate_ml_h = ?,
+                    volume_total = ?,
+                    duration_min = ?,
+                    is_committed = 0,
+                    comment = ?,
+                    last_modified_by = 'doctor',
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE id = ?
+                """,
+                (
+                    text_rep,
+                    dto.drug_key,
+                    dto.latin,
+                    dto.type.value,
+                    float(dto.dose_value or 0),
+                    dto.dose_unit,
+                    1 if dto.is_per_kg else 0,
+                    int(dto.frequency or 0),
+                    json.dumps(dto.specific_times or []),
+                    dto.rate_ml_h,
+                    dto.volume_total,
+                    dto.duration_min,
+                    dto.comment,
+                    int(order_id),
+                ),
+            )
+            cursor.execute("SELECT * FROM orders WHERE id = ?", (int(order_id),))
+            updated = cursor.fetchone()
+            result = self.dao._map_order_row(updated)
+            result.admission_id = admission_id
+            return result
+
     def add_orders_batch(self, orders: List[OrderDTO]):
         with self.dao.db.remcard_transaction():
             next_sort_order_by_context: dict[tuple[int, str], int] = {}

@@ -15,12 +15,14 @@ from rem_card.ui.shared.base_dialog import BaseStyledDialog
 class ManualEntryDialog(BaseStyledDialog):
 
     """Диалог для ручного ввода препарата (Ruki)."""
-    def __init__(self, parent=None):
-        super().__init__("Ручное добавление препарата", parent)
+    def __init__(self, parent=None, *, title="Ручное добавление препарата", initial_order=None):
+        super().__init__(title, parent)
         self.setFixedWidth(500)
         self.setMinimumHeight(450)
         self.result_text = ""
         self.setup_ui_content()
+        if initial_order is not None:
+            self.fill_from_order(initial_order)
 
     def setup_ui_content(self):
         from rem_card.ui.styles.theme import BG_CARD, BORDER_RADIUS_SM, BORDER_LIGHT
@@ -161,6 +163,159 @@ class ManualEntryDialog(BaseStyledDialog):
         if checked:
             self.duration_combo.setEditText("До конца суток")
 
+    @staticmethod
+    def _normalize_combo_text(value):
+        return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+    @staticmethod
+    def _normalize_diluent(value):
+        value = str(value or "").strip()
+        value = value.replace("[RU]", "").strip()
+        value = re.sub(r"\s*-\s*", " - ", value)
+        value = re.sub(r"\s+", " ", value)
+        value = re.sub(r"\s+(мл|ml)\b", r"\1", value, flags=re.IGNORECASE)
+        if value.lower().startswith("s. "):
+            value = value[3:].strip()
+        return value.lower()
+
+    @staticmethod
+    def _extract_tag(text, tag):
+        match = re.search(rf"\[{re.escape(tag)}:(.*?)\]", str(text or ""))
+        return match.group(1).strip() if match else ""
+
+    @classmethod
+    def _extract_route_text(cls, comment):
+        return cls._extract_tag(comment, "ROUTE")
+
+    @classmethod
+    def _extract_duration_value(cls, order):
+        comment = str(getattr(order, "comment", "") or "")
+        duration_text = cls._extract_tag(comment, "DUR")
+        if duration_text:
+            try:
+                return int(duration_text)
+            except Exception:
+                return 0
+        try:
+            return int(getattr(order, "duration_min", 0) or 0)
+        except Exception:
+            return 0
+
+    @classmethod
+    def _extract_diluent_text(cls, comment):
+        comment = str(comment or "")
+        diluent_text = cls._extract_tag(comment, "DIL")
+        if diluent_text:
+            return diluent_text
+        cleaned = re.sub(r"\[ROUTE:.*?\]", "", comment).strip()
+        cleaned = re.sub(r"\[DUR:.*?\]", "", cleaned).strip()
+        cleaned = cleaned.replace("[RU]", "").strip()
+        return cleaned[1:].strip() if cleaned.startswith("+") else cleaned
+
+    @staticmethod
+    def _strip_latin_prefix(name):
+        return re.sub(r"^[A-Za-z]+\.\s+", "", str(name or "").strip()).strip()
+
+    def _set_combo_by_data(self, combo, value):
+        target = str(value or "").strip()
+        if not target:
+            return False
+        for idx in range(combo.count()):
+            if str(combo.itemData(idx) or "").strip() == target:
+                combo.setCurrentIndex(idx)
+                return True
+        return False
+
+    def _set_combo_by_text(self, combo, value):
+        target = self._normalize_combo_text(value)
+        if not target:
+            return False
+        for idx in range(combo.count()):
+            if self._normalize_combo_text(combo.itemText(idx)) == target:
+                combo.setCurrentIndex(idx)
+                return True
+        return False
+
+    def _set_unit_from_order(self, order):
+        unit = str(getattr(order, "dose_unit", "") or "").strip()
+        unit_map = {"mg": "мг", "mcg": "мкг", "g": "г", "ml": "мл", "iu": "ЕД"}
+        self.unit_combo.setCurrentText(unit_map.get(unit.lower(), unit))
+
+    def _set_duration_value(self, duration_value):
+        try:
+            duration_value = int(duration_value or 0)
+        except Exception:
+            duration_value = 0
+
+        if duration_value == -1:
+            self.end_of_day_cb.setChecked(True)
+            self.duration_combo.setEditText("До конца суток")
+            return
+
+        self.end_of_day_cb.setChecked(False)
+        idx = self.duration_combo.findData(duration_value)
+        if idx >= 0:
+            self.duration_combo.setCurrentIndex(idx)
+        elif duration_value > 0:
+            self.duration_combo.setEditText(f"{duration_value} мин")
+        else:
+            idx = self.duration_combo.findData(0)
+            if idx >= 0:
+                self.duration_combo.setCurrentIndex(idx)
+
+    def _set_diluent_value(self, diluent_text):
+        diluent_text = str(diluent_text or "").strip()
+        if not diluent_text:
+            self.diluent_combo.setCurrentIndex(0)
+            return
+
+        target = self._normalize_diluent(diluent_text)
+        for idx in range(self.diluent_combo.count()):
+            if self._normalize_diluent(self.diluent_combo.itemData(idx)) == target:
+                self.diluent_combo.setCurrentIndex(idx)
+                return
+
+        display_text = diluent_text[3:].strip() if diluent_text.lower().startswith("s. ") else diluent_text
+        self.diluent_combo.addItem(display_text, diluent_text)
+        self.diluent_combo.setCurrentIndex(self.diluent_combo.count() - 1)
+
+    def fill_from_order(self, order):
+        drug_data = getattr(self, "drug_data", {}) or {}
+        drug_key = getattr(self, "drug_key", None) or getattr(order, "drug_key", None)
+
+        if drug_data.get("latin"):
+            self.name_input.setText(str(drug_data.get("latin") or ""))
+        else:
+            self.name_input.setText(self._strip_latin_prefix(getattr(order, "latin", "") or ""))
+
+        form_key = drug_data.get("form_key")
+        if form_key:
+            self._set_combo_by_data(self.form_combo, form_key)
+        else:
+            latin = str(getattr(order, "latin", "") or "")
+            prefix_match = re.match(r"^([A-Za-z]+\.)\s+", latin.strip())
+            if prefix_match:
+                prefix = prefix_match.group(1).rstrip(".")
+                for key, info in engine.forms.items():
+                    if str(info.get("latin_abbr", "") or "").rstrip(".") == prefix:
+                        self._set_combo_by_data(self.form_combo, key)
+                        break
+        self.on_form_changed()
+
+        route_text = self._extract_route_text(getattr(order, "comment", "") or "")
+        if route_text:
+            self._set_combo_by_text(self.route_combo, route_text)
+        elif drug_data.get("admin_type"):
+            self._set_combo_by_data(self.route_combo, drug_data.get("admin_type"))
+
+        try:
+            self.dose_spin.setValue(float(getattr(order, "dose_value", 0) or 0))
+        except Exception:
+            self.dose_spin.setValue(0)
+        self._set_unit_from_order(order)
+        self._set_duration_value(self._extract_duration_value(order))
+        self._set_diluent_value(self._extract_diluent_text(getattr(order, "comment", "") or ""))
+
     def on_add(self):
         name = self.name_input.text().strip()
         if not name:
@@ -242,7 +397,7 @@ class ManualEntryDialog(BaseStyledDialog):
 
 class MultiCompCharacteristicsDialog(BaseStyledDialog):
     """Диалог для многокомпонентного препарата."""
-    def __init__(self, drug_key, parent=None):
+    def __init__(self, drug_key, parent=None, *, initial_order=None):
         self.drug_data = engine.drugs.get(drug_key, {})
         title = "Настройка: " + self.drug_data.get("latin", drug_key)
         super().__init__(title, parent)
@@ -250,6 +405,8 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
         self.result_text = ""
         self.setFixedWidth(550)
         self.setup_ui_content()
+        if initial_order is not None:
+            self.fill_from_order(initial_order)
 
     def setup_ui_content(self):
         from rem_card.ui.styles.theme import BG_CARD, BORDER_RADIUS_SM, BORDER_LIGHT
@@ -352,6 +509,97 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
         btns.addWidget(btn_cancel)
         layout.addLayout(btns)
 
+    def _set_combo_by_data(self, combo, value):
+        return ManualEntryDialog._set_combo_by_data(self, combo, value)
+
+    def _set_combo_by_text(self, combo, value):
+        target = ManualEntryDialog._normalize_combo_text(value)
+        if not target:
+            return False
+        for idx in range(combo.count()):
+            if ManualEntryDialog._normalize_combo_text(combo.itemText(idx)) == target:
+                combo.setCurrentIndex(idx)
+                return True
+        return False
+
+    def _set_duration_value(self, duration_value):
+        try:
+            duration_value = int(duration_value or 0)
+        except Exception:
+            duration_value = 0
+
+        if duration_value == -1:
+            self.end_of_day_cb.setChecked(True)
+            self.duration_combo.setEditText("До конца суток")
+            return
+
+        self.end_of_day_cb.setChecked(False)
+        idx = self.duration_combo.findData(duration_value)
+        if idx >= 0:
+            self.duration_combo.setCurrentIndex(idx)
+        elif duration_value > 0:
+            self.duration_combo.setEditText(f"{duration_value} мин")
+        else:
+            idx = self.duration_combo.findData(0)
+            if idx >= 0:
+                self.duration_combo.setCurrentIndex(idx)
+
+    def _set_diluent_value(self, diluent_text):
+        diluent_text = str(diluent_text or "").strip()
+        if not diluent_text:
+            self.diluent_combo.setCurrentIndex(0)
+            return
+
+        target = ManualEntryDialog._normalize_diluent(diluent_text)
+        for idx in range(self.diluent_combo.count()):
+            if ManualEntryDialog._normalize_diluent(self.diluent_combo.itemData(idx)) == target:
+                self.diluent_combo.setCurrentIndex(idx)
+                return
+
+        display_text = diluent_text[3:].strip() if diluent_text.lower().startswith("s. ") else diluent_text
+        self.diluent_combo.addItem(display_text, diluent_text)
+        self.diluent_combo.setCurrentIndex(self.diluent_combo.count() - 1)
+
+    def _component_dose_map_from_order(self, order):
+        latin = str(getattr(order, "latin", "") or "")
+        dose_by_key = {}
+        found_any = False
+        for comp in self.drug_data.get("components", []):
+            c_key = comp.get("drug_key")
+            c_drug = engine.drugs.get(c_key, {})
+            c_lat = str(c_drug.get("latin", c_key) or c_key)
+            match = re.search(
+                rf"{re.escape(c_lat)}\s*-\s*(\d+(?:[.,]\d+)?)",
+                latin,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                try:
+                    dose_by_key[c_key] = float(match.group(1).replace(",", "."))
+                    found_any = True
+                except Exception:
+                    pass
+        if not found_any:
+            return None
+        return dose_by_key
+
+    def fill_from_order(self, order):
+        route_text = ManualEntryDialog._extract_route_text(getattr(order, "comment", "") or "")
+        if route_text:
+            self._set_combo_by_text(self.route_combo, route_text)
+        elif self.drug_data.get("admin_type"):
+            self._set_combo_by_data(self.route_combo, self.drug_data.get("admin_type"))
+
+        dose_by_key = self._component_dose_map_from_order(order)
+        if dose_by_key is not None:
+            for comp, spin, _c_drug in self.comp_spins:
+                spin.setValue(float(dose_by_key.get(comp.get("drug_key"), 0.0) or 0.0))
+
+        self._set_duration_value(ManualEntryDialog._extract_duration_value(order))
+        self._set_diluent_value(
+            ManualEntryDialog._extract_diluent_text(getattr(order, "comment", "") or "")
+        )
+
     def on_add(self):
         form_key = self.drug_data.get("form_key")
         form_info = engine.forms.get(form_key, {})
@@ -363,11 +611,21 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
         for comp, spin, c_drug in self.comp_spins:
             c_key = comp.get("drug_key")
             c_dose = spin.value()
+            if not engine.component_dose_is_positive(c_dose):
+                continue
             c_lat = c_drug.get("latin", c_key)
             c_unit = c_drug.get("unit", "")
             
             c_str = f"{prefix} {c_lat} - {c_dose:g} {c_unit}" if prefix else f"{c_lat} - {c_dose:g} {c_unit}"
             comp_strs.append(c_str)
+
+        if not comp_strs:
+            CustomMessageBox.warning(
+                self,
+                "Многокомпонентный препарат",
+                "Укажите дозу хотя бы одного компонента.",
+            )
+            return
             
         main_line = " + ".join(comp_strs)
         
@@ -399,7 +657,7 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
 
 class DrugCharacteristicsDialog(ManualEntryDialog):
     """Диалог для выбора характеристик выбранного препарата (копия ManualEntryDialog)."""
-    def __init__(self, drug_key, initial_dose=None, parent=None):
+    def __init__(self, drug_key, initial_dose=None, parent=None, *, initial_order=None):
         super().__init__(parent)
         self.title_bar.title_label.setText("Выберите характеристики препарата")
         self.setFixedWidth(500)
@@ -410,6 +668,9 @@ class DrugCharacteristicsDialog(ManualEntryDialog):
         self.drug_data = engine.drugs.get(drug_key, {})
         
         self.fill_from_drug_data(initial_dose)
+        if initial_order is not None:
+            self.title_bar.title_label.setText("Редактирование назначения")
+            self.fill_from_order(initial_order)
 
     def fill_from_drug_data(self, initial_dose):
         name = self.drug_data.get("latin", self.drug_key)

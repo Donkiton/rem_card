@@ -1419,6 +1419,219 @@ def _check_order_input_real_examples(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_multicomp_zero_components_hidden(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.prescription_engine import engine
+    from rem_card.ui.admin_view.drugs_dict_widget import MultiCompDrugDialog
+    from rem_card.ui.doctor_view.administration_dialog import MultiCompCharacteristicsDialog
+    from rem_card.ui.doctor_view.components.order_input_handler import OrderInputHandler
+
+    original_drugs = engine.drugs
+    original_forms = engine.forms
+    original_admin_types = engine.admin_types
+    app = QApplication.instance() or QApplication([])
+    dialogs = []
+    try:
+        engine.drugs = dict(original_drugs)
+        engine.forms = dict(original_forms)
+        engine.admin_types = dict(original_admin_types)
+        engine.forms["regression_solution"] = {"latin_abbr": "S", "can_dilute": True, "name_ru": "Раствор"}
+        engine.admin_types.setdefault("bolus", {"name_ru": "болюс"})
+        engine.drugs.update(
+            {
+                "regression_k": {"latin": "Kalii", "unit": "ml", "admin_type": "bolus"},
+                "regression_mg": {"latin": "Magnesii", "unit": "ml", "admin_type": "bolus"},
+                "regression_ins": {"latin": "Insulini", "unit": "ЕД", "admin_type": "bolus"},
+                "regression_mix": {
+                    "is_multicomp": True,
+                    "latin": "Polarka",
+                    "aliases": ["полярка"],
+                    "admin_type": "bolus",
+                    "form_key": "regression_solution",
+                    "components": [
+                        {"drug_key": "regression_k", "default_dose": 10},
+                        {"drug_key": "regression_mg", "default_dose": 0},
+                        {"drug_key": "regression_ins", "default_dose": 4},
+                    ],
+                    "unit": "ml",
+                },
+            }
+        )
+
+        built = engine.build_prescription("regression_mix")
+        built_text = built.get("result", "")
+        if "Magnesii" in built_text or " - 0 " in built_text:
+            return False, f"engine kept zero component: {built_text!r}"
+        if "Kalii" not in built_text or "Insulini" not in built_text:
+            return False, f"engine lost positive components: {built_text!r}"
+
+        assign_dialog = MultiCompCharacteristicsDialog("regression_mix")
+        dialogs.append(assign_dialog)
+        assign_dialog.on_add()
+        raw_text = assign_dialog.result_text
+        if "Magnesii" in raw_text or " - 0 " in raw_text:
+            return False, f"assignment dialog kept zero component: {raw_text!r}"
+        if "Kalii" not in raw_text or "Insulini" not in raw_text:
+            return False, f"assignment dialog lost positive components: {raw_text!r}"
+
+        parsed = OrderInputHandler.parse_input_to_dto(raw_text, admission_id=1)
+        if "Magnesii" in parsed.latin or " - 0 " in parsed.latin:
+            return False, f"parsed order kept zero component: {parsed.latin!r}"
+
+        edit_source = OrderDTO(
+            id=5,
+            admission_id=1,
+            drug_key="regression_mix",
+            latin="S. Kalii - 7 ml + S. Insulini - 2 ЕД",
+            type=OrderType.INFUSION_CONTINUOUS,
+            status=OrderStatus.ACTIVE,
+            duration_min=30,
+            comment="[ROUTE:болюс] [DUR:30]",
+        )
+        edit_dialog = MultiCompCharacteristicsDialog("regression_mix", initial_order=edit_source)
+        dialogs.append(edit_dialog)
+        doses_by_key = {comp.get("drug_key"): spin.value() for comp, spin, _ in edit_dialog.comp_spins}
+        if doses_by_key.get("regression_k") != 7 or doses_by_key.get("regression_ins") != 2:
+            return False, f"edit dialog did not prefill existing component doses: {doses_by_key}"
+        if doses_by_key.get("regression_mg") != 0:
+            return False, f"edit dialog restored omitted zero component: {doses_by_key}"
+        edit_dialog.on_add()
+        edit_text = edit_dialog.result_text
+        if "Magnesii" in edit_text or " - 0 " in edit_text:
+            return False, f"edit dialog kept zero component: {edit_text!r}"
+        if "Kalii - 7" not in edit_text or "Insulini - 2" not in edit_text:
+            return False, f"edit dialog did not keep changed component doses: {edit_text!r}"
+
+        dict_dialog = MultiCompDrugDialog("regression_mix", engine.drugs["regression_mix"])
+        dialogs.append(dict_dialog)
+        _, saved_data = dict_dialog.get_data()
+        saved_components = saved_data.get("components", []) if saved_data else []
+        saved_keys = {item.get("drug_key") for item in saved_components}
+        if "regression_mg" in saved_keys:
+            return False, f"dictionary save kept zero component: {saved_components!r}"
+        if {"regression_k", "regression_ins"} - saved_keys:
+            return False, f"dictionary save lost positive components: {saved_components!r}"
+
+        engine.drugs["regression_mix"]["components"] = [
+            {"drug_key": "regression_mg", "default_dose": 0},
+        ]
+        empty = engine.build_prescription("regression_mix")
+        if "error" not in empty:
+            return False, f"all-zero multicomp should be rejected: {empty!r}"
+    finally:
+        for dialog in dialogs:
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()
+        engine.drugs = original_drugs
+        engine.forms = original_forms
+        engine.admin_types = original_admin_types
+
+    return True, "ok"
+
+
+def _check_order_edit_dialog_prefills_current_values(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.prescription_engine import engine
+    from rem_card.ui.doctor_view.administration_dialog import DrugCharacteristicsDialog
+    from rem_card.ui.doctor_view.components.order_input_handler import OrderInputHandler
+
+    original_drugs = engine.drugs
+    original_forms = engine.forms
+    original_admin_types = engine.admin_types
+    original_dilutions = engine.dilutions
+    app = QApplication.instance() or QApplication([])
+    dialog = None
+    try:
+        engine.drugs = dict(original_drugs)
+        engine.forms = dict(original_forms)
+        engine.admin_types = dict(original_admin_types)
+        engine.dilutions = dict(original_dilutions)
+        engine.forms["regression_solution"] = {
+            "latin_abbr": "S",
+            "can_dilute": True,
+            "name_ru": "Раствор",
+        }
+        engine.admin_types["regression_infusion"] = {"name_ru": "В/в капельно"}
+        engine.dilutions["regression_nacl"] = {
+            "display": "NaCl 0.9%",
+            "default_volumes": [100],
+        }
+        engine.drugs["regression_edit_drug"] = {
+            "latin": "Ceftriaxoni",
+            "unit": "mg",
+            "admin_type": "regression_infusion",
+            "form_key": "regression_solution",
+            "default_dose": 1,
+            "duration_min": 10,
+        }
+
+        order = OrderDTO(
+            id=7,
+            admission_id=3,
+            drug_key="regression_edit_drug",
+            latin="Ceftriaxoni",
+            type=OrderType.INFUSION_CONTINUOUS,
+            status=OrderStatus.ACTIVE,
+            dose_value=2.5,
+            dose_unit="mg",
+            frequency=1,
+            specific_times=[],
+            duration_min=30,
+            is_committed=1,
+            created_at=datetime(2026, 4, 24, 9, 0, 0),
+            comment="S. NaCl 0.9% - 100мл [ROUTE:В/в капельно] [DUR:30]",
+        )
+        dialog = DrugCharacteristicsDialog(
+            "regression_edit_drug",
+            initial_dose=order.dose_value,
+            initial_order=order,
+        )
+
+        if abs(dialog.dose_spin.value() - 2.5) > 0.001:
+            return False, f"dose was not prefilled: {dialog.dose_spin.value()}"
+        if dialog.route_combo.currentText() != "В/в капельно":
+            return False, f"route was not prefilled: {dialog.route_combo.currentText()!r}"
+        if dialog.duration_combo.currentText() != "30 мин":
+            return False, f"duration was not prefilled: {dialog.duration_combo.currentText()!r}"
+        if "100" not in str(dialog.diluent_combo.currentData() or ""):
+            return False, f"diluent was not prefilled: {dialog.diluent_combo.currentData()!r}"
+
+        dialog.on_add()
+        parsed = OrderInputHandler.parse_input_to_dto(dialog.result_text, admission_id=3)
+        if parsed.drug_key != "regression_edit_drug":
+            return False, f"edited dialog lost drug key: {parsed.drug_key!r}"
+        if abs(parsed.dose_value - 2.5) > 0.001:
+            return False, f"edited dialog result lost dose: {parsed.dose_value}"
+        if int(parsed.duration_min or 0) != 30:
+            return False, f"edited dialog result lost duration: {parsed.duration_min}"
+        if "NaCl 0.9%" not in parsed.comment or "В/в капельно" not in parsed.comment:
+            return False, f"edited dialog result lost comment parts: {parsed.comment!r}"
+    finally:
+        if dialog is not None:
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()
+        engine.drugs = original_drugs
+        engine.forms = original_forms
+        engine.admin_types = original_admin_types
+        engine.dilutions = original_dilutions
+
+    return True, "ok"
+
+
 def _create_sqlite_file(path: str):
     conn = sqlite3.connect(path)
     try:
@@ -6194,6 +6407,125 @@ def _check_orders_cell_delete_draft_and_noop_toggle(temp_root: str) -> tuple[boo
         manager.close()
 
 
+def _check_order_row_edit_updates_existing_order(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.remcard_dao import FluidsDAO, OrdersDAO, PatientDAO, VentilationDAO, VitalsDAO
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.order_service import OrderConflictError
+    from rem_card.services.remcard_service import RemCardService
+
+    db_path = os.path.join(temp_root, "orders_row_edit.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_patient") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Regression Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-ORDER-EDIT", "2026-04-24T08:00:00"),
+            )
+            admission_id = int(cursor.lastrowid)
+
+        service = RemCardService(
+            VitalsDAO(manager),
+            FluidsDAO(manager),
+            OrdersDAO(manager),
+            VentilationDAO(manager),
+            PatientDAO(manager),
+        )
+        shift_date = datetime(2026, 4, 24, 12, 0, 0)
+        order = OrderDTO(
+            admission_id=admission_id,
+            drug_key="regression_edit_original",
+            latin="Regression Original",
+            type=OrderType.MEDICATION,
+            status=OrderStatus.ACTIVE,
+            dose_value=1.0,
+            dose_unit="mg",
+            is_per_kg=False,
+            frequency=1,
+            specific_times=[],
+            duration_min=0,
+            is_committed=0,
+            created_at=datetime(2026, 4, 24, 9, 0, 0),
+            comment="",
+            last_modified_by="doctor",
+        )
+        service.add_order(order)
+        service.apply_order_left_click(order, None, datetime(2026, 4, 24, 10, 0, 0))
+        service.finalize_order_card(admission_id, shift_date=shift_date)
+
+        baseline = next(item for item in service.get_orders(admission_id, shift_date) if item.id == order.id)
+        edited = OrderDTO(
+            admission_id=admission_id,
+            drug_key="regression_edit_updated",
+            latin="Regression Updated",
+            type=OrderType.INFUSION_CONTINUOUS,
+            status=OrderStatus.ACTIVE,
+            dose_value=2.5,
+            dose_unit="mg",
+            is_per_kg=False,
+            frequency=2,
+            specific_times=["08:00", "20:00"],
+            duration_min=30,
+            is_committed=0,
+            created_at=datetime(2026, 4, 24, 9, 30, 0),
+            comment="S. NaCl 0.9% - 100мл [ROUTE:В/в капельно] [DUR:30]",
+            last_modified_by="doctor",
+        )
+        service.update_order(order.id, edited, expected_revision=baseline.revision)
+
+        draft_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
+        visible_orders = draft_snapshot["orders"]
+        if [item.id for item in visible_orders] != [order.id]:
+            return False, f"edit must keep the same visible order id, got {[item.id for item in visible_orders]}"
+        updated_order = visible_orders[0]
+        if updated_order.latin != "Regression Updated" or updated_order.dose_value != 2.5:
+            return False, f"order fields were not updated: {updated_order}"
+        if int(updated_order.is_committed or 0) != 0 or not draft_snapshot["has_any_draft"]:
+            return False, "edited committed order must become an unsaved draft"
+
+        active_rows = [
+            dict(row)
+            for row in draft_snapshot["admin_rows"]
+            if int(dict(row).get("order_id") or 0) == int(order.id)
+            and str(dict(row).get("planned_time") or "") == "2026-04-24T10:00:00"
+            and str(dict(row).get("status") or "") == "planned"
+        ]
+        if not active_rows:
+            return False, "edit detached or removed existing administration cells"
+
+        try:
+            service.update_order(order.id, edited, expected_revision=baseline.revision)
+            return False, "stale order edit did not raise conflict"
+        except OrderConflictError:
+            pass
+
+        latest = next(item for item in service.get_orders(admission_id, shift_date) if item.id == order.id)
+        service.finalize_order_card(admission_id, shift_date=shift_date, expected_revisions={order.id: latest.revision})
+        nurse_rows = service.get_nurse_orders_data(admission_id, shift_date)
+        nurse_row = next((dict(row) for row in nurse_rows if int(dict(row).get("order_id") or 0) == int(order.id)), None)
+        if nurse_row is None:
+            return False, f"edited order disappeared from nurse read model: {nurse_rows}"
+        if nurse_row.get("latin") != "Regression Updated" or float(nurse_row.get("dose_value") or 0) != 2.5:
+            return False, f"nurse read model did not get edited order fields: {nurse_row}"
+
+        source = (PROJECT_ROOT / "ui" / "doctor_view" / "orders_widget.py").read_text(encoding="utf-8")
+        if "index.column() == 0 and event.button() == Qt.RightButton" not in source:
+            return False, "doctor order column right click branch is missing"
+        if "_open_order_edit_dialog(index)" not in source:
+            return False, "doctor order column right click does not open edit dialog"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_orders_optimistic_lock_conflicts(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime
 
@@ -9686,6 +10018,8 @@ def main():
         ("orders_pending_states_before_commit", _check_orders_pending_states_before_commit),
         ("blood_plasma_key_ru_prescription_parse", _check_blood_plasma_key_ru_prescription_parse),
         ("order_input_real_examples", _check_order_input_real_examples),
+        ("multicomp_zero_components_hidden", _check_multicomp_zero_components_hidden),
+        ("order_edit_dialog_prefills_current_values", _check_order_edit_dialog_prefills_current_values),
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
@@ -9712,6 +10046,7 @@ def main():
         ("orders_widget_skips_duplicate_snapshot", _check_orders_widget_skips_duplicate_snapshot),
         ("order_row_delete_without_times_marks_draft", _check_order_row_delete_without_times_marks_draft),
         ("orders_cell_delete_draft_and_noop_toggle", _check_orders_cell_delete_draft_and_noop_toggle),
+        ("order_row_edit_updates_existing_order", _check_order_row_edit_updates_existing_order),
         ("orders_optimistic_lock_conflicts", _check_orders_optimistic_lock_conflicts),
         ("remaining_clinical_optimistic_lock_conflicts", _check_remaining_clinical_optimistic_lock_conflicts),
         ("medical_audit_log_triggers", _check_medical_audit_log_triggers),
