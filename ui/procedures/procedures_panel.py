@@ -125,7 +125,12 @@ class ProceduresPanel(QWidget):
         body_layout.addWidget(self.list_widget, 1)
 
         self.status_label = QLabel("")
+        self.status_label.setVisible(False)
         body_layout.addWidget(self.status_label)
+
+    def _set_status(self, text: str):
+        self.status_label.setText(text)
+        self.status_label.setVisible(bool(text))
 
     def _create_procedure_button(self, text: str, *, icon_name: str = "") -> QPushButton:
         button = QPushButton(text)
@@ -149,14 +154,15 @@ class ProceduresPanel(QWidget):
         self._resolve_runtime_context()
         if not self.remcard_service or not self.admission_id:
             self.list_widget.set_procedures([])
+            self._set_status("")
             return
 
         try:
             procedures = self.remcard_service.list_procedures(int(self.admission_id))
             self.list_widget.set_procedures(procedures)
-            self.status_label.setText(f"Записей: {len(procedures)}")
+            self._set_status("")
         except Exception as exc:
-            self.status_label.setText("Ошибка загрузки процедур.")
+            self._set_status("Ошибка загрузки процедур.")
             CustomMessageBox.warning(self, "Процедуры", str(exc))
 
     def _resolve_runtime_context(self):
@@ -225,7 +231,7 @@ class ProceduresPanel(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Печать", str(exc))
             return
-        self.status_label.setText("Формирование PDF...")
+        self._set_status("Формирование PDF...")
         self._pdf_worker = ProcedurePdfWorker(
             self.remcard_service,
             int(procedure_id),
@@ -239,11 +245,11 @@ class ProceduresPanel(QWidget):
         self._pdf_worker.start()
 
     def _on_pdf_ready(self, pdf_path: str):
-        self.status_label.setText("PDF сформирован.")
+        self._set_status("PDF сформирован.")
         open_pdf_file(pdf_path, parent=self)
 
     def _on_pdf_error(self, message: str):
-        self.status_label.setText("Ошибка PDF.")
+        self._set_status("Ошибка PDF.")
         CustomMessageBox.warning(self, "Печать", message)
 
     def _clear_pdf_worker(self):
@@ -261,7 +267,7 @@ class ProceduresPanel(QWidget):
             return
 
         self._write_pending = True
-        self.status_label.setText("Отмена процедуры...")
+        self._set_status("Отмена процедуры...")
         service = self.remcard_service
 
         def operation():
@@ -276,12 +282,12 @@ class ProceduresPanel(QWidget):
 
     def _finish_cancel_success(self):
         self._write_pending = False
-        self.status_label.setText("Процедура отменена.")
+        self._set_status("Процедура отменена.")
         self.refresh()
 
     def _finish_cancel_error(self, exc: Exception):
         self._write_pending = False
-        self.status_label.setText("Ошибка отмены.")
+        self._set_status("Ошибка отмены.")
         CustomMessageBox.warning(self, "Процедуры", str(exc))
         self.refresh()
 
