@@ -7,7 +7,7 @@ class NurseSectorProc(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("Процедуры", parent)
         self.label.hide()
-        self.container_layout.setContentsMargins(1, 1, 1, 1)
+        self.container_layout.setContentsMargins(0, 3, 0, 5)
 
         main_frame = QFrame()
         main_frame.setStyleSheet("""
@@ -50,7 +50,7 @@ class NurseSectorAnal(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("Анализы", parent)
         self.label.hide()
-        self.container_layout.setContentsMargins(1, 1, 1, 1)
+        self.container_layout.setContentsMargins(0, 3, 0, 5)
 
         main_frame = QFrame()
         main_frame.setStyleSheet("""

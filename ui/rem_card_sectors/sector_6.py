@@ -15,7 +15,7 @@ class Sector6(BaseSectorWidget):
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_6_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
-        self.main_layout_v.setContentsMargins(1, 1, 1, 5) # Нижний отступ +4px (всего 5)
+        self.main_layout_v.setContentsMargins(5, 1, 4, 5)
         self.main_layout_v.setSpacing(0)
         
         # 1. Шапка

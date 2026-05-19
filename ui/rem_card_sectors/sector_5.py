@@ -17,7 +17,7 @@ class Sector5(BaseSectorWidget):
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_5_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
-        self.main_layout_v.setContentsMargins(1, 1, 1, 5)
+        self.main_layout_v.setContentsMargins(0, 1, 0, 5)
         self.main_layout_v.setSpacing(0)
 
         self.header_lbl = QLabel("Перорально")

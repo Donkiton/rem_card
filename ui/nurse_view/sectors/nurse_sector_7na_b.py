@@ -16,7 +16,7 @@ class NurseSector7naB(BaseSectorWidget):
         self.main_container.setObjectName("sector_7na_b_nurse_main_container")
 
         self.main_layout_v = QVBoxLayout(self.main_container)
-        self.main_layout_v.setContentsMargins(5, 5, 3, 1)
+        self.main_layout_v.setContentsMargins(5, 5, 0, 1)
         self.main_layout_v.setSpacing(0)
 
         self.header_lbl = QLabel("Навигация")

@@ -18,8 +18,8 @@ class Sector7na_b(BaseSectorWidget):
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_7na_b_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
-        # Левый 5px, Верхний 5px (увеличен на 1), остальные 1
-        self.main_layout_v.setContentsMargins(5, 5, 1, 1)
+        # Правый край выровнен с верхними секторами правой колонки.
+        self.main_layout_v.setContentsMargins(5, 5, 0, 1)
         self.main_layout_v.setSpacing(0)
         
         # 1. Шапка

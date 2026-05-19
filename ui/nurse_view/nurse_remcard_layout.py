@@ -10,6 +10,12 @@ from ..shared.layout_components import CurrentPageStack, SectorFactory, Splitter
 from .components.nurse_beds_selection_widget import NurseBedsSelectionWidget
 from ..rem_card_sectors.sector_w1a import SectorW1a
 
+
+# Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
+# Чтобы вернуть его на вкладку, добавьте название вкладки в этот набор.
+BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
+
+
 class NurseRemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
 
@@ -114,6 +120,7 @@ class NurseRemCardLayoutManager(QWidget):
 
         # Центр: Стек для разных вкладок
         self.vitals_stack = QStackedWidget()
+        self.vitals_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         
         # Вкладка Витальные функции
         self.vitals_splitter = SplitterManager.create_splitter(Qt.Horizontal)
@@ -162,6 +169,7 @@ class NurseRemCardLayoutManager(QWidget):
         # Сборка рядов
         self.mid_row = SplitterManager.create_splitter(Qt.Horizontal)
         self.left_content_splitter = SplitterManager.create_splitter(Qt.Vertical)
+        self.left_content_splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
 
         self._nurse_7b_min_height = 160
         target_h = self._nurse_7b_min_height
@@ -367,6 +375,12 @@ class NurseRemCardLayoutManager(QWidget):
             widget.setFixedHeight(target_h)
         return target_h
 
+    def _apply_bottom_row_visibility(self, tab_name: str, *, is_orders: bool = False):
+        show_bottom_row = tab_name in BOTTOM_ROW_VISIBLE_TABS
+        self.bottom_row.setVisible(show_bottom_row)
+        self.sector_7b_mode_stack.setCurrentIndex(0 if is_orders else 1)
+        return show_bottom_row
+
     def _post_restore_fix(self):
         try:
             if self.selection_stack.currentIndex() == 0:
@@ -383,13 +397,16 @@ class NurseRemCardLayoutManager(QWidget):
                         or self.height()
                     ),
                 )
-                self.left_content_splitter.setSizes([
-                    max(1, left_h - self._nurse_7b_min_height),
-                    self._nurse_7b_min_height,
-                ])
-                bottom_w = max(1, int(self.bottom_row.width() or left_w))
-                bottom_equal = max(1, bottom_w // 3)
-                self.bottom_row.setSizes([bottom_equal, bottom_equal, bottom_equal])
+                if self.bottom_row.isVisible():
+                    self.left_content_splitter.setSizes([
+                        max(1, left_h - self._nurse_7b_min_height),
+                        self._nurse_7b_min_height,
+                    ])
+                    bottom_w = max(1, int(self.bottom_row.width() or left_w))
+                    bottom_equal = max(1, bottom_w // 3)
+                    self.bottom_row.setSizes([bottom_equal, bottom_equal, bottom_equal])
+                else:
+                    self.left_content_splitter.setSizes([left_h, 0])
 
                 # Принудительное выравнивание ширины 2b_g и 2b_v во вкладке баланса
                 if self.balance_top_splitter is not None:
@@ -772,8 +789,7 @@ class NurseRemCardLayoutManager(QWidget):
                         self.ensure_orders_widget()
                     self.vitals_stack.setCurrentIndex(idx)
 
-                    self.bottom_row.setVisible(not is_orders)
-                    self.sector_7b_mode_stack.setCurrentIndex(0 if is_orders else 1)
+                    self._apply_bottom_row_visibility(tab_name, is_orders=is_orders)
 
                     # Мгновенно подтягиваем данные листа назначений при открытии вкладки,
                     # чтобы не ждать следующий тик автообновления (2с).

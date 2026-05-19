@@ -23,7 +23,7 @@ class Sector3a(BaseSectorWidget):
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_3a_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
-        self.main_layout_v.setContentsMargins(5, 1, 3, 5)
+        self.main_layout_v.setContentsMargins(5, 1, 0, 5)
         self.main_layout_v.setSpacing(0)
         
         # 1. Шапка "Баланс жидкости" (Стиль как у "Показатели" в 2г)

@@ -233,7 +233,7 @@ class DataCollectorWorker(QThread):
 class NurseSectorPrint(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("Печать", parent)
-        self.label.hide(); self.container_layout.setContentsMargins(1, 1, 1, 1)
+        self.label.hide(); self.container_layout.setContentsMargins(0, 3, 0, 5)
         self.remcard_service, self.admission_id, self.card_date, self.config = None, None, None, NursePrintConfig()
         self._init_ui(); self.load_settings()
 

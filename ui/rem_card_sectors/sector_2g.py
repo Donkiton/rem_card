@@ -20,7 +20,7 @@ class Sector2g(BaseSectorWidget):
         self.main_container.setObjectName("sector_2g_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
         # Сдвигаем рамку (слой 2) сверху и снизу на 3 пикселя
-        self.main_layout_v.setContentsMargins(0, 3, 0, 3) 
+        self.main_layout_v.setContentsMargins(0, 3, 0, 5) 
         self.main_layout_v.setSpacing(0)
         
         # 1. Шапка "Показатели" (Закругление только СЛЕВА СВЕРХУ)

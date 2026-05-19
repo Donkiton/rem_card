@@ -6,7 +6,7 @@ class SectorProc(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("Процедуры", parent)
         self.label.hide()
-        self.container_layout.setContentsMargins(0, 3, 1, 3)
+        self.container_layout.setContentsMargins(0, 3, 0, 5)
         self.panel = ProceduresPanel(self)
         self.set_content(self.panel)
 

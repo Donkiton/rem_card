@@ -52,7 +52,7 @@ class SectorEvents(BaseSectorWidget):
         self.main_container.setObjectName("sector_events_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
         # Отступ 3px сверху и снизу для унификации с другими секторами
-        self.main_layout_v.setContentsMargins(0, 3, 0, 3)
+        self.main_layout_v.setContentsMargins(0, 3, 0, 5)
         self.main_layout_v.setSpacing(0)
         
         # 1. Шапка

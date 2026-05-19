@@ -10,6 +10,12 @@ from rem_card.ui.shared.display_settings_storage import (
 from .layout_components import CurrentPageStack, SectorFactory, SplitterManager
 import time
 
+
+# Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
+# Чтобы вернуть его на вкладку, добавьте название вкладки в этот набор.
+BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
+
+
 class RemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
 
@@ -95,14 +101,15 @@ class RemCardLayoutManager(QWidget):
         # Фиксируем ширину 230 пикселей для всех вкладок
         self.sector_3_4_wrapper.setFixedWidth(230) 
         wrapper_layout = QVBoxLayout(self.sector_3_4_wrapper)
-        # Отступ 2px справа для видимости рамки
-        wrapper_layout.setContentsMargins(4, 3, 2, 4) 
+        # Правый край рамок правой колонки совпадает с верхними секторами.
+        wrapper_layout.setContentsMargins(4, 3, 0, 4) 
         wrapper_layout.setSpacing(0)
         wrapper_layout.addWidget(self.sector_3_4_container)
         wrapper_layout.addWidget(self.sector_3_4_spacer)
 
         # Центр: Стек для разных вкладок
         self.vitals_stack = QStackedWidget()
+        self.vitals_stack.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         
         # Вкладка Витальные функции
         self.vitals_splitter = SplitterManager.create_splitter(Qt.Horizontal)
@@ -164,6 +171,7 @@ class RemCardLayoutManager(QWidget):
         # Основной ряд (Центр + Правая колонка)
         self.mid_row = SplitterManager.create_splitter(Qt.Horizontal)
         self.left_content_splitter = SplitterManager.create_splitter(Qt.Vertical)
+        self.left_content_splitter.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.left_content_splitter.setChildrenCollapsible(False)
 
         self._doctor_7b_min_height = 160
@@ -422,6 +430,12 @@ class RemCardLayoutManager(QWidget):
             widget.setFixedHeight(target_h)
         return target_h
 
+    def _apply_bottom_row_visibility(self, tab_name: str, *, is_orders: bool = False):
+        show_bottom_row = tab_name in BOTTOM_ROW_VISIBLE_TABS
+        self.bottom_row.setVisible(show_bottom_row)
+        self.sector_7b_mode_stack.setCurrentIndex(0 if is_orders else 1)
+        return show_bottom_row
+
     def _post_restore_fix(self):
         try:
             # Установка пропорций сплиттеров (только если мы в режиме карты)
@@ -443,13 +457,16 @@ class RemCardLayoutManager(QWidget):
                         or self.height()
                     ),
                 )
-                self.left_content_splitter.setSizes([
-                    max(1, left_h - self._doctor_7b_min_height),
-                    self._doctor_7b_min_height,
-                ])
-                bottom_w = max(1, int(self.bottom_row.width() or left_w))
-                bottom_equal = max(1, bottom_w // 3)
-                self.bottom_row.setSizes([bottom_equal, bottom_equal, bottom_equal])
+                if self.bottom_row.isVisible():
+                    self.left_content_splitter.setSizes([
+                        max(1, left_h - self._doctor_7b_min_height),
+                        self._doctor_7b_min_height,
+                    ])
+                    bottom_w = max(1, int(self.bottom_row.width() or left_w))
+                    bottom_equal = max(1, bottom_w // 3)
+                    self.bottom_row.setSizes([bottom_equal, bottom_equal, bottom_equal])
+                else:
+                    self.left_content_splitter.setSizes([left_h, 0])
                 
                 # Принудительное выравнивание ширины 2b_g и 2b_v во вкладке баланса
                 if self.balance_top_splitter is not None:
@@ -894,8 +911,7 @@ class RemCardLayoutManager(QWidget):
             try:
                 # Всегда 230px
                 self.sector_3_4_wrapper.setFixedWidth(230)
-                self.bottom_row.setVisible(not is_orders)
-                self.sector_7b_mode_stack.setCurrentIndex(0 if is_orders else 1)
+                self._apply_bottom_row_visibility(tab_name, is_orders=is_orders)
                 self.sector_3_4_spacer.show()
 
                 if is_orders:

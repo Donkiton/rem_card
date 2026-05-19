@@ -502,8 +502,8 @@ class SectorPrint(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("Печать", parent)
         self.label.hide()
-        # Отступ: 3px сверху и снизу, 0px слева, 1px справа
-        self.container_layout.setContentsMargins(0, 3, 1, 3)
+        # Внешняя рамка совпадает с эталонной рамкой вкладки "Назначения".
+        self.container_layout.setContentsMargins(0, 3, 0, 5)
         self.remcard_service = None
         self.admission_id = None
         self.card_date = None

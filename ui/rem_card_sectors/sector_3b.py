@@ -23,7 +23,7 @@ class Sector3b(BaseSectorWidget):
         self.main_container = QWidget()
         self.main_container.setObjectName("sector_3b_main_container")
         self.main_layout_v = QVBoxLayout(self.main_container)
-        self.main_layout_v.setContentsMargins(5, 3, 3, 5)
+        self.main_layout_v.setContentsMargins(5, 3, 0, 5)
         self.main_layout_v.setSpacing(0)
         
         # 1. Шапка "Выведено" (Стиль с серым фоном и верхними закруглениями)

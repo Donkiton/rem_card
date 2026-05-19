@@ -140,7 +140,7 @@ class ChartWidget(QWidget):
 
         self.layout = QVBoxLayout(self)
         # РЎРґРІРёРіР°РµРј СЂР°РјРєСѓ (СЃР»РѕР№ 2): СЃРІРµСЂС…Сѓ 3px, СЃРЅРёР·Сѓ 3px, СЃРїСЂР°РІР° 0px (СѓРјРµРЅСЊС€РµРЅ РґР»СЏ СЃРґРІРёРіР° РІРїСЂР°РІРѕ)
-        self.layout.setContentsMargins(0, 3, 0, 3)
+        self.layout.setContentsMargins(0, 3, 0, 5)
         self.layout.setSpacing(0)
 
         self.value_font = QFont("Segoe UI", 10, QFont.Bold)

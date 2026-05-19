@@ -9,8 +9,8 @@ class SectorAnal(BaseSectorWidget):
         # Скрываем стандартную шапку
         self.label.hide()
         
-        # Отступ: 3px сверху и снизу, 0px слева, 1px справа
-        self.container_layout.setContentsMargins(0, 3, 1, 3)
+        # Внешняя рамка совпадает с эталонной рамкой вкладки "Назначения".
+        self.container_layout.setContentsMargins(0, 3, 0, 5)
         
         # Общий фрейм с рамкой
         main_frame = QFrame()

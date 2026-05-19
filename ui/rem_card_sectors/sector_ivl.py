@@ -60,7 +60,7 @@ class SectorIvl(BaseSectorWidget):
     def __init__(self, parent=None):
         super().__init__("ИВЛ", parent)
         self.label.hide()
-        self.container_layout.setContentsMargins(0, 3, 1, 3)
+        self.container_layout.setContentsMargins(0, 3, 0, 5)
 
         self.remcard_service = None
         self.admission_id: Optional[int] = None
@@ -367,7 +367,8 @@ class SectorIvl(BaseSectorWidget):
         self.btn_add_event = QPushButton("Добавить событие")
         self.btn_add_event.setObjectName("ivl_btn_custom")
         self.btn_add_event.clicked.connect(self._on_add_event_clicked)
-        self.btn_add_event.setFixedWidth(170)
+        self.btn_add_event.setMinimumWidth(140)
+        self.btn_add_event.setMaximumWidth(160)
 
         event_row_top = QHBoxLayout()
         event_row_top.setContentsMargins(0, 0, 0, 0)
