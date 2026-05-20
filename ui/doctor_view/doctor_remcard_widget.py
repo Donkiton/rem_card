@@ -528,7 +528,8 @@ class DoctorRemCardWidget(QWidget):
             idle_window_sec=CARD_HYDRATION_FOREGROUND_IDLE_SEC,
             names={"orders", "orders_show"},
         )
-        if should_defer and defer_attempts < CARD_HYDRATION_MAX_DEFER_ATTEMPTS:
+        active_foreground = str(reason or "").startswith("active:")
+        if should_defer and (active_foreground or defer_attempts < CARD_HYDRATION_MAX_DEFER_ATTEMPTS):
             delay_ms = max(1000, CARD_OPEN_HYDRATE_DELAY_MS)
             logger.info(
                 "[DOCTOR_VIEW] card_hydration_deferred_for_foreground admission_id=%s reason=%s age_sec=%s attempt=%s delay_ms=%s",

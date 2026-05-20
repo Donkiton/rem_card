@@ -32,18 +32,27 @@ from .ventilation_service import VentilationService
 _ORDERS_SNAPSHOT_CALLER = ContextVar("remcard_orders_snapshot_caller", default="legacy")
 _ORDERS_SNAPSHOT_CONTEXT_HASH = ContextVar("remcard_orders_snapshot_context_hash", default="unknown")
 _ORDERS_SNAPSHOT_REQUEST_SOURCE = ContextVar("remcard_orders_snapshot_request_source", default="refresh")
+_ORDERS_SNAPSHOT_STEP_OBSERVER = ContextVar("remcard_orders_snapshot_step_observer", default=None)
 _DIRECT_ORDERS_BUILD_WARNED: set[tuple[str, int, str, str]] = set()
 _LEGACY_ORDERS_ACCESS_COUNT = 0
 
 
 @contextmanager
-def orders_snapshot_caller(source: str, *, context_hash: Optional[str] = None, request_source: Optional[str] = None):
+def orders_snapshot_caller(
+    source: str,
+    *,
+    context_hash: Optional[str] = None,
+    request_source: Optional[str] = None,
+    step_observer: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
+):
     token = _ORDERS_SNAPSHOT_CALLER.set(str(source or "legacy"))
     context_token = _ORDERS_SNAPSHOT_CONTEXT_HASH.set(str(context_hash or "unknown"))
     request_source_token = _ORDERS_SNAPSHOT_REQUEST_SOURCE.set(str(request_source or "refresh"))
+    step_observer_token = _ORDERS_SNAPSHOT_STEP_OBSERVER.set(step_observer)
     try:
         yield
     finally:
+        _ORDERS_SNAPSHOT_STEP_OBSERVER.reset(step_observer_token)
         _ORDERS_SNAPSHOT_REQUEST_SOURCE.reset(request_source_token)
         _ORDERS_SNAPSHOT_CONTEXT_HASH.reset(context_token)
         _ORDERS_SNAPSHOT_CALLER.reset(token)
@@ -501,19 +510,90 @@ class RemCardService(QObject):
         caller = str(_ORDERS_SNAPSHOT_CALLER.get() or "legacy")
         context_hash = str(_ORDERS_SNAPSHOT_CONTEXT_HASH.get() or "unknown")
         request_source = str(_ORDERS_SNAPSHOT_REQUEST_SOURCE.get() or "refresh").strip().lower()
-        metric_source = "click" if request_source == "user" else "refresh"
+        metric_source = "click" if request_source in {"user", "click"} else request_source
+        if metric_source not in {"click", "post_finalize", "monitor", "cache"}:
+            metric_source = "monitor"
         total_started = time.perf_counter()
 
-        def _record_orders_snapshot_step(step: str, started: float, *, row_count=None) -> None:
+        def _notify_orders_snapshot_step(event: str, step: str, **fields) -> None:
+            observer = _ORDERS_SNAPSHOT_STEP_OBSERVER.get()
+            if observer is None:
+                return
+            try:
+                observer(event, step, fields)
+            except Exception:
+                logger.debug("Orders snapshot step observer failed", exc_info=True)
+
+        def _record_orders_snapshot_step_start(step: str) -> float:
+            started = time.perf_counter()
+            logger.info(
+                "[RemCardService] orders_snapshot_step_start step=%s admission_id=%s caller=%s context_hash=%s",
+                step,
+                admission_id,
+                caller,
+                context_hash,
+            )
+            record_metric(
+                "orders_snapshot_step_start",
+                1,
+                admission_id=admission_id,
+                source=metric_source,
+                step=step,
+                caller=caller,
+                request_source=request_source,
+                context_hash=context_hash,
+                only_committed=int(bool(only_committed)),
+            )
+            _notify_orders_snapshot_step("start", step, started=started)
+            return started
+
+        def _record_orders_snapshot_step_end(
+            step: str,
+            started: float,
+            *,
+            row_count=None,
+            status: str = "ok",
+        ) -> None:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             logger.info(
-                "[RemCardService] orders_snapshot_sql_step_ms=%.2f step=%s admission_id=%s caller=%s context_hash=%s row_count=%s",
+                "[RemCardService] orders_snapshot_step_end step=%s admission_id=%s caller=%s context_hash=%s status=%s elapsed_ms=%.2f row_count=%s",
+                step,
+                admission_id,
+                caller,
+                context_hash,
+                status,
+                elapsed_ms,
+                row_count,
+            )
+            record_metric(
+                "orders_snapshot_step_end",
+                round(elapsed_ms, 3),
+                admission_id=admission_id,
+                source=metric_source,
+                step=step,
+                caller=caller,
+                request_source=request_source,
+                context_hash=context_hash,
+                row_count=row_count,
+                only_committed=int(bool(only_committed)),
+                status=status,
+            )
+            _notify_orders_snapshot_step(
+                "end",
+                step,
+                elapsed_ms=elapsed_ms,
+                row_count=row_count,
+                status=status,
+            )
+            logger.info(
+                "[RemCardService] orders_snapshot_sql_step_ms=%.2f step=%s admission_id=%s caller=%s context_hash=%s row_count=%s status=%s",
                 elapsed_ms,
                 step,
                 admission_id,
                 caller,
                 context_hash,
                 row_count,
+                status,
             )
             record_metric(
                 "orders_snapshot_sql_step_ms",
@@ -526,6 +606,7 @@ class RemCardService(QObject):
                 context_hash=context_hash,
                 row_count=row_count,
                 only_committed=int(bool(only_committed)),
+                status=status,
             )
 
         if caller != "read_coordinator":
@@ -542,55 +623,81 @@ class RemCardService(QObject):
                     context_hash,
                     _LEGACY_ORDERS_ACCESS_COUNT,
                 )
-        step_started = time.perf_counter()
-        all_orders = self.get_orders(admission_id, shift_date, only_committed=only_committed)
-        _record_orders_snapshot_step("get_orders", step_started, row_count=len(all_orders or ()))
+        step_started = _record_orders_snapshot_step_start("get_orders")
+        try:
+            all_orders = self.get_orders(admission_id, shift_date, only_committed=only_committed)
+        except Exception:
+            _record_orders_snapshot_step_end("get_orders", step_started, status="error")
+            raise
+        _record_orders_snapshot_step_end("get_orders", step_started, row_count=len(all_orders or ()))
 
-        step_started = time.perf_counter()
-        visible_orders = (
-            [order for order in all_orders if order]
-            if only_committed
-            else [order for order in all_orders if order and order.status != OrderStatus.DELETED]
-        )
-        _record_orders_snapshot_step("filter_visible_orders", step_started, row_count=len(visible_orders))
-
-        step_started = time.perf_counter()
-        admin_rows = [
-            dict(row)
-            for row in self.get_latest_administrations(
-                admission_id=admission_id,
-                shift_date=shift_date,
-                only_committed=only_committed,
-                include_deleted=True,
-                include_cancelled=True,
-                include_deleted_orders=True,
+        step_started = _record_orders_snapshot_step_start("filter_visible_orders")
+        try:
+            visible_orders = (
+                [order for order in all_orders if order]
+                if only_committed
+                else [order for order in all_orders if order and order.status != OrderStatus.DELETED]
             )
-        ]
-        _record_orders_snapshot_step("get_latest_administrations", step_started, row_count=len(admin_rows))
+        except Exception:
+            _record_orders_snapshot_step_end("filter_visible_orders", step_started, status="error")
+            raise
+        _record_orders_snapshot_step_end("filter_visible_orders", step_started, row_count=len(visible_orders))
 
-        step_started = time.perf_counter()
-        has_any_draft = self._orders.has_drafts(admission_id, shift_date=shift_date)
-        _record_orders_snapshot_step("has_drafts", step_started)
+        step_started = _record_orders_snapshot_step_start("get_latest_administrations")
+        try:
+            admin_rows = [
+                dict(row)
+                for row in self.get_latest_administrations(
+                    admission_id=admission_id,
+                    shift_date=shift_date,
+                    only_committed=only_committed,
+                    include_deleted=True,
+                    include_cancelled=True,
+                    include_deleted_orders=True,
+                )
+            ]
+        except Exception:
+            _record_orders_snapshot_step_end("get_latest_administrations", step_started, status="error")
+            raise
+        _record_orders_snapshot_step_end("get_latest_administrations", step_started, row_count=len(admin_rows))
 
-        has_any_administrations = any(
-            str(row.get("status") or "") not in ("deleted", "cancelled")
-            for row in admin_rows
-        )
+        step_started = _record_orders_snapshot_step_start("has_drafts")
+        try:
+            has_any_draft = self._orders.has_drafts(admission_id, shift_date=shift_date)
+        except Exception:
+            _record_orders_snapshot_step_end("has_drafts", step_started, status="error")
+            raise
+        _record_orders_snapshot_step_end("has_drafts", step_started)
 
-        snapshot: Dict[str, Any] = {
-            "admission_id": admission_id,
-            "shift_date": shift_date,
-            "only_committed": bool(only_committed),
-            "orders": visible_orders,
-            "admin_rows": admin_rows,
-            "has_any_draft": has_any_draft,
-            "has_any_administrations": has_any_administrations,
-            "has_any_orders": bool(visible_orders),
-        }
+        step_started = _record_orders_snapshot_step_start("finalize")
+        try:
+            has_any_administrations = any(
+                str(row.get("status") or "") not in ("deleted", "cancelled")
+                for row in admin_rows
+            )
+
+            snapshot: Dict[str, Any] = {
+                "admission_id": admission_id,
+                "shift_date": shift_date,
+                "only_committed": bool(only_committed),
+                "orders": visible_orders,
+                "admin_rows": admin_rows,
+                "has_any_draft": has_any_draft,
+                "has_any_administrations": has_any_administrations,
+                "has_any_orders": bool(visible_orders),
+            }
+        except Exception:
+            _record_orders_snapshot_step_end("finalize", step_started, status="error")
+            raise
+        _record_orders_snapshot_step_end("finalize", step_started, row_count=len(visible_orders))
         if include_change_cursor:
-            step_started = time.perf_counter()
-            snapshot["change_id"] = self.get_latest_change_id(admission_id, include_global=False)
-            _record_orders_snapshot_step("get_latest_change_id", step_started)
+            step_started = _record_orders_snapshot_step_start("get_latest_change_id")
+            try:
+                snapshot["change_id"] = self.get_latest_change_id(admission_id, include_global=False)
+            except Exception:
+                _record_orders_snapshot_step_end("get_latest_change_id", step_started, status="error")
+                raise
+            _record_orders_snapshot_step_end("get_latest_change_id", step_started)
         total_elapsed_ms = (time.perf_counter() - total_started) * 1000.0
         record_metric(
             "orders_snapshot_build_total_ms",

@@ -309,6 +309,25 @@ class DatabaseManager:
             except Exception as exc:
                 logger.debug("Startup quick_check idle probe failed: %s", exc)
                 return False
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+            names={"orders", "orders_show"},
+        )
+        if should_defer:
+            logger.info(
+                "Background startup quick_check deferred: foreground read is active/recent (reason=%s age_sec=%s idle_window_sec=%.1f)",
+                reason,
+                None if age_sec is None else round(age_sec, 3),
+                PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+            )
+            record_metric(
+                "startup_quick_check_deferred_foreground_read",
+                1,
+                reason=reason,
+                age_sec=None if age_sec is None else round(age_sec, 3),
+                idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+            )
+            return False
         return True
 
     def _maybe_rotate_db_lifecycle(self):

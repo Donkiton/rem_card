@@ -12,7 +12,11 @@ from itertools import count
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple
 
-from rem_card.app.foreground_activity import foreground_read
+from rem_card.app.foreground_activity import (
+    foreground_read,
+    mark_foreground_read_stalled,
+    poison_foreground_read,
+)
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.data.dao.sync_cursor import EPOCH_SYNC_TS, is_cursor_newer, make_sync_cursor
@@ -37,6 +41,19 @@ READ_MONITOR_STATE_MAX_AGE_SEC = max(
     2.0,
     float(os.environ.get("REMCARD_READ_MONITOR_STATE_MAX_AGE_SEC", "5")),
 )
+READ_ORDERS_STALL_THRESHOLD_SEC = max(
+    0.05,
+    float(os.environ.get("REMCARD_ORDERS_STALL_THRESHOLD_SEC", "5")),
+)
+READ_ORDERS_COALESCE_WAIT_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_ORDERS_COALESCE_WAIT_SEC", "0.25")),
+)
+READ_ORDERS_POISON_THRESHOLD_SEC = max(
+    READ_ORDERS_STALL_THRESHOLD_SEC,
+    float(os.environ.get("REMCARD_ORDERS_POISON_THRESHOLD_SEC", "12")),
+)
+READ_ORDERS_RETIRED_REFRESH_MAX = max(20, int(os.environ.get("REMCARD_ORDERS_RETIRED_REFRESH_MAX", "100")))
 
 _VALID_ROLES = {"doctor", "nurse"}
 _VALID_MODES = {"live", "archive"}
@@ -134,6 +151,16 @@ class PatientSnapshotContext(SnapshotContext):
         if normalized.hour < 8:
             shift_start -= timedelta(days=1)
         return shift_start
+
+
+@dataclass(frozen=True)
+class OrdersCachedDeltaResult:
+    snapshot: Optional[Dict[str, Any]] = None
+    delta_attempted: bool = False
+    delta_applied: int = 0
+    delta_failure_reason: str = "0"
+    delta_time_ms: float = 0.0
+    delta_base: str = "none"
 
 
 @dataclass
@@ -375,7 +402,12 @@ class ReadCoordinator:
         self._load_waiting: list[tuple[int, int, str, str, str, str]] = []
         self._load_counter = count(1)
         self._trace_counter = count(1)
+        self._orders_generation_counter = count(1)
         self._active_loads = 0
+        self._active_load_tokens: dict[str, dict[str, Any]] = {}
+        self._orders_active_refreshes: dict[tuple[str, int, str, str, str, str, str], dict[str, Any]] = {}
+        self._orders_retired_refreshes: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self._orders_refresh_lock = threading.Lock()
         self._orders_telemetry = OrdersTelemetryState()
         self._orders_telemetry_lock = threading.Lock()
 
@@ -857,21 +889,42 @@ class ReadCoordinator:
         _retry: bool = False,
     ):
         context_hash = context.hash()
+        request_source = self._normalize_orders_request_source(source)
+        request_id = self._next_trace_id("orders", context_hash)
+        step_state = self._new_orders_step_state()
+        done_event = threading.Event()
+        self._start_orders_load_watchdog(
+            done_event=done_event,
+            context=context,
+            context_hash=context_hash,
+            request_id=request_id,
+            source=request_source,
+            priority=priority,
+            step_state=step_state,
+        )
         with foreground_read(
             "orders",
             admission_id=context.admission_id,
-            source=source,
+            source=request_source,
             context_hash=context_hash,
             priority=self._normalize_priority(priority),
+            request_id=request_id,
+            generation=0,
         ):
-            return self._load_orders_tab_impl(
-                context,
-                source=source,
-                priority=priority,
-                force_refresh=force_refresh,
-                timeout_sec=timeout_sec,
-                _retry=_retry,
-            )
+            try:
+                return self._load_orders_tab_impl(
+                    context,
+                    source=request_source,
+                    priority=priority,
+                    force_refresh=force_refresh,
+                    timeout_sec=timeout_sec,
+                    _retry=_retry,
+                    request_id=request_id,
+                    step_state=step_state,
+                    done_event=done_event,
+                )
+            finally:
+                done_event.set()
 
     def _load_orders_tab_impl(
         self,
@@ -882,245 +935,288 @@ class ReadCoordinator:
         force_refresh: bool = False,
         timeout_sec: float = READ_LOAD_TIMEOUT_SEC,
         _retry: bool = False,
+        request_id: Optional[str] = None,
+        step_state: Optional[dict[str, Any]] = None,
+        done_event: Optional[threading.Event] = None,
     ):
         context_hash = context.hash()
-        trace_id = self._next_trace_id("orders", context_hash)
+        trace_id = request_id or self._next_trace_id("orders", context_hash)
+        source = self._normalize_orders_request_source(source)
         started = time.perf_counter()
         cache_key = context.cache_key()
-        delta_attempted = False
-        delta_applied = 0
-        delta_failure_reason = "0"
-        delta_time_ms = 0.0
-        delta_base = "none"
-        base_snapshot = None
-
-        if context.mode == "live" and not force_refresh:
-            cached = self.get_cached_tab(context)
-            if cached is not None:
-                base_snapshot = cached
-                delta_base = "cache"
-            else:
-                base_snapshot = self._orders_stale_snapshots.get(cache_key)
-                if base_snapshot is not None:
-                    delta_base = "stale_base"
-                    logger.info(
-                        "[ReadCoordinator] orders_cache_lookup hit=0 stale_base=1 context_hash=%s trace_id=%s",
-                        context_hash,
-                        base_snapshot.get("load_trace_id") or trace_id,
-                    )
-
-        if base_snapshot is not None and not force_refresh:
-            current_change_id = self._get_orders_current_change_id(context)
-            base_version = int(base_snapshot.get("version") or 0)
-            if current_change_id <= base_version:
-                if context.mode == "live" and delta_base != "cache":
-                    self._store_orders_tab(context, base_snapshot)
-                elapsed_ms = (time.perf_counter() - started) * 1000.0
-                logger.info(
-                    "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=0 orders_delta_failed=0 orders_delta_time_ms=0.00 orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s",
-                    elapsed_ms,
-                    source,
-                    context_hash,
-                    base_snapshot.get("load_trace_id") or trace_id,
-                    self._normalize_priority(priority),
-                    delta_base,
-                    base_snapshot.get("version"),
-                )
-                self._record_orders_load_telemetry(
-                    source=source,
-                    cache_hit=True,
-                    delta_applied=False,
-                    delta_failure_reason="0",
-                    delta_time_ms=0.0,
-                    elapsed_ms=elapsed_ms,
-                    fallback_after_delta=False,
-                    admission_id=context.admission_id,
-                    context_hash=context_hash,
-                    trace_id=base_snapshot.get("load_trace_id") or trace_id,
-                    priority=priority,
-                    fallback_used=0,
-                    base=delta_base,
-                    version=int(base_snapshot.get("version") or 0),
-                )
-                return base_snapshot
-
-            stale_age_sec = self._snapshot_age_sec(base_snapshot)
-            if (
-                delta_base == "stale_base"
-                and stale_age_sec is not None
-                and stale_age_sec > READ_ORDERS_DELTA_STALE_THRESHOLD_SEC
-            ):
-                delta_attempted = True
-                delta_failure_reason = f"stale_base_age_exceeded:{stale_age_sec:.2f}"
-                logger.info(
-                    "[ReadCoordinator] orders_delta_skip reason=%s threshold_sec=%.2f context_hash=%s trace_id=%s priority=%s base=%s",
-                    delta_failure_reason,
-                    READ_ORDERS_DELTA_STALE_THRESHOLD_SEC,
-                    context_hash,
-                    trace_id,
-                    self._normalize_priority(priority),
-                    delta_base,
-                )
-            else:
-                delta_attempted = True
-                delta_started = time.perf_counter()
-                try:
-                    delta_snapshot = self._try_apply_orders_delta(
-                        context=context,
-                        base_snapshot=base_snapshot,
-                        current_change_id=current_change_id,
-                        source=source,
-                        trace_id=trace_id,
-                    )
-                    delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
-                    delta_applied = 1
-                    elapsed_ms = (time.perf_counter() - started) * 1000.0
-                    logger.info(
-                        "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=1 orders_delta_failed=0 orders_delta_time_ms=%.2f orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s",
-                        elapsed_ms,
-                        source,
-                        delta_time_ms,
-                        context_hash,
-                        delta_snapshot.get("load_trace_id") or trace_id,
-                        self._normalize_priority(priority),
-                        delta_base,
-                        delta_snapshot.get("version"),
-                    )
-                    self._record_orders_load_telemetry(
-                        source=source,
-                        cache_hit=True,
-                        delta_applied=True,
-                        delta_failure_reason="0",
-                        delta_time_ms=delta_time_ms,
-                        elapsed_ms=elapsed_ms,
-                        fallback_after_delta=False,
-                        admission_id=context.admission_id,
-                        context_hash=context_hash,
-                        trace_id=delta_snapshot.get("load_trace_id") or trace_id,
-                        priority=priority,
-                        fallback_used=0,
-                        base=delta_base,
-                        version=int(delta_snapshot.get("version") or 0),
-                    )
-                    return delta_snapshot
-                except Exception as exc:
-                    delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
-                    delta_failure_reason = str(exc) or exc.__class__.__name__
-                    logger.log(
-                        self._orders_delta_fallback_log_level(delta_failure_reason),
-                        "[ReadCoordinator] orders_delta_applied=0 orders_delta_failed=%s orders_delta_time_ms=%.2f orders_fallback_after_delta=1 context_hash=%s trace_id=%s priority=%s base=%s",
-                        delta_failure_reason,
-                        delta_time_ms,
-                        context_hash,
-                        trace_id,
-                        self._normalize_priority(priority),
-                        delta_base,
-                    )
+        step_state = step_state or self._new_orders_step_state()
+        done_event = done_event or threading.Event()
+        delta_result = self._load_orders_cached_or_delta(
+            context=context,
+            source=source,
+            priority=priority,
+            force_refresh=force_refresh,
+            started=started,
+            trace_id=trace_id,
+            context_hash=context_hash,
+            cache_key=cache_key,
+        )
+        if delta_result.snapshot is not None:
+            return delta_result.snapshot
+        delta_attempted = delta_result.delta_attempted
+        delta_applied = delta_result.delta_applied
+        delta_failure_reason = delta_result.delta_failure_reason
+        delta_time_ms = delta_result.delta_time_ms
 
         fallback_used = 0
         stale_version = int(self._orders_stale_versions.get(cache_key) or 0)
         stale_snapshot_for_validation = self._orders_stale_snapshots.get(cache_key)
-        with self._load_slot(
-            priority=priority,
-            scope="orders",
+        active_guard = self._begin_orders_refresh(
+            context=context,
             context_hash=context_hash,
+            request_id=trace_id,
             source=source,
-            timeout_sec=timeout_sec,
-            trace_id=trace_id,
-        ):
-            try:
-                build_started = time.perf_counter()
-                with orders_snapshot_caller("read_coordinator", context_hash=context_hash, request_source=source):
-                    snapshot = self.remcard_service.build_orders_snapshot(
-                        context.admission_id,
-                        context.shift_date,
-                        only_committed=(context.variant == "committed"),
-                        include_change_cursor=True,
-                    )
-                build_elapsed_ms = (time.perf_counter() - build_started) * 1000.0
-                logger.info(
-                    "[ReadCoordinator] build_orders_snapshot_time_ms=%.2f path=read_coordinator admission_id=%s source=%s context_hash=%s trace_id=%s",
-                    build_elapsed_ms,
-                    context.admission_id,
-                    source,
-                    context_hash,
-                    trace_id,
-                )
-                record_metric(
-                    "build_orders_snapshot_time_ms",
-                    round(build_elapsed_ms, 3),
-                    admission_id=context.admission_id,
-                    source="click" if str(source or "").lower() == "user" else "refresh",
-                    path="read_coordinator",
-                    context_hash=context_hash,
-                    trace_id=trace_id,
-                    status="ok",
-                )
-            except Exception:
-                failed_elapsed_ms = (time.perf_counter() - build_started) * 1000.0 if "build_started" in locals() else 0.0
-                record_metric(
-                    "build_orders_snapshot_time_ms",
-                    round(failed_elapsed_ms, 3),
-                    admission_id=context.admission_id,
-                    source="click" if str(source or "").lower() == "user" else "refresh",
-                    path="read_coordinator",
-                    context_hash=context_hash,
-                    trace_id=trace_id,
-                    status="error",
-                )
-                fallback_used = 1
-                logger.exception(
-                    "[ReadCoordinator] coordinator_fail scope=orders admission_id=%s source=%s priority=%s context_hash=%s trace_id=%s reason=build_orders_snapshot_failed",
-                    context.admission_id,
-                    source,
-                    self._normalize_priority(priority),
-                    context_hash,
-                    trace_id,
-                )
-                fallback_started = time.perf_counter()
-                with orders_snapshot_caller("legacy_fallback", context_hash=context_hash, request_source=source):
-                    snapshot = self.remcard_service.build_orders_snapshot(
-                        context.admission_id,
-                        context.shift_date,
-                        only_committed=(context.variant == "committed"),
-                        include_change_cursor=True,
-                    )
-                fallback_elapsed_ms = (time.perf_counter() - fallback_started) * 1000.0
-                record_metric(
-                    "build_orders_snapshot_time_ms",
-                    round(fallback_elapsed_ms, 3),
-                    admission_id=context.admission_id,
-                    source="refresh",
-                    path="legacy_fallback",
-                    context_hash=context_hash,
-                    trace_id=trace_id,
-                    status="ok",
-                )
-                logger.warning(
-                    "[ReadCoordinator] fallback_to_legacy scope=orders admission_id=%s source=%s priority=%s context_hash=%s trace_id=%s reason=build_orders_snapshot_failed",
-                    context.admission_id,
-                    source,
-                    self._normalize_priority(priority),
-                    context_hash,
-                    trace_id,
+            priority=priority,
+            done_event=done_event,
+        )
+        if not active_guard["started"]:
+            coalesced = self._coalesced_orders_snapshot(
+                context=context,
+                active=active_guard,
+                source=source,
+                priority=priority,
+                started=started,
+                request_id=trace_id,
+            )
+            if coalesced is not None:
+                return coalesced
+            raise TimeoutError(
+                f"Orders refresh already active and no cached snapshot is available context_hash={context_hash}"
             )
 
-        frozen_snapshot = self._finalize_snapshot(
-            snapshot=snapshot,
-            scope="orders_tab",
-            tab_name="orders",
-            cache_key=cache_key,
-            context_hash=context_hash,
-            role=context.role,
-            mode=context.mode,
-            source_db=context.source_db,
-            variant=context.variant,
-            load_strategy="orders_snapshot",
-            load_trace_id=trace_id,
+        generation = int(active_guard.get("generation") or 0)
+        try:
+            with self._load_slot(
+                priority=priority,
+                scope="orders",
+                context_hash=context_hash,
+                source=source,
+                timeout_sec=timeout_sec,
+                trace_id=trace_id,
+            ):
+                try:
+                    build_started = time.perf_counter()
+                    with orders_snapshot_caller(
+                        "read_coordinator",
+                        context_hash=context_hash,
+                        request_source=source,
+                        step_observer=self._orders_step_observer(
+                            step_state,
+                            cache_key=cache_key,
+                            request_id=trace_id,
+                        ),
+                    ):
+                        snapshot = self.remcard_service.build_orders_snapshot(
+                            context.admission_id,
+                            context.shift_date,
+                            only_committed=(context.variant == "committed"),
+                            include_change_cursor=True,
+                        )
+                    build_elapsed_ms = (time.perf_counter() - build_started) * 1000.0
+                    logger.info(
+                        "[ReadCoordinator] build_orders_snapshot_time_ms=%.2f path=read_coordinator admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s",
+                        build_elapsed_ms,
+                        context.admission_id,
+                        source,
+                        context_hash,
+                        trace_id,
+                        generation,
+                    )
+                    record_metric(
+                        "build_orders_snapshot_time_ms",
+                        round(build_elapsed_ms, 3),
+                        admission_id=context.admission_id,
+                        source=self._orders_metric_source(source, cache_hit=False),
+                        path="read_coordinator",
+                        context_hash=context_hash,
+                        trace_id=trace_id,
+                        request_id=trace_id,
+                        generation=generation,
+                        status="ok",
+                    )
+                except Exception:
+                    failed_elapsed_ms = (time.perf_counter() - build_started) * 1000.0 if "build_started" in locals() else 0.0
+                    record_metric(
+                        "build_orders_snapshot_time_ms",
+                        round(failed_elapsed_ms, 3),
+                        admission_id=context.admission_id,
+                        source=self._orders_metric_source(source, cache_hit=False),
+                        path="read_coordinator",
+                        context_hash=context_hash,
+                        trace_id=trace_id,
+                        request_id=trace_id,
+                        generation=generation,
+                        status="error",
+                    )
+                    fallback_used = 1
+                    logger.exception(
+                        "[ReadCoordinator] coordinator_fail scope=orders admission_id=%s source=%s priority=%s context_hash=%s trace_id=%s generation=%s reason=build_orders_snapshot_failed",
+                        context.admission_id,
+                        source,
+                        self._normalize_priority(priority),
+                        context_hash,
+                        trace_id,
+                        generation,
+                    )
+                    fallback_started = time.perf_counter()
+                    with orders_snapshot_caller(
+                        "legacy_fallback",
+                        context_hash=context_hash,
+                        request_source=source,
+                        step_observer=self._orders_step_observer(
+                            step_state,
+                            cache_key=cache_key,
+                            request_id=trace_id,
+                        ),
+                    ):
+                        snapshot = self.remcard_service.build_orders_snapshot(
+                            context.admission_id,
+                            context.shift_date,
+                            only_committed=(context.variant == "committed"),
+                            include_change_cursor=True,
+                        )
+                    fallback_elapsed_ms = (time.perf_counter() - fallback_started) * 1000.0
+                    record_metric(
+                        "build_orders_snapshot_time_ms",
+                        round(fallback_elapsed_ms, 3),
+                        admission_id=context.admission_id,
+                        source=self._orders_metric_source(source, cache_hit=False),
+                        path="legacy_fallback",
+                        context_hash=context_hash,
+                        trace_id=trace_id,
+                        request_id=trace_id,
+                        generation=generation,
+                        status="ok",
+                    )
+                    logger.warning(
+                        "[ReadCoordinator] fallback_to_legacy scope=orders admission_id=%s source=%s priority=%s context_hash=%s trace_id=%s generation=%s reason=build_orders_snapshot_failed",
+                        context.admission_id,
+                        source,
+                        self._normalize_priority(priority),
+                        context_hash,
+                        trace_id,
+                        generation,
+                    )
+        except Exception:
+            self._expire_orders_refresh(
+                context.cache_key(),
+                request_id=trace_id,
+                reason="build_snapshot_error",
+                context_hash=context_hash,
+            )
+            raise
+
+        internal_step_started = self._record_orders_internal_step_start(
+            step_state,
+            "content_hash_finalize",
+            admission_id=context.admission_id,
             source=source,
-            stale=False,
-            invalidate_reason=None,
+            context_hash=context_hash,
+            trace_id=trace_id,
+            generation=generation,
+            cache_key=cache_key,
         )
+        try:
+            frozen_snapshot = self._finalize_snapshot(
+                snapshot=snapshot,
+                scope="orders_tab",
+                tab_name="orders",
+                cache_key=cache_key,
+                context_hash=context_hash,
+                role=context.role,
+                mode=context.mode,
+                source_db=context.source_db,
+                variant=context.variant,
+                load_strategy="orders_snapshot",
+                load_trace_id=trace_id,
+                source=source,
+                stale=False,
+                invalidate_reason=None,
+                generation=generation,
+            )
+        except Exception:
+            self._record_orders_internal_step_end(
+                step_state,
+                "content_hash_finalize",
+                internal_step_started,
+                admission_id=context.admission_id,
+                source=source,
+                context_hash=context_hash,
+                trace_id=trace_id,
+                generation=generation,
+                status="error",
+                cache_key=cache_key,
+            )
+            self._expire_orders_refresh(
+                cache_key,
+                request_id=trace_id,
+                reason="content_hash_finalize_error",
+                context_hash=context_hash,
+            )
+            raise
+        self._record_orders_internal_step_end(
+            step_state,
+            "content_hash_finalize",
+            internal_step_started,
+            admission_id=context.admission_id,
+            source=source,
+            context_hash=context_hash,
+            trace_id=trace_id,
+            generation=generation,
+            cache_key=cache_key,
+        )
+
+        retired_refresh = self._is_orders_refresh_retired(trace_id)
+        retired_status = str((retired_refresh or {}).get("status") or "")
+        if retired_status in {"poisoned", "expired", "superseded"}:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            logger.warning(
+                "[ReadCoordinator] orders_refresh_late_result_ignored admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s retired_status=%s",
+                context.admission_id,
+                source,
+                context_hash,
+                trace_id,
+                generation,
+                retired_status,
+            )
+            record_metric(
+                "orders_refresh_late_result_ignored",
+                1,
+                admission_id=context.admission_id,
+                source=self._orders_metric_source(source, cache_hit=False),
+                request_source=self._normalize_orders_request_source(source),
+                context_hash=context_hash,
+                trace_id=trace_id,
+                request_id=trace_id,
+                generation=generation,
+                retired_status=retired_status,
+                elapsed_ms=round(elapsed_ms, 3),
+                last_started_step=(retired_refresh or {}).get("last_started_step"),
+                last_finished_step=(retired_refresh or {}).get("last_finished_step"),
+            )
+            self._record_orders_load_telemetry(
+                source=source,
+                cache_hit=False,
+                delta_applied=bool(delta_applied),
+                delta_failure_reason=delta_failure_reason,
+                delta_time_ms=delta_time_ms,
+                elapsed_ms=elapsed_ms,
+                fallback_after_delta=bool(delta_attempted and not delta_applied),
+                admission_id=context.admission_id,
+                context_hash=context_hash,
+                trace_id=trace_id,
+                priority=priority,
+                fallback_used=fallback_used,
+                base="late_ignored",
+                version=int(frozen_snapshot.get("version") or 0),
+                generation=generation,
+            )
+            return frozen_snapshot
 
         if stale_version > 0:
             new_version = int(frozen_snapshot.get("version") or 0)
@@ -1145,8 +1241,17 @@ class ReadCoordinator:
                     )
 
         self._orders_stale_versions.pop(cache_key, None)
-        if context.mode == "live":
-            self._store_orders_tab(context, frozen_snapshot)
+        try:
+            if context.mode == "live":
+                self._store_orders_tab(context, frozen_snapshot)
+        except Exception:
+            self._expire_orders_refresh(
+                cache_key,
+                request_id=trace_id,
+                reason="store_snapshot_error",
+                context_hash=context_hash,
+            )
+            raise
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -1178,8 +1283,252 @@ class ReadCoordinator:
             fallback_used=fallback_used,
             base="fresh",
             version=int(frozen_snapshot.get("version") or 0),
+            generation=generation,
         )
+        self._finish_orders_refresh(context.cache_key(), request_id=trace_id)
         return frozen_snapshot
+
+    def _load_orders_cached_or_delta(
+        self,
+        *,
+        context: OrdersContext,
+        source: str,
+        priority: str,
+        force_refresh: bool,
+        started: float,
+        trace_id: str,
+        context_hash: str,
+        cache_key: Tuple[Any, ...],
+    ) -> OrdersCachedDeltaResult:
+        base_snapshot, delta_base = self._orders_base_snapshot(
+            context=context,
+            force_refresh=force_refresh,
+            cache_key=cache_key,
+            context_hash=context_hash,
+            trace_id=trace_id,
+        )
+        if base_snapshot is None or force_refresh:
+            return OrdersCachedDeltaResult(delta_base=delta_base)
+
+        current_change_id = self._get_orders_current_change_id(context)
+        base_version = int(base_snapshot.get("version") or 0)
+        if current_change_id <= base_version:
+            return self._orders_current_base_result(
+                context=context,
+                base_snapshot=base_snapshot,
+                delta_base=delta_base,
+                source=source,
+                priority=priority,
+                started=started,
+                trace_id=trace_id,
+                context_hash=context_hash,
+            )
+
+        stale_age_sec = self._snapshot_age_sec(base_snapshot)
+        stale_skip_reason = self._orders_delta_stale_skip_reason(delta_base, stale_age_sec)
+        if stale_skip_reason:
+            logger.info(
+                "[ReadCoordinator] orders_delta_skip reason=%s threshold_sec=%.2f context_hash=%s trace_id=%s priority=%s base=%s",
+                stale_skip_reason,
+                READ_ORDERS_DELTA_STALE_THRESHOLD_SEC,
+                context_hash,
+                trace_id,
+                self._normalize_priority(priority),
+                delta_base,
+            )
+            return OrdersCachedDeltaResult(
+                delta_attempted=True,
+                delta_failure_reason=stale_skip_reason,
+                delta_base=delta_base,
+            )
+
+        return self._try_orders_delta_result(
+            context=context,
+            base_snapshot=base_snapshot,
+            current_change_id=current_change_id,
+            delta_base=delta_base,
+            source=source,
+            priority=priority,
+            started=started,
+            trace_id=trace_id,
+            context_hash=context_hash,
+        )
+
+    def _orders_base_snapshot(
+        self,
+        *,
+        context: OrdersContext,
+        force_refresh: bool,
+        cache_key: Tuple[Any, ...],
+        context_hash: str,
+        trace_id: str,
+    ) -> Tuple[Optional[Dict[str, Any]], str]:
+        if context.mode != "live" or force_refresh:
+            return None, "none"
+
+        cached = self.get_cached_tab(context)
+        if cached is not None:
+            return cached, "cache"
+
+        stale = self._orders_stale_snapshots.get(cache_key)
+        if stale is not None:
+            logger.info(
+                "[ReadCoordinator] orders_cache_lookup hit=0 stale_base=1 context_hash=%s trace_id=%s",
+                context_hash,
+                stale.get("load_trace_id") or trace_id,
+            )
+            return stale, "stale_base"
+        return None, "none"
+
+    def _orders_current_base_result(
+        self,
+        *,
+        context: OrdersContext,
+        base_snapshot: Dict[str, Any],
+        delta_base: str,
+        source: str,
+        priority: str,
+        started: float,
+        trace_id: str,
+        context_hash: str,
+    ) -> OrdersCachedDeltaResult:
+        if context.mode == "live" and delta_base != "cache":
+            self._store_orders_tab(context, base_snapshot)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        result_trace_id = base_snapshot.get("load_trace_id") or trace_id
+        logger.info(
+            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=0 orders_delta_failed=0 orders_delta_time_ms=0.00 orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s",
+            elapsed_ms,
+            source,
+            context_hash,
+            result_trace_id,
+            self._normalize_priority(priority),
+            delta_base,
+            base_snapshot.get("version"),
+        )
+        self._record_orders_load_telemetry(
+            source=source,
+            cache_hit=True,
+            delta_applied=False,
+            delta_failure_reason="0",
+            delta_time_ms=0.0,
+            elapsed_ms=elapsed_ms,
+            fallback_after_delta=False,
+            admission_id=context.admission_id,
+            context_hash=context_hash,
+            trace_id=result_trace_id,
+            priority=priority,
+            fallback_used=0,
+            base=delta_base,
+            version=int(base_snapshot.get("version") or 0),
+        )
+        return OrdersCachedDeltaResult(snapshot=base_snapshot, delta_base=delta_base)
+
+    def _orders_delta_stale_skip_reason(self, delta_base: str, stale_age_sec: Optional[float]) -> str:
+        if delta_base != "stale_base" or stale_age_sec is None:
+            return ""
+        if stale_age_sec <= READ_ORDERS_DELTA_STALE_THRESHOLD_SEC:
+            return ""
+        return f"stale_base_age_exceeded:{stale_age_sec:.2f}"
+
+    def _try_orders_delta_result(
+        self,
+        *,
+        context: OrdersContext,
+        base_snapshot: Dict[str, Any],
+        current_change_id: int,
+        delta_base: str,
+        source: str,
+        priority: str,
+        started: float,
+        trace_id: str,
+        context_hash: str,
+    ) -> OrdersCachedDeltaResult:
+        delta_started = time.perf_counter()
+        try:
+            delta_snapshot = self._try_apply_orders_delta(
+                context=context,
+                base_snapshot=base_snapshot,
+                current_change_id=current_change_id,
+                source=source,
+                trace_id=trace_id,
+            )
+        except Exception as exc:
+            return self._orders_delta_failure_result(
+                exc=exc,
+                delta_started=delta_started,
+                delta_base=delta_base,
+                priority=priority,
+                trace_id=trace_id,
+                context_hash=context_hash,
+            )
+
+        delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        result_trace_id = delta_snapshot.get("load_trace_id") or trace_id
+        logger.info(
+            "[ReadCoordinator] orders_load_time_ms=%.2f orders_cache_hit=1 orders_source=%s orders_fallback=0 orders_delta_applied=1 orders_delta_failed=0 orders_delta_time_ms=%.2f orders_fallback_after_delta=0 context_hash=%s trace_id=%s priority=%s base=%s version=%s",
+            elapsed_ms,
+            source,
+            delta_time_ms,
+            context_hash,
+            result_trace_id,
+            self._normalize_priority(priority),
+            delta_base,
+            delta_snapshot.get("version"),
+        )
+        self._record_orders_load_telemetry(
+            source=source,
+            cache_hit=True,
+            delta_applied=True,
+            delta_failure_reason="0",
+            delta_time_ms=delta_time_ms,
+            elapsed_ms=elapsed_ms,
+            fallback_after_delta=False,
+            admission_id=context.admission_id,
+            context_hash=context_hash,
+            trace_id=result_trace_id,
+            priority=priority,
+            fallback_used=0,
+            base=delta_base,
+            version=int(delta_snapshot.get("version") or 0),
+        )
+        return OrdersCachedDeltaResult(
+            snapshot=delta_snapshot,
+            delta_attempted=True,
+            delta_applied=1,
+            delta_time_ms=delta_time_ms,
+            delta_base=delta_base,
+        )
+
+    def _orders_delta_failure_result(
+        self,
+        *,
+        exc: Exception,
+        delta_started: float,
+        delta_base: str,
+        priority: str,
+        trace_id: str,
+        context_hash: str,
+    ) -> OrdersCachedDeltaResult:
+        delta_time_ms = (time.perf_counter() - delta_started) * 1000.0
+        delta_failure_reason = str(exc) or exc.__class__.__name__
+        logger.log(
+            self._orders_delta_fallback_log_level(delta_failure_reason),
+            "[ReadCoordinator] orders_delta_applied=0 orders_delta_failed=%s orders_delta_time_ms=%.2f orders_fallback_after_delta=1 context_hash=%s trace_id=%s priority=%s base=%s",
+            delta_failure_reason,
+            delta_time_ms,
+            context_hash,
+            trace_id,
+            self._normalize_priority(priority),
+            delta_base,
+        )
+        return OrdersCachedDeltaResult(
+            delta_attempted=True,
+            delta_failure_reason=delta_failure_reason,
+            delta_time_ms=delta_time_ms,
+            delta_base=delta_base,
+        )
 
     def get_cached_tab(self, context: OrdersContext, *, allow_stale: bool = False):
         cache_key = context.cache_key()
@@ -1201,6 +1550,19 @@ class ReadCoordinator:
         if is_stale and not allow_stale:
             return None
         return snapshot
+
+    def get_cached_or_stale_orders_tab(self, context: OrdersContext):
+        cached = self.get_cached_tab(context, allow_stale=True)
+        if cached is not None:
+            return cached
+        stale = self._orders_stale_snapshots.get(context.cache_key())
+        if stale is not None:
+            logger.info(
+                "[ReadCoordinator] orders_cache_lookup hit=0 stale_base=1 context_hash=%s trace_id=%s",
+                context.hash(),
+                stale.get("load_trace_id"),
+            )
+        return stale
 
     def invalidate_tab(self, context: OrdersContext, reason: str) -> None:
         cache_key = context.cache_key()
@@ -1822,6 +2184,7 @@ class ReadCoordinator:
         source: str,
         stale: bool,
         invalidate_reason: Optional[str],
+        generation: Optional[int] = None,
     ):
         payload = self._normalize_snapshot_payload(snapshot)
         version = int(payload.get("change_id") or 0)
@@ -1846,6 +2209,8 @@ class ReadCoordinator:
         payload["context_hash"] = context_hash
         payload["load_strategy"] = load_strategy
         payload["load_trace_id"] = load_trace_id
+        if generation is not None:
+            payload["generation"] = int(generation)
         payload["source"] = source
         payload["stale"] = bool(stale)
         payload["invalidate_reason"] = invalidate_reason
@@ -1997,9 +2362,10 @@ class ReadCoordinator:
         fallback_used: Optional[int] = None,
         base: Optional[str] = None,
         version: Optional[int] = None,
+        generation: Optional[int] = None,
     ) -> None:
         normalized_source = str(source or "refresh").strip().lower() or "refresh"
-        metric_source = "cache" if cache_hit else ("click" if normalized_source == "user" else "refresh")
+        metric_source = self._orders_metric_source(normalized_source, cache_hit=cache_hit)
         record_metric(
             "orders_load_time_ms",
             round(float(elapsed_ms or 0.0), 3),
@@ -2007,6 +2373,7 @@ class ReadCoordinator:
             source=metric_source,
             request_source=normalized_source,
             cache_hit=int(bool(cache_hit)),
+            full_reload=int(not cache_hit and not delta_applied),
             delta_applied=int(bool(delta_applied)),
             delta_failed=0 if str(delta_failure_reason or "0") in {"0", "", "none"} else 1,
             delta_time_ms=round(float(delta_time_ms or 0.0), 3),
@@ -2016,6 +2383,8 @@ class ReadCoordinator:
             version=version,
             context_hash=context_hash,
             trace_id=trace_id,
+            request_id=trace_id,
+            generation=0 if generation is None else int(generation),
             priority=self._normalize_priority(priority or "HIGH"),
         )
         now = time.monotonic()
@@ -2028,14 +2397,14 @@ class ReadCoordinator:
             state.dirty_events += 1
             state.sample_count += 1
             state.total_loads += 1
-            if normalized_source != "user":
+            if normalized_source not in {"user", "click"}:
                 state.total_update_loads += 1
             if cache_hit:
                 state.cache_hits += 1
-            if normalized_source == "user":
+            if normalized_source in {"user", "click"}:
                 state.user_open_count += 1
                 state.user_open_time_ms_total += max(0.0, float(elapsed_ms or 0.0))
-            if normalized_source == "refresh":
+            if normalized_source in {"refresh", "monitor", "post_finalize"}:
                 state.refresh_load_count += 1
             if delta_applied:
                 state.delta_applied += 1
@@ -2178,6 +2547,657 @@ class ReadCoordinator:
     def _next_trace_id(self, scope: str, context_hash: str) -> str:
         return f"{scope}-{next(self._trace_counter):06d}-{context_hash[:6]}"
 
+    @staticmethod
+    def _normalize_orders_request_source(source: str) -> str:
+        value = str(source or "monitor").strip().lower() or "monitor"
+        if value in {"user", "click"}:
+            return "click"
+        if value == "post_finalize":
+            return "post_finalize"
+        if value == "cache":
+            return "cache"
+        if value in {"refresh", "monitor", "local_silent_sync", "stale_snapshot", "poll_external_updates"}:
+            return "monitor"
+        return "monitor"
+
+    def _orders_metric_source(self, source: str, *, cache_hit: bool) -> str:
+        if cache_hit:
+            return "cache"
+        return self._normalize_orders_request_source(source)
+
+    @staticmethod
+    def _new_orders_step_state() -> dict[str, Any]:
+        return {
+            "lock": threading.Lock(),
+            "last_started_step": None,
+            "last_finished_step": None,
+            "last_step_status": None,
+            "last_step_started_monotonic": 0.0,
+            "last_step_finished_monotonic": 0.0,
+        }
+
+    @staticmethod
+    def _orders_step_snapshot(step_state: dict[str, Any]) -> dict[str, Any]:
+        lock = step_state.get("lock")
+        if lock is None:
+            return dict(step_state)
+        with lock:
+            return {
+                "last_started_step": step_state.get("last_started_step"),
+                "last_finished_step": step_state.get("last_finished_step"),
+                "last_step_status": step_state.get("last_step_status"),
+                "last_step_started_monotonic": step_state.get("last_step_started_monotonic"),
+                "last_step_finished_monotonic": step_state.get("last_step_finished_monotonic"),
+            }
+
+    def _mark_orders_step(self, step_state: dict[str, Any], event: str, step: str, **fields) -> None:
+        lock = step_state.get("lock")
+        if lock is None:
+            return
+        now = time.monotonic()
+        with lock:
+            if event == "start":
+                step_state["last_started_step"] = step
+                step_state["last_step_started_monotonic"] = now
+            elif event == "end":
+                step_state["last_finished_step"] = step
+                step_state["last_step_finished_monotonic"] = now
+                step_state["last_step_status"] = fields.get("status") or "ok"
+
+    def _mark_orders_refresh_step(self, cache_key, *, request_id: Optional[str], event: str, step: str, **fields) -> None:
+        if cache_key is None or not request_id:
+            return
+        now = time.monotonic()
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if not active or active.get("request_id") != request_id:
+                return
+            if event == "start":
+                active["last_started_step"] = step
+                active["last_step_started_monotonic"] = now
+            elif event == "end":
+                active["last_finished_step"] = step
+                active["last_step_finished_monotonic"] = now
+                active["last_step_status"] = fields.get("status") or "ok"
+
+    def _orders_step_observer(self, step_state: dict[str, Any], *, cache_key=None, request_id: Optional[str] = None):
+        def observer(event: str, step: str, fields: dict[str, Any]) -> None:
+            self._mark_orders_step(step_state, event, step, **(fields or {}))
+            self._mark_orders_refresh_step(cache_key, request_id=request_id, event=event, step=step, **(fields or {}))
+
+        return observer
+
+    def _record_orders_internal_step_start(
+        self,
+        step_state: dict[str, Any],
+        step: str,
+        *,
+        admission_id: int,
+        source: str,
+        context_hash: str,
+        trace_id: str,
+        generation: int,
+        cache_key=None,
+    ) -> float:
+        started = time.perf_counter()
+        self._mark_orders_step(step_state, "start", step)
+        self._mark_orders_refresh_step(cache_key, request_id=trace_id, event="start", step=step)
+        logger.info(
+            "[ReadCoordinator] orders_snapshot_step_start step=%s admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s",
+            step,
+            admission_id,
+            source,
+            context_hash,
+            trace_id,
+            generation,
+        )
+        record_metric(
+            "orders_snapshot_step_start",
+            1,
+            admission_id=admission_id,
+            source=self._orders_metric_source(source, cache_hit=False),
+            request_source=self._normalize_orders_request_source(source),
+            step=step,
+            caller="read_coordinator",
+            context_hash=context_hash,
+            trace_id=trace_id,
+            request_id=trace_id,
+            generation=generation,
+        )
+        return started
+
+    def _record_orders_internal_step_end(
+        self,
+        step_state: dict[str, Any],
+        step: str,
+        started: float,
+        *,
+        admission_id: int,
+        source: str,
+        context_hash: str,
+        trace_id: str,
+        generation: int,
+        status: str = "ok",
+        cache_key=None,
+    ) -> None:
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self._mark_orders_step(step_state, "end", step, status=status)
+        self._mark_orders_refresh_step(cache_key, request_id=trace_id, event="end", step=step, status=status)
+        logger.info(
+            "[ReadCoordinator] orders_snapshot_step_end step=%s admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s status=%s elapsed_ms=%.2f",
+            step,
+            admission_id,
+            source,
+            context_hash,
+            trace_id,
+            generation,
+            status,
+            elapsed_ms,
+        )
+        record_metric(
+            "orders_snapshot_step_end",
+            round(elapsed_ms, 3),
+            admission_id=admission_id,
+            source=self._orders_metric_source(source, cache_hit=False),
+            request_source=self._normalize_orders_request_source(source),
+            step=step,
+            caller="read_coordinator",
+            context_hash=context_hash,
+            trace_id=trace_id,
+            request_id=trace_id,
+            generation=generation,
+            status=status,
+        )
+
+    @staticmethod
+    def _orders_priority_rank(priority: str) -> int:
+        return {"LOW": 0, "MEDIUM": 1, "HIGH": 2}.get(str(priority or "MEDIUM").upper(), 1)
+
+    def _orders_refresh_rank(self, source: str, priority: str) -> int:
+        source_rank = {
+            "cache": 0,
+            "monitor": 0,
+            "click": 2,
+            "post_finalize": 3,
+        }.get(self._normalize_orders_request_source(source), 0)
+        return source_rank * 10 + self._orders_priority_rank(priority)
+
+    def _remember_retired_orders_refresh_locked(
+        self,
+        active: dict[str, Any],
+        *,
+        status: str,
+        reason: str,
+        replacement_request_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        retired = dict(active or {})
+        retired.update(
+            {
+                "status": status,
+                "retired_reason": reason,
+                "retired_monotonic": time.monotonic(),
+                "replacement_request_id": replacement_request_id,
+            }
+        )
+        request_id = str(retired.get("request_id") or "")
+        if request_id:
+            self._orders_retired_refreshes[request_id] = retired
+            self._orders_retired_refreshes.move_to_end(request_id)
+            while len(self._orders_retired_refreshes) > READ_ORDERS_RETIRED_REFRESH_MAX:
+                self._orders_retired_refreshes.popitem(last=False)
+        return retired
+
+    def _retire_orders_refresh_locked(
+        self,
+        cache_key,
+        active: dict[str, Any],
+        *,
+        status: str,
+        reason: str,
+        replacement_request_id: Optional[str] = None,
+        set_done: bool = False,
+    ) -> dict[str, Any]:
+        current = self._orders_active_refreshes.get(cache_key)
+        if current and current.get("request_id") == active.get("request_id"):
+            self._orders_active_refreshes.pop(cache_key, None)
+        retired = self._remember_retired_orders_refresh_locked(
+            active,
+            status=status,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        if set_done:
+            done_event = active.get("done_event")
+            if isinstance(done_event, threading.Event):
+                done_event.set()
+        return retired
+
+    def _is_orders_refresh_retired(self, request_id: str) -> Optional[dict[str, Any]]:
+        with self._orders_refresh_lock:
+            retired = self._orders_retired_refreshes.get(str(request_id or ""))
+            return dict(retired) if retired else None
+
+    def _record_orders_refresh_retired_metric(
+        self,
+        metric_name: str,
+        retired: dict[str, Any],
+        *,
+        context_hash: Optional[str] = None,
+        replacement_request_id: Optional[str] = None,
+    ) -> None:
+        record_metric(
+            metric_name,
+            1,
+            admission_id=retired.get("admission_id"),
+            source=retired.get("source"),
+            request_source=retired.get("source"),
+            context_hash=context_hash or retired.get("context_hash"),
+            request_id=retired.get("request_id"),
+            generation=retired.get("generation"),
+            priority=retired.get("priority"),
+            status=retired.get("status"),
+            reason=retired.get("retired_reason"),
+            replacement_request_id=replacement_request_id or retired.get("replacement_request_id"),
+            last_started_step=retired.get("last_started_step"),
+            last_finished_step=retired.get("last_finished_step"),
+        )
+
+    def _expire_orders_refresh(
+        self,
+        cache_key,
+        *,
+        request_id: str,
+        reason: str,
+        context_hash: Optional[str] = None,
+    ) -> bool:
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if not active or active.get("request_id") != request_id:
+                return False
+            retired = self._retire_orders_refresh_locked(
+                cache_key,
+                active,
+                status="expired",
+                reason=reason,
+            )
+        self._record_orders_refresh_retired_metric(
+            "orders_refresh_expired",
+            retired,
+            context_hash=context_hash,
+        )
+        return True
+
+    def _poison_orders_refresh(
+        self,
+        cache_key,
+        *,
+        request_id: str,
+        reason: str,
+        context_hash: Optional[str] = None,
+        replacement_request_id: Optional[str] = None,
+    ) -> bool:
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if not active or active.get("request_id") != request_id:
+                return False
+            retired = self._retire_orders_refresh_locked(
+                cache_key,
+                active,
+                status="poisoned" if reason != "superseded" else "superseded",
+                reason=reason,
+                replacement_request_id=replacement_request_id,
+                set_done=True,
+            )
+        poison_foreground_read(
+            "orders",
+            request_id=request_id,
+            source=str(retired.get("source") or "monitor"),
+            reason=reason,
+            context_hash=context_hash or retired.get("context_hash"),
+            priority=retired.get("priority"),
+            generation=retired.get("generation"),
+            last_started_step=retired.get("last_started_step"),
+            last_finished_step=retired.get("last_finished_step"),
+        )
+        self._record_orders_refresh_retired_metric(
+            "orders_refresh_superseded" if reason == "superseded" else "orders_refresh_poisoned",
+            retired,
+            context_hash=context_hash,
+            replacement_request_id=replacement_request_id,
+        )
+        self._expire_load_slot(
+            request_id,
+            reason=reason,
+            scope="orders",
+            context_hash=context_hash or str(retired.get("context_hash") or ""),
+            source=str(retired.get("source") or "monitor"),
+        )
+        return True
+
+    def _mark_orders_refresh_stalled(self, cache_key, *, request_id: str, step_snapshot: dict[str, Any]) -> bool:
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if not active or active.get("request_id") != request_id:
+                return False
+            active["status"] = "stalled"
+            active["stalled_monotonic"] = time.monotonic()
+            active["last_started_step"] = step_snapshot.get("last_started_step")
+            active["last_finished_step"] = step_snapshot.get("last_finished_step")
+            active["last_step_status"] = step_snapshot.get("last_step_status")
+        return True
+
+    def _start_orders_load_watchdog(
+        self,
+        *,
+        done_event: threading.Event,
+        context: OrdersContext,
+        context_hash: str,
+        request_id: str,
+        source: str,
+        priority: str,
+        step_state: dict[str, Any],
+    ) -> None:
+        threshold_sec = float(READ_ORDERS_STALL_THRESHOLD_SEC or 0.0)
+        if threshold_sec <= 0:
+            return
+
+        started = time.monotonic()
+
+        def watchdog() -> None:
+            if done_event.wait(threshold_sec):
+                return
+            elapsed_ms = (time.monotonic() - started) * 1000.0
+            step_snapshot = self._orders_step_snapshot(step_state)
+            cache_key = context.cache_key()
+            self._mark_orders_refresh_stalled(cache_key, request_id=request_id, step_snapshot=step_snapshot)
+            mark_foreground_read_stalled(
+                "orders",
+                request_id=request_id,
+                source=source,
+                context_hash=context_hash,
+                priority=self._normalize_priority(priority),
+                last_started_step=step_snapshot.get("last_started_step"),
+                last_finished_step=step_snapshot.get("last_finished_step"),
+            )
+            fields = {
+                "admission_id": context.admission_id,
+                "source": self._orders_metric_source(source, cache_hit=False),
+                "request_source": self._normalize_orders_request_source(source),
+                "context_hash": context_hash,
+                "trace_id": request_id,
+                "request_id": request_id,
+                "priority": self._normalize_priority(priority),
+                "threshold_ms": round(threshold_sec * 1000.0, 3),
+                "last_started_step": step_snapshot.get("last_started_step"),
+                "last_finished_step": step_snapshot.get("last_finished_step"),
+                "last_step_status": step_snapshot.get("last_step_status"),
+            }
+            logger.warning(
+                "[ReadCoordinator] orders_load_stalled elapsed_ms=%.2f threshold_ms=%.2f admission_id=%s source=%s context_hash=%s trace_id=%s last_started_step=%s last_finished_step=%s",
+                elapsed_ms,
+                threshold_sec * 1000.0,
+                context.admission_id,
+                source,
+                context_hash,
+                request_id,
+                fields["last_started_step"],
+                fields["last_finished_step"],
+            )
+            record_metric("orders_load_stalled", round(elapsed_ms, 3), **fields)
+            record_metric(
+                "foreground_read_stalled",
+                round(elapsed_ms, 3),
+                activity_name="orders",
+                active_count=1,
+                **fields,
+            )
+            poison_delay_sec = max(0.0, READ_ORDERS_POISON_THRESHOLD_SEC - threshold_sec)
+            if done_event.wait(poison_delay_sec):
+                return
+            poisoned = self._poison_orders_refresh(
+                cache_key,
+                request_id=request_id,
+                reason="stalled_timeout",
+                context_hash=context_hash,
+            )
+            if not poisoned:
+                poison_foreground_read(
+                    "orders",
+                    request_id=request_id,
+                    source=source,
+                    reason="stalled_timeout",
+                    context_hash=context_hash,
+                    priority=self._normalize_priority(priority),
+                    last_started_step=step_snapshot.get("last_started_step"),
+                    last_finished_step=step_snapshot.get("last_finished_step"),
+                )
+                self._expire_load_slot(
+                    request_id,
+                    reason="stalled_timeout",
+                    scope="orders",
+                    context_hash=context_hash,
+                    source=source,
+                )
+            if poisoned:
+                record_metric(
+                    "foreground_read_poisoned",
+                    round((time.monotonic() - started) * 1000.0, 3),
+                    activity_name="orders",
+                    admission_id=context.admission_id,
+                    source=self._orders_metric_source(source, cache_hit=False),
+                    request_source=self._normalize_orders_request_source(source),
+                    context_hash=context_hash,
+                    trace_id=request_id,
+                    request_id=request_id,
+                    priority=self._normalize_priority(priority),
+                    last_started_step=step_snapshot.get("last_started_step"),
+                    last_finished_step=step_snapshot.get("last_finished_step"),
+                )
+
+        threading.Thread(target=watchdog, name="OrdersLoadWatchdog", daemon=True).start()
+
+    def _begin_orders_refresh(
+        self,
+        *,
+        context: OrdersContext,
+        context_hash: str,
+        request_id: str,
+        source: str,
+        priority: str,
+        done_event: threading.Event,
+    ) -> dict[str, Any]:
+        cache_key = context.cache_key()
+        incoming_source = self._normalize_orders_request_source(source)
+        incoming_priority = self._normalize_priority(priority)
+        poison_after_lock = None
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if active is not None:
+                active_status = str(active.get("status") or "active")
+                elapsed_sec = max(0.0, time.monotonic() - float(active.get("started_monotonic") or 0.0))
+                if active_status == "stalled" and elapsed_sec >= READ_ORDERS_POISON_THRESHOLD_SEC:
+                    poison_after_lock = self._retire_orders_refresh_locked(
+                        cache_key,
+                        active,
+                        status="poisoned",
+                        reason="stalled_timeout",
+                        replacement_request_id=request_id,
+                        set_done=True,
+                    )
+                elif active_status in {"poisoned", "expired", "superseded", "finished"}:
+                    self._orders_active_refreshes.pop(cache_key, None)
+                elif self._orders_should_supersede_active_refresh(active, incoming_source, incoming_priority):
+                    poison_after_lock = self._retire_orders_refresh_locked(
+                        cache_key,
+                        active,
+                        status="superseded",
+                        reason="superseded",
+                        replacement_request_id=request_id,
+                        set_done=True,
+                    )
+                else:
+                    return {**active, "started": False}
+
+            generation = next(self._orders_generation_counter)
+            active = {
+                "started": True,
+                "status": "active",
+                "cache_key": cache_key,
+                "admission_id": context.admission_id,
+                "context_hash": context_hash,
+                "request_id": request_id,
+                "generation": generation,
+                "source": incoming_source,
+                "priority": incoming_priority,
+                "started_at": datetime.now().isoformat(timespec="milliseconds"),
+                "done_event": done_event,
+                "started_monotonic": time.monotonic(),
+                "last_started_step": None,
+                "last_finished_step": None,
+                "last_step_status": None,
+            }
+            self._orders_active_refreshes[cache_key] = active
+        if poison_after_lock is not None:
+            retired_reason = str(poison_after_lock.get("retired_reason") or poison_after_lock.get("status") or "superseded")
+            poison_foreground_read(
+                "orders",
+                request_id=str(poison_after_lock.get("request_id") or ""),
+                source=str(poison_after_lock.get("source") or "monitor"),
+                reason=retired_reason,
+                context_hash=poison_after_lock.get("context_hash"),
+                priority=poison_after_lock.get("priority"),
+                generation=poison_after_lock.get("generation"),
+                last_started_step=poison_after_lock.get("last_started_step"),
+                last_finished_step=poison_after_lock.get("last_finished_step"),
+            )
+            self._record_orders_refresh_retired_metric(
+                "orders_refresh_superseded" if retired_reason == "superseded" else "orders_refresh_poisoned",
+                poison_after_lock,
+                context_hash=context_hash,
+                replacement_request_id=request_id,
+            )
+            self._expire_load_slot(
+                str(poison_after_lock.get("request_id") or ""),
+                reason=retired_reason,
+                scope="orders",
+                context_hash=str(poison_after_lock.get("context_hash") or context_hash),
+                source=str(poison_after_lock.get("source") or "monitor"),
+            )
+        return active
+
+    def _orders_should_supersede_active_refresh(
+        self,
+        active: dict[str, Any],
+        incoming_source: str,
+        incoming_priority: str,
+    ) -> bool:
+        active_status = str(active.get("status") or "active")
+        active_source = str(active.get("source") or "monitor")
+        active_priority = str(active.get("priority") or "MEDIUM")
+        incoming_visible = incoming_source in {"click", "post_finalize"}
+        active_visible = active_source in {"click", "post_finalize"}
+        if incoming_visible and not active_visible:
+            return True
+        if active_status == "stalled" and incoming_visible:
+            return self._orders_refresh_rank(incoming_source, incoming_priority) >= self._orders_refresh_rank(
+                active_source,
+                active_priority,
+            )
+        return False
+
+    def _finish_orders_refresh(self, cache_key, *, request_id: str) -> None:
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if active and active.get("request_id") == request_id:
+                self._retire_orders_refresh_locked(
+                    cache_key,
+                    active,
+                    status="finished",
+                    reason="finished",
+                )
+
+    def _coalesced_orders_snapshot(
+        self,
+        *,
+        context: OrdersContext,
+        active: dict[str, Any],
+        source: str,
+        priority: str,
+        started: float,
+        request_id: str,
+    ):
+        active_done = active.get("done_event")
+        if isinstance(active_done, threading.Event) and READ_ORDERS_COALESCE_WAIT_SEC > 0:
+            active_done.wait(READ_ORDERS_COALESCE_WAIT_SEC)
+        snapshot = self.get_cached_or_stale_orders_tab(context)
+        if snapshot is None:
+            logger.warning(
+                "[ReadCoordinator] orders_refresh_coalesced_no_snapshot admission_id=%s source=%s active_request_id=%s request_id=%s context_hash=%s",
+                context.admission_id,
+                source,
+                active.get("request_id"),
+                request_id,
+                context.hash(),
+            )
+            record_metric(
+                "orders_refresh_coalesced_no_snapshot",
+                1,
+                admission_id=context.admission_id,
+                source=self._orders_metric_source(source, cache_hit=False),
+                request_source=self._normalize_orders_request_source(source),
+                context_hash=context.hash(),
+                active_request_id=active.get("request_id"),
+                request_id=request_id,
+                active_status=active.get("status"),
+                priority=self._normalize_priority(priority),
+            )
+            return None
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        base = "stale_base" if context.cache_key() in self._orders_stale_snapshots else "cache"
+        logger.info(
+            "[ReadCoordinator] orders_refresh_coalesced admission_id=%s source=%s active_request_id=%s request_id=%s context_hash=%s base=%s active_status=%s",
+            context.admission_id,
+            source,
+            active.get("request_id"),
+            request_id,
+            context.hash(),
+            base,
+            active.get("status"),
+        )
+        record_metric(
+            "orders_refresh_coalesced",
+            1,
+            admission_id=context.admission_id,
+            source=self._orders_metric_source(source, cache_hit=False),
+            request_source=self._normalize_orders_request_source(source),
+            context_hash=context.hash(),
+            active_request_id=active.get("request_id"),
+            request_id=request_id,
+            active_generation=active.get("generation"),
+            active_status=active.get("status"),
+            priority=self._normalize_priority(priority),
+            base=base,
+        )
+        self.record_orders_ui_event("duplicate_load_prevented", role=context.role, context_hash=context.hash())
+        self._record_orders_load_telemetry(
+            source="cache",
+            cache_hit=True,
+            delta_applied=False,
+            delta_failure_reason="0",
+            delta_time_ms=0.0,
+            elapsed_ms=elapsed_ms,
+            fallback_after_delta=False,
+            admission_id=context.admission_id,
+            context_hash=context.hash(),
+            trace_id=snapshot.get("load_trace_id") or active.get("request_id") or request_id,
+            priority=priority,
+            fallback_used=0,
+            base=base,
+            version=int(snapshot.get("version") or 0),
+        )
+        return snapshot
+
     def _load_slot(
         self,
         *,
@@ -2204,9 +3224,16 @@ class ReadCoordinator:
                     while True:
                         head = self._load_waiting[0] if self._load_waiting else None
                         is_head = bool(head and head[1] == request_seq)
-                        if is_head and self._active_loads < self.max_concurrent_loads:
+                        if is_head and len(self._active_load_tokens) < self.max_concurrent_loads:
                             heapq.heappop(self._load_waiting)
-                            self._active_loads += 1
+                            self._active_load_tokens[trace_id] = {
+                                "scope": scope,
+                                "priority": priority_name,
+                                "source": source,
+                                "context_hash": context_hash,
+                                "started_monotonic": time.monotonic(),
+                            }
+                            self._active_loads = len(self._active_load_tokens)
                             logger.info(
                                 "[ReadCoordinator] load_start scope=%s priority=%s source=%s context_hash=%s trace_id=%s active=%s",
                                 scope,
@@ -2236,19 +3263,60 @@ class ReadCoordinator:
 
             def __exit__(self_inner, exc_type, exc, tb):
                 with self._load_condition:
-                    self._active_loads = max(0, self._active_loads - 1)
+                    released = self._active_load_tokens.pop(trace_id, None) is not None
+                    self._active_loads = len(self._active_load_tokens)
                     logger.info(
-                        "[ReadCoordinator] load_finish scope=%s priority=%s source=%s context_hash=%s trace_id=%s active=%s",
+                        "[ReadCoordinator] load_finish scope=%s priority=%s source=%s context_hash=%s trace_id=%s active=%s released=%s",
                         scope,
                         priority_name,
                         source,
                         context_hash,
                         trace_id,
                         self._active_loads,
+                        int(released),
                     )
                     self._load_condition.notify_all()
 
         return _LoadGuard(self)
+
+    def _expire_load_slot(
+        self,
+        trace_id: str,
+        *,
+        reason: str,
+        scope: str,
+        context_hash: str,
+        source: str,
+    ) -> bool:
+        if not trace_id:
+            return False
+        with self._load_condition:
+            payload = self._active_load_tokens.pop(str(trace_id), None)
+            if payload is None:
+                return False
+            self._active_loads = len(self._active_load_tokens)
+            logger.warning(
+                "[ReadCoordinator] load_slot_expired scope=%s source=%s context_hash=%s trace_id=%s reason=%s active=%s",
+                scope,
+                source,
+                context_hash,
+                trace_id,
+                reason,
+                self._active_loads,
+            )
+            record_metric(
+                "read_load_slot_expired",
+                1,
+                scope=scope,
+                source=source,
+                context_hash=context_hash,
+                trace_id=trace_id,
+                request_id=trace_id,
+                reason=reason,
+                active=self._active_loads,
+            )
+            self._load_condition.notify_all()
+            return True
 
     def _remove_waiting_request(self, request_seq: int) -> None:
         remaining = [entry for entry in self._load_waiting if entry[1] != request_seq]

@@ -19,12 +19,28 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
-from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, 
+from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, TEXT_SECONDARY,
                             BORDER_COLOR, BG_LIGHT)
 
 ORDERS_CELL_REPEAT_GUARD_SEC = max(
     0.15,
     float(os.getenv("REMCARD_ORDERS_CELL_REPEAT_GUARD_SEC", "0.45")),
+)
+ORDERS_POST_FINALIZE_WATCHDOG_MS = max(
+    1000,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_WATCHDOG_MS", "7000")),
+)
+ORDERS_POST_FINALIZE_MAX_RETRIES = max(
+    1,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_MAX_RETRIES", "3")),
+)
+ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS = max(
+    1000,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS", "5000")),
+)
+ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS = max(
+    ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS,
+    int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS", "30000")),
 )
 
 
@@ -80,6 +96,15 @@ class OrdersWidget(QWidget):
         self._active_request_context_key = None
         self._active_request_force = False
         self._active_request_priority = "MEDIUM"
+        self._active_request_seq = 0
+        self._active_request_id = ""
+        self._active_request_generation = 0
+        self._active_request_source = "refresh"
+        self._active_request_started_monotonic = 0.0
+        self._active_snapshot_worker_state = {}
+        self._retired_snapshot_worker_states = {}
+        self._post_finalize_retry_count = 0
+        self._refresh_status_label = None
         self._snapshot_stale = False
         self._snapshot_seq = 0
         self._last_applied_snapshot_signature = None
@@ -108,6 +133,9 @@ class OrdersWidget(QWidget):
         self._soft_update_timer = QTimer(self)
         self._soft_update_timer.setSingleShot(True)
         self._soft_update_timer.timeout.connect(self._show_soft_update_if_needed)
+        self._post_finalize_watchdog_timer = QTimer(self)
+        self._post_finalize_watchdog_timer.setSingleShot(True)
+        self._post_finalize_watchdog_timer.timeout.connect(self._on_post_finalize_snapshot_watchdog)
         self._perf_enabled = os.getenv("REMCARD_PROFILE_ORDERS_CLICK", "0") == "1"
         self._perf_next_click_id = 0
         self._perf_clicks = {}
@@ -162,6 +190,98 @@ class OrdersWidget(QWidget):
             except Exception:
                 pass
 
+    def _retire_snapshot_worker_state(
+        self,
+        *,
+        state: str,
+        reason: str,
+        replacement_request_id: str | None = None,
+    ):
+        active = dict(getattr(self, "_active_snapshot_worker_state", {}) or {})
+        if not active and self._active_request_id:
+            active = {
+                "request_id": self._active_request_id,
+                "generation": self._active_request_generation,
+                "source": self._active_request_source,
+                "priority": self._active_request_priority,
+                "admission_id": self.admission_id,
+                "started_monotonic": self._active_request_started_monotonic,
+                "context_key": self._active_request_context_key,
+                "seq": self._active_request_seq,
+                "force": self._active_request_force,
+            }
+        if not active:
+            return {}
+        active["state"] = state
+        active["retired_reason"] = reason
+        active["retired_at"] = datetime.now().isoformat(timespec="milliseconds")
+        active["replacement_request_id"] = replacement_request_id
+        request_id = str(active.get("request_id") or "")
+        if request_id:
+            self._retired_snapshot_worker_states[request_id] = active
+            while len(self._retired_snapshot_worker_states) > 50:
+                oldest_key = next(iter(self._retired_snapshot_worker_states))
+                self._retired_snapshot_worker_states.pop(oldest_key, None)
+        self._active_snapshot_worker_state = {}
+        return active
+
+    def _reset_active_snapshot_request(self):
+        self._active_request_context_key = None
+        self._active_request_force = False
+        self._active_request_priority = "MEDIUM"
+        self._active_request_seq = 0
+        self._active_request_id = ""
+        self._active_request_generation = 0
+        self._active_request_source = "refresh"
+        self._active_request_started_monotonic = 0.0
+        self._active_snapshot_worker_state = {}
+
+    def _detach_snapshot_worker(
+        self,
+        worker,
+        *,
+        state: str,
+        reason: str,
+        replacement_request_id: str | None = None,
+    ):
+        retired = self._retire_snapshot_worker_state(
+            state=state,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        self._disconnect_snapshot_worker(worker)
+        try:
+            worker.quit()
+        except Exception:
+            pass
+        if self._snapshot_worker is worker:
+            self._snapshot_worker = None
+        self._post_finalize_watchdog_timer.stop()
+        self._reset_active_snapshot_request()
+        logger.warning(
+            "[OrdersWidget] snapshot_worker_detached admission_id=%s request_id=%s source=%s priority=%s state=%s reason=%s replacement_request_id=%s",
+            self.admission_id,
+            retired.get("request_id"),
+            retired.get("source"),
+            retired.get("priority"),
+            state,
+            reason,
+            replacement_request_id,
+        )
+        record_metric(
+            "orders_snapshot_worker_detached",
+            1,
+            admission_id=self.admission_id,
+            source=str(retired.get("source") or "refresh"),
+            priority=str(retired.get("priority") or "MEDIUM"),
+            request_id=retired.get("request_id"),
+            generation=retired.get("generation"),
+            state=state,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        return retired
+
     def _disconnect_load_yesterday_worker(self, worker):
         if worker is None:
             return
@@ -183,6 +303,7 @@ class OrdersWidget(QWidget):
             "_state_sync_timer",
             "_change_batch_timer",
             "_soft_update_timer",
+            "_post_finalize_watchdog_timer",
             "timer",
         ):
             timer = getattr(self, timer_name, None)
@@ -191,9 +312,7 @@ class OrdersWidget(QWidget):
 
         worker = self._snapshot_worker
         self._snapshot_worker = None
-        self._active_request_context_key = None
-        self._active_request_force = False
-        self._active_request_priority = "MEDIUM"
+        self._reset_active_snapshot_request()
         self._disconnect_snapshot_worker(worker)
         if worker is not None and worker.isRunning():
             worker.quit()
@@ -511,16 +630,17 @@ class OrdersWidget(QWidget):
         finally:
             self._applying_pending_structure_sync = False
 
-    def request_refresh(self, *, force: bool = False):
+    def request_refresh(self, *, force: bool = False, source: str = "refresh", priority: str = "HIGH"):
         logger.info(
-            "[OrdersClick] request_refresh role=doctor admission_id=%s force=%s",
+            "[OrdersClick] request_refresh role=doctor admission_id=%s force=%s source=%s",
             self.admission_id,
             int(bool(force)),
+            source,
         )
         self._request_snapshot(
             force=force,
-            source="refresh",
-            priority="HIGH",
+            source=source,
+            priority=priority,
             invalidate_reason="widget_refresh_force" if force else "widget_refresh",
         )
 
@@ -592,7 +712,7 @@ class OrdersWidget(QWidget):
         self.table_view.verticalHeader().setDefaultSectionSize(45)
         self._apply_table_header_layout()
 
-    def _apply_cached_snapshot_if_available(self, context=None) -> bool:
+    def _apply_cached_snapshot_if_available(self, context=None, *, allow_stale: bool = False) -> bool:
         coordinator = self._get_read_coordinator()
         if coordinator is None:
             return False
@@ -601,7 +721,10 @@ class OrdersWidget(QWidget):
         except Exception as exc:
             logger.warning("[OrdersWidget] Failed to build context for cache lookup: %s", exc, exc_info=True)
             return False
-        snapshot = coordinator.get_cached_tab(target_context)
+        if allow_stale and hasattr(coordinator, "get_cached_or_stale_orders_tab"):
+            snapshot = coordinator.get_cached_or_stale_orders_tab(target_context)
+        else:
+            snapshot = coordinator.get_cached_tab(target_context)
         if snapshot is None:
             return False
         return self._apply_snapshot_data(
@@ -845,49 +968,95 @@ class OrdersWidget(QWidget):
 
         if self._snapshot_worker is not None:
             worker_running = self._snapshot_worker.isRunning()
-            if (
-                worker_running
-                and self._is_request_covered_by_active(
-                    context_key=context_key,
-                    force=force,
-                    priority=priority_name,
-                )
+            request_id_preview = f"orders-ui-{self._snapshot_seq + 1}-{context.hash()[:6]}"
+            if not worker_running:
+                self._snapshot_worker = None
+                self._retire_snapshot_worker_state(state="finished", reason="worker_not_running")
+            elif self._should_supersede_active_snapshot_worker(
+                context_key=context_key,
+                source=source,
+                priority=priority_name,
             ):
-                if hasattr(coordinator, "record_orders_ui_event"):
-                    coordinator.record_orders_ui_event(
-                        "duplicate_load_prevented",
-                        role="doctor",
-                        context_hash=context.hash(),
-                    )
-                logger.info(
-                    "[OrdersWidget] skipped duplicate in-flight request admission_id=%s priority=%s force=%s context_hash=%s",
-                    context.admission_id,
-                    priority_name,
-                    int(bool(force)),
-                    context.hash(),
+                self._detach_snapshot_worker(
+                    self._snapshot_worker,
+                    state="superseded",
+                    reason="higher_priority_request",
+                    replacement_request_id=request_id_preview,
                 )
+            else:
+                if (
+                    worker_running
+                    and self._is_request_covered_by_active(
+                        context_key=context_key,
+                        source=source,
+                        force=force,
+                        priority=priority_name,
+                    )
+                ):
+                    if hasattr(coordinator, "record_orders_ui_event"):
+                        coordinator.record_orders_ui_event(
+                            "duplicate_load_prevented",
+                            role="doctor",
+                            context_hash=context.hash(),
+                        )
+                    logger.info(
+                        "[OrdersWidget] skipped duplicate in-flight request admission_id=%s priority=%s force=%s source=%s context_hash=%s",
+                        context.admission_id,
+                        priority_name,
+                        int(bool(force)),
+                        source,
+                        context.hash(),
+                    )
+                    return
+                self._snapshot_pending = True
+                self._snapshot_force_pending = self._snapshot_force_pending or force
+                self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, priority)
+                self._snapshot_pending_source = self._merge_source(
+                    self._snapshot_pending_source,
+                    source,
+                    self._snapshot_pending_priority,
+                    priority,
+                )
+                self._snapshot_pending_reason = invalidate_reason or self._snapshot_pending_reason
                 return
-            self._snapshot_pending = True
-            self._snapshot_force_pending = self._snapshot_force_pending or force
-            self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, priority)
-            self._snapshot_pending_source = self._merge_source(
-                self._snapshot_pending_source,
-                source,
-                self._snapshot_pending_priority,
-                priority,
-            )
-            self._snapshot_pending_reason = invalidate_reason or self._snapshot_pending_reason
+
+        if self._snapshot_worker is not None:
+            # Defensive guard: supersede/detach above must clear the active worker before
+            # a higher-priority request can start.
             return
 
         self._snapshot_seq += 1
         seq = self._snapshot_seq
+        request_id = f"orders-ui-{seq}-{context.hash()[:6]}"
+        request_generation = seq
         admission_id = context.admission_id
         shift_date = context.shift_date
         context_hash = context.hash()
         self._active_request_context_key = context_key
         self._active_request_force = bool(force)
         self._active_request_priority = priority_name
+        self._active_request_seq = seq
+        self._active_request_id = request_id
+        self._active_request_generation = request_generation
+        self._active_request_source = str(source or "refresh").strip().lower() or "refresh"
+        self._active_request_started_monotonic = time.monotonic()
+        self._active_snapshot_worker_state = {
+            "request_id": request_id,
+            "generation": request_generation,
+            "source": self._active_request_source,
+            "priority": priority_name,
+            "admission_id": admission_id,
+            "started_at": datetime.now().isoformat(timespec="milliseconds"),
+            "started_monotonic": self._active_request_started_monotonic,
+            "state": "active",
+            "context_key": context_key,
+            "seq": seq,
+            "force": bool(force),
+        }
         self._schedule_soft_update_state(source=source)
+        if self._active_request_source == "post_finalize":
+            self._set_refresh_status("Сохранено, обновляю назначения...")
+        self._post_finalize_watchdog_timer.start(ORDERS_POST_FINALIZE_WATCHDOG_MS)
 
         def job():
             if force:
@@ -909,6 +1078,10 @@ class OrdersWidget(QWidget):
                 "context_hash": context_hash,
                 "priority": priority_name,
                 "source": source,
+                "request_id": request_id,
+                "generation": request_generation,
+                "snapshot_request_id": (snapshot or {}).get("load_trace_id"),
+                "snapshot_generation": (snapshot or {}).get("generation", 0),
                 "snapshot": snapshot,
             }
 
@@ -924,7 +1097,13 @@ class OrdersWidget(QWidget):
         try:
             if not isinstance(payload, dict):
                 return
+            payload_request_id = str(payload.get("request_id") or "")
+            retired_state = self._retired_snapshot_worker_states.get(payload_request_id)
+            if retired_state and str(retired_state.get("state") or "") in {"stalled", "superseded", "detached"}:
+                self._record_late_result_ignored(payload, reason=f"retired_{retired_state.get('state')}")
+                return
             if payload.get("seq") != self._snapshot_seq:
+                self._record_late_result_ignored(payload, reason="seq_mismatch")
                 logger.info(
                     "[OrdersWidget] discard stale snapshot seq request_seq=%s current_seq=%s context_hash=%s trace_id=%s",
                     payload.get("seq"),
@@ -933,7 +1112,16 @@ class OrdersWidget(QWidget):
                     (payload.get("snapshot") or {}).get("load_trace_id"),
                 )
                 return
+            expected_request_id = str(self._active_request_id or "")
+            if expected_request_id and str(payload.get("request_id") or "") != expected_request_id:
+                self._record_late_result_ignored(payload, reason="request_id_mismatch")
+                return
+            expected_generation = int(self._active_request_generation or 0)
+            if expected_generation and int(payload.get("generation") or 0) != expected_generation:
+                self._record_late_result_ignored(payload, reason="generation_mismatch")
+                return
             if payload.get("admission_id") != self.admission_id:
+                self._record_late_result_ignored(payload, reason="admission_mismatch")
                 logger.info(
                     "[OrdersWidget] discard stale snapshot admission request_admission_id=%s current_admission_id=%s context_hash=%s trace_id=%s",
                     payload.get("admission_id"),
@@ -942,14 +1130,43 @@ class OrdersWidget(QWidget):
                     (payload.get("snapshot") or {}).get("load_trace_id"),
                 )
                 return
-            self._apply_snapshot_data(
+            applied = self._apply_snapshot_data(
                 snapshot=payload.get("snapshot") or {},
                 admission_id=payload.get("admission_id"),
                 shift_date=payload.get("shift_date"),
                 context_key=payload.get("context_key"),
             )
+            if applied and str(payload.get("source") or "").strip().lower() == "post_finalize":
+                self._post_finalize_retry_count = 0
         except Exception:
             logger.exception("[OrdersWidget] Failed to apply orders snapshot")
+
+    def _record_late_result_ignored(self, payload, *, reason: str):
+        snapshot = (payload or {}).get("snapshot") or {}
+        logger.info(
+            "[OrdersWidget] orders_refresh_late_result_ignored reason=%s admission_id=%s request_id=%s generation=%s current_request_id=%s current_generation=%s context_hash=%s trace_id=%s",
+            reason,
+            (payload or {}).get("admission_id"),
+            (payload or {}).get("request_id"),
+            (payload or {}).get("generation"),
+            self._active_request_id,
+            self._active_request_generation,
+            (payload or {}).get("context_hash"),
+            snapshot.get("load_trace_id"),
+        )
+        record_metric(
+            "orders_refresh_late_result_ignored",
+            1,
+            admission_id=(payload or {}).get("admission_id"),
+            source=str((payload or {}).get("source") or "refresh"),
+            reason=reason,
+            request_id=(payload or {}).get("request_id"),
+            generation=(payload or {}).get("generation"),
+            current_request_id=self._active_request_id,
+            current_generation=self._active_request_generation,
+            context_hash=(payload or {}).get("context_hash"),
+            trace_id=snapshot.get("load_trace_id"),
+        )
 
     def _capture_table_scroll(self):
         if not hasattr(self, "table_view"):
@@ -1074,7 +1291,14 @@ class OrdersWidget(QWidget):
                 snapshot.get("version"),
             )
             snapshot_source = str(snapshot.get("source") or "refresh").strip().lower()
-            metric_source = "click" if snapshot_source == "user" else ("cache" if snapshot_source == "cache" else "refresh")
+            if snapshot_source in {"user", "click"}:
+                metric_source = "click"
+            elif snapshot_source == "post_finalize":
+                metric_source = "post_finalize"
+            elif snapshot_source == "cache":
+                metric_source = "cache"
+            else:
+                metric_source = "monitor"
             record_metric(
                 "orders_snapshot_apply_skipped",
                 1,
@@ -1215,8 +1439,8 @@ class OrdersWidget(QWidget):
             return (
                 context_key or snapshot.get("cache_key"),
                 int(snapshot.get("version") or snapshot.get("change_id") or 0),
-                str(snapshot.get("load_trace_id") or ""),
-                id(snapshot),
+                str(snapshot.get("content_hash") or ""),
+                str(snapshot.get("dedup_signature") or ""),
             )
         except Exception:
             return None
@@ -1227,14 +1451,145 @@ class OrdersWidget(QWidget):
         self._clear_soft_update_state()
         logger.warning("[OrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
 
+    def _on_post_finalize_snapshot_watchdog(self):
+        if self._is_closing:
+            return
+        worker = self._snapshot_worker
+        if worker is None or not worker.isRunning():
+            return
+
+        elapsed_ms = max(0.0, (time.monotonic() - self._active_request_started_monotonic) * 1000.0)
+        stale_seq = int(self._active_request_seq or 0)
+        request_source = str(self._active_request_source or "refresh")
+        request_id = str(self._active_request_id or "")
+        state = dict(getattr(self, "_active_snapshot_worker_state", {}) or {})
+        if state:
+            state["state"] = "stalled"
+            state["stalled_at"] = datetime.now().isoformat(timespec="milliseconds")
+            self._active_snapshot_worker_state = state
+        try:
+            context = self._build_orders_context()
+            context_hash = context.hash()
+        except Exception:
+            context = None
+            context_hash = None
+        logger.warning(
+            "[OrdersWidget] snapshot_worker_stalled admission_id=%s seq=%s request_id=%s source=%s elapsed_ms=%.2f context_hash=%s",
+            self.admission_id,
+            stale_seq,
+            request_id,
+            request_source,
+            elapsed_ms,
+            context_hash,
+        )
+        record_metric(
+            "orders_snapshot_worker_stalled",
+            round(elapsed_ms, 3),
+            admission_id=self.admission_id,
+            source=request_source,
+            request_id=request_id,
+            seq=stale_seq,
+            context_hash=context_hash,
+            threshold_ms=ORDERS_POST_FINALIZE_WATCHDOG_MS,
+        )
+        if request_source == "post_finalize":
+            record_metric(
+                "orders_post_finalize_snapshot_stalled",
+                round(elapsed_ms, 3),
+                admission_id=self.admission_id,
+                source="post_finalize",
+                request_id=request_id,
+                seq=stale_seq,
+                context_hash=context_hash,
+                threshold_ms=ORDERS_POST_FINALIZE_WATCHDOG_MS,
+            )
+
+        self._detach_snapshot_worker(
+            worker,
+            state="detached",
+            reason="watchdog_stalled",
+        )
+        self._snapshot_seq += 1
+        self._clear_soft_update_state()
+        if request_source == "post_finalize" and context is not None:
+            self._apply_cached_snapshot_if_available(context=context, allow_stale=True)
+            self._set_refresh_status("Сохранено, данные обновляются...")
+            self._schedule_post_finalize_retry(context_hash=context_hash)
+        if self._snapshot_pending:
+            force = self._snapshot_force_pending
+            source = self._snapshot_pending_source
+            priority = self._snapshot_pending_priority
+            invalidate_reason = self._snapshot_pending_reason
+            self._reset_pending_snapshot_request()
+            self._defer_snapshot_request(
+                force=force,
+                source=source,
+                priority=priority,
+                invalidate_reason=invalidate_reason,
+            )
+
+    def _schedule_post_finalize_retry(self, *, context_hash=None):
+        if self._is_closing:
+            return
+        if self._post_finalize_retry_count >= ORDERS_POST_FINALIZE_MAX_RETRIES:
+            logger.warning(
+                "[OrdersWidget] post_finalize_retry_limit admission_id=%s retries=%s context_hash=%s",
+                self.admission_id,
+                self._post_finalize_retry_count,
+                context_hash,
+            )
+            record_metric(
+                "orders_post_finalize_retry_limit",
+                1,
+                admission_id=self.admission_id,
+                source="post_finalize",
+                retries=self._post_finalize_retry_count,
+                context_hash=context_hash,
+            )
+            self._set_refresh_status("Сохранено. Не удалось обновить список назначений автоматически.")
+            return
+        self._post_finalize_retry_count += 1
+        retry_index = self._post_finalize_retry_count
+        delay_ms = 0
+        if retry_index > 1:
+            delay_ms = min(
+                ORDERS_POST_FINALIZE_RETRY_MAX_BACKOFF_MS,
+                ORDERS_POST_FINALIZE_RETRY_BACKOFF_MS * (2 ** max(0, retry_index - 2)),
+            )
+        logger.warning(
+            "[OrdersWidget] post_finalize_retry_scheduled admission_id=%s retry=%s delay_ms=%s context_hash=%s",
+            self.admission_id,
+            retry_index,
+            delay_ms,
+            context_hash,
+        )
+        record_metric(
+            "orders_post_finalize_retry_scheduled",
+            1,
+            admission_id=self.admission_id,
+            source="post_finalize",
+            retry=retry_index,
+            delay_ms=delay_ms,
+            context_hash=context_hash,
+        )
+        QTimer.singleShot(
+            delay_ms,
+            lambda: self._request_snapshot(
+                force=True,
+                source="post_finalize",
+                priority="HIGH",
+                invalidate_reason=f"post_finalize_retry_{retry_index}",
+            ),
+        )
+
     def _on_snapshot_finished(self):
         worker = self.sender()
         if worker is not None and self._snapshot_worker is not worker:
             return
+        self._post_finalize_watchdog_timer.stop()
         self._snapshot_worker = None
-        self._active_request_context_key = None
-        self._active_request_force = False
-        self._active_request_priority = "MEDIUM"
+        self._retire_snapshot_worker_state(state="finished", reason="worker_finished")
+        self._reset_active_snapshot_request()
         self._clear_soft_update_state()
         if self._is_closing:
             self._reset_pending_snapshot_request()
@@ -1274,15 +1629,63 @@ class OrdersWidget(QWidget):
             return str(incoming or current or "refresh")
         return str(current or incoming or "refresh")
 
-    def _is_request_covered_by_active(self, *, context_key, force: bool, priority: str) -> bool:
+    @staticmethod
+    def _normalize_snapshot_source(value: str) -> str:
+        source = str(value or "refresh").strip().lower() or "refresh"
+        if source in {"user", "click", "user_click"}:
+            return "click"
+        if source in {"post_finalize", "cache", "monitor", "background", "visible_tab", "refresh"}:
+            return source
+        if source in {"local_silent_sync", "stale_snapshot", "poll_external_updates"}:
+            return "monitor"
+        return "refresh"
+
+    @classmethod
+    def _snapshot_request_rank(cls, source: str, priority: str) -> int:
+        priority_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}.get(cls._normalize_priority(priority), 1)
+        source_rank = {
+            "cache": 0,
+            "monitor": 0,
+            "background": 0,
+            "refresh": 1,
+            "visible_tab": 2,
+            "click": 2,
+            "post_finalize": 3,
+        }.get(cls._normalize_snapshot_source(source), 1)
+        return source_rank * 10 + priority_rank
+
+    def _should_supersede_active_snapshot_worker(self, *, context_key, source: str, priority: str) -> bool:
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        if not state or state.get("context_key") != context_key:
+            return False
+        active_state = str(state.get("state") or "active")
+        if active_state not in {"active", "stalled"}:
+            return False
+        incoming_rank = self._snapshot_request_rank(source, priority)
+        active_rank = self._snapshot_request_rank(
+            str(state.get("source") or self._active_request_source),
+            str(state.get("priority") or self._active_request_priority),
+        )
+        incoming_source = self._normalize_snapshot_source(source)
+        active_source = self._normalize_snapshot_source(str(state.get("source") or self._active_request_source))
+        incoming_visible = incoming_source in {"click", "post_finalize", "visible_tab"} or (
+            incoming_source == "refresh" and self._normalize_priority(priority) == "HIGH"
+        )
+        active_background = active_source in {"cache", "monitor", "background", "refresh"}
+        return bool(incoming_visible and active_background and incoming_rank > active_rank)
+
+    def _is_request_covered_by_active(self, *, context_key, source: str, force: bool, priority: str) -> bool:
         if self._active_request_context_key != context_key:
             return False
-        weights = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-        active_priority = self._normalize_priority(self._active_request_priority)
-        incoming_priority = self._normalize_priority(priority)
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        active_rank = self._snapshot_request_rank(
+            str(state.get("source") or self._active_request_source),
+            str(state.get("priority") or self._active_request_priority),
+        )
+        incoming_rank = self._snapshot_request_rank(source, priority)
         if self._active_request_force and not force:
             return True
-        if self._active_request_force == bool(force) and weights[active_priority] >= weights[incoming_priority]:
+        if self._active_request_force == bool(force) and active_rank >= incoming_rank:
             return True
         return False
 
@@ -1342,9 +1745,18 @@ class OrdersWidget(QWidget):
     def _show_soft_update_if_needed(self):
         return
 
+    def _set_refresh_status(self, text: str):
+        label = getattr(self, "_refresh_status_label", None)
+        if label is None:
+            return
+        value = str(text or "").strip()
+        label.setText(value)
+        label.setVisible(bool(value))
+
     def _clear_soft_update_state(self):
         self._soft_update_timer.stop()
         self._soft_update_message = ""
+        self._set_refresh_status("")
 
     def _enqueue_write(
         self,
@@ -2056,7 +2468,8 @@ class OrdersWidget(QWidget):
             self._clear_local_cell_draft_guard()
             self._admin_only_snapshot_until = 0.0
             self._clear_pending_reorder()
-            self._refresh_model()
+            self._post_finalize_retry_count = 0
+            self._refresh_model(source="post_finalize")
 
         self._enqueue_write(
             f"orders_finalize:{target_admission_id}",
@@ -2172,6 +2585,10 @@ class OrdersWidget(QWidget):
         self.input_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.input_widget.prescription_generated.connect(self.on_prescription_input)
         top_layout.addWidget(self.input_widget, 1)
+        self._refresh_status_label = QLabel("")
+        self._refresh_status_label.setVisible(False)
+        self._refresh_status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 9pt; padding: 0 6px;")
+        top_layout.addWidget(self._refresh_status_label, 0)
         self.frame_layout.addWidget(self.top_container, 0)
 
         # 2. Таблица
@@ -2806,10 +3223,10 @@ class OrdersWidget(QWidget):
         if hasattr(self, 'timer') and not self.timer.isActive():
             self.timer.start(60000)
 
-    def _refresh_model(self):
+    def _refresh_model(self, *, source: str = "refresh"):
         if self.admission_id:
             logger.debug(f"[OrdersWidget] Scheduling async refresh for ID {self.admission_id}")
-        self.request_refresh(force=True)
+        self.request_refresh(force=True, source=source, priority="HIGH")
         
     def clear_all_times(self):
         if not self.admission_id or self._is_read_only(): return

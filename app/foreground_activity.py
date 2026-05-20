@@ -1,6 +1,7 @@
 import threading
 import time
 from contextlib import contextmanager
+from itertools import count
 from typing import Iterable
 
 from rem_card.app.local_metrics import record_metric
@@ -8,7 +9,9 @@ from rem_card.app.local_metrics import record_metric
 
 _LOCK = threading.Lock()
 _ACTIVE_COUNTS: dict[str, int] = {}
+_ACTIVE_READS: dict[str, dict[str, dict[str, object]]] = {}
 _LAST_ACTIVITY: dict[str, dict[str, object]] = {}
+_TOKEN_COUNTER = count(1)
 
 
 def _normalize_name(name: str) -> str:
@@ -19,7 +22,9 @@ def _normalize_source(source: str) -> str:
     value = str(source or "refresh").strip().lower() or "refresh"
     if value == "user":
         return "click"
-    if value not in {"click", "cache", "refresh"}:
+    if value in {"local_silent_sync", "stale_snapshot"}:
+        return "monitor"
+    if value not in {"click", "cache", "refresh", "post_finalize", "monitor"}:
         return "refresh"
     return value
 
@@ -55,6 +60,108 @@ def mark_foreground_activity(
     )
 
 
+def _activity_token(name: str, fields: dict[str, object]) -> str:
+    request_id = str(fields.get("request_id") or "").strip()
+    if request_id:
+        return request_id
+    return f"{name}:{threading.get_ident()}:{next(_TOKEN_COUNTER)}"
+
+
+def _set_active_count_locked(name: str) -> int:
+    active_reads = _ACTIVE_READS.get(name) or {}
+    count_value = len(active_reads)
+    if count_value:
+        _ACTIVE_COUNTS[name] = count_value
+    else:
+        _ACTIVE_COUNTS.pop(name, None)
+        _ACTIVE_READS.pop(name, None)
+    return count_value
+
+
+def _find_active_token_locked(name: str, request_id: str | None) -> tuple[str | None, dict[str, object] | None]:
+    active_reads = _ACTIVE_READS.get(name) or {}
+    if request_id:
+        key = str(request_id)
+        payload = active_reads.get(key)
+        if payload is not None:
+            return key, payload
+        for token, payload in active_reads.items():
+            if str(payload.get("request_id") or "") == key:
+                return token, payload
+    if len(active_reads) == 1:
+        token, payload = next(iter(active_reads.items()))
+        return token, payload
+    return None, None
+
+
+def mark_foreground_read_stalled(
+    name: str,
+    *,
+    request_id: str | None = None,
+    source: str = "refresh",
+    **fields,
+) -> bool:
+    normalized_name = _normalize_name(name)
+    normalized_source = _normalize_source(source)
+    now = time.monotonic()
+    with _LOCK:
+        token, payload = _find_active_token_locked(normalized_name, request_id)
+        if payload is None:
+            return False
+        payload["status"] = "stalled"
+        payload["stalled_at"] = now
+        payload["monotonic"] = now
+        payload["source"] = normalized_source
+        payload.update(fields)
+        _LAST_ACTIVITY[normalized_name] = dict(payload)
+    return True
+
+
+def poison_foreground_read(
+    name: str,
+    *,
+    request_id: str | None = None,
+    source: str = "refresh",
+    reason: str = "stalled_timeout",
+    **fields,
+) -> bool:
+    normalized_name = _normalize_name(name)
+    normalized_source = _normalize_source(source)
+    now = time.monotonic()
+    removed_payload: dict[str, object] | None = None
+    with _LOCK:
+        token, payload = _find_active_token_locked(normalized_name, request_id)
+        if token is None or payload is None:
+            return False
+        active_reads = _ACTIVE_READS.get(normalized_name) or {}
+        removed_payload = dict(active_reads.pop(token, payload))
+        current_count = _set_active_count_locked(normalized_name)
+        removed_payload.update(
+            {
+                "name": normalized_name,
+                "source": normalized_source,
+                "status": "poisoned",
+                "poison_reason": reason,
+                "monotonic": now,
+                "active_until": now,
+                **fields,
+            }
+        )
+        _LAST_ACTIVITY[normalized_name] = removed_payload
+    record_metric(
+        "foreground_read_poisoned",
+        1,
+        activity_name=normalized_name,
+        admission_id=removed_payload.get("admission_id") if removed_payload else None,
+        source=normalized_source,
+        active_count=current_count,
+        request_id=request_id,
+        reason=reason,
+        **fields,
+    )
+    return True
+
+
 @contextmanager
 def foreground_read(
     name: str,
@@ -66,17 +173,21 @@ def foreground_read(
     normalized_name = _normalize_name(name)
     normalized_source = _normalize_source(source)
     started = time.monotonic()
+    token = _activity_token(normalized_name, fields)
     with _LOCK:
-        _ACTIVE_COUNTS[normalized_name] = int(_ACTIVE_COUNTS.get(normalized_name, 0)) + 1
-        _LAST_ACTIVITY[normalized_name] = {
+        payload = {
             "name": normalized_name,
             "admission_id": admission_id,
             "source": normalized_source,
+            "request_id": token,
+            "status": "active",
             "monotonic": started,
             "active_until": started,
             **fields,
         }
-        active_count = int(_ACTIVE_COUNTS.get(normalized_name, 0))
+        _ACTIVE_READS.setdefault(normalized_name, {})[token] = payload
+        active_count = _set_active_count_locked(normalized_name)
+        _LAST_ACTIVITY[normalized_name] = dict(payload)
     try:
         record_metric(
             "foreground_read_start",
@@ -91,18 +202,21 @@ def foreground_read(
     finally:
         elapsed_ms = (time.monotonic() - started) * 1000.0
         with _LOCK:
-            current_count = max(0, int(_ACTIVE_COUNTS.get(normalized_name, 0)) - 1)
-            if current_count:
-                _ACTIVE_COUNTS[normalized_name] = current_count
-            else:
-                _ACTIVE_COUNTS.pop(normalized_name, None)
+            active_reads = _ACTIVE_READS.get(normalized_name) or {}
+            was_active = token in active_reads
+            if was_active:
+                active_reads.pop(token, None)
+            current_count = _set_active_count_locked(normalized_name)
             ended = time.monotonic()
             _LAST_ACTIVITY[normalized_name] = {
                 "name": normalized_name,
                 "admission_id": admission_id,
                 "source": normalized_source,
+                "request_id": token,
+                "status": "finished",
                 "monotonic": ended,
                 "active_until": ended,
+                "was_active": int(bool(was_active)),
                 **fields,
             }
         record_metric(
@@ -112,6 +226,7 @@ def foreground_read(
             admission_id=admission_id,
             source=normalized_source,
             active_count=current_count,
+            was_active=int(bool(was_active)),
             **fields,
         )
 
@@ -147,6 +262,9 @@ def should_defer_background_io(
     latest_ts = float(latest_payload.get("monotonic") or 0.0)
     active_until = float(latest_payload.get("active_until") or latest_ts)
     age_sec = max(0.0, now - latest_ts)
+    latest_status = str(latest_payload.get("status") or "")
+    if latest_status in {"poisoned", "expired", "superseded"}:
+        return False, f"{latest_status}:{latest_name}", age_sec
     if now <= active_until:
         return True, f"recent:{latest_name}", age_sec
     if age_sec < idle_window:
@@ -157,4 +275,5 @@ def should_defer_background_io(
 def _reset_foreground_activity_for_tests() -> None:
     with _LOCK:
         _ACTIVE_COUNTS.clear()
+        _ACTIVE_READS.clear()
         _LAST_ACTIVITY.clear()
