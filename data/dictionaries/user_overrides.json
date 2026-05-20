@@ -2845,6 +2845,28 @@
       "form_unit": "ml",
       "forms": [],
       "group": "fluids"
+    },
+    "monosan": {
+      "latin": "Isosorbidi Mononitratis",
+      "aliases": [
+        "моносан",
+        "оликард",
+        "кардикет"
+      ],
+      "star_alias": "монос*",
+      "admin_type": "per_os",
+      "uses_line": false,
+      "duration_min": 0,
+      "default_dose": 20.0,
+      "forms": [
+        20.0
+      ],
+      "unit": "mg",
+      "form_unit": "mg",
+      "form_key": "tablet",
+      "concentration_mg_ml": 0,
+      "default_dilution": null,
+      "group": "nitrats"
     }
   },
   "admin_types": {
