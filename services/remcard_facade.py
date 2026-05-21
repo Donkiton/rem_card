@@ -615,6 +615,14 @@ class RemCardService(QObject):
                 status=status,
             )
 
+        def _orders_snapshot_cancel_check(step: str, started: float):
+            def _check_cancelled() -> bool:
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                _notify_orders_snapshot_step("poll", step, elapsed_ms=elapsed_ms)
+                return False
+
+            return _check_cancelled
+
         if caller != "read_coordinator":
             _LEGACY_ORDERS_ACCESS_COUNT += 1
             warn_key = (caller, int(admission_id), shift_date.isoformat(), context_hash)
@@ -660,8 +668,12 @@ class RemCardService(QObject):
                     include_deleted=True,
                     include_cancelled=True,
                     include_deleted_orders=True,
+                    cancel_check=_orders_snapshot_cancel_check("get_latest_administrations", step_started),
                 )
             ]
+        except OrdersSnapshotCancelled:
+            _record_orders_snapshot_step_end("get_latest_administrations", step_started, status="cancelled")
+            raise
         except Exception:
             _record_orders_snapshot_step_end("get_latest_administrations", step_started, status="error")
             raise
@@ -1303,6 +1315,7 @@ class RemCardService(QObject):
         include_cancelled: bool = False,
         include_deleted_orders: bool = True,
         updated_after: Optional[str] = None,
+        cancel_check=None,
     ):
         return self._orders.get_latest_admin_rows(
             admission_id=admission_id,
@@ -1312,6 +1325,7 @@ class RemCardService(QObject):
             include_cancelled=include_cancelled,
             include_deleted_orders=include_deleted_orders,
             updated_after=updated_after,
+            cancel_check=cancel_check,
         )
 
     def get_latest_administrations_for_order_ids(
@@ -1325,6 +1339,7 @@ class RemCardService(QObject):
         include_cancelled: bool = False,
         include_deleted_orders: bool = True,
         updated_after: Optional[str] = None,
+        cancel_check=None,
     ):
         return self._orders.get_latest_admin_rows_for_order_ids(
             order_ids=order_ids,
@@ -1335,6 +1350,7 @@ class RemCardService(QObject):
             include_cancelled=include_cancelled,
             include_deleted_orders=include_deleted_orders,
             updated_after=updated_after,
+            cancel_check=cancel_check,
         )
 
     def apply_order_left_click(self, order: OrderDTO, admin, planned_time: datetime):

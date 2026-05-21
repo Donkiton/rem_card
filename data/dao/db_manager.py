@@ -1453,7 +1453,86 @@ class DatabaseManager:
             except Exception as exc:
                 logger.debug("Failed to close finished thread central read connection: %s", exc)
 
-    def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False):
+    @staticmethod
+    def _read_cancel_requested(cancel_check, cancel_state: dict[str, Any]) -> bool:
+        if cancel_check is None:
+            return False
+        if bool(cancel_state.get("cancelled")):
+            return True
+        try:
+            requested = bool(cancel_check())
+        except Exception as exc:
+            cancel_state["cancelled"] = True
+            cancel_state["exception"] = exc
+            return True
+        if requested:
+            cancel_state["cancelled"] = True
+        return requested
+
+    @staticmethod
+    def _cancelled_read_exception(cancel_state: dict[str, Any]) -> Exception:
+        exc = cancel_state.get("exception")
+        if isinstance(exc, Exception):
+            return exc
+        return RuntimeError("SQLite read cancelled")
+
+    def _fetch_all_with_cancel(self, conn, query, params=(), *, cancel_check=None):
+        cancel_state: dict[str, Any] = {"cancelled": False, "exception": None}
+        done_event = threading.Event()
+        watchdog_thread = None
+
+        def should_cancel() -> bool:
+            return self._read_cancel_requested(cancel_check, cancel_state)
+
+        def progress_handler() -> int:
+            return 1 if should_cancel() else 0
+
+        def cancel_watchdog() -> None:
+            while not done_event.wait(0.10):
+                if not should_cancel():
+                    continue
+                try:
+                    conn.interrupt()
+                except Exception:
+                    pass
+                return
+
+        if cancel_check is not None:
+            try:
+                conn.set_progress_handler(progress_handler, 1000)
+            except Exception:
+                logger.debug("Failed to install SQLite read progress handler", exc_info=True)
+            watchdog_thread = threading.Thread(
+                target=cancel_watchdog,
+                name="SQLiteReadCancelWatchdog",
+                daemon=True,
+            )
+            watchdog_thread.start()
+
+        try:
+            if should_cancel():
+                raise self._cancelled_read_exception(cancel_state)
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            if should_cancel():
+                raise self._cancelled_read_exception(cancel_state)
+            return rows
+        except sqlite3.OperationalError as exc:
+            if bool(cancel_state.get("cancelled")) and "interrupted" in str(exc).lower():
+                raise self._cancelled_read_exception(cancel_state) from exc
+            raise
+        finally:
+            done_event.set()
+            if cancel_check is not None:
+                try:
+                    conn.set_progress_handler(None, 0)
+                except Exception:
+                    pass
+            if watchdog_thread is not None and watchdog_thread.is_alive():
+                watchdog_thread.join(timeout=0.2)
+
+    def _fetch_all_central(self, query, params=(), *, use_write_connection: bool = False, cancel_check=None):
         # Чтения внутри текущей транзакции должны видеть незакоммиченные строки.
         # Обычные фоновые чтения открывают короткоживущее read-only connection
         # на конкретный запрос. Worker-потоки здесь короткие, поэтому кэшировать
@@ -1465,14 +1544,10 @@ class DatabaseManager:
                 if use_write_connection or self._in_current_thread_remcard_transaction():
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
                     with self.write_controller.connection_guard(conn):
-                        cursor = conn.cursor()
-                        cursor.execute(query, params)
-                        return cursor.fetchall()
+                        return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
                 conn = self._open_readonly_central_connection()
                 try:
-                    cursor = conn.cursor()
-                    cursor.execute(query, params)
-                    return cursor.fetchall()
+                    return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
                 finally:
                     try:
                         conn.close()
@@ -1811,27 +1886,43 @@ class DatabaseManager:
                 return DeferredWriteCursor(op_id=op_id)
             raise
 
-    def fetch_all_remcard(self, query, params=()):
+    def fetch_all_remcard(self, query, params=(), *, cancel_check=None):
         logger.debug("SQL RemCard FetchAll: %s | Params: %s", query, params)
         started = time.perf_counter()
         source = "central"
         status = "error"
         try:
             if self._in_current_thread_remcard_transaction():
-                rows = self._fetch_all_central(query, params, use_write_connection=True)
+                rows = self._fetch_all_central(query, params, use_write_connection=True, cancel_check=cancel_check)
                 status = "ok"
                 return rows
             if self._should_read_from_local():
                 try:
+                    if cancel_check is not None:
+                        cancel_state: dict[str, Any] = {"cancelled": False, "exception": None}
+                        if self._read_cancel_requested(cancel_check, cancel_state):
+                            raise self._cancelled_read_exception(cancel_state)
                     rows = self._local_replica.fetch_all(query, params)
+                    if cancel_check is not None:
+                        cancel_state = {"cancelled": False, "exception": None}
+                        if self._read_cancel_requested(cancel_check, cancel_state):
+                            raise self._cancelled_read_exception(cancel_state)
                     source = "local_replica"
                     status = "ok"
                     return rows
                 except Exception as exc:
+                    exc_name = exc.__class__.__name__.lower()
+                    if cancel_check is not None and ("cancel" in exc_name or "cancelled" in str(exc).lower()):
+                        raise
                     logger.debug("Local replica fetch_all failed, fallback to central: %s", exc)
-            rows = self._fetch_all_central(query, params)
+            rows = self._fetch_all_central(query, params, cancel_check=cancel_check)
             status = "ok"
             return rows
+        except Exception as exc:
+            exc_name = exc.__class__.__name__.lower()
+            if cancel_check is not None and ("cancel" in exc_name or "cancelled" in str(exc).lower()):
+                status = "cancelled"
+            raise
         finally:
             record_metric(
                 "read_duration_ms",

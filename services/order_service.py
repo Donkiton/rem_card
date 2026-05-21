@@ -263,6 +263,7 @@ class OrderService:
         include_cancelled: bool = False,
         include_deleted_orders: bool = True,
         updated_after=None,
+        cancel_check=None,
     ):
         start, end = self._shifts.get_day_period(shift_date)
         return self.get_latest_admin_rows_for_order_ids(
@@ -275,6 +276,7 @@ class OrderService:
             include_cancelled=include_cancelled,
             include_deleted_orders=include_deleted_orders,
             updated_after=updated_after,
+            cancel_check=cancel_check,
         )
 
     def get_latest_admin_rows_for_order_ids(
@@ -289,6 +291,7 @@ class OrderService:
         include_cancelled: bool = False,
         include_deleted_orders: bool = True,
         updated_after=None,
+        cancel_check=None,
     ):
         if order_ids is not None and not order_ids:
             return []
@@ -358,7 +361,7 @@ class OrderService:
         final_params: List[object] = [start_dt.isoformat(), end_dt.isoformat(), *params, start_dt.isoformat(), end_dt.isoformat(), *params]
         if updated_after is not None:
             final_params.extend([updated_after_ts, updated_after_ts, int(updated_after_id)])
-        return self.dao.db.fetch_all_remcard(query, tuple(final_params))
+        return self.dao.db.fetch_all_remcard(query, tuple(final_params), cancel_check=cancel_check)
 
     def _apply_order_sort_order(
         self,

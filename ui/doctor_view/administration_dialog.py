@@ -371,18 +371,22 @@ class ManualEntryDialog(BaseStyledDialog):
             if self.end_of_day_cb.isChecked() or duration_text == "До конца суток":
                 main_line += " [DUR:-1]"
             else:
+                duration_written = False
                 try:
                     nums = re.findall(r"\d+", duration_text)
                     if nums:
                         duration_val = int(nums[0])
-                        if duration_val > 0:
-                            main_line += f" [DUR:{duration_val}]"
+                        main_line += f" [DUR:{duration_val}]"
+                        duration_written = True
                     else:
                         duration_val = self.duration_combo.currentData()
-                        if duration_val and duration_val > 0:
+                        if duration_val is not None:
                             main_line += f" [DUR:{duration_val}]"
+                            duration_written = True
                 except:
                     pass
+                if not duration_written:
+                    main_line += " [DUR:0]"
         else:
             main_line += " [DUR:0]"
 
@@ -644,14 +648,22 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
             main_line += " [DUR:-1]"
         else:
             duration_text = self.duration_combo.currentText()
+            duration_written = False
             try:
                 nums = re.findall(r"\d+", duration_text)
                 if nums:
                     val = int(nums[0])
-                    if val > 0:
-                        main_line += f" [DUR:{val}]"
+                    main_line += f" [DUR:{val}]"
+                    duration_written = True
+                else:
+                    duration_val = self.duration_combo.currentData()
+                    if duration_val is not None:
+                        main_line += f" [DUR:{duration_val}]"
+                        duration_written = True
             except: pass
-            
+            if not duration_written:
+                main_line += " [DUR:0]"
+
         self.result_text = main_line
         self.accept()
 

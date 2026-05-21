@@ -115,6 +115,8 @@ class OrdersWidget(QWidget):
         self._active_snapshot_worker_state = {}
         self._retired_snapshot_worker_states = {}
         self._post_finalize_retry_count = 0
+        self._post_finalize_retry_after_cancel = False
+        self._post_finalize_retry_context_hash = None
         self._refresh_status_label = None
         self._snapshot_stale = False
         self._snapshot_seq = 0
@@ -396,6 +398,8 @@ class OrdersWidget(QWidget):
 
         worker = self._snapshot_worker
         self._snapshot_worker = None
+        self._post_finalize_retry_after_cancel = False
+        self._post_finalize_retry_context_hash = None
         self._reset_active_snapshot_request()
         self._disconnect_snapshot_worker(worker)
         if worker is not None and worker.isRunning():
@@ -1765,10 +1769,21 @@ class OrdersWidget(QWidget):
     def _on_snapshot_failed(self, exc):
         if self._is_closing:
             return
-        self._clear_soft_update_state()
         if isinstance(exc, OrdersRefreshCancelled):
+            request_source = str(self._active_request_source or "refresh").strip().lower()
+            if request_source == "post_finalize":
+                try:
+                    context_hash = self._build_orders_context().hash()
+                except Exception:
+                    context_hash = None
+                self._post_finalize_retry_after_cancel = True
+                self._post_finalize_retry_context_hash = context_hash
+                logger.info("[OrdersWidget] post_finalize snapshot load cancelled; retry will be scheduled: %s", exc)
+                return
+            self._clear_soft_update_state()
             logger.info("[OrdersWidget] Orders snapshot load cancelled: %s", exc)
             return
+        self._clear_soft_update_state()
         logger.warning("[OrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
 
     def _on_post_finalize_snapshot_watchdog(self):
@@ -1915,6 +1930,20 @@ class OrdersWidget(QWidget):
         self._clear_soft_update_state()
         if self._is_closing:
             self._reset_pending_snapshot_request()
+            return
+        if self._post_finalize_retry_after_cancel:
+            context_hash = self._post_finalize_retry_context_hash
+            self._post_finalize_retry_after_cancel = False
+            self._post_finalize_retry_context_hash = None
+            try:
+                context = self._build_orders_context()
+                context_hash = context_hash or context.hash()
+            except Exception:
+                context = None
+            if context is not None:
+                self._apply_cached_snapshot_if_available(context=context, allow_stale=True)
+            self._set_refresh_status("Сохранено, данные обновляются...")
+            self._schedule_post_finalize_retry(context_hash=context_hash)
             return
         if self._snapshot_pending:
             force = self._snapshot_force_pending

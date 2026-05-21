@@ -53,6 +53,10 @@ READ_ORDERS_POISON_THRESHOLD_SEC = max(
     READ_ORDERS_STALL_THRESHOLD_SEC,
     float(os.environ.get("REMCARD_ORDERS_POISON_THRESHOLD_SEC", "12")),
 )
+READ_ORDERS_SQL_STEP_TIMEOUT_SEC = max(
+    0.5,
+    float(os.environ.get("REMCARD_ORDERS_SQL_STEP_TIMEOUT_SEC", "4.5")),
+)
 READ_ORDERS_RETIRED_REFRESH_MAX = max(20, int(os.environ.get("REMCARD_ORDERS_RETIRED_REFRESH_MAX", "100")))
 
 _VALID_ROLES = {"doctor", "nurse"}
@@ -955,14 +959,15 @@ class ReadCoordinator:
         started: float,
         step: str,
         cancel_check: Optional[Callable[[], bool]],
+        forced_reason: Optional[str] = None,
     ) -> None:
-        cancel_requested = self._cancel_check_requested(cancel_check)
+        cancel_requested = bool(forced_reason) or self._cancel_check_requested(cancel_check)
         retired = self._is_orders_refresh_retired(request_id)
         retired_status = str((retired or {}).get("status") or "")
         if not cancel_requested and retired_status not in {"cancelled", "poisoned", "expired", "superseded"}:
             return
 
-        reason = "cancel_check" if cancel_requested else retired_status
+        reason = str(forced_reason or ("cancel_check" if cancel_requested else retired_status))
         with self._orders_refresh_lock:
             active = self._orders_active_refreshes.get(cache_key)
             if active and active.get("request_id") == request_id:
@@ -2843,7 +2848,13 @@ class ReadCoordinator:
         cancel_context: Optional[dict[str, Any]] = None,
     ):
         def observer(event: str, step: str, fields: dict[str, Any]) -> None:
-            if event == "start" and cancel_context:
+            forced_reason = None
+            if event == "poll" and cancel_context:
+                elapsed_ms = float((fields or {}).get("elapsed_ms") or 0.0)
+                threshold_ms = READ_ORDERS_SQL_STEP_TIMEOUT_SEC * 1000.0
+                if threshold_ms > 0 and elapsed_ms >= threshold_ms:
+                    forced_reason = f"sql_step_timeout:{step}"
+            if event in {"start", "poll"} and cancel_context:
                 self._raise_if_orders_refresh_cancelled(
                     context=cancel_context["context"],
                     cache_key=cancel_context.get("cache_key"),
@@ -2853,8 +2864,9 @@ class ReadCoordinator:
                     context_hash=str(cancel_context.get("context_hash") or ""),
                     generation=int(cancel_context.get("generation") or 0),
                     started=float(cancel_context.get("started") or time.perf_counter()),
-                    step=f"before_{step}",
+                    step=f"before_{step}" if event == "start" else f"during_{step}",
                     cancel_check=cancel_check,
+                    forced_reason=forced_reason,
                 )
             self._mark_orders_step(step_state, event, step, **(fields or {}))
             self._mark_orders_refresh_step(cache_key, request_id=request_id, event=event, step=step, **(fields or {}))

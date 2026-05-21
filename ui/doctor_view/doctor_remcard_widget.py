@@ -2383,7 +2383,7 @@ class DoctorRemCardWidget(QWidget):
                 self.admission_id = admission_id
                 self.layout_manager.current_admission_id = admission_id
                 self.layout_manager.set_patient_selection_mode("card")
-                self.layout_manager.bottom_row.show()
+                self.layout_manager.sync_bottom_row_visibility_to_current_tab()
 
             self.current_date = selected_date
             self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
@@ -2941,7 +2941,7 @@ class DoctorRemCardWidget(QWidget):
                 target_date = self._resolve_archive_open_date(int(source_admission_id), fallback_patient=patient)
                 self.load_patient_card(int(source_admission_id), target_date)
                 self.layout_manager.set_patient_selection_mode("card")
-                self.layout_manager.bottom_row.show()
+                self.layout_manager.sync_bottom_row_visibility_to_current_tab()
                 db_name = getattr(patient, "source_db_name", None) or "архивная БД"
                 CustomMessageBox.information(
                     self,
@@ -2960,7 +2960,7 @@ class DoctorRemCardWidget(QWidget):
         self.load_patient_card(patient.id, target_date, balance_patient_period_manual_mode=True)
         self._prime_patient_header_from_w1(patient, target_date)
         self.layout_manager.set_patient_selection_mode("card")
-        self.layout_manager.bottom_row.show()
+        self.layout_manager.sync_bottom_row_visibility_to_current_tab()
 
     def on_patient_selected_from_list(self, patient, action_type):
         self._exit_archive_read_only_mode()

@@ -219,6 +219,7 @@ class RemCardLayoutManager(QWidget):
         self.bottom_row.setStretchFactor(0, 1)
         self.bottom_row.setStretchFactor(1, 1)
         self.bottom_row.setStretchFactor(2, 1)
+        self._apply_bottom_row_visibility("Витальные функции")
 
         # Вертикальная сборка контента
         self.left_content_splitter.addWidget(self.vitals_stack)
@@ -435,6 +436,12 @@ class RemCardLayoutManager(QWidget):
         self.bottom_row.setVisible(show_bottom_row)
         self.sector_7b_mode_stack.setCurrentIndex(0 if is_orders else 1)
         return show_bottom_row
+
+    def sync_bottom_row_visibility_to_current_tab(self):
+        tab_name = "Витальные функции"
+        if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "current_tab_name"):
+            tab_name = self.sector_2b.current_tab_name() or tab_name
+        return self._apply_bottom_row_visibility(tab_name, is_orders=(tab_name == "Назначения"))
 
     def _post_restore_fix(self):
         try:
@@ -802,6 +809,7 @@ class RemCardLayoutManager(QWidget):
                     self.sector_1b_stack.setCurrentIndex(0)
 
                 self.sector_1b.setEnabled(True)
+                self.sync_bottom_row_visibility_to_current_tab()
                 self._post_restore_fix()
             except Exception:
                 self.setUpdatesEnabled(True)

@@ -1632,6 +1632,179 @@ def _check_order_edit_dialog_prefills_current_values(temp_root: str) -> tuple[bo
     return True, "ok"
 
 
+def _check_order_dialog_bolus_duration_overrides_default(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
+    from rem_card.services.prescription_engine import engine
+    from rem_card.ui.doctor_view.administration_dialog import (
+        DrugCharacteristicsDialog,
+        MultiCompCharacteristicsDialog,
+    )
+    from rem_card.ui.doctor_view.components.order_input_handler import OrderInputHandler
+
+    original_drugs = engine.drugs
+    original_forms = engine.forms
+    original_admin_types = engine.admin_types
+    original_dilutions = engine.dilutions
+    app = QApplication.instance() or QApplication([])
+    dialogs = []
+    try:
+        engine.drugs = dict(original_drugs)
+        engine.forms = dict(original_forms)
+        engine.admin_types = dict(original_admin_types)
+        engine.dilutions = dict(original_dilutions)
+        engine.forms["regression_solution"] = {
+            "latin_abbr": "S",
+            "can_dilute": True,
+            "name_ru": "Раствор",
+        }
+        engine.admin_types["infusion"] = {"name_ru": "В/в капельно"}
+        engine.admin_types["bolus"] = {"name_ru": "В/в струйно"}
+        engine.dilutions["regression_nacl"] = {
+            "display": "NaCl 0.9%",
+            "default_volumes": [100],
+        }
+        engine.drugs["regression_default_infusion"] = {
+            "latin": "Ceftriaxoni",
+            "unit": "g",
+            "admin_type": "infusion",
+            "form_key": "regression_solution",
+            "default_dose": 1,
+            "duration_min": 60,
+            "default_dilution": {"base": "regression_nacl", "volume": 100},
+        }
+
+        add_dialog = DrugCharacteristicsDialog("regression_default_infusion")
+        dialogs.append(add_dialog)
+        bolus_idx = add_dialog.duration_combo.findData(0)
+        if bolus_idx < 0:
+            return False, "bolus duration option is missing"
+        add_dialog.duration_combo.setCurrentIndex(bolus_idx)
+        add_dialog.on_add()
+        if "[DUR:0]" not in add_dialog.result_text:
+            return False, f"add dialog did not emit explicit bolus duration: {add_dialog.result_text!r}"
+        parsed_add = OrderInputHandler.parse_input_to_dto(add_dialog.result_text, admission_id=3)
+        if int(parsed_add.duration_min or 0) != 0:
+            return False, f"add dialog bolus parsed as default duration: {parsed_add.duration_min}"
+
+        edit_source = OrderDTO(
+            id=11,
+            admission_id=3,
+            drug_key="regression_default_infusion",
+            latin="Ceftriaxoni",
+            type=OrderType.INFUSION_CONTINUOUS,
+            status=OrderStatus.ACTIVE,
+            dose_value=1,
+            dose_unit="g",
+            duration_min=5,
+            created_at=datetime(2026, 5, 20, 9, 0, 0),
+            comment="S. NaCl 0.9% - 100мл [ROUTE:В/в капельно] [DUR:5]",
+        )
+        edit_dialog = DrugCharacteristicsDialog(
+            "regression_default_infusion",
+            initial_dose=edit_source.dose_value,
+            initial_order=edit_source,
+        )
+        dialogs.append(edit_dialog)
+        edit_dialog.duration_combo.setCurrentIndex(edit_dialog.duration_combo.findData(0))
+        edit_dialog.on_add()
+        if "[DUR:0]" not in edit_dialog.result_text:
+            return False, f"edit dialog did not emit explicit bolus duration: {edit_dialog.result_text!r}"
+        parsed_edit = OrderInputHandler.parse_input_to_dto(edit_dialog.result_text, admission_id=3)
+        if int(parsed_edit.duration_min or 0) != 0:
+            return False, f"edit dialog bolus parsed as default duration: {parsed_edit.duration_min}"
+
+        engine.drugs.update(
+            {
+                "regression_mix_a": {"latin": "Kalii", "unit": "ml", "admin_type": "bolus"},
+                "regression_mix_b": {"latin": "Insulini", "unit": "ЕД", "admin_type": "bolus"},
+                "regression_bolus_mix": {
+                    "is_multicomp": True,
+                    "latin": "Polarka",
+                    "aliases": ["полярка"],
+                    "admin_type": "infusion",
+                    "form_key": "regression_solution",
+                    "duration_min": 120,
+                    "components": [
+                        {"drug_key": "regression_mix_a", "default_dose": 10},
+                        {"drug_key": "regression_mix_b", "default_dose": 4},
+                    ],
+                    "unit": "ml",
+                },
+            }
+        )
+        multi_dialog = MultiCompCharacteristicsDialog("regression_bolus_mix")
+        dialogs.append(multi_dialog)
+        multi_dialog.duration_combo.setCurrentIndex(multi_dialog.duration_combo.findData(0))
+        multi_dialog.on_add()
+        if "[DUR:0]" not in multi_dialog.result_text:
+            return False, f"multicomp dialog did not emit explicit bolus duration: {multi_dialog.result_text!r}"
+        parsed_multi = OrderInputHandler.parse_input_to_dto(multi_dialog.result_text, admission_id=3)
+        if int(parsed_multi.duration_min or 0) != 0:
+            return False, f"multicomp bolus parsed as default duration: {parsed_multi.duration_min}"
+    finally:
+        for dialog in dialogs:
+            dialog.close()
+            dialog.deleteLater()
+        app.processEvents()
+        engine.drugs = original_drugs
+        engine.forms = original_forms
+        engine.admin_types = original_admin_types
+        engine.dilutions = original_dilutions
+
+    return True, "ok"
+
+
+def _check_card_bottom_row_hidden_on_vitals_open(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.shared.remcard_layout import RemCardLayoutManager
+
+    display_settings_path = Path(temp_root) / "display_settings_card_bottom_row.json"
+    saved_display_settings_path = os.environ.get("REMCARD_DISPLAY_SETTINGS_PATH")
+    os.environ["REMCARD_DISPLAY_SETTINGS_PATH"] = str(display_settings_path)
+
+    app = QApplication.instance() or QApplication([])
+    layout = None
+    try:
+        layout = RemCardLayoutManager(patient_service=None, remcard_service=None)
+        layout.set_active_tab("Витальные функции", source="refresh")
+        layout.set_patient_selection_mode("card")
+        app.processEvents()
+
+        if not layout.bottom_row.isHidden():
+            return False, "bottom row must be explicitly hidden on initial vitals card view"
+
+        layout.bottom_row.show()
+        layout.sync_bottom_row_visibility_to_current_tab()
+        if not layout.bottom_row.isHidden():
+            return False, "bottom row show() must be corrected while vitals tab is active"
+
+        layout.set_active_tab("Баланс жидкости", source="refresh")
+        app.processEvents()
+        if layout.bottom_row.isHidden():
+            return False, "bottom row must still be visible on balance tab"
+    finally:
+        if layout is not None:
+            layout.close()
+            layout.deleteLater()
+            app.processEvents()
+        if saved_display_settings_path is None:
+            os.environ.pop("REMCARD_DISPLAY_SETTINGS_PATH", None)
+        else:
+            os.environ["REMCARD_DISPLAY_SETTINGS_PATH"] = saved_display_settings_path
+
+    return True, "ok"
+
+
 def _create_sqlite_file(path: str):
     conn = sqlite3.connect(path)
     try:
@@ -6841,6 +7014,21 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             if "orders_post_finalize_retry_scheduled" not in metric_names:
                 return False, "post_finalize watchdog did not schedule guaranteed retry"
 
+            retry_metric_count = sum(1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled")
+            widget._snapshot_worker = FakeWorker()
+            widget._active_request_source = "post_finalize"
+            widget._active_request_seq = 11
+            widget._active_request_id = "orders-ui-cancelled"
+            widget._active_request_generation = 11
+            widget._active_request_started_monotonic = time.monotonic() - 1.0
+            widget._on_snapshot_failed(OrdersRefreshCancelled("regression post_finalize sql step timeout"))
+            widget._on_snapshot_finished()
+            retry_metric_count_after_cancel = sum(
+                1 for name, _value, _fields in metrics if name == "orders_post_finalize_retry_scheduled"
+            )
+            if retry_metric_count_after_cancel <= retry_metric_count:
+                return False, "post_finalize controlled cancel did not schedule retry"
+
             widget._snapshot_seq = 12
             widget._active_request_id = "orders-ui-new"
             widget._active_request_generation = 12
@@ -6874,6 +7062,62 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = original_coalesce_wait
         orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = original_widget_watchdog_ms
         foreground_activity._reset_foreground_activity_for_tests()
+
+
+def _check_orders_admin_read_cancellable_sql(temp_root: str) -> tuple[bool, str]:
+    from pathlib import Path
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+
+    db_path = Path(temp_root) / "orders_admin_cancel.db"
+    setup_conn = sqlite3.connect(db_path)
+    try:
+        setup_conn.execute("CREATE TABLE seed(id INTEGER PRIMARY KEY)")
+        setup_conn.execute("INSERT INTO seed(id) VALUES (1)")
+        setup_conn.commit()
+    finally:
+        setup_conn.close()
+
+    manager = DatabaseManager.__new__(DatabaseManager)
+    manager.db_path = db_path
+    manager._closed = False
+    manager._remcard_conn = sqlite3.connect(db_path)
+    manager._central_io_lock = threading.Lock()
+    manager._thread_state = threading.local()
+
+    class RegressionReadCancelled(RuntimeError):
+        pass
+
+    calls = 0
+
+    def cancel_check():
+        nonlocal calls
+        calls += 1
+        if calls >= 2:
+            raise RegressionReadCancelled("orders admin read cancelled")
+        return False
+
+    query = """
+        WITH RECURSIVE cnt(x) AS (
+            VALUES(0)
+            UNION ALL
+            SELECT x + 1 FROM cnt WHERE x < 50000000
+        )
+        SELECT sum(x) FROM cnt
+    """
+    try:
+        try:
+            manager._fetch_all_central(query, cancel_check=cancel_check)
+        except RegressionReadCancelled:
+            if calls < 2:
+                return False, f"cancel_check was not polled enough: {calls}"
+            return True, "ok"
+        return False, "cancellable read completed instead of interrupting"
+    finally:
+        try:
+            manager._remcard_conn.close()
+        except Exception:
+            pass
 
 
 def _check_orders_widget_post_finalize_supersedes_hung_worker(temp_root: str) -> tuple[bool, str]:
@@ -11222,6 +11466,8 @@ def main():
         ("order_input_real_examples", _check_order_input_real_examples),
         ("multicomp_zero_components_hidden", _check_multicomp_zero_components_hidden),
         ("order_edit_dialog_prefills_current_values", _check_order_edit_dialog_prefills_current_values),
+        ("order_dialog_bolus_duration_overrides_default", _check_order_dialog_bolus_duration_overrides_default),
+        ("card_bottom_row_hidden_on_vitals_open", _check_card_bottom_row_hidden_on_vitals_open),
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
@@ -11247,6 +11493,7 @@ def main():
         ("orders_tab_targeted_diagnostics_performance", _check_orders_tab_targeted_diagnostics_performance),
         ("orders_reload_storm_coalesces_and_cancels", _check_orders_reload_storm_coalesces_and_cancels),
         ("orders_post_finalize_stall_guard", _check_orders_post_finalize_stall_guard),
+        ("orders_admin_read_cancellable_sql", _check_orders_admin_read_cancellable_sql),
         ("orders_widget_post_finalize_supersedes_hung_worker", _check_orders_widget_post_finalize_supersedes_hung_worker),
         ("orders_finish_after_content_hash_guard", _check_orders_finish_after_content_hash_guard),
         ("doctor_orders_late_model_binding", _check_doctor_orders_late_model_binding),
