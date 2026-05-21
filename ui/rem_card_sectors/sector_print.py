@@ -15,6 +15,7 @@ from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
+from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 from rem_card.services.report_balance import build_print_balance_final
 from rem_card.services.report_vitals_slotting import select_latest_vitals_by_report_hour
 from rem_card.services.shift_service import ShiftService
@@ -628,6 +629,8 @@ class SectorPrint(BaseSectorWidget):
         srv, adm, dt = self._get_context_from_parents()
         if adm and dt and srv: self.set_context(srv, adm, dt)
         if not self.admission_id: return
+        if not ensure_daily_card_exists(self, self.remcard_service, self.admission_id, self.card_date):
+            return
         self.save_settings()
         self.status_label.setText("Формирование...")
         self.worker = DataCollectorWorker(self.remcard_service, self.admission_id, self.card_date, self.config.load())

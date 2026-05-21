@@ -10,6 +10,7 @@ from rem_card.ui.shared.background_settings import get_active_background_path
 from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
 from rem_card.ui.shared.w1_beds_signature import build_w1_bed_row_signature
 from rem_card.ui.shared.pdf_opener import open_pdf_file
+from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 import pathlib
 import datetime
 
@@ -454,6 +455,8 @@ class BedsSelectionWidget(QWidget):
         
         try:
             target_date = datetime.datetime.now()
+            if not ensure_daily_card_exists(self, self.remcard_service, patient.id, target_date):
+                return
             logger.info(
                 "[W1Report] daily requested role=doctor admission_id=%s date=%s",
                 patient.id,

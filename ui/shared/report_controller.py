@@ -9,6 +9,7 @@ from rem_card.app.paths import REPORT_DIR
 from rem_card.app.logger import logger
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
+from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 
 
 class RemCardReportController(QObject):
@@ -45,6 +46,8 @@ class RemCardReportController(QObject):
             return
         if self.daily_worker is not None and self.daily_worker.isRunning():
             CustomMessageBox.information(self.parent, "Инфо", "Отчет за сутки уже формируется.")
+            return
+        if not ensure_daily_card_exists(self.parent, self.service, admission_id, shift_date):
             return
 
         from ..rem_card_sectors.sector_print import DataCollectorWorker, PrintConfig
