@@ -5984,10 +5984,24 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
             "card_hydration_deferred_for_foreground",
         ],
         "ui/main_window.py": ["event_loop_pause_ms", "REMCARD_UI_WATCHDOG_THRESHOLD_MS"],
-        "services/read_coordinator.py": ["foreground_read", "orders_load_time_ms", "build_orders_snapshot_time_ms"],
+        "services/read_coordinator.py": [
+            "foreground_read",
+            "orders_load_time_ms",
+            "build_orders_snapshot_time_ms",
+            "orders_refresh_cancelled_before_expensive_step",
+        ],
         "services/remcard_facade.py": ["orders_snapshot_sql_step_ms", "orders_snapshot_build_total_ms"],
-        "data/dao/db_manager.py": ["periodic_backup_deferred_foreground_read", "PERIODIC_BACKUP_FOREGROUND_IDLE_SEC"],
-        "ui/doctor_view/orders_widget.py": ["orders_snapshot_apply_skipped"],
+        "data/dao/db_manager.py": [
+            "periodic_backup_deferred_foreground_read",
+            "PERIODIC_BACKUP_FOREGROUND_IDLE_SEC",
+            "startup_quick_check_deferred_maintenance_cooldown",
+        ],
+        "ui/doctor_view/orders_widget.py": [
+            "orders_snapshot_apply_skipped",
+            "orders_forced_reload_requested",
+            "orders_forced_reload_suppressed",
+            "orders_stale_block_guard_active",
+        ],
     }
     for rel_path, tokens in required_tokens.items():
         text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
@@ -6067,6 +6081,501 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
         foreground_activity._reset_foreground_activity_for_tests()
 
 
+def _orders_metric_count_since(metrics, start_index: int, name: str, **expected_fields) -> int:
+    count = 0
+    for metric_name, _value, fields in metrics[start_index:]:
+        if metric_name != name:
+            continue
+        if all(fields.get(key) == value for key, value in expected_fields.items()):
+            count += 1
+    return count
+
+
+def _orders_metric_exists_since(metrics, start_index: int, name: str, **expected_fields) -> bool:
+    return _orders_metric_count_since(metrics, start_index, name, **expected_fields) > 0
+
+
+def _exercise_orders_initial_stale_storm(widget, deferred_calls, metrics, warnings, sync_events, *, role: str) -> tuple[bool, str]:
+    metric_start = len(metrics)
+    warning_start = len(warnings)
+    sync_start = len(sync_events)
+    for _idx in range(100):
+        widget._queue_forced_reload_after_stale_snapshot(reason="local_cell_draft_guard")
+    if len(deferred_calls) != 1:
+        return False, f"{role} 100 identical stale blocks scheduled {len(deferred_calls)} reloads"
+    if _orders_metric_count_since(metrics, metric_start, "orders_forced_reload_requested", role=role) != 100:
+        return False, f"{role} forced reload request metric was not recorded for every stale block"
+    if _orders_metric_count_since(metrics, metric_start, "orders_forced_reload_suppressed", role=role) < 99:
+        return False, f"{role} duplicate stale blocks were not suppressed"
+    forced_warnings = [
+        item
+        for item in warnings[warning_start:]
+        if "forced_reload_after_stale_block" in str(item[0]) and f"role={role}" in str(item[0])
+    ]
+    if len(forced_warnings) != 1:
+        return False, f"{role} duplicate stale blocks logged repeated warnings: {len(forced_warnings)}"
+    if len(sync_events[sync_start:]) != 1:
+        return False, f"{role} duplicate stale blocks emitted repeated sync events: {len(sync_events[sync_start:])}"
+    return True, "ok"
+
+
+def _exercise_orders_initial_stale_storm_from_factory(
+    make_widget,
+    metrics,
+    warnings,
+    sync_events,
+    widgets,
+    *,
+    role: str,
+    admission_id: int,
+) -> tuple[bool, str]:
+    widget, deferred_calls = make_widget(admission_id=admission_id)
+    widgets.append(widget)
+    return _exercise_orders_initial_stale_storm(
+        widget,
+        deferred_calls,
+        metrics,
+        warnings,
+        sync_events,
+        role=role,
+    )
+
+
+def _exercise_orders_active_worker_coalescing(
+    make_widget,
+    running_worker,
+    metrics,
+    widgets,
+    *,
+    role: str,
+    admission_id: int,
+) -> tuple[bool, str]:
+    metric_start = len(metrics)
+    widget, deferred_calls = make_widget(admission_id=admission_id)
+    widgets.append(widget)
+    widget._snapshot_worker = running_worker()
+    for _idx in range(100):
+        widget._queue_forced_reload_after_stale_snapshot(reason="stale_snapshot")
+    if deferred_calls:
+        return False, f"{role} active worker duplicate stale block started a new deferred reload"
+    if not widget._snapshot_pending or not widget._snapshot_force_pending:
+        return False, f"{role} first stale block did not schedule a single pending reload behind active worker"
+    suppressed = _orders_metric_count_since(
+        metrics,
+        metric_start,
+        "orders_forced_reload_suppressed",
+        role=role,
+        suppress_reason="pending",
+    )
+    if suppressed < 99:
+        return False, f"{role} active worker duplicates were not coalesced, suppressed={suppressed}"
+    widget._snapshot_worker = None
+    return True, "ok"
+
+
+def _exercise_orders_guard_coalescing(make_widget, metrics, widgets, *, role: str, admission_id: int) -> tuple[bool, str]:
+    metric_start = len(metrics)
+    widget, deferred_calls = make_widget(admission_id=admission_id)
+    widgets.append(widget)
+    widget._local_cell_draft_guard = True
+    for _idx in range(100):
+        widget._queue_forced_reload_after_stale_snapshot(reason="local_cell_draft_guard")
+    if deferred_calls or widget._snapshot_pending:
+        return False, f"{role} local_cell_draft_guard started reload work before guard was cleared"
+    if widget._forced_reload_after_guard_key is None:
+        return False, f"{role} local_cell_draft_guard did not retain one deferred forced reload"
+    suppressed = _orders_metric_count_since(
+        metrics,
+        metric_start,
+        "orders_forced_reload_suppressed",
+        role=role,
+        suppress_reason="guard_deferred",
+    )
+    if suppressed < 99:
+        return False, f"{role} guard duplicates were not coalesced, suppressed={suppressed}"
+    widget._clear_local_cell_draft_guard()
+    if len(deferred_calls) != 1:
+        return False, f"{role} guard release scheduled {len(deferred_calls)} reloads"
+    return True, "ok"
+
+
+def _exercise_orders_deferred_discard(make_widget, metrics, widgets, *, role: str, admission_id: int) -> tuple[bool, str]:
+    from datetime import datetime
+
+    metric_start = len(metrics)
+    widget, deferred_calls = make_widget(admission_id=admission_id)
+    widgets.append(widget)
+    widget._local_cell_draft_guard = True
+    widget._queue_forced_reload_after_stale_snapshot(reason="local_cell_draft_guard")
+    widget.set_context(admission_id=admission_id + 1, shift_date=datetime(2026, 5, 20, 8, 0, 0))
+    if deferred_calls:
+        return False, f"{role} context reset flushed deferred reload instead of discarding it"
+    if not _orders_metric_exists_since(
+        metrics,
+        metric_start,
+        "orders_deferred_reload_discarded_context_reset",
+        role=role,
+    ):
+        return False, f"{role} deferred reload discard metric was not recorded on context reset"
+    return True, "ok"
+
+
+def _exercise_orders_context_switch_supersedes(
+    make_widget,
+    metrics,
+    widgets,
+    *,
+    role: str,
+    admission_id: int,
+) -> tuple[bool, str]:
+    from datetime import datetime
+
+    metric_start = len(metrics)
+    widget, _deferred_calls = make_widget(admission_id=admission_id)
+    widgets.append(widget)
+    old_context = widget._build_orders_context()
+    widget._request_snapshot(force=False, source="refresh", priority="MEDIUM")
+    old_worker = widget._snapshot_worker
+    if old_worker is None:
+        return False, f"{role} initial context request did not start"
+    old_payload = {
+        "seq": widget._snapshot_seq,
+        "admission_id": old_context.admission_id,
+        "shift_date": old_context.shift_date,
+        "context_key": old_context.cache_key(),
+        "context_hash": old_context.hash(),
+        "source": "refresh",
+        "request_id": widget._active_request_id,
+        "generation": widget._active_request_generation,
+        "snapshot": {"load_trace_id": f"old-{role}"},
+    }
+    widget.set_context(admission_id=admission_id + 1, shift_date=datetime(2026, 5, 20, 8, 0, 0))
+    if widget._snapshot_worker is not None:
+        return False, f"{role} context switch did not detach old worker"
+    if not getattr(old_worker, "quit_called", False):
+        return False, f"{role} context switch did not request old worker cancellation"
+    widget._request_snapshot(force=False, source="user", priority="HIGH")
+    if widget._snapshot_worker is old_worker or widget._snapshot_worker is None:
+        return False, f"{role} new context request did not start immediately"
+    if widget._snapshot_pending:
+        return False, f"{role} new context request was left pending behind old worker"
+    widget._apply_snapshot(old_payload)
+    if not _orders_metric_exists_since(
+        metrics,
+        metric_start,
+        "orders_snapshot_worker_superseded_context_switch",
+        role=role,
+    ):
+        return False, f"{role} context switch supersede metric was not recorded"
+    late_result_ignored = _orders_metric_exists_since(
+        metrics,
+        metric_start,
+        "orders_refresh_late_result_ignored",
+        reason="retired_superseded",
+    )
+    if role != "doctor":
+        late_result_ignored = _orders_metric_exists_since(
+            metrics,
+            metric_start,
+            "orders_refresh_late_result_ignored",
+            role=role,
+            reason="retired_superseded",
+        )
+    if not late_result_ignored:
+        return False, f"{role} old context result was not ignored as retired"
+    return True, "ok"
+
+
+def _check_orders_reload_storm_coalesces_and_cancels(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime, timedelta
+
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QApplication
+
+    import rem_card.app.foreground_activity as foreground_activity
+    import rem_card.data.dao.db_manager as dbm
+    import rem_card.services.read_coordinator as read_coordinator
+    import rem_card.ui.doctor_view.orders_widget as orders_widget_module
+    import rem_card.ui.nurse_view.components.nurse_orders_widget as nurse_orders_widget_module
+    from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
+    from rem_card.ui.nurse_view.components.nurse_orders_widget import NurseOrdersWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+    metrics: list[tuple[str, object, dict]] = []
+    sync_events: list[tuple[str, dict]] = []
+    warnings: list[tuple[object, tuple[object, ...]]] = []
+
+    original_widget_metric = orders_widget_module.record_metric
+    original_widget_sync_event = orders_widget_module.record_orders_sync_event
+    original_widget_warning = orders_widget_module.logger.warning
+    original_widget_async = orders_widget_module.AsyncCallThread
+    original_nurse_metric = nurse_orders_widget_module.record_metric
+    original_nurse_sync_event = nurse_orders_widget_module.record_orders_sync_event
+    original_nurse_warning = nurse_orders_widget_module.logger.warning
+    original_nurse_async = nurse_orders_widget_module.AsyncCallThread
+    original_rc_metric = read_coordinator.record_metric
+    original_dbm_metric = dbm.record_metric
+
+    def capture_metric(name, value=None, **fields):
+        metrics.append((str(name), value, dict(fields)))
+
+    def capture_sync_event(event_name, **fields):
+        sync_events.append((str(event_name), dict(fields)))
+
+    def capture_warning(message, *args, **kwargs):
+        warnings.append((message, args))
+
+    class DummyOrdersService(QObject):
+        def get_day_period(self, shift_date):
+            start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
+            return start, start + timedelta(hours=24)
+
+        def build_orders_snapshot(self, admission_id, shift_date, *, only_committed=False, include_change_cursor=False):
+            raise AssertionError("build_orders_snapshot must not be called after early cancellation")
+
+    class RunningWorker:
+        def isRunning(self):
+            return True
+
+    class FakeSignal:
+        def __init__(self):
+            self._slots = []
+
+        def connect(self, slot):
+            self._slots.append(slot)
+
+        def disconnect(self, slot):
+            try:
+                self._slots.remove(slot)
+            except ValueError:
+                pass
+
+        def emit(self, *args):
+            for slot in list(self._slots):
+                slot(*args)
+
+    class FakeAsyncCallThread:
+        created = []
+
+        def __init__(self, fn, *args, **kwargs):
+            del args, kwargs
+            self.fn = fn
+            self.succeeded = FakeSignal()
+            self.failed = FakeSignal()
+            self.finished = FakeSignal()
+            self.running = False
+            self.quit_called = False
+            self.started = False
+
+        def start(self, priority=None):
+            del priority
+            self.running = True
+            self.started = True
+            self.created.append(self)
+
+        def isRunning(self):
+            return self.running
+
+        def quit(self):
+            self.quit_called = True
+
+    def metric_count(name: str) -> int:
+        return sum(1 for metric_name, _value, _fields in metrics if metric_name == name)
+
+    def make_widget(admission_id: int = 25):
+        service = DummyOrdersService()
+        service.read_coordinator = ReadCoordinator(service)
+        widget = OrdersWidget(
+            service=service,
+            admission_id=admission_id,
+            shift_date=datetime(2026, 5, 20, 8, 0, 0),
+            defer_ui=True,
+        )
+        deferred_calls: list[dict] = []
+        widget._defer_snapshot_request = lambda **kwargs: deferred_calls.append(dict(kwargs))
+        return widget, deferred_calls
+
+    def make_nurse_widget(admission_id: int = 25):
+        service = DummyOrdersService()
+        service.read_coordinator = ReadCoordinator(service)
+        widget = NurseOrdersWidget(
+            service=service,
+            admission_id=admission_id,
+            shift_date=datetime(2026, 5, 20, 8, 0, 0),
+            defer_ui=True,
+        )
+        deferred_calls: list[dict] = []
+        widget._defer_snapshot_request = lambda **kwargs: deferred_calls.append(dict(kwargs))
+        return widget, deferred_calls
+
+    orders_widget_module.record_metric = capture_metric
+    orders_widget_module.record_orders_sync_event = capture_sync_event
+    orders_widget_module.logger.warning = capture_warning
+    orders_widget_module.AsyncCallThread = FakeAsyncCallThread
+    nurse_orders_widget_module.record_metric = capture_metric
+    nurse_orders_widget_module.record_orders_sync_event = capture_sync_event
+    nurse_orders_widget_module.logger.warning = capture_warning
+    nurse_orders_widget_module.AsyncCallThread = FakeAsyncCallThread
+    read_coordinator.record_metric = capture_metric
+    dbm.record_metric = capture_metric
+    foreground_activity._reset_foreground_activity_for_tests()
+
+    widgets = []
+    try:
+        widget, deferred_calls = make_widget()
+        widgets.append(widget)
+        checks = [
+            lambda: _exercise_orders_initial_stale_storm(
+                widget,
+                deferred_calls,
+                metrics,
+                warnings,
+                sync_events,
+                role="doctor",
+            ),
+            lambda: _exercise_orders_active_worker_coalescing(
+                make_widget,
+                RunningWorker,
+                metrics,
+                widgets,
+                role="doctor",
+                admission_id=26,
+            ),
+            lambda: _exercise_orders_guard_coalescing(
+                make_widget,
+                metrics,
+                widgets,
+                role="doctor",
+                admission_id=27,
+            ),
+            lambda: _exercise_orders_deferred_discard(
+                make_widget,
+                metrics,
+                widgets,
+                role="doctor",
+                admission_id=28,
+            ),
+            lambda: _exercise_orders_initial_stale_storm_from_factory(
+                make_nurse_widget,
+                metrics,
+                warnings,
+                sync_events,
+                widgets,
+                role="nurse",
+                admission_id=30,
+            ),
+            lambda: _exercise_orders_active_worker_coalescing(
+                make_nurse_widget,
+                RunningWorker,
+                metrics,
+                widgets,
+                role="nurse",
+                admission_id=31,
+            ),
+            lambda: _exercise_orders_guard_coalescing(
+                make_nurse_widget,
+                metrics,
+                widgets,
+                role="nurse",
+                admission_id=32,
+            ),
+            lambda: _exercise_orders_deferred_discard(
+                make_nurse_widget,
+                metrics,
+                widgets,
+                role="nurse",
+                admission_id=37,
+            ),
+            lambda: _exercise_orders_context_switch_supersedes(
+                make_widget,
+                metrics,
+                widgets,
+                role="doctor",
+                admission_id=33,
+            ),
+            lambda: _exercise_orders_context_switch_supersedes(
+                make_nurse_widget,
+                metrics,
+                widgets,
+                role="nurse",
+                admission_id=35,
+            ),
+        ]
+        for check in checks:
+            ok, details = check()
+            if not ok:
+                return False, details
+
+        if metric_count("orders_stale_block_guard_active") < 2:
+            return False, "local_cell_draft_guard metric was not recorded for doctor+nurse"
+
+        cancel_service = DummyOrdersService()
+        coordinator = ReadCoordinator(cancel_service)
+        context = coordinator.make_orders_context(
+            source_db="live",
+            admission_id=28,
+            shift_date=datetime(2026, 5, 20, 8, 0, 0),
+            role="doctor",
+            mode="live",
+            variant="full",
+        )
+        try:
+            coordinator.load_orders_tab(
+                context,
+                source="stale_snapshot",
+                priority="HIGH",
+                force_refresh=True,
+                cancel_check=lambda: True,
+            )
+            return False, "superseded orders request did not exit through controlled cancellation"
+        except OrdersRefreshCancelled:
+            pass
+        if metric_count("orders_refresh_cancelled_before_expensive_step") < 1:
+            return False, "early cancellation metric was not recorded"
+
+        manager = dbm.DatabaseManager.__new__(dbm.DatabaseManager)
+        manager._closed = False
+        manager._startup_quickcheck_stop_evt = None
+        manager._startup_quickcheck_next_allowed_ts = 0.0
+        manager._last_heavy_maintenance_ts = 0.0
+        manager._last_heavy_maintenance_source = ""
+        manager._write_activity_lock = None
+        manager._write_queue_idle_probe = None
+        with foreground_activity.foreground_read("orders", admission_id=29, source="regression"):
+            if manager._is_startup_quickcheck_idle():
+                return False, "startup quick_check was not deferred during foreground Orders read"
+        if metric_count("startup_quick_check_deferred_foreground_read") < 1:
+            return False, "foreground quick_check deferral metric was not recorded"
+        manager._last_heavy_maintenance_ts = time.time()
+        manager._last_heavy_maintenance_source = "shutdown_backup"
+        if manager._is_startup_quickcheck_idle():
+            return False, "startup quick_check was not deferred near shutdown backup"
+        if metric_count("startup_quick_check_deferred_maintenance_cooldown") < 1:
+            return False, "maintenance cooldown quick_check deferral metric was not recorded"
+
+        return True, "ok"
+    finally:
+        for widget in widgets:
+            widget._snapshot_worker = None
+            widget.close()
+        foreground_activity._reset_foreground_activity_for_tests()
+        orders_widget_module.record_metric = original_widget_metric
+        orders_widget_module.record_orders_sync_event = original_widget_sync_event
+        orders_widget_module.logger.warning = original_widget_warning
+        orders_widget_module.AsyncCallThread = original_widget_async
+        nurse_orders_widget_module.record_metric = original_nurse_metric
+        nurse_orders_widget_module.record_orders_sync_event = original_nurse_sync_event
+        nurse_orders_widget_module.logger.warning = original_nurse_warning
+        nurse_orders_widget_module.AsyncCallThread = original_nurse_async
+        read_coordinator.record_metric = original_rc_metric
+        dbm.record_metric = original_dbm_metric
+        app.processEvents()
+
+
 def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -6078,7 +6587,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     import rem_card.services.remcard_facade as remcard_facade
     import rem_card.services.read_coordinator as read_coordinator
     import rem_card.ui.doctor_view.orders_widget as orders_widget_module
-    from rem_card.services.read_coordinator import ReadCoordinator
+    from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
     from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 
     _ = temp_root
@@ -6286,9 +6795,9 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             return False, "post_finalize refresh thread did not finish after release"
         if monitor_thread.is_alive():
             return False, "monitor refresh thread did not finish after release"
-        if "error" in result_holder:
+        if "error" in result_holder and not isinstance(result_holder["error"], OrdersRefreshCancelled):
             return False, f"post_finalize refresh failed: {result_holder['error']}"
-        if "error" in monitor_holder:
+        if "error" in monitor_holder and not isinstance(monitor_holder["error"], OrdersRefreshCancelled):
             return False, f"monitor refresh failed: {monitor_holder['error']}"
 
         metric_names = {name for name, _value, _fields in metrics}
@@ -6300,7 +6809,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
             "orders_refresh_coalesced",
             "periodic_backup_deferred_foreground_read",
             "startup_quick_check_deferred_foreground_read",
-            "orders_refresh_late_result_ignored",
+            "orders_refresh_cancelled_before_expensive_step",
         ):
             if required not in metric_names:
                 return False, f"missing metric {required}; got {sorted(metric_names)}"
@@ -6555,7 +7064,7 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
     from datetime import datetime
 
     import rem_card.services.read_coordinator as read_coordinator
-    from rem_card.services.read_coordinator import ReadCoordinator
+    from rem_card.services.read_coordinator import OrdersRefreshCancelled, ReadCoordinator
 
     _ = temp_root
     metrics: list[tuple[str, object, dict]] = []
@@ -6642,11 +7151,13 @@ def _check_orders_finish_after_content_hash_guard(temp_root: str) -> tuple[bool,
         thread.join(timeout=2.0)
         if thread.is_alive():
             return False, "content_hash_finalize load thread did not finish after release"
-        if "error" in holder:
+        if "error" in holder and not isinstance(holder["error"], OrdersRefreshCancelled):
             return False, f"load failed unexpectedly: {holder['error']}"
         metric_names = {name for name, _value, _fields in metrics}
         if "orders_refresh_late_result_ignored" not in metric_names:
             return False, "late result after content_hash poison was not ignored"
+        if "orders_refresh_cancelled_before_expensive_step" not in metric_names:
+            return False, "late content_hash result did not exit through controlled cancellation"
         return True, "ok"
     finally:
         release_finalize.set()
@@ -7743,7 +8254,9 @@ def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) 
             return False, f"{role}: snapshot worker must stay busy until finished signal"
 
         stale_source = ast.get_source_segment(source_text, methods["_queue_forced_reload_after_stale_snapshot"]) or ""
-        if "_defer_snapshot_request" not in stale_source:
+        enqueue_method = methods.get("_enqueue_forced_reload")
+        enqueue_source = ast.get_source_segment(source_text, enqueue_method) if enqueue_method else ""
+        if "_defer_snapshot_request" not in stale_source and "_defer_snapshot_request" not in enqueue_source:
             return False, f"{role}: stale snapshot reload must be deferred"
 
         finished_source = ast.get_source_segment(source_text, methods["_on_snapshot_finished"]) or ""
@@ -10732,6 +11245,7 @@ def main():
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("orders_tab_targeted_diagnostics_performance", _check_orders_tab_targeted_diagnostics_performance),
+        ("orders_reload_storm_coalesces_and_cancels", _check_orders_reload_storm_coalesces_and_cancels),
         ("orders_post_finalize_stall_guard", _check_orders_post_finalize_stall_guard),
         ("orders_widget_post_finalize_supersedes_hung_worker", _check_orders_widget_post_finalize_supersedes_hung_worker),
         ("orders_finish_after_content_hash_guard", _check_orders_finish_after_content_hash_guard),

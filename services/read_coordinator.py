@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from hashlib import sha1
 from itertools import count
 from types import MappingProxyType
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from rem_card.app.foreground_activity import (
     foreground_read,
@@ -21,7 +21,7 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.data.dao.sync_cursor import EPOCH_SYNC_TS, is_cursor_newer, make_sync_cursor
 from rem_card.services import persistent_snapshot_cache
-from rem_card.services.remcard_facade import orders_snapshot_caller
+from rem_card.services.remcard_facade import OrdersSnapshotCancelled, orders_snapshot_caller
 
 
 READ_CACHE_MAX_PATIENTS = min(10, max(3, int(os.environ.get("REMCARD_READ_CACHE_PATIENTS", "10"))))
@@ -58,6 +58,10 @@ READ_ORDERS_RETIRED_REFRESH_MAX = max(20, int(os.environ.get("REMCARD_ORDERS_RET
 _VALID_ROLES = {"doctor", "nurse"}
 _VALID_MODES = {"live", "archive"}
 _PRIORITY_WEIGHTS = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+
+class OrdersRefreshCancelled(OrdersSnapshotCancelled):
+    """Controlled exit for obsolete orders refresh workers."""
 
 
 @dataclass(frozen=True)
@@ -887,6 +891,7 @@ class ReadCoordinator:
         force_refresh: bool = False,
         timeout_sec: float = READ_LOAD_TIMEOUT_SEC,
         _retry: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         context_hash = context.hash()
         request_source = self._normalize_orders_request_source(source)
@@ -922,9 +927,89 @@ class ReadCoordinator:
                     request_id=request_id,
                     step_state=step_state,
                     done_event=done_event,
+                    cancel_check=cancel_check,
                 )
             finally:
                 done_event.set()
+
+    @staticmethod
+    def _cancel_check_requested(cancel_check: Optional[Callable[[], bool]]) -> bool:
+        if cancel_check is None:
+            return False
+        try:
+            return bool(cancel_check())
+        except Exception as exc:
+            logger.debug("[ReadCoordinator] orders cancel_check failed: %s", exc)
+            return False
+
+    def _raise_if_orders_refresh_cancelled(
+        self,
+        *,
+        context: OrdersContext,
+        cache_key,
+        request_id: str,
+        source: str,
+        priority: str,
+        context_hash: str,
+        generation: int,
+        started: float,
+        step: str,
+        cancel_check: Optional[Callable[[], bool]],
+    ) -> None:
+        cancel_requested = self._cancel_check_requested(cancel_check)
+        retired = self._is_orders_refresh_retired(request_id)
+        retired_status = str((retired or {}).get("status") or "")
+        if not cancel_requested and retired_status not in {"cancelled", "poisoned", "expired", "superseded"}:
+            return
+
+        reason = "cancel_check" if cancel_requested else retired_status
+        with self._orders_refresh_lock:
+            active = self._orders_active_refreshes.get(cache_key)
+            if active and active.get("request_id") == request_id:
+                retired = self._retire_orders_refresh_locked(
+                    cache_key,
+                    active,
+                    status="cancelled",
+                    reason=f"cancelled_before_{step}:{reason}",
+                    set_done=True,
+                )
+
+        self._expire_load_slot(
+            request_id,
+            reason=f"cancelled_before_{step}:{reason}",
+            scope="orders",
+            context_hash=context_hash,
+            source=source,
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        logger.info(
+            "[ReadCoordinator] orders_refresh_cancelled_before_expensive_step admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s step=%s reason=%s",
+            context.admission_id,
+            source,
+            context_hash,
+            request_id,
+            generation,
+            step,
+            reason,
+        )
+        record_metric(
+            "orders_refresh_cancelled_before_expensive_step",
+            1,
+            admission_id=context.admission_id,
+            source=self._orders_metric_source(source, cache_hit=False),
+            request_source=self._normalize_orders_request_source(source),
+            context_hash=context_hash,
+            trace_id=request_id,
+            request_id=request_id,
+            generation=generation,
+            priority=self._normalize_priority(priority),
+            step=step,
+            reason=reason,
+            elapsed_ms=round(elapsed_ms, 3),
+        )
+        raise OrdersRefreshCancelled(
+            f"orders refresh cancelled before {step}: request_id={request_id} context_hash={context_hash} reason={reason}"
+        )
 
     def _load_orders_tab_impl(
         self,
@@ -938,6 +1023,7 @@ class ReadCoordinator:
         request_id: Optional[str] = None,
         step_state: Optional[dict[str, Any]] = None,
         done_event: Optional[threading.Event] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         context_hash = context.hash()
         trace_id = request_id or self._next_trace_id("orders", context_hash)
@@ -946,6 +1032,18 @@ class ReadCoordinator:
         cache_key = context.cache_key()
         step_state = step_state or self._new_orders_step_state()
         done_event = done_event or threading.Event()
+        self._raise_if_orders_refresh_cancelled(
+            context=context,
+            cache_key=cache_key,
+            request_id=trace_id,
+            source=source,
+            priority=priority,
+            context_hash=context_hash,
+            generation=0,
+            started=started,
+            step="before_cache_delta",
+            cancel_check=cancel_check,
+        )
         delta_result = self._load_orders_cached_or_delta(
             context=context,
             source=source,
@@ -991,6 +1089,18 @@ class ReadCoordinator:
 
         generation = int(active_guard.get("generation") or 0)
         try:
+            self._raise_if_orders_refresh_cancelled(
+                context=context,
+                cache_key=cache_key,
+                request_id=trace_id,
+                source=source,
+                priority=priority,
+                context_hash=context_hash,
+                generation=generation,
+                started=started,
+                step="before_build_orders_snapshot",
+                cancel_check=cancel_check,
+            )
             with self._load_slot(
                 priority=priority,
                 scope="orders",
@@ -1000,6 +1110,18 @@ class ReadCoordinator:
                 trace_id=trace_id,
             ):
                 try:
+                    self._raise_if_orders_refresh_cancelled(
+                        context=context,
+                        cache_key=cache_key,
+                        request_id=trace_id,
+                        source=source,
+                        priority=priority,
+                        context_hash=context_hash,
+                        generation=generation,
+                        started=started,
+                        step="before_build_orders_snapshot",
+                        cancel_check=cancel_check,
+                    )
                     build_started = time.perf_counter()
                     with orders_snapshot_caller(
                         "read_coordinator",
@@ -1009,6 +1131,17 @@ class ReadCoordinator:
                             step_state,
                             cache_key=cache_key,
                             request_id=trace_id,
+                            cancel_check=cancel_check,
+                            cancel_context={
+                                "context": context,
+                                "cache_key": cache_key,
+                                "request_id": trace_id,
+                                "source": source,
+                                "priority": priority,
+                                "context_hash": context_hash,
+                                "generation": generation,
+                                "started": started,
+                            },
                         ),
                     ):
                         snapshot = self.remcard_service.build_orders_snapshot(
@@ -1039,6 +1172,8 @@ class ReadCoordinator:
                         generation=generation,
                         status="ok",
                     )
+                except OrdersRefreshCancelled:
+                    raise
                 except Exception:
                     failed_elapsed_ms = (time.perf_counter() - build_started) * 1000.0 if "build_started" in locals() else 0.0
                     record_metric(
@@ -1064,6 +1199,18 @@ class ReadCoordinator:
                         generation,
                     )
                     fallback_started = time.perf_counter()
+                    self._raise_if_orders_refresh_cancelled(
+                        context=context,
+                        cache_key=cache_key,
+                        request_id=trace_id,
+                        source=source,
+                        priority=priority,
+                        context_hash=context_hash,
+                        generation=generation,
+                        started=started,
+                        step="before_legacy_fallback",
+                        cancel_check=cancel_check,
+                    )
                     with orders_snapshot_caller(
                         "legacy_fallback",
                         context_hash=context_hash,
@@ -1072,6 +1219,17 @@ class ReadCoordinator:
                             step_state,
                             cache_key=cache_key,
                             request_id=trace_id,
+                            cancel_check=cancel_check,
+                            cancel_context={
+                                "context": context,
+                                "cache_key": cache_key,
+                                "request_id": trace_id,
+                                "source": source,
+                                "priority": priority,
+                                "context_hash": context_hash,
+                                "generation": generation,
+                                "started": started,
+                            },
                         ),
                     ):
                         snapshot = self.remcard_service.build_orders_snapshot(
@@ -1102,6 +1260,8 @@ class ReadCoordinator:
                         trace_id,
                         generation,
                     )
+        except OrdersRefreshCancelled:
+            raise
         except Exception:
             self._expire_orders_refresh(
                 context.cache_key(),
@@ -1122,6 +1282,18 @@ class ReadCoordinator:
             cache_key=cache_key,
         )
         try:
+            self._raise_if_orders_refresh_cancelled(
+                context=context,
+                cache_key=cache_key,
+                request_id=trace_id,
+                source=source,
+                priority=priority,
+                context_hash=context_hash,
+                generation=generation,
+                started=started,
+                step="before_content_hash_finalize",
+                cancel_check=cancel_check,
+            )
             frozen_snapshot = self._finalize_snapshot(
                 snapshot=snapshot,
                 scope="orders_tab",
@@ -1139,6 +1311,20 @@ class ReadCoordinator:
                 invalidate_reason=None,
                 generation=generation,
             )
+        except OrdersRefreshCancelled:
+            self._record_orders_internal_step_end(
+                step_state,
+                "content_hash_finalize",
+                internal_step_started,
+                admission_id=context.admission_id,
+                source=source,
+                context_hash=context_hash,
+                trace_id=trace_id,
+                generation=generation,
+                status="cancelled",
+                cache_key=cache_key,
+            )
+            raise
         except Exception:
             self._record_orders_internal_step_end(
                 step_state,
@@ -1173,7 +1359,7 @@ class ReadCoordinator:
 
         retired_refresh = self._is_orders_refresh_retired(trace_id)
         retired_status = str((retired_refresh or {}).get("status") or "")
-        if retired_status in {"poisoned", "expired", "superseded"}:
+        if retired_status in {"poisoned", "expired", "superseded", "cancelled"}:
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             logger.warning(
                 "[ReadCoordinator] orders_refresh_late_result_ignored admission_id=%s source=%s context_hash=%s trace_id=%s generation=%s retired_status=%s",
@@ -1216,7 +1402,22 @@ class ReadCoordinator:
                 version=int(frozen_snapshot.get("version") or 0),
                 generation=generation,
             )
-            return frozen_snapshot
+            self._raise_if_orders_refresh_cancelled(
+                context=context,
+                cache_key=cache_key,
+                request_id=trace_id,
+                source=source,
+                priority=priority,
+                context_hash=context_hash,
+                generation=generation,
+                started=started,
+                step="before_store_apply_handoff",
+                cancel_check=cancel_check,
+            )
+            raise OrdersRefreshCancelled(
+                f"orders refresh retired before store/apply handoff: "
+                f"request_id={trace_id} context_hash={context_hash} retired_status={retired_status}"
+            )
 
         if stale_version > 0:
             new_version = int(frozen_snapshot.get("version") or 0)
@@ -1241,6 +1442,18 @@ class ReadCoordinator:
                     )
 
         self._orders_stale_versions.pop(cache_key, None)
+        self._raise_if_orders_refresh_cancelled(
+            context=context,
+            cache_key=cache_key,
+            request_id=trace_id,
+            source=source,
+            priority=priority,
+            context_hash=context_hash,
+            generation=generation,
+            started=started,
+            step="before_store_apply_handoff",
+            cancel_check=cancel_check,
+        )
         try:
             if context.mode == "live":
                 self._store_orders_tab(context, frozen_snapshot)
@@ -2620,8 +2833,29 @@ class ReadCoordinator:
                 active["last_step_finished_monotonic"] = now
                 active["last_step_status"] = fields.get("status") or "ok"
 
-    def _orders_step_observer(self, step_state: dict[str, Any], *, cache_key=None, request_id: Optional[str] = None):
+    def _orders_step_observer(
+        self,
+        step_state: dict[str, Any],
+        *,
+        cache_key=None,
+        request_id: Optional[str] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        cancel_context: Optional[dict[str, Any]] = None,
+    ):
         def observer(event: str, step: str, fields: dict[str, Any]) -> None:
+            if event == "start" and cancel_context:
+                self._raise_if_orders_refresh_cancelled(
+                    context=cancel_context["context"],
+                    cache_key=cancel_context.get("cache_key"),
+                    request_id=str(cancel_context.get("request_id") or request_id or ""),
+                    source=str(cancel_context.get("source") or "refresh"),
+                    priority=str(cancel_context.get("priority") or "MEDIUM"),
+                    context_hash=str(cancel_context.get("context_hash") or ""),
+                    generation=int(cancel_context.get("generation") or 0),
+                    started=float(cancel_context.get("started") or time.perf_counter()),
+                    step=f"before_{step}",
+                    cancel_check=cancel_check,
+                )
             self._mark_orders_step(step_state, event, step, **(fields or {}))
             self._mark_orders_refresh_step(cache_key, request_id=request_id, event=event, step=step, **(fields or {}))
 
@@ -3024,7 +3258,7 @@ class ReadCoordinator:
                         replacement_request_id=request_id,
                         set_done=True,
                     )
-                elif active_status in {"poisoned", "expired", "superseded", "finished"}:
+                elif active_status in {"cancelled", "poisoned", "expired", "superseded", "finished"}:
                     self._orders_active_refreshes.pop(cache_key, None)
                 elif self._orders_should_supersede_active_refresh(active, incoming_source, incoming_priority):
                     poison_after_lock = self._retire_orders_refresh_locked(

@@ -17,9 +17,16 @@ from ...styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY,
                             BORDER_COLOR, BG_LIGHT)
 from PySide6.QtGui import QColor
 from ...shared.custom_message_box import CustomMessageBox
+from rem_card.app.local_metrics import record_metric
+from rem_card.services.read_coordinator import OrdersRefreshCancelled
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.services.order_domain_service import (
     NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
+)
+
+ORDERS_FORCED_RELOAD_COOLDOWN_MS = max(
+    250,
+    int(os.getenv("REMCARD_ORDERS_FORCED_RELOAD_COOLDOWN_MS", "1500")),
 )
 
 class NurseOrdersDelegate(OrdersDelegate):
@@ -78,6 +85,20 @@ class NurseOrdersWidget(QWidget):
         self._active_request_context_key = None
         self._active_request_force = False
         self._active_request_priority = "MEDIUM"
+        self._active_request_seq = 0
+        self._active_request_id = ""
+        self._active_request_generation = 0
+        self._active_request_source = "refresh"
+        self._active_request_started_monotonic = 0.0
+        self._forced_reload_cooldown_ms = ORDERS_FORCED_RELOAD_COOLDOWN_MS
+        self._forced_reload_recent = {}
+        self._forced_reload_active_key = None
+        self._forced_reload_pending_key = None
+        self._forced_reload_after_guard_key = None
+        self._forced_reload_after_guard_reason = None
+        self._local_cell_draft_guard = False
+        self._active_snapshot_worker_state = {}
+        self._retired_snapshot_worker_states = {}
         self._snapshot_stale = False
         self._snapshot_seq = 0
         self._last_applied_snapshot_signature = None
@@ -123,6 +144,7 @@ class NurseOrdersWidget(QWidget):
         self._cached_has_administrations = False
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
+        self._discard_deferred_forced_reload_after_guard(discard_reason="context_reset")
 
     def _reset_pending_snapshot_request(self):
         self._snapshot_pending = False
@@ -130,6 +152,7 @@ class NurseOrdersWidget(QWidget):
         self._snapshot_pending_source = "refresh"
         self._snapshot_pending_priority = "MEDIUM"
         self._snapshot_pending_reason = None
+        self._forced_reload_pending_key = None
 
     def _disconnect_snapshot_worker(self, worker):
         if worker is None:
@@ -143,6 +166,169 @@ class NurseOrdersWidget(QWidget):
                 signal.disconnect(slot)
             except Exception:
                 pass
+
+    def _retire_snapshot_worker_state(
+        self,
+        *,
+        state: str,
+        reason: str,
+        replacement_request_id: str | None = None,
+    ):
+        active = dict(getattr(self, "_active_snapshot_worker_state", {}) or {})
+        if not active and self._active_request_id:
+            active = {
+                "request_id": self._active_request_id,
+                "generation": self._active_request_generation,
+                "source": self._active_request_source,
+                "priority": self._active_request_priority,
+                "admission_id": self.admission_id,
+                "started_monotonic": self._active_request_started_monotonic,
+                "context_key": self._active_request_context_key,
+                "seq": self._active_request_seq,
+                "force": self._active_request_force,
+            }
+        if not active:
+            return {}
+        active["state"] = state
+        active["retired_reason"] = reason
+        active["retired_at"] = datetime.now().isoformat(timespec="milliseconds")
+        active["replacement_request_id"] = replacement_request_id
+        request_id = str(active.get("request_id") or "")
+        if request_id:
+            self._retired_snapshot_worker_states[request_id] = active
+            while len(self._retired_snapshot_worker_states) > 50:
+                oldest_key = next(iter(self._retired_snapshot_worker_states))
+                self._retired_snapshot_worker_states.pop(oldest_key, None)
+        self._active_snapshot_worker_state = {}
+        return active
+
+    def _reset_active_snapshot_request(self):
+        self._active_request_context_key = None
+        self._active_request_force = False
+        self._active_request_priority = "MEDIUM"
+        self._active_request_seq = 0
+        self._active_request_id = ""
+        self._active_request_generation = 0
+        self._active_request_source = "refresh"
+        self._active_request_started_monotonic = 0.0
+        self._forced_reload_active_key = None
+        self._active_snapshot_worker_state = {}
+
+    def _detach_snapshot_worker(
+        self,
+        worker,
+        *,
+        state: str,
+        reason: str,
+        replacement_request_id: str | None = None,
+    ):
+        retired = self._retire_snapshot_worker_state(
+            state=state,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        self._disconnect_snapshot_worker(worker)
+        try:
+            worker.quit()
+        except Exception:
+            pass
+        if self._snapshot_worker is worker:
+            self._snapshot_worker = None
+        self._reset_active_snapshot_request()
+        logger.warning(
+            "[NurseOrdersWidget] snapshot_worker_detached admission_id=%s request_id=%s source=%s priority=%s state=%s reason=%s replacement_request_id=%s",
+            self.admission_id,
+            retired.get("request_id"),
+            retired.get("source"),
+            retired.get("priority"),
+            state,
+            reason,
+            replacement_request_id,
+        )
+        record_metric(
+            "orders_snapshot_worker_detached",
+            1,
+            admission_id=self.admission_id,
+            role="nurse",
+            source=str(retired.get("source") or "refresh"),
+            priority=str(retired.get("priority") or "MEDIUM"),
+            request_id=retired.get("request_id"),
+            generation=retired.get("generation"),
+            state=state,
+            reason=reason,
+            replacement_request_id=replacement_request_id,
+        )
+        return retired
+
+    def _active_snapshot_context_key(self):
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        return state.get("context_key") or self._active_request_context_key
+
+    def _record_snapshot_worker_superseded_context_switch(
+        self,
+        *,
+        retired: dict,
+        new_context_key,
+        new_context_hash: str | None,
+        replacement_request_id: str | None,
+    ) -> None:
+        logger.warning(
+            "[NurseOrdersWidget] orders_snapshot_worker_superseded_context_switch old_admission_id=%s new_admission_id=%s request_id=%s replacement_request_id=%s old_context=%s new_context=%s",
+            retired.get("admission_id"),
+            self.admission_id,
+            retired.get("request_id"),
+            replacement_request_id,
+            retired.get("context_key"),
+            new_context_key,
+        )
+        record_metric(
+            "orders_snapshot_worker_superseded_context_switch",
+            1,
+            role="nurse",
+            admission_id=int(self.admission_id or 0),
+            old_admission_id=retired.get("admission_id"),
+            request_id=retired.get("request_id"),
+            generation=retired.get("generation"),
+            replacement_request_id=replacement_request_id,
+            old_context_key=str(retired.get("context_key") or ""),
+            new_context_key=str(new_context_key or ""),
+            context_hash=str(new_context_hash or ""),
+            source=str(retired.get("source") or "refresh"),
+            priority=str(retired.get("priority") or "MEDIUM"),
+        )
+
+    def _detach_active_snapshot_for_context_switch(
+        self,
+        *,
+        new_context_key,
+        new_context_hash: str | None = None,
+        replacement_request_id: str | None = None,
+    ) -> bool:
+        worker = self._snapshot_worker
+        if worker is None:
+            return False
+        try:
+            worker_running = bool(worker.isRunning())
+        except Exception:
+            worker_running = False
+        if not worker_running:
+            return False
+        old_context_key = self._active_snapshot_context_key()
+        if old_context_key == new_context_key:
+            return False
+        retired = self._detach_snapshot_worker(
+            worker,
+            state="superseded",
+            reason="context_switch",
+            replacement_request_id=replacement_request_id,
+        )
+        self._record_snapshot_worker_superseded_context_switch(
+            retired=retired,
+            new_context_key=new_context_key,
+            new_context_hash=new_context_hash,
+            replacement_request_id=replacement_request_id,
+        )
+        return True
 
     def shutdown(self, timeout_ms: int = 1200):
         self._is_closing = True
@@ -159,9 +345,7 @@ class NurseOrdersWidget(QWidget):
 
         worker = self._snapshot_worker
         self._snapshot_worker = None
-        self._active_request_context_key = None
-        self._active_request_force = False
-        self._active_request_priority = "MEDIUM"
+        self._reset_active_snapshot_request()
         self._disconnect_snapshot_worker(worker)
         if worker is not None and worker.isRunning():
             worker.quit()
@@ -214,6 +398,11 @@ class NurseOrdersWidget(QWidget):
         self.shift_date = shift_date
         current_context_key = self._current_context_key()
         if previous_context_key != current_context_key:
+            self._detach_active_snapshot_for_context_switch(
+                new_context_key=current_context_key,
+                new_context_hash=None,
+                replacement_request_id=None,
+            )
             if self.model is not None:
                 self.model.clear_for_context(self.admission_id, self.shift_date)
             self._reset_cached_state()
@@ -429,28 +618,154 @@ class NurseOrdersWidget(QWidget):
                 pass
         return has_relevant_change, max_scoped_change_id
 
-    def _queue_forced_reload_after_stale_snapshot(self, *, reason: str):
-        if self._is_closing:
+    def _forced_reload_key(self, *, context_hash=None, reason: str):
+        return (
+            int(self.admission_id or 0),
+            str(context_hash or "unknown"),
+            str(reason or "unknown"),
+        )
+
+    def _record_forced_reload_metric(self, name: str, value=1, *, key=None, reason: str = "", **fields):
+        admission_id, context_hash, key_reason = key or self._forced_reload_key(
+            context_hash=fields.get("context_hash"),
+            reason=reason,
+        )
+        record_metric(
+            name,
+            value,
+            role="nurse",
+            admission_id=admission_id,
+            context_hash=context_hash,
+            reason=reason or key_reason,
+            **fields,
+        )
+
+    def _is_forced_reload_coalesced(self, *, key, now_ms: float, reason: str, guard_active: bool = False) -> bool:
+        active_same = self._forced_reload_active_key == key
+        pending_same = self._forced_reload_pending_key == key
+        guard_deferred_same = self._forced_reload_after_guard_key == key
+        last_ms = float((self._forced_reload_recent or {}).get(key) or 0.0)
+        elapsed_ms = max(0.0, now_ms - last_ms) if last_ms > 0 else None
+        cooldown_ms = float(self._forced_reload_cooldown_ms or 0)
+        in_cooldown = elapsed_ms is not None and cooldown_ms > 0 and elapsed_ms < cooldown_ms
+
+        suppress_reason = ""
+        if active_same:
+            suppress_reason = "active"
+        elif pending_same:
+            suppress_reason = "pending"
+        elif guard_deferred_same:
+            suppress_reason = "guard_deferred"
+        elif in_cooldown:
+            suppress_reason = "cooldown"
+        if not suppress_reason:
+            return False
+
+        if in_cooldown:
+            remaining_ms = max(0.0, cooldown_ms - float(elapsed_ms or 0.0))
+            self._record_forced_reload_metric(
+                "orders_forced_reload_cooldown_ms",
+                round(remaining_ms, 3),
+                key=key,
+                reason=reason,
+                suppress_reason=suppress_reason,
+                guard_active=int(bool(guard_active)),
+            )
+        self._record_forced_reload_metric(
+            "orders_forced_reload_coalesced",
+            1,
+            key=key,
+            reason=reason,
+            suppress_reason=suppress_reason,
+            guard_active=int(bool(guard_active)),
+        )
+        self._record_forced_reload_metric(
+            "orders_forced_reload_suppressed",
+            1,
+            key=key,
+            reason=reason,
+            suppress_reason=suppress_reason,
+            guard_active=int(bool(guard_active)),
+        )
+        logger.debug(
+            "[OrdersSync] forced_reload_after_stale_block_suppressed role=nurse admission_id=%s reason=%s suppress_reason=%s context_hash=%s",
+            key[0],
+            reason,
+            suppress_reason,
+            key[1],
+        )
+        return True
+
+    def _flush_deferred_forced_reload_after_guard(self):
+        if self._is_closing or self._local_cell_draft_guard:
             return
+        key = self._forced_reload_after_guard_key
+        reason = self._forced_reload_after_guard_reason
+        if key is None:
+            return
+        self._forced_reload_after_guard_key = None
+        self._forced_reload_after_guard_reason = None
+        if self._forced_reload_active_key == key or self._forced_reload_pending_key == key:
+            self._record_forced_reload_metric(
+                "orders_forced_reload_coalesced",
+                1,
+                key=key,
+                reason=str(reason or key[2]),
+                suppress_reason="guard_release_already_scheduled",
+                guard_active=0,
+            )
+            return
+        self._enqueue_forced_reload(key=key, reason=str(reason or key[2]), log_warning=False)
+
+    def _clear_local_cell_draft_guard(self):
+        self._local_cell_draft_guard = False
+        self._flush_deferred_forced_reload_after_guard()
+
+    def _discard_deferred_forced_reload_after_guard(self, *, discard_reason: str):
+        key = self._forced_reload_after_guard_key
+        reason = self._forced_reload_after_guard_reason
+        if key is None:
+            return
+        self._forced_reload_after_guard_key = None
+        self._forced_reload_after_guard_reason = None
+        reload_reason = str(reason or key[2])
+        logger.info(
+            "[OrdersSync] orders_deferred_reload_discarded_context_reset role=nurse old_admission_id=%s current_admission_id=%s reason=%s context_hash=%s discard_reason=%s",
+            key[0],
+            self.admission_id,
+            reload_reason,
+            key[1],
+            discard_reason,
+        )
+        record_metric(
+            "orders_deferred_reload_discarded_context_reset",
+            1,
+            role="nurse",
+            admission_id=key[0],
+            current_admission_id=int(self.admission_id or 0),
+            context_hash=key[1],
+            reason=reload_reason,
+            discard_reason=discard_reason,
+        )
+
+    def _enqueue_forced_reload(self, *, key, reason: str, log_warning: bool):
+        self._forced_reload_pending_key = key
         pending_inflight = bool(self._snapshot_worker is not None)
-        try:
-            context_hash = self._build_orders_context().hash()
-        except Exception:
-            context_hash = None
-        logger.warning(
+        log = logger.warning if log_warning else logger.info
+        log(
             "[OrdersSync] forced_reload_after_stale_block role=nurse admission_id=%s reason=%s pending_inflight=%s context_hash=%s",
             self.admission_id,
             reason,
             int(pending_inflight),
-            context_hash,
+            key[1],
         )
         record_orders_sync_event(
             "forced_reload",
             role="nurse",
             admission_id=int(self.admission_id or 0),
-            context_hash=context_hash,
+            context_hash=key[1],
             reason=reason,
-            immediate=True,
+            immediate=bool(log_warning),
         )
         if self._snapshot_worker is not None:
             self._snapshot_pending = True
@@ -466,6 +781,52 @@ class NurseOrdersWidget(QWidget):
             priority="HIGH",
             invalidate_reason=reason,
         )
+
+    def _queue_forced_reload_after_stale_snapshot(self, *, reason: str):
+        if self._is_closing:
+            return
+        pending_inflight = bool(self._snapshot_worker is not None)
+        try:
+            context_hash = self._build_orders_context().hash()
+        except Exception:
+            context_hash = None
+        key = self._forced_reload_key(context_hash=context_hash, reason=reason)
+        now_ms = time.monotonic() * 1000.0
+        guard_active = bool(self._local_cell_draft_guard)
+        self._record_forced_reload_metric(
+            "orders_forced_reload_requested",
+            1,
+            key=key,
+            reason=reason,
+            pending_inflight=int(pending_inflight),
+            guard_active=int(guard_active),
+        )
+        if self._is_forced_reload_coalesced(key=key, now_ms=now_ms, reason=reason, guard_active=guard_active):
+            return
+
+        self._forced_reload_recent[key] = now_ms
+        while len(self._forced_reload_recent) > 32:
+            oldest_key = next(iter(self._forced_reload_recent))
+            self._forced_reload_recent.pop(oldest_key, None)
+        if guard_active:
+            self._forced_reload_after_guard_key = key
+            self._forced_reload_after_guard_reason = reason
+            self._record_forced_reload_metric(
+                "orders_stale_block_guard_active",
+                1,
+                key=key,
+                reason=reason,
+                pending_inflight=int(pending_inflight),
+            )
+            logger.warning(
+                "[OrdersSync] forced_reload_after_stale_block role=nurse admission_id=%s reason=%s pending_inflight=%s context_hash=%s deferred=local_cell_draft_guard",
+                self.admission_id,
+                reason,
+                int(pending_inflight),
+                context_hash,
+            )
+            return
+        self._enqueue_forced_reload(key=key, reason=reason, log_warning=True)
 
     def _defer_snapshot_request(
         self,
@@ -515,52 +876,115 @@ class NurseOrdersWidget(QWidget):
 
         priority_name = self._normalize_priority(priority)
         context_key = context.cache_key()
+        forced_reload_key = None
+        if bool(force) and str(source or "").strip().lower() == "stale_snapshot":
+            forced_reload_key = self._forced_reload_pending_key or self._forced_reload_key(
+                context_hash=context.hash(),
+                reason=str(invalidate_reason or "stale_snapshot"),
+            )
 
         if self._snapshot_worker is not None:
             worker_running = self._snapshot_worker.isRunning()
-            if (
-                worker_running
-                and self._is_request_covered_by_active(
-                    context_key=context_key,
-                    force=force,
-                    priority=priority_name,
-                )
+            request_id_preview = f"orders-ui-nurse-{self._snapshot_seq + 1}-{context.hash()[:6]}"
+            if not worker_running:
+                self._snapshot_worker = None
+                self._retire_snapshot_worker_state(state="finished", reason="worker_not_running")
+            elif self._detach_active_snapshot_for_context_switch(
+                new_context_key=context_key,
+                new_context_hash=context.hash(),
+                replacement_request_id=request_id_preview,
             ):
-                if hasattr(coordinator, "record_orders_ui_event"):
-                    coordinator.record_orders_ui_event(
-                        "duplicate_load_prevented",
-                        role="nurse",
-                        context_hash=context.hash(),
-                    )
-                logger.info(
-                    "[NurseOrdersWidget] skipped duplicate in-flight request admission_id=%s priority=%s force=%s context_hash=%s",
-                    context.admission_id,
-                    priority_name,
-                    int(bool(force)),
-                    context.hash(),
+                pass
+            elif self._should_supersede_active_snapshot_worker(
+                context_key=context_key,
+                source=source,
+                priority=priority_name,
+            ):
+                self._detach_snapshot_worker(
+                    self._snapshot_worker,
+                    state="superseded",
+                    reason="higher_priority_request",
+                    replacement_request_id=request_id_preview,
                 )
+            else:
+                if (
+                    worker_running
+                    and self._is_request_covered_by_active(
+                        context_key=context_key,
+                        source=source,
+                        force=force,
+                        priority=priority_name,
+                    )
+                ):
+                    if hasattr(coordinator, "record_orders_ui_event"):
+                        coordinator.record_orders_ui_event(
+                            "duplicate_load_prevented",
+                            role="nurse",
+                            context_hash=context.hash(),
+                        )
+                    logger.info(
+                        "[NurseOrdersWidget] skipped duplicate in-flight request admission_id=%s priority=%s force=%s context_hash=%s",
+                        context.admission_id,
+                        priority_name,
+                        int(bool(force)),
+                        context.hash(),
+                    )
+                    return
+                self._snapshot_pending = True
+                self._snapshot_force_pending = self._snapshot_force_pending or force
+                self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, priority)
+                self._snapshot_pending_source = self._merge_source(
+                    self._snapshot_pending_source,
+                    source,
+                    self._snapshot_pending_priority,
+                    priority,
+                )
+                self._snapshot_pending_reason = invalidate_reason or self._snapshot_pending_reason
                 return
-            self._snapshot_pending = True
-            self._snapshot_force_pending = self._snapshot_force_pending or force
-            self._snapshot_pending_priority = self._merge_priority(self._snapshot_pending_priority, priority)
-            self._snapshot_pending_source = self._merge_source(
-                self._snapshot_pending_source,
-                source,
-                self._snapshot_pending_priority,
-                priority,
-            )
-            self._snapshot_pending_reason = invalidate_reason or self._snapshot_pending_reason
+
+        if self._snapshot_worker is not None:
             return
 
         self._snapshot_seq += 1
         seq = self._snapshot_seq
+        request_id = f"orders-ui-nurse-{seq}-{context.hash()[:6]}"
+        request_generation = seq
         admission_id = context.admission_id
         shift_date = context.shift_date
         context_hash = context.hash()
         self._active_request_context_key = context_key
         self._active_request_force = bool(force)
         self._active_request_priority = priority_name
+        self._active_request_seq = seq
+        self._active_request_id = request_id
+        self._active_request_generation = request_generation
+        self._active_request_source = str(source or "refresh").strip().lower() or "refresh"
+        self._active_request_started_monotonic = time.monotonic()
+        self._forced_reload_active_key = forced_reload_key
+        if forced_reload_key is not None and self._forced_reload_pending_key == forced_reload_key:
+            self._forced_reload_pending_key = None
+        self._active_snapshot_worker_state = {
+            "request_id": request_id,
+            "generation": request_generation,
+            "source": self._active_request_source,
+            "priority": priority_name,
+            "admission_id": admission_id,
+            "started_at": datetime.now().isoformat(timespec="milliseconds"),
+            "started_monotonic": self._active_request_started_monotonic,
+            "state": "active",
+            "context_key": context_key,
+            "seq": seq,
+            "force": bool(force),
+        }
         self._schedule_soft_update_state(source=source)
+
+        def cancel_check():
+            return (
+                self._is_closing
+                or str(self._active_request_id or "") != request_id
+                or int(self._active_request_generation or 0) != request_generation
+                or self._active_request_context_key != context_key
+            )
 
         def job():
             if force:
@@ -573,6 +997,7 @@ class NurseOrdersWidget(QWidget):
                 source=source,
                 priority=priority_name,
                 force_refresh=force,
+                cancel_check=cancel_check,
             )
             return {
                 "seq": seq,
@@ -582,6 +1007,8 @@ class NurseOrdersWidget(QWidget):
                 "context_hash": context_hash,
                 "priority": priority_name,
                 "source": source,
+                "request_id": request_id,
+                "generation": request_generation,
                 "snapshot": snapshot,
             }
 
@@ -597,7 +1024,13 @@ class NurseOrdersWidget(QWidget):
         try:
             if not isinstance(payload, dict):
                 return
+            payload_request_id = str(payload.get("request_id") or "")
+            retired_state = self._retired_snapshot_worker_states.get(payload_request_id)
+            if retired_state and str(retired_state.get("state") or "") in {"stalled", "superseded", "detached"}:
+                self._record_late_result_ignored(payload, reason=f"retired_{retired_state.get('state')}")
+                return
             if payload.get("seq") != self._snapshot_seq:
+                self._record_late_result_ignored(payload, reason="seq_mismatch")
                 logger.info(
                     "[NurseOrdersWidget] discard stale snapshot seq request_seq=%s current_seq=%s context_hash=%s trace_id=%s",
                     payload.get("seq"),
@@ -606,7 +1039,23 @@ class NurseOrdersWidget(QWidget):
                     (payload.get("snapshot") or {}).get("load_trace_id"),
                 )
                 return
+            expected_request_id = str(self._active_request_id or "")
+            if expected_request_id and str(payload.get("request_id") or "") != expected_request_id:
+                logger.info(
+                    "[NurseOrdersWidget] discard stale snapshot request_id request_id=%s current_request_id=%s context_hash=%s trace_id=%s",
+                    payload.get("request_id"),
+                    expected_request_id,
+                    payload.get("context_hash"),
+                    (payload.get("snapshot") or {}).get("load_trace_id"),
+                )
+                self._record_late_result_ignored(payload, reason="request_id_mismatch")
+                return
+            expected_generation = int(self._active_request_generation or 0)
+            if expected_generation and int(payload.get("generation") or 0) != expected_generation:
+                self._record_late_result_ignored(payload, reason="generation_mismatch")
+                return
             if payload.get("admission_id") != self.admission_id:
+                self._record_late_result_ignored(payload, reason="admission_mismatch")
                 logger.info(
                     "[NurseOrdersWidget] discard stale snapshot admission request_admission_id=%s current_admission_id=%s context_hash=%s trace_id=%s",
                     payload.get("admission_id"),
@@ -623,6 +1072,34 @@ class NurseOrdersWidget(QWidget):
             )
         except Exception:
             logger.exception("[NurseOrdersWidget] Failed to apply orders snapshot")
+
+    def _record_late_result_ignored(self, payload, *, reason: str):
+        snapshot = (payload or {}).get("snapshot") or {}
+        logger.info(
+            "[NurseOrdersWidget] orders_refresh_late_result_ignored reason=%s admission_id=%s request_id=%s generation=%s current_request_id=%s current_generation=%s context_hash=%s trace_id=%s",
+            reason,
+            (payload or {}).get("admission_id"),
+            (payload or {}).get("request_id"),
+            (payload or {}).get("generation"),
+            self._active_request_id,
+            self._active_request_generation,
+            (payload or {}).get("context_hash"),
+            snapshot.get("load_trace_id"),
+        )
+        record_metric(
+            "orders_refresh_late_result_ignored",
+            1,
+            admission_id=(payload or {}).get("admission_id"),
+            role="nurse",
+            source=str((payload or {}).get("source") or "refresh"),
+            reason=reason,
+            request_id=(payload or {}).get("request_id"),
+            generation=(payload or {}).get("generation"),
+            current_request_id=self._active_request_id,
+            current_generation=self._active_request_generation,
+            context_hash=(payload or {}).get("context_hash"),
+            trace_id=snapshot.get("load_trace_id"),
+        )
 
     def _capture_table_scroll(self):
         if not hasattr(self, "table_view"):
@@ -753,7 +1230,7 @@ class NurseOrdersWidget(QWidget):
             len(snapshot.get("admin_rows") or []),
             scroll_value,
         )
-        self.model.apply_snapshot(snapshot)
+        self._apply_full_snapshot_to_model(snapshot)
         self._restore_table_scroll(scroll_value)
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
@@ -845,16 +1322,49 @@ class NurseOrdersWidget(QWidget):
             return (
                 context_key or snapshot.get("cache_key"),
                 int(snapshot.get("version") or snapshot.get("change_id") or 0),
-                str(snapshot.get("load_trace_id") or ""),
-                id(snapshot),
+                str(snapshot.get("content_hash") or ""),
+                str(snapshot.get("dedup_signature") or ""),
             )
         except Exception:
             return None
+
+    def _apply_full_snapshot_to_model(self, snapshot):
+        table = getattr(self, "table_view", None)
+        previous_signals = None
+        sorting_enabled = False
+        if table is not None:
+            try:
+                previous_signals = table.blockSignals(True)
+            except Exception:
+                previous_signals = None
+            try:
+                sorting_enabled = bool(table.isSortingEnabled())
+                if sorting_enabled:
+                    table.setSortingEnabled(False)
+            except Exception:
+                sorting_enabled = False
+        try:
+            self.model.apply_snapshot(snapshot)
+        finally:
+            if table is not None:
+                try:
+                    if sorting_enabled:
+                        table.setSortingEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    if previous_signals is not None:
+                        table.blockSignals(previous_signals)
+                except Exception:
+                    pass
 
     def _on_snapshot_failed(self, exc):
         if self._is_closing:
             return
         self._clear_soft_update_state()
+        if isinstance(exc, OrdersRefreshCancelled):
+            logger.info("[NurseOrdersWidget] Orders snapshot load cancelled: %s", exc)
+            return
         logger.warning("[NurseOrdersWidget] Orders snapshot load failed: %s", exc, exc_info=True)
 
     def _on_snapshot_finished(self):
@@ -862,9 +1372,8 @@ class NurseOrdersWidget(QWidget):
         if worker is not None and self._snapshot_worker is not worker:
             return
         self._snapshot_worker = None
-        self._active_request_context_key = None
-        self._active_request_force = False
-        self._active_request_priority = "MEDIUM"
+        self._retire_snapshot_worker_state(state="finished", reason="worker_finished")
+        self._reset_active_snapshot_request()
         self._clear_soft_update_state()
         if self._is_closing:
             self._reset_pending_snapshot_request()
@@ -881,6 +1390,8 @@ class NurseOrdersWidget(QWidget):
                 priority=priority,
                 invalidate_reason=invalidate_reason,
             )
+        else:
+            self._flush_deferred_forced_reload_after_guard()
 
     @staticmethod
     def _normalize_priority(value: str) -> str:
@@ -904,15 +1415,57 @@ class NurseOrdersWidget(QWidget):
             return str(incoming or current or "refresh")
         return str(current or incoming or "refresh")
 
-    def _is_request_covered_by_active(self, *, context_key, force: bool, priority: str) -> bool:
+    @staticmethod
+    def _normalize_snapshot_source(value: str) -> str:
+        source = str(value or "refresh").strip().lower() or "refresh"
+        if source in {"user", "click", "user_click"}:
+            return "click"
+        if source in {"post_finalize", "cache", "monitor", "background", "visible_tab", "refresh"}:
+            return source
+        if source in {"local_silent_sync", "stale_snapshot", "poll_external_updates"}:
+            return "monitor"
+        return "refresh"
+
+    @classmethod
+    def _snapshot_request_rank(cls, source: str, priority: str) -> int:
+        priority_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}.get(cls._normalize_priority(priority), 1)
+        source_rank = {
+            "cache": 0,
+            "monitor": 0,
+            "background": 0,
+            "refresh": 1,
+            "visible_tab": 2,
+            "click": 2,
+            "post_finalize": 3,
+        }.get(cls._normalize_snapshot_source(source), 1)
+        return source_rank * 10 + priority_rank
+
+    def _should_supersede_active_snapshot_worker(self, *, context_key, source: str, priority: str) -> bool:
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        if not state or state.get("context_key") != context_key:
+            return False
+        active_state = str(state.get("state") or "active")
+        if active_state not in {"active", "stalled"}:
+            return False
+        incoming_rank = self._snapshot_request_rank(source, priority)
+        active_rank = self._snapshot_request_rank(
+            str(state.get("source") or self._active_request_source),
+            str(state.get("priority") or self._active_request_priority),
+        )
+        return incoming_rank > active_rank
+
+    def _is_request_covered_by_active(self, *, context_key, source: str, force: bool, priority: str) -> bool:
         if self._active_request_context_key != context_key:
             return False
-        weights = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
-        active_priority = self._normalize_priority(self._active_request_priority)
-        incoming_priority = self._normalize_priority(priority)
+        state = getattr(self, "_active_snapshot_worker_state", {}) or {}
+        active_rank = self._snapshot_request_rank(
+            str(state.get("source") or self._active_request_source),
+            str(state.get("priority") or self._active_request_priority),
+        )
+        incoming_rank = self._snapshot_request_rank(source, priority)
         if self._active_request_force and not force:
             return True
-        if self._active_request_force == bool(force) and weights[active_priority] >= weights[incoming_priority]:
+        if self._active_request_force == bool(force) and active_rank >= incoming_rank:
             return True
         return False
 

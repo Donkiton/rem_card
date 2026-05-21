@@ -37,6 +37,10 @@ _DIRECT_ORDERS_BUILD_WARNED: set[tuple[str, int, str, str]] = set()
 _LEGACY_ORDERS_ACCESS_COUNT = 0
 
 
+class OrdersSnapshotCancelled(RuntimeError):
+    """Controlled cancellation used to stop obsolete orders snapshot builds."""
+
+
 @contextmanager
 def orders_snapshot_caller(
     source: str,
@@ -521,6 +525,8 @@ class RemCardService(QObject):
                 return
             try:
                 observer(event, step, fields)
+            except OrdersSnapshotCancelled:
+                raise
             except Exception:
                 logger.debug("Orders snapshot step observer failed", exc_info=True)
 

@@ -130,6 +130,18 @@ STARTUP_QUICKCHECK_IDLE_GRACE_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_IDLE_GRACE_SEC", "3")),
 )
+STARTUP_QUICKCHECK_SLOW_MS = max(
+    1000.0,
+    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_SLOW_MS", "2000")),
+)
+STARTUP_QUICKCHECK_SLOW_BACKOFF_SEC = max(
+    STARTUP_QUICKCHECK_BACKGROUND_INTERVAL_SEC,
+    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_SLOW_BACKOFF_SEC", "600")),
+)
+BACKGROUND_MAINTENANCE_IO_COOLDOWN_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_BACKGROUND_MAINTENANCE_IO_COOLDOWN_SEC", "20")),
+)
 SHUTDOWN_BACKUP_MIN_INTERVAL_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_SHUTDOWN_BACKUP_MIN_INTERVAL_SEC", str(6 * 60 * 60))),
@@ -228,6 +240,9 @@ class DatabaseManager:
         self._write_queue_idle_probe: Optional[Callable[[], bool]] = None
         self._close_state_lock = threading.Lock()
         self._closing = False
+        self._startup_quickcheck_next_allowed_ts = 0.0
+        self._last_heavy_maintenance_ts = 0.0
+        self._last_heavy_maintenance_source = ""
 
         self._maybe_rotate_db_lifecycle()
 
@@ -293,6 +308,25 @@ class DatabaseManager:
         stop_evt = getattr(self, "_startup_quickcheck_stop_evt", None)
         if stop_evt is not None and stop_evt.is_set():
             return False
+        now_ts = time.time()
+        next_allowed = float(getattr(self, "_startup_quickcheck_next_allowed_ts", 0.0) or 0.0)
+        if next_allowed > now_ts:
+            remaining_sec = max(0.0, next_allowed - now_ts)
+            record_metric(
+                "startup_quick_check_deferred_slow_backoff",
+                1,
+                remaining_sec=round(remaining_sec, 3),
+            )
+            return False
+        cooldown_remaining = self._maintenance_io_cooldown_remaining("startup_quick_check")
+        if cooldown_remaining > 0:
+            record_metric(
+                "startup_quick_check_deferred_maintenance_cooldown",
+                1,
+                remaining_sec=round(cooldown_remaining, 3),
+                last_source=getattr(self, "_last_heavy_maintenance_source", ""),
+            )
+            return False
         lock = getattr(self, "_write_activity_lock", None)
         if lock is not None:
             with lock:
@@ -329,6 +363,23 @@ class DatabaseManager:
             )
             return False
         return True
+
+    def _maintenance_io_cooldown_remaining(self, source: str) -> float:
+        cooldown_sec = float(BACKGROUND_MAINTENANCE_IO_COOLDOWN_SEC or 0.0)
+        if cooldown_sec <= 0:
+            return 0.0
+        last_ts = float(getattr(self, "_last_heavy_maintenance_ts", 0.0) or 0.0)
+        if last_ts <= 0:
+            return 0.0
+        last_source = str(getattr(self, "_last_heavy_maintenance_source", "") or "")
+        if last_source == str(source or ""):
+            return 0.0
+        elapsed = max(0.0, time.time() - last_ts)
+        return max(0.0, cooldown_sec - elapsed)
+
+    def _mark_heavy_maintenance_io(self, source: str) -> None:
+        self._last_heavy_maintenance_ts = time.time()
+        self._last_heavy_maintenance_source = str(source or "maintenance")
 
     def _maybe_rotate_db_lifecycle(self):
         result = maybe_rotate_database_if_due(
@@ -970,7 +1021,18 @@ class DatabaseManager:
             )
             configure_connection(conn, readonly=True, profile="network")
             conn.set_progress_handler(cancel_if_not_idle, 1000)
+            quick_started = time.perf_counter()
             ok, result = run_quick_check(conn)
+            elapsed_ms = (time.perf_counter() - quick_started) * 1000.0
+            if elapsed_ms >= STARTUP_QUICKCHECK_SLOW_MS:
+                self._startup_quickcheck_next_allowed_ts = time.time() + STARTUP_QUICKCHECK_SLOW_BACKOFF_SEC
+                record_metric(
+                    "startup_quick_check_slow_backoff",
+                    round(elapsed_ms, 3),
+                    backoff_sec=round(STARTUP_QUICKCHECK_SLOW_BACKOFF_SEC, 3),
+                )
+            if elapsed_ms >= STARTUP_QUICKCHECK_SLOW_MS or ok:
+                self._mark_heavy_maintenance_io("startup_quick_check")
             if ok:
                 self._write_startup_quickcheck_state(int(time.time()), result="ok")
                 logger.info("Background startup quick_check state updated for %s", self.db_path)
@@ -1552,6 +1614,7 @@ class DatabaseManager:
                     )
             self._rotate_backups()
             self._last_backup_ts = time.time()
+            self._mark_heavy_maintenance_io(f"{prefix}_backup")
             logger.info("%s backup created (%s): %s", prefix.capitalize(), source, backup_path)
             return backup_path
         except Exception as exc:
@@ -1576,6 +1639,16 @@ class DatabaseManager:
     def _maybe_create_periodic_backup(self, source: str = "write"):
         now = time.time()
         if now - self._last_backup_ts < self._periodic_backup_interval_sec:
+            return
+        cooldown_remaining = self._maintenance_io_cooldown_remaining("periodic_backup")
+        if cooldown_remaining > 0:
+            record_metric(
+                "periodic_backup_deferred_maintenance_cooldown",
+                1,
+                source=str(source or "write"),
+                remaining_sec=round(cooldown_remaining, 3),
+                last_source=getattr(self, "_last_heavy_maintenance_source", ""),
+            )
             return
         should_defer, reason, age_sec = should_defer_background_io(
             idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
