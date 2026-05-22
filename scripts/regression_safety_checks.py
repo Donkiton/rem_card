@@ -4928,6 +4928,175 @@ def _check_outcome_guard_rejects_time_before_latest_activity(temp_root: str) -> 
         manager.close()
 
 
+def _check_cvc_auto_closes_on_outcome(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.patient_status_dao import PatientStatusDAO
+    from rem_card.data.dto.remcard_dto import PatientStatus
+    from rem_card.services.analytics.detailed_statistics_service import DetailedStatisticsReportBuilder
+
+    db_path = os.path.join(temp_root, "cvc_auto_close_outcome.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        status_dao = PatientStatusDAO(manager)
+
+        def seed_case(history: str, bed: int, started_at: datetime) -> tuple[int, int]:
+            with manager.remcard_transaction(source=f"regression_seed_{history}") as cursor:
+                cursor.execute("INSERT INTO patients(full_name) VALUES (?)", (history,))
+                patient_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (patient_id, bed, history, started_at.isoformat()),
+                )
+                admission_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    INSERT INTO patient_status_events(
+                        admission_id, status, start_time, created_by, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, 'REGRESSION', ?, ?)
+                    """,
+                    (
+                        admission_id,
+                        PatientStatus.ACTIVE.value,
+                        started_at.isoformat(),
+                        started_at.isoformat(),
+                        started_at.isoformat(),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    INSERT INTO procedures(
+                        patient_id, admission_id, procedure_type, status,
+                        started_at, finished_at, duration_minutes,
+                        doctor_name_snapshot, patient_snapshot_json, is_deleted
+                    )
+                    VALUES (?, ?, 'CVC', 'active', ?, NULL, NULL, 'Тест Врач', '{}', 0)
+                    """,
+                    (patient_id, admission_id, started_at.isoformat()),
+                )
+                procedure_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    INSERT INTO procedure_cvc(
+                        procedure_id, access_code, catheter_status, removed_or_replaced, operator_doctor_name
+                    )
+                    VALUES (?, 'ijv_right', 'active', '', 'Тест Врач')
+                    """,
+                    (procedure_id,),
+                )
+                return admission_id, procedure_id
+
+        transfer_start = datetime(2026, 5, 7, 10, 0)
+        transfer_dt = datetime(2026, 5, 9, 10, 0)
+        transfer_admission_id, transfer_procedure_id = seed_case("REG-CVC-TRANSFER", 1, transfer_start)
+        if not status_dao.change_status_with_outcome_details(
+            transfer_admission_id,
+            PatientStatus.TRANSFERRED,
+            transfer_dt,
+            reason_text="Куда переведен: Терапия",
+            user_id="REGRESSION",
+            admission_details={"transfer_department": "Терапия"},
+        ):
+            return False, "transfer outcome was rejected"
+
+        row = manager.fetch_one_remcard(
+            """
+            SELECT p.status, p.finished_at, p.duration_minutes, c.catheter_status, c.removed_at
+            FROM procedures p
+            JOIN procedure_cvc c ON c.procedure_id = p.id
+            WHERE p.id = ?
+            """,
+            (transfer_procedure_id,),
+        )
+        if not row:
+            return False, "transfer CVC row disappeared"
+        expected_transfer = {
+            "status": "catheter_transferred",
+            "finished_at": transfer_dt.isoformat(),
+            "duration_minutes": 2880,
+            "catheter_status": "transferred_with_catheter",
+            "removed_at": transfer_dt.isoformat(),
+        }
+        actual_transfer = {key: row[key] for key in expected_transfer}
+        if actual_transfer != expected_transfer:
+            return False, f"transfer CVC auto-close mismatch: {actual_transfer}"
+
+        if not status_dao.rollback_last_status(transfer_admission_id):
+            return False, "transfer rollback was rejected"
+        rolled_back = manager.fetch_one_remcard(
+            """
+            SELECT p.status, p.finished_at, p.duration_minutes, c.catheter_status, c.removed_at
+            FROM procedures p
+            JOIN procedure_cvc c ON c.procedure_id = p.id
+            WHERE p.id = ?
+            """,
+            (transfer_procedure_id,),
+        )
+        if (
+            not rolled_back
+            or rolled_back["status"] != "active"
+            or rolled_back["finished_at"] is not None
+            or rolled_back["duration_minutes"] is not None
+            or rolled_back["catheter_status"] != "active"
+            or rolled_back["removed_at"] is not None
+        ):
+            return False, f"rollback did not restore active CVC: {dict(rolled_back) if rolled_back else None}"
+
+        death_start = datetime(2026, 5, 10, 8, 0)
+        death_dt = datetime(2026, 5, 11, 8, 30)
+        death_admission_id, death_procedure_id = seed_case("REG-CVC-DEATH", 2, death_start)
+        if not status_dao.change_status_with_outcome_details(
+            death_admission_id,
+            PatientStatus.DEAD,
+            death_dt,
+            reason_text="",
+            user_id="REGRESSION",
+            admission_details={
+                "death_datetime": death_dt,
+                "clinical_death_datetime": death_dt,
+                "cardiac_arrest_cause": "Асистолия",
+                "cardiac_arrest_measures_json": "{}",
+            },
+        ):
+            return False, "death outcome was rejected"
+
+        death_row = manager.fetch_one_remcard(
+            """
+            SELECT p.status, p.finished_at, p.duration_minutes, c.catheter_status, c.removed_at
+            FROM procedures p
+            JOIN procedure_cvc c ON c.procedure_id = p.id
+            WHERE p.id = ?
+            """,
+            (death_procedure_id,),
+        )
+        expected_death = {
+            "status": "catheter_dead",
+            "finished_at": death_dt.isoformat(),
+            "duration_minutes": 1470,
+            "catheter_status": "dead_with_catheter",
+            "removed_at": death_dt.isoformat(),
+        }
+        actual_death = {key: death_row[key] for key in expected_death} if death_row else None
+        if actual_death != expected_death:
+            return False, f"death CVC auto-close mismatch: {actual_death}"
+
+        stats = DetailedStatisticsReportBuilder(manager, "2026-05-01", "2026-05-31")._calculate_statistics()
+        if stats.get("cvc_count") != 2 or stats.get("cvc_closed_count") != 1:
+            return False, f"unexpected CVC dwell counters in statistics: {stats}"
+        expected_dwell_days = 1470 / 1440
+        if abs(float(stats.get("cvc_avg_dwell_days") or 0.0) - expected_dwell_days) > 0.0001:
+            return False, f"unexpected CVC dwell duration in statistics: {stats.get('cvc_avg_dwell_days')}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_sector_print_transform_snapshot(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
     from types import SimpleNamespace
@@ -5837,7 +6006,7 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "107b569bade4be1ffddbdb733c104d057d17ad174a289ee0cd862ac1e71986e1"
+    expected_digest = "5a551b15499bfd6f9813772d4f9b739d7dd369306486002945777fa50280e0fe"
     if digest != expected_digest:
         return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
@@ -11615,6 +11784,7 @@ def main():
         ("report_night_admission_shift_dates", _check_report_night_admission_shift_dates),
         ("outcome_datetime_resolution", _check_outcome_datetime_resolution),
         ("outcome_guard_rejects_time_before_latest_activity", _check_outcome_guard_rejects_time_before_latest_activity),
+        ("cvc_auto_closes_on_outcome", _check_cvc_auto_closes_on_outcome),
         ("sector_print_transform_snapshot", _check_sector_print_transform_snapshot),
         ("full_report_movement_summary", _check_full_report_movement_summary),
         ("reportlab_pdf_builder_smoke", _check_reportlab_pdf_builder_smoke),

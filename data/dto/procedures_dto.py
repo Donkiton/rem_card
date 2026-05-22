@@ -19,6 +19,8 @@ class ProcedureStatus(Enum):
     CANCELLED = "cancelled"
     CATHETER_REMOVED = "catheter_removed"
     CATHETER_REPLACED = "catheter_replaced"
+    CATHETER_TRANSFERRED = "catheter_transferred"
+    CATHETER_DEAD = "catheter_dead"
 
 
 class ConsentKind(Enum):
@@ -47,6 +49,8 @@ PROCEDURE_STATUS_LABELS = {
     ProcedureStatus.CANCELLED.value: "Отменена",
     ProcedureStatus.CATHETER_REMOVED.value: "Удалён катетер",
     ProcedureStatus.CATHETER_REPLACED.value: "Переустановлен катетер",
+    ProcedureStatus.CATHETER_TRANSFERRED.value: "Переведен с кат.",
+    ProcedureStatus.CATHETER_DEAD.value: "Умер с кат.",
 }
 
 

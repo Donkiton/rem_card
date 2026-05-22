@@ -45,7 +45,14 @@ SECTION_GROUPS = {
 }
 TOP_SECTIONS = ["s1", "s2", "s6", "s7", "s9", "s10", "s11", "s12", "s13", "s14", "s18", "s19", "sx"]
 
-PERFORMED_PROCEDURE_STATUSES = {"active", "completed", "catheter_removed", "catheter_replaced"}
+PERFORMED_PROCEDURE_STATUSES = {
+    "active",
+    "completed",
+    "catheter_removed",
+    "catheter_replaced",
+    "catheter_transferred",
+    "catheter_dead",
+}
 
 CVC_ACCESS_LABELS = {
     "ijv_right": "Внутренняя яремная вена правая",
@@ -64,6 +71,10 @@ CVC_STATUS_LABELS = {
     "catheter_replaced": "Катетер переустановлен",
     "removed": "Катетер удален",
     "replaced": "Катетер переустановлен",
+    "catheter_transferred": "Переведен с кат.",
+    "catheter_dead": "Умер с кат.",
+    "transferred_with_catheter": "Переведен с кат.",
+    "dead_with_catheter": "Умер с кат.",
 }
 
 LP_ACCESS_LABELS = {
@@ -626,6 +637,8 @@ class DetailedStatisticsReportBuilder:
                 p.admission_id,
                 p.status,
                 p.started_at,
+                p.finished_at,
+                p.duration_minutes,
                 p.created_at,
                 p.doctor_name_snapshot,
                 c.access_code,
@@ -640,6 +653,7 @@ class DetailedStatisticsReportBuilder:
                 c.usage_complications_description,
                 c.catheter_status,
                 c.removed_or_replaced,
+                c.removed_at,
                 c.operator_doctor_name,
                 c.removal_doctor_name
             FROM procedures p
@@ -661,6 +675,20 @@ class DetailedStatisticsReportBuilder:
             removal_doctor = self._normalize_text(row.get("removal_doctor_name"), fallback="")
             technical_description = str(row.get("technical_difficulty_description") or "").strip()
             usage_description = str(row.get("usage_complications_description") or "").strip()
+            catheter_status = str(row.get("catheter_status") or "").strip().lower()
+            action = str(row.get("removed_or_replaced") or "").strip().lower()
+            has_catheter_endpoint = (
+                status in {"catheter_removed", "catheter_replaced", "catheter_transferred", "catheter_dead"}
+                or catheter_status in {"removed", "replaced", "transferred_with_catheter", "dead_with_catheter"}
+                or action in {"removed", "replaced"}
+            )
+            start_dt = self._parse_datetime(row.get("started_at") or row.get("created_at"))
+            finish_dt = self._parse_datetime(row.get("finished_at") or row.get("removed_at"))
+            dwell_minutes = None
+            if has_catheter_endpoint and start_dt is not None and finish_dt is not None:
+                dwell_minutes = max(0.0, (finish_dt - start_dt).total_seconds() / 60.0)
+            elif has_catheter_endpoint and row.get("duration_minutes") is not None:
+                dwell_minutes = self._safe_float(row.get("duration_minutes"), default=0.0)
             result.append(
                 {
                     "admission_id": aid,
@@ -686,6 +714,7 @@ class DetailedStatisticsReportBuilder:
                         usage_description,
                     ),
                     "usage_description": usage_description,
+                    "dwell_minutes": dwell_minutes,
                 }
             )
         return result
@@ -932,6 +961,7 @@ class DetailedStatisticsReportBuilder:
         cvc_lumens = []
         cvc_lengths = []
         cvc_diameters = []
+        cvc_dwell_minutes = []
         cvc_technical_complications = 0
         cvc_usage_complications = 0
         cvc_any_complications = 0
@@ -952,6 +982,11 @@ class DetailedStatisticsReportBuilder:
                     parsed = self._safe_float(value, default=0.0)
                     if parsed > 0:
                         target.append(parsed)
+            dwell_minutes = cvc.get("dwell_minutes")
+            if dwell_minutes is not None:
+                parsed_dwell = self._safe_float(dwell_minutes, default=0.0)
+                if parsed_dwell >= 0:
+                    cvc_dwell_minutes.append(parsed_dwell)
 
             has_technical = bool(cvc.get("technical_complication"))
             has_usage = bool(cvc.get("usage_complication"))
@@ -1031,6 +1066,9 @@ class DetailedStatisticsReportBuilder:
             "cvc_avg_lumens": self._safe_div(sum(cvc_lumens), len(cvc_lumens)) if cvc_lumens else None,
             "cvc_avg_length": self._safe_div(sum(cvc_lengths), len(cvc_lengths)) if cvc_lengths else None,
             "cvc_avg_diameter": self._safe_div(sum(cvc_diameters), len(cvc_diameters)) if cvc_diameters else None,
+            "cvc_closed_count": len(cvc_dwell_minutes),
+            "cvc_total_dwell_days": sum(cvc_dwell_minutes) / 1440.0,
+            "cvc_avg_dwell_days": self._safe_div(sum(cvc_dwell_minutes), len(cvc_dwell_minutes)) / 1440.0 if cvc_dwell_minutes else None,
             "cvc_technical_complications": cvc_technical_complications,
             "cvc_technical_no_complications": max(0, cvc_count - cvc_technical_complications),
             "cvc_usage_complications": cvc_usage_complications,
@@ -1252,6 +1290,9 @@ class DetailedStatisticsReportBuilder:
             "cvc_avg_lumens": procedures["cvc_avg_lumens"],
             "cvc_avg_length": procedures["cvc_avg_length"],
             "cvc_avg_diameter": procedures["cvc_avg_diameter"],
+            "cvc_closed_count": procedures["cvc_closed_count"],
+            "cvc_total_dwell_days": procedures["cvc_total_dwell_days"],
+            "cvc_avg_dwell_days": procedures["cvc_avg_dwell_days"],
             "cvc_technical_complications": procedures["cvc_technical_complications"],
             "cvc_technical_no_complications": procedures["cvc_technical_no_complications"],
             "cvc_usage_complications": procedures["cvc_usage_complications"],
@@ -1439,6 +1480,9 @@ class DetailedStatisticsReportBuilder:
                 ("12.7 Среднее число просветов", "Среднее число просветов среди заполненных протоколов", self._fmt_num(s["cvc_avg_lumens"])),
                 ("12.8 Средняя длина катетера, см", "Средняя длина среди заполненных протоколов", self._fmt_num(s["cvc_avg_length"])),
                 ("12.9 Средний диаметр, F", "Средний диаметр среди заполненных протоколов", self._fmt_num(s["cvc_avg_diameter"])),
+                ("12.10 ЦВК с рассчитанной длительностью", "Катетеры с временем окончания пребывания", self._fmt_num(s["cvc_closed_count"], 0)),
+                ("12.11 Суммарная длительность ЦВК, дней", "Сумма времени от установки до удаления/переустановки/исхода", self._fmt_num(s["cvc_total_dwell_days"])),
+                ("12.12 Средняя длительность ЦВК, дней", "Среднее время от установки до удаления/переустановки/исхода", self._fmt_num(s["cvc_avg_dwell_days"])),
             ]
 
         if section_key == "s13":

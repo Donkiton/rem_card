@@ -251,6 +251,8 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         else:
             self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
             self.status_combo.addItem("Активна", ProcedureStatus.ACTIVE.value)
+            self.status_combo.addItem("Переведен с кат.", ProcedureStatus.CATHETER_TRANSFERRED.value)
+            self.status_combo.addItem("Умер с кат.", ProcedureStatus.CATHETER_DEAD.value)
 
         now = datetime.now().replace(second=0, microsecond=0)
         self.request_edit = None

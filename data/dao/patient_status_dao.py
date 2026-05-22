@@ -6,6 +6,11 @@ from rem_card.app.logger import logger
 from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
 
+CVC_OUTCOME_STATUS_BY_PATIENT_STATUS = {
+    PatientStatus.TRANSFERRED.value: ("catheter_transferred", "transferred_with_catheter"),
+    PatientStatus.DEAD.value: ("catheter_dead", "dead_with_catheter"),
+}
+
 class PatientStatusDAO:
     def __init__(self, db_manager):
         self.db = db_manager
@@ -184,6 +189,135 @@ class PatientStatusDAO:
             if parsed and (latest is None or parsed > latest):
                 latest = parsed
         return latest
+
+    @staticmethod
+    def _active_cvc_outcome_candidate_ids(cursor, admission_id: int) -> List[int]:
+        cursor.execute(
+            """
+            SELECT p.id
+            FROM procedures p
+            JOIN procedure_cvc c ON c.procedure_id = p.id
+            WHERE p.admission_id = ?
+              AND p.procedure_type = 'CVC'
+              AND p.status = 'active'
+              AND COALESCE(p.is_deleted, 0) = 0
+              AND LOWER(COALESCE(NULLIF(c.catheter_status, ''), 'active')) = 'active'
+              AND COALESCE(c.removed_or_replaced, '') = ''
+            """,
+            (admission_id,),
+        )
+        return [int(row["id"] if hasattr(row, "keys") else row[0]) for row in cursor.fetchall()]
+
+    def _sync_active_cvc_for_outcome(
+        self,
+        cursor,
+        admission_id: int,
+        patient_status: PatientStatus,
+        event_time_str: str,
+        now_str: str,
+        user_id: Optional[str],
+    ) -> None:
+        status_pair = CVC_OUTCOME_STATUS_BY_PATIENT_STATUS.get(patient_status.value)
+        if not status_pair:
+            return
+
+        procedure_status, catheter_status = status_pair
+        procedure_ids = self._active_cvc_outcome_candidate_ids(cursor, admission_id)
+        if not procedure_ids:
+            return
+
+        placeholders = ",".join("?" for _ in procedure_ids)
+        cursor.execute(
+            f"""
+            UPDATE procedures
+            SET status = ?,
+                finished_at = ?,
+                duration_minutes = CASE
+                    WHEN started_at IS NULL THEN duration_minutes
+                    ELSE CAST(MAX(0, ROUND((julianday(?) - julianday(started_at)) * 24.0 * 60.0)) AS INTEGER)
+                END,
+                updated_by = ?,
+                updated_at = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id IN ({placeholders})
+            """,
+            (procedure_status, event_time_str, event_time_str, user_id or "SYSTEM", now_str, *procedure_ids),
+        )
+        cursor.execute(
+            f"""
+            UPDATE procedure_cvc
+            SET catheter_status = ?,
+                removed_at = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE procedure_id IN ({placeholders})
+            """,
+            (catheter_status, event_time_str, *procedure_ids),
+        )
+        logger.info(
+            "[StatusDAO] Admission %s: auto-closed %s active CVC catheter(s) as %s",
+            admission_id,
+            len(procedure_ids),
+            procedure_status,
+        )
+
+    def _restore_cvc_outcome_autoclose(
+        self,
+        cursor,
+        admission_id: int,
+        current_status: str,
+        now_str: str,
+    ) -> None:
+        status_pair = CVC_OUTCOME_STATUS_BY_PATIENT_STATUS.get(str(current_status or ""))
+        if not status_pair:
+            return
+
+        procedure_status, catheter_status = status_pair
+        cursor.execute(
+            """
+            SELECT p.id
+            FROM procedures p
+            JOIN procedure_cvc c ON c.procedure_id = p.id
+            WHERE p.admission_id = ?
+              AND p.procedure_type = 'CVC'
+              AND p.status = ?
+              AND COALESCE(p.is_deleted, 0) = 0
+              AND c.catheter_status = ?
+              AND COALESCE(c.removed_or_replaced, '') = ''
+            """,
+            (admission_id, procedure_status, catheter_status),
+        )
+        procedure_ids = [int(row["id"] if hasattr(row, "keys") else row[0]) for row in cursor.fetchall()]
+        if not procedure_ids:
+            return
+
+        placeholders = ",".join("?" for _ in procedure_ids)
+        cursor.execute(
+            f"""
+            UPDATE procedures
+            SET status = 'active',
+                finished_at = NULL,
+                duration_minutes = NULL,
+                updated_at = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id IN ({placeholders})
+            """,
+            (now_str, *procedure_ids),
+        )
+        cursor.execute(
+            f"""
+            UPDATE procedure_cvc
+            SET catheter_status = 'active',
+                removed_at = NULL,
+                revision = COALESCE(revision, 0) + 1
+            WHERE procedure_id IN ({placeholders})
+            """,
+            tuple(procedure_ids),
+        )
+        logger.info(
+            "[StatusDAO] Admission %s: restored %s auto-closed CVC catheter(s) after outcome rollback",
+            admission_id,
+            len(procedure_ids),
+        )
 
     def _get_active_ventilation_context(self, admission_id: int) -> Optional[Dict[str, Any]]:
         """Возвращает текущий режим/параметры активного случая ИВЛ для окна исхода смерти."""
@@ -755,6 +889,14 @@ class PatientStatusDAO:
                 if expected_admission_revision is not None and cursor.rowcount != 1:
                     raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
+                self._sync_active_cvc_for_outcome(
+                    cursor,
+                    admission_id,
+                    new_status,
+                    event_time_str,
+                    now_str,
+                    user_id,
+                )
                 return True
         except DataConflictError:
             raise
@@ -905,6 +1047,13 @@ class PatientStatusDAO:
                                 """,
                                 (bed_number, admission_id),
                             )
+
+                        self._restore_cvc_outcome_autoclose(
+                            cursor,
+                            admission_id,
+                            current_status,
+                            now_str,
+                        )
                     
                 return True
         except DataConflictError:

@@ -105,6 +105,7 @@ FALLBACK_DDL: dict[str, str] = {
             usage_complications_description TEXT,
             catheter_status TEXT,
             removed_or_replaced TEXT,
+            removed_at TEXT,
             operator_doctor_name TEXT,
             removal_doctor_name TEXT
         )

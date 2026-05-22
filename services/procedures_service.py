@@ -422,9 +422,27 @@ class ProceduresService:
         if action == "removed":
             procedure.status = ProcedureStatus.CATHETER_REMOVED.value
             cvc.catheter_status = "removed"
+            if cvc.removed_at is not None:
+                procedure.finished_at = cvc.removed_at
+                ProceduresService._normalize_duration(procedure)
         elif action == "replaced":
             procedure.status = ProcedureStatus.CATHETER_REPLACED.value
             cvc.catheter_status = "replaced"
+            if cvc.removed_at is not None:
+                procedure.finished_at = cvc.removed_at
+                ProceduresService._normalize_duration(procedure)
+        elif procedure.status == ProcedureStatus.CATHETER_TRANSFERRED.value:
+            cvc.catheter_status = "transferred_with_catheter"
+            cvc.removed_at = procedure.finished_at or cvc.removed_at
+            ProceduresService._normalize_duration(procedure)
+        elif procedure.status == ProcedureStatus.CATHETER_DEAD.value:
+            cvc.catheter_status = "dead_with_catheter"
+            cvc.removed_at = procedure.finished_at or cvc.removed_at
+            ProceduresService._normalize_duration(procedure)
+        elif procedure.status == ProcedureStatus.ACTIVE.value:
+            cvc.catheter_status = "active"
+            procedure.finished_at = None
+            procedure.duration_minutes = None
         elif not cvc.catheter_status:
             cvc.catheter_status = "active"
 
