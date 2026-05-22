@@ -11513,6 +11513,14 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
             return False, f"{path.name}: local order force must not synchronously reload balance from DB"
         if "_schedule_balance_update()" not in local_force_block:
             return False, f"{path.name}: local order force must schedule local balance update"
+        if "_refresh_current_orders_from_payload(payload)" not in local_force_block:
+            return False, f"{path.name}: local order force must refresh sector 1a current orders"
+        refresh_orders_method = methods.get("_refresh_orders_from_payload", "")
+        if "_refresh_current_orders_from_payload(payload)" not in refresh_orders_method:
+            return False, f"{path.name}: external order changes must refresh sector 1a current orders"
+        current_orders_helper = methods.get("_refresh_current_orders_from_payload", "")
+        if "handle_data_changes(payload)" not in current_orders_helper:
+            return False, f"{path.name}: sector 1a current orders helper must delegate change payloads"
         partial_actions = methods.get("_apply_partial_sync_actions", "")
         if "_apply_partial_sync_actions(" not in on_changes or not partial_actions:
             return False, f"{path.name}: partial sync action dispatcher missing"

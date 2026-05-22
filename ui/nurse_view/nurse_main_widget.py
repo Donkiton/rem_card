@@ -1099,13 +1099,17 @@ class NurseMainWidget(QWidget):
                 )
             except Exception:
                 logger.exception("Nurse orders delta refresh failed")
-        if hasattr(self.layout_manager, "nurse_orders_manager"):
-            try:
-                mgr = self.layout_manager.nurse_orders_manager
-                if mgr and hasattr(mgr, "handle_data_changes"):
-                    mgr.handle_data_changes(payload)
-            except Exception:
-                logger.exception("Current nurse orders refresh failed")
+        self._refresh_current_orders_from_payload(payload)
+
+    def _refresh_current_orders_from_payload(self, payload: dict) -> None:
+        layout = getattr(self, "layout_manager", None)
+        mgr = getattr(layout, "nurse_orders_manager", None) if layout is not None else None
+        if mgr is None or not hasattr(mgr, "handle_data_changes"):
+            return
+        try:
+            mgr.handle_data_changes(payload)
+        except Exception:
+            logger.exception("Current nurse orders refresh failed")
 
     def _apply_partial_sync_actions(self, sync_actions: dict, *, full_refresh_required: bool) -> None:
         if full_refresh_required:
@@ -1180,6 +1184,7 @@ class NurseMainWidget(QWidget):
                     )
                 except Exception:
                     logger.exception("Nurse orders local forced skip failed")
+            self._refresh_current_orders_from_payload(payload)
             logger.info(
                 "[OrdersClick] skip local forced card snapshot role=nurse admission_id=%s sources=%s entities=%s",
                 getattr(self.layout_manager, "current_admission_id", None),
