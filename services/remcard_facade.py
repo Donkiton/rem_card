@@ -113,6 +113,43 @@ class RemCardService(QObject):
         self.procedures_dao = ProceduresDAO(self.orders_dao.db)
         self._procedures = ProceduresService(self.procedures_dao, data_service=data_service)
         self._procedures_print = ProceduresPrintService(self.procedures_dao)
+        self._connect_cache_invalidation()
+
+    def _connect_cache_invalidation(self):
+        if not self.data_service or not hasattr(self.data_service, "changes_detected"):
+            return
+        try:
+            self.data_service.changes_detected.connect(self._handle_data_changes_for_cache)
+        except Exception as exc:
+            logger.warning("Failed to connect RemCardService cache invalidation: %s", exc)
+
+    @staticmethod
+    def _changed_entities_from_payload(payload: dict[str, Any]) -> set[str]:
+        changed_entities = {
+            str(entity)
+            for entity in (payload.get("changed_entities") or [])
+            if entity is not None
+        }
+        if changed_entities:
+            return changed_entities
+        return {
+            str(change.get("entity_name") or "")
+            for change in (payload.get("changes") or [])
+            if change.get("entity_name")
+        }
+
+    def _handle_data_changes_for_cache(self, payload: dict):
+        try:
+            sync_actions = (payload or {}).get("sync_actions") or {}
+            changed_entities = self._changed_entities_from_payload(payload or {})
+            if "vital_settings" in changed_entities or sync_actions.get("full_refresh_required"):
+                self._vitals.invalidate_cache()
+                logger.info(
+                    "RemCardService invalidated vital settings cache reason=%s",
+                    "full_refresh" if sync_actions.get("full_refresh_required") else "vital_settings",
+                )
+        except Exception as exc:
+            logger.warning("Failed to invalidate RemCardService caches after data changes: %s", exc)
 
     def has_card(self, admission_id: int, date: datetime) -> bool:
         """

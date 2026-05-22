@@ -102,6 +102,60 @@ def load_snapshot(namespace: str, cache_key: Any, *, now: Optional[datetime] = N
         return payload.get("snapshot")
 
 
+def delete_snapshot(namespace: str, cache_key: Any) -> bool:
+    if not PERSISTENT_SNAPSHOT_CACHE_ENABLED:
+        return False
+    with _CACHE_LOCK:
+        path = _cache_path(namespace, cache_key)
+        try:
+            existed = path.exists()
+            path.unlink(missing_ok=True)
+            return bool(existed)
+        except Exception as exc:
+            logger.warning("[PersistentSnapshotCache] failed to delete %s: %s", path, exc)
+            return False
+
+
+def delete_snapshots_for_admission(namespace: str, admission_id: int, *, admission_id_index: int = 1) -> int:
+    if not PERSISTENT_SNAPSHOT_CACHE_ENABLED:
+        return 0
+    target_admission_id = int(admission_id)
+    removed = 0
+    with _CACHE_LOCK:
+        namespace_dir = _namespace_dir(namespace)
+        if not namespace_dir.exists():
+            return 0
+        try:
+            files = [path for path in namespace_dir.glob("*.pkl") if path.is_file()]
+        except Exception as exc:
+            logger.warning("[PersistentSnapshotCache] failed to list cache dir %s: %s", namespace_dir, exc)
+            return 0
+
+        for path in files:
+            try:
+                with path.open("rb") as fh:
+                    payload = pickle.load(fh)
+                cache_key = payload.get("cache_key") if isinstance(payload, dict) else None
+                if cache_key is None or int(cache_key[admission_id_index]) != target_admission_id:
+                    continue
+                path.unlink(missing_ok=True)
+                removed += 1
+            except Exception as exc:
+                logger.warning("[PersistentSnapshotCache] failed to inspect %s: %s", path, exc)
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+    if removed:
+        logger.info(
+            "[PersistentSnapshotCache] deleted namespace=%s admission_id=%s entries=%s",
+            namespace,
+            target_admission_id,
+            removed,
+        )
+    return removed
+
+
 def store_snapshot(
     namespace: str,
     cache_key: Any,

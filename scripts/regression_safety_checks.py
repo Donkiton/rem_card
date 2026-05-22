@@ -10505,6 +10505,132 @@ def _check_patient_snapshot_cache_invalidates_on_vitals_change(temp_root: str) -
     return True, "ok"
 
 
+def _check_vital_settings_cache_invalidates_on_sync(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+
+    from rem_card.services.remcard_facade import RemCardService
+    from rem_card.services.vital_service import VitalService
+
+    class FakeVitalsDAO:
+        def __init__(self):
+            self.settings = {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0}
+            self.reads = 0
+
+        def get_vital_settings(self, admission_id, date):
+            _ = admission_id, date
+            self.reads += 1
+            return dict(self.settings)
+
+    service = RemCardService.__new__(RemCardService)
+    fake_dao = FakeVitalsDAO()
+    service._vitals = VitalService(fake_dao, patient_dao=None)
+
+    from datetime import datetime
+
+    shift_date = datetime(2026, 5, 22, 8, 0)
+    first = service._vitals.get_vital_settings_cached(29, shift_date)
+    if first.get("cvp") != 0:
+        return False, f"initial fake settings mismatch: {first}"
+
+    fake_dao.settings["cvp"] = 1
+    still_cached = service._vitals.get_vital_settings_cached(29, shift_date)
+    if still_cached.get("cvp") != 0:
+        return False, "test setup failed: settings cache did not hold the old cvp value"
+
+    RemCardService._handle_data_changes_for_cache(
+        service,
+        {
+            "changed_entities": ["vital_settings"],
+            "sync_actions": {"full_refresh_required": False},
+        },
+    )
+    after_vital_settings_change = service._vitals.get_vital_settings_cached(29, shift_date)
+    if after_vital_settings_change.get("cvp") != 1:
+        return False, "vital_settings change did not refresh VitalService settings cache"
+
+    fake_dao.settings["cvp"] = 0
+    RemCardService._handle_data_changes_for_cache(
+        service,
+        {
+            "changes": [{"entity_name": "orders", "admission_id": 1}],
+            "sync_actions": {"full_refresh_required": False},
+        },
+    )
+    after_orders_change = service._vitals.get_vital_settings_cached(29, shift_date)
+    if after_orders_change.get("cvp") != 1:
+        return False, "unrelated orders change should not invalidate vital settings cache"
+
+    RemCardService._handle_data_changes_for_cache(
+        service,
+        {
+            "changed_entities": [],
+            "sync_actions": {"full_refresh_required": True},
+        },
+    )
+    after_full_refresh = service._vitals.get_vital_settings_cached(29, shift_date)
+    if after_full_refresh.get("cvp") != 0:
+        return False, "full refresh did not invalidate vital settings cache"
+
+    return True, "ok"
+
+
+def _check_patient_snapshot_persistent_cache_invalidation(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from datetime import datetime
+
+    from rem_card.services import persistent_snapshot_cache
+    from rem_card.services.read_coordinator import ReadCoordinator
+
+    shift_key = datetime(2026, 5, 22, 8, 0, 0).isoformat(timespec="seconds")
+    card_key = ("live", 29, shift_key, "nurse", "live", "card_committed", "card-hash")
+    vitals_key = ("live", 29, shift_key, "nurse", "live", "vitals", "vitals-hash")
+
+    persistent_snapshot_cache.store_snapshot(
+        "patient_card",
+        card_key,
+        {
+            "admission_id": 29,
+            "version": 97701,
+            "settings": {"cvp": 0},
+        },
+    )
+
+    coordinator = object.__new__(ReadCoordinator)
+    coordinator._patient_card_cache = {}
+    coordinator._patient_card_cache_index = {}
+    coordinator._cache_version_validation = {}
+    stale_card = ReadCoordinator.get_cached_card(coordinator, card_key)
+    if stale_card is not None:
+        return False, "old-format patient_card persistent snapshot was accepted"
+    if persistent_snapshot_cache.load_snapshot("patient_card", card_key) is not None:
+        return False, "old-format patient_card persistent snapshot was not deleted"
+
+    current_snapshot = {
+        "admission_id": 29,
+        "version": 97702,
+        "settings": {"cvp": 1},
+        "snapshot_cache_format_version": 2,
+    }
+    persistent_snapshot_cache.store_snapshot("patient_card", card_key, current_snapshot)
+    persistent_snapshot_cache.store_snapshot("patient_vitals", vitals_key, current_snapshot)
+
+    removed = ReadCoordinator.invalidate_patient_card_for_admission(coordinator, 29, reason="test")
+    if removed < 1:
+        return False, "patient_card persistent snapshot was not counted as invalidated"
+    if persistent_snapshot_cache.load_snapshot("patient_card", card_key) is not None:
+        return False, "patient_card persistent snapshot survived admission invalidation"
+
+    coordinator._patient_vitals_cache = {}
+    coordinator._patient_cache_index = {}
+    removed_vitals = ReadCoordinator.invalidate_patient_vitals_for_admission(coordinator, 29, reason="test")
+    if removed_vitals < 1:
+        return False, "patient_vitals persistent snapshot was not counted as invalidated"
+    if persistent_snapshot_cache.load_snapshot("patient_vitals", vitals_key) is not None:
+        return False, "patient_vitals persistent snapshot survived admission invalidation"
+
+    return True, "ok"
+
+
 def _check_read_coordinator_partial_snapshots(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime
@@ -11540,6 +11666,8 @@ def main():
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
         ("patient_open_cached_card_always_rehydrates", _check_patient_open_cached_card_always_rehydrates),
         ("patient_snapshot_cache_invalidates_on_vitals_change", _check_patient_snapshot_cache_invalidates_on_vitals_change),
+        ("vital_settings_cache_invalidates_on_sync", _check_vital_settings_cache_invalidates_on_sync),
+        ("patient_snapshot_persistent_cache_invalidation", _check_patient_snapshot_persistent_cache_invalidation),
         ("read_coordinator_partial_snapshots", _check_read_coordinator_partial_snapshots),
         ("read_coordinator_monitor_validated_cache_hits", _check_read_coordinator_monitor_validated_cache_hits),
         ("visible_section_cache_keys_use_shift_context", _check_visible_section_cache_keys_use_shift_context),

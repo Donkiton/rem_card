@@ -58,6 +58,7 @@ READ_ORDERS_SQL_STEP_TIMEOUT_SEC = max(
     float(os.environ.get("REMCARD_ORDERS_SQL_STEP_TIMEOUT_SEC", "4.5")),
 )
 READ_ORDERS_RETIRED_REFRESH_MAX = max(20, int(os.environ.get("REMCARD_ORDERS_RETIRED_REFRESH_MAX", "100")))
+PATIENT_SNAPSHOT_CACHE_FORMAT_VERSION = 2
 
 _VALID_ROLES = {"doctor", "nurse"}
 _VALID_MODES = {"live", "archive"}
@@ -1875,11 +1876,32 @@ class ReadCoordinator:
     def _drop_cache_validation(self, cache_key) -> None:
         self._cache_version_validation.pop(cache_key, None)
 
+    @staticmethod
+    def _is_current_patient_snapshot_cache(snapshot) -> bool:
+        try:
+            return int((snapshot or {}).get("snapshot_cache_format_version") or 0) == PATIENT_SNAPSHOT_CACHE_FORMAT_VERSION
+        except Exception:
+            return False
+
+    def _discard_stale_persistent_patient_snapshot(self, namespace: str, cache_key, snapshot) -> bool:
+        if self._is_current_patient_snapshot_cache(snapshot):
+            return False
+        persistent_snapshot_cache.delete_snapshot(namespace, cache_key)
+        logger.info(
+            "[ReadCoordinator] discarded stale persistent %s snapshot admission_id=%s version=%s",
+            namespace,
+            cache_key[1] if len(cache_key) > 1 else "unknown",
+            (snapshot or {}).get("version") if isinstance(snapshot, dict) else None,
+        )
+        return True
+
     def get_cached_vitals(self, cache_key):
         snapshot = self._patient_vitals_cache.get(cache_key)
         if snapshot is None:
             persisted = persistent_snapshot_cache.load_snapshot("patient_vitals", cache_key)
             if persisted is None:
+                return None
+            if self._discard_stale_persistent_patient_snapshot("patient_vitals", cache_key, persisted):
                 return None
             snapshot = MappingProxyType(dict(persisted or {}))
             self._store_patient_vitals_by_key(cache_key, snapshot, persist=False)
@@ -1944,6 +1966,8 @@ class ReadCoordinator:
             persisted = persistent_snapshot_cache.load_snapshot("patient_card", cache_key)
             if persisted is None:
                 return None
+            if self._discard_stale_persistent_patient_snapshot("patient_card", cache_key, persisted):
+                return None
             snapshot = MappingProxyType(dict(persisted or {}))
             self._store_patient_card_by_key(cache_key, snapshot, persist=False)
             logger.info(
@@ -2006,6 +2030,8 @@ class ReadCoordinator:
         if snapshot is None:
             persisted = persistent_snapshot_cache.load_snapshot("patient_scope", cache_key)
             if persisted is None:
+                return None
+            if self._discard_stale_persistent_patient_snapshot("patient_scope", cache_key, persisted):
                 return None
             snapshot = MappingProxyType(dict(persisted or {}))
             self._store_patient_scope_by_key(cache_key, snapshot, persist=False)
@@ -2099,6 +2125,7 @@ class ReadCoordinator:
                 cache_key,
                 context.hash(),
             )
+        persistent_snapshot_cache.delete_snapshot("patient_vitals", cache_key)
 
     def invalidate_patient_vitals_for_admission(self, admission_id: int, *, reason: str = "") -> int:
         if admission_id is None:
@@ -2119,7 +2146,11 @@ class ReadCoordinator:
                 removed,
                 reason or "unknown",
             )
-        return removed
+        persistent_removed = persistent_snapshot_cache.delete_snapshots_for_admission(
+            "patient_vitals",
+            target_admission_id,
+        )
+        return removed + persistent_removed
 
     def invalidate_patient_card_for_admission(self, admission_id: int, *, reason: str = "") -> int:
         if admission_id is None:
@@ -2140,7 +2171,11 @@ class ReadCoordinator:
                 removed,
                 reason or "unknown",
             )
-        return removed
+        persistent_removed = persistent_snapshot_cache.delete_snapshots_for_admission(
+            "patient_card",
+            target_admission_id,
+        )
+        return removed + persistent_removed
 
     def validate_reload_version(
         self,
@@ -2410,6 +2445,7 @@ class ReadCoordinator:
         payload["version"] = version
         payload["last_change_id"] = version
         payload["content_hash"] = content_hash
+        payload["snapshot_cache_format_version"] = PATIENT_SNAPSHOT_CACHE_FORMAT_VERSION
         payload["dedup_signature"] = (
             int(payload.get("admission_id") or 0),
             scope,
