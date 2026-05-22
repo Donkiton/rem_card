@@ -4,7 +4,10 @@ from datetime import datetime
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import QDateEdit, QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from rem_card.services.analytics.statistics_service import build_statistical_report_html
+from rem_card.services.analytics.detailed_statistics_service import (
+    SECTION_GROUPS,
+    build_detailed_statistics_report_html,
+)
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
 from rem_card.ui.shared.html_pdf_worker import HtmlPdfWorker
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
@@ -172,9 +175,10 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
 
         start_dt = self.start_date.date().toString("yyyy-MM-dd 00:00:00")
         end_dt = self.end_date.date().toString("yyyy-MM-dd 23:59:59")
+        selected_sections = [key for group in SECTION_GROUPS.values() for key in group.keys()]
         self._set_pdf_busy(True)
         self._stats_worker = AnalyticsWorker(
-            lambda: build_statistical_report_html(self.db_manager, start_dt, end_dt),
+            lambda: build_detailed_statistics_report_html(self.db_manager, start_dt, end_dt, selected_sections),
             parent=self,
         )
         self._stats_worker.completed.connect(self._on_statistics_html_ready)

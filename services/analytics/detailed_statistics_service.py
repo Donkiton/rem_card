@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from html import escape
 from statistics import median
@@ -32,6 +33,9 @@ SECTION_GROUPS = {
         "s9": "9. ИВЛ",
         "s10": "10. Операции",
         "s11": "11. Переливания",
+        "s12": "12. Центральные венозные катетеры",
+        "s13": "13. Люмбальные пункции",
+        "s14": "14. Осложнения процедур",
         "s16": "16. Индексы интенсивности",
         "s17": "17. Индексы нагрузки",
         "s18": "18. Специальные показатели",
@@ -39,7 +43,52 @@ SECTION_GROUPS = {
         "sx": "➕ Дополнительные показатели",
     },
 }
-TOP_SECTIONS = ["s1", "s2", "s6", "s7", "s9", "s10", "s11", "s18", "s19", "sx"]
+TOP_SECTIONS = ["s1", "s2", "s6", "s7", "s9", "s10", "s11", "s12", "s13", "s14", "s18", "s19", "sx"]
+
+PERFORMED_PROCEDURE_STATUSES = {"active", "completed", "catheter_removed", "catheter_replaced"}
+
+CVC_ACCESS_LABELS = {
+    "ijv_right": "Внутренняя яремная вена правая",
+    "ijv_left": "Внутренняя яремная вена левая",
+    "subclavian_right": "Подключичная вена правая",
+    "subclavian_left": "Подключичная вена левая",
+    "femoral_right": "Бедренная вена правая",
+    "femoral_left": "Бедренная вена левая",
+    "other": "Прочие локализации",
+}
+
+CVC_STATUS_LABELS = {
+    "active": "Катетер активен",
+    "completed": "Процедура завершена",
+    "catheter_removed": "Катетер удален",
+    "catheter_replaced": "Катетер переустановлен",
+    "removed": "Катетер удален",
+    "replaced": "Катетер переустановлен",
+}
+
+LP_ACCESS_LABELS = {
+    "midline": "Срединный доступ",
+    "paramedian": "Парамедианный доступ",
+    "taylor": "Доступ Тейлора",
+}
+
+LP_LEVEL_LABELS = {
+    "L1-L2": "L1-L2",
+    "L2-L3": "L2-L3",
+    "L3-L4": "L3-L4",
+    "L4-L5": "L4-L5",
+    "L5-S1": "L5-S1",
+}
+
+LP_RESULT_LABELS = {
+    "csf_obtained": "Ликвор получен",
+    "csf_not_obtained": "Ликвор не получен",
+}
+
+TRANSFUSION_INDICATION_LABELS = {
+    "voce": "ВОЦЭ",
+    "vpfs": "ВПФС",
+}
 
 
 def parse_statistics_datetime(value):
@@ -234,15 +283,168 @@ class DetailedStatisticsReportBuilder:
             lines.append(f"{escape(str(group_name))}: {deaths}/{total} ({rate})")
         return "<br/>".join(lines) if lines else "н/д"
 
+    @staticmethod
+    def _table_exists(cursor, table_name: str) -> bool:
+        cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table_name,),
+        )
+        return cursor.fetchone() is not None
+
+    @classmethod
+    def _table_columns(cls, cursor, table_name: str) -> set[str]:
+        if not cls._table_exists(cursor, table_name):
+            return set()
+        cursor.execute(f'PRAGMA table_info("{table_name}")')
+        return {str(row[1]) for row in cursor.fetchall() if row and row[1]}
+
+    @staticmethod
+    def _select_expr(columns: set[str], column: str, fallback: str = "NULL") -> str:
+        if column in columns:
+            return column
+        return f"{fallback} AS {column}"
+
+    @staticmethod
+    def _json_dict(value):
+        if isinstance(value, dict):
+            return dict(value)
+        text = str(value or "").strip()
+        if not text:
+            return {}
+        try:
+            decoded = json.loads(text)
+        except Exception:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+
+    @classmethod
+    def _death_doctor_from_payload(cls, value) -> str:
+        payload = cls._json_dict(value)
+        protocol = payload.get("death_protocol")
+        protocol = protocol if isinstance(protocol, dict) else {}
+        doctor = str(
+            protocol.get("doctor")
+            or protocol.get("signature_doctor")
+            or payload.get("doctor")
+            or payload.get("signature_doctor")
+            or ""
+        ).strip()
+        return doctor or "Не указан"
+
+    @staticmethod
+    def _clean_label(value, fallback="Не указано") -> str:
+        text = str(value or "").strip()
+        return text if text else fallback
+
+    @classmethod
+    def _transfusion_type_label(cls, value) -> str:
+        text = str(value or "").strip()
+        normalized = text.lower().replace("ё", "е")
+        if normalized in {"blood", "rbc"} or any(token in normalized for token in ("кров", "эритро", "эрмас")):
+            return "Кровь"
+        if normalized in {"plasma", "ffp"} or any(token in normalized for token in ("плазм", "сзп")):
+            return "Плазма"
+        return cls._clean_label(text)
+
+    @classmethod
+    def _procedure_transfusion_type_label(cls, indication_code, component_name) -> str:
+        indication = str(indication_code or "").strip().lower()
+        component = str(component_name or "").strip().lower().replace("ё", "е")
+        if indication == "vpfs" or "плазм" in component or "сзп" in component or "ffp" in component:
+            return "Плазма"
+        if indication == "voce" or any(token in component for token in ("эритро", "эр.", "rbc", "кров")):
+            return "Кровь"
+        return "Прочее"
+
+    @classmethod
+    def _cvc_access_label(cls, access_code, access_other="") -> str:
+        code = str(access_code or "").strip()
+        other = str(access_other or "").strip()
+        if code == "other" and other:
+            return f"Прочие локализации: {other}"
+        return CVC_ACCESS_LABELS.get(code, cls._clean_label(other or code))
+
+    @classmethod
+    def _cvc_status_label(cls, procedure_status, catheter_status="", action="") -> str:
+        for raw in (action, catheter_status, procedure_status):
+            text = str(raw or "").strip()
+            if text in CVC_STATUS_LABELS:
+                return CVC_STATUS_LABELS[text]
+        return cls._clean_label(procedure_status)
+
+    @classmethod
+    def _lp_access_label(cls, access_code, access_other="") -> str:
+        code = str(access_code or "").strip()
+        other = str(access_other or "").strip()
+        return LP_ACCESS_LABELS.get(code, cls._clean_label(other or code))
+
+    @classmethod
+    def _lp_level_label(cls, level_code, level_other="") -> str:
+        code = str(level_code or "").strip()
+        other = str(level_other or "").strip()
+        return LP_LEVEL_LABELS.get(code, cls._clean_label(other or code))
+
+    @classmethod
+    def _lp_result_label(cls, result_code) -> str:
+        code = str(result_code or "").strip()
+        return LP_RESULT_LABELS.get(code, cls._clean_label(code))
+
+    @staticmethod
+    def _is_performed_procedure_status(status) -> bool:
+        return str(status or "").strip().lower() in PERFORMED_PROCEDURE_STATUSES
+
+    @staticmethod
+    def _has_complication(code, description="") -> bool:
+        normalized = str(code or "").strip().lower()
+        if normalized in {"complications", "present", "yes", "true"}:
+            return True
+        if normalized in {"none", "no", "false"}:
+            return False
+        return bool(str(description or "").strip())
+
+    @classmethod
+    def _count_volume_text(cls, count: int, volume_ml: float) -> str:
+        return f"{cls._fmt_num(count, 0)} / {cls._fmt_num(volume_ml, 0)} мл"
+
+    @classmethod
+    def _count_volume_distribution_lines(cls, stats: dict[str, dict[str, float]], total_count: int, *, limit=12):
+        if not stats:
+            return "н/д"
+        items = sorted(stats.items(), key=lambda item: (-item[1].get("count", 0), item[0]))[:limit]
+        lines = []
+        for name, values in items:
+            count = int(values.get("count") or 0)
+            volume = float(values.get("volume") or 0.0)
+            lines.append(
+                f"{escape(str(name))}: {count} ({cls._fmt_pct(count, total_count)}), {cls._fmt_num(volume, 0)} мл"
+            )
+        return "<br/>".join(lines) if lines else "н/д"
+
+    @classmethod
+    def _death_doctor_lines(cls, counter: dict[str, int], total_deaths: int, total_admissions: int, *, limit=12):
+        if not counter:
+            return "н/д"
+        items = sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:limit]
+        lines = []
+        for doctor, count in items:
+            lines.append(
+                f"{escape(str(doctor))}: {count} "
+                f"({cls._fmt_pct(count, total_deaths)} от смертей; "
+                f"{cls._fmt_pct(count, total_admissions)} от госпитализаций)"
+            )
+        return "<br/>".join(lines) if lines else "н/д"
+
     def _fetch_context(self):
         manager, cleanup = _thread_local_manager(self.db_manager)
         conn = manager.get_connection()
         cursor = conn.cursor()
         try:
             period_params = (self.start_date_str, self.end_date_str)
+            admission_columns = self._table_columns(cursor, "admissions")
+            cardiac_measures_expr = self._select_expr(admission_columns, "cardiac_arrest_measures_json")
 
             cursor.execute(
-                """
+                f"""
                 SELECT
                     id,
                     patient_id,
@@ -255,7 +457,8 @@ class DetailedStatisticsReportBuilder:
                     patient_gender,
                     source_department,
                     diagnosis_code,
-                    diagnosis_text
+                    diagnosis_text,
+                    {cardiac_measures_expr}
                 FROM admissions
                 WHERE admission_datetime BETWEEN ? AND ?
                 """,
@@ -287,6 +490,7 @@ class DetailedStatisticsReportBuilder:
                 death_time_hours = None
                 if is_death and death_dt is not None:
                     death_time_hours = max(0.0, (death_dt - adm_dt).total_seconds() / 3600.0)
+                death_doctor = self._death_doctor_from_payload(row.get("cardiac_arrest_measures_json")) if is_death else ""
 
                 age_years = self._age_to_years(row.get("patient_age"), row.get("patient_age_unit"))
                 gender = self._normalize_text(row.get("patient_gender"))
@@ -315,6 +519,7 @@ class DetailedStatisticsReportBuilder:
                         "month_label": adm_dt.strftime("%Y-%m"),
                         "is_death": is_death,
                         "death_time_hours": death_time_hours,
+                        "death_doctor": death_doctor,
                     }
                 )
 
@@ -347,7 +552,7 @@ class DetailedStatisticsReportBuilder:
                 transfusions.append(
                     {
                         "admission_id": aid,
-                        "type": self._normalize_text(transf_type),
+                        "type": self._transfusion_type_label(transf_type),
                         "volume_ml": self._safe_float(volume_ml, default=0.0),
                     }
                 )
@@ -380,15 +585,215 @@ class DetailedStatisticsReportBuilder:
                     }
                 )
 
+            cvc_procedures = self._fetch_cvc_procedures(cursor, admission_ids)
+            lumbar_punctures = self._fetch_lumbar_punctures(cursor, admission_ids)
+            procedure_transfusions = self._fetch_procedure_transfusions(cursor, admission_ids)
+
             return {
                 "admissions": admissions,
                 "operations_adm_ids": operations_adm_ids,
                 "transfusions": transfusions,
                 "ivl_episodes": ivl_episodes,
+                "cvc_procedures": cvc_procedures,
+                "lumbar_punctures": lumbar_punctures,
+                "procedure_transfusions": procedure_transfusions,
             }
         finally:
             if cleanup:
                 cleanup()
+
+    @staticmethod
+    def _cursor_dict_rows(cursor) -> list[dict]:
+        columns = [column[0] for column in (cursor.description or [])]
+        rows = []
+        for row in cursor.fetchall():
+            if hasattr(row, "keys"):
+                rows.append(dict(row))
+            else:
+                rows.append(dict(zip(columns, row)))
+        return rows
+
+    def _fetch_cvc_procedures(self, cursor, admission_ids: set[int]) -> list[dict]:
+        if not admission_ids or not (
+            self._table_exists(cursor, "procedures") and self._table_exists(cursor, "procedure_cvc")
+        ):
+            return []
+
+        cursor.execute(
+            """
+            SELECT
+                p.id AS procedure_id,
+                p.admission_id,
+                p.status,
+                p.started_at,
+                p.created_at,
+                p.doctor_name_snapshot,
+                c.access_code,
+                c.access_other,
+                c.attempts_count,
+                c.diameter_f,
+                c.length_cm,
+                c.lumens_count,
+                c.technical_difficulty_code,
+                c.technical_difficulty_description,
+                c.usage_complications_code,
+                c.usage_complications_description,
+                c.catheter_status,
+                c.removed_or_replaced,
+                c.operator_doctor_name,
+                c.removal_doctor_name
+            FROM procedures p
+            JOIN procedure_cvc c ON c.procedure_id = p.id
+            WHERE p.procedure_type = 'CVC'
+              AND COALESCE(p.is_deleted, 0) = 0
+              AND DATETIME(COALESCE(p.started_at, p.created_at)) BETWEEN DATETIME(?) AND DATETIME(?)
+            """,
+            (self.start_date_str, self.end_date_str),
+        )
+
+        result = []
+        for row in self._cursor_dict_rows(cursor):
+            aid = self._safe_int(row.get("admission_id"), default=0)
+            status = str(row.get("status") or "").strip().lower()
+            if not aid or aid not in admission_ids or not self._is_performed_procedure_status(status):
+                continue
+            doctor = self._normalize_text(row.get("operator_doctor_name") or row.get("doctor_name_snapshot"))
+            removal_doctor = self._normalize_text(row.get("removal_doctor_name"), fallback="")
+            technical_description = str(row.get("technical_difficulty_description") or "").strip()
+            usage_description = str(row.get("usage_complications_description") or "").strip()
+            result.append(
+                {
+                    "admission_id": aid,
+                    "doctor": doctor,
+                    "removal_doctor": removal_doctor,
+                    "access": self._cvc_access_label(row.get("access_code"), row.get("access_other")),
+                    "status": self._cvc_status_label(
+                        status,
+                        row.get("catheter_status"),
+                        row.get("removed_or_replaced"),
+                    ),
+                    "attempts_count": row.get("attempts_count"),
+                    "diameter_f": row.get("diameter_f"),
+                    "length_cm": row.get("length_cm"),
+                    "lumens_count": row.get("lumens_count"),
+                    "technical_complication": self._has_complication(
+                        row.get("technical_difficulty_code"),
+                        technical_description,
+                    ),
+                    "technical_description": technical_description,
+                    "usage_complication": self._has_complication(
+                        row.get("usage_complications_code"),
+                        usage_description,
+                    ),
+                    "usage_description": usage_description,
+                }
+            )
+        return result
+
+    def _fetch_lumbar_punctures(self, cursor, admission_ids: set[int]) -> list[dict]:
+        if not admission_ids or not (
+            self._table_exists(cursor, "procedures") and self._table_exists(cursor, "procedure_lumbar_puncture")
+        ):
+            return []
+
+        cursor.execute(
+            """
+            SELECT
+                p.id AS procedure_id,
+                p.admission_id,
+                p.status,
+                p.started_at,
+                p.created_at,
+                p.doctor_name_snapshot,
+                lp.access_code,
+                lp.access_other,
+                lp.level_code,
+                lp.level_other,
+                lp.technical_difficulty_code,
+                lp.technical_difficulty_description,
+                lp.result_code,
+                lp.operator_doctor_name
+            FROM procedures p
+            JOIN procedure_lumbar_puncture lp ON lp.procedure_id = p.id
+            WHERE p.procedure_type = 'LUMBAR_PUNCTURE'
+              AND COALESCE(p.is_deleted, 0) = 0
+              AND DATETIME(COALESCE(p.started_at, p.created_at)) BETWEEN DATETIME(?) AND DATETIME(?)
+            """,
+            (self.start_date_str, self.end_date_str),
+        )
+
+        result = []
+        for row in self._cursor_dict_rows(cursor):
+            aid = self._safe_int(row.get("admission_id"), default=0)
+            status = str(row.get("status") or "").strip().lower()
+            if not aid or aid not in admission_ids or not self._is_performed_procedure_status(status):
+                continue
+            description = str(row.get("technical_difficulty_description") or "").strip()
+            result.append(
+                {
+                    "admission_id": aid,
+                    "doctor": self._normalize_text(row.get("operator_doctor_name") or row.get("doctor_name_snapshot")),
+                    "access": self._lp_access_label(row.get("access_code"), row.get("access_other")),
+                    "level": self._lp_level_label(row.get("level_code"), row.get("level_other")),
+                    "result": self._lp_result_label(row.get("result_code")),
+                    "complication": self._has_complication(row.get("technical_difficulty_code"), description),
+                    "complication_description": description,
+                }
+            )
+        return result
+
+    def _fetch_procedure_transfusions(self, cursor, admission_ids: set[int]) -> list[dict]:
+        if not admission_ids or not (
+            self._table_exists(cursor, "procedures") and self._table_exists(cursor, "procedure_transfusion")
+        ):
+            return []
+
+        cursor.execute(
+            """
+            SELECT
+                p.id AS procedure_id,
+                p.admission_id,
+                p.status,
+                p.started_at,
+                p.created_at,
+                p.doctor_name_snapshot,
+                t.indication_code,
+                t.donor_component_name,
+                t.volume_ml,
+                t.reaction_symptoms,
+                t.reaction_severity,
+                t.operator_doctor_name
+            FROM procedures p
+            JOIN procedure_transfusion t ON t.procedure_id = p.id
+            WHERE p.procedure_type = 'TRANSFUSION'
+              AND COALESCE(p.is_deleted, 0) = 0
+              AND DATETIME(COALESCE(p.started_at, p.created_at)) BETWEEN DATETIME(?) AND DATETIME(?)
+            """,
+            (self.start_date_str, self.end_date_str),
+        )
+
+        result = []
+        for row in self._cursor_dict_rows(cursor):
+            aid = self._safe_int(row.get("admission_id"), default=0)
+            status = str(row.get("status") or "").strip().lower()
+            if not aid or aid not in admission_ids or not self._is_performed_procedure_status(status):
+                continue
+            indication_code = str(row.get("indication_code") or "").strip()
+            component = str(row.get("donor_component_name") or "").strip()
+            reaction_symptoms = str(row.get("reaction_symptoms") or "").strip()
+            reaction_severity = str(row.get("reaction_severity") or "").strip()
+            result.append(
+                {
+                    "admission_id": aid,
+                    "doctor": self._normalize_text(row.get("operator_doctor_name") or row.get("doctor_name_snapshot")),
+                    "type": self._procedure_transfusion_type_label(indication_code, component),
+                    "indication": TRANSFUSION_INDICATION_LABELS.get(indication_code, self._clean_label(indication_code)),
+                    "component": self._clean_label(component),
+                    "volume_ml": self._safe_float(row.get("volume_ml"), default=0.0),
+                    "reaction": bool(reaction_symptoms or reaction_severity),
+                }
+            )
+        return result
 
     def _population_stats(self, admissions):
         return {
@@ -441,6 +846,7 @@ class DetailedStatisticsReportBuilder:
         diagnoses = {}
         mkb_classes = {}
         outcomes = {}
+        death_doctors = {}
 
         for admission in admissions:
             self._inc_counter(age_groups, admission["age_group"])
@@ -454,6 +860,7 @@ class DetailedStatisticsReportBuilder:
             self._inc_counter(outcomes, outcome_label)
             if admission["is_death"]:
                 self._inc_counter(age_groups_deaths, admission["age_group"])
+                self._inc_counter(death_doctors, admission.get("death_doctor") or "Не указан")
 
         return {
             "age_groups": age_groups,
@@ -465,6 +872,7 @@ class DetailedStatisticsReportBuilder:
             "diagnoses": diagnoses,
             "mkb_classes": mkb_classes,
             "outcomes": outcomes,
+            "death_doctors": death_doctors,
         }
 
     def _operation_stats(self, operations_adm_ids, death_ids):
@@ -479,15 +887,188 @@ class DetailedStatisticsReportBuilder:
     def _transfusion_stats(self, transfusions, death_ids):
         transf_adm_ids = {t["admission_id"] for t in transfusions}
         transf_by_type = {}
+        transf_volume_by_type = {}
         for t in transfusions:
             self._inc_counter(transf_by_type, t["type"])
+            bucket = transf_volume_by_type.setdefault(t["type"], {"count": 0, "volume": 0.0})
+            bucket["count"] += 1
+            bucket["volume"] += self._safe_float(t.get("volume_ml"), default=0.0)
+        blood_bucket = transf_volume_by_type.get("Кровь", {})
+        plasma_bucket = transf_volume_by_type.get("Плазма", {})
+        other_units = sum(
+            int(values.get("count") or 0)
+            for name, values in transf_volume_by_type.items()
+            if name not in {"Кровь", "Плазма"}
+        )
+        other_volume = sum(
+            float(values.get("volume") or 0.0)
+            for name, values in transf_volume_by_type.items()
+            if name not in {"Кровь", "Плазма"}
+        )
         return {
             "transfusion_units": len(transfusions),
             "transf_adm_ids": transf_adm_ids,
             "n_transf": len(transf_adm_ids),
             "volume_total": sum(t["volume_ml"] for t in transfusions),
             "transf_by_type": transf_by_type,
+            "transf_volume_by_type": transf_volume_by_type,
+            "blood_units": int(blood_bucket.get("count") or 0),
+            "blood_volume": float(blood_bucket.get("volume") or 0.0),
+            "plasma_units": int(plasma_bucket.get("count") or 0),
+            "plasma_volume": float(plasma_bucket.get("volume") or 0.0),
+            "other_transfusion_units": other_units,
+            "other_transfusion_volume": other_volume,
             "deaths_transf": len(death_ids.intersection(transf_adm_ids)),
+        }
+
+    def _procedure_stats(self, cvc_procedures, lumbar_punctures, procedure_transfusions):
+        cvc_accesses = {}
+        cvc_statuses = {}
+        cvc_doctors = {}
+        cvc_comp_by_access = {}
+        cvc_comp_by_doctor = {}
+        cvc_usage_comp_by_doctor = {}
+        cvc_attempts = []
+        cvc_lumens = []
+        cvc_lengths = []
+        cvc_diameters = []
+        cvc_technical_complications = 0
+        cvc_usage_complications = 0
+        cvc_any_complications = 0
+
+        for cvc in cvc_procedures:
+            self._inc_counter(cvc_accesses, cvc["access"])
+            self._inc_counter(cvc_statuses, cvc["status"])
+            self._inc_counter(cvc_doctors, cvc["doctor"])
+
+            for target, key in (
+                (cvc_attempts, "attempts_count"),
+                (cvc_lumens, "lumens_count"),
+                (cvc_lengths, "length_cm"),
+                (cvc_diameters, "diameter_f"),
+            ):
+                value = cvc.get(key)
+                if value is not None:
+                    parsed = self._safe_float(value, default=0.0)
+                    if parsed > 0:
+                        target.append(parsed)
+
+            has_technical = bool(cvc.get("technical_complication"))
+            has_usage = bool(cvc.get("usage_complication"))
+            if has_technical:
+                cvc_technical_complications += 1
+            if has_usage:
+                cvc_usage_complications += 1
+                self._inc_counter(cvc_usage_comp_by_doctor, cvc.get("removal_doctor") or cvc["doctor"])
+            if has_technical or has_usage:
+                cvc_any_complications += 1
+                self._inc_counter(cvc_comp_by_access, cvc["access"])
+                self._inc_counter(cvc_comp_by_doctor, cvc["doctor"])
+
+        lp_accesses = {}
+        lp_levels = {}
+        lp_results = {}
+        lp_doctors = {}
+        lp_comp_by_access = {}
+        lp_comp_by_level = {}
+        lp_comp_by_doctor = {}
+        lp_complications = 0
+        for lp in lumbar_punctures:
+            self._inc_counter(lp_accesses, lp["access"])
+            self._inc_counter(lp_levels, lp["level"])
+            self._inc_counter(lp_results, lp["result"])
+            self._inc_counter(lp_doctors, lp["doctor"])
+            if lp.get("complication"):
+                lp_complications += 1
+                self._inc_counter(lp_comp_by_access, lp["access"])
+                self._inc_counter(lp_comp_by_level, lp["level"])
+                self._inc_counter(lp_comp_by_doctor, lp["doctor"])
+
+        protocol_types = {}
+        protocol_indications = {}
+        protocol_components = {}
+        protocol_doctors = {}
+        procedure_transfusion_volume_by_type = {}
+        procedure_transfusion_reactions = 0
+        procedure_transfusion_reactions_by_doctor = {}
+        for transfusion in procedure_transfusions:
+            transf_type = transfusion["type"]
+            volume = self._safe_float(transfusion.get("volume_ml"), default=0.0)
+            self._inc_counter(protocol_types, transf_type)
+            self._inc_counter(protocol_indications, transfusion["indication"])
+            self._inc_counter(protocol_components, transfusion["component"])
+            self._inc_counter(protocol_doctors, transfusion["doctor"])
+            bucket = procedure_transfusion_volume_by_type.setdefault(transf_type, {"count": 0, "volume": 0.0})
+            bucket["count"] += 1
+            bucket["volume"] += volume
+            if transfusion.get("reaction"):
+                procedure_transfusion_reactions += 1
+                self._inc_counter(procedure_transfusion_reactions_by_doctor, transfusion["doctor"])
+
+        protocol_blood = procedure_transfusion_volume_by_type.get("Кровь", {})
+        protocol_plasma = procedure_transfusion_volume_by_type.get("Плазма", {})
+        protocol_other_units = sum(
+            int(values.get("count") or 0)
+            for name, values in procedure_transfusion_volume_by_type.items()
+            if name not in {"Кровь", "Плазма"}
+        )
+        protocol_other_volume = sum(
+            float(values.get("volume") or 0.0)
+            for name, values in procedure_transfusion_volume_by_type.items()
+            if name not in {"Кровь", "Плазма"}
+        )
+
+        cvc_count = len(cvc_procedures)
+        lp_count = len(lumbar_punctures)
+        procedure_transfusion_count = len(procedure_transfusions)
+        return {
+            "cvc_count": cvc_count,
+            "cvc_patients": len({row["admission_id"] for row in cvc_procedures}),
+            "cvc_accesses": cvc_accesses,
+            "cvc_statuses": cvc_statuses,
+            "cvc_doctors": cvc_doctors,
+            "cvc_avg_attempts": self._safe_div(sum(cvc_attempts), len(cvc_attempts)) if cvc_attempts else None,
+            "cvc_avg_lumens": self._safe_div(sum(cvc_lumens), len(cvc_lumens)) if cvc_lumens else None,
+            "cvc_avg_length": self._safe_div(sum(cvc_lengths), len(cvc_lengths)) if cvc_lengths else None,
+            "cvc_avg_diameter": self._safe_div(sum(cvc_diameters), len(cvc_diameters)) if cvc_diameters else None,
+            "cvc_technical_complications": cvc_technical_complications,
+            "cvc_technical_no_complications": max(0, cvc_count - cvc_technical_complications),
+            "cvc_usage_complications": cvc_usage_complications,
+            "cvc_usage_no_complications": max(0, cvc_count - cvc_usage_complications),
+            "cvc_any_complications": cvc_any_complications,
+            "cvc_comp_by_access": cvc_comp_by_access,
+            "cvc_comp_by_doctor": cvc_comp_by_doctor,
+            "cvc_usage_comp_by_doctor": cvc_usage_comp_by_doctor,
+            "lp_count": lp_count,
+            "lp_patients": len({row["admission_id"] for row in lumbar_punctures}),
+            "lp_accesses": lp_accesses,
+            "lp_levels": lp_levels,
+            "lp_results": lp_results,
+            "lp_doctors": lp_doctors,
+            "lp_complications": lp_complications,
+            "lp_no_complications": max(0, lp_count - lp_complications),
+            "lp_comp_by_access": lp_comp_by_access,
+            "lp_comp_by_level": lp_comp_by_level,
+            "lp_comp_by_doctor": lp_comp_by_doctor,
+            "procedure_transfusion_count": procedure_transfusion_count,
+            "procedure_transfusion_patients": len({row["admission_id"] for row in procedure_transfusions}),
+            "procedure_transfusion_volume": sum(
+                self._safe_float(row.get("volume_ml"), default=0.0) for row in procedure_transfusions
+            ),
+            "procedure_transfusion_types": protocol_types,
+            "procedure_transfusion_indications": protocol_indications,
+            "procedure_transfusion_components": protocol_components,
+            "procedure_transfusion_doctors": protocol_doctors,
+            "procedure_transfusion_volume_by_type": procedure_transfusion_volume_by_type,
+            "procedure_blood_units": int(protocol_blood.get("count") or 0),
+            "procedure_blood_volume": float(protocol_blood.get("volume") or 0.0),
+            "procedure_plasma_units": int(protocol_plasma.get("count") or 0),
+            "procedure_plasma_volume": float(protocol_plasma.get("volume") or 0.0),
+            "procedure_other_transfusion_units": protocol_other_units,
+            "procedure_other_transfusion_volume": protocol_other_volume,
+            "procedure_transfusion_reactions": procedure_transfusion_reactions,
+            "procedure_transfusion_no_reactions": max(0, procedure_transfusion_count - procedure_transfusion_reactions),
+            "procedure_transfusion_reactions_by_doctor": procedure_transfusion_reactions_by_doctor,
         }
 
     def _ivl_stats(self, ivl_episodes, death_ids):
@@ -567,6 +1148,9 @@ class DetailedStatisticsReportBuilder:
         operations_adm_ids = context["operations_adm_ids"]
         transfusions = context["transfusions"]
         ivl_episodes = context["ivl_episodes"]
+        cvc_procedures = context["cvc_procedures"]
+        lumbar_punctures = context["lumbar_punctures"]
+        procedure_transfusions = context["procedure_transfusions"]
 
         population = self._population_stats(admissions)
         total_n = population["total_n"]
@@ -579,6 +1163,7 @@ class DetailedStatisticsReportBuilder:
         distributions = self._distribution_stats(admissions)
         operations = self._operation_stats(operations_adm_ids, death_ids)
         transfusion = self._transfusion_stats(transfusions, death_ids)
+        procedures = self._procedure_stats(cvc_procedures, lumbar_punctures, procedure_transfusions)
         ivl = self._ivl_stats(ivl_episodes, death_ids)
         bed_period = self._period_bed_stats(los["bed_days"], total_n)
         load = self._daily_load_stats(admissions, los["bed_days"], bed_period["period_days"], bed_period["beds"])
@@ -638,6 +1223,7 @@ class DetailedStatisticsReportBuilder:
             "deaths_3_7_days": death_timing["deaths_3_7_days"],
             "deaths_ge_7_days": death_timing["deaths_ge_7_days"],
             "age_groups_deaths": distributions["age_groups_deaths"],
+            "death_doctors": distributions["death_doctors"],
             "N_IVL": ivl["n_ivl"],
             "ivl_episodes_count": ivl["ivl_episodes_count"],
             "ivl_days": ivl["ivl_days"],
@@ -649,7 +1235,59 @@ class DetailedStatisticsReportBuilder:
             "transfusion_units": transfusion["transfusion_units"],
             "volume_total": transfusion["volume_total"],
             "transf_by_type": transfusion["transf_by_type"],
+            "transf_volume_by_type": transfusion["transf_volume_by_type"],
+            "blood_units": transfusion["blood_units"],
+            "blood_volume": transfusion["blood_volume"],
+            "plasma_units": transfusion["plasma_units"],
+            "plasma_volume": transfusion["plasma_volume"],
+            "other_transfusion_units": transfusion["other_transfusion_units"],
+            "other_transfusion_volume": transfusion["other_transfusion_volume"],
             "deaths_transf": transfusion["deaths_transf"],
+            "cvc_count": procedures["cvc_count"],
+            "cvc_patients": procedures["cvc_patients"],
+            "cvc_accesses": procedures["cvc_accesses"],
+            "cvc_statuses": procedures["cvc_statuses"],
+            "cvc_doctors": procedures["cvc_doctors"],
+            "cvc_avg_attempts": procedures["cvc_avg_attempts"],
+            "cvc_avg_lumens": procedures["cvc_avg_lumens"],
+            "cvc_avg_length": procedures["cvc_avg_length"],
+            "cvc_avg_diameter": procedures["cvc_avg_diameter"],
+            "cvc_technical_complications": procedures["cvc_technical_complications"],
+            "cvc_technical_no_complications": procedures["cvc_technical_no_complications"],
+            "cvc_usage_complications": procedures["cvc_usage_complications"],
+            "cvc_usage_no_complications": procedures["cvc_usage_no_complications"],
+            "cvc_any_complications": procedures["cvc_any_complications"],
+            "cvc_comp_by_access": procedures["cvc_comp_by_access"],
+            "cvc_comp_by_doctor": procedures["cvc_comp_by_doctor"],
+            "cvc_usage_comp_by_doctor": procedures["cvc_usage_comp_by_doctor"],
+            "lp_count": procedures["lp_count"],
+            "lp_patients": procedures["lp_patients"],
+            "lp_accesses": procedures["lp_accesses"],
+            "lp_levels": procedures["lp_levels"],
+            "lp_results": procedures["lp_results"],
+            "lp_doctors": procedures["lp_doctors"],
+            "lp_complications": procedures["lp_complications"],
+            "lp_no_complications": procedures["lp_no_complications"],
+            "lp_comp_by_access": procedures["lp_comp_by_access"],
+            "lp_comp_by_level": procedures["lp_comp_by_level"],
+            "lp_comp_by_doctor": procedures["lp_comp_by_doctor"],
+            "procedure_transfusion_count": procedures["procedure_transfusion_count"],
+            "procedure_transfusion_patients": procedures["procedure_transfusion_patients"],
+            "procedure_transfusion_volume": procedures["procedure_transfusion_volume"],
+            "procedure_transfusion_types": procedures["procedure_transfusion_types"],
+            "procedure_transfusion_indications": procedures["procedure_transfusion_indications"],
+            "procedure_transfusion_components": procedures["procedure_transfusion_components"],
+            "procedure_transfusion_doctors": procedures["procedure_transfusion_doctors"],
+            "procedure_transfusion_volume_by_type": procedures["procedure_transfusion_volume_by_type"],
+            "procedure_blood_units": procedures["procedure_blood_units"],
+            "procedure_blood_volume": procedures["procedure_blood_volume"],
+            "procedure_plasma_units": procedures["procedure_plasma_units"],
+            "procedure_plasma_volume": procedures["procedure_plasma_volume"],
+            "procedure_other_transfusion_units": procedures["procedure_other_transfusion_units"],
+            "procedure_other_transfusion_volume": procedures["procedure_other_transfusion_volume"],
+            "procedure_transfusion_reactions": procedures["procedure_transfusion_reactions"],
+            "procedure_transfusion_no_reactions": procedures["procedure_transfusion_no_reactions"],
+            "procedure_transfusion_reactions_by_doctor": procedures["procedure_transfusion_reactions_by_doctor"],
             "IVL_index": self._safe_div(ivl["n_ivl"], total_n),
             "Surgery_index": self._safe_div(operations["n_surg"], total_n),
             "Transfusion_index": self._safe_div(transfusion["n_transf"], total_n),
@@ -734,6 +1372,7 @@ class DetailedStatisticsReportBuilder:
                 ("6.2 Летальность (%)", "Летальность = Умершие / Госпитализации × 100%", f"{self._fmt_num(s['mortality_pct'])}%"),
                 ("6.3 На 1000 койко-дней", "Летальность = Умершие / Койко-дни × 1000", self._fmt_num(s["mortality_per_1000_bed_days"])),
                 ("6.4 Исходы", "Доля = Число исходов в группе / Госпитализации × 100%", self._distribution_lines(s["outcomes"], total_n)),
+                ("6.5 Смерти по врачу", "Врач из протокола установления смерти: смерти врача / все смерти; смерти врача / госпитализации", self._death_doctor_lines(s["death_doctors"], deaths, total_n)),
             ]
 
         if section_key == "s7":
@@ -749,7 +1388,8 @@ class DetailedStatisticsReportBuilder:
         if section_key == "s8":
             lines = self._distribution_mortality_lines(s["age_groups"], s["age_groups_deaths"])
             return [
-                ("8. Летальность по группам", "Летальность группы = Умершие в группе / Пациенты в группе × 100%", lines),
+                ("8.1 Летальность по группам", "Летальность группы = Умершие в группе / Пациенты в группе × 100%", lines),
+                ("8.2 Смертность по врачу протокола", "Врач из протокола установления смерти: смерти врача / все смерти; смерти врача / госпитализации", self._death_doctor_lines(s["death_doctors"], deaths, total_n)),
             ]
 
         if section_key == "s9":
@@ -777,7 +1417,56 @@ class DetailedStatisticsReportBuilder:
                 ("11.3 Общий объем, мл", "Общий объем переливаний", self._fmt_num(s["volume_total"])),
                 ("11.4 Средний объем дозы, мл", "Средняя доза = Общий объем переливаний / Число доз", self._fmt_num(self._safe_div(s["volume_total"], s["transfusion_units"]))),
                 ("11.5 Летальность при переливаниях", "Летальность = Умершие после переливаний / Пациенты с переливаниями × 100%", self._fmt_pct(s["deaths_transf"], s["N_transf"])),
-                ("11.6 По типам", "Доля = Число доз данного типа / Число доз × 100%", self._distribution_lines(s["transf_by_type"], s["transfusion_units"])),
+                ("11.6 Перелито крови", "Количество доз / суммарный объем крови", self._count_volume_text(s["blood_units"], s["blood_volume"])),
+                ("11.7 Перелито плазмы", "Количество доз / суммарный объем плазмы", self._count_volume_text(s["plasma_units"], s["plasma_volume"])),
+                ("11.8 Прочие компоненты", "Количество доз / суммарный объем прочих компонентов", self._count_volume_text(s["other_transfusion_units"], s["other_transfusion_volume"])),
+                ("11.9 По типам", "Доля = Число доз данного типа / Число доз × 100%; указан суммарный объем", self._count_volume_distribution_lines(s["transf_volume_by_type"], s["transfusion_units"])),
+                ("11.10 Протоколы гемотрансфузий", "Сохраненные выполненные протоколы гемотрансфузий", self._fmt_num(s["procedure_transfusion_count"], 0)),
+                ("11.11 Кровь по протоколам", "Количество протоколов / суммарный объем крови", self._count_volume_text(s["procedure_blood_units"], s["procedure_blood_volume"])),
+                ("11.12 Плазма по протоколам", "Количество протоколов / суммарный объем плазмы", self._count_volume_text(s["procedure_plasma_units"], s["procedure_plasma_volume"])),
+                ("11.13 Реакции при гемотрансфузиях", "Реакции = протоколы с симптомами/тяжестью реакции", f"{self._fmt_num(s['procedure_transfusion_reactions'], 0)} / {self._fmt_num(s['procedure_transfusion_count'], 0)}"),
+                ("11.14 Реакции по врачам", "Врач-исполнитель протокола гемотрансфузии", self._distribution_lines(s["procedure_transfusion_reactions_by_doctor"], s["procedure_transfusion_reactions"])),
+            ]
+
+        if section_key == "s12":
+            return [
+                ("12.1 Установлено ЦВК", "Выполненные/активные процедуры ЦВК", self._fmt_num(s["cvc_count"], 0)),
+                ("12.2 Пациенты с ЦВК", "Уникальные госпитализации с ЦВК", self._fmt_num(s["cvc_patients"], 0)),
+                ("12.3 Локализации ЦВК", "Доля = число ЦВК в локализации / все ЦВК × 100%", self._distribution_lines(s["cvc_accesses"], s["cvc_count"])),
+                ("12.4 Статус катетера", "Доля = число катетеров в статусе / все ЦВК × 100%", self._distribution_lines(s["cvc_statuses"], s["cvc_count"])),
+                ("12.5 Врачи-исполнители", "Доля = число ЦВК врача / все ЦВК × 100%", self._distribution_lines(s["cvc_doctors"], s["cvc_count"])),
+                ("12.6 Среднее число попыток", "Среднее число попыток среди заполненных протоколов", self._fmt_num(s["cvc_avg_attempts"])),
+                ("12.7 Среднее число просветов", "Среднее число просветов среди заполненных протоколов", self._fmt_num(s["cvc_avg_lumens"])),
+                ("12.8 Средняя длина катетера, см", "Средняя длина среди заполненных протоколов", self._fmt_num(s["cvc_avg_length"])),
+                ("12.9 Средний диаметр, F", "Средний диаметр среди заполненных протоколов", self._fmt_num(s["cvc_avg_diameter"])),
+            ]
+
+        if section_key == "s13":
+            return [
+                ("13.1 Выполнено люмбальных пункций", "Выполненные процедуры люмбальной пункции", self._fmt_num(s["lp_count"], 0)),
+                ("13.2 Пациенты с пункциями", "Уникальные госпитализации с люмбальной пункцией", self._fmt_num(s["lp_patients"], 0)),
+                ("13.3 Результат пункции", "Доля = число результатов / все пункции × 100%", self._distribution_lines(s["lp_results"], s["lp_count"])),
+                ("13.4 Доступ", "Доля = число доступов / все пункции × 100%", self._distribution_lines(s["lp_accesses"], s["lp_count"])),
+                ("13.5 Уровень пункции", "Доля = число уровней / все пункции × 100%", self._distribution_lines(s["lp_levels"], s["lp_count"])),
+                ("13.6 Врачи-исполнители", "Доля = число пункций врача / все пункции × 100%", self._distribution_lines(s["lp_doctors"], s["lp_count"])),
+            ]
+
+        if section_key == "s14":
+            return [
+                ("14.1 Осложнения при постановке ЦВК", "Осложнения / все ЦВК", f"{self._fmt_num(s['cvc_technical_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
+                ("14.2 Без осложнений при постановке ЦВК", "Без осложнений / все ЦВК", f"{self._fmt_num(s['cvc_technical_no_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
+                ("14.3 Осложнения при использовании/удалении ЦВК", "Осложнения / все ЦВК", f"{self._fmt_num(s['cvc_usage_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
+                ("14.4 ЦВК с любыми осложнениями", "Уникальные ЦВК с осложнениями постановки или использования", self._fmt_num(s["cvc_any_complications"], 0)),
+                ("14.5 Осложнения ЦВК по локализации", "Локализация выбранного доступа при осложнении", self._distribution_lines(s["cvc_comp_by_access"], s["cvc_any_complications"])),
+                ("14.6 Осложнения ЦВК по врачу-исполнителю", "Врач-исполнитель ЦВК, где отмечено осложнение", self._distribution_lines(s["cvc_comp_by_doctor"], s["cvc_any_complications"])),
+                ("14.7 Осложнения удаления/использования ЦВК по врачу", "Врач удаления/переустановки; если не указан, врач-исполнитель ЦВК", self._distribution_lines(s["cvc_usage_comp_by_doctor"], s["cvc_usage_complications"])),
+                ("14.8 Осложнения люмбальных пункций", "Осложнения / все люмбальные пункции", f"{self._fmt_num(s['lp_complications'], 0)} / {self._fmt_num(s['lp_count'], 0)}"),
+                ("14.9 Без осложнений люмбальных пункций", "Без осложнений / все люмбальные пункции", f"{self._fmt_num(s['lp_no_complications'], 0)} / {self._fmt_num(s['lp_count'], 0)}"),
+                ("14.10 Осложнения пункций по доступу", "Доступ при осложненной люмбальной пункции", self._distribution_lines(s["lp_comp_by_access"], s["lp_complications"])),
+                ("14.11 Осложнения пункций по уровню", "Уровень при осложненной люмбальной пункции", self._distribution_lines(s["lp_comp_by_level"], s["lp_complications"])),
+                ("14.12 Осложнения пункций по врачу", "Врач-исполнитель люмбальной пункции", self._distribution_lines(s["lp_comp_by_doctor"], s["lp_complications"])),
+                ("14.13 Реакции гемотрансфузий", "Реакции / все выполненные протоколы гемотрансфузии", f"{self._fmt_num(s['procedure_transfusion_reactions'], 0)} / {self._fmt_num(s['procedure_transfusion_count'], 0)}"),
+                ("14.14 Реакции гемотрансфузий по врачу", "Врач-исполнитель протокола гемотрансфузии", self._distribution_lines(s["procedure_transfusion_reactions_by_doctor"], s["procedure_transfusion_reactions"])),
             ]
 
         if section_key == "s16":

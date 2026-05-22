@@ -13,6 +13,10 @@ TABLE_SPECS: dict[str, dict[str, str | None]] = {
     "operations": {"time_col": "operation_datetime"},
     "transfusions": {"time_col": "datetime"},
     "ivl_episodes": {"time_col": "start_time"},
+    "procedures": {"time_col": "started_at"},
+    "procedure_cvc": {"time_col": None},
+    "procedure_lumbar_puncture": {"time_col": None},
+    "procedure_transfusion": {"time_col": None},
 }
 
 
@@ -60,6 +64,73 @@ FALLBACK_DDL: dict[str, str] = {
             admission_id INTEGER,
             start_time TEXT,
             end_time TEXT
+        )
+    """,
+    "procedures": """
+        CREATE TABLE IF NOT EXISTS procedures (
+            id INTEGER,
+            patient_id INTEGER,
+            admission_id INTEGER,
+            procedure_type TEXT,
+            status TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            started_at TEXT,
+            finished_at TEXT,
+            duration_minutes INTEGER,
+            doctor_id INTEGER,
+            doctor_name_snapshot TEXT,
+            department_snapshot TEXT,
+            patient_snapshot_json TEXT,
+            diagnosis_snapshot TEXT,
+            notes TEXT,
+            created_by TEXT,
+            updated_by TEXT,
+            revision INTEGER,
+            is_deleted INTEGER
+        )
+    """,
+    "procedure_cvc": """
+        CREATE TABLE IF NOT EXISTS procedure_cvc (
+            procedure_id INTEGER,
+            access_code TEXT,
+            access_other TEXT,
+            attempts_count INTEGER,
+            diameter_f REAL,
+            length_cm REAL,
+            lumens_count INTEGER,
+            technical_difficulty_code TEXT,
+            technical_difficulty_description TEXT,
+            usage_complications_code TEXT,
+            usage_complications_description TEXT,
+            catheter_status TEXT,
+            removed_or_replaced TEXT,
+            operator_doctor_name TEXT,
+            removal_doctor_name TEXT
+        )
+    """,
+    "procedure_lumbar_puncture": """
+        CREATE TABLE IF NOT EXISTS procedure_lumbar_puncture (
+            procedure_id INTEGER,
+            access_code TEXT,
+            access_other TEXT,
+            level_code TEXT,
+            level_other TEXT,
+            technical_difficulty_code TEXT,
+            technical_difficulty_description TEXT,
+            result_code TEXT,
+            operator_doctor_name TEXT
+        )
+    """,
+    "procedure_transfusion": """
+        CREATE TABLE IF NOT EXISTS procedure_transfusion (
+            procedure_id INTEGER,
+            indication_code TEXT,
+            donor_component_name TEXT,
+            volume_ml REAL,
+            reaction_symptoms TEXT,
+            reaction_severity TEXT,
+            operator_doctor_name TEXT
         )
     """,
 }
@@ -229,6 +300,7 @@ def _create_light_indexes(conn: sqlite3.Connection):
         "operations": ("operation_datetime",),
         "transfusions": ("datetime",),
         "ivl_episodes": ("start_time",),
+        "procedures": ("started_at",),
     }
     for table_name, cols in indexed.items():
         if not _table_exists(conn, table_name, schema="main"):
