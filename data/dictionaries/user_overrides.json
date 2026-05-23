@@ -749,6 +749,12 @@
       "priority_level": 3,
       "offset_min": 0,
       "color": "#bdc3c7"
+    },
+    "protivpodagry": {
+      "name_ru": "Противоподагрическое",
+      "priority_level": 3,
+      "offset_min": 0,
+      "color": "#bdc3c7"
     }
   },
   "drugs": {
@@ -2867,6 +2873,27 @@
       "concentration_mg_ml": 0,
       "default_dilution": null,
       "group": "nitrats"
+    },
+    "Allopurinol": {
+      "latin": "Allopurinoli",
+      "aliases": [
+        "аллопуринол",
+        "милурит"
+      ],
+      "star_alias": "алло*",
+      "admin_type": "per_os",
+      "uses_line": false,
+      "duration_min": 0,
+      "default_dose": 100.0,
+      "forms": [
+        100.0
+      ],
+      "unit": "mg",
+      "form_unit": "mg",
+      "form_key": "tablet",
+      "concentration_mg_ml": 0,
+      "default_dilution": null,
+      "group": "protivpodagry"
     }
   },
   "admin_types": {
