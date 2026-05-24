@@ -641,7 +641,10 @@ class OrdersWidget(QWidget):
         self._pending_reorder_order_ids = self._visible_order_ids()
         self._cached_has_drafts = True
         if self.model is not None:
-            self.model.has_any_draft = True
+            if hasattr(self.model, "_set_has_any_draft"):
+                self.model._set_has_any_draft(True, emit_order_column=True)
+            else:
+                self.model.has_any_draft = True
         self.check_drafts()
 
     def _persist_reorder_draft(self):
@@ -681,16 +684,17 @@ class OrdersWidget(QWidget):
 
         setattr(self.model.orders[row], "_pending_delete", True)
         if was_committed:
-            self.model.has_any_draft = True
+            if hasattr(self.model, "_set_has_any_draft"):
+                self.model._set_has_any_draft(True, emit_order_column=True)
+            else:
+                self.model.has_any_draft = True
             self._cached_has_drafts = True
         elif hasattr(self.model, "_recompute_draft_flag"):
-            self.model._recompute_draft_flag()
+            self.model._recompute_draft_flag(emit_order_column=True)
             self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
         idx_left = self.model.index(row, 0)
         idx_right = self.model.index(row, max(0, self.model.columnCount() - 1))
         self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self.check_drafts()
         self.localBalanceChanged.emit()
 
@@ -702,13 +706,11 @@ class OrdersWidget(QWidget):
                 if hasattr(item, "_pending_delete"):
                     delattr(item, "_pending_delete")
                 if hasattr(self.model, "_recompute_draft_flag"):
-                    self.model._recompute_draft_flag()
+                    self.model._recompute_draft_flag(emit_order_column=True)
                     self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
                 idx_left = self.model.index(row, 0)
                 idx_right = self.model.index(row, max(0, self.model.columnCount() - 1))
                 self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
-                if hasattr(self, "table_view"):
-                    self.table_view.viewport().update()
                 self.check_drafts()
                 self.localBalanceChanged.emit()
                 return
@@ -1704,8 +1706,6 @@ class OrdersWidget(QWidget):
         if self._last_polled_change_id > 0:
             self._last_polled_context_key = current_context_key
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self._clear_soft_update_state()
         record_orders_sync_event(
             "applied",
@@ -2260,7 +2260,7 @@ class OrdersWidget(QWidget):
             return
         changed_keys = list(dict.fromkeys(changed_keys))
         if hasattr(self.model, "_recompute_draft_flag"):
-            self.model._recompute_draft_flag()
+            self.model._recompute_draft_flag(emit_order_column=True)
         self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
         self._cached_has_administrations = self._model_has_administrations()
         if hasattr(self.model, "_emit_admin_cell_changes"):
@@ -3028,14 +3028,17 @@ class OrdersWidget(QWidget):
 
         scroll_value = self._capture_table_scroll()
         row = len(self.model.orders)
+        draft_changed = False
         self.model.beginInsertRows(QModelIndex(), row, row)
         try:
             self.model.orders.append(copy(order))
             self.model._renumber_local_sort_order()
             if hasattr(self.model, "_recompute_draft_flag"):
-                self.model._recompute_draft_flag()
+                draft_changed = bool(self.model._recompute_draft_flag())
         finally:
             self.model.endInsertRows()
+        if draft_changed and hasattr(self.model, "_emit_order_column_changes"):
+            self.model._emit_order_column_changes()
 
         self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False)) or bool(self._pending_reorder_order_ids)
         self._cached_has_orders = any(
@@ -3047,8 +3050,6 @@ class OrdersWidget(QWidget):
         self._apply_table_header_layout()
         self._restore_table_scroll(scroll_value)
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self._schedule_fast_sync()
         self.localBalanceChanged.emit()
 
@@ -3078,7 +3079,7 @@ class OrdersWidget(QWidget):
         local_order.is_committed = 0
         self.model.orders[target_row] = local_order
         if hasattr(self.model, "_recompute_draft_flag"):
-            self.model._recompute_draft_flag()
+            self.model._recompute_draft_flag(emit_order_column=True)
         self._cached_has_drafts = True
         self._cached_has_orders = any(
             item and item.status != OrderStatus.DELETED
@@ -3090,8 +3091,6 @@ class OrdersWidget(QWidget):
         idx_right = self.model.index(target_row, max(0, self.model.columnCount() - 1))
         self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self._schedule_fast_sync()
         self.localBalanceChanged.emit()
 
@@ -3320,8 +3319,6 @@ class OrdersWidget(QWidget):
         if self.model.move_order_row(source_row, final_row, mark_draft=True):
             self._mark_local_reorder_draft()
             self._persist_reorder_draft()
-            if hasattr(self, "table_view"):
-                self.table_view.viewport().update()
         return True
 
     def _cleanup_order_row_drag(self):

@@ -1296,8 +1296,6 @@ class NurseOrdersWidget(QWidget):
             self._last_polled_context_key = current_context_key
         self._restore_highlight()
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self._clear_soft_update_state()
         record_orders_sync_event(
             "applied",
@@ -1722,6 +1720,15 @@ class NurseOrdersWidget(QWidget):
     def _refresh_model(self):
         self.request_refresh(force=True)
 
+    def _emit_row_visual_changed(self, row: int):
+        if self.model is None:
+            return
+        if row is None or row < 0 or row >= self.model.rowCount():
+            return
+        left = self.model.index(row, 0)
+        right = self.model.index(row, max(0, self.model.columnCount() - 1))
+        self.model.dataChanged.emit(left, right, [Qt.UserRole])
+
     def _restore_highlight(self):
         if not hasattr(self, 'delegate') or not self.model:
             return
@@ -1797,8 +1804,6 @@ class NurseOrdersWidget(QWidget):
         self._cached_has_administrations = self._model_has_administrations()
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
         self.check_drafts()
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self.localBalanceChanged.emit()
 
     def _apply_optimistic_nurse_mark(self, index, admin, mark: str):
@@ -1820,8 +1825,6 @@ class NurseOrdersWidget(QWidget):
         optimistic_admin.actual_time = datetime.now() if mark else None
         self.model.admin_map[key] = optimistic_admin
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
 
     def _apply_pending_nurse_mark(self, index, admin, mark: str):
         if not self.model or not index.isValid() or admin is None:
@@ -1833,8 +1836,6 @@ class NurseOrdersWidget(QWidget):
         setattr(pending_admin, "_pending_mark", mark or "")
         self.model.admin_map[key] = pending_admin
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self.localBalanceChanged.emit()
 
     def _apply_committed_nurse_mark(self, index, admin, mark: str):
@@ -1850,8 +1851,6 @@ class NurseOrdersWidget(QWidget):
             delattr(committed_admin, "_pending_mark")
         self.model.admin_map[key] = committed_admin
         self.model.dataChanged.emit(index, index, [Qt.UserRole])
-        if hasattr(self, "table_view"):
-            self.table_view.viewport().update()
         self.localBalanceChanged.emit()
 
     def eventFilter(self, obj, event):
@@ -1956,6 +1955,7 @@ class NurseOrdersWidget(QWidget):
             order = self.model.data(index, Qt.UserRole)
             if order:
                 row = index.row()
+                previous_row = self.delegate.highlighted_row
                 # Переключаем подсветку
                 if self.highlighted_order_id == order.id:
                     self.highlighted_order_id = None
@@ -1963,10 +1963,9 @@ class NurseOrdersWidget(QWidget):
                 else:
                     self.highlighted_order_id = order.id
                     self.delegate.highlighted_row = row
-                
-                # Обновляем отображение таблицы (только её область)
-                if hasattr(self, 'table_view'):
-                    self.table_view.viewport().update()
+
+                self._emit_row_visual_changed(previous_row)
+                self._emit_row_visual_changed(self.delegate.highlighted_row)
 
     def _on_mark_updated(self):
         logger.info(
@@ -1976,8 +1975,6 @@ class NurseOrdersWidget(QWidget):
         if self.model is not None:
             self._cached_has_administrations = self._model_has_administrations()
             self.check_drafts()
-            if hasattr(self, "table_view"):
-                self.table_view.viewport().update()
         else:
             self.check_drafts()
         self.orderMarked.emit()

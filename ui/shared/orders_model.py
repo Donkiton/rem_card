@@ -31,8 +31,25 @@ class OrdersModel(QAbstractTableModel):
             self.time_slots.append(curr)
             curr += timedelta(hours=1)
 
-    def _recompute_draft_flag(self):
-        self.has_any_draft = (
+    def _emit_order_column_changes(self):
+        if self.rowCount() <= 0:
+            return
+        self.dataChanged.emit(
+            self.index(0, 0),
+            self.index(self.rowCount() - 1, 0),
+            [Qt.UserRole],
+        )
+
+    def _set_has_any_draft(self, value, *, emit_order_column: bool = False) -> bool:
+        next_value = bool(value)
+        changed = bool(self.has_any_draft) != next_value
+        self.has_any_draft = next_value
+        if changed and emit_order_column:
+            self._emit_order_column_changes()
+        return changed
+
+    def _recompute_draft_flag(self, *, emit_order_column: bool = False):
+        next_value = (
             any(
                 getattr(o, "is_committed", 0) == 0
                 or getattr(o, "draft_sort_order", None) is not None
@@ -40,6 +57,7 @@ class OrdersModel(QAbstractTableModel):
             )
             or any(getattr(a, "is_committed", 0) == 0 for a in self.admin_map.values())
         )
+        return self._set_has_any_draft(next_value, emit_order_column=emit_order_column)
 
     def _renumber_local_sort_order(self):
         for idx, order in enumerate(self.orders):
@@ -273,7 +291,10 @@ class OrdersModel(QAbstractTableModel):
         }
 
         self.admin_map = new_admin_map
-        self.has_any_draft = bool(snapshot.get("has_any_draft", False))
+        self._set_has_any_draft(
+            bool(snapshot.get("has_any_draft", False)),
+            emit_order_column=True,
+        )
         sync_cursor = self._compute_sync_cursor(admin_rows)
         self.last_sync_cursor = sync_cursor
         self.last_sync_ts = sync_cursor["updated_at"]
@@ -356,7 +377,7 @@ class OrdersModel(QAbstractTableModel):
                 )
                 return False
 
-            self._recompute_draft_flag()
+            self._recompute_draft_flag(emit_order_column=True)
             self.last_sync_cursor = new_sync_cursor
             self.last_sync_ts = new_sync_cursor["updated_at"]
 

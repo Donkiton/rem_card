@@ -3769,6 +3769,12 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
         doctor_model.has_any_draft = False
         doctor_widget._cached_has_drafts = False
+        repaint_events = []
+        doctor_model.dataChanged.connect(
+            lambda top_left, bottom_right, _roles: repaint_events.append(
+                (top_left.row(), top_left.column(), bottom_right.row(), bottom_right.column())
+            )
+        )
         committed_delete = doctor_widget._apply_optimistic_cell(
             index,
             doctor_order,
@@ -3783,6 +3789,10 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
             return False, f"doctor committed cell delete did not create draft tombstone: {deleted_admin}"
         if not doctor_widget.has_drafts():
             return False, "doctor committed cell delete did not activate save draft state"
+        if not any(left_col <= 0 <= right_col for _top, left_col, _bottom, right_col in repaint_events):
+            return False, f"doctor draft-state change did not repaint order column: {repaint_events}"
+        if not any(left_col <= index.column() <= right_col for _top, left_col, _bottom, right_col in repaint_events):
+            return False, f"doctor cell change did not repaint target cell: {repaint_events}"
         ok, details = _assert_stale_snapshot_preserves_cell_delete_draft(
             doctor_widget,
             doctor_model,
@@ -3795,6 +3805,41 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_widget._restore_admin_cells(committed_delete)
         if doctor_model.data(index, Qt.UserRole) != committed_admin:
             return False, "doctor committed cell tombstone was not restored on error"
+
+        snapshot_model = OrdersModel(service, admission_id=1, shift_date=shift)
+        snapshot_order = OrderDTO(id=90, admission_id=1, latin="Snapshot", is_committed=1)
+        snapshot_model.orders = [snapshot_order]
+        snapshot_events = []
+        snapshot_model.dataChanged.connect(
+            lambda top_left, bottom_right, _roles: snapshot_events.append(
+                (top_left.row(), top_left.column(), bottom_right.row(), bottom_right.column())
+            )
+        )
+        snapshot = {
+            "admission_id": 1,
+            "shift_date": shift,
+            "only_committed": False,
+            "orders": [snapshot_order],
+            "admin_rows": [
+                {
+                    "id": 900,
+                    "order_id": 90,
+                    "planned_time": snapshot_model.time_slots[0].isoformat(),
+                    "actual_time": None,
+                    "cell_role": "single",
+                    "status": "planned",
+                    "is_committed": 0,
+                    "comment": "",
+                    "volume_ml": 0.0,
+                    "updated_at": "2026-05-03 08:00:00.000",
+                }
+            ],
+            "has_any_draft": True,
+        }
+        if not snapshot_model.apply_admin_rows_snapshot(snapshot):
+            return False, "admin-only snapshot was not applied to matching order model"
+        if not any(left_col <= 0 <= right_col for _top, left_col, _bottom, right_col in snapshot_events):
+            return False, f"admin-only draft-state change did not repaint order column: {snapshot_events}"
 
         committed_admin.comment = ""
         doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
@@ -8973,6 +9018,66 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
     emit_source = ast.get_source_segment(source_text, methods["_emit_admin_cell_changes"]) or ""
     if ".viewport().update(" in emit_source or "viewport().update()" in emit_source:
         return False, "doctor: local cell changes must not repaint the whole orders viewport"
+
+    def assert_no_viewport_update(methods_map, text, method_name: str, label: str):
+        method = methods_map.get(method_name)
+        if method is None:
+            return False, f"{label}: {method_name} not found"
+        method_source = ast.get_source_segment(text, method) or ""
+        if ".viewport().update(" in method_source or "viewport().update()" in method_source:
+            return False, f"{label}: {method_name} must use targeted dataChanged, not full viewport repaint"
+        return True, "ok"
+
+    for guarded_method in (
+        "_try_apply_admin_only_snapshot",
+        "_mark_local_order_row_deleted",
+        "_clear_local_order_row_pending_delete",
+        "_replace_local_order_after_edit",
+    ):
+        ok, details = assert_no_viewport_update(methods, source_text, guarded_method, "doctor")
+        if not ok:
+            return False, details
+
+    nurse_path = root / "ui/nurse_view/components/nurse_orders_widget.py"
+    nurse_text = nurse_path.read_text(encoding="utf-8")
+    nurse_tree = ast.parse(nurse_text)
+    nurse_classes = [
+        node
+        for node in nurse_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "NurseOrdersWidget"
+    ]
+    if not nurse_classes:
+        return False, "nurse: NurseOrdersWidget class not found"
+    nurse_methods = {node.name: node for node in nurse_classes[0].body if isinstance(node, ast.FunctionDef)}
+    for guarded_method in (
+        "_try_apply_admin_only_snapshot",
+        "_restore_admin_cell",
+        "_apply_pending_nurse_mark",
+        "_apply_committed_nurse_mark",
+        "_on_table_clicked",
+        "_on_mark_updated",
+    ):
+        ok, details = assert_no_viewport_update(nurse_methods, nurse_text, guarded_method, "nurse")
+        if not ok:
+            return False, details
+
+    model_path = root / "ui/shared/orders_model.py"
+    model_text = model_path.read_text(encoding="utf-8")
+    model_tree = ast.parse(model_text)
+    model_classes = [
+        node
+        for node in model_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "OrdersModel"
+    ]
+    if not model_classes:
+        return False, "shared: OrdersModel class not found"
+    model_methods = {node.name: node for node in model_classes[0].body if isinstance(node, ast.FunctionDef)}
+    apply_admin_method = model_methods.get("apply_admin_rows_snapshot")
+    if apply_admin_method is None:
+        return False, "shared: OrdersModel.apply_admin_rows_snapshot not found"
+    apply_admin_source = ast.get_source_segment(model_text, apply_admin_method) or ""
+    if "_set_has_any_draft(" not in apply_admin_source or "emit_order_column=True" not in apply_admin_source:
+        return False, "shared: admin-only snapshot must repaint order column when draft state changes"
 
     delegate_path = root / "ui/shared/orders_delegate.py"
     delegate_text = delegate_path.read_text(encoding="utf-8")
