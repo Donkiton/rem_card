@@ -49,6 +49,7 @@ LOCAL_ORDER_FORCE_PREFIXES = (
 )
 EMERGENCY_NOTICE_FORCE_PREFIX = "emergency_notice_save:"
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
+LAB_ORDER_CHANGE_ENTITIES = {"lab_orders"}
 VITALS_CACHE_CHANGE_ENTITIES = {
     "patients",
     "admissions",
@@ -921,7 +922,7 @@ class DoctorRemCardWidget(QWidget):
         if payload.get("forced"):
             return True
 
-        relevant_entities = {"patients", "admissions", "beds", "operations", "diet_templates"}
+        relevant_entities = {"patients", "admissions", "beds", "operations", "diet_templates"} | LAB_ORDER_CHANGE_ENTITIES
         orders_entities = {"orders", "administrations"}
         for change in payload.get("changes") or []:
             admission_id = change.get("admission_id")
@@ -1121,6 +1122,14 @@ class DoctorRemCardWidget(QWidget):
         except Exception:
             logger.exception("Doctor procedures partial refresh failed")
 
+    def _refresh_labs_from_db(self) -> None:
+        try:
+            sector_anal = getattr(self.layout_manager, "sector_anal", None)
+            if sector_anal is not None and hasattr(sector_anal, "refresh"):
+                sector_anal.refresh()
+        except Exception:
+            logger.exception("Doctor lab orders partial refresh failed")
+
     def _refresh_emergency_notice_from_db(self) -> None:
         try:
             layout = getattr(self, "layout_manager", None)
@@ -1214,6 +1223,8 @@ class DoctorRemCardWidget(QWidget):
             self._refresh_ivl_from_db()
         if sync_actions.get("procedures_refresh"):
             self._refresh_procedures_from_db()
+        if sync_actions.get("lab_orders_refresh"):
+            self._refresh_labs_from_db()
         if sync_actions.get("emergency_notice_refresh"):
             self._refresh_emergency_notice_from_db()
 

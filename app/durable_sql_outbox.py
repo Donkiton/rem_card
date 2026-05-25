@@ -41,6 +41,7 @@ APPEND_ONLY_INSERT_TABLES = {
     "devices",
     "respiratory_support",
     "lab_data",
+    "lab_orders",
     "administrations",
 }
 

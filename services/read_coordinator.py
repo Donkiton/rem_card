@@ -783,6 +783,31 @@ class ReadCoordinator:
             ),
         )
 
+    def load_lab_orders_snapshot(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        role: str,
+        mode: str = "live",
+        source_db: Optional[str] = None,
+        force_refresh: bool = True,
+    ):
+        return self._load_patient_scope_snapshot(
+            admission_id=admission_id,
+            shift_date=shift_date,
+            role=role,
+            mode=mode,
+            source_db=source_db,
+            scope="lab_orders",
+            force_refresh=force_refresh,
+            build_snapshot=lambda context: self.remcard_service.build_lab_orders_snapshot(
+                context.admission_id,
+                shift_date=context.shift_date,
+                include_change_cursor=True,
+            ),
+        )
+
     def load_beds_snapshot(
         self,
         reference_dt: Optional[datetime] = None,

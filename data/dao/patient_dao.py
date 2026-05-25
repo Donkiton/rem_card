@@ -274,6 +274,7 @@ class PatientDAO:
             (admission_id,),
         )
         cursor.execute("DELETE FROM procedures WHERE admission_id = ?", (admission_id,))
+        cursor.execute("DELETE FROM lab_orders WHERE admission_id = ?", (admission_id,))
         cursor.execute("DELETE FROM clinical_events WHERE admission_id = ?", (admission_id,))
         cursor.execute("DELETE FROM devices WHERE admission_id = ?", (admission_id,))
         cursor.execute("DELETE FROM respiratory_support WHERE admission_id = ?", (admission_id,))

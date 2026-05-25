@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 16
-SCHEMA_MIN_MIGRATION_VERSION = 16
+SCHEMA_FASTPATH_REV = 17
+SCHEMA_MIN_MIGRATION_VERSION = 17
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -36,6 +36,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "diet_plan",
     "oral_intake_events",
     "procedures",
+    "lab_orders",
     "procedure_consents",
     "procedure_cvc",
     "procedure_lumbar_puncture",
@@ -105,6 +106,26 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     "diet_plan": {"admission_id", "shift_start", "template_id", "diet_text", "schedule_json", "created_at", "version", "last_modified_by", "updated_at"},
     "oral_intake_events": {"admission_id", "shift_start", "event_time", "amount_ml", "created_at", "version", "last_modified_by", "updated_at"},
     "procedures": {"patient_id", "admission_id", "procedure_type", "status", "patient_snapshot_json", "diagnosis_snapshot", "revision", "is_deleted"},
+    "lab_orders": {
+        "patient_id",
+        "admission_id",
+        "card_day_id",
+        "analysis_code",
+        "analysis_name",
+        "material",
+        "status",
+        "created_at",
+        "scheduled_at",
+        "completed_at",
+        "comment",
+        "created_by_role",
+        "created_by_user",
+        "completed_by_role",
+        "completed_by_user",
+        "revision",
+        "created_at_db",
+        "updated_at",
+    },
     "procedure_consents": {"procedure_id", "consent_kind", "consent_mode", "patient_signed", "consilium_json", "revision"},
     "procedure_cvc": {"procedure_id", "indications_json", "access_code", "catheter_status", "removed_or_replaced", "revision"},
     "procedure_lumbar_puncture": {"procedure_id", "indications_json", "access_code", "level_code", "result_code", "revision"},
@@ -129,6 +150,9 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_medical_audit_table_row",
     "idx_medical_audit_operation",
     "idx_procedures_admission_type_time",
+    "idx_lab_orders_admission_card_day",
+    "idx_lab_orders_admission_scheduled",
+    "idx_lab_orders_updated_at",
     "idx_procedure_consents_procedure",
     "idx_procedure_cvc_catheter_status",
     "idx_procedure_transfusion_indication",
@@ -145,6 +169,7 @@ _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
     "diet_plan",
     "oral_intake_events",
     "procedures",
+    "lab_orders",
 )
 
 _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
@@ -167,6 +192,7 @@ _CHANGE_TRIGGER_TABLES: tuple[str, ...] = (
     "diet_plan",
     "oral_intake_events",
     "procedures",
+    "lab_orders",
     "procedure_consents",
     "procedure_cvc",
     "procedure_lumbar_puncture",
@@ -185,6 +211,7 @@ _MEDICAL_AUDIT_TABLES: tuple[str, ...] = (
     "clinical_events",
     "diet_plan",
     "oral_intake_events",
+    "lab_orders",
 )
 
 _FASTPATH_REQUIRED_TRIGGERS: tuple[str, ...] = tuple(
@@ -970,6 +997,34 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
 
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS lab_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id INTEGER NOT NULL,
+            admission_id INTEGER NOT NULL,
+            card_day_id TEXT,
+            analysis_code TEXT NOT NULL,
+            analysis_name TEXT NOT NULL,
+            material TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'assigned',
+            created_at DATETIME NOT NULL,
+            scheduled_at DATETIME NOT NULL,
+            completed_at DATETIME,
+            comment TEXT,
+            created_by_role TEXT NOT NULL DEFAULT 'doctor',
+            created_by_user TEXT,
+            completed_by_role TEXT,
+            completed_by_user TEXT,
+            revision INTEGER DEFAULT 0,
+            created_at_db DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            FOREIGN KEY (patient_id) REFERENCES patients(id),
+            FOREIGN KEY (admission_id) REFERENCES admissions(id)
+        )
+        """
+    )
+
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS procedure_consents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             procedure_id INTEGER NOT NULL,
@@ -1294,6 +1349,24 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "patient_status_events", "last_modified_by", "TEXT", logger)
     _ensure_column(conn, "patient_status_events", "updated_at", "DATETIME", logger)
     _ensure_column(conn, "patient_status_events", "revision", "INTEGER DEFAULT 0", logger)
+    _ensure_column(conn, "lab_orders", "patient_id", "INTEGER", logger)
+    _ensure_column(conn, "lab_orders", "admission_id", "INTEGER", logger)
+    _ensure_column(conn, "lab_orders", "card_day_id", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "analysis_code", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "analysis_name", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "material", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "status", "TEXT DEFAULT 'assigned'", logger)
+    _ensure_column(conn, "lab_orders", "created_at", "DATETIME", logger)
+    _ensure_column(conn, "lab_orders", "scheduled_at", "DATETIME", logger)
+    _ensure_column(conn, "lab_orders", "completed_at", "DATETIME", logger)
+    _ensure_column(conn, "lab_orders", "comment", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "created_by_role", "TEXT DEFAULT 'doctor'", logger)
+    _ensure_column(conn, "lab_orders", "created_by_user", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "completed_by_role", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "completed_by_user", "TEXT", logger)
+    _ensure_column(conn, "lab_orders", "revision", "INTEGER DEFAULT 0", logger)
+    _ensure_column(conn, "lab_orders", "created_at_db", "DATETIME", logger)
+    _ensure_column(conn, "lab_orders", "updated_at", "DATETIME", logger)
     _ensure_column(conn, "procedure_transfusion", "request_at", "DATETIME", logger)
     _ensure_column(conn, "procedure_transfusion", "indication_code", "TEXT", logger)
     _ensure_column(conn, "procedure_transfusion", "donor_code", "TEXT", logger)
@@ -1322,6 +1395,10 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("UPDATE diet_templates SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE diet_plan SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute("UPDATE oral_intake_events SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
+    conn.execute("UPDATE lab_orders SET status = COALESCE(status, 'assigned') WHERE status IS NULL OR status = ''")
+    conn.execute("UPDATE lab_orders SET revision = COALESCE(revision, 0) WHERE revision IS NULL")
+    conn.execute("UPDATE lab_orders SET created_at_db = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE created_at_db IS NULL")
+    conn.execute("UPDATE lab_orders SET updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now') WHERE updated_at IS NULL")
     conn.execute(
         """
         UPDATE ivl_episodes
@@ -1387,6 +1464,9 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_applied_ops_applied_at ON sync_applied_ops(applied_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_schema_migrations_applied_at ON schema_migrations(applied_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedures_admission_type_time ON procedures(admission_id, procedure_type, started_at, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_orders_admission_card_day ON lab_orders(admission_id, card_day_id, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_orders_admission_scheduled ON lab_orders(admission_id, scheduled_at, id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_orders_updated_at ON lab_orders(updated_at, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_consents_procedure ON procedure_consents(procedure_id, consent_kind)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_cvc_catheter_status ON procedure_cvc(catheter_status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedure_transfusion_indication ON procedure_transfusion(indication_code)")
@@ -1406,6 +1486,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 13, "lumbar puncture procedure")
     _mark_schema_migration(conn, 14, "transfusion procedure")
     _mark_schema_migration(conn, 15, "schema contract satisfied")
+    _mark_schema_migration(conn, 16, "admissions emergency notice fields")
 
     for table in (
         "vitals",
@@ -1418,6 +1499,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "diet_plan",
         "oral_intake_events",
         "procedures",
+        "lab_orders",
     ):
         _create_updated_at_trigger(conn, table)
 
@@ -1530,6 +1612,17 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         "OLD.admission_id",
         "COALESCE(NEW.updated_by, NEW.created_by, 'doctor')",
         "COALESCE(OLD.updated_by, OLD.created_by, 'doctor')",
+        use_updated_at_gate=False,
+    )
+    _create_change_triggers(
+        conn,
+        "lab_orders",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.completed_by_role, NEW.created_by_role, 'doctor')",
+        "COALESCE(OLD.completed_by_role, OLD.created_by_role, 'doctor')",
         use_updated_at_gate=False,
     )
     _create_change_triggers(
@@ -1797,5 +1890,32 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         ("id", "admission_id", "shift_start", "event_time", "amount_ml", "version", "updated_at", "last_modified_by"),
         use_updated_at_gate=True,
     )
-    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "admissions emergency notice fields")
+    _create_medical_audit_triggers(
+        conn,
+        "lab_orders",
+        "NEW.id",
+        "OLD.id",
+        "NEW.admission_id",
+        "OLD.admission_id",
+        "COALESCE(NEW.completed_by_role, NEW.created_by_role, 'doctor')",
+        "COALESCE(OLD.completed_by_role, OLD.created_by_role, 'doctor')",
+        (
+            "id",
+            "patient_id",
+            "admission_id",
+            "card_day_id",
+            "analysis_code",
+            "analysis_name",
+            "material",
+            "status",
+            "created_at",
+            "scheduled_at",
+            "completed_at",
+            "comment",
+            "revision",
+            "updated_at",
+        ),
+        use_updated_at_gate=True,
+    )
+    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "lab orders worklist")
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

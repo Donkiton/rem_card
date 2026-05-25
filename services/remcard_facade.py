@@ -107,12 +107,16 @@ class RemCardService(QObject):
         self._oral_intake = OralIntakeService(self.oral_intake_dao, self._vitals, self._diet_plan)
 
         from rem_card.data.dao.procedures_dao import ProceduresDAO
+        from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
+        from rem_card.services.lab_orders_service import LabOrdersService
         from rem_card.services.procedures_print_service import ProceduresPrintService
         from rem_card.services.procedures_service import ProceduresService
 
         self.procedures_dao = ProceduresDAO(self.orders_dao.db)
         self._procedures = ProceduresService(self.procedures_dao, data_service=data_service)
         self._procedures_print = ProceduresPrintService(self.procedures_dao)
+        self.lab_orders_dao = LabOrdersDAO(self.orders_dao.db)
+        self._lab_orders = LabOrdersService(self.lab_orders_dao, data_service=data_service)
         self._connect_cache_invalidation()
 
     def _connect_cache_invalidation(self):
@@ -196,11 +200,26 @@ class RemCardService(QObject):
                         WHERE oi.admission_id = ids.admission_id
                           AND oi.event_time >= ? AND oi.event_time < ?
                     )
+                    OR EXISTS (
+                        SELECT 1 FROM lab_orders lo
+                        WHERE lo.admission_id = ids.admission_id
+                          AND (
+                            (lo.card_day_id = ?)
+                            OR (
+                                lo.card_day_id IS NULL
+                                AND (
+                                    (lo.scheduled_at IS NOT NULL AND DATETIME(lo.scheduled_at) >= DATETIME(?) AND DATETIME(lo.scheduled_at) < DATETIME(?))
+                                    OR (lo.created_at IS NOT NULL AND DATETIME(lo.created_at) >= DATETIME(?) AND DATETIME(lo.created_at) < DATETIME(?))
+                                )
+                            )
+                          )
+                    )
                     THEN 1
                     ELSE 0
                 END AS has_card
             FROM ids
         """
+        card_day_id = self._lab_orders.card_day_id_from_shift_start(start)
         params = tuple(ids) + (
             start.isoformat(),
             end.isoformat(),
@@ -212,6 +231,11 @@ class RemCardService(QObject):
             end.isoformat(timespec="minutes").replace("T", " "),
             start.isoformat(timespec="minutes").replace("T", " "),
             end.isoformat(timespec="minutes").replace("T", " "),
+            card_day_id,
+            start.isoformat(),
+            end.isoformat(),
+            start.isoformat(),
+            end.isoformat(),
         )
         rows = self.orders_dao.db.fetch_all_remcard(query, params)
         result: Dict[int, bool] = {adm_id: False for adm_id in ids}
@@ -477,6 +501,52 @@ class RemCardService(QObject):
         if include_change_cursor:
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
+
+    def build_lab_orders_snapshot(
+        self,
+        admission_id: int,
+        card_day_id: Optional[str] = None,
+        *,
+        shift_date: Optional[datetime] = None,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        if isinstance(card_day_id, datetime) and shift_date is None:
+            shift_date = card_day_id
+            card_day_id = None
+
+        effective_date = shift_date or datetime.now()
+        if shift_date is None and card_day_id is not None:
+            start_dt = None
+            end_dt = None
+            resolved_card_day_id = str(card_day_id)
+        else:
+            start_dt, end_dt = self.get_day_period(effective_date)
+            resolved_card_day_id = str(card_day_id or self._lab_orders.card_day_id_from_shift_start(start_dt))
+        snapshot = self._lab_orders.build_snapshot(
+            int(admission_id),
+            card_day_id=resolved_card_day_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        snapshot.update(
+            {
+                "shift_date": effective_date,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "card_day_id": resolved_card_day_id,
+            }
+        )
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id)
+        return snapshot
+
+    def list_lab_orders(self, admission_id: int, shift_date: Optional[datetime] = None):
+        snapshot = self.build_lab_orders_snapshot(
+            int(admission_id),
+            shift_date=shift_date or datetime.now(),
+            include_change_cursor=False,
+        )
+        return snapshot.get("rows") or []
 
     def build_full_card_snapshot(
         self,
@@ -1092,9 +1162,10 @@ class RemCardService(QObject):
         o_dates = self.orders_dao.get_all_dates(admission_id)
         f_dates = self.fluids_dao.get_all_dates(admission_id)
         diet_dates = self._get_diet_raw_dates(admission_id)
+        lab_dates = self._get_lab_orders_raw_dates(admission_id)
         
         # РћР±СЉРµРґРёРЅСЏРµРј РІСЃРµ "СЃС‹СЂС‹Рµ" РґР°С‚С‹ РІ РѕРґРёРЅ СЃРїРёСЃРѕРє
-        raw_dates = list(set(v_dates + o_dates + f_dates + diet_dates))
+        raw_dates = list(set(v_dates + o_dates + f_dates + diet_dates + lab_dates))
         
         return self._shifts.get_all_card_dates(raw_dates)
 
@@ -1104,8 +1175,9 @@ class RemCardService(QObject):
         o_dates = self.orders_dao.get_all_dates(admission_id)
         f_dates = self.fluids_dao.get_all_dates(admission_id)
         diet_dates = self._get_diet_raw_dates(admission_id)
+        lab_dates = self._get_lab_orders_raw_dates(admission_id)
         
-        all_dates = v_dates + o_dates + f_dates + diet_dates
+        all_dates = v_dates + o_dates + f_dates + diet_dates + lab_dates
         return max(all_dates) if all_dates else None
 
     def _get_diet_raw_dates(self, admission_id: int) -> List[datetime]:
@@ -1116,6 +1188,26 @@ class RemCardService(QObject):
             SELECT event_time AS dt FROM oral_intake_events WHERE admission_id = ?
             """,
             (int(admission_id), int(admission_id)),
+        )
+        dates: List[datetime] = []
+        for row in rows:
+            text = str(row["dt"] or "").strip()
+            if not text:
+                continue
+            try:
+                dates.append(datetime.fromisoformat(text.replace(" ", "T")))
+            except Exception:
+                continue
+        return dates
+
+    def _get_lab_orders_raw_dates(self, admission_id: int) -> List[datetime]:
+        rows = self.orders_dao.db.fetch_all_remcard(
+            """
+            SELECT COALESCE(scheduled_at, created_at, completed_at) AS dt
+            FROM lab_orders
+            WHERE admission_id = ?
+            """,
+            (int(admission_id),),
         )
         dates: List[datetime] = []
         for row in rows:
@@ -1577,6 +1669,7 @@ class RemCardService(QObject):
         self._orders.dao.delete_all_for_admission(admission_id)
         self.orders_dao.db.execute_remcard("DELETE FROM diet_plan WHERE admission_id = ?", (admission_id,))
         self.orders_dao.db.execute_remcard("DELETE FROM oral_intake_events WHERE admission_id = ?", (admission_id,))
+        self.orders_dao.db.execute_remcard("DELETE FROM lab_orders WHERE admission_id = ?", (admission_id,))
 
     def delete_last_card(self, admission_id: int):
         """
@@ -1614,6 +1707,13 @@ class RemCardService(QObject):
                     start_dt.isoformat(timespec="minutes").replace("T", " "),
                     end_dt.isoformat(timespec="minutes").replace("T", " "),
                 ),
+            )
+            self.lab_orders_dao.delete_for_card_day(
+                cursor,
+                admission_id,
+                card_day_id=self._lab_orders.card_day_id_from_shift_start(start_dt),
+                start_dt=start_dt,
+                end_dt=end_dt,
             )
             cursor.execute(
                 """
@@ -1775,6 +1875,13 @@ class RemCardService(QObject):
 
     def get_ventilation_summary(self, admission_id: int):
         return self._require_ventilation().get_active_case_summary(admission_id)
+
+    # --- Lab Orders ---
+    def create_lab_order(self, **kwargs):
+        return self._lab_orders.create_lab_order(**kwargs)
+
+    def mark_lab_order_completed(self, order_id: int, **kwargs):
+        return self._lab_orders.mark_completed(int(order_id), **kwargs)
 
     # --- Procedures ---
     def list_procedures(self, admission_id: int):

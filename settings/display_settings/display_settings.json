@@ -44,7 +44,7 @@
           "events": true,
           "ivl": true,
           "procedures": true,
-          "labs": false,
+          "labs": true,
           "print": false
         }
       },
@@ -94,7 +94,7 @@
           "balance": true,
           "events": false,
           "procedures": false,
-          "labs": false,
+          "labs": true,
           "print": false
         }
       },

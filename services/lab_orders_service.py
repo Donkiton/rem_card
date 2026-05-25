@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime
+from typing import Any, Callable, Optional, Sequence
+
+from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
+from rem_card.data.dto.lab_orders_dto import (
+    LAB_MATERIAL_LABELS,
+    LabMaterial,
+    LabOrderDTO,
+    LabOrderStatus,
+)
+
+
+class LabOrdersService:
+    def __init__(self, dao: LabOrdersDAO, data_service=None):
+        self.dao = dao
+        self.data_service = data_service
+
+    @staticmethod
+    def card_day_id_from_shift_start(shift_start: datetime) -> str:
+        return shift_start.isoformat(timespec="minutes").replace("T", " ")
+
+    def list_orders_for_card_day(
+        self,
+        admission_id: int,
+        *,
+        card_day_id: Optional[str],
+        start_dt: Optional[datetime],
+        end_dt: Optional[datetime],
+    ) -> list[LabOrderDTO]:
+        return self.dao.list_for_card_day(
+            int(admission_id),
+            card_day_id=card_day_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+
+    def build_snapshot(
+        self,
+        admission_id: int,
+        *,
+        card_day_id: Optional[str],
+        start_dt: Optional[datetime],
+        end_dt: Optional[datetime],
+    ) -> dict[str, Any]:
+        orders = self.list_orders_for_card_day(
+            int(admission_id),
+            card_day_id=card_day_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        rows = [self._row_payload(order) for order in orders]
+        assigned_count = sum(1 for row in rows if row.get("status") != LabOrderStatus.COMPLETED.value)
+        completed_count = sum(1 for row in rows if row.get("status") == LabOrderStatus.COMPLETED.value)
+        return {
+            "scope": "lab_orders",
+            "admission_id": int(admission_id),
+            "card_day_id": card_day_id,
+            "start_dt": start_dt,
+            "end_dt": end_dt,
+            "rows": rows,
+            "counts": {
+                "assigned": assigned_count,
+                "completed": completed_count,
+                "total": len(rows),
+            },
+            "content_hash": self._content_hash(rows),
+        }
+
+    def create_lab_order(
+        self,
+        *,
+        admission_id: int,
+        card_day_id: Optional[str],
+        analysis_code: str,
+        analysis_name: str,
+        material: str,
+        scheduled_at: datetime,
+        created_at: Optional[datetime] = None,
+        comment: str = "",
+        created_by_role: str = "doctor",
+        created_by_user: Optional[str] = None,
+    ) -> int:
+        patient_id = self.dao.get_admission_patient_id(int(admission_id))
+        if patient_id is None:
+            raise ValueError("Госпитализация пациента не найдена.")
+        normalized_material = self._normalize_material(material)
+        created_dt = created_at or datetime.now().replace(microsecond=0)
+        dto = LabOrderDTO(
+            patient_id=patient_id,
+            admission_id=int(admission_id),
+            card_day_id=card_day_id,
+            analysis_code=str(analysis_code or "").strip(),
+            analysis_name=str(analysis_name or "").strip(),
+            material=normalized_material,
+            status=LabOrderStatus.ASSIGNED.value,
+            created_at=created_dt,
+            scheduled_at=scheduled_at,
+            comment=str(comment or "").strip(),
+            created_by_role=created_by_role or "doctor",
+            created_by_user=created_by_user,
+        )
+        if not dto.analysis_name:
+            raise ValueError("Укажите анализ.")
+
+        def operation(cursor):
+            return self.dao.save_lab_order(cursor, dto)
+
+        return int(self._run_write(f"lab_order_create:{admission_id}", operation))
+
+    def mark_completed(
+        self,
+        order_id: int,
+        *,
+        completed_at: Optional[datetime] = None,
+        completed_by_role: str = "nurse",
+        completed_by_user: Optional[str] = None,
+    ) -> int:
+        completed_dt = completed_at or datetime.now().replace(microsecond=0)
+
+        def operation(cursor):
+            self.dao.mark_completed(
+                cursor,
+                int(order_id),
+                completed_at=completed_dt,
+                completed_by_role=completed_by_role or "nurse",
+                completed_by_user=completed_by_user,
+            )
+            return int(order_id)
+
+        return int(self._run_write(f"lab_order_complete:{order_id}", operation))
+
+    def _run_write(self, description: str, operation: Callable):
+        if self.data_service:
+            return self.data_service.run_write(description, operation)
+        return self.dao.db.run_write_operation(operation, source=description)
+
+    @classmethod
+    def _row_payload(cls, order: LabOrderDTO) -> dict[str, Any]:
+        row = order.as_dict()
+        material = cls._normalize_material(row.get("material"))
+        row["material"] = material
+        row["material_label"] = LAB_MATERIAL_LABELS.get(material, row.get("material_label") or material)
+        row["status"] = (
+            LabOrderStatus.COMPLETED.value
+            if str(row.get("status") or "").lower() == LabOrderStatus.COMPLETED.value
+            else LabOrderStatus.ASSIGNED.value
+        )
+        return row
+
+    @staticmethod
+    def _content_hash(rows: Sequence[dict[str, Any]]) -> str:
+        stable_rows: list[dict[str, Any]] = []
+        for row in rows or []:
+            stable_rows.append(
+                {
+                    "id": row.get("id"),
+                    "patient_id": row.get("patient_id"),
+                    "admission_id": row.get("admission_id"),
+                    "card_day_id": row.get("card_day_id"),
+                    "analysis_code": row.get("analysis_code"),
+                    "analysis_name": row.get("analysis_name"),
+                    "material": row.get("material"),
+                    "status": row.get("status"),
+                    "created_at": row.get("created_at"),
+                    "scheduled_at": row.get("scheduled_at"),
+                    "completed_at": row.get("completed_at"),
+                    "comment": row.get("comment"),
+                    "revision": row.get("revision"),
+                    "updated_at": row.get("updated_at"),
+                }
+            )
+        payload = json.dumps(stable_rows, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _normalize_material(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        aliases = {
+            LabMaterial.VENOUS_BLOOD.value: LabMaterial.VENOUS_BLOOD.value,
+            "venous": LabMaterial.VENOUS_BLOOD.value,
+            "кровь венозная": LabMaterial.VENOUS_BLOOD.value,
+            "венозная кровь": LabMaterial.VENOUS_BLOOD.value,
+            LabMaterial.ARTERIAL_BLOOD.value: LabMaterial.ARTERIAL_BLOOD.value,
+            "arterial": LabMaterial.ARTERIAL_BLOOD.value,
+            "кровь артериальная": LabMaterial.ARTERIAL_BLOOD.value,
+            "артериальная кровь": LabMaterial.ARTERIAL_BLOOD.value,
+            LabMaterial.URINE.value: LabMaterial.URINE.value,
+            "моча": LabMaterial.URINE.value,
+            LabMaterial.LIQUOR.value: LabMaterial.LIQUOR.value,
+            "csf": LabMaterial.LIQUOR.value,
+            "ликвор": LabMaterial.LIQUOR.value,
+        }
+        return aliases.get(raw, raw if raw in LAB_MATERIAL_LABELS else LabMaterial.VENOUS_BLOOD.value)

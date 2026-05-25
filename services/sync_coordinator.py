@@ -34,6 +34,7 @@ class SyncCoordinator:
         "procedure_cvc": {"procedures"},
         "procedure_lumbar_puncture": {"procedures"},
         "procedure_transfusion": {"procedures"},
+        "lab_orders": {"lab_orders"},
         "operations": {"patient_header"},
         "transfusions": {"balance"},
     }
@@ -52,6 +53,7 @@ class SyncCoordinator:
         "ivl": {"ivl"},
         "vent": {"ivl"},
         "procedure": {"procedures"},
+        "lab_order": {"lab_orders"},
         "patient_bed": {"beds", "patient_header"},
         "archive_": {"beds", "patient_header"},
         "emergency_notice": {"emergency_notice"},
@@ -101,6 +103,7 @@ class SyncCoordinator:
             "status_refresh": bool(full_refresh_required or "patient_status" in scopes),
             "ivl_refresh": bool(full_refresh_required or "ivl" in scopes),
             "procedures_refresh": bool(full_refresh_required or "procedures" in scopes),
+            "lab_orders_refresh": bool(full_refresh_required or "lab_orders" in scopes),
         }
         return result
 
