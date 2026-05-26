@@ -393,11 +393,10 @@ class SettingsService:
         from rem_card.app import paths as app_paths
 
         seed_dir = app_paths.SEED_DIR
-        user_dir = app_paths.USER_DICT_DIR
+        user_dir = self._legacy_user_dict_dir(app_paths)
         package_root = os.path.abspath(os.path.join(os.path.dirname(app_paths.__file__), ".."))
         bundled_settings_dir = os.path.join(app_paths.get_resources_dir(), "rem_card", "settings")
         package_settings_dir = os.path.join(package_root, "settings")
-        external_settings_dir = os.path.join(app_paths.get_executable_dir(), "settings")
 
         def legacy_dict(file_name: str) -> dict[str, Any]:
             return _read_json_dict(
@@ -413,7 +412,6 @@ class SettingsService:
 
         def settings_path(*parts: str) -> str:
             return _first_existing_path(
-                os.path.join(external_settings_dir, *parts),
                 os.path.join(bundled_settings_dir, *parts),
                 os.path.join(package_settings_dir, *parts),
             )
@@ -495,10 +493,32 @@ class SettingsService:
         return report
 
     @staticmethod
+    def _is_external_dictionary_dir(app_paths: Any, path: str) -> bool:
+        try:
+            external_dir = os.path.join(app_paths.get_executable_dir(), "rem_card", "data", "dictionaries")
+        except Exception:
+            return False
+        try:
+            return os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(external_dir))
+        except Exception:
+            return False
+
+    def _legacy_user_dict_dir(self, app_paths: Any) -> str:
+        seed_dir = str(getattr(app_paths, "SEED_DIR", "") or "")
+        user_dir = str(getattr(app_paths, "USER_DICT_DIR", "") or "")
+        if user_dir and not self._is_external_dictionary_dir(app_paths, user_dir):
+            return user_dir
+        return seed_dir
+
+    @staticmethod
     def _legacy_user_overrides_path(app_paths: Any) -> str:
+        seed_dir = str(getattr(app_paths, "SEED_DIR", "") or "")
+        user_dir = str(getattr(app_paths, "USER_DICT_DIR", "") or "")
+        if SettingsService._is_external_dictionary_dir(app_paths, user_dir):
+            user_dir = seed_dir
         candidates = [
-            os.path.join(getattr(app_paths, "USER_DICT_DIR", ""), "user_overrides.json"),
-            os.path.join(getattr(app_paths, "SEED_DIR", ""), "user_overrides.json"),
+            os.path.join(user_dir, "user_overrides.json"),
+            os.path.join(seed_dir, "user_overrides.json"),
         ]
         baza_dir = str(getattr(app_paths, "BAZA_DIR", "") or "")
         if baza_dir:
@@ -522,7 +542,9 @@ class SettingsService:
                 "SELECT value FROM settings_meta WHERE key = ?",
                 (LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY,),
             ).fetchone()
-            if row and str(row["value"]) == overrides_hash:
+            if row:
+                return
+            if not self._legacy_override_repair_needed(conn):
                 return
 
         with self.db.transaction("settings_legacy_prescription_overrides") as cursor:
@@ -564,6 +586,27 @@ class SettingsService:
                         "warnings": warnings,
                     },
                 )
+
+    @staticmethod
+    def _legacy_override_repair_needed(conn) -> bool:
+        for table in (
+            "drug_groups",
+            "dosage_forms",
+            "administration_routes",
+            "solvents",
+            "drugs",
+            "order_templates",
+        ):
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS cnt
+                FROM {table}
+                WHERE COALESCE(source, '') IN ('override', 'manual')
+                """
+            ).fetchone()
+            if int(row["cnt"] if row else 0) > 0:
+                return False
+        return True
 
     def _apply_legacy_prescription_overrides(
         self,

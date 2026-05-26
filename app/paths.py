@@ -91,10 +91,7 @@ def ensure_external_dictionaries_initialized() -> str:
     if not is_compiled():
         return _project_dictionaries_dir()
 
-    bundled_dir = _compiled_bundled_dictionaries_dir()
-    if os.path.isdir(bundled_dir):
-        return bundled_dir
-    return _compiled_external_dictionaries_dir()
+    return _compiled_bundled_dictionaries_dir()
 
 def get_seed_dir() -> str:
     if is_compiled():
@@ -118,9 +115,6 @@ def get_patient_assets_dir() -> str:
     return os.path.join(get_resources_dir(), "rem_card", "data", "patient_assets")
 
 def get_user_dict_dir() -> str:
-    if is_compiled():
-        # Legacy-only source for one-time migration of old external overrides.
-        return _compiled_external_dictionaries_dir()
     return get_seed_dir()
 
 NETWORK_ROOT = get_base_dir()

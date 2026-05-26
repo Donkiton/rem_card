@@ -56,9 +56,11 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
     from rem_card.app import runtime_paths
 
     saved_env = os.environ.get(runtime_paths.DEV_BAZA_DIR_ENV)
+    saved_data_path_config = os.environ.get("REMCARD_DATA_PATH_CONFIG")
     original_get_project_root = runtime_paths.get_project_root
     try:
         os.environ.pop(runtime_paths.DEV_BAZA_DIR_ENV, None)
+        os.environ.pop("REMCARD_DATA_PATH_CONFIG", None)
         project_root = os.path.join(temp_root, "project_root")
         expected = os.path.join(project_root, runtime_paths.BAZA_DIR_NAME)
         legacy = os.path.join(project_root, "rework_baza")
@@ -69,6 +71,12 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
         resolved = runtime_paths.get_dev_baza_dir()
         if os.path.abspath(resolved) != os.path.abspath(expected):
             return False, f"dev baza dir should use project Baza_rao3_jurnal, got: {resolved}"
+
+        configured = os.path.join(temp_root, "configured_network_baza")
+        runtime_paths.write_configured_baza_dir(configured)
+        resolved_configured = runtime_paths.get_dev_baza_dir()
+        if os.path.abspath(resolved_configured) != os.path.abspath(expected):
+            return False, f"dev baza dir must ignore remcard_data_path.json, got: {resolved_configured}"
 
         override = os.path.join(temp_root, "explicit_dev_override")
         os.environ[runtime_paths.DEV_BAZA_DIR_ENV] = override
@@ -81,6 +89,10 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
             os.environ.pop(runtime_paths.DEV_BAZA_DIR_ENV, None)
         else:
             os.environ[runtime_paths.DEV_BAZA_DIR_ENV] = saved_env
+        if saved_data_path_config is None:
+            os.environ.pop("REMCARD_DATA_PATH_CONFIG", None)
+        else:
+            os.environ["REMCARD_DATA_PATH_CONFIG"] = saved_data_path_config
 
 
 def _check_arbitrary_baza_dir_name_allowed(temp_root: str) -> tuple[bool, str]:
@@ -12170,6 +12182,158 @@ def _check_compiled_bundled_overrides_repair_seed_only_settings_db(temp_root: st
         app_paths.get_executable_dir = original_get_executable_dir
 
 
+def _check_compiled_external_dictionary_json_does_not_shadow_settings_seed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import paths as app_paths
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    source_dir = PROJECT_ROOT / "data" / "dictionaries"
+    source_overrides = json.loads((source_dir / "user_overrides.json").read_text(encoding="utf-8"))
+    source_seed_drugs = json.loads((source_dir / "drugs.seed.json").read_text(encoding="utf-8"))
+    expected_key = ""
+    expected_seed_payload: dict[str, object] = {}
+    stale_external_payload: dict[str, object] = {}
+    for key, payload in (source_overrides.get("drugs") or {}).items():
+        if not isinstance(payload, dict) or payload.get("_deleted"):
+            continue
+        seed_payload = source_seed_drugs.get(key)
+        if isinstance(seed_payload, dict) and seed_payload != payload:
+            expected_key = str(key)
+            expected_seed_payload = dict(seed_payload)
+            stale_external_payload = dict(payload)
+            break
+    if not expected_key:
+        return False, "no drug override differs from seed"
+
+    compiled_root = Path(temp_root) / "compiled_external_shadow" / "Prog"
+    bundled_dict_dir = compiled_root / "_internal" / "rem_card" / "data" / "dictionaries"
+    bundled_settings_dir = compiled_root / "_internal" / "rem_card" / "settings" / "display_settings"
+    external_dict_dir = compiled_root / "rem_card" / "data" / "dictionaries"
+    external_settings_dir = compiled_root / "settings" / "display_settings"
+    bundled_dict_dir.mkdir(parents=True, exist_ok=True)
+    bundled_settings_dir.mkdir(parents=True, exist_ok=True)
+    external_dict_dir.mkdir(parents=True, exist_ok=True)
+    external_settings_dir.mkdir(parents=True, exist_ok=True)
+    for source_path in source_dir.glob("*.json"):
+        if source_path.name == "user_overrides.json":
+            continue
+        shutil.copy2(source_path, bundled_dict_dir / source_path.name)
+    (external_dict_dir / "user_overrides.json").write_text(
+        json.dumps({"drugs": {expected_key: stale_external_payload}}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (bundled_settings_dir / "display_settings.json").write_text(
+        json.dumps({"source_marker": "bundled_settings"}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (external_settings_dir / "display_settings.json").write_text(
+        json.dumps({"source_marker": "external_settings"}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    baza_dir = os.path.join(temp_root, "BazaExternalJsonIgnored")
+    original_seed_dir = app_paths.SEED_DIR
+    original_user_dict_dir = app_paths.USER_DICT_DIR
+    original_baza_dir = app_paths.BAZA_DIR
+    original_get_resources_dir = app_paths.get_resources_dir
+    original_get_executable_dir = app_paths.get_executable_dir
+    try:
+        app_paths.SEED_DIR = str(bundled_dict_dir)
+        app_paths.USER_DICT_DIR = str(external_dict_dir)
+        app_paths.BAZA_DIR = baza_dir
+        app_paths.get_resources_dir = lambda: str(compiled_root / "_internal")
+        app_paths.get_executable_dir = lambda: str(compiled_root)
+
+        service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+        service.ensure_ready()
+        payload = service.load_prescription_datasets()["drugs"].get(expected_key)
+        if payload != expected_seed_payload:
+            return False, f"external JSON next to exe shadowed settings seed for {expected_key}"
+        display_settings = service.get_app_setting("shared", "display_settings", default={})
+        if not isinstance(display_settings, dict) or display_settings.get("source_marker") != "bundled_settings":
+            return False, "external settings JSON next to exe shadowed bundled settings seed"
+        with service.db.read_connection() as conn:
+            meta = conn.execute(
+                "SELECT value FROM settings_meta WHERE key = 'prescription_legacy_override_import_hash'"
+            ).fetchone()
+        if meta:
+            return False, "external user_overrides.json was treated as imported legacy override"
+        return True, f"ignored {external_dict_dir / 'user_overrides.json'}"
+    finally:
+        app_paths.SEED_DIR = original_seed_dir
+        app_paths.USER_DICT_DIR = original_user_dict_dir
+        app_paths.BAZA_DIR = original_baza_dir
+        app_paths.get_resources_dir = original_get_resources_dir
+        app_paths.get_executable_dir = original_get_executable_dir
+
+
+def _check_legacy_overrides_do_not_reapply_after_settings_import(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import paths as app_paths
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    source_dir = PROJECT_ROOT / "data" / "dictionaries"
+    source_overrides = json.loads((source_dir / "user_overrides.json").read_text(encoding="utf-8"))
+    first_overrides = json.loads(json.dumps(source_overrides, ensure_ascii=False))
+    first_overrides.setdefault("drugs", {}).setdefault("dopamine", {})["default_dilution"] = {
+        "base": "nacl_09",
+        "volume": 10,
+    }
+    second_overrides = json.loads(json.dumps(source_overrides, ensure_ascii=False))
+    second_overrides.setdefault("drugs", {}).setdefault("dopamine", {})["default_dilution"] = {
+        "base": "nacl_09",
+        "volume": 15,
+    }
+
+    compiled_root = Path(temp_root) / "compiled" / "Prog"
+    bundled_dict_dir = compiled_root / "_internal" / "rem_card" / "data" / "dictionaries"
+    external_dict_dir = compiled_root / "rem_card" / "data" / "dictionaries"
+    bundled_dict_dir.mkdir(parents=True, exist_ok=True)
+    external_dict_dir.mkdir(parents=True, exist_ok=True)
+    for source_path in source_dir.glob("*.json"):
+        shutil.copy2(source_path, bundled_dict_dir / source_path.name)
+    (bundled_dict_dir / "user_overrides.json").write_text(
+        json.dumps(first_overrides, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    baza_dir = os.path.join(temp_root, "BazaLegacyOverrideNoReapply")
+    original_seed_dir = app_paths.SEED_DIR
+    original_user_dict_dir = app_paths.USER_DICT_DIR
+    original_baza_dir = app_paths.BAZA_DIR
+    original_get_resources_dir = app_paths.get_resources_dir
+    original_get_executable_dir = app_paths.get_executable_dir
+    try:
+        app_paths.SEED_DIR = str(bundled_dict_dir)
+        app_paths.USER_DICT_DIR = str(external_dict_dir)
+        app_paths.BAZA_DIR = baza_dir
+        app_paths.get_resources_dir = lambda: str(compiled_root / "_internal")
+        app_paths.get_executable_dir = lambda: str(compiled_root)
+
+        first_service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+        first_service.ensure_ready()
+        first_payload = first_service.load_prescription_datasets()["drugs"].get("dopamine") or {}
+        if (first_payload.get("default_dilution") or {}).get("volume") != 10:
+            return False, f"first import did not use initial overrides: {first_payload}"
+
+        (bundled_dict_dir / "user_overrides.json").write_text(
+            json.dumps(second_overrides, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        second_service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+        second_service.ensure_ready()
+        second_payload = second_service.load_prescription_datasets()["drugs"].get("dopamine") or {}
+        if (second_payload.get("default_dilution") or {}).get("volume") != 10:
+            return False, "legacy user_overrides were reapplied after settings DB import"
+        return True, "ok"
+    finally:
+        app_paths.SEED_DIR = original_seed_dir
+        app_paths.USER_DICT_DIR = original_user_dict_dir
+        app_paths.BAZA_DIR = original_baza_dir
+        app_paths.get_resources_dir = original_get_resources_dir
+        app_paths.get_executable_dir = original_get_executable_dir
+
+
 def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.diet_service import DietTemplateService
     from rem_card.services.doctor_list_service import DoctorListStore
@@ -12604,6 +12768,8 @@ def main():
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
         ("edited_drug_catalog_preserved_after_restart", _check_edited_drug_catalog_preserved_after_restart),
         ("compiled_bundled_overrides_repair_seed_only_settings_db", _check_compiled_bundled_overrides_repair_seed_only_settings_db),
+        ("compiled_external_dictionary_json_does_not_shadow_settings_seed", _check_compiled_external_dictionary_json_does_not_shadow_settings_seed),
+        ("legacy_overrides_do_not_reapply_after_settings_import", _check_legacy_overrides_do_not_reapply_after_settings_import),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
         ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),
         ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),

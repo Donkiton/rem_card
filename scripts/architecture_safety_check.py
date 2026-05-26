@@ -143,6 +143,7 @@ def _check_settings_db_guardrails() -> dict[str, Any]:
     db_text = (PROJECT_ROOT / "data" / "settings" / "settings_db.py").read_text(encoding="utf-8")
     runtime_paths_text = (PROJECT_ROOT / "app" / "runtime_paths.py").read_text(encoding="utf-8")
     app_paths_text = (PROJECT_ROOT / "app" / "paths.py").read_text(encoding="utf-8")
+    settings_service_text = (PROJECT_ROOT / "services" / "settings" / "settings_service.py").read_text(encoding="utf-8")
 
     if "SETTINGS_DIR_NAME = \"settings\"" not in paths_text:
         findings.append("settings DB path must use <BAZA_DIR>/settings")
@@ -163,6 +164,12 @@ def _check_settings_db_guardrails() -> dict[str, Any]:
     ensure_body = app_paths_text[ensure_start: app_paths_text.find("\ndef ", ensure_start + 1)]
     if "_copy_missing_json_files" in ensure_body or "os.makedirs(target_dir" in ensure_body:
         findings.append("compiled startup must not create external dictionary JSON files")
+    user_dir_start = app_paths_text.find("def get_user_dict_dir")
+    user_dir_body = app_paths_text[user_dir_start: app_paths_text.find("\ndef ", user_dir_start + 1)]
+    if "_compiled_external_dictionaries_dir()" in user_dir_body:
+        findings.append("compiled runtime must not read dictionary JSON from Prog/rem_card/data/dictionaries")
+    if 'get_executable_dir(), "settings"' in settings_service_text:
+        findings.append("settings import must not read JSON from Prog/settings")
     return {"name": "settings_db_guardrails", "ok": not findings, "findings": findings}
 
 
