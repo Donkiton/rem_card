@@ -32,6 +32,7 @@ DISPLAY_SETTINGS_KEY = "display_settings"
 BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
 PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
+LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,14 @@ PRESCRIPTION_DATASET_TABLES = {
     "diluents": "solvents",
     "templates": "order_templates",
 }
+PRESCRIPTION_SEED_SOURCES = {
+    "groups": "groups.seed.json",
+    "forms": "forms.seed.json",
+    "admin_types": "admin_types.seed.json",
+    "diluents": "diluents.seed.json",
+    "drugs": "drugs.seed.json",
+    "templates": "templates.seed.json",
+}
 
 
 def _stable_json(value: Any) -> str:
@@ -142,6 +151,12 @@ def _read_json_dict(path: str, *, warnings: list[str]) -> dict[str, Any]:
         warnings.append(f"{path}: недоступен ({exc})")
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _read_optional_json_dict(path: str, *, warnings: list[str]) -> dict[str, Any]:
+    if not path or not os.path.exists(path):
+        return {}
+    return _read_json_dict(path, warnings=warnings)
 
 
 def _read_json_any(path: str, *, warnings: list[str]) -> Any:
@@ -301,20 +316,28 @@ class SettingsService:
         return self.get_app_setting("shared", "settings_import_report", default={}) or {}
 
     def _ensure_legacy_import(self) -> None:
+        seed_already_imported = False
         with self.db.read_connection() as conn:
             row = conn.execute(
                 "SELECT value FROM settings_meta WHERE key = 'seed_import_version'"
             ).fetchone()
             if row and str(row[0]) == SEED_IMPORT_VERSION:
-                return
-            existing_rows = 0
-            for table, _key in (
-                ("drugs", "code"),
-                ("drug_groups", "code"),
-                ("lab_analysis_templates", "analysis_code"),
-                ("diet_templates", "template_key"),
-            ):
-                existing_rows += int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+                seed_already_imported = True
+            if seed_already_imported:
+                existing_rows = 0
+            else:
+                existing_rows = 0
+                for table, _key in (
+                    ("drugs", "code"),
+                    ("drug_groups", "code"),
+                    ("lab_analysis_templates", "analysis_code"),
+                    ("diet_templates", "template_key"),
+                ):
+                    existing_rows += int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] or 0)
+
+        if seed_already_imported:
+            self._ensure_legacy_prescription_overrides_imported()
+            return
 
         with self.db.transaction("settings_legacy_import") as cursor:
             report = self._import_legacy_sources(cursor) if existing_rows == 0 else {
@@ -362,6 +385,7 @@ class SettingsService:
             ok, reason = run_integrity_check(conn)
             if not ok:
                 raise RuntimeError(f"settings DB integrity_check after import failed: {reason}")
+        self._ensure_legacy_prescription_overrides_imported()
 
     def _import_legacy_sources(self, cursor) -> dict[str, Any]:
         started = time.perf_counter()
@@ -394,19 +418,12 @@ class SettingsService:
                 os.path.join(package_settings_dir, *parts),
             )
 
-        overrides = _read_json_dict(os.path.join(user_dir, "user_overrides.json"), warnings=warnings)
+        overrides_path = self._legacy_user_overrides_path(app_paths)
+        overrides = _read_optional_json_dict(overrides_path, warnings=warnings)
 
         counts: dict[str, int] = {}
-        seed_sources = {
-            "groups": "groups.seed.json",
-            "forms": "forms.seed.json",
-            "admin_types": "admin_types.seed.json",
-            "diluents": "diluents.seed.json",
-            "drugs": "drugs.seed.json",
-            "templates": "templates.seed.json",
-        }
         merged_by_name: dict[str, dict[str, tuple[dict[str, Any], int, str]]] = {}
-        for name, file_name in seed_sources.items():
+        for name, file_name in PRESCRIPTION_SEED_SOURCES.items():
             seed = _read_json_dict(os.path.join(seed_dir, file_name), warnings=warnings)
             merged_by_name[name] = self._merged_legacy_catalog(seed, overrides.get(name), source_name=file_name)
 
@@ -465,14 +482,192 @@ class SettingsService:
         report = {
             "source_seed_dir": seed_dir,
             "source_user_dir": user_dir,
+            "source_user_overrides_path": overrides_path,
             "counts": counts,
             "warnings": warnings,
             "imported_at": now_text(),
             "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
         }
+        if overrides:
+            self._set_meta(cursor, LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY, _hash_value(overrides))
         record_metric("settings_import_ms", report["elapsed_ms"], force_flush=True)
         logger.info("Settings legacy import report: %s", report)
         return report
+
+    @staticmethod
+    def _legacy_user_overrides_path(app_paths: Any) -> str:
+        candidates = [
+            os.path.join(getattr(app_paths, "USER_DICT_DIR", ""), "user_overrides.json"),
+            os.path.join(getattr(app_paths, "SEED_DIR", ""), "user_overrides.json"),
+        ]
+        baza_dir = str(getattr(app_paths, "BAZA_DIR", "") or "")
+        if baza_dir:
+            candidates.append(os.path.join(baza_dir, "rem_card", "data", "dictionaries", "user_overrides.json"))
+        for candidate in candidates:
+            if candidate and os.path.exists(candidate):
+                return candidate
+        return ""
+
+    def _ensure_legacy_prescription_overrides_imported(self) -> None:
+        warnings: list[str] = []
+        from rem_card.app import paths as app_paths
+
+        overrides_path = self._legacy_user_overrides_path(app_paths)
+        overrides = _read_optional_json_dict(overrides_path, warnings=warnings)
+        if not overrides:
+            return
+        overrides_hash = _hash_value(overrides)
+        with self.db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM settings_meta WHERE key = ?",
+                (LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY,),
+            ).fetchone()
+            if row and str(row["value"]) == overrides_hash:
+                return
+
+        with self.db.transaction("settings_legacy_prescription_overrides") as cursor:
+            changed = self._apply_legacy_prescription_overrides(
+                cursor,
+                overrides,
+                seed_dir=app_paths.SEED_DIR,
+                warnings=warnings,
+            )
+            self._set_meta(cursor, LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY, overrides_hash)
+            self._set_meta(cursor, "last_legacy_prescription_overrides_path", overrides_path)
+            if changed["drug_catalog"]:
+                self._bump_catalog_version(
+                    cursor,
+                    DRUG_CATALOG_KEY,
+                    entity_type="drug_catalog",
+                    entity_id=None,
+                    operation="legacy_override_import",
+                    changed_by_role="system",
+                    before=None,
+                    after={
+                        "source": overrides_path,
+                        "changed_rows": changed["drug_catalog"],
+                        "warnings": warnings,
+                    },
+                )
+            if changed["order_templates"]:
+                self._bump_catalog_version(
+                    cursor,
+                    ORDER_TEMPLATES_KEY,
+                    entity_type="order_templates",
+                    entity_id=None,
+                    operation="legacy_override_import",
+                    changed_by_role="system",
+                    before=None,
+                    after={
+                        "source": overrides_path,
+                        "changed_rows": changed["order_templates"],
+                        "warnings": warnings,
+                    },
+                )
+
+    def _apply_legacy_prescription_overrides(
+        self,
+        cursor,
+        overrides: dict[str, Any],
+        *,
+        seed_dir: str,
+        warnings: list[str],
+    ) -> dict[str, int]:
+        changed = {"drug_catalog": 0, "order_templates": 0}
+        merged_by_name: dict[str, dict[str, tuple[dict[str, Any], int, str]]] = {}
+        for name, file_name in PRESCRIPTION_SEED_SOURCES.items():
+            seed = _read_json_dict(os.path.join(seed_dir, file_name), warnings=warnings)
+            merged_by_name[name] = self._merged_legacy_catalog(seed, overrides.get(name), source_name=file_name)
+
+        changed["drug_catalog"] += self._apply_legacy_override_items(
+            cursor,
+            "drug_groups",
+            "code",
+            merged_by_name["groups"],
+            self._upsert_group,
+        )
+        changed["drug_catalog"] += self._apply_legacy_override_items(
+            cursor,
+            "dosage_forms",
+            "code",
+            merged_by_name["forms"],
+            self._upsert_form,
+        )
+        changed["drug_catalog"] += self._apply_legacy_override_items(
+            cursor,
+            "administration_routes",
+            "code",
+            merged_by_name["admin_types"],
+            self._upsert_route,
+        )
+        changed["drug_catalog"] += self._apply_legacy_override_items(
+            cursor,
+            "solvents",
+            "code",
+            merged_by_name["diluents"],
+            self._upsert_solvent,
+        )
+        changed["drug_catalog"] += self._apply_legacy_override_items(
+            cursor,
+            "drugs",
+            "code",
+            merged_by_name["drugs"],
+            self._upsert_drug,
+        )
+
+        template_order = list(overrides.get("template_order")) if isinstance(overrides.get("template_order"), list) else []
+        order_index = {str(key): idx + 1 for idx, key in enumerate(template_order)}
+        ordered_templates: dict[str, tuple[dict[str, Any], int, str]] = {}
+        for fallback_sort, (code, (payload, enabled, source)) in enumerate(merged_by_name["templates"].items(), start=1):
+            if source != "override":
+                continue
+            sort_order = order_index.get(str(code), len(order_index) + fallback_sort)
+            ordered_templates[code] = (payload, enabled, source)
+            payload["_legacy_sort_order"] = sort_order
+        changed["order_templates"] += self._apply_legacy_override_items(
+            cursor,
+            "order_templates",
+            "template_key",
+            ordered_templates,
+            self._upsert_order_template,
+            sort_order_from_payload="_legacy_sort_order",
+        )
+        return changed
+
+    def _apply_legacy_override_items(
+        self,
+        cursor,
+        table: str,
+        key_column: str,
+        items: dict[str, tuple[dict[str, Any], int, str]],
+        upsert,
+        *,
+        sort_order_from_payload: str | None = None,
+    ) -> int:
+        changed = 0
+        for fallback_sort_order, (code, (payload, enabled, source)) in enumerate(items.items(), start=1):
+            if source != "override":
+                continue
+            row = self._select_by_key(cursor, table, key_column, code)
+            if row and str(row.get("source") or "") == "manual":
+                continue
+            sort_order = int(payload.pop(sort_order_from_payload, fallback_sort_order)) if sort_order_from_payload else fallback_sort_order
+            payload_json = _stable_json(payload)
+            if row:
+                row_payload = str(row.get("payload_json") or "")
+                row_enabled = int(row.get("enabled") if row.get("enabled") is not None else 1)
+                row_sort_order = int(row.get("sort_order") if row.get("sort_order") is not None else 0)
+                row_source = str(row.get("source") or "")
+                if (
+                    row_payload == payload_json
+                    and row_enabled == int(enabled)
+                    and row_sort_order == int(sort_order)
+                    and row_source == "override"
+                ):
+                    continue
+            upsert(cursor, code, payload, enabled=enabled, sort_order=sort_order, source="override", bump=False)
+            changed += 1
+        return changed
 
     @staticmethod
     def _set_meta(cursor, key: str, value: str) -> None:

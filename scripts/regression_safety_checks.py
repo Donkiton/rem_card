@@ -12095,6 +12095,81 @@ def _check_edited_drug_catalog_preserved_after_restart(temp_root: str) -> tuple[
     return True, f"preserved {expected_key}"
 
 
+def _check_compiled_bundled_overrides_repair_seed_only_settings_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import paths as app_paths
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    source_dir = PROJECT_ROOT / "data" / "dictionaries"
+    source_overrides = json.loads((source_dir / "user_overrides.json").read_text(encoding="utf-8"))
+    source_seed_drugs = json.loads((source_dir / "drugs.seed.json").read_text(encoding="utf-8"))
+    edited_drugs = source_overrides.get("drugs") or {}
+    expected_key = ""
+    expected_payload: dict[str, object] = {}
+    for key, payload in edited_drugs.items():
+        if not isinstance(payload, dict) or payload.get("_deleted"):
+            continue
+        if source_seed_drugs.get(key) != payload:
+            expected_key = str(key)
+            expected_payload = dict(payload)
+            break
+    if not expected_key:
+        return False, "no drug override differs from seed"
+
+    compiled_root = Path(temp_root) / "compiled" / "Prog"
+    bundled_dict_dir = compiled_root / "_internal" / "rem_card" / "data" / "dictionaries"
+    external_dict_dir = compiled_root / "rem_card" / "data" / "dictionaries"
+    bundled_dict_dir.mkdir(parents=True, exist_ok=True)
+    external_dict_dir.mkdir(parents=True, exist_ok=True)
+    for source_path in source_dir.glob("*.json"):
+        if source_path.name == "user_overrides.json":
+            continue
+        shutil.copy2(source_path, bundled_dict_dir / source_path.name)
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    original_seed_dir = app_paths.SEED_DIR
+    original_user_dict_dir = app_paths.USER_DICT_DIR
+    original_baza_dir = app_paths.BAZA_DIR
+    original_get_resources_dir = app_paths.get_resources_dir
+    original_get_executable_dir = app_paths.get_executable_dir
+    try:
+        app_paths.SEED_DIR = str(bundled_dict_dir)
+        app_paths.USER_DICT_DIR = str(external_dict_dir)
+        app_paths.BAZA_DIR = baza_dir
+        app_paths.get_resources_dir = lambda: str(compiled_root / "_internal")
+        app_paths.get_executable_dir = lambda: str(compiled_root)
+
+        seed_only = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+        seed_only.ensure_ready()
+        seed_payload = seed_only.load_prescription_datasets()["drugs"].get(expected_key)
+        if seed_payload == expected_payload:
+            return False, "test setup failed: seed-only import already used user_overrides"
+
+        shutil.copy2(source_dir / "user_overrides.json", bundled_dict_dir / "user_overrides.json")
+        repaired = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+        repaired.ensure_ready()
+        repaired_payload = repaired.load_prescription_datasets()["drugs"].get(expected_key)
+        if repaired_payload != expected_payload:
+            return False, f"compiled bundled user_overrides were not applied for {expected_key}"
+
+        with repaired.db.read_connection() as conn:
+            row = conn.execute("SELECT source FROM drugs WHERE code = ?", (expected_key,)).fetchone()
+            meta = conn.execute(
+                "SELECT value FROM settings_meta WHERE key = 'prescription_legacy_override_import_hash'"
+            ).fetchone()
+        if not row or str(row["source"]) != "override":
+            return False, f"repaired drug source should be override, got {dict(row) if row else None}"
+        if not meta or not str(meta["value"]):
+            return False, "legacy override import hash meta was not stored"
+        return True, f"repaired {expected_key}"
+    finally:
+        app_paths.SEED_DIR = original_seed_dir
+        app_paths.USER_DICT_DIR = original_user_dict_dir
+        app_paths.BAZA_DIR = original_baza_dir
+        app_paths.get_resources_dir = original_get_resources_dir
+        app_paths.get_executable_dir = original_get_executable_dir
+
+
 def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.diet_service import DietTemplateService
     from rem_card.services.doctor_list_service import DoctorListStore
@@ -12528,6 +12603,7 @@ def main():
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
         ("edited_drug_catalog_preserved_after_restart", _check_edited_drug_catalog_preserved_after_restart),
+        ("compiled_bundled_overrides_repair_seed_only_settings_db", _check_compiled_bundled_overrides_repair_seed_only_settings_db),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
         ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),
         ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),
