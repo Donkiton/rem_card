@@ -20,6 +20,7 @@ class AdminMainWidget(QWidget):
         self.forms_widget = None
         self.templates_widget = None
         self.diet_templates_widget = None
+        self.lab_analysis_catalog_widget = None
         self.doctor_list_dialog = None
         self.admin_types_widget = None
         self.print_widget = None
@@ -53,6 +54,7 @@ class AdminMainWidget(QWidget):
         self.btn_admin_types = QPushButton("Типы введения")
         self.btn_diluents = QPushButton("Растворители")
         self.btn_templates = QPushButton("Шаблоны назначений")
+        self.btn_lab_analysis_catalog = QPushButton("Справочник анализов")
         self.btn_diet_templates = QPushButton("Шаблоны питания")
         self.btn_doctor_list = QPushButton("Список врачей")
         self.btn_print = QPushButton("Печать / Отчеты")
@@ -78,6 +80,7 @@ class AdminMainWidget(QWidget):
             self.btn_doctor_list,
         ]
         if self.role != "nurse":
+            template_buttons.insert(1, self.btn_lab_analysis_catalog)
             template_buttons.append(self.btn_diet_templates)
 
         self.btn_style.setVisible(False)
@@ -124,6 +127,7 @@ class AdminMainWidget(QWidget):
         self.btn_admin_types.clicked.connect(self.open_admin_types)
         self.btn_diluents.clicked.connect(self.open_diluents)
         self.btn_templates.clicked.connect(self.open_templates)
+        self.btn_lab_analysis_catalog.clicked.connect(self.open_lab_analysis_catalog)
         self.btn_doctor_list.clicked.connect(self.open_doctor_list)
         self.btn_diet_templates.clicked.connect(self.open_diet_templates)
         self.btn_print.clicked.connect(self.open_print)
@@ -197,6 +201,18 @@ class AdminMainWidget(QWidget):
             self.diet_templates_widget.set_service(self.service)
         return self.diet_templates_widget
 
+    def _ensure_lab_analysis_catalog_widget(self):
+        if self.lab_analysis_catalog_widget is None:
+            from .lab_analysis_catalog_widget import LabAnalysisCatalogWidget
+
+            self.lab_analysis_catalog_widget = self._connect_back(
+                LabAnalysisCatalogWidget(self.service, role=self.role)
+            )
+            self.stack.addWidget(self.lab_analysis_catalog_widget)
+        elif hasattr(self.lab_analysis_catalog_widget, "set_service"):
+            self.lab_analysis_catalog_widget.set_service(self.service)
+        return self.lab_analysis_catalog_widget
+
     def _ensure_print_dialog(self):
         if self.print_dialog is None:
             from .print_settings_widget import PrintSettingsDialog
@@ -223,6 +239,9 @@ class AdminMainWidget(QWidget):
 
     def open_templates(self):
         self._show_page(self._ensure_templates_widget())
+
+    def open_lab_analysis_catalog(self):
+        self._show_page(self._ensure_lab_analysis_catalog_widget())
 
     def open_doctor_list(self):
         if self.doctor_list_dialog is None:
@@ -269,6 +288,8 @@ class AdminMainWidget(QWidget):
         self._pending_print_context = (service, admission_id, date)
         if self.diet_templates_widget is not None:
             self.diet_templates_widget.set_service(service)
+        if self.lab_analysis_catalog_widget is not None:
+            self.lab_analysis_catalog_widget.set_service(service)
         if self.print_widget is not None:
             self.print_widget.set_context(service, admission_id, date)
         if self.print_dialog is not None:

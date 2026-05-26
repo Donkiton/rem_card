@@ -108,6 +108,7 @@ class RemCardService(QObject):
 
         from rem_card.data.dao.procedures_dao import ProceduresDAO
         from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
+        from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
         from rem_card.services.lab_orders_service import LabOrdersService
         from rem_card.services.procedures_print_service import ProceduresPrintService
         from rem_card.services.procedures_service import ProceduresService
@@ -116,7 +117,12 @@ class RemCardService(QObject):
         self._procedures = ProceduresService(self.procedures_dao, data_service=data_service)
         self._procedures_print = ProceduresPrintService(self.procedures_dao)
         self.lab_orders_dao = LabOrdersDAO(self.orders_dao.db)
-        self._lab_orders = LabOrdersService(self.lab_orders_dao, data_service=data_service)
+        self._lab_analysis_catalog = LabAnalysisCatalogService()
+        self._lab_orders = LabOrdersService(
+            self.lab_orders_dao,
+            data_service=data_service,
+            catalog_service=self._lab_analysis_catalog,
+        )
         self._connect_cache_invalidation()
 
     def _connect_cache_invalidation(self):
@@ -209,7 +215,12 @@ class RemCardService(QObject):
                                 lo.card_day_id IS NULL
                                 AND (
                                     (lo.scheduled_at IS NOT NULL AND DATETIME(lo.scheduled_at) >= DATETIME(?) AND DATETIME(lo.scheduled_at) < DATETIME(?))
-                                    OR (lo.created_at IS NOT NULL AND DATETIME(lo.created_at) >= DATETIME(?) AND DATETIME(lo.created_at) < DATETIME(?))
+                                    OR (
+                                        lo.scheduled_at IS NULL
+                                        AND lo.created_at IS NOT NULL
+                                        AND DATETIME(lo.created_at) >= DATETIME(?)
+                                        AND DATETIME(lo.created_at) < DATETIME(?)
+                                    )
                                 )
                             )
                           )
@@ -1879,6 +1890,49 @@ class RemCardService(QObject):
     # --- Lab Orders ---
     def create_lab_order(self, **kwargs):
         return self._lab_orders.create_lab_order(**kwargs)
+
+    def create_lab_orders(
+        self,
+        admission_id: int,
+        *,
+        orders: Sequence[dict[str, Any]],
+        shift_date: Optional[datetime] = None,
+        card_day_id: Optional[str] = None,
+        created_by_role: str = "doctor",
+        created_by_user: Optional[str] = None,
+    ):
+        effective_date = shift_date or datetime.now()
+        if card_day_id is None:
+            start_dt, _ = self.get_day_period(effective_date)
+            card_day_id = self._lab_orders.card_day_id_from_shift_start(start_dt)
+        return self._lab_orders.create_lab_orders(
+            admission_id=int(admission_id),
+            card_day_id=card_day_id,
+            orders=orders,
+            created_by_role=created_by_role,
+            created_by_user=created_by_user,
+        )
+
+    def list_lab_analysis_templates(self):
+        return self._lab_analysis_catalog.list_templates()
+
+    def create_lab_analysis_template(self, **kwargs):
+        return self._lab_analysis_catalog.create_template(**kwargs)
+
+    def update_lab_analysis_template(self, template_id: int, **kwargs):
+        return self._lab_analysis_catalog.update_template(int(template_id), **kwargs)
+
+    def delete_lab_analysis_template(self, template_id: int, **kwargs):
+        return self._lab_analysis_catalog.delete_template(int(template_id), **kwargs)
+
+    def reorder_lab_analysis_templates(self, ordered_template_ids: list[int]):
+        return self._lab_analysis_catalog.reorder_templates(ordered_template_ids)
+
+    def update_lab_order_details(self, order_id: int, **kwargs):
+        return self._lab_orders.update_lab_order_details(int(order_id), **kwargs)
+
+    def delete_lab_orders(self, admission_id: int, *, order_ids: Sequence[int]):
+        return self._lab_orders.delete_lab_orders(int(admission_id), order_ids=order_ids)
 
     def mark_lab_order_completed(self, order_id: int, **kwargs):
         return self._lab_orders.mark_completed(int(order_id), **kwargs)

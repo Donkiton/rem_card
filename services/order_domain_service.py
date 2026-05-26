@@ -959,6 +959,7 @@ class OrderDomainService:
                    o.type as order_type
             FROM administrations a
             JOIN orders o ON a.order_id = o.id
+            JOIN admissions adm ON adm.id = o.admission_id
             WHERE o.admission_id = ?
               AND a.planned_time >= ? AND a.planned_time < ?
               AND a.is_committed = 1
@@ -970,6 +971,20 @@ class OrderDomainService:
               )
               AND a.cell_role IN ('start', 'single')
               AND COALESCE(a.status, '') = 'planned'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM patient_status_events pse_out
+                  WHERE pse_out.admission_id = adm.id
+                    AND pse_out.end_time IS NULL
+                    AND pse_out.status IN ('TRANSFERRED', 'DEAD')
+              )
+              AND TRIM(COALESCE(adm.outcome, '')) NOT IN (
+                  'переведен', 'переведён', 'умер',
+                  'Переведен', 'Переведён', 'Умер',
+                  'transferred', 'TRANSFERRED', 'dead', 'DEAD'
+              )
+              AND NULLIF(TRIM(COALESCE(adm.transfer_datetime, '')), '') IS NULL
+              AND NULLIF(TRIM(COALESCE(adm.death_datetime, '')), '') IS NULL
               /* Убрано AND COALESCE(o.status, '') != 'deleted', чтобы сектора 1а/5
                  не реагировали на черновики удаления до нажатия Сохранить */
         """
@@ -1054,8 +1069,6 @@ class OrderDomainService:
             JOIN admissions adm ON adm.id = o.admission_id
             JOIN patients p ON p.id = adm.patient_id
             JOIN beds b ON b.current_admission_id = adm.id AND b.status = 'OCCUPIED'
-            LEFT JOIN patient_status_events pse
-                ON pse.admission_id = adm.id AND pse.end_time IS NULL
             WHERE a.planned_time >= ? AND a.planned_time < ?
               AND a.is_committed = 1
               AND a.id IN (
@@ -1068,7 +1081,20 @@ class OrderDomainService:
               )
               AND a.cell_role IN ('start', 'single')
               AND COALESCE(a.status, '') = 'planned'
-              AND COALESCE(pse.status, 'ACTIVE') NOT IN ('TRANSFERRED', 'DEAD')
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM patient_status_events pse_out
+                  WHERE pse_out.admission_id = adm.id
+                    AND pse_out.end_time IS NULL
+                    AND pse_out.status IN ('TRANSFERRED', 'DEAD')
+              )
+              AND TRIM(COALESCE(adm.outcome, '')) NOT IN (
+                  'переведен', 'переведён', 'умер',
+                  'Переведен', 'Переведён', 'Умер',
+                  'transferred', 'TRANSFERRED', 'dead', 'DEAD'
+              )
+              AND NULLIF(TRIM(COALESCE(adm.transfer_datetime, '')), '') IS NULL
+              AND NULLIF(TRIM(COALESCE(adm.death_datetime, '')), '') IS NULL
               /* Mirrors sector 1a: committed administrations stay visible while
                  an unsaved doctor delete draft is pending on the order row. */
             ORDER BY CAST(b.bed_number AS INTEGER) ASC, b.bed_number ASC, a.planned_time ASC, a.id ASC

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QSettings, QTimer, Qt, QSize
-from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -22,8 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from rem_card.ui.rem_card_sectors.lab_analysis_dialog import AddLabAnalysisDialog
+from rem_card.ui.rem_card_sectors.lab_analysis_dialog import AddLabAnalysisDialog, EditLabOrderDialog
 from rem_card.ui.shared.base_sector import BaseSectorWidget
+from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
 MATERIAL_OPTIONS = {
@@ -43,7 +45,7 @@ MATERIAL_OPTIONS = {
         "label": "Кровь артериальная",
         "color": "#b74242",
         "accent": "#f0a3a3",
-        "shape": "drop",
+        "shape": "balans_blood",
     },
     "liquor": {
         "label": "Ликвор",
@@ -58,6 +60,8 @@ MATERIAL_OPTIONS = {
         "shape": "vial",
     },
 }
+LAB_ORDER_ROW_ROLE = Qt.UserRole + 100
+LAB_ORDER_ID_ROLE = Qt.UserRole + 101
 
 
 class LabSummaryCard(QFrame):
@@ -130,6 +134,8 @@ class LabStatusBadge(QFrame):
 
 
 class MaterialIcon(QWidget):
+    _BALANS_BLOOD_PIXMAP: QPixmap | None = None
+
     def __init__(self, material_key: str, parent=None):
         super().__init__(parent)
         self.material_key = material_key if material_key in MATERIAL_OPTIONS else "other"
@@ -143,13 +149,22 @@ class MaterialIcon(QWidget):
         option = MATERIAL_OPTIONS.get(self.material_key, MATERIAL_OPTIONS["other"])
         color = QColor(str(option["color"]))
         accent = QColor(str(option["accent"]))
+        shape = str(option.get("shape") or "vial")
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
+        if shape == "balans_blood":
+            pixmap = self._balans_blood_pixmap()
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(18, 18, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                x = int((self.width() - scaled.width()) / 2)
+                y = int((self.height() - scaled.height()) / 2)
+                painter.drawPixmap(x, y, scaled)
+                return
+
         painter.setPen(QPen(color.darker(115), 1.2))
         painter.setBrush(accent)
 
-        shape = str(option.get("shape") or "vial")
         if shape == "cup":
             painter.drawRoundedRect(5, 5, 12, 14, 3, 3)
             painter.setBrush(color)
@@ -178,13 +193,24 @@ class MaterialIcon(QWidget):
             painter.setBrush(Qt.NoBrush)
             painter.drawLine(8, 4, 14, 4)
 
+    @classmethod
+    def _balans_blood_pixmap(cls) -> QPixmap:
+        if cls._BALANS_BLOOD_PIXMAP is None:
+            icon_path = Path(__file__).resolve().parents[2] / "icon" / "balans_blood.png"
+            cls._BALANS_BLOOD_PIXMAP = QPixmap(str(icon_path))
+        return cls._BALANS_BLOOD_PIXMAP
+
 
 class MaterialCell(QWidget):
     def __init__(self, material: str, parent=None, row_tone: str = "even"):
         super().__init__(parent)
         self.setObjectName("lab_material_cell")
         self.setProperty("rowTone", row_tone)
-        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setProperty("selected", "false")
+        self.setAttribute(Qt.WA_StyledBackground, False)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(9, 0, 9, 0)
         layout.setSpacing(7)
@@ -198,13 +224,17 @@ class MaterialCell(QWidget):
         layout.addWidget(icon, 0, Qt.AlignVCenter)
         layout.addWidget(label, 1, Qt.AlignVCenter)
 
+    def paintEvent(self, event):
+        event.ignore()
+
 
 class SectorAnal(BaseSectorWidget):
     """Врачебный сектор назначений лабораторных анализов за сутки карты."""
 
-    HEADER_SETTINGS_KEY = "labs/doctor_orders_header_state"
+    HEADER_SETTINGS_KEY = "labs/doctor_orders_header_state_v2"
 
     HEADERS = [
+        "",
         "Время назначения",
         "Анализ",
         "Материал",
@@ -212,8 +242,10 @@ class SectorAnal(BaseSectorWidget):
         "Назначено на",
         "Выполнено",
     ]
-    MIN_COLUMN_WIDTHS = (158, 190, 150, 112, 126, 126)
-    DEFAULT_COLUMN_WIDTHS = (166, 300, 205, 136, 142, 142)
+    MIN_COLUMN_WIDTHS = (44, 158, 190, 150, 112, 126, 126)
+    DEFAULT_COLUMN_WIDTHS = (44, 166, 300, 205, 136, 142, 142)
+    DEFAULT_SORT_COLUMN = 5
+    DEFAULT_SORT_ORDER = Qt.AscendingOrder
 
     def __init__(self, parent=None):
         super().__init__("Анализы", parent)
@@ -224,8 +256,11 @@ class SectorAnal(BaseSectorWidget):
         self.admission_id = None
         self.card_date = None
         self._orders: list[Any] = []
+        self._checked_order_ids: set[int] = set()
         self._last_content_hash: str | None = None
         self._status_filter = "all"
+        self._rendering_table = False
+        self._delete_pending = False
         self._restoring_header = False
         self._constraining_header = False
         self._save_header_timer = QTimer(self)
@@ -279,6 +314,7 @@ class SectorAnal(BaseSectorWidget):
                 background-color: #ffffff;
             }
             QToolButton#lab_filter_button,
+            QPushButton#lab_delete_button,
             QPushButton#lab_assign_button {
                 background: #eef3f8;
                 color: #172033;
@@ -289,15 +325,31 @@ class SectorAnal(BaseSectorWidget):
                 font-weight: bold;
             }
             QToolButton#lab_filter_button:hover,
+            QPushButton#lab_delete_button:hover,
             QPushButton#lab_assign_button:hover {
                 background: #e2ebf5;
                 border-color: #7aa6d8;
             }
             QToolButton#lab_filter_button:pressed,
+            QPushButton#lab_delete_button:pressed,
             QPushButton#lab_assign_button:pressed {
                 background: #d5e2ef;
                 padding-top: 7px;
                 padding-bottom: 5px;
+            }
+            QPushButton#lab_delete_button {
+                background: #f6eeee;
+                border-color: #d9b8b8;
+                color: #744646;
+            }
+            QPushButton#lab_delete_button:hover {
+                background: #f1e2e2;
+                border-color: #c99191;
+            }
+            QPushButton#lab_delete_button:disabled {
+                background: #eef2f6;
+                border-color: #d4dde6;
+                color: #9aa6b2;
             }
             QFrame#lab_summary_card {
                 border-radius: 7px;
@@ -319,6 +371,9 @@ class SectorAnal(BaseSectorWidget):
             QLabel#lab_summary_value {
                 font-size: 12pt;
                 font-weight: bold;
+            }
+            QLabel#lab_summary_value {
+                font-size: 16pt;
             }
             QLabel#lab_summary_title[tone="assigned"],
             QLabel#lab_summary_value[tone="assigned"] {
@@ -364,19 +419,6 @@ class SectorAnal(BaseSectorWidget):
                 border-bottom: 1px solid #cbd6e2;
                 padding: 7px 8px;
                 font-weight: bold;
-            }
-            QWidget#lab_material_cell,
-            QWidget#lab_embedded_cell {
-                border-right: 1px solid #d8e1ea;
-                border-bottom: 1px solid #e8eef4;
-            }
-            QWidget#lab_material_cell[rowTone="even"],
-            QWidget#lab_embedded_cell[rowTone="even"] {
-                background-color: #ffffff;
-            }
-            QWidget#lab_material_cell[rowTone="odd"],
-            QWidget#lab_embedded_cell[rowTone="odd"] {
-                background-color: #f4f8fc;
             }
             QFrame#lab_status_badge {
                 border-radius: 5px;
@@ -439,6 +481,12 @@ class SectorAnal(BaseSectorWidget):
         self.filter_button.setMenu(self._build_filter_menu())
         self._update_filter_button_text()
 
+        self.delete_button = QPushButton("Удалить отмеченное")
+        self.delete_button.setObjectName("lab_delete_button")
+        self.delete_button.setCursor(Qt.PointingHandCursor)
+        self.delete_button.setEnabled(False)
+        self.delete_button.clicked.connect(self._delete_checked_lab_orders)
+
         self.assign_button = QPushButton("Назначить анализы")
         self.assign_button.setObjectName("lab_assign_button")
         self.assign_button.setCursor(Qt.PointingHandCursor)
@@ -446,6 +494,7 @@ class SectorAnal(BaseSectorWidget):
 
         controls.addWidget(self.search_input, 1)
         controls.addWidget(self.filter_button, 0)
+        controls.addWidget(self.delete_button, 0)
         controls.addWidget(self.assign_button, 0)
         body_layout.addLayout(controls)
 
@@ -473,6 +522,9 @@ class SectorAnal(BaseSectorWidget):
         self.table.setSortingEnabled(True)
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._configure_table_header()
+        self.table.itemSelectionChanged.connect(self._apply_visual_row_tones)
+        self.table.itemChanged.connect(self._on_table_item_changed)
+        self.table.cellDoubleClicked.connect(self._open_edit_dialog_for_table_row)
         body_layout.addWidget(self.table, 1)
 
         self.set_content(main_frame)
@@ -495,10 +547,11 @@ class SectorAnal(BaseSectorWidget):
         header.setStretchLastSection(False)
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
-        header.setSortIndicator(0, Qt.DescendingOrder)
+        header.setSortIndicator(self.DEFAULT_SORT_COLUMN, self.DEFAULT_SORT_ORDER)
         header.setMinimumSectionSize(min(self.MIN_COLUMN_WIDTHS))
         for column in range(len(self.HEADERS)):
-            header.setSectionResizeMode(column, QHeaderView.Interactive)
+            mode = QHeaderView.Fixed if column == 0 else QHeaderView.Interactive
+            header.setSectionResizeMode(column, mode)
         header.sectionResized.connect(self._on_section_resized)
         self._apply_default_widths()
         self._restore_header_state()
@@ -514,6 +567,7 @@ class SectorAnal(BaseSectorWidget):
         try:
             self.table.horizontalHeader().restoreState(value)
             self.table.horizontalHeader().setSortIndicatorShown(True)
+            self.table.horizontalHeader().setSortIndicator(self.DEFAULT_SORT_COLUMN, self.DEFAULT_SORT_ORDER)
         finally:
             self._restoring_header = False
         QTimer.singleShot(0, self._fit_columns_to_viewport)
@@ -634,8 +688,15 @@ class SectorAnal(BaseSectorWidget):
         if content_hash is not None:
             self._last_content_hash = content_hash
         self._orders = list(rows or [])
+        visible_ids = {
+            order_id
+            for order_id in (_optional_int(_row_value(row, "id")) for row in self._orders)
+            if order_id is not None
+        }
+        self._checked_order_ids.intersection_update(visible_ids)
         self._update_summary()
         self._apply_filter()
+        self._update_delete_button_state()
 
     def refresh(self):
         self._resolve_runtime_context()
@@ -678,8 +739,200 @@ class SectorAnal(BaseSectorWidget):
         return {"rows": [], "content_hash": None}
 
     def _open_add_dialog(self):
-        dialog = AddLabAnalysisDialog(self)
-        dialog.exec()
+        self._resolve_runtime_context()
+        if not self.remcard_service or not self.admission_id or self.card_date is None:
+            CustomMessageBox.warning(self, "Анализы", "Сначала выберите пациента и текущую карту.")
+            return
+        dialog = AddLabAnalysisDialog(
+            remcard_service=self.remcard_service,
+            admission_id=int(self.admission_id),
+            card_date=self.card_date,
+            parent=self,
+        )
+        if dialog.exec():
+            self._last_content_hash = None
+            self.refresh()
+
+    def _open_edit_dialog_for_table_row(self, row_index: int, column_index: int):
+        if column_index == 0:
+            return
+        row_payload = self._row_payload_from_table_row(row_index)
+        if not row_payload:
+            return
+        order_id = _row_value(row_payload, "id")
+        if not order_id:
+            return
+        self._resolve_runtime_context()
+        if not self.remcard_service or not hasattr(self.remcard_service, "update_lab_order_details"):
+            CustomMessageBox.warning(self, "Анализы", "Редактирование анализа сейчас недоступно.")
+            return
+
+        dialog = EditLabOrderDialog(row_payload, self)
+        if not dialog.exec():
+            return
+        data = dialog.result_data()
+        if not data:
+            return
+        self._save_edited_lab_order(row_payload, data)
+
+    def _row_payload_from_table_row(self, row_index: int):
+        if row_index < 0 or row_index >= self.table.rowCount():
+            return None
+        for column in range(self.table.columnCount()):
+            item = self.table.item(row_index, column)
+            if item is not None:
+                payload = item.data(LAB_ORDER_ROW_ROLE)
+                if payload:
+                    return payload
+        return None
+
+    def _save_edited_lab_order(self, row_payload: Any, data: dict[str, Any]):
+        order_id = _row_value(row_payload, "id")
+        if not order_id:
+            return
+        try:
+            scheduled_at = self._scheduled_datetime_from_time(str(data.get("time") or ""))
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Анализы", f"Не удалось определить время анализа: {exc}")
+            return
+        expected_revision = _optional_int(_row_value(row_payload, "revision"))
+        self.table.setEnabled(False)
+
+        def operation():
+            return self.remcard_service.update_lab_order_details(
+                int(order_id),
+                material=data.get("material"),
+                scheduled_at=scheduled_at,
+                comment=str(data.get("comment") or ""),
+                expected_revision=expected_revision,
+            )
+
+        def on_success(_result=None):
+            self.table.setEnabled(True)
+            self._last_content_hash = None
+            self.refresh()
+
+        def on_error(exc):
+            self.table.setEnabled(True)
+            self._last_content_hash = None
+            self.refresh()
+            CustomMessageBox.warning(self, "Ошибка сохранения", f"Не удалось изменить анализ: {exc}")
+
+        if hasattr(self.remcard_service, "enqueue_write"):
+            self.remcard_service.enqueue_write(
+                description=f"lab_order_update_ui:{int(order_id)}",
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+
+        try:
+            result = operation()
+            on_success(result)
+        except Exception as exc:
+            on_error(exc)
+
+    def _on_table_item_changed(self, item: QTableWidgetItem):
+        if self._rendering_table or item is None or item.column() != 0:
+            return
+        order_id = _optional_int(item.data(LAB_ORDER_ID_ROLE))
+        if order_id is None:
+            return
+        if item.checkState() == Qt.Checked:
+            self._checked_order_ids.add(order_id)
+            item.setData(Qt.UserRole, 1)
+        else:
+            self._checked_order_ids.discard(order_id)
+            item.setData(Qt.UserRole, 0)
+        self._update_delete_button_state()
+
+    def _checked_lab_order_ids(self) -> list[int]:
+        current_ids = {
+            order_id
+            for order_id in (_optional_int(_row_value(row, "id")) for row in self._orders)
+            if order_id is not None
+        }
+        self._checked_order_ids.intersection_update(current_ids)
+        return sorted(self._checked_order_ids)
+
+    def _update_delete_button_state(self):
+        if hasattr(self, "delete_button"):
+            self.delete_button.setEnabled(bool(self._checked_lab_order_ids()) and not self._delete_pending)
+
+    def _set_delete_pending(self, pending: bool):
+        self._delete_pending = bool(pending)
+        self.table.setEnabled(not pending)
+        self.search_input.setEnabled(not pending)
+        self.filter_button.setEnabled(not pending)
+        self.assign_button.setEnabled(not pending)
+        self._update_delete_button_state()
+
+    def _delete_checked_lab_orders(self):
+        self._resolve_runtime_context()
+        order_ids = self._checked_lab_order_ids()
+        if not order_ids:
+            self._update_delete_button_state()
+            return
+        if not self.remcard_service or not self.admission_id or not hasattr(self.remcard_service, "delete_lab_orders"):
+            CustomMessageBox.warning(self, "Анализы", "Удаление анализов сейчас недоступно.")
+            return
+
+        self._set_delete_pending(True)
+
+        def operation():
+            return self.remcard_service.delete_lab_orders(
+                int(self.admission_id),
+                order_ids=order_ids,
+            )
+
+        def on_success(_result=None):
+            self._checked_order_ids.difference_update(order_ids)
+            self._set_delete_pending(False)
+            self._last_content_hash = None
+            self.refresh()
+
+        def on_error(exc):
+            self._set_delete_pending(False)
+            self._last_content_hash = None
+            self.refresh()
+            CustomMessageBox.warning(self, "Ошибка удаления", f"Не удалось удалить отмеченные анализы: {exc}")
+
+        if hasattr(self.remcard_service, "enqueue_write"):
+            self.remcard_service.enqueue_write(
+                description=f"lab_orders_delete_ui:{int(self.admission_id)}",
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+
+        try:
+            result = operation()
+            on_success(result)
+        except Exception as exc:
+            on_error(exc)
+
+    def _scheduled_datetime_from_time(self, time_text: str) -> datetime:
+        normalized_time = str(time_text or "").strip()
+        if self.remcard_service and hasattr(self.remcard_service, "resolve_datetime"):
+            return self.remcard_service.resolve_datetime(normalized_time, self._effective_card_datetime())
+        hour, minute = map(int, normalized_time.split(":"))
+        return self._effective_card_datetime().replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    def _effective_card_datetime(self) -> datetime:
+        value = self.card_date
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time(8, 0))
+        if hasattr(value, "toPython"):
+            converted = value.toPython()
+            if isinstance(converted, datetime):
+                return converted
+            if isinstance(converted, date):
+                return datetime.combine(converted, time(8, 0))
+        return datetime.now()
 
     def _resolve_runtime_context(self):
         widget = self.parentWidget()
@@ -732,6 +985,7 @@ class SectorAnal(BaseSectorWidget):
         sorting_enabled = self.table.isSortingEnabled()
         sort_column = self.table.horizontalHeader().sortIndicatorSection()
         sort_order = self.table.horizontalHeader().sortIndicatorOrder()
+        self._rendering_table = True
         self.table.setSortingEnabled(False)
         self.table.setUpdatesEnabled(False)
         try:
@@ -759,9 +1013,10 @@ class SectorAnal(BaseSectorWidget):
                 status_label = _status_label(status)
                 material_text = _material_label(material)
 
+                self._set_check_item(row_index, row, row_tone=row_tone)
                 self._set_text_item(
                     row_index,
-                    0,
+                    1,
                     _format_dt(created_at, "%H:%M"),
                     align=Qt.AlignCenter,
                     sort_value=_sort_dt(created_at),
@@ -769,48 +1024,54 @@ class SectorAnal(BaseSectorWidget):
                 )
                 self._set_text_item(
                     row_index,
-                    1,
+                    2,
                     str(analysis or "Анализ не указан"),
                     sort_value=str(analysis or "").lower(),
                     row_tone=row_tone,
                 )
                 self._set_text_item(
                     row_index,
-                    2,
+                    3,
                     material_text,
                     sort_value=material_text.lower(),
                     row_tone=row_tone,
                 )
-                self.table.setCellWidget(row_index, 2, MaterialCell(material_text, self.table, row_tone=row_tone))
+                self._hide_item_text(row_index, 3)
+                self.table.setCellWidget(row_index, 3, MaterialCell(material_text, self.table, row_tone=row_tone))
                 self._set_text_item(
                     row_index,
-                    3,
+                    4,
                     status_label,
                     align=Qt.AlignCenter,
                     sort_value=1 if status == "completed" else 0,
                     row_tone=row_tone,
                 )
+                self._hide_item_text(row_index, 4)
                 self.table.setCellWidget(
                     row_index,
-                    3,
+                    4,
                     _centered_cell(LabStatusBadge(status, self.table), self.table, row_tone=row_tone),
                 )
                 self._set_text_item(
                     row_index,
-                    4,
+                    5,
                     _format_dt(planned_at, "%H:%M"),
                     align=Qt.AlignCenter,
-                    sort_value=_sort_dt(planned_at),
+                    sort_value=_sort_shift_dt(planned_at, self._effective_card_datetime()),
                     row_tone=row_tone,
                 )
                 self._set_text_item(
                     row_index,
-                    5,
+                    6,
                     _format_dt(completed_at, "%d.%m %H:%M"),
                     align=Qt.AlignCenter,
                     sort_value=_sort_dt(completed_at),
                     row_tone=row_tone,
                 )
+                for column in range(self.table.columnCount()):
+                    item = self.table.item(row_index, column)
+                    if item is not None:
+                        item.setData(LAB_ORDER_ROW_ROLE, row)
                 self.table.setRowHeight(row_index, 44)
         finally:
             if sorting_enabled:
@@ -819,6 +1080,8 @@ class SectorAnal(BaseSectorWidget):
                     self.table.sortItems(sort_column, sort_order)
                     self._apply_visual_row_tones()
             self.table.setUpdatesEnabled(True)
+            self._rendering_table = False
+            self._update_delete_button_state()
 
     def _render_empty_row(self, message: str):
         self.table.setRowCount(1)
@@ -848,10 +1111,32 @@ class SectorAnal(BaseSectorWidget):
         item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         self.table.setItem(row, column, item)
 
+    def _set_check_item(self, row: int, payload: Any, *, row_tone: str = "even"):
+        order_id = _optional_int(_row_value(payload, "id"))
+        item = LabTableItem("")
+        item.setData(Qt.UserRole, 1 if order_id in self._checked_order_ids else 0)
+        item.setData(LAB_ORDER_ID_ROLE, order_id)
+        item.setData(LAB_ORDER_ROW_ROLE, payload)
+        item.setBackground(QColor(_row_background(row_tone)))
+        item.setTextAlignment(Qt.AlignCenter)
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
+        item.setCheckState(Qt.Checked if order_id in self._checked_order_ids else Qt.Unchecked)
+        self.table.setItem(row, 0, item)
+
+    def _hide_item_text(self, row: int, column: int):
+        item = self.table.item(row, column)
+        if item is not None:
+            item.setText("")
+
     def _apply_visual_row_tones(self):
+        selected_rows = set()
+        selection_model = self.table.selectionModel() if hasattr(self, "table") else None
+        if selection_model is not None:
+            selected_rows = {index.row() for index in selection_model.selectedRows()}
         for row in range(self.table.rowCount()):
             row_tone = "odd" if row % 2 else "even"
             row_color = QColor(_row_background(row_tone))
+            selected = row in selected_rows
             for column in range(self.table.columnCount()):
                 item = self.table.item(row, column)
                 if item is not None:
@@ -859,16 +1144,24 @@ class SectorAnal(BaseSectorWidget):
                 widget = self.table.cellWidget(row, column)
                 if widget is not None:
                     widget.setProperty("rowTone", row_tone)
-                    widget.style().unpolish(widget)
-                    widget.style().polish(widget)
+                    widget.setProperty("selected", "true" if selected else "false")
                     widget.update()
 
 
+class TransparentEmbeddedCell(QWidget):
+    def paintEvent(self, event):
+        event.ignore()
+
+
 def _centered_cell(widget: QWidget, parent=None, row_tone: str = "even") -> QWidget:
-    cell = QWidget(parent)
+    cell = TransparentEmbeddedCell(parent)
     cell.setObjectName("lab_embedded_cell")
     cell.setProperty("rowTone", row_tone)
-    cell.setAttribute(Qt.WA_StyledBackground, True)
+    cell.setProperty("selected", "false")
+    cell.setAttribute(Qt.WA_StyledBackground, False)
+    cell.setAttribute(Qt.WA_TranslucentBackground, True)
+    cell.setAttribute(Qt.WA_NoSystemBackground, True)
+    cell.setAutoFillBackground(False)
     layout = QHBoxLayout(cell)
     layout.setContentsMargins(8, 0, 8, 0)
     layout.addWidget(widget, 0, Qt.AlignCenter)
@@ -882,6 +1175,15 @@ def _row_value(row: Any, *names: str, default=None):
         if hasattr(row, name):
             return getattr(row, name)
     return default
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _status_key(value: Any) -> str:
@@ -939,6 +1241,45 @@ def _sort_dt(value: Any) -> str:
         except Exception:
             pass
     return text.lower()
+
+
+def _sort_shift_dt(value: Any, card_date: datetime) -> str:
+    parsed = _parse_dt_value(value)
+    if parsed is not None:
+        return parsed.isoformat()
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parts = text.split(":")
+    if len(parts) >= 2:
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except ValueError:
+            return text.lower()
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            shift_start = card_date.replace(hour=8, minute=0, second=0, microsecond=0)
+            if card_date.hour < 8:
+                shift_start -= timedelta(days=1)
+            target_date = shift_start.date() + (timedelta(days=1) if hour < 8 else timedelta())
+            return datetime.combine(target_date, time(hour, minute)).isoformat()
+    return text.lower()
+
+
+def _parse_dt_value(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    for candidate in (text, text.replace(" ", "T")):
+        try:
+            return datetime.fromisoformat(candidate)
+        except Exception:
+            pass
+    return None
 
 
 def _format_dt(value: Any, pattern: str) -> str:

@@ -922,7 +922,14 @@ class DoctorRemCardWidget(QWidget):
         if payload.get("forced"):
             return True
 
-        relevant_entities = {"patients", "admissions", "beds", "operations", "diet_templates"} | LAB_ORDER_CHANGE_ENTITIES
+        relevant_entities = {
+            "patients",
+            "admissions",
+            "beds",
+            "operations",
+            "diet_templates",
+            "patient_status_events",
+        } | LAB_ORDER_CHANGE_ENTITIES
         orders_entities = {"orders", "administrations"}
         for change in payload.get("changes") or []:
             admission_id = change.get("admission_id")
@@ -1122,11 +1129,33 @@ class DoctorRemCardWidget(QWidget):
         except Exception:
             logger.exception("Doctor procedures partial refresh failed")
 
+    def _sync_lab_orders_context(self) -> bool:
+        try:
+            layout = getattr(self, "layout_manager", None)
+            if layout is None:
+                return False
+            layout.current_admission_id = self.admission_id
+            layout.current_date = self._current_date
+            sector_anal = getattr(layout, "sector_anal", None)
+            if sector_anal is None:
+                return False
+            if not self.admission_id or self._current_date is None:
+                if hasattr(sector_anal, "set_lab_orders"):
+                    sector_anal.set_lab_orders([])
+                return True
+            if hasattr(sector_anal, "set_context"):
+                sector_anal.set_context(self.service, self.admission_id, self._current_date)
+                return True
+            if hasattr(sector_anal, "refresh"):
+                sector_anal.refresh()
+                return True
+        except Exception:
+            logger.exception("Doctor lab orders context sync failed")
+        return False
+
     def _refresh_labs_from_db(self) -> None:
         try:
-            sector_anal = getattr(self.layout_manager, "sector_anal", None)
-            if sector_anal is not None and hasattr(sector_anal, "refresh"):
-                sector_anal.refresh()
+            self._sync_lab_orders_context()
         except Exception:
             logger.exception("Doctor lab orders partial refresh failed")
 
@@ -1189,8 +1218,15 @@ class DoctorRemCardWidget(QWidget):
         has_orders_changes: bool,
         orders_refresh: bool,
     ) -> None:
+        current_orders_visibility_changes = bool(
+            self._changed_entities_from_payload(payload).intersection(
+                {"admissions", "patient_status_events"}
+            )
+        )
         should_refresh = full_refresh_required or has_orders_changes or orders_refresh
         if not should_refresh:
+            if current_orders_visibility_changes:
+                self._refresh_current_orders_from_payload(payload)
             return
         if hasattr(self.layout_manager, 'orders_widget'):
             try:
@@ -1632,6 +1668,8 @@ class DoctorRemCardWidget(QWidget):
 
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
+        self.layout_manager.current_date = date
+        self._sync_lab_orders_context()
         self._update_emergency_notice_sector()
         chart_matches_target = False
         if hasattr(self, 'chart'):
@@ -1821,6 +1859,8 @@ class DoctorRemCardWidget(QWidget):
         if self._current_date == value:
             return
         self._current_date = value
+        if hasattr(self, 'layout_manager'):
+            self.layout_manager.current_date = self._current_date
         if hasattr(self, 'date_info_lbl'):
             self.date_info_lbl.setText(f"Дата карты: {value.strftime('%d.%m.%Y')}")
         if hasattr(self, 'vitals_input'):
@@ -1838,6 +1878,7 @@ class DoctorRemCardWidget(QWidget):
         diet_widget = self._ensure_diet_widget()
         if diet_widget and self.admission_id:
             diet_widget.set_context(self.admission_id, self._current_date)
+        self._sync_lab_orders_context()
         # Критично: сектор 5 (история) должен строго следовать дате открытой карты,
         # иначе при переходе в архив может остаться контекст "сегодня".
         if (
@@ -1862,6 +1903,7 @@ class DoctorRemCardWidget(QWidget):
         self.layout_manager = RemCardLayoutManager(role="Врач", patient_service=p_service, remcard_service=self.service)
         self.layout_manager.patient_status_service = self.service.status_service
         self.layout_manager.current_admission_id = self.admission_id
+        self.layout_manager.current_date = self._current_date
         
         main_layout.addWidget(self.layout_manager)
 
@@ -2398,6 +2440,8 @@ class DoctorRemCardWidget(QWidget):
             if admission_id is not None:
                 self.admission_id = admission_id
                 self.layout_manager.current_admission_id = admission_id
+                self.layout_manager.current_date = selected_date
+                self._sync_lab_orders_context()
                 self.layout_manager.set_patient_selection_mode("card")
                 self.layout_manager.sync_bottom_row_visibility_to_current_tab()
 
@@ -2562,6 +2606,8 @@ class DoctorRemCardWidget(QWidget):
 
     def on_tab_changed(self, tab_name):
         tab_name = self.layout_manager.set_active_tab(tab_name, source="click") or tab_name
+        if tab_name == "Анализы":
+            self._sync_lab_orders_context()
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":

@@ -24,6 +24,8 @@ class RemCardLayoutManager(QWidget):
         self.role = role
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.current_admission_id = None
+        self.current_date = None
         self.current_mode = "normal"
         self._archive_last_change_id = -1
         self._first_card_mode_switch_done = False
@@ -956,8 +958,16 @@ class RemCardLayoutManager(QWidget):
                     self.vitals_stack.setCurrentIndex(6)
                     self.sector_7a_stack.setCurrentIndex(0)
                     self.sector_7b_stack.setCurrentIndex(5)
-                    if hasattr(self, 'sector_anal') and hasattr(self.sector_anal, 'refresh'):
-                        self.sector_anal.refresh()
+                    if hasattr(self, 'sector_anal'):
+                        if (
+                            hasattr(self.sector_anal, 'set_context')
+                            and self.remcard_service is not None
+                            and admission_id is not None
+                            and self.current_date is not None
+                        ):
+                            self.sector_anal.set_context(self.remcard_service, admission_id, self.current_date)
+                        elif hasattr(self.sector_anal, 'refresh'):
+                            self.sector_anal.refresh()
                 elif tab_name == "Печать":
                     self._ensure_print_tab_initialized()
                     self.vitals_stack.setCurrentIndex(7)

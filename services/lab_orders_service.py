@@ -12,12 +12,14 @@ from rem_card.data.dto.lab_orders_dto import (
     LabOrderDTO,
     LabOrderStatus,
 )
+from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
 
 
 class LabOrdersService:
-    def __init__(self, dao: LabOrdersDAO, data_service=None):
+    def __init__(self, dao: LabOrdersDAO, data_service=None, catalog_service: Optional[LabAnalysisCatalogService] = None):
         self.dao = dao
         self.data_service = data_service
+        self.catalog_service = catalog_service or LabAnalysisCatalogService()
 
     @staticmethod
     def card_day_id_from_shift_start(shift_start: datetime) -> str:
@@ -111,6 +113,54 @@ class LabOrdersService:
 
         return int(self._run_write(f"lab_order_create:{admission_id}", operation))
 
+    def create_lab_orders(
+        self,
+        *,
+        admission_id: int,
+        card_day_id: Optional[str],
+        orders: Sequence[dict[str, Any]],
+        created_by_role: str = "doctor",
+        created_by_user: Optional[str] = None,
+    ) -> list[int]:
+        patient_id = self.dao.get_admission_patient_id(int(admission_id))
+        if patient_id is None:
+            raise ValueError("Госпитализация пациента не найдена.")
+        now = datetime.now().replace(microsecond=0)
+        dtos: list[LabOrderDTO] = []
+        for raw in orders or []:
+            analysis_name = str(raw.get("analysis_name") or raw.get("name") or "").strip()
+            if not analysis_name:
+                raise ValueError("Укажите анализ.")
+            scheduled_at = self._parse_datetime(raw.get("scheduled_at"))
+            if scheduled_at is None:
+                raise ValueError(f"Не указано время для анализа «{analysis_name}».")
+            dtos.append(
+                LabOrderDTO(
+                    patient_id=patient_id,
+                    admission_id=int(admission_id),
+                    card_day_id=card_day_id,
+                    analysis_code=str(raw.get("analysis_code") or raw.get("code") or "").strip(),
+                    analysis_name=analysis_name,
+                    material=self._normalize_material(raw.get("material")),
+                    status=LabOrderStatus.ASSIGNED.value,
+                    created_at=now,
+                    scheduled_at=scheduled_at,
+                    comment=str(raw.get("comment") or "").strip(),
+                    created_by_role=created_by_role or "doctor",
+                    created_by_user=created_by_user,
+                )
+            )
+        if not dtos:
+            raise ValueError("Не выбраны анализы для назначения.")
+
+        def operation(cursor):
+            return [self.dao.save_lab_order(cursor, dto) for dto in dtos]
+
+        return list(self._run_write(f"lab_orders_create:{admission_id}", operation))
+
+    def list_analysis_templates(self) -> list[dict[str, Any]]:
+        return self.catalog_service.list_templates()
+
     def mark_completed(
         self,
         order_id: int,
@@ -133,10 +183,63 @@ class LabOrdersService:
 
         return int(self._run_write(f"lab_order_complete:{order_id}", operation))
 
+    def update_lab_order_details(
+        self,
+        order_id: int,
+        *,
+        material: str,
+        scheduled_at: datetime,
+        comment: str = "",
+        expected_revision: Optional[int] = None,
+    ) -> int:
+        scheduled_dt = self._parse_datetime(scheduled_at)
+        if scheduled_dt is None:
+            raise ValueError("Укажите время назначения анализа.")
+        normalized_material = self._normalize_material(material)
+
+        def operation(cursor):
+            self.dao.update_lab_order_details(
+                cursor,
+                int(order_id),
+                material=normalized_material,
+                scheduled_at=scheduled_dt,
+                comment=str(comment or "").strip(),
+                expected_revision=expected_revision,
+            )
+            return int(order_id)
+
+        return int(self._run_write(f"lab_order_update:{order_id}", operation))
+
+    def delete_lab_orders(self, admission_id: int, *, order_ids: Sequence[int]) -> int:
+        normalized_ids = sorted({int(order_id) for order_id in (order_ids or []) if order_id})
+        if not normalized_ids:
+            raise ValueError("Не выбраны анализы для удаления.")
+
+        def operation(cursor):
+            return self.dao.delete_lab_orders(cursor, int(admission_id), normalized_ids)
+
+        return int(self._run_write(f"lab_orders_delete:{admission_id}", operation))
+
     def _run_write(self, description: str, operation: Callable):
         if self.data_service:
             return self.data_service.run_write(description, operation)
         return self.dao.db.run_write_operation(operation, source=description)
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Optional[datetime]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        for candidate in (text, text.replace(" ", "T")):
+            try:
+                return datetime.fromisoformat(candidate)
+            except ValueError:
+                pass
+        return None
 
     @classmethod
     def _row_payload(cls, order: LabOrderDTO) -> dict[str, Any]:

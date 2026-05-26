@@ -1,0 +1,138 @@
+{
+  "next_id": 11,
+  "templates": [
+    {
+      "id": 1,
+      "code": "cbc",
+      "name": "Общий анализ крови",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 2,
+      "code": "blood_biochemistry",
+      "name": "Биохимический анализ крови",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 3,
+      "code": "electrolytes",
+      "name": "Электролиты крови",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 4,
+      "code": "coagulogram",
+      "name": "Коагулограмма",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 5,
+      "code": "crp",
+      "name": "С-реактивный белок",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 6,
+      "code": "pct",
+      "name": "Прокальцитонин",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 7,
+      "code": "blood_glucose",
+      "name": "Глюкоза крови",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [
+        "09:00",
+        "10:00"
+      ],
+      "version": 2,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 08:30:13",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 8,
+      "code": "arterial_blood_gas",
+      "name": "КЩС и газы артериальной крови",
+      "material": "arterial_blood",
+      "material_label": "Кровь артериальная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 9,
+      "code": "urinalysis",
+      "name": "Общий анализ мочи",
+      "material": "urine",
+      "material_label": "Моча",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 10,
+      "code": "csf_general",
+      "name": "Общий анализ ликвора",
+      "material": "liquor",
+      "material_label": "Ликвор",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 00:00:00",
+      "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    }
+  ]
+}

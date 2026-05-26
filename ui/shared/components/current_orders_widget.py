@@ -13,6 +13,12 @@ SECTOR_1A_BEFORE_MIN = 60
 SECTOR_1A_AFTER_MIN = 180
 TIME_TIMER_MAX_MS = 60 * 60 * 1000
 CURRENT_ORDERS_CACHE_LIMIT = 10
+CURRENT_ORDERS_REFRESH_ENTITIES = {
+    "orders",
+    "administrations",
+    "admissions",
+    "patient_status_events",
+}
 
 class CurrentNurseOrdersWidget(QWidget):
     """Менеджер назначений в 1а. Сектор 5 теперь принадлежит питанию."""
@@ -185,12 +191,12 @@ class CurrentNurseOrdersWidget(QWidget):
                 if change.get("entity_name")
             }
 
-        if not payload.get("forced") and not changed_entities.intersection({"orders", "administrations"}):
+        if not payload.get("forced") and not changed_entities.intersection(CURRENT_ORDERS_REFRESH_ENTITIES):
             return
 
         for change in changes:
             entity_name = str(change.get("entity_name") or "")
-            if entity_name and entity_name not in {"orders", "administrations"}:
+            if entity_name and entity_name not in CURRENT_ORDERS_REFRESH_ENTITIES:
                 continue
             admission_id = change.get("admission_id")
             if admission_id is None or int(admission_id) == int(self.admission_id):

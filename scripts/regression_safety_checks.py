@@ -8624,6 +8624,136 @@ def _check_medical_audit_log_triggers(temp_root: str) -> tuple[bool, str]:
         manager.close()
 
 
+def _check_lab_orders_are_scoped_to_card_day(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
+    from rem_card.services.lab_orders_service import LabOrdersService
+
+    db_path = os.path.join(temp_root, "lab_orders_scope.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_lab_orders_scope") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES (?)", ("Lab Scope Patient",))
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime)
+                VALUES (?, ?, ?, ?)
+                """,
+                (patient_id, 1, "REG-LAB-SCOPE", "2026-05-24 08:00:00"),
+            )
+            admission_id = int(cursor.lastrowid)
+
+        service = LabOrdersService(LabOrdersDAO(manager))
+        yesterday_start = datetime(2026, 5, 24, 8, 0, 0)
+        today_start = datetime(2026, 5, 25, 8, 0, 0)
+        yesterday_end = yesterday_start + timedelta(days=1)
+        today_end = today_start + timedelta(days=1)
+        yesterday_card_day_id = service.card_day_id_from_shift_start(yesterday_start)
+        today_card_day_id = service.card_day_id_from_shift_start(today_start)
+
+        service.create_lab_orders(
+            admission_id=admission_id,
+            card_day_id=yesterday_card_day_id,
+            orders=[
+                {
+                    "analysis_name": "Вчерашний анализ",
+                    "material": "venous_blood",
+                    "scheduled_at": datetime(2026, 5, 24, 10, 0, 0),
+                }
+            ],
+        )
+        service.create_lab_orders(
+            admission_id=admission_id,
+            card_day_id=today_card_day_id,
+            orders=[
+                {
+                    "analysis_name": "Сегодняшний анализ",
+                    "material": "urine",
+                    "scheduled_at": datetime(2026, 5, 25, 10, 0, 0),
+                }
+            ],
+        )
+        with manager.remcard_transaction(source="regression_seed_legacy_lab_order") as cursor:
+            cursor.execute(
+                """
+                INSERT INTO lab_orders(
+                    patient_id, admission_id, card_day_id,
+                    analysis_code, analysis_name, material, status,
+                    created_at, scheduled_at, completed_at, comment,
+                    created_by_role, revision
+                )
+                VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    patient_id,
+                    admission_id,
+                    "legacy_yesterday",
+                    "Legacy yesterday",
+                    "venous_blood",
+                    "completed",
+                    "2026-05-25 09:30:00",
+                    "2026-05-24 10:00:00",
+                    "2026-05-25 10:30:00",
+                    "",
+                    "doctor",
+                    0,
+                ),
+            )
+
+        today_rows = service.build_snapshot(
+            admission_id,
+            card_day_id=today_card_day_id,
+            start_dt=today_start,
+            end_dt=today_end,
+        )["rows"]
+        yesterday_rows = service.build_snapshot(
+            admission_id,
+            card_day_id=yesterday_card_day_id,
+            start_dt=yesterday_start,
+            end_dt=yesterday_end,
+        )["rows"]
+        today_names = {row.get("analysis_name") for row in today_rows}
+        yesterday_names = {row.get("analysis_name") for row in yesterday_rows}
+        if "Сегодняшний анализ" not in today_names:
+            return False, f"today lab order missing: {today_names}"
+        if "Вчерашний анализ" in today_names or "Legacy yesterday" in today_names:
+            return False, f"today snapshot contains another card day: {today_names}"
+        if {"Вчерашний анализ", "Legacy yesterday"} - yesterday_names:
+            return False, f"yesterday lab orders missing: {yesterday_names}"
+        if "Сегодняшний анализ" in yesterday_names:
+            return False, f"yesterday snapshot contains today order: {yesterday_names}"
+
+        today_id = next((row.get("id") for row in today_rows if row.get("analysis_name") == "Сегодняшний анализ"), None)
+        if today_id is None:
+            return False, "today lab order id missing"
+        deleted_count = service.delete_lab_orders(admission_id, order_ids=[today_id])
+        if deleted_count != 1:
+            return False, f"unexpected deleted lab orders count: {deleted_count}"
+        today_after_delete = service.build_snapshot(
+            admission_id,
+            card_day_id=today_card_day_id,
+            start_dt=today_start,
+            end_dt=today_end,
+        )["rows"]
+        yesterday_after_delete = service.build_snapshot(
+            admission_id,
+            card_day_id=yesterday_card_day_id,
+            start_dt=yesterday_start,
+            end_dt=yesterday_end,
+        )["rows"]
+        if today_after_delete:
+            return False, f"today snapshot still has deleted rows: {today_after_delete}"
+        yesterday_after_delete_names = {row.get("analysis_name") for row in yesterday_after_delete}
+        if {"Вчерашний анализ", "Legacy yesterday"} - yesterday_after_delete_names:
+            return False, f"delete affected another card day: {yesterday_after_delete_names}"
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = Path(__file__).resolve().parents[1] / "ui" / "doctor_view" / "doctor_remcard_widget.py"
@@ -11913,6 +12043,7 @@ def main():
         ("orders_optimistic_lock_conflicts", _check_orders_optimistic_lock_conflicts),
         ("remaining_clinical_optimistic_lock_conflicts", _check_remaining_clinical_optimistic_lock_conflicts),
         ("medical_audit_log_triggers", _check_medical_audit_log_triggers),
+        ("lab_orders_are_scoped_to_card_day", _check_lab_orders_are_scoped_to_card_day),
         ("doctor_create_card_avoids_open_snapshot_race", _check_doctor_create_card_avoids_open_snapshot_race),
         (
             "orders_widgets_defer_snapshot_reload_thread_creation",

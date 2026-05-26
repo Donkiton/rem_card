@@ -73,13 +73,17 @@ class LabOrdersDAO:
                     card_day_id IS NULL
                     AND (
                         (scheduled_at IS NOT NULL AND DATETIME(scheduled_at) >= DATETIME(?) AND DATETIME(scheduled_at) < DATETIME(?))
-                        OR (created_at IS NOT NULL AND DATETIME(created_at) >= DATETIME(?) AND DATETIME(created_at) < DATETIME(?))
-                        OR (completed_at IS NOT NULL AND DATETIME(completed_at) >= DATETIME(?) AND DATETIME(completed_at) < DATETIME(?))
+                        OR (
+                            scheduled_at IS NULL
+                            AND created_at IS NOT NULL
+                            AND DATETIME(created_at) >= DATETIME(?)
+                            AND DATETIME(created_at) < DATETIME(?)
+                        )
                     )
                 )
                 """
             )
-            params.extend([start_value, end_value, start_value, end_value, start_value, end_value])
+            params.extend([start_value, end_value, start_value, end_value])
 
         where = "admission_id = ?"
         if day_filters:
@@ -193,6 +197,62 @@ class LabOrdersDAO:
         if cursor.rowcount == 0:
             raise ValueError("Назначение анализа не найдено.")
 
+    def update_lab_order_details(
+        self,
+        cursor,
+        order_id: int,
+        *,
+        material: str,
+        scheduled_at: datetime,
+        comment: str = "",
+        expected_revision: Optional[int] = None,
+    ) -> None:
+        where = "id = ?"
+        params: list[Any] = [
+            material,
+            self._dt_value(scheduled_at),
+            comment,
+            int(order_id),
+        ]
+        if expected_revision is not None:
+            where += " AND COALESCE(revision, 0) = ?"
+            params.append(int(expected_revision))
+
+        cursor.execute(
+            f"""
+            UPDATE lab_orders
+            SET material = ?,
+                scheduled_at = ?,
+                comment = ?,
+                revision = COALESCE(revision, 0) + 1,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE {where}
+            """,
+            tuple(params),
+        )
+        if cursor.rowcount == 0:
+            if expected_revision is not None:
+                raise ValueError("Назначение анализа было изменено другим пользователем.")
+            raise ValueError("Назначение анализа не найдено.")
+
+    def delete_lab_orders(self, cursor, admission_id: int, order_ids: list[int]) -> int:
+        normalized_ids = sorted({int(order_id) for order_id in (order_ids or []) if order_id})
+        if not normalized_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        cursor.execute(
+            f"""
+            DELETE FROM lab_orders
+            WHERE admission_id = ?
+              AND id IN ({placeholders})
+            """,
+            (int(admission_id), *normalized_ids),
+        )
+        deleted_count = int(cursor.rowcount or 0)
+        if deleted_count != len(normalized_ids):
+            raise ValueError("Не все отмеченные анализы найдены для удаления.")
+        return deleted_count
+
     def delete_for_admission(self, cursor, admission_id: int) -> None:
         cursor.execute("DELETE FROM lab_orders WHERE admission_id = ?", (int(admission_id),))
 
@@ -219,7 +279,12 @@ class LabOrdersDAO:
                     card_day_id IS NULL
                     AND (
                         (scheduled_at IS NOT NULL AND DATETIME(scheduled_at) >= DATETIME(?) AND DATETIME(scheduled_at) < DATETIME(?))
-                        OR (created_at IS NOT NULL AND DATETIME(created_at) >= DATETIME(?) AND DATETIME(created_at) < DATETIME(?))
+                        OR (
+                            scheduled_at IS NULL
+                            AND created_at IS NOT NULL
+                            AND DATETIME(created_at) >= DATETIME(?)
+                            AND DATETIME(created_at) < DATETIME(?)
+                        )
                     )
                 )
                 """

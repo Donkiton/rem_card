@@ -829,7 +829,14 @@ class NurseMainWidget(QWidget):
             return False
         if payload.get("forced"):
             return True
-        relevant_entities = {"patients", "admissions", "beds", "operations", "diet_templates"}
+        relevant_entities = {
+            "patients",
+            "admissions",
+            "beds",
+            "operations",
+            "diet_templates",
+            "patient_status_events",
+        }
         orders_entities = {"orders", "administrations"}
         for change in payload.get("changes") or []:
             admission_id = change.get("admission_id")
@@ -1088,8 +1095,15 @@ class NurseMainWidget(QWidget):
         has_orders_changes: bool,
         orders_refresh: bool,
     ) -> None:
+        current_orders_visibility_changes = bool(
+            self._changed_entities_from_payload(payload).intersection(
+                {"admissions", "patient_status_events"}
+            )
+        )
         should_refresh = full_refresh_required or has_orders_changes or orders_refresh
         if not should_refresh:
+            if current_orders_visibility_changes:
+                self._refresh_current_orders_from_payload(payload)
             return
         if hasattr(self.layout_manager, 'orders_widget'):
             try:
