@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -30,6 +31,7 @@ PRINT_SETTINGS_KEY = "print_settings"
 DISPLAY_SETTINGS_KEY = "display_settings"
 BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
+PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 
 
 @dataclass(frozen=True)
@@ -89,13 +91,20 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
         ("drugs", "code"),
     ),
     ORDER_TEMPLATES_KEY: (("order_templates", "template_key"),),
-    LAB_ANALYSIS_KEY: (("lab_analysis_templates", "analysis_code"),),
+    LAB_ANALYSIS_KEY: (("lab_analysis_templates", "analysis_code"), ("app_settings", "key")),
     DIET_TEMPLATES_KEY: (("diet_templates", "template_key"),),
     DOCTORS_KEY: (("doctors", "id"),),
-    PRINT_SETTINGS_KEY: (("print_templates", "template_key"),),
+    PRINT_SETTINGS_KEY: (("print_templates", "template_key"), ("app_settings", "key")),
     DISPLAY_SETTINGS_KEY: (("app_settings", "key"),),
     BACKGROUND_SETTINGS_KEY: (("ui_backgrounds", "background_key"),),
     STYLE_SETTINGS_KEY: (("app_settings", "key"),),
+}
+
+APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
+    LAB_ANALYSIS_KEY: ("lab_materials",),
+    PRINT_SETTINGS_KEY: ("print_config",),
+    DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns"),
+    STYLE_SETTINGS_KEY: ("style_settings",),
 }
 
 PRESCRIPTION_DATASET_TABLES = {
@@ -267,6 +276,7 @@ class SettingsService:
         self._import_report: dict[str, Any] = {}
         self._snapshot_cache: dict[str, tuple[int, str, Any]] = {}
         self._last_seen_settings_change_id = 0
+        self.source_client_id = PROCESS_SOURCE_CLIENT_ID
 
     def ensure_ready(self) -> dict[str, Any]:
         with self._ready_lock:
@@ -1080,16 +1090,15 @@ class SettingsService:
         payload: dict[str, Any] = {"catalog_key": catalog_key, "tables": {}}
         for table, key_column in CATALOG_TABLES.get(catalog_key, ()):
             if table == "app_settings":
+                keys = APP_SETTINGS_HASH_KEYS.get(catalog_key, ())
                 rows = cursor.execute(
                     """
                     SELECT scope, key, value_json, revision, updated_at
                     FROM app_settings
-                    WHERE key IN (
-                        'display_settings', 'style_settings', 'lab_orders_columns',
-                        'lab_materials', 'print_config', 'settings_import_report'
-                    )
+                    WHERE key IN ({})
                     ORDER BY scope, key
-                    """
+                    """.format(",".join("?" for _ in keys) or "''"),
+                    tuple(keys),
                 ).fetchall()
             elif table == "ui_backgrounds":
                 rows = cursor.execute(
@@ -1128,6 +1137,9 @@ class SettingsService:
         version = current_version + 1
         content_hash = self._compute_catalog_hash(cursor, catalog_key)
         changed_at = now_text()
+        effective_source_client_id = str(source_client_id or self.source_client_id).strip()
+        if not effective_source_client_id:
+            effective_source_client_id = PROCESS_SOURCE_CLIENT_ID
         cursor.execute(
             """
             INSERT INTO settings_catalog_versions (
@@ -1160,7 +1172,7 @@ class SettingsService:
                 changed_at,
                 changed_by_role,
                 changed_by_user,
-                source_client_id,
+                effective_source_client_id,
                 content_hash,
             ),
         )
@@ -1181,7 +1193,7 @@ class SettingsService:
                 changed_at,
                 changed_by_role,
                 changed_by_user,
-                source_client_id,
+                effective_source_client_id,
             ),
         )
         self.invalidate_cache(catalog_key)

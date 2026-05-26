@@ -12064,6 +12064,159 @@ def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tu
     return True, "ok"
 
 
+def _check_settings_change_log_source_client_id_is_non_empty(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    service.set_app_setting(
+        "shared",
+        "display_settings",
+        {"probe": "source_client_non_empty"},
+        catalog_key=DISPLAY_SETTINGS_KEY,
+        entity_type="source_client_probe",
+        operation="update",
+    )
+    with service.db.read_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT source_client_id
+            FROM settings_change_log
+            WHERE entity_type = 'source_client_probe'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        audit_row = conn.execute(
+            """
+            SELECT source_client_id
+            FROM settings_audit_log
+            WHERE entity_type = 'source_client_probe'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    source_client_id = str(row["source_client_id"] or "") if row else ""
+    if not source_client_id:
+        return False, "settings_change_log.source_client_id is empty after settings write"
+    audit_source_client_id = str(audit_row["source_client_id"] or "") if audit_row else ""
+    if audit_source_client_id != source_client_id:
+        return False, "settings_audit_log.source_client_id does not match settings_change_log"
+    return True, source_client_id
+
+
+def _check_settings_source_client_id_is_stable_within_process(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    for index in (1, 2):
+        service.set_app_setting(
+            "shared",
+            "display_settings",
+            {"probe": f"source_client_stable_{index}"},
+            catalog_key=DISPLAY_SETTINGS_KEY,
+            entity_type="source_client_stable_probe",
+            operation="update",
+        )
+    with service.db.read_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT source_client_id
+            FROM settings_change_log
+            WHERE entity_type = 'source_client_stable_probe'
+            ORDER BY id DESC
+            LIMIT 2
+            """
+        ).fetchall()
+    ids = [str(row["source_client_id"] or "") for row in rows]
+    if len(ids) != 2 or not ids[0] or not ids[1]:
+        return False, f"expected two non-empty source_client_id values, got {ids}"
+    if ids[0] != ids[1]:
+        return False, f"source_client_id changed within process: {ids}"
+    return True, ids[0]
+
+
+def _check_lab_materials_change_updates_lab_analysis_hash(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import LAB_ANALYSIS_KEY, SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    before_version, before_hash = service.get_catalog_version(LAB_ANALYSIS_KEY)
+    materials = [
+        dict(item)
+        for item in service.list_lab_materials()
+        if str(item.get("code") or "") != "regression_hash_material"
+    ]
+    materials.append(
+        {
+            "code": "regression_hash_material",
+            "label": "Материал проверки hash",
+            "built_in": False,
+            "version": 1,
+        }
+    )
+    service.save_lab_materials(materials)
+    after_version, after_hash = service.get_catalog_version(LAB_ANALYSIS_KEY)
+    if after_version <= before_version:
+        return False, f"lab_analysis version did not increase: {before_version} -> {after_version}"
+    if after_hash == before_hash:
+        return False, "lab_analysis content_hash did not change after lab_materials update"
+    return True, "ok"
+
+
+def _check_print_config_change_updates_print_settings_hash(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import PRINT_SETTINGS_KEY, SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    before_version, before_hash = service.get_catalog_version(PRINT_SETTINGS_KEY)
+    current = service.get_app_setting("doctor", "print_config", default={})
+    if not isinstance(current, dict):
+        current = {}
+    updated = dict(current)
+    updated["labs"] = not bool(updated.get("labs", False))
+    service.set_app_setting(
+        "doctor",
+        "print_config",
+        updated,
+        catalog_key=PRINT_SETTINGS_KEY,
+        entity_type="print_settings",
+        operation="update",
+    )
+    after_version, after_hash = service.get_catalog_version(PRINT_SETTINGS_KEY)
+    if after_version <= before_version:
+        return False, f"print_settings version did not increase: {before_version} -> {after_version}"
+    if after_hash == before_hash:
+        return False, "print_settings content_hash did not change after print_config update"
+    return True, "ok"
+
+
+def _check_unchanged_catalog_hash_is_stable(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import (
+        LAB_ANALYSIS_KEY,
+        PRINT_SETTINGS_KEY,
+        SettingsService,
+    )
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    first_lab = service.get_catalog_version(LAB_ANALYSIS_KEY)
+    second_lab = service.get_catalog_version(LAB_ANALYSIS_KEY)
+    first_print = service.get_catalog_version(PRINT_SETTINGS_KEY)
+    second_print = service.get_catalog_version(PRINT_SETTINGS_KEY)
+    if first_lab != second_lab:
+        return False, f"lab_analysis hash/version changed without write: {first_lab} -> {second_lab}"
+    if first_print != second_print:
+        return False, f"print_settings hash/version changed without write: {first_print} -> {second_print}"
+    return True, "ok"
+
+
 def _check_lab_materials_management_from_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
@@ -12317,6 +12470,11 @@ def main():
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("edited_drug_catalog_preserved_after_restart", _check_edited_drug_catalog_preserved_after_restart),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
+        ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),
+        ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),
+        ("lab_materials_change_updates_lab_analysis_hash", _check_lab_materials_change_updates_lab_analysis_hash),
+        ("print_config_change_updates_print_settings_hash", _check_print_config_change_updates_print_settings_hash),
+        ("unchanged_catalog_hash_is_stable", _check_unchanged_catalog_hash_is_stable),
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
