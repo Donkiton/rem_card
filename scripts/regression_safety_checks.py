@@ -12002,6 +12002,64 @@ def _check_settings_db_schema_and_no_wal(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_settings_write_creates_validated_pre_write_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.settings_db_paths import get_settings_backup_dir
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    backup_dir = get_settings_backup_dir(baza_dir)
+    before = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
+    first_marker = f"settings_pre_write_backup_first_{os.getpid()}"
+    second_marker = f"settings_pre_write_backup_second_{os.getpid()}"
+    service.set_app_setting(
+        "shared",
+        "display_settings",
+        {"probe": first_marker},
+        catalog_key=DISPLAY_SETTINGS_KEY,
+        entity_type="display_settings",
+        operation="update",
+    )
+    service.set_app_setting(
+        "shared",
+        "display_settings",
+        {"probe": second_marker},
+        catalog_key=DISPLAY_SETTINGS_KEY,
+        entity_type="display_settings",
+        operation="update",
+    )
+    after = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
+    created = sorted(after - before)
+    if len(created) < 2:
+        return False, f"expected pre-write backup for each settings write, got {len(created)}"
+
+    latest_backup = created[-1]
+    meta_path = f"{latest_backup}.meta.json"
+    if not os.path.isfile(meta_path):
+        return False, f"missing backup metadata: {meta_path}"
+    meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
+    if meta.get("quick_check") != "ok" or meta.get("integrity_check") != "ok":
+        return False, f"backup was not validated: {meta}"
+
+    with sqlite3.connect(latest_backup) as backup_conn:
+        row = backup_conn.execute(
+            "SELECT value_json FROM app_settings WHERE scope = ? AND key = ?",
+            ("shared", "display_settings"),
+        ).fetchone()
+    raw_value = str(row[0] if row else "")
+    if first_marker not in raw_value:
+        return False, "latest pre-write backup does not contain state before the second write"
+    if second_marker in raw_value:
+        return False, "latest pre-write backup contains data written after backup point"
+
+    current = service.get_app_setting("shared", "display_settings", default={})
+    if not isinstance(current, dict) or current.get("probe") != second_marker:
+        return False, "live settings DB did not commit the second write"
+    return True, "ok"
+
+
 def _check_edited_drug_catalog_preserved_after_restart(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -12468,6 +12526,7 @@ def main():
         ("orders_balance_adapter_uses_local_state", _check_orders_balance_adapter_uses_local_state),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
+        ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
         ("edited_drug_catalog_preserved_after_restart", _check_edited_drug_catalog_preserved_after_restart),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
         ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),

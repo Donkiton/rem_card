@@ -730,7 +730,12 @@ class SQLiteWriteController:
             yield
 
     @contextmanager
-    def transaction(self, conn: sqlite3.Connection, source: str = "unknown"):
+    def transaction(
+        self,
+        conn: sqlite3.Connection,
+        source: str = "unknown",
+        before_begin: Optional[Callable[[], None]] = None,
+    ):
         if conn is None:
             raise DatabaseClosedError(f"SQLite connection is closed for {source}")
         started = time.perf_counter()
@@ -769,6 +774,8 @@ class SQLiteWriteController:
                         attempt=attempt,
                     )
                     try:
+                        if before_begin is not None:
+                            before_begin()
                         conn.execute("BEGIN IMMEDIATE")
                         cursor = conn.cursor()
                         break

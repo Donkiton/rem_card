@@ -71,7 +71,11 @@ class SettingsDatabase:
             if current_version < settings_schema.SCHEMA_VERSION and not created and current_version > 0:
                 self._backup_before_migration(conn)
 
-            with self.write_controller.transaction(conn, source="settings_schema_init") as _cursor:
+            with self.write_controller.transaction(
+                conn,
+                source="settings_schema_init",
+                before_begin=lambda: self._backup_before_write(conn, "settings_schema_init"),
+            ) as _cursor:
                 settings_schema.apply_schema(conn)
 
             ok, reason = run_quick_check(conn)
@@ -141,7 +145,11 @@ class SettingsDatabase:
         status = "error"
         conn = self.connect(readonly=False)
         try:
-            with self.write_controller.transaction(conn, source=source) as cursor:
+            with self.write_controller.transaction(
+                conn,
+                source=source,
+                before_begin=lambda: self._backup_before_write(conn, source),
+            ) as cursor:
                 yield cursor
             status = "ok"
         except sqlite3.OperationalError as exc:
@@ -175,6 +183,20 @@ class SettingsDatabase:
             lock_path=self.lock_path,
             source="settings_migration_backup",
             lock_wait_sec=20.0,
+        )
+
+    def _backup_before_write(self, conn: sqlite3.Connection, source: str) -> None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_dir = get_settings_backup_dir(self.baza_dir)
+        backup_path = os.path.join(backup_dir, f"settings_pre_{stamp}.db")
+        backup_connection(
+            conn,
+            backup_path,
+            invalid_dir=os.path.join(backup_dir, "invalid"),
+            logger=logger,
+            validate=True,
+            lock_path=None,
+            source=f"settings_pre_write_backup:{source or 'settings_write'}",
         )
 
 
