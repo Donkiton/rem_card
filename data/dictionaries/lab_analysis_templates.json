@@ -1,5 +1,52 @@
 {
-  "next_id": 11,
+  "next_id": 14,
+  "materials": [
+    {
+      "code": "venous_blood",
+      "label": "Кровь венозная",
+      "built_in": true,
+      "version": 1,
+      "created_at": "2026-05-26 11:13:47",
+      "updated_at": "2026-05-26 11:13:47",
+      "last_modified_by": "doctor"
+    },
+    {
+      "code": "arterial_blood",
+      "label": "Кровь артериальная",
+      "built_in": true,
+      "version": 1,
+      "created_at": "2026-05-26 11:13:47",
+      "updated_at": "2026-05-26 11:13:47",
+      "last_modified_by": "doctor"
+    },
+    {
+      "code": "urine",
+      "label": "Моча",
+      "built_in": true,
+      "version": 1,
+      "created_at": "2026-05-26 11:13:47",
+      "updated_at": "2026-05-26 11:13:47",
+      "last_modified_by": "doctor"
+    },
+    {
+      "code": "liquor",
+      "label": "Ликвор",
+      "built_in": true,
+      "version": 1,
+      "created_at": "2026-05-26 11:13:47",
+      "updated_at": "2026-05-26 11:13:47",
+      "last_modified_by": "doctor"
+    },
+    {
+      "code": "material_5",
+      "label": "Мокрота",
+      "built_in": false,
+      "version": 1,
+      "created_at": "2026-05-26 11:13:21",
+      "updated_at": "2026-05-26 11:13:21",
+      "last_modified_by": "doctor"
+    }
+  ],
   "templates": [
     {
       "id": 1,
@@ -88,11 +135,13 @@
       "comment": "",
       "default_times": [
         "09:00",
-        "10:00"
+        "13:00",
+        "18:00",
+        "21:00"
       ],
-      "version": 2,
+      "version": 3,
       "created_at": "2026-05-26 00:00:00",
-      "updated_at": "2026-05-26 08:30:13",
+      "updated_at": "2026-05-26 10:56:33",
       "last_modified_by": "doctor"
     },
     {
@@ -132,6 +181,45 @@
       "version": 1,
       "created_at": "2026-05-26 00:00:00",
       "updated_at": "2026-05-26 00:00:00",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 11,
+      "code": "rh",
+      "name": "Группа крови + Rh()",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 10:56:59",
+      "updated_at": "2026-05-26 10:56:59",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 12,
+      "code": "analysis_12",
+      "name": "Кровь на гепатиты",
+      "material": "venous_blood",
+      "material_label": "Кровь венозная",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 10:57:13",
+      "updated_at": "2026-05-26 10:57:13",
+      "last_modified_by": "doctor"
+    },
+    {
+      "id": 13,
+      "code": "analysis_13",
+      "name": "Мокрота на КУМ + чувствительность к АБ",
+      "material": "material_5",
+      "material_label": "Мокрота",
+      "comment": "",
+      "default_times": [],
+      "version": 1,
+      "created_at": "2026-05-26 11:13:47",
+      "updated_at": "2026-05-26 11:13:47",
       "last_modified_by": "doctor"
     }
   ]

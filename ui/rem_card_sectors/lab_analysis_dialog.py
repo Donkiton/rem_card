@@ -42,18 +42,56 @@ class LabDraft:
     custom: bool = False
 
 
-def _material_options() -> tuple[tuple[str, str], ...]:
-    return tuple((key, label) for key, label in LAB_MATERIAL_LABELS.items())
+def _material_options(source=None) -> tuple[tuple[str, str], ...]:
+    materials = []
+    if isinstance(source, (list, tuple)):
+        options: list[tuple[str, str]] = []
+        for item in source:
+            if isinstance(item, dict):
+                code = str(item.get("code") or "").strip()
+                label = str(item.get("label") or "").strip()
+            else:
+                try:
+                    code, label = item
+                except (TypeError, ValueError):
+                    continue
+                code = str(code).strip()
+                label = str(label).strip()
+            if code and label:
+                options.append((code, label))
+        return tuple(options or ((key, label) for key, label in LAB_MATERIAL_LABELS.items()))
+    if source is not None:
+        loader = getattr(source, "list_lab_materials", None) or getattr(source, "list_materials", None)
+        if callable(loader):
+            try:
+                materials = loader()
+            except Exception:
+                materials = []
+    if not materials:
+        try:
+            materials = LabAnalysisCatalogService().list_materials()
+        except Exception:
+            materials = []
+    options: list[tuple[str, str]] = []
+    for material in materials or []:
+        code = str(material.get("code") or "").strip() if isinstance(material, dict) else ""
+        label = str(material.get("label") or "").strip() if isinstance(material, dict) else ""
+        if code and label:
+            options.append((code, label))
+    return tuple(options or ((key, label) for key, label in LAB_MATERIAL_LABELS.items()))
 
 
-def _material_label(material: Any) -> str:
+def _material_label(material: Any, material_options: tuple[tuple[str, str], ...] | None = None) -> str:
     key = str(material or "").strip()
-    return LAB_MATERIAL_LABELS.get(key, key or "Материал не указан")
+    labels = dict(LAB_MATERIAL_LABELS)
+    labels.update({code: label for code, label in (material_options or ())})
+    return labels.get(key, key or "Материал не указан")
 
 
 class OneTimeLabAnalysisDialog(BaseStyledDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, material_options: tuple[tuple[str, str], ...] | None = None):
         super().__init__("Добавить анализ", parent)
+        self._material_options = tuple(material_options or _material_options())
         self._result: dict[str, Any] | None = None
         self.setMinimumSize(440, 340)
         self._build_ui()
@@ -86,7 +124,7 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
         self.name_input.setPlaceholderText("Название анализа")
 
         self.material_combo = QComboBox()
-        for key, label in _material_options():
+        for key, label in self._material_options:
             self.material_combo.addItem(label, key)
 
         self.time_edit = QTimeEdit()
@@ -133,9 +171,15 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
 
 
 class EditLabOrderDialog(BaseStyledDialog):
-    def __init__(self, order_row: Any, parent=None):
+    def __init__(
+        self,
+        order_row: Any,
+        parent=None,
+        material_options: tuple[tuple[str, str], ...] | None = None,
+    ):
         super().__init__("Редактировать анализ", parent)
         self.order_row = order_row
+        self._material_options = tuple(material_options or _material_options())
         self._result: dict[str, Any] | None = None
         self.setMinimumSize(460, 360)
         self._build_ui()
@@ -178,7 +222,7 @@ class EditLabOrderDialog(BaseStyledDialog):
         self.analysis_label.setWordWrap(True)
 
         self.material_combo = QComboBox()
-        for key, label in _material_options():
+        for key, label in self._material_options:
             self.material_combo.addItem(label, key)
 
         self.time_edit = QTimeEdit()
@@ -208,6 +252,12 @@ class EditLabOrderDialog(BaseStyledDialog):
         self.analysis_label.setText(str(_row_value(self.order_row, "analysis_name", "analysis", "lab_name") or "Анализ"))
         material = str(_row_value(self.order_row, "material", default=LabMaterial.VENOUS_BLOOD.value) or "")
         material_index = self.material_combo.findData(material)
+        if material_index < 0 and material:
+            self.material_combo.addItem(
+                str(_row_value(self.order_row, "material_label", default=material) or material),
+                material,
+            )
+            material_index = self.material_combo.findData(material)
         if material_index >= 0:
             self.material_combo.setCurrentIndex(material_index)
         self.time_edit.setTime(_qtime_from_value(_row_value(self.order_row, "scheduled_at", "planned_at", "planned_for")))
@@ -237,6 +287,7 @@ class AddLabAnalysisDialog(BaseStyledDialog):
         self.admission_id = admission_id
         self.card_date = card_date
         self._fallback_catalog = LabAnalysisCatalogService()
+        self._material_options = _material_options(self.remcard_service or self._fallback_catalog)
         self._templates: list[dict[str, Any]] = []
         self._drafts: dict[str, LabDraft] = {}
         self._current_key: str | None = None
@@ -394,7 +445,7 @@ class AddLabAnalysisDialog(BaseStyledDialog):
 
         layout.addWidget(QLabel("Материал"))
         self.material_combo = QComboBox()
-        for key, label in _material_options():
+        for key, label in self._material_options:
             self.material_combo.addItem(label, key)
         self.material_combo.currentIndexChanged.connect(self._update_current_material)
         layout.addWidget(self.material_combo)
@@ -503,7 +554,7 @@ class AddLabAnalysisDialog(BaseStyledDialog):
             self.catalog_list.clear()
             for template in self._templates:
                 name = str(template.get("name") or "")
-                material = _material_label(template.get("material"))
+                material = str(template.get("material_label") or _material_label(template.get("material"), self._material_options))
                 if query and query not in f"{name} {material}".lower():
                     continue
                 item = QListWidgetItem(f"{name}\n{material}")
@@ -562,7 +613,7 @@ class AddLabAnalysisDialog(BaseStyledDialog):
         return draft
 
     def _open_custom_analysis_dialog(self):
-        dialog = OneTimeLabAnalysisDialog(self)
+        dialog = OneTimeLabAnalysisDialog(self, material_options=self._material_options)
         if dialog.exec():
             data = dialog.result_data()
             if not data:
@@ -595,6 +646,9 @@ class AddLabAnalysisDialog(BaseStyledDialog):
             self._set_details_enabled(True)
             self.selected_label.setText(draft.analysis_name)
             material_index = self.material_combo.findData(draft.material)
+            if material_index < 0 and draft.material:
+                self.material_combo.addItem(_material_label(draft.material, self._material_options), draft.material)
+                material_index = self.material_combo.findData(draft.material)
             if material_index >= 0:
                 self.material_combo.setCurrentIndex(material_index)
             self.times_list.clear()
@@ -716,7 +770,8 @@ class AddLabAnalysisDialog(BaseStyledDialog):
             comment = f"\n{draft.comment}" if draft.comment else ""
             item = QListWidgetItem(
                 f"{draft.analysis_name}\n"
-                f"{_material_label(draft.material)} · {', '.join(draft.times) if draft.times else 'время не указано'}"
+                f"{_material_label(draft.material, self._material_options)} · "
+                f"{', '.join(draft.times) if draft.times else 'время не указано'}"
                 f"{comment}"
             )
             item.setData(Qt.UserRole, draft.key)

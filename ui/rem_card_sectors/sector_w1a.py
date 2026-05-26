@@ -25,6 +25,7 @@ W1A_REFRESH_DEBOUNCE_MS = 150
 W1A_REFRESH_ENTITIES = {
     "orders",
     "administrations",
+    "lab_orders",
     "patients",
     "admissions",
     "beds",
@@ -35,6 +36,7 @@ W1A_REFRESH_SOURCE_PREFIXES = (
     "doctor_order_mark:",
     "nurse_order_mark:",
     "nurse_order_panel_mark:",
+    "lab_order",
     "patient_bed",
     "status_",
     "archive_",
@@ -245,6 +247,17 @@ class SectorW1a(BaseSectorWidget):
                 frame.setParent(None)
                 frame.deleteLater()
         self.groups.clear()
+
+    @staticmethod
+    def _is_lab_order_card_id(item_id) -> bool:
+        try:
+            return int(item_id) < 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _lab_order_id_from_card_id(item_id) -> int:
+        return abs(int(item_id))
 
     def refresh_data(self, force: bool = False):
         if self._is_shutting_down or not self._display_enabled or not self.service:
@@ -666,6 +679,13 @@ class SectorW1a(BaseSectorWidget):
             "order_type",
             "duration_min",
             "order_revision",
+            "source_type",
+            "lab_order_id",
+            "analysis_name",
+            "material",
+            "material_label",
+            "lab_comment",
+            "allow_not_done",
             "defer_mark_visual",
         )
         return tuple((key, item.get(key)) for key in keys)
@@ -768,15 +788,27 @@ class SectorW1a(BaseSectorWidget):
         if mark not in (NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED):
             return
 
-        def operation(aid=admin_id, value=mark):
-            if hasattr(self.service, "set_nurse_order_mark"):
-                return self.service.set_nurse_order_mark(aid, value)
-            return self.service.set_nurse_status(aid, value)
+        if self._is_lab_order_card_id(admin_id):
+            if mark != NURSE_MARK_EXECUTED:
+                return
+            lab_order_id = self._lab_order_id_from_card_id(admin_id)
+
+            def operation(oid=lab_order_id):
+                return self.service.mark_lab_order_completed(oid)
+
+            description = f"lab_order_complete_panel:w1a:{lab_order_id}"
+        else:
+            def operation(aid=admin_id, value=mark):
+                if hasattr(self.service, "set_nurse_order_mark"):
+                    return self.service.set_nurse_order_mark(aid, value)
+                return self.service.set_nurse_status(aid, value)
+
+            description = f"nurse_order_panel_mark:w1a:{admin_id}"
 
         self._set_pending_mark(admin_id, mark)
         self._render_from_cache()
         self._enqueue_write(
-            f"nurse_order_panel_mark:w1a:{admin_id}",
+            description,
             operation,
             on_success=lambda _result=None, aid=admin_id: self._on_mark_write_success(aid),
             on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc),

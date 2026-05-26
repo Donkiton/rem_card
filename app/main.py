@@ -193,8 +193,10 @@ def _apply_basic_app_theme(app):
     """Cheap baseline styling for startup without global QSS repolish costs."""
     if app is None:
         return
+    _install_no_button_focus_rect_style(app)
     try:
         from PySide6.QtGui import QColor, QFont, QPalette
+        from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
 
         app.setFont(QFont("Segoe UI", 10))
         palette = app.palette()
@@ -217,6 +219,7 @@ def _apply_basic_app_theme(app):
             for role, color in colors.items():
                 palette.setColor(group, role, QColor(color))
         app.setPalette(palette)
+        apply_tooltip_palette(app)
     except Exception:
         pass
     try:
@@ -227,7 +230,17 @@ def _apply_basic_app_theme(app):
         pass
 
 
+def _install_no_button_focus_rect_style(app):
+    try:
+        from rem_card.ui.styles.focus_rect_style import install_no_button_focus_rect_style
+
+        install_no_button_focus_rect_style(app)
+    except Exception:
+        pass
+
+
 def _apply_app_theme(app, role: Optional[str] = None):
+    _install_no_button_focus_rect_style(app)
     if not _env_flag_enabled(FULL_RUNTIME_THEME_ENV):
         _apply_basic_app_theme(app)
         return

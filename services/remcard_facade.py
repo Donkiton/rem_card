@@ -21,6 +21,7 @@ from ..data.dto.remcard_dto import (
     VentilationCaseDTO,
     VentilationEventDTO,
 )
+from ..data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabOrderStatus
 from .patient_service import PatientService
 from .vital_service import VitalService
 from .fluid_service import FluidService
@@ -35,6 +36,7 @@ _ORDERS_SNAPSHOT_REQUEST_SOURCE = ContextVar("remcard_orders_snapshot_request_so
 _ORDERS_SNAPSHOT_STEP_OBSERVER = ContextVar("remcard_orders_snapshot_step_observer", default=None)
 _DIRECT_ORDERS_BUILD_WARNED: set[tuple[str, int, str, str]] = set()
 _LEGACY_ORDERS_ACCESS_COUNT = 0
+_LAB_ORDER_CARD_PRIORITY = 998
 
 
 class OrdersSnapshotCancelled(RuntimeError):
@@ -1527,8 +1529,269 @@ class RemCardService(QObject):
     def cancel_doctor_action(self, admin_id: int):
         self._orders.cancel_doctor_action(admin_id)
 
+    @staticmethod
+    def _card_datetime(value: Any) -> Optional[datetime]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        for candidate in (text, text.replace(" ", "T")):
+            try:
+                return datetime.fromisoformat(candidate)
+            except ValueError:
+                if "." in candidate:
+                    head, frac = candidate.split(".", 1)
+                    try:
+                        return datetime.fromisoformat(f"{head}.{frac[:6]}")
+                    except ValueError:
+                        pass
+        return None
+
+    @classmethod
+    def _card_datetime_text(cls, value: Any) -> str:
+        parsed = cls._card_datetime(value)
+        if parsed is not None:
+            return parsed.isoformat(timespec="seconds")
+        return str(value or "").strip()
+
+    @staticmethod
+    def _lab_order_card_id(order_id: Any) -> int:
+        return -abs(int(order_id))
+
+    @classmethod
+    def _signal_state_for_card_time(cls, planned_time: Any) -> str:
+        planned_dt = cls._card_datetime(planned_time)
+        if planned_dt is None:
+            return ""
+        diff_minutes = (datetime.now() - planned_dt).total_seconds() / 60.0
+        if -60 <= diff_minutes < 0:
+            return "upcoming"
+        if 0 <= diff_minutes < 60:
+            return "current"
+        if 60 <= diff_minutes < 180:
+            return "overdue"
+        return ""
+
+    @staticmethod
+    def _bed_sort_key(value: Any) -> tuple[int, int, str]:
+        raw = str(value if value is not None else "").strip()
+        if not raw:
+            return (1, 999999, "")
+        try:
+            return (0, int(raw), raw)
+        except ValueError:
+            return (0, 999999, raw.lower())
+
+    @classmethod
+    def _upcoming_card_sort_key(cls, row: dict[str, Any]) -> tuple:
+        planned = cls._card_datetime(row.get("planned_time")) or datetime.max
+        return (
+            cls._bed_sort_key(row.get("bed_number")),
+            planned.isoformat(),
+            int(row.get("priority") or 999),
+            str(row.get("source_type") or "order"),
+            abs(int(row.get("id") or 0)),
+        )
+
+    def _lab_order_card_payload(self, row: Any, *, include_patient: bool = False) -> Optional[dict[str, Any]]:
+        data = dict(row or {})
+        lab_order_id = data.get("lab_order_id", data.get("id"))
+        if lab_order_id is None:
+            return None
+        scheduled_text = self._card_datetime_text(data.get("scheduled_at"))
+        if not scheduled_text:
+            return None
+
+        material = str(data.get("material") or "").strip()
+        try:
+            material_labels = self._lab_analysis_catalog.material_labels()
+        except Exception:
+            material_labels = dict(LAB_MATERIAL_LABELS)
+        material_label = material_labels.get(material, material or "Материал не указан")
+        analysis_name = str(data.get("analysis_name") or "Анализ").strip() or "Анализ"
+        revision = int(data.get("revision") or 0)
+        card_id = self._lab_order_card_id(lab_order_id)
+        payload = {
+            "id": card_id,
+            "admin_id": card_id,
+            "source_type": "lab_order",
+            "lab_order_id": int(lab_order_id),
+            "patient_id": data.get("patient_id"),
+            "admission_id": data.get("admission_id"),
+            "planned_time": scheduled_text,
+            "actual_time": self._card_datetime_text(data.get("completed_at")),
+            "status": "planned",
+            "comment": "",
+            "cell_role": "single",
+            "expected_revision": revision,
+            "order_id": None,
+            "order_title": analysis_name,
+            "latin": analysis_name,
+            "drug_key": "lab_order",
+            "dose_value": None,
+            "dose_unit": "",
+            "order_comment": "",
+            "order_type": "lab_order",
+            "duration_min": 0,
+            "order_revision": revision,
+            "priority": _LAB_ORDER_CARD_PRIORITY,
+            "group_name": "lab_orders",
+            "analysis_code": data.get("analysis_code"),
+            "analysis_name": analysis_name,
+            "material": material,
+            "material_label": material_label,
+            "lab_comment": str(data.get("comment") or "").strip(),
+            "created_at": self._card_datetime_text(data.get("created_at")),
+            "updated_at": self._card_datetime_text(data.get("updated_at")),
+            "allow_not_done": False,
+            "signal_state": self._signal_state_for_card_time(scheduled_text),
+        }
+        if include_patient:
+            payload["patient_name"] = data.get("patient_name")
+            payload["patient_full_name"] = data.get("patient_name")
+            payload["bed_number"] = data.get("bed_number")
+        return payload
+
+    def _lab_order_cards_for_admission(self, admission_id: int, shift_date: datetime) -> list[dict[str, Any]]:
+        start_dt, end_dt = self.get_day_period(shift_date)
+        rows = self.orders_dao.db.fetch_all_remcard(
+            """
+            SELECT
+                lo.id AS lab_order_id,
+                lo.patient_id,
+                lo.admission_id,
+                lo.card_day_id,
+                lo.analysis_code,
+                lo.analysis_name,
+                lo.material,
+                lo.status,
+                lo.created_at,
+                lo.scheduled_at,
+                lo.completed_at,
+                lo.comment,
+                lo.created_by_role,
+                lo.created_by_user,
+                lo.completed_by_role,
+                lo.completed_by_user,
+                lo.revision,
+                lo.updated_at
+            FROM lab_orders lo
+            JOIN admissions adm ON adm.id = lo.admission_id
+            WHERE lo.admission_id = ?
+              AND lo.scheduled_at IS NOT NULL
+              AND DATETIME(lo.scheduled_at) >= DATETIME(?)
+              AND DATETIME(lo.scheduled_at) < DATETIME(?)
+              AND LOWER(COALESCE(NULLIF(TRIM(lo.status), ''), ?)) = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM patient_status_events pse_out
+                  WHERE pse_out.admission_id = adm.id
+                    AND pse_out.end_time IS NULL
+                    AND pse_out.status IN ('TRANSFERRED', 'DEAD')
+              )
+              AND TRIM(COALESCE(adm.outcome, '')) NOT IN (
+                  'переведен', 'переведён', 'умер',
+                  'Переведен', 'Переведён', 'Умер',
+                  'transferred', 'TRANSFERRED', 'dead', 'DEAD'
+              )
+              AND NULLIF(TRIM(COALESCE(adm.transfer_datetime, '')), '') IS NULL
+              AND NULLIF(TRIM(COALESCE(adm.death_datetime, '')), '') IS NULL
+            ORDER BY DATETIME(lo.scheduled_at) ASC, lo.id ASC
+            """,
+            (
+                int(admission_id),
+                start_dt.isoformat(timespec="seconds"),
+                end_dt.isoformat(timespec="seconds"),
+                LabOrderStatus.ASSIGNED.value,
+                LabOrderStatus.ASSIGNED.value,
+            ),
+        )
+        return [
+            payload
+            for payload in (self._lab_order_card_payload(row) for row in rows)
+            if payload is not None
+        ]
+
+    def _lab_order_cards_across_active_admissions(self, shift_date: datetime) -> list[dict[str, Any]]:
+        start_dt, end_dt = self.get_day_period(shift_date)
+        rows = self.orders_dao.db.fetch_all_remcard(
+            """
+            SELECT
+                lo.id AS lab_order_id,
+                lo.patient_id,
+                lo.admission_id,
+                lo.card_day_id,
+                lo.analysis_code,
+                lo.analysis_name,
+                lo.material,
+                lo.status,
+                lo.created_at,
+                lo.scheduled_at,
+                lo.completed_at,
+                lo.comment,
+                lo.created_by_role,
+                lo.created_by_user,
+                lo.completed_by_role,
+                lo.completed_by_user,
+                lo.revision,
+                lo.updated_at,
+                b.bed_number AS bed_number,
+                COALESCE(
+                    NULLIF(TRIM(
+                        COALESCE(p.last_name, '') || ' ' ||
+                        COALESCE(p.first_name, '') || ' ' ||
+                        COALESCE(p.middle_name, '')
+                    ), ''),
+                    NULLIF(TRIM(COALESCE(p.full_name, '')), ''),
+                    'Неизвестно'
+                ) AS patient_name
+            FROM lab_orders lo
+            JOIN admissions adm ON adm.id = lo.admission_id
+            JOIN patients p ON p.id = adm.patient_id
+            JOIN beds b ON b.current_admission_id = adm.id AND b.status = 'OCCUPIED'
+            WHERE lo.scheduled_at IS NOT NULL
+              AND DATETIME(lo.scheduled_at) >= DATETIME(?)
+              AND DATETIME(lo.scheduled_at) < DATETIME(?)
+              AND LOWER(COALESCE(NULLIF(TRIM(lo.status), ''), ?)) = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM patient_status_events pse_out
+                  WHERE pse_out.admission_id = adm.id
+                    AND pse_out.end_time IS NULL
+                    AND pse_out.status IN ('TRANSFERRED', 'DEAD')
+              )
+              AND TRIM(COALESCE(adm.outcome, '')) NOT IN (
+                  'переведен', 'переведён', 'умер',
+                  'Переведен', 'Переведён', 'Умер',
+                  'transferred', 'TRANSFERRED', 'dead', 'DEAD'
+              )
+              AND NULLIF(TRIM(COALESCE(adm.transfer_datetime, '')), '') IS NULL
+              AND NULLIF(TRIM(COALESCE(adm.death_datetime, '')), '') IS NULL
+            ORDER BY CAST(b.bed_number AS INTEGER) ASC, b.bed_number ASC, DATETIME(lo.scheduled_at) ASC, lo.id ASC
+            """,
+            (
+                start_dt.isoformat(timespec="seconds"),
+                end_dt.isoformat(timespec="seconds"),
+                LabOrderStatus.ASSIGNED.value,
+                LabOrderStatus.ASSIGNED.value,
+            ),
+        )
+        return [
+            payload
+            for payload in (self._lab_order_card_payload(row, include_patient=True) for row in rows)
+            if payload is not None
+        ]
+
     def get_nurse_orders_data(self, admission_id: int, shift_date: datetime):
-        return self._orders.get_nurse_orders_data(admission_id, shift_date)
+        rows = [
+            dict(row)
+            for row in self._orders.get_nurse_orders_data(admission_id, shift_date)
+        ]
+        rows.extend(self._lab_order_cards_for_admission(int(admission_id), shift_date))
+        return rows
 
     @staticmethod
     def _upcoming_orders_content_hash(rows: Sequence[dict]) -> str:
@@ -1551,6 +1814,8 @@ class RemCardService(QObject):
             dict(row)
             for row in self._orders.get_upcoming_orders_across_active_admissions(effective_shift_date)
         ]
+        rows.extend(self._lab_order_cards_across_active_admissions(effective_shift_date))
+        rows.sort(key=self._upcoming_card_sort_key)
         if self.data_service and hasattr(self.data_service, "get_latest_change_id"):
             change_id = self.data_service.get_latest_change_id(admission_id=None, include_global=True)
         elif hasattr(self.orders_dao.db, "get_latest_change_id"):
@@ -1915,6 +2180,12 @@ class RemCardService(QObject):
 
     def list_lab_analysis_templates(self):
         return self._lab_analysis_catalog.list_templates()
+
+    def list_lab_materials(self):
+        return self._lab_analysis_catalog.list_materials()
+
+    def create_lab_material(self, **kwargs):
+        return self._lab_analysis_catalog.create_material(**kwargs)
 
     def create_lab_analysis_template(self, **kwargs):
         return self._lab_analysis_catalog.create_template(**kwargs)

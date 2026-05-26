@@ -13,6 +13,7 @@ W1A_STARTUP_IDLE_DELAY_MS = max(0, int(os.environ.get("REMCARD_W1A_STARTUP_IDLE_
 W1A_PANEL_REFRESH_ENTITIES = {
     "orders",
     "administrations",
+    "lab_orders",
     "patients",
     "admissions",
     "beds",

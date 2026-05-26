@@ -31,8 +31,9 @@ class StatusPopup(QFrame):
     """Окошко выбора выполнения (Выполнено / Не выполнено)."""
     actionSelected = Signal(str) # 'done' или 'not_done'
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, allow_not_done: bool = True):
         super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.allow_not_done = bool(allow_not_done)
         self.setObjectName("status_popup")
         self.init_ui()
 
@@ -54,7 +55,10 @@ class StatusPopup(QFrame):
         self.btn_not_done.setFixedSize(44, 44)
         self.btn_not_done.setIcon(_cached_icon_pixmap("notdone.png"))
         self.btn_not_done.setIconSize(QSize(36, 36))
-        self.btn_not_done.setToolTip("Не выполнено")
+        self.btn_not_done.setToolTip(
+            "Не выполнено" if self.allow_not_done else "Для анализов доступна только отметка «Выполнено»"
+        )
+        self.btn_not_done.setEnabled(self.allow_not_done)
         self.btn_not_done.clicked.connect(lambda: self.actionSelected.emit("not_done"))
         layout.addWidget(self.btn_not_done)
 
@@ -72,6 +76,10 @@ class StatusPopup(QFrame):
             }
             QPushButton:hover {
                 background-color: #e9ecef;
+            }
+            QPushButton:disabled {
+                background-color: #edf0f3;
+                border-color: #d7dce0;
             }
         """)
 
@@ -189,6 +197,22 @@ class NurseOrderCard(QFrame):
 
         return self._is_empty_dose(dose, unit)
 
+    @staticmethod
+    def _parse_datetime(value) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        return datetime.fromisoformat(str(value or "").replace(" ", "T"))
+
+    @staticmethod
+    def _is_lab_order_data(data) -> bool:
+        source = str((data or {}).get("source_type") or (data or {}).get("order_type") or "").strip().lower()
+        return source in {"lab_order", "lab", "analysis"}
+
+    def _allow_not_done(self) -> bool:
+        if self._is_lab_order_data(self.data):
+            return False
+        return bool(self.data.get("allow_not_done", True))
+
     def _build_drug_text(self, latin, dose, unit, order_type_val, drug_key: str) -> tuple[str, bool]:
         if self._is_multicomponent_order(drug_key, latin, dose, unit):
             return "\n".join(self._split_components(latin)), True
@@ -302,6 +326,10 @@ class NurseOrderCard(QFrame):
         patient_name = self._patient_name_from_data(self.data)
         if self.lbl_patient_header is not None:
             self.lbl_patient_header.setText(patient_name)
+
+        if self._is_lab_order_data(self.data):
+            self._update_lab_order_data()
+            return
         
         # --- Сбор данных ---
         latin = self.data.get('latin', '')
@@ -312,7 +340,7 @@ class NurseOrderCard(QFrame):
         diluent = self._extract_diluent(comment)
         route = self._extract_route(comment)
         dur_min = self.data.get('duration_min', 0)
-        planned_dt = datetime.fromisoformat(self.data['planned_time'])
+        planned_dt = self._parse_datetime(self.data['planned_time'])
 
         # --- Форматирование ---
         drug_key = str(self.data.get('drug_key', '') or '').strip().lower()
@@ -345,6 +373,29 @@ class NurseOrderCard(QFrame):
         
         self.lbl_method_dur.setText(" - ".join(tail_parts))
         self.lbl_method_dur.setVisible(bool(tail_parts))
+
+        self.update_signal()
+        self.updateGeometry()
+        self._queue_height_sync()
+
+    def _update_lab_order_data(self):
+        planned_dt = self._parse_datetime(self.data['planned_time'])
+        analysis_name = str(
+            self.data.get("analysis_name")
+            or self.data.get("order_title")
+            or self.data.get("latin")
+            or "Анализ"
+        ).strip()
+        material_text = str(self.data.get("material_label") or self.data.get("material") or "").strip()
+        lab_comment = str(self.data.get("lab_comment") or "").strip()
+
+        self.lbl_time.setText(planned_dt.strftime("%H:%M"))
+        self.lbl_line1.setWordWrap(True)
+        self.lbl_line1.setText(analysis_name)
+        self.lbl_line2.setText(material_text)
+        self.lbl_line2.setVisible(bool(material_text))
+        self.lbl_method_dur.setText(lab_comment)
+        self.lbl_method_dur.setVisible(bool(lab_comment))
 
         self.update_signal()
         self.updateGeometry()
@@ -408,7 +459,7 @@ class NurseOrderCard(QFrame):
         return match.group(1) if match else ""
 
     def update_signal(self):
-        planned_dt = datetime.fromisoformat(self.data['planned_time'])
+        planned_dt = self._parse_datetime(self.data['planned_time'])
         now = datetime.now()
         diff_minutes = (now - planned_dt).total_seconds() / 60.0
 
@@ -433,7 +484,7 @@ class NurseOrderCard(QFrame):
             return
         self.last_click_time = now_ts
 
-        self.popup = StatusPopup(self)
+        self.popup = StatusPopup(self, allow_not_done=self._allow_not_done())
         self.popup.actionSelected.connect(self.handle_popup_action)
         pos = self.lbl_signal.mapToGlobal(QPoint(0, 0))
         self.popup.move(pos.x() + self.lbl_signal.width() + 5, pos.y() - 10)
@@ -441,6 +492,8 @@ class NurseOrderCard(QFrame):
 
     def handle_popup_action(self, action):
         self.popup.close()
+        if action == "not_done" and not self._allow_not_done():
+            return
         new_mark = NURSE_MARK_EXECUTED if action == "done" else NURSE_MARK_NOT_EXECUTED
         defer_visual = bool(self.data.get("defer_mark_visual"))
         if not defer_visual:

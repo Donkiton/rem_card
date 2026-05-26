@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,8 @@ MATERIAL_OPTIONS = {
 }
 LAB_ORDER_ROW_ROLE = Qt.UserRole + 100
 LAB_ORDER_ID_ROLE = Qt.UserRole + 101
+LAB_COLUMNS_SETTINGS_ENV = "REMCARD_LAB_COLUMNS_SETTINGS_PATH"
+LAB_COLUMNS_SETTINGS_FILE = "lab_orders_columns.json"
 
 
 class LabSummaryCard(QFrame):
@@ -229,11 +233,10 @@ class MaterialCell(QWidget):
 
 
 class SectorAnal(BaseSectorWidget):
-    """Врачебный сектор назначений лабораторных анализов за сутки карты."""
+    """Сектор назначений лабораторных анализов за сутки карты."""
 
     HEADER_SETTINGS_KEY = "labs/doctor_orders_header_state_v2"
-
-    HEADERS = [
+    DOCTOR_HEADERS = [
         "",
         "Время назначения",
         "Анализ",
@@ -242,21 +245,57 @@ class SectorAnal(BaseSectorWidget):
         "Назначено на",
         "Выполнено",
     ]
-    MIN_COLUMN_WIDTHS = (44, 158, 190, 150, 112, 126, 126)
-    DEFAULT_COLUMN_WIDTHS = (44, 166, 300, 205, 136, 142, 142)
+    NURSE_HEADERS = [
+        "Время назначения",
+        "Анализ",
+        "Материал",
+        "Статус",
+        "Назначено на",
+        "Выполнено",
+    ]
+    DOCTOR_MIN_COLUMN_WIDTHS = (44, 158, 190, 150, 112, 126, 126)
+    DOCTOR_DEFAULT_COLUMN_WIDTHS = (44, 166, 300, 205, 136, 142, 142)
+    NURSE_MIN_COLUMN_WIDTHS = (158, 220, 150, 112, 126, 132)
+    NURSE_DEFAULT_COLUMN_WIDTHS = (166, 330, 205, 136, 142, 154)
+    HEADERS = DOCTOR_HEADERS
+    MIN_COLUMN_WIDTHS = DOCTOR_MIN_COLUMN_WIDTHS
+    DEFAULT_COLUMN_WIDTHS = DOCTOR_DEFAULT_COLUMN_WIDTHS
     DEFAULT_SORT_COLUMN = 5
     DEFAULT_SORT_ORDER = Qt.AscendingOrder
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, role: str = "doctor"):
         super().__init__("Анализы", parent)
         self.label.hide()
         self.container_layout.setContentsMargins(0, 3, 0, 5)
+
+        self.role_key = "nurse" if str(role or "").lower() in {"nurse", "медсестра"} else "doctor"
+        self.is_nurse = self.role_key == "nurse"
+        if self.is_nurse:
+            self.HEADER_SETTINGS_KEY = "labs/nurse_orders_header_state_v2"
+            self.HEADERS = self.NURSE_HEADERS
+            self.MIN_COLUMN_WIDTHS = self.NURSE_MIN_COLUMN_WIDTHS
+            self.DEFAULT_COLUMN_WIDTHS = self.NURSE_DEFAULT_COLUMN_WIDTHS
+            self.DEFAULT_SORT_COLUMN = 4
+        else:
+            self.HEADER_SETTINGS_KEY = "labs/doctor_orders_header_state_v2"
+            self.HEADERS = self.DOCTOR_HEADERS
+            self.MIN_COLUMN_WIDTHS = self.DOCTOR_MIN_COLUMN_WIDTHS
+            self.DEFAULT_COLUMN_WIDTHS = self.DOCTOR_DEFAULT_COLUMN_WIDTHS
+            self.DEFAULT_SORT_COLUMN = 5
+        self._col_check = 0 if not self.is_nurse else None
+        self._col_created = 1 if not self.is_nurse else 0
+        self._col_analysis = 2 if not self.is_nurse else 1
+        self._col_material = 3 if not self.is_nurse else 2
+        self._col_status = 4 if not self.is_nurse else 3
+        self._col_planned = 5 if not self.is_nurse else 4
+        self._col_completed = 6 if not self.is_nurse else 5
 
         self.remcard_service = None
         self.admission_id = None
         self.card_date = None
         self._orders: list[Any] = []
         self._checked_order_ids: set[int] = set()
+        self._completion_pending_ids: set[int] = set()
         self._last_content_hash: str | None = None
         self._status_filter = "all"
         self._rendering_table = False
@@ -446,6 +485,31 @@ class SectorAnal(BaseSectorWidget):
                 color: #24313d;
                 font-weight: bold;
             }
+            QPushButton#lab_complete_button {
+                background: lightgray;
+                color: dimgray;
+                border: 1px solid silver;
+                border-radius: 5px;
+                padding: 1px 8px;
+                min-height: 16px;
+                max-height: 16px;
+                font-size: 8pt;
+                font-weight: bold;
+            }
+            QPushButton#lab_complete_button:hover {
+                background: gainsboro;
+                border-color: gray;
+            }
+            QPushButton#lab_complete_button:pressed {
+                padding-top: 2px;
+                padding-bottom: 0px;
+            }
+            QPushButton#lab_complete_button[status="completed"],
+            QPushButton#lab_complete_button[status="completed"]:disabled {
+                background: honeydew;
+                border-color: lightgreen;
+                color: seagreen;
+            }
             """
         )
 
@@ -481,21 +545,22 @@ class SectorAnal(BaseSectorWidget):
         self.filter_button.setMenu(self._build_filter_menu())
         self._update_filter_button_text()
 
-        self.delete_button = QPushButton("Удалить отмеченное")
-        self.delete_button.setObjectName("lab_delete_button")
-        self.delete_button.setCursor(Qt.PointingHandCursor)
-        self.delete_button.setEnabled(False)
-        self.delete_button.clicked.connect(self._delete_checked_lab_orders)
-
-        self.assign_button = QPushButton("Назначить анализы")
-        self.assign_button.setObjectName("lab_assign_button")
-        self.assign_button.setCursor(Qt.PointingHandCursor)
-        self.assign_button.clicked.connect(self._open_add_dialog)
-
         controls.addWidget(self.search_input, 1)
         controls.addWidget(self.filter_button, 0)
-        controls.addWidget(self.delete_button, 0)
-        controls.addWidget(self.assign_button, 0)
+        if not self.is_nurse:
+            self.delete_button = QPushButton("Удалить отмеченное")
+            self.delete_button.setObjectName("lab_delete_button")
+            self.delete_button.setCursor(Qt.PointingHandCursor)
+            self.delete_button.setEnabled(False)
+            self.delete_button.clicked.connect(self._delete_checked_lab_orders)
+
+            self.assign_button = QPushButton("Назначить анализы")
+            self.assign_button.setObjectName("lab_assign_button")
+            self.assign_button.setCursor(Qt.PointingHandCursor)
+            self.assign_button.clicked.connect(self._open_add_dialog)
+
+            controls.addWidget(self.delete_button, 0)
+            controls.addWidget(self.assign_button, 0)
         body_layout.addLayout(controls)
 
         summary_row = QHBoxLayout()
@@ -523,8 +588,9 @@ class SectorAnal(BaseSectorWidget):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._configure_table_header()
         self.table.itemSelectionChanged.connect(self._apply_visual_row_tones)
-        self.table.itemChanged.connect(self._on_table_item_changed)
-        self.table.cellDoubleClicked.connect(self._open_edit_dialog_for_table_row)
+        if not self.is_nurse:
+            self.table.itemChanged.connect(self._on_table_item_changed)
+            self.table.cellDoubleClicked.connect(self._open_edit_dialog_for_table_row)
         body_layout.addWidget(self.table, 1)
 
         self.set_content(main_frame)
@@ -550,31 +616,38 @@ class SectorAnal(BaseSectorWidget):
         header.setSortIndicator(self.DEFAULT_SORT_COLUMN, self.DEFAULT_SORT_ORDER)
         header.setMinimumSectionSize(min(self.MIN_COLUMN_WIDTHS))
         for column in range(len(self.HEADERS)):
-            mode = QHeaderView.Fixed if column == 0 else QHeaderView.Interactive
+            mode = QHeaderView.Fixed if self._col_check is not None and column == self._col_check else QHeaderView.Interactive
             header.setSectionResizeMode(column, mode)
         header.sectionResized.connect(self._on_section_resized)
         self._apply_default_widths()
         self._restore_header_state()
 
     def _apply_default_widths(self):
-        self._set_column_widths(self._normalized_widths(self.DEFAULT_COLUMN_WIDTHS))
+        defaults = self._managed_default_header_payload()
+        widths = defaults.get("widths") if isinstance(defaults, dict) else None
+        self._set_column_widths(self._valid_widths(widths) or list(self.DEFAULT_COLUMN_WIDTHS))
+        visual_order = defaults.get("visual_order") if isinstance(defaults, dict) else None
+        self._apply_visual_order(visual_order)
 
     def _restore_header_state(self):
         value = QSettings("MyHospital", "RemCard").value(self.HEADER_SETTINGS_KEY)
         if value is None:
             return
+        restored = False
         self._restoring_header = True
         try:
-            self.table.horizontalHeader().restoreState(value)
+            restored = bool(self.table.horizontalHeader().restoreState(value))
             self.table.horizontalHeader().setSortIndicatorShown(True)
             self.table.horizontalHeader().setSortIndicator(self.DEFAULT_SORT_COLUMN, self.DEFAULT_SORT_ORDER)
         finally:
             self._restoring_header = False
+        if restored:
+            self._save_managed_default_header_state()
         QTimer.singleShot(0, self._fit_columns_to_viewport)
 
     def _on_section_resized(self, logical_index: int, old_size: int, new_size: int):
         del old_size, new_size
-        if self._restoring_header or self._constraining_header:
+        if self._restoring_header or self._constraining_header or not self.table.isVisible():
             return
         self._constrain_columns_to_viewport(logical_index)
         self._save_header_timer.start(500)
@@ -583,9 +656,98 @@ class SectorAnal(BaseSectorWidget):
         settings = QSettings("MyHospital", "RemCard")
         settings.setValue(self.HEADER_SETTINGS_KEY, self.table.horizontalHeader().saveState())
         settings.sync()
+        self._save_managed_default_header_state()
+
+    def _managed_default_header_payload(self) -> dict[str, Any]:
+        payload = self._read_lab_columns_settings()
+        active = payload.get("active") if isinstance(payload, dict) else None
+        role_payload = active.get(self.role_key) if isinstance(active, dict) else None
+        if not isinstance(role_payload, dict):
+            return {}
+        headers = role_payload.get("headers")
+        if headers != list(self.HEADERS):
+            return {}
+        widths = self._valid_widths(role_payload.get("widths"))
+        visual_order = self._valid_visual_order(role_payload.get("visual_order"))
+        result: dict[str, Any] = {}
+        if widths is not None:
+            result["widths"] = widths
+        if visual_order is not None:
+            result["visual_order"] = visual_order
+        return result
+
+    def _save_managed_default_header_state(self):
+        if not self._dev_managed_defaults_writable() or not hasattr(self, "table"):
+            return
+        path = self._lab_columns_settings_path()
+        payload = self._read_lab_columns_settings()
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["version"] = 1
+        active = payload.get("active")
+        if not isinstance(active, dict):
+            active = {}
+            payload["active"] = active
+        active[self.role_key] = {
+            "headers": list(self.HEADERS),
+            "widths": self._current_column_widths(),
+            "visual_order": self._current_visual_order(),
+        }
+        self._write_lab_columns_settings(path, payload)
+
+    @staticmethod
+    def _dev_managed_defaults_writable() -> bool:
+        try:
+            from rem_card.app.runtime_paths import is_compiled
+
+            return not is_compiled()
+        except Exception:
+            return True
+
+    @staticmethod
+    def _lab_columns_settings_path() -> Path:
+        override = os.environ.get(LAB_COLUMNS_SETTINGS_ENV)
+        if override:
+            return Path(os.path.abspath(os.path.normpath(override)))
+        try:
+            from rem_card.ui.shared.display_settings_storage import get_display_settings_path
+
+            display_path = Path(get_display_settings_path())
+            return display_path.parent / LAB_COLUMNS_SETTINGS_FILE
+        except Exception:
+            return Path(__file__).resolve().parents[2] / "settings" / "display_settings" / LAB_COLUMNS_SETTINGS_FILE
+
+    @classmethod
+    def _read_lab_columns_settings(cls) -> dict[str, Any]:
+        path = cls._lab_columns_settings_path()
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            return payload if isinstance(payload, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _write_lab_columns_settings(path: Path, payload: dict[str, Any]):
+        directory = path.parent
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if hasattr(self, "table"):
+            QTimer.singleShot(0, self._fit_columns_to_viewport)
+
+    def showEvent(self, event):
+        super().showEvent(event)
         if hasattr(self, "table"):
             QTimer.singleShot(0, self._fit_columns_to_viewport)
 
@@ -600,6 +762,53 @@ class SectorAnal(BaseSectorWidget):
     def _current_column_widths(self) -> list[int]:
         header = self.table.horizontalHeader()
         return [int(header.sectionSize(column)) for column in range(len(self.HEADERS))]
+
+    def _current_visual_order(self) -> list[int]:
+        header = self.table.horizontalHeader()
+        return [int(header.logicalIndex(visual_index)) for visual_index in range(header.count())]
+
+    def _valid_widths(self, value: Any) -> list[int] | None:
+        if not isinstance(value, list) or len(value) != len(self.HEADERS):
+            return None
+        result: list[int] = []
+        for index, raw_width in enumerate(value):
+            try:
+                width = int(raw_width)
+            except (TypeError, ValueError):
+                return None
+            result.append(max(width, self.MIN_COLUMN_WIDTHS[index]))
+        return result
+
+    def _valid_visual_order(self, value: Any) -> list[int] | None:
+        if not isinstance(value, list):
+            return None
+        order: list[int] = []
+        valid_columns = set(range(len(self.HEADERS)))
+        for raw_index in value:
+            try:
+                logical_index = int(raw_index)
+            except (TypeError, ValueError):
+                return None
+            if logical_index not in valid_columns or logical_index in order:
+                return None
+            order.append(logical_index)
+        if len(order) != len(self.HEADERS):
+            return None
+        return order
+
+    def _apply_visual_order(self, value: Any):
+        order = self._valid_visual_order(value)
+        if not order:
+            return
+        header = self.table.horizontalHeader()
+        self._constraining_header = True
+        try:
+            for target_visual_index, logical_index in enumerate(order):
+                current_visual_index = header.visualIndex(logical_index)
+                if current_visual_index >= 0 and current_visual_index != target_visual_index:
+                    header.moveSection(current_visual_index, target_visual_index)
+        finally:
+            self._constraining_header = False
 
     def _set_column_widths(self, widths: list[int] | tuple[int, ...]):
         self._constraining_header = True
@@ -651,6 +860,8 @@ class SectorAnal(BaseSectorWidget):
     def _fit_columns_to_viewport(self):
         if self._restoring_header or self._constraining_header or not hasattr(self, "table"):
             return
+        if not self.table.isVisible():
+            return
         self._set_column_widths(self._normalized_widths(self._current_column_widths()))
 
     def _constrain_columns_to_viewport(self, changed_column: int):
@@ -670,7 +881,8 @@ class SectorAnal(BaseSectorWidget):
         self._apply_filter()
 
     def _update_filter_button_text(self):
-        self.filter_button.setText("Фильтры")
+        if hasattr(self, "filter_button"):
+            self.filter_button.setText("Фильтры")
 
     def set_context(self, remcard_service=None, admission_id=None, card_date=None):
         old_scope = (self.remcard_service, self.admission_id, self.card_date)
@@ -694,6 +906,7 @@ class SectorAnal(BaseSectorWidget):
             if order_id is not None
         }
         self._checked_order_ids.intersection_update(visible_ids)
+        self._completion_pending_ids.intersection_update(visible_ids)
         self._update_summary()
         self._apply_filter()
         self._update_delete_button_state()
@@ -719,7 +932,7 @@ class SectorAnal(BaseSectorWidget):
             snapshot = coordinator.load_lab_orders_snapshot(
                 int(self.admission_id),
                 self.card_date,
-                role="doctor",
+                role=self.role_key,
                 force_refresh=True,
             )
             return snapshot or {}
@@ -739,6 +952,8 @@ class SectorAnal(BaseSectorWidget):
         return {"rows": [], "content_hash": None}
 
     def _open_add_dialog(self):
+        if self.is_nurse:
+            return
         self._resolve_runtime_context()
         if not self.remcard_service or not self.admission_id or self.card_date is None:
             CustomMessageBox.warning(self, "Анализы", "Сначала выберите пациента и текущую карту.")
@@ -754,6 +969,8 @@ class SectorAnal(BaseSectorWidget):
             self.refresh()
 
     def _open_edit_dialog_for_table_row(self, row_index: int, column_index: int):
+        if self.is_nurse:
+            return
         if column_index == 0:
             return
         row_payload = self._row_payload_from_table_row(row_index)
@@ -864,8 +1081,10 @@ class SectorAnal(BaseSectorWidget):
         self._delete_pending = bool(pending)
         self.table.setEnabled(not pending)
         self.search_input.setEnabled(not pending)
-        self.filter_button.setEnabled(not pending)
-        self.assign_button.setEnabled(not pending)
+        if hasattr(self, "filter_button"):
+            self.filter_button.setEnabled(not pending)
+        if hasattr(self, "assign_button"):
+            self.assign_button.setEnabled(not pending)
         self._update_delete_button_state()
 
     def _delete_checked_lab_orders(self):
@@ -973,8 +1192,10 @@ class SectorAnal(BaseSectorWidget):
             if self._status_filter != "all" and status != self._status_filter:
                 continue
             analysis = str(_row_value(row, "analysis", "analysis_name", "lab_name", default="") or "")
-            material = _row_value(row, "material", "material_label", "sample_material", default="")
-            material_label = _material_label(material)
+            material = _row_value(row, "material", default="")
+            material_label = str(
+                _row_value(row, "material_label", "sample_material", default="") or _material_label(material)
+            )
             if query and query not in f"{analysis} {material} {material_label}".lower():
                 continue
             filtered_rows.append(row)
@@ -1007,16 +1228,18 @@ class SectorAnal(BaseSectorWidget):
                 status = _status_key(_row_value(row, "status", "state", "execution_status"))
                 created_at = _row_value(row, "created_at", "assigned_at", "appointment_time", "created")
                 analysis = _row_value(row, "analysis", "analysis_name", "lab_name", default="Анализ не указан")
-                material = _row_value(row, "material", "material_label", "sample_material", default="Материал не указан")
+                material = _row_value(row, "material", default="")
+                material_label = _row_value(row, "material_label", "sample_material", default="")
                 planned_at = _row_value(row, "planned_at", "planned_for", "scheduled_at")
                 completed_at = _row_value(row, "completed_at", "done_at", "performed_at")
                 status_label = _status_label(status)
-                material_text = _material_label(material)
+                material_text = str(material_label or _material_label(material))
 
-                self._set_check_item(row_index, row, row_tone=row_tone)
+                if self._col_check is not None:
+                    self._set_check_item(row_index, row, row_tone=row_tone)
                 self._set_text_item(
                     row_index,
-                    1,
+                    self._col_created,
                     _format_dt(created_at, "%H:%M"),
                     align=Qt.AlignCenter,
                     sort_value=_sort_dt(created_at),
@@ -1024,50 +1247,57 @@ class SectorAnal(BaseSectorWidget):
                 )
                 self._set_text_item(
                     row_index,
-                    2,
+                    self._col_analysis,
                     str(analysis or "Анализ не указан"),
                     sort_value=str(analysis or "").lower(),
                     row_tone=row_tone,
                 )
                 self._set_text_item(
                     row_index,
-                    3,
+                    self._col_material,
                     material_text,
                     sort_value=material_text.lower(),
                     row_tone=row_tone,
                 )
-                self._hide_item_text(row_index, 3)
-                self.table.setCellWidget(row_index, 3, MaterialCell(material_text, self.table, row_tone=row_tone))
+                self._hide_item_text(row_index, self._col_material)
+                self.table.setCellWidget(
+                    row_index,
+                    self._col_material,
+                    MaterialCell(material_text, self.table, row_tone=row_tone),
+                )
                 self._set_text_item(
                     row_index,
-                    4,
+                    self._col_status,
                     status_label,
                     align=Qt.AlignCenter,
                     sort_value=1 if status == "completed" else 0,
                     row_tone=row_tone,
                 )
-                self._hide_item_text(row_index, 4)
+                self._hide_item_text(row_index, self._col_status)
                 self.table.setCellWidget(
                     row_index,
-                    4,
+                    self._col_status,
                     _centered_cell(LabStatusBadge(status, self.table), self.table, row_tone=row_tone),
                 )
                 self._set_text_item(
                     row_index,
-                    5,
+                    self._col_planned,
                     _format_dt(planned_at, "%H:%M"),
                     align=Qt.AlignCenter,
                     sort_value=_sort_shift_dt(planned_at, self._effective_card_datetime()),
                     row_tone=row_tone,
                 )
-                self._set_text_item(
-                    row_index,
-                    6,
-                    _format_dt(completed_at, "%d.%m %H:%M"),
-                    align=Qt.AlignCenter,
-                    sort_value=_sort_dt(completed_at),
-                    row_tone=row_tone,
-                )
+                if self.is_nurse:
+                    self._set_completion_button(row_index, row, status=status, row_tone=row_tone)
+                else:
+                    self._set_text_item(
+                        row_index,
+                        self._col_completed,
+                        _format_dt(completed_at, "%d.%m %H:%M"),
+                        align=Qt.AlignCenter,
+                        sort_value=_sort_dt(completed_at),
+                        row_tone=row_tone,
+                    )
                 for column in range(self.table.columnCount()):
                     item = self.table.item(row_index, column)
                     if item is not None:
@@ -1122,6 +1352,88 @@ class SectorAnal(BaseSectorWidget):
         item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsUserCheckable)
         item.setCheckState(Qt.Checked if order_id in self._checked_order_ids else Qt.Unchecked)
         self.table.setItem(row, 0, item)
+
+    def _set_completion_button(self, row: int, payload: Any, *, status: str, row_tone: str = "even"):
+        order_id = _optional_int(_row_value(payload, "id"))
+        completed = status == "completed"
+        pending = order_id in self._completion_pending_ids if order_id is not None else False
+        text = "Выполнено" if completed else ("Ждите" if pending else "Выполнить")
+        self._set_text_item(
+            row,
+            self._col_completed,
+            text,
+            align=Qt.AlignCenter,
+            sort_value=1 if completed else 0,
+            row_tone=row_tone,
+        )
+        self._hide_item_text(row, self._col_completed)
+
+        button = QPushButton(text)
+        button.setObjectName("lab_complete_button")
+        button.setProperty("status", "completed" if completed else "assigned")
+        font = button.font()
+        font.setPointSize(8)
+        font.setBold(True)
+        button.setFont(font)
+        button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        button.setFixedSize(82, 20)
+        button.setCursor(Qt.ArrowCursor if completed or pending else Qt.PointingHandCursor)
+        button.setEnabled(not completed and not pending and order_id is not None)
+        if not completed and not pending and order_id is not None:
+            button.clicked.connect(lambda _checked=False, row_payload=payload: self._complete_lab_order(row_payload))
+        self.table.setCellWidget(
+            row,
+            self._col_completed,
+            _centered_cell(button, self.table, row_tone=row_tone),
+        )
+
+    def _complete_lab_order(self, row_payload: Any):
+        if not self.is_nurse:
+            return
+        order_id = _optional_int(_row_value(row_payload, "id"))
+        if order_id is None:
+            return
+        if _status_key(_row_value(row_payload, "status", "state", "execution_status")) == "completed":
+            return
+        self._resolve_runtime_context()
+        if not self.remcard_service or not hasattr(self.remcard_service, "mark_lab_order_completed"):
+            CustomMessageBox.warning(self, "Анализы", "Отметка выполнения анализа сейчас недоступна.")
+            return
+
+        self._completion_pending_ids.add(order_id)
+        self._apply_filter()
+
+        def operation():
+            return self.remcard_service.mark_lab_order_completed(
+                int(order_id),
+                completed_by_role="nurse",
+            )
+
+        def on_success(_result=None):
+            self._completion_pending_ids.discard(order_id)
+            self._last_content_hash = None
+            self.refresh()
+
+        def on_error(exc):
+            self._completion_pending_ids.discard(order_id)
+            self._last_content_hash = None
+            self.refresh()
+            CustomMessageBox.warning(self, "Ошибка выполнения", f"Не удалось отметить анализ выполненным: {exc}")
+
+        if hasattr(self.remcard_service, "enqueue_write"):
+            self.remcard_service.enqueue_write(
+                description=f"lab_order_complete_ui:{int(order_id)}",
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+
+        try:
+            result = operation()
+            on_success(result)
+        except Exception as exc:
+            on_error(exc)
 
     def _hide_item_text(self, row: int, column: int):
         item = self.table.item(row, column)

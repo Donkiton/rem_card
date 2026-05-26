@@ -6,6 +6,7 @@ from PySide6.QtCore import QTimer, Signal
 from .nurse_order_card import NurseOrderCard
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.app.logger import logger
+from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED
 from rem_card.services import persistent_snapshot_cache
 
 PENDING_MARK_TTL_SEC = 8.0
@@ -16,6 +17,7 @@ CURRENT_ORDERS_CACHE_LIMIT = 10
 CURRENT_ORDERS_REFRESH_ENTITIES = {
     "orders",
     "administrations",
+    "lab_orders",
     "admissions",
     "patient_status_events",
 }
@@ -153,6 +155,17 @@ class CurrentNurseOrdersWidget(QWidget):
 
     def _clear_sector_5(self):
         return
+
+    @staticmethod
+    def _is_lab_order_card_id(item_id) -> bool:
+        try:
+            return int(item_id) < 0
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _lab_order_id_from_card_id(item_id) -> int:
+        return abs(int(item_id))
 
     def refresh_data(self, *, force: bool = False):
         if not self.admission_id or not self.shift_date:
@@ -449,13 +462,21 @@ class CurrentNurseOrdersWidget(QWidget):
         )
 
     def handle_status_change(self, admin_id, mark):
-        operation = lambda aid=admin_id, m=mark: self.service.set_nurse_status(aid, m)
+        if self._is_lab_order_card_id(admin_id):
+            if mark != NURSE_MARK_EXECUTED:
+                return
+            lab_order_id = self._lab_order_id_from_card_id(admin_id)
+            operation = lambda oid=lab_order_id: self.service.mark_lab_order_completed(oid)
+            description = f"lab_order_complete_panel:{lab_order_id}"
+        else:
+            operation = lambda aid=admin_id, m=mark: self.service.set_nurse_status(aid, m)
+            description = f"nurse_order_panel_mark:{admin_id}"
 
         self._set_pending_mark(admin_id, mark)
         self._render_from_cache()
         self.localBalanceChanged.emit()
         self._enqueue_write(
-            f"nurse_order_panel_mark:{admin_id}",
+            description,
             operation,
             on_success=lambda result=None, aid=admin_id: self._on_mark_write_success(aid, result),
             on_error=lambda exc, aid=admin_id: self._on_mark_write_error(aid, exc),

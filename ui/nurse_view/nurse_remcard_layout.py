@@ -434,8 +434,8 @@ class NurseRemCardLayoutManager(QWidget):
     def _ensure_anal_tab_initialized(self):
         if self._anal_initialized:
             return
-        from .sectors.nurse_sector_dev import NurseSectorAnal
-        self.sector_anal = NurseSectorAnal()
+        from rem_card.ui.rem_card_sectors.sector_anal import SectorAnal
+        self.sector_anal = SectorAnal(role="nurse")
         self._anal_layout.addWidget(self.sector_anal)
         self._anal_initialized = True
 
@@ -818,8 +818,19 @@ class NurseRemCardLayoutManager(QWidget):
                             self.sector_proc.refresh()
                     elif tab_name == "Анализы":
                         self._ensure_anal_tab_initialized()
-                        if hasattr(self, 'sector_anal') and hasattr(self.sector_anal, 'refresh'):
-                            self.sector_anal.refresh()
+                        if hasattr(self, 'sector_anal'):
+                            if (
+                                hasattr(self.sector_anal, 'set_context')
+                                and getattr(self, "current_admission_id", None)
+                                and getattr(self, "current_date", None) is not None
+                            ):
+                                self.sector_anal.set_context(
+                                    self.remcard_service,
+                                    self.current_admission_id,
+                                    self.current_date,
+                                )
+                            elif hasattr(self.sector_anal, 'refresh'):
+                                self.sector_anal.refresh()
                     elif tab_name == "Печать":
                         self._ensure_print_tab_initialized()
                         if hasattr(self, 'sector_print') and hasattr(self.sector_print, 'refresh'):

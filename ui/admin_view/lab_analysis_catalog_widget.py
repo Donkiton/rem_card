@@ -25,15 +25,33 @@ from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
-def _material_options() -> tuple[tuple[str, str], ...]:
-    return tuple((key, label) for key, label in LAB_MATERIAL_LABELS.items())
+def _material_options(catalog_service=None) -> tuple[tuple[str, str], ...]:
+    materials = []
+    if catalog_service is not None and hasattr(catalog_service, "list_materials"):
+        try:
+            materials = catalog_service.list_materials()
+        except Exception:
+            materials = []
+    options: list[tuple[str, str]] = []
+    for material in materials or []:
+        code = str(material.get("code") or "").strip() if isinstance(material, dict) else ""
+        label = str(material.get("label") or "").strip() if isinstance(material, dict) else ""
+        if code and label:
+            options.append((code, label))
+    return tuple(options or ((key, label) for key, label in LAB_MATERIAL_LABELS.items()))
 
 
 class LabAnalysisTemplateDialog(BaseStyledDialog):
-    def __init__(self, template: dict[str, Any] | None = None, parent=None):
+    def __init__(
+        self,
+        template: dict[str, Any] | None = None,
+        parent=None,
+        material_options: tuple[tuple[str, str], ...] | None = None,
+    ):
         title = "Редактирование шаблона анализа" if template else "Новый шаблон анализа"
         super().__init__(title, parent)
         self.template = dict(template or {})
+        self._material_options = tuple(material_options or _material_options())
         self._result_data: dict[str, Any] | None = None
         self.setMinimumSize(540, 420)
         self._build_ui()
@@ -70,7 +88,7 @@ class LabAnalysisTemplateDialog(BaseStyledDialog):
         self.name_input.setPlaceholderText("Название анализа")
 
         self.material_combo = QComboBox()
-        for key, label in _material_options():
+        for key, label in self._material_options:
             self.material_combo.addItem(label, key)
 
         self.comment_input = QLineEdit()
@@ -120,6 +138,9 @@ class LabAnalysisTemplateDialog(BaseStyledDialog):
         self.name_input.setText(str(self.template.get("name") or ""))
         material = str(self.template.get("material") or "")
         index = self.material_combo.findData(material)
+        if index < 0 and material:
+            self.material_combo.addItem(str(self.template.get("material_label") or material), material)
+            index = self.material_combo.findData(material)
         if index >= 0:
             self.material_combo.setCurrentIndex(index)
         self.comment_input.setText(str(self.template.get("comment") or ""))
@@ -172,6 +193,50 @@ class LabAnalysisTemplateDialog(BaseStyledDialog):
         if not data:
             return
         self._result_data = data
+        super().accept()
+
+
+class LabMaterialDialog(BaseStyledDialog):
+    def __init__(self, parent=None):
+        super().__init__("Добавить материал", parent)
+        self._result: dict[str, Any] | None = None
+        self.setMinimumSize(420, 180)
+        self._build_ui()
+
+    def _build_ui(self):
+        self.content_widget.setStyleSheet(
+            """
+            QLineEdit {
+                background: #ffffff;
+                border: 1px solid #c8d2dc;
+                border-radius: 6px;
+                padding: 7px 9px;
+            }
+            """
+        )
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Название материала"))
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Например: мокрота")
+        layout.addWidget(self.name_input)
+        self.content_layout.addLayout(layout)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        for button in buttons.buttons():
+            button.setObjectName("DialogOkBtn")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        self.content_layout.addWidget(buttons)
+
+    def result_data(self) -> dict[str, Any] | None:
+        return dict(self._result or {})
+
+    def accept(self):
+        name = self.name_input.text().strip()
+        if not name:
+            CustomMessageBox.warning(self, "Ошибка", "Укажите название материала.")
+            return
+        self._result = {"name": name}
         super().accept()
 
 
@@ -232,7 +297,15 @@ class LabAnalysisCatalogWidget(QWidget):
         self.btn_add = QPushButton("Добавить")
         self.btn_edit = QPushButton("Изменить")
         self.btn_delete = QPushButton("Удалить")
-        for button in (self.btn_move_up, self.btn_move_down, self.btn_add, self.btn_edit, self.btn_delete):
+        self.btn_add_material = QPushButton("Добавить материал")
+        for button in (
+            self.btn_move_up,
+            self.btn_move_down,
+            self.btn_add,
+            self.btn_edit,
+            self.btn_delete,
+            self.btn_add_material,
+        ):
             button.setObjectName("DialogOkBtn")
             button.setFixedHeight(35)
             buttons.addWidget(button)
@@ -254,6 +327,7 @@ class LabAnalysisCatalogWidget(QWidget):
         self.btn_add.clicked.connect(self.add_template)
         self.btn_edit.clicked.connect(self.edit_template)
         self.btn_delete.clicked.connect(self.delete_template)
+        self.btn_add_material.clicked.connect(self.add_material)
         self._update_reorder_buttons()
 
     def set_service(self, service):
@@ -298,7 +372,7 @@ class LabAnalysisCatalogWidget(QWidget):
         return self._templates_by_id.get(int(item.data(Qt.UserRole)))
 
     def add_template(self):
-        dialog = LabAnalysisTemplateDialog(parent=self)
+        dialog = LabAnalysisTemplateDialog(parent=self, material_options=self._load_material_options())
         if dialog.exec():
             data = dialog.result_data()
             if data:
@@ -313,7 +387,11 @@ class LabAnalysisCatalogWidget(QWidget):
         if not template:
             CustomMessageBox.warning(self, "Внимание", "Выберите анализ для редактирования.")
             return
-        dialog = LabAnalysisTemplateDialog(template=template, parent=self)
+        dialog = LabAnalysisTemplateDialog(
+            template=template,
+            parent=self,
+            material_options=self._load_material_options(),
+        )
         if dialog.exec():
             data = dialog.result_data()
             if data:
@@ -340,6 +418,17 @@ class LabAnalysisCatalogWidget(QWidget):
                 expected_version=template.get("version"),
             ),
         )
+
+    def add_material(self):
+        dialog = LabMaterialDialog(self)
+        if dialog.exec():
+            data = dialog.result_data()
+            if not data:
+                return
+            self._enqueue_catalog_write(
+                "lab_analysis_material_create",
+                lambda: self._catalog_service().create_material(**data),
+            )
 
     def move_selected_up(self):
         self._move_selected(self.table.currentRow() - 1)
@@ -370,6 +459,13 @@ class LabAnalysisCatalogWidget(QWidget):
             CustomMessageBox.warning(self, "Предупреждение", f"Не удалось загрузить справочник анализов: {exc}")
             return []
 
+    def _load_material_options(self) -> tuple[tuple[str, str], ...]:
+        try:
+            return _material_options(self._catalog_service())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Предупреждение", f"Не удалось загрузить материалы анализов: {exc}")
+            return _material_options()
+
     def _catalog_service(self):
         if self.service and hasattr(self.service, "list_lab_analysis_templates"):
             return _FacadeCatalogAdapter(self.service)
@@ -390,14 +486,18 @@ class LabAnalysisCatalogWidget(QWidget):
                 description=description,
                 operation=operation,
                 on_success=reload_after_write,
-                on_error=lambda exc: CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения анализа: {exc}"),
+                on_error=lambda exc: CustomMessageBox.warning(
+                    self,
+                    "Предупреждение",
+                    f"Ошибка сохранения справочника анализов: {exc}",
+                ),
             )
             return
         try:
             result = operation()
             reload_after_write(result)
         except Exception as exc:
-            CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения анализа: {exc}")
+            CustomMessageBox.warning(self, "Предупреждение", f"Ошибка сохранения справочника анализов: {exc}")
 
     def _template_ids_in_table(self) -> list[int]:
         ids = []
@@ -433,3 +533,9 @@ class _FacadeCatalogAdapter:
 
     def reorder_templates(self, order: list[int]):
         return self.service.reorder_lab_analysis_templates(order)
+
+    def list_materials(self):
+        return self.service.list_lab_materials()
+
+    def create_material(self, **kwargs):
+        return self.service.create_lab_material(**kwargs)

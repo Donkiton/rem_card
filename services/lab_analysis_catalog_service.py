@@ -28,13 +28,34 @@ DEFAULT_LAB_ANALYSIS_TEMPLATES: tuple[dict[str, Any], ...] = (
     {"code": "csf_general", "name": "Общий анализ ликвора", "material": LabMaterial.LIQUOR.value},
 )
 
+DEFAULT_LAB_MATERIALS: tuple[dict[str, Any], ...] = tuple(
+    {"code": code, "label": label, "built_in": True}
+    for code, label in LAB_MATERIAL_LABELS.items()
+)
+
 
 def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def normalize_lab_material(value: Any) -> str:
-    raw = str(value or "").strip().lower()
+def _material_label_map(materials: list["LabMaterialDTO"] | None = None) -> dict[str, str]:
+    labels = dict(LAB_MATERIAL_LABELS)
+    for material in materials or []:
+        code = str(material.code or "").strip()
+        label = str(material.label or "").strip()
+        if code and label:
+            labels[code] = label
+    return labels
+
+
+def normalize_lab_material(value: Any, material_labels: dict[str, str] | None = None) -> str:
+    text = str(value or "").strip()
+    raw = text.lower()
+    if not raw:
+        return LabMaterial.VENOUS_BLOOD.value
+
+    labels = dict(LAB_MATERIAL_LABELS)
+    labels.update(material_labels or {})
     aliases = {
         LabMaterial.VENOUS_BLOOD.value: LabMaterial.VENOUS_BLOOD.value,
         "venous": LabMaterial.VENOUS_BLOOD.value,
@@ -50,7 +71,10 @@ def normalize_lab_material(value: Any) -> str:
         "csf": LabMaterial.LIQUOR.value,
         "ликвор": LabMaterial.LIQUOR.value,
     }
-    return aliases.get(raw, raw if raw in LAB_MATERIAL_LABELS else LabMaterial.VENOUS_BLOOD.value)
+    for code, label in labels.items():
+        aliases[str(code or "").strip().lower()] = str(code)
+        aliases[str(label or "").strip().lower()] = str(code)
+    return aliases.get(raw, text)
 
 
 def normalize_lab_times(values: Any) -> list[str]:
@@ -79,6 +103,29 @@ def normalize_lab_times(values: Any) -> list[str]:
 
 
 @dataclass
+class LabMaterialDTO:
+    code: str
+    label: str
+    built_in: bool = False
+    version: int = 1
+    created_at: str = ""
+    updated_at: str = ""
+    last_modified_by: str = "doctor"
+
+    def as_dict(self) -> dict[str, Any]:
+        now = _now_text()
+        return {
+            "code": self.code,
+            "label": self.label,
+            "built_in": bool(self.built_in),
+            "version": int(self.version or 1),
+            "created_at": self.created_at or now,
+            "updated_at": self.updated_at or now,
+            "last_modified_by": self.last_modified_by or "doctor",
+        }
+
+
+@dataclass
 class LabAnalysisTemplateDTO:
     id: int
     code: str
@@ -91,14 +138,16 @@ class LabAnalysisTemplateDTO:
     updated_at: str = ""
     last_modified_by: str = "doctor"
 
-    def as_dict(self) -> dict[str, Any]:
-        material = normalize_lab_material(self.material)
+    def as_dict(self, material_labels: dict[str, str] | None = None) -> dict[str, Any]:
+        labels = dict(LAB_MATERIAL_LABELS)
+        labels.update(material_labels or {})
+        material = normalize_lab_material(self.material, labels)
         return {
             "id": int(self.id),
             "code": self.code,
             "name": self.name,
             "material": material,
-            "material_label": LAB_MATERIAL_LABELS.get(material, material),
+            "material_label": labels.get(material, material),
             "comment": self.comment or "",
             "default_times": list(self.default_times or []),
             "version": int(self.version or 1),
@@ -116,20 +165,49 @@ class LabAnalysisCatalogFileStore:
         return os.path.exists(self.path)
 
     def load(self) -> tuple[dict[str, Any], list[LabAnalysisTemplateDTO]]:
+        payload, templates, _materials = self.load_catalog()
+        return payload, templates
+
+    def load_catalog(self) -> tuple[dict[str, Any], list[LabAnalysisTemplateDTO], list[LabMaterialDTO]]:
         payload = self._read_payload()
-        return payload, self._templates_from_payload(payload)
+        materials = self._materials_from_payload(payload)
+        return payload, self._templates_from_payload(payload, materials), materials
 
     def list_templates(self) -> list[LabAnalysisTemplateDTO]:
         _, templates = self.load()
         return templates
 
-    def save_templates(self, templates: list[LabAnalysisTemplateDTO], *, next_id: Optional[int] = None):
+    def list_materials(self) -> list[LabMaterialDTO]:
+        _payload, _templates, materials = self.load_catalog()
+        return materials
+
+    def save_templates(
+        self,
+        templates: list[LabAnalysisTemplateDTO],
+        *,
+        next_id: Optional[int] = None,
+        materials: Optional[list[LabMaterialDTO]] = None,
+    ):
+        if materials is None:
+            materials = self._materials_from_payload(self._read_payload())
+        self.save_catalog(templates, materials, next_id=next_id)
+
+    def save_catalog(
+        self,
+        templates: list[LabAnalysisTemplateDTO],
+        materials: list[LabMaterialDTO],
+        *,
+        next_id: Optional[int] = None,
+    ):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         ordered = list(templates or [])
+        ordered_materials = list(materials or [])
+        material_labels = _material_label_map(ordered_materials)
         max_id = max((int(item.id or 0) for item in ordered), default=0)
         payload = {
             "next_id": int(next_id if next_id is not None else max_id + 1),
-            "templates": [item.as_dict() for item in ordered],
+            "materials": [item.as_dict() for item in ordered_materials],
+            "templates": [item.as_dict(material_labels) for item in ordered],
         }
         directory = os.path.dirname(self.path)
         fd, tmp_path = tempfile.mkstemp(prefix=".lab_analysis_templates_", suffix=".json", dir=directory)
@@ -147,16 +225,18 @@ class LabAnalysisCatalogFileStore:
 
     def initialize_from_defaults(self):
         if self.exists():
-            self.list_templates()
+            self.load_catalog()
             return
 
         now = _now_text()
+        materials = self._default_materials(now)
+        material_labels = _material_label_map(materials)
         templates = [
             LabAnalysisTemplateDTO(
                 id=index,
                 code=str(raw.get("code") or f"analysis_{index}"),
                 name=str(raw.get("name") or "").strip(),
-                material=normalize_lab_material(raw.get("material")),
+                material=normalize_lab_material(raw.get("material"), material_labels),
                 comment=str(raw.get("comment") or ""),
                 default_times=normalize_lab_times(raw.get("default_times")),
                 version=1,
@@ -165,7 +245,7 @@ class LabAnalysisCatalogFileStore:
             )
             for index, raw in enumerate(DEFAULT_LAB_ANALYSIS_TEMPLATES, start=1)
         ]
-        self.save_templates(templates, next_id=len(templates) + 1)
+        self.save_catalog(templates, materials, next_id=len(templates) + 1)
 
     def next_id(self, payload: dict[str, Any], templates: list[LabAnalysisTemplateDTO]) -> int:
         max_id = max((int(item.id or 0) for item in templates), default=0)
@@ -190,12 +270,56 @@ class LabAnalysisCatalogFileStore:
             raise ValueError(f"Файл справочника анализов должен быть JSON-объектом: {self.path}")
         return payload
 
-    def _templates_from_payload(self, payload: dict[str, Any]) -> list[LabAnalysisTemplateDTO]:
+    def _materials_from_payload(self, payload: dict[str, Any]) -> list[LabMaterialDTO]:
+        now = _now_text()
+        materials = self._default_materials(now)
+        used_codes = {material.code for material in materials}
+        used_labels = {material.label.strip().lower() for material in materials}
+        raw_materials = payload.get("materials")
+        if raw_materials is None:
+            return materials
+        if not isinstance(raw_materials, list):
+            raise ValueError("Поле materials в lab_analysis_templates.json должно быть списком")
+
+        for raw in raw_materials:
+            if not isinstance(raw, dict) or raw.get("_deleted"):
+                continue
+            label = str(raw.get("label") or raw.get("name") or "").strip()
+            if not label:
+                continue
+            raw_code = str(raw.get("code") or "").strip()
+            if raw_code in LAB_MATERIAL_LABELS:
+                continue
+            code = self._coerce_material_code(raw_code or label, used_codes)
+            normalized_label = label.lower()
+            if normalized_label in used_labels:
+                continue
+            used_codes.add(code)
+            used_labels.add(normalized_label)
+            materials.append(
+                LabMaterialDTO(
+                    code=code,
+                    label=label,
+                    built_in=False,
+                    version=self._coerce_int(raw.get("version"), default=1),
+                    created_at=str(raw.get("created_at") or now),
+                    updated_at=str(raw.get("updated_at") or now),
+                    last_modified_by=str(raw.get("last_modified_by") or "doctor"),
+                )
+            )
+        return materials
+
+    def _templates_from_payload(
+        self,
+        payload: dict[str, Any],
+        materials: list[LabMaterialDTO] | None = None,
+    ) -> list[LabAnalysisTemplateDTO]:
         raw_templates = payload.get("templates", [])
         if not isinstance(raw_templates, list):
             raise ValueError("Поле templates в lab_analysis_templates.json должно быть списком")
 
         templates: list[LabAnalysisTemplateDTO] = []
+        material_labels = _material_label_map(materials)
         used_ids: set[int] = set()
         used_codes: set[str] = set()
         now = _now_text()
@@ -214,7 +338,7 @@ class LabAnalysisCatalogFileStore:
                     id=template_id,
                     code=code,
                     name=name,
-                    material=normalize_lab_material(raw.get("material")),
+                    material=normalize_lab_material(raw.get("material"), material_labels),
                     comment=str(raw.get("comment") or ""),
                     default_times=normalize_lab_times(raw.get("default_times")),
                     version=self._coerce_int(raw.get("version"), default=1),
@@ -224,6 +348,20 @@ class LabAnalysisCatalogFileStore:
                 )
             )
         return templates
+
+    @staticmethod
+    def _default_materials(now: str) -> list[LabMaterialDTO]:
+        return [
+            LabMaterialDTO(
+                code=str(raw["code"]),
+                label=str(raw["label"]),
+                built_in=True,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+            for raw in DEFAULT_LAB_MATERIALS
+        ]
 
     @staticmethod
     def _coerce_id(value: Any, used_ids: set[int]) -> int:
@@ -253,6 +391,16 @@ class LabAnalysisCatalogFileStore:
             suffix += 1
         return code
 
+    @classmethod
+    def _coerce_material_code(cls, value: Any, used_codes: set[str]) -> str:
+        code = cls._slug(value) or f"material_{len(used_codes) + 1}"
+        base = code
+        suffix = 2
+        while code in used_codes:
+            code = f"{base}_{suffix}"
+            suffix += 1
+        return code
+
     @staticmethod
     def _slug(value: Any) -> str:
         text = str(value or "").strip().lower()
@@ -266,7 +414,39 @@ class LabAnalysisCatalogService:
         self.file_store.initialize_from_defaults()
 
     def list_templates(self) -> list[dict[str, Any]]:
-        return [template.as_dict() for template in self.file_store.list_templates()]
+        _payload, templates, materials = self.file_store.load_catalog()
+        material_labels = _material_label_map(materials)
+        return [template.as_dict(material_labels) for template in templates]
+
+    def list_materials(self) -> list[dict[str, Any]]:
+        return [material.as_dict() for material in self.file_store.list_materials()]
+
+    def material_labels(self) -> dict[str, str]:
+        return _material_label_map(self.file_store.list_materials())
+
+    def create_material(self, *, name: str) -> str:
+        label = str(name or "").strip()
+        if not label:
+            raise ValueError("Укажите название материала")
+        payload, templates, materials = self.file_store.load_catalog()
+        used_codes = {material.code for material in materials}
+        used_labels = {material.label.strip().lower() for material in materials}
+        if label.lower() in used_labels:
+            raise ValueError("Такой материал уже есть в справочнике")
+        code = LabAnalysisCatalogFileStore._coerce_material_code(label, used_codes)
+        now = _now_text()
+        materials.append(
+            LabMaterialDTO(
+                code=code,
+                label=label,
+                built_in=False,
+                version=1,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        self.file_store.save_catalog(templates, materials, next_id=self.file_store.next_id(payload, templates))
+        return code
 
     def create_template(
         self,
@@ -277,7 +457,8 @@ class LabAnalysisCatalogService:
         default_times: Any = None,
         code: str = "",
     ) -> int:
-        payload, templates = self.file_store.load()
+        payload, templates, materials = self.file_store.load_catalog()
+        material_labels = _material_label_map(materials)
         new_id = self.file_store.next_id(payload, templates)
         used_codes = {item.code for item in templates}
         now = _now_text()
@@ -285,7 +466,7 @@ class LabAnalysisCatalogService:
             id=new_id,
             code=LabAnalysisCatalogFileStore._coerce_code(code, self._normalize_name(name), new_id, used_codes),
             name=self._normalize_name(name),
-            material=normalize_lab_material(material),
+            material=normalize_lab_material(material, material_labels),
             comment=str(comment or "").strip(),
             default_times=normalize_lab_times(default_times),
             version=1,
@@ -293,7 +474,7 @@ class LabAnalysisCatalogService:
             updated_at=now,
         )
         templates.append(dto)
-        self.file_store.save_templates(templates, next_id=new_id + 1)
+        self.file_store.save_catalog(templates, materials, next_id=new_id + 1)
         return new_id
 
     def update_template(
@@ -306,7 +487,8 @@ class LabAnalysisCatalogService:
         default_times: Any = None,
         expected_version: Optional[int] = None,
     ) -> None:
-        payload, templates = self.file_store.load()
+        payload, templates, materials = self.file_store.load_catalog()
+        material_labels = _material_label_map(materials)
         current = self._find_template_in_list(templates, template_id)
         if not current:
             raise ValueError("Шаблон анализа не найден")
@@ -316,7 +498,7 @@ class LabAnalysisCatalogService:
             id=int(current.id),
             code=current.code,
             name=self._normalize_name(name),
-            material=normalize_lab_material(material),
+            material=normalize_lab_material(material, material_labels),
             comment=str(comment or "").strip(),
             default_times=normalize_lab_times(default_times),
             version=int(current.version or 0) + 1,
@@ -325,20 +507,20 @@ class LabAnalysisCatalogService:
             last_modified_by="doctor",
         )
         updated = [updated_template if int(item.id) == int(template_id) else item for item in templates]
-        self.file_store.save_templates(updated, next_id=self.file_store.next_id(payload, templates))
+        self.file_store.save_catalog(updated, materials, next_id=self.file_store.next_id(payload, templates))
 
     def delete_template(self, template_id: int, *, expected_version: Optional[int] = None) -> None:
-        payload, templates = self.file_store.load()
+        payload, templates, materials = self.file_store.load_catalog()
         current = self._find_template_in_list(templates, template_id)
         if not current:
             raise ValueError("Шаблон анализа не найден")
         if expected_version is not None and int(current.version or 0) != int(expected_version):
             raise ValueError("Шаблон анализа был изменен другим пользователем")
         remaining = [item for item in templates if int(item.id) != int(template_id)]
-        self.file_store.save_templates(remaining, next_id=self.file_store.next_id(payload, templates))
+        self.file_store.save_catalog(remaining, materials, next_id=self.file_store.next_id(payload, templates))
 
     def reorder_templates(self, ordered_template_ids: list[int]) -> None:
-        payload, templates = self.file_store.load()
+        payload, templates, materials = self.file_store.load_catalog()
         templates_by_id = {int(item.id): item for item in templates}
         ordered_ids: list[int] = []
         for raw_id in ordered_template_ids or []:
@@ -354,7 +536,7 @@ class LabAnalysisCatalogService:
             raise ValueError("Не указан порядок шаблонов анализов")
 
         reordered = [templates_by_id[template_id] for template_id in ordered_ids + missing_ids]
-        self.file_store.save_templates(reordered, next_id=self.file_store.next_id(payload, templates))
+        self.file_store.save_catalog(reordered, materials, next_id=self.file_store.next_id(payload, templates))
 
     @staticmethod
     def _normalize_name(name: Any) -> str:

@@ -930,7 +930,7 @@ class DoctorRemCardWidget(QWidget):
             "diet_templates",
             "patient_status_events",
         } | LAB_ORDER_CHANGE_ENTITIES
-        orders_entities = {"orders", "administrations"}
+        orders_entities = {"orders", "administrations", "lab_orders"}
         for change in payload.get("changes") or []:
             admission_id = change.get("admission_id")
             entity_name = str(change.get("entity_name") or "")
@@ -1273,7 +1273,7 @@ class DoctorRemCardWidget(QWidget):
         vitals_snapshot_required = bool(sync_actions.get("vitals_snapshot_required"))
         changed_entities = self._changed_entities_from_payload(payload)
         self._invalidate_vitals_cache_from_payload(payload, changed_entities)
-        orders_entities = {"orders", "administrations"}
+        orders_entities = {"orders", "administrations", "lab_orders"}
         if self._selection_mode == "archive" and (
             full_refresh_required or changed_entities.intersection({"patients", "admissions"})
         ):

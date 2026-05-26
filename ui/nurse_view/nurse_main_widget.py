@@ -36,9 +36,11 @@ LOCAL_ORDER_FORCE_PREFIXES = (
 )
 EMERGENCY_NOTICE_FORCE_PREFIX = "emergency_notice_save:"
 ORDER_CHANGE_ENTITIES = {"orders", "administrations"}
+LAB_ORDER_CHANGE_ENTITIES = {"lab_orders"}
 W1A_PANEL_REFRESH_ENTITIES = {
     "orders",
     "administrations",
+    "lab_orders",
     "patients",
     "admissions",
     "beds",
@@ -836,8 +838,8 @@ class NurseMainWidget(QWidget):
             "operations",
             "diet_templates",
             "patient_status_events",
-        }
-        orders_entities = {"orders", "administrations"}
+        } | LAB_ORDER_CHANGE_ENTITIES
+        orders_entities = {"orders", "administrations", "lab_orders"}
         for change in payload.get("changes") or []:
             admission_id = change.get("admission_id")
             entity_name = str(change.get("entity_name") or "")
@@ -1035,6 +1037,36 @@ class NurseMainWidget(QWidget):
         except Exception:
             logger.exception("Nurse procedures partial refresh failed")
 
+    def _sync_lab_orders_context(self) -> bool:
+        try:
+            layout = getattr(self, "layout_manager", None)
+            if layout is None:
+                return False
+            layout.current_date = self._current_date
+            sector_anal = getattr(layout, "sector_anal", None)
+            if sector_anal is None:
+                return False
+            admission_id = getattr(layout, "current_admission_id", None)
+            if not admission_id or self._current_date is None:
+                if hasattr(sector_anal, "set_lab_orders"):
+                    sector_anal.set_lab_orders([])
+                return True
+            if hasattr(sector_anal, "set_context"):
+                sector_anal.set_context(self.remcard_service, admission_id, self._current_date)
+                return True
+            if hasattr(sector_anal, "refresh"):
+                sector_anal.refresh()
+                return True
+        except Exception:
+            logger.exception("Nurse lab orders context sync failed")
+        return False
+
+    def _refresh_labs_from_db(self) -> None:
+        try:
+            self._sync_lab_orders_context()
+        except Exception:
+            logger.exception("Nurse lab orders partial refresh failed")
+
     def _refresh_emergency_notice_from_db(self) -> None:
         try:
             layout = getattr(self, "layout_manager", None)
@@ -1136,6 +1168,8 @@ class NurseMainWidget(QWidget):
             self._refresh_ivl_from_db()
         if sync_actions.get("procedures_refresh"):
             self._refresh_procedures_from_db()
+        if sync_actions.get("lab_orders_refresh"):
+            self._refresh_labs_from_db()
         if sync_actions.get("emergency_notice_refresh"):
             self._refresh_emergency_notice_from_db()
 
@@ -1148,7 +1182,7 @@ class NurseMainWidget(QWidget):
         vitals_snapshot_required = bool(sync_actions.get("vitals_snapshot_required"))
         changed_entities = self._changed_entities_from_payload(payload)
         self._invalidate_vitals_cache_from_payload(payload, changed_entities)
-        orders_entities = {"orders", "administrations"}
+        orders_entities = {"orders", "administrations", "lab_orders"}
         has_w1_changes = bool(changed_entities.intersection(W1_REFRESH_ENTITIES))
         if self._selection_mode != "card" and self._is_local_emergency_notice_payload(payload, changed_entities):
             return
@@ -1659,6 +1693,8 @@ class NurseMainWidget(QWidget):
     @current_date.setter
     def current_date(self, value):
         self._current_date = value
+        if hasattr(self, 'layout_manager'):
+            self.layout_manager.current_date = self._current_date
         if hasattr(self.layout_manager, 'sector_2a'):
             start_dt, _ = self.remcard_service.get_day_period(value)
             self.layout_manager.sector_2a.update_period(start_dt)
@@ -1667,6 +1703,7 @@ class NurseMainWidget(QWidget):
             diet_widget.set_context(self.layout_manager.current_admission_id, self._current_date)
         self._update_emergency_notice_sector()
         self._configure_balance_quick_oral_input()
+        self._sync_lab_orders_context()
         # Держим сектор 5 в синхроне с датой открытой карты.
         if (
             hasattr(self, 'layout_manager')
@@ -1893,6 +1930,8 @@ class NurseMainWidget(QWidget):
         tab_name = self.layout_manager.set_active_tab(tab_name) or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
+        elif tab_name == "Анализы":
+            self._sync_lab_orders_context()
         elif tab_name == "Назначения":
             ow = self._ensure_orders_widget()
             if ow is None:

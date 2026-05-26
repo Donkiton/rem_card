@@ -8,11 +8,10 @@ from typing import Any, Callable, Optional, Sequence
 from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
 from rem_card.data.dto.lab_orders_dto import (
     LAB_MATERIAL_LABELS,
-    LabMaterial,
     LabOrderDTO,
     LabOrderStatus,
 )
-from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
+from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService, normalize_lab_material
 
 
 class LabOrdersService:
@@ -54,7 +53,8 @@ class LabOrdersService:
             start_dt=start_dt,
             end_dt=end_dt,
         )
-        rows = [self._row_payload(order) for order in orders]
+        material_labels = self._material_labels()
+        rows = [self._row_payload(order, material_labels) for order in orders]
         assigned_count = sum(1 for row in rows if row.get("status") != LabOrderStatus.COMPLETED.value)
         completed_count = sum(1 for row in rows if row.get("status") == LabOrderStatus.COMPLETED.value)
         return {
@@ -241,12 +241,12 @@ class LabOrdersService:
                 pass
         return None
 
-    @classmethod
-    def _row_payload(cls, order: LabOrderDTO) -> dict[str, Any]:
+    def _row_payload(self, order: LabOrderDTO, material_labels: Optional[dict[str, str]] = None) -> dict[str, Any]:
         row = order.as_dict()
-        material = cls._normalize_material(row.get("material"))
+        material_labels = material_labels or self._material_labels()
+        material = self._normalize_material(row.get("material"), material_labels)
         row["material"] = material
-        row["material_label"] = LAB_MATERIAL_LABELS.get(material, row.get("material_label") or material)
+        row["material_label"] = material_labels.get(material, row.get("material_label") or material)
         row["status"] = (
             LabOrderStatus.COMPLETED.value
             if str(row.get("status") or "").lower() == LabOrderStatus.COMPLETED.value
@@ -279,22 +279,12 @@ class LabOrdersService:
         payload = json.dumps(stable_rows, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _normalize_material(value: Any) -> str:
-        raw = str(value or "").strip().lower()
-        aliases = {
-            LabMaterial.VENOUS_BLOOD.value: LabMaterial.VENOUS_BLOOD.value,
-            "venous": LabMaterial.VENOUS_BLOOD.value,
-            "кровь венозная": LabMaterial.VENOUS_BLOOD.value,
-            "венозная кровь": LabMaterial.VENOUS_BLOOD.value,
-            LabMaterial.ARTERIAL_BLOOD.value: LabMaterial.ARTERIAL_BLOOD.value,
-            "arterial": LabMaterial.ARTERIAL_BLOOD.value,
-            "кровь артериальная": LabMaterial.ARTERIAL_BLOOD.value,
-            "артериальная кровь": LabMaterial.ARTERIAL_BLOOD.value,
-            LabMaterial.URINE.value: LabMaterial.URINE.value,
-            "моча": LabMaterial.URINE.value,
-            LabMaterial.LIQUOR.value: LabMaterial.LIQUOR.value,
-            "csf": LabMaterial.LIQUOR.value,
-            "ликвор": LabMaterial.LIQUOR.value,
-        }
-        return aliases.get(raw, raw if raw in LAB_MATERIAL_LABELS else LabMaterial.VENOUS_BLOOD.value)
+    def _material_labels(self) -> dict[str, str]:
+        try:
+            return self.catalog_service.material_labels()
+        except Exception:
+            return dict(LAB_MATERIAL_LABELS)
+
+    def _normalize_material(self, value: Any, material_labels: Optional[dict[str, str]] = None) -> str:
+        labels = material_labels if material_labels is not None else self._material_labels()
+        return normalize_lab_material(value, labels)
