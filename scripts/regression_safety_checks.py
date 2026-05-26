@@ -11945,6 +11945,229 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
     return True, "ok"
 
 
+def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.settings_db_paths import get_settings_db_path, get_settings_dir, get_settings_lock_path
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    db_path = os.path.abspath(get_settings_db_path(baza_dir))
+    settings_dir = os.path.abspath(get_settings_dir(baza_dir))
+    lock_path = os.path.abspath(get_settings_lock_path(baza_dir))
+    expected_db = os.path.join(settings_dir, "remcard_settings.db")
+    if db_path != os.path.abspath(expected_db):
+        return False, f"settings DB path mismatch: {db_path}"
+    if os.path.basename(os.path.dirname(db_path)).lower() != "settings":
+        return False, f"settings DB must be in settings folder: {db_path}"
+    if "archiv" in Path(db_path).parts:
+        return False, f"settings DB must not be inside archiv: {db_path}"
+    if os.path.basename(lock_path) != "settings.db.lock" or os.path.dirname(lock_path) != settings_dir:
+        return False, f"settings lock path mismatch: {lock_path}"
+    return True, "ok"
+
+
+def _check_settings_db_schema_and_no_wal(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_schema import REQUIRED_TABLES
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    info = service.ensure_ready()
+    db_path = str(info.get("settings_db_path") or "")
+    if not db_path.endswith(os.path.join("settings", "remcard_settings.db")):
+        return False, f"unexpected settings DB path: {db_path}"
+    if not os.path.isfile(db_path):
+        return False, "settings DB was not created"
+    conn = service.db.connect(readonly=False)
+    try:
+        journal_mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        synchronous = int(conn.execute("PRAGMA synchronous").fetchone()[0])
+        mmap_size = int(conn.execute("PRAGMA mmap_size").fetchone()[0])
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+    finally:
+        conn.close()
+    if journal_mode == "wal":
+        return False, "settings DB must not use WAL"
+    if journal_mode != "delete":
+        return False, f"settings DB journal_mode should be DELETE, got {journal_mode}"
+    if synchronous < 3:
+        return False, f"settings DB synchronous must remain EXTRA, got {synchronous}"
+    if mmap_size != 0:
+        return False, f"settings DB mmap_size must be 0, got {mmap_size}"
+    missing = sorted(set(REQUIRED_TABLES) - tables)
+    if missing:
+        return False, f"settings DB missing tables: {missing}"
+    return True, "ok"
+
+
+def _check_edited_drug_catalog_preserved_after_restart(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    overrides_path = PROJECT_ROOT / "data" / "dictionaries" / "user_overrides.json"
+    overrides = json.loads(overrides_path.read_text(encoding="utf-8"))
+    edited_drugs = {
+        key: value
+        for key, value in (overrides.get("drugs") or {}).items()
+        if isinstance(value, dict) and not value.get("_deleted")
+    }
+    if not edited_drugs:
+        return False, "no edited drug overrides found"
+    expected_key = sorted(edited_drugs)[0]
+    expected_payload = edited_drugs[expected_key]
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    db = SettingsDatabase(baza_dir=baza_dir)
+    service = SettingsService(db)
+    service.ensure_ready()
+    first_payload = service.load_prescription_datasets()["drugs"].get(expected_key)
+    if first_payload != expected_payload:
+        return False, f"edited drug override was not imported for {expected_key}"
+
+    restarted = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    restarted.ensure_ready()
+    second_payload = restarted.load_prescription_datasets()["drugs"].get(expected_key)
+    if second_payload != expected_payload:
+        return False, f"edited drug override was not preserved after restart for {expected_key}"
+    report = restarted.get_import_report()
+    if int((report.get("counts") or {}).get("drugs") or 0) < len(edited_drugs):
+        return False, "settings import report does not include edited drug catalog"
+    return True, f"preserved {expected_key}"
+
+
+def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.services.diet_service import DietTemplateService
+    from rem_card.services.doctor_list_service import DoctorListStore
+    from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
+
+    _ = temp_root
+    lab_service = LabAnalysisCatalogService()
+    diet_service = DietTemplateService()
+    doctor_store = DoctorListStore()
+    if getattr(lab_service, "file_store", None) is not None:
+        return False, "LabAnalysisCatalogService default must not use JSON file store"
+    if getattr(diet_service, "file_store", None) is not None:
+        return False, "DietTemplateService default must not use JSON file store"
+    if getattr(doctor_store, "settings_service", None) is None:
+        return False, "DoctorListStore default must use settings DB"
+
+    prescription_source = (PROJECT_ROOT / "services" / "prescription_engine.py").read_text(encoding="utf-8")
+    order_domain_source = (PROJECT_ROOT / "services" / "order_domain_service.py").read_text(encoding="utf-8")
+    forbidden = ("user_overrides.json", ".seed.json", "json.load")
+    for token in forbidden:
+        if token in prescription_source:
+            return False, f"PrescriptionEngine runtime still references {token}"
+    if ".seed.json" in order_domain_source or "json.load" in order_domain_source:
+        return False, "OrderDomainService priority helpers must not read seed JSON"
+    return True, "ok"
+
+
+def _check_lab_materials_management_from_settings_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
+    from rem_card.services.settings.settings_service import SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    catalog = LabAnalysisCatalogService(settings_service=service)
+
+    initial = [dict(item) for item in catalog.list_materials()]
+    if len(initial) < 2:
+        return False, "lab materials fixture must contain at least two materials"
+    regression_code = "regression_material"
+    initial = [item for item in initial if str(item.get("code") or "") != regression_code]
+    first_code = str(initial[0].get("code") or "")
+    second_code = str(initial[1].get("code") or "")
+    reordered = [
+        {"code": regression_code, "label": "Регрессионный материал", "built_in": False, "version": 1},
+        dict(initial[1]),
+        dict(initial[0]),
+        *[dict(item) for item in initial[2:]],
+    ]
+
+    before_version, _before_hash = service.get_catalog_version("lab_analysis")
+    before_change_id = service.latest_change_id()
+    catalog.save_materials(reordered)
+    saved = catalog.list_materials()
+    saved_codes = [str(item.get("code") or "") for item in saved]
+    if saved_codes[:3] != [regression_code, second_code, first_code]:
+        return False, f"lab material order was not saved: {saved_codes[:3]}"
+    after_version, _after_hash = service.get_catalog_version("lab_analysis")
+    if after_version <= before_version or service.latest_change_id() <= before_change_id:
+        return False, "lab material save did not bump settings catalog version/change log"
+
+    template_id = catalog.create_template(
+        name="Регрессионный анализ материала",
+        material=regression_code,
+        default_times=["09:00"],
+    )
+    try:
+        catalog.save_materials([item for item in saved if str(item.get("code") or "") != regression_code])
+    except ValueError as exc:
+        if "используется" not in str(exc):
+            return False, f"unexpected used-material error: {exc}"
+    else:
+        return False, "used lab material was deleted without controlled error"
+
+    created = next((item for item in catalog.list_templates() if int(item.get("id") or 0) == int(template_id)), None)
+    if created is None:
+        return False, "created lab template was not visible before cleanup"
+    catalog.delete_template(template_id, expected_version=created.get("version"))
+    catalog.save_materials([item for item in saved if str(item.get("code") or "") != regression_code])
+    final_codes = [str(item.get("code") or "") for item in catalog.list_materials()]
+    if regression_code in final_codes:
+        return False, "unused lab material was not deleted"
+    return True, "ok"
+
+
+def _check_settings_change_log_invalidates_cache(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    before_version, before_hash = service.get_catalog_version("drug_catalog")
+    before_change_id = service.latest_change_id()
+    service.drug_catalog_snapshot()
+    service.save_prescription_item(
+        "groups",
+        "regression_group",
+        {"name": "Регрессионная группа", "priority_level": 77},
+    )
+    after_version, after_hash = service.get_catalog_version("drug_catalog")
+    after_change_id = service.latest_change_id()
+    snapshot = service.drug_catalog_snapshot()
+    if after_change_id <= before_change_id:
+        return False, "settings_change_log id did not advance"
+    if after_version <= before_version:
+        return False, "catalog version did not advance"
+    if after_hash == before_hash:
+        return False, "catalog content_hash did not change"
+    if "regression_group" not in snapshot.groups:
+        return False, "snapshot cache did not reload after catalog version bump"
+    return True, "ok"
+
+
+def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    print_config = service.get_app_setting("doctor", "print_config", default={})
+    background = service.get_app_setting("shared", "background_settings", default={})
+    display = service.get_app_setting("shared", "display_settings", default={})
+    if not isinstance(print_config, dict) or "vitals" not in print_config:
+        return False, "doctor print settings were not imported into settings DB"
+    if not isinstance(background, dict) or not background.get("backgrounds"):
+        return False, "background settings were not imported into settings DB"
+    if not isinstance(display, dict) or not display.get("active"):
+        return False, "display settings were not imported into settings DB"
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -12090,6 +12313,13 @@ def main():
         ("sync_coordinator_classifies_targeted_refresh", _check_sync_coordinator_classifies_targeted_refresh),
         ("orders_delta_expected_fallbacks_are_info", _check_orders_delta_expected_fallbacks_are_info),
         ("orders_balance_adapter_uses_local_state", _check_orders_balance_adapter_uses_local_state),
+        ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
+        ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
+        ("edited_drug_catalog_preserved_after_restart", _check_edited_drug_catalog_preserved_after_restart),
+        ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
+        ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
+        ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
+        ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
 

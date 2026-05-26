@@ -65,11 +65,23 @@ def get_style_settings_path() -> str:
 
 class ThemeStorage:
     def __init__(self, path: str | None = None):
+        self._file_mode = path is not None or bool(os.environ.get(STYLE_SETTINGS_ENV))
         self.path = os.path.abspath(path or get_style_settings_path())
         self.last_error: str | None = None
 
     def load(self) -> dict[str, Any]:
         self.last_error = None
+        if not self._file_mode:
+            try:
+                from rem_card.services.settings.settings_service import get_settings_service
+
+                payload = get_settings_service().get_app_setting("shared", "style_settings", default=None)
+                if isinstance(payload, dict):
+                    return self._normalize_payload(payload)
+                return self._default_and_save()
+            except Exception as exc:
+                self.last_error = str(exc)
+                raise
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
@@ -89,6 +101,18 @@ class ThemeStorage:
 
     def save(self, payload: dict[str, Any]) -> None:
         normalized = self._normalize_payload(payload)
+        if not self._file_mode:
+            from rem_card.services.settings.settings_service import STYLE_SETTINGS_KEY, get_settings_service
+
+            get_settings_service().set_app_setting(
+                "shared",
+                "style_settings",
+                normalized,
+                catalog_key=STYLE_SETTINGS_KEY,
+                entity_type="style_settings",
+                operation="update",
+            )
+            return
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
         tmp_path = f"{self.path}.tmp"

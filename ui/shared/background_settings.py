@@ -219,10 +219,19 @@ def active_background_entry(payload: dict[str, Any] | None = None, today: date |
         if not date_in_background_range(current_date, str(entry.get("start")), str(entry.get("end"))):
             continue
         path = background_entry_file_path(entry)
-        if os.path.isfile(path):
+        if os.path.isfile(path) or _materialize_background_from_db(entry, path):
             return entry
 
     return default_entry
+
+
+def _materialize_background_from_db(entry: dict[str, Any], path: str) -> bool:
+    try:
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        return get_settings_service().materialize_background_image(str(entry.get("id") or ""), path)
+    except Exception:
+        return False
 
 
 def get_active_background_path(today: date | None = None) -> str:
@@ -279,11 +288,23 @@ def copy_background_to_icon_dir(source_path: str) -> str:
 
 class BackgroundSettingsStorage:
     def __init__(self, path: str | None = None):
+        self._file_mode = path is not None or bool(os.environ.get(BACKGROUND_SETTINGS_ENV))
         self.path = os.path.abspath(path or get_background_settings_path())
         self.last_error: str | None = None
 
     def load(self) -> dict[str, Any]:
         self.last_error = None
+        if not self._file_mode:
+            try:
+                from rem_card.services.settings.settings_service import get_settings_service
+
+                payload = get_settings_service().get_app_setting("shared", "background_settings", default=None)
+                if isinstance(payload, dict):
+                    return normalize_background_settings_payload(payload)
+                return self._default_and_save()
+            except Exception as exc:
+                self.last_error = str(exc)
+                raise
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
@@ -300,6 +321,19 @@ class BackgroundSettingsStorage:
 
     def save(self, payload: dict[str, Any]) -> None:
         normalized = normalize_background_settings_payload(payload)
+        if not self._file_mode:
+            from rem_card.services.settings.settings_service import BACKGROUND_SETTINGS_KEY, get_settings_service
+
+            get_settings_service().set_app_setting(
+                "shared",
+                "background_settings",
+                normalized,
+                catalog_key=BACKGROUND_SETTINGS_KEY,
+                entity_type="background_settings",
+                operation="update",
+            )
+            invalidate_background_settings_cache()
+            return
         directory = os.path.dirname(self.path)
         os.makedirs(directory, exist_ok=True)
         tmp_path = f"{self.path}.tmp"

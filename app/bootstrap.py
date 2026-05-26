@@ -79,11 +79,20 @@ def bootstrap() -> Container:
     logger.info(f"[DB PATH] rao_journal.db -> {JOURNAL_DB_PATH}")
     logger.info(f"[DB PATH] unified_runtime.db -> {REMCARD_DB_PATH}")
 
+    from rem_card.services.settings.settings_service import get_settings_service
+
+    settings_info = get_settings_service().ensure_ready()
+    logger.info(
+        "[SETTINGS DB] remcard_settings.db -> %s",
+        settings_info.get("settings_db_path"),
+    )
+
     if os.environ.get("REMCARD_BOOTSTRAP_DEBUG") == "1":
         print(f"[NETWORK ROOT] {NETWORK_ROOT}")
         print(f"[BAZA PATH] {BAZA_DIR}")
         print(f"[DB PATH] rao_journal.db -> {JOURNAL_DB_PATH}")
         print(f"[DB PATH] unified_runtime.db -> {REMCARD_DB_PATH}")
+        print(f"[SETTINGS DB] remcard_settings.db -> {settings_info.get('settings_db_path')}")
 
     db_manager = DatabaseManager(JOURNAL_DB_PATH, REMCARD_DB_PATH)
     return Container(db_manager)

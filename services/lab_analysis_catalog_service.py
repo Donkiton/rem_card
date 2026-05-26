@@ -409,22 +409,36 @@ class LabAnalysisCatalogFileStore:
 
 
 class LabAnalysisCatalogService:
-    def __init__(self, file_store: Optional[LabAnalysisCatalogFileStore] = None):
-        self.file_store = file_store or LabAnalysisCatalogFileStore()
-        self.file_store.initialize_from_defaults()
+    def __init__(self, file_store: Optional[LabAnalysisCatalogFileStore] = None, settings_service: Any = None):
+        self.file_store = file_store
+        if self.file_store is not None:
+            self.file_store.initialize_from_defaults()
+            self.settings_service = None
+        else:
+            from rem_card.services.settings.settings_service import get_settings_service
+
+            self.settings_service = settings_service or get_settings_service()
 
     def list_templates(self) -> list[dict[str, Any]]:
+        if self.settings_service is not None:
+            return self.settings_service.list_lab_templates()
         _payload, templates, materials = self.file_store.load_catalog()
         material_labels = _material_label_map(materials)
         return [template.as_dict(material_labels) for template in templates]
 
     def list_materials(self) -> list[dict[str, Any]]:
+        if self.settings_service is not None:
+            return self.settings_service.list_lab_materials()
         return [material.as_dict() for material in self.file_store.list_materials()]
 
     def material_labels(self) -> dict[str, str]:
+        if self.settings_service is not None:
+            return self.settings_service.material_labels()
         return _material_label_map(self.file_store.list_materials())
 
     def create_material(self, *, name: str) -> str:
+        if self.settings_service is not None:
+            return self.settings_service.create_lab_material(name=name)
         label = str(name or "").strip()
         if not label:
             raise ValueError("Укажите название материала")
@@ -448,6 +462,49 @@ class LabAnalysisCatalogService:
         self.file_store.save_catalog(templates, materials, next_id=self.file_store.next_id(payload, templates))
         return code
 
+    def save_materials(self, materials: list[dict[str, Any]]) -> None:
+        if self.settings_service is not None:
+            self.settings_service.save_lab_materials(materials)
+            return
+        payload, templates, current_materials = self.file_store.load_catalog()
+        current_by_code = {material.code: material for material in current_materials}
+        normalized: list[LabMaterialDTO] = []
+        used_codes: set[str] = set()
+        used_labels: set[str] = set()
+        for index, raw in enumerate(materials or [], start=1):
+            if not isinstance(raw, dict):
+                continue
+            label = " ".join(str(raw.get("label") or raw.get("name") or "").split())
+            if not label:
+                raise ValueError("Укажите название материала")
+            label_key = label.lower()
+            if label_key in used_labels:
+                raise ValueError(f"Материал уже есть в списке: {label}")
+            code = str(raw.get("code") or "").strip() or LabAnalysisCatalogFileStore._coerce_material_code(label, used_codes)
+            if code in used_codes:
+                code = LabAnalysisCatalogFileStore._coerce_material_code(code, used_codes)
+            if any(str(template.material) == code for template in templates) and not label:
+                raise ValueError("Материал используется в анализах")
+            original = current_by_code.get(code)
+            used_codes.add(code)
+            used_labels.add(label_key)
+            normalized.append(
+                LabMaterialDTO(
+                    code=code,
+                    label=label,
+                    built_in=bool(raw.get("built_in", code in LAB_MATERIAL_LABELS)),
+                    version=int(raw.get("version") or (original.version if original else 1) or 1),
+                    created_at=str(raw.get("created_at") or (original.created_at if original else _now_text())),
+                    updated_at=_now_text(),
+                    last_modified_by=str(raw.get("last_modified_by") or "doctor"),
+                )
+            )
+        removed_codes = {material.code for material in current_materials} - {material.code for material in normalized}
+        used_removed = [template.name for template in templates if str(template.material) in removed_codes]
+        if used_removed:
+            raise ValueError("Материал используется в анализах: " + ", ".join(used_removed[:5]))
+        self.file_store.save_catalog(templates, normalized, next_id=self.file_store.next_id(payload, templates))
+
     def create_template(
         self,
         *,
@@ -457,6 +514,14 @@ class LabAnalysisCatalogService:
         default_times: Any = None,
         code: str = "",
     ) -> int:
+        if self.settings_service is not None:
+            return self.settings_service.create_lab_template(
+                name=name,
+                material=material,
+                comment=comment,
+                default_times=default_times,
+                code=code,
+            )
         payload, templates, materials = self.file_store.load_catalog()
         material_labels = _material_label_map(materials)
         new_id = self.file_store.next_id(payload, templates)
@@ -487,6 +552,16 @@ class LabAnalysisCatalogService:
         default_times: Any = None,
         expected_version: Optional[int] = None,
     ) -> None:
+        if self.settings_service is not None:
+            self.settings_service.update_lab_template(
+                template_id,
+                name=name,
+                material=material,
+                comment=comment,
+                default_times=default_times,
+                expected_version=expected_version,
+            )
+            return
         payload, templates, materials = self.file_store.load_catalog()
         material_labels = _material_label_map(materials)
         current = self._find_template_in_list(templates, template_id)
@@ -510,6 +585,9 @@ class LabAnalysisCatalogService:
         self.file_store.save_catalog(updated, materials, next_id=self.file_store.next_id(payload, templates))
 
     def delete_template(self, template_id: int, *, expected_version: Optional[int] = None) -> None:
+        if self.settings_service is not None:
+            self.settings_service.delete_lab_template(template_id, expected_version=expected_version)
+            return
         payload, templates, materials = self.file_store.load_catalog()
         current = self._find_template_in_list(templates, template_id)
         if not current:
@@ -520,6 +598,9 @@ class LabAnalysisCatalogService:
         self.file_store.save_catalog(remaining, materials, next_id=self.file_store.next_id(payload, templates))
 
     def reorder_templates(self, ordered_template_ids: list[int]) -> None:
+        if self.settings_service is not None:
+            self.settings_service.reorder_lab_templates(ordered_template_ids)
+            return
         payload, templates, materials = self.file_store.load_catalog()
         templates_by_id = {int(item.id): item for item in templates}
         ordered_ids: list[int] = []

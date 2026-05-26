@@ -3,17 +3,23 @@ import os
 import tempfile
 from typing import Any, List, Optional
 
-from rem_card.app.paths import USER_DICT_DIR
-
 
 DOCTOR_LIST_FILE_NAME = "death_protocol_doctors.json"
 
 
 class DoctorListStore:
     def __init__(self, path: Optional[str] = None):
-        self.path = path or os.path.join(USER_DICT_DIR, DOCTOR_LIST_FILE_NAME)
+        self.path = path
+        if path is None:
+            from rem_card.services.settings.settings_service import get_settings_service
+
+            self.settings_service = get_settings_service()
+        else:
+            self.settings_service = None
 
     def load_doctors(self) -> List[str]:
+        if self.settings_service is not None:
+            return self.settings_service.load_doctors()
         payload = self._read_payload()
         raw_items: Any
         if isinstance(payload, list):
@@ -25,6 +31,9 @@ class DoctorListStore:
         return self._normalize_doctors(raw_items)
 
     def save_doctors(self, doctors: List[str]) -> None:
+        if self.settings_service is not None:
+            self.settings_service.save_doctors(doctors)
+            return
         normalized = self._normalize_doctors(doctors)
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         payload = {"doctors": normalized}

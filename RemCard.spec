@@ -89,12 +89,12 @@ a = Analysis(
 		# иконки
 		_data_dir('icon'),
 
-		# dictionaries (json): базовый набор попадает в _internal,
-		# при запуске приложения недостающие файлы копируются наружу рядом с exe.
+		# dictionaries (json): seed для первого импорта в settings DB внутри _internal;
+		# наружу рядом с exe эти файлы больше не копируются.
 		*_dictionary_json_datas(),
 
-		# settings: dev-настройки попадают в _internal как управляемый
-		# эталон для compiled-версии и перезаписывают локальные settings при запуске.
+		# settings: seed для первого импорта в settings DB внутри _internal.
+		# Runtime-источник истины: <BAZA_DIR>/settings/remcard_settings.db.
 		*_settings_datas(),
 
 		# активные ресурсы управления пациентами и МКБ

@@ -2187,6 +2187,9 @@ class RemCardService(QObject):
     def create_lab_material(self, **kwargs):
         return self._lab_analysis_catalog.create_material(**kwargs)
 
+    def save_lab_materials(self, materials: list[dict[str, Any]]):
+        return self._lab_analysis_catalog.save_materials(materials)
+
     def create_lab_analysis_template(self, **kwargs):
         return self._lab_analysis_catalog.create_template(**kwargs)
 

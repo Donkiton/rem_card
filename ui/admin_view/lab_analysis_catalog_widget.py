@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from PySide6.QtCore import Qt, QTime
@@ -196,12 +197,15 @@ class LabAnalysisTemplateDialog(BaseStyledDialog):
         super().accept()
 
 
-class LabMaterialDialog(BaseStyledDialog):
-    def __init__(self, parent=None):
-        super().__init__("Добавить материал", parent)
+class LabMaterialsDialog(BaseStyledDialog):
+    def __init__(self, materials: list[dict[str, Any]], parent=None):
+        super().__init__("Материалы анализов", parent)
+        self._materials = [dict(item) for item in materials or [] if isinstance(item, dict)]
         self._result: dict[str, Any] | None = None
-        self.setMinimumSize(420, 180)
+        self.setMinimumSize(620, 460)
         self._build_ui()
+        self._reload_table(self._materials)
+        self._update_buttons()
 
     def _build_ui(self):
         self.content_widget.setStyleSheet(
@@ -212,14 +216,57 @@ class LabMaterialDialog(BaseStyledDialog):
                 border-radius: 6px;
                 padding: 7px 9px;
             }
+            QTableWidget {
+                background: #ffffff;
+                border: 1px solid #d6dee8;
+                border-radius: 6px;
+                gridline-color: #d8e1ea;
+            }
+            QHeaderView::section {
+                background: #e8eef5;
+                border: none;
+                border-right: 1px solid #c5d1dc;
+                border-bottom: 1px solid #cbd6e2;
+                padding: 6px;
+                font-weight: bold;
+            }
             """
         )
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Название материала"))
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Материал", "Код", "Тип"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.content_layout.addWidget(self.table, 1)
+
+        add_layout = QHBoxLayout()
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Например: мокрота")
-        layout.addWidget(self.name_input)
-        self.content_layout.addLayout(layout)
+        self.name_input.setPlaceholderText("Новый материал")
+        self.btn_add = QPushButton("Добавить")
+        self.btn_add.setObjectName("DialogOkBtn")
+        self.btn_add.setFixedHeight(34)
+        add_layout.addWidget(self.name_input, 1)
+        add_layout.addWidget(self.btn_add)
+        self.content_layout.addLayout(add_layout)
+
+        manage_buttons = QHBoxLayout()
+        self.btn_move_up = QPushButton("↑")
+        self.btn_move_down = QPushButton("↓")
+        self.btn_delete = QPushButton("Удалить")
+        for button in (self.btn_move_up, self.btn_move_down, self.btn_delete):
+            button.setObjectName("DialogOkBtn")
+            button.setFixedHeight(34)
+            manage_buttons.addWidget(button)
+        self.btn_move_up.setFixedWidth(45)
+        self.btn_move_down.setFixedWidth(45)
+        manage_buttons.addStretch(1)
+        self.content_layout.addLayout(manage_buttons)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         for button in buttons.buttons():
@@ -228,15 +275,152 @@ class LabMaterialDialog(BaseStyledDialog):
         buttons.rejected.connect(self.reject)
         self.content_layout.addWidget(buttons)
 
+        self.name_input.returnPressed.connect(self._add_material)
+        self.btn_add.clicked.connect(self._add_material)
+        self.btn_delete.clicked.connect(self._delete_selected)
+        self.btn_move_up.clicked.connect(lambda: self._move_selected(-1))
+        self.btn_move_down.clicked.connect(lambda: self._move_selected(1))
+
+    def _reload_table(self, materials: list[dict[str, Any]], selected_row: int | None = None):
+        self.table.setRowCount(0)
+        for row, material in enumerate(materials):
+            self.table.insertRow(row)
+            label = str(material.get("label") or material.get("name") or "").strip()
+            code = str(material.get("code") or "").strip()
+            material_payload = dict(material)
+            material_payload["label"] = label
+            material_payload["code"] = code
+
+            label_item = QTableWidgetItem(label)
+            label_item.setData(Qt.UserRole, material_payload)
+            self.table.setItem(row, 0, label_item)
+            self.table.setItem(row, 1, QTableWidgetItem(code))
+            self.table.setItem(
+                row,
+                2,
+                QTableWidgetItem("системный" if material_payload.get("built_in") else "пользовательский"),
+            )
+            self.table.setRowHeight(row, 34)
+
+        if selected_row is not None and 0 <= selected_row < self.table.rowCount():
+            self.table.setCurrentCell(selected_row, 0)
+            self.table.selectRow(selected_row)
+        self._update_buttons()
+
     def result_data(self) -> dict[str, Any] | None:
         return dict(self._result or {})
 
-    def accept(self):
-        name = self.name_input.text().strip()
-        if not name:
+    def _table_materials(self) -> list[dict[str, Any]]:
+        materials: list[dict[str, Any]] = []
+        for row in range(self.table.rowCount()):
+            label_item = self.table.item(row, 0)
+            if label_item is None:
+                continue
+            material = dict(label_item.data(Qt.UserRole) or {})
+            label = str(label_item.text() or material.get("label") or material.get("name") or "").strip()
+            code_item = self.table.item(row, 1)
+            code = str(material.get("code") or (code_item.text() if code_item else "")).strip()
+            material["label"] = label
+            material["code"] = code
+            material["sort_order"] = row + 1
+            materials.append(material)
+        return materials
+
+    def _add_material(self):
+        label = " ".join(self.name_input.text().split())
+        if not label:
             CustomMessageBox.warning(self, "Ошибка", "Укажите название материала.")
             return
-        self._result = {"name": name}
+        materials = self._table_materials()
+        if label.lower() in {str(item.get("label") or "").strip().lower() for item in materials}:
+            CustomMessageBox.warning(self, "Ошибка", "Такой материал уже есть в списке.")
+            return
+        code = self._make_code(label, {str(item.get("code") or "") for item in materials})
+        materials.append(
+            {
+                "code": code,
+                "label": label,
+                "built_in": False,
+                "version": 1,
+                "sort_order": len(materials) + 1,
+            }
+        )
+        self.name_input.clear()
+        self._reload_table(materials, len(materials) - 1)
+
+    def _delete_selected(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        materials = self._table_materials()
+        label = str(materials[row].get("label") or "")
+        if CustomMessageBox.question(self, "Удаление", f"Удалить материал '{label}'?") != CustomMessageBox.Yes:
+            return
+        materials.pop(row)
+        selected = min(row, len(materials) - 1) if materials else None
+        self._reload_table(materials, selected)
+
+    def _move_selected(self, direction: int):
+        row = self.table.currentRow()
+        target = row + int(direction)
+        materials = self._table_materials()
+        if row < 0 or target < 0 or target >= len(materials):
+            return
+        materials[row], materials[target] = materials[target], materials[row]
+        self._reload_table(materials, target)
+
+    def _update_buttons(self):
+        row = self.table.currentRow() if hasattr(self, "table") else -1
+        count = self.table.rowCount() if hasattr(self, "table") else 0
+        self.btn_delete.setEnabled(0 <= row < count)
+        self.btn_move_up.setEnabled(0 < row < count)
+        self.btn_move_down.setEnabled(0 <= row < count - 1)
+
+    def _validated_materials(self) -> list[dict[str, Any]] | None:
+        materials = self._table_materials()
+        if not materials:
+            CustomMessageBox.warning(self, "Ошибка", "Список материалов не должен быть пустым.")
+            return None
+        seen_labels: set[str] = set()
+        seen_codes: set[str] = set()
+        for row, material in enumerate(materials, start=1):
+            label = str(material.get("label") or "").strip()
+            code = str(material.get("code") or "").strip()
+            if not label:
+                CustomMessageBox.warning(self, "Ошибка", "Укажите название материала.")
+                return None
+            if not code:
+                code = self._make_code(label, seen_codes)
+                material["code"] = code
+            label_key = label.lower()
+            if label_key in seen_labels:
+                CustomMessageBox.warning(self, "Ошибка", f"Материал уже есть в списке: {label}")
+                return None
+            if code in seen_codes:
+                CustomMessageBox.warning(self, "Ошибка", f"Код материала повторяется: {code}")
+                return None
+            seen_labels.add(label_key)
+            seen_codes.add(code)
+            material["label"] = label
+            material["sort_order"] = row
+        return materials
+
+    @staticmethod
+    def _make_code(label: str, used_codes: set[str]) -> str:
+        base = re.sub(r"[^a-z0-9_]+", "_", str(label or "").strip().lower())
+        base = re.sub(r"_+", "_", base).strip("_") or f"material_{len(used_codes) + 1}"
+        code = base
+        suffix = 2
+        while code in used_codes:
+            code = f"{base}_{suffix}"
+            suffix += 1
+        return code
+
+    def accept(self):
+        materials = self._validated_materials()
+        if materials is None:
+            return
+        self._result = {"materials": materials}
         super().accept()
 
 
@@ -420,14 +604,15 @@ class LabAnalysisCatalogWidget(QWidget):
         )
 
     def add_material(self):
-        dialog = LabMaterialDialog(self)
+        dialog = LabMaterialsDialog(self._load_materials(), self)
         if dialog.exec():
             data = dialog.result_data()
-            if not data:
+            materials = data.get("materials") if data else None
+            if materials is None:
                 return
             self._enqueue_catalog_write(
-                "lab_analysis_material_create",
-                lambda: self._catalog_service().create_material(**data),
+                "lab_analysis_materials_save",
+                lambda: self._catalog_service().save_materials(materials),
             )
 
     def move_selected_up(self):
@@ -465,6 +650,13 @@ class LabAnalysisCatalogWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Предупреждение", f"Не удалось загрузить материалы анализов: {exc}")
             return _material_options()
+
+    def _load_materials(self) -> list[dict[str, Any]]:
+        try:
+            return list(self._catalog_service().list_materials())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Предупреждение", f"Не удалось загрузить материалы анализов: {exc}")
+            return [dict(code=key, label=label, built_in=True) for key, label in LAB_MATERIAL_LABELS.items()]
 
     def _catalog_service(self):
         if self.service and hasattr(self.service, "list_lab_analysis_templates"):
@@ -539,3 +731,6 @@ class _FacadeCatalogAdapter:
 
     def create_material(self, **kwargs):
         return self.service.create_lab_material(**kwargs)
+
+    def save_materials(self, materials: list[dict[str, Any]]):
+        return self.service.save_lab_materials(materials)

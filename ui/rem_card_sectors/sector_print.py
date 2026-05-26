@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, 
     QPushButton, QLabel, QFrame, QApplication
 )
-from PySide6.QtCore import Qt, QSettings, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 
 from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -32,7 +32,6 @@ def _movement_comment_text(status_value, reason_text):
 
 class PrintConfig:
     def __init__(self):
-        self.settings = QSettings("SectorPrint", "Config")
         self.version = "1.0"
         
     def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool,
@@ -45,33 +44,51 @@ class PrintConfig:
             death_protocol = current.get("death_protocol", death_outcome)
         if transfusion_registration is None:
             transfusion_registration = current.get("transfusion_registration", True)
-        self.settings.setValue("sector_print/version", self.version)
-        self.settings.setValue("sector_print/sections/vitals", vitals)
-        self.settings.setValue("sector_print/sections/balance", balance)
-        self.settings.setValue("sector_print/sections/prescriptions", prescriptions)
-        self.settings.setValue("sector_print/sections/events", events)
-        self.settings.setValue("sector_print/sections/ventilation", ventilation)
-        self.settings.setValue("sector_print/sections/labs", labs)
-        self.settings.setValue("sector_print/sections/procedures", procedures)
-        self.settings.setValue("sector_print/sections/death_outcome", death_outcome)
-        self.settings.setValue("sector_print/sections/death_protocol", death_protocol)
-        self.settings.setValue("sector_print/sections/transfusion_registration", transfusion_registration)
-        self.settings.sync()
+        from rem_card.services.settings.settings_service import PRINT_SETTINGS_KEY, get_settings_service
+
+        payload = {
+            "vitals": bool(vitals),
+            "balance": bool(balance),
+            "prescriptions": bool(prescriptions),
+            "events": bool(events),
+            "ventilation": bool(ventilation),
+            "labs": bool(labs),
+            "procedures": bool(procedures),
+            "death_outcome": bool(death_outcome),
+            "death_protocol": bool(death_protocol),
+            "transfusion_registration": bool(transfusion_registration),
+        }
+        get_settings_service().set_app_setting(
+            "doctor",
+            "print_config",
+            payload,
+            catalog_key=PRINT_SETTINGS_KEY,
+            entity_type="print_settings",
+            operation="update",
+        )
         
     def load(self):
-        death_outcome = self.settings.value("sector_print/sections/death_outcome", True, type=bool)
-        return {
-            "vitals": self.settings.value("sector_print/sections/vitals", True, type=bool),
-            "balance": self.settings.value("sector_print/sections/balance", True, type=bool),
-            "prescriptions": self.settings.value("sector_print/sections/prescriptions", True, type=bool),
-            "events": self.settings.value("sector_print/sections/events", True, type=bool),
-            "ventilation": self.settings.value("sector_print/sections/ventilation", False, type=bool),
-            "labs": self.settings.value("sector_print/sections/labs", False, type=bool),
-            "procedures": self.settings.value("sector_print/sections/procedures", False, type=bool),
-            "death_outcome": death_outcome,
-            "death_protocol": self.settings.value("sector_print/sections/death_protocol", death_outcome, type=bool),
-            "transfusion_registration": self.settings.value("sector_print/sections/transfusion_registration", True, type=bool),
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        default = {
+            "vitals": True,
+            "balance": True,
+            "prescriptions": True,
+            "events": True,
+            "ventilation": False,
+            "labs": False,
+            "procedures": False,
+            "death_outcome": True,
+            "death_protocol": True,
+            "transfusion_registration": True,
         }
+        payload = get_settings_service().get_app_setting("doctor", "print_config", default=default)
+        if not isinstance(payload, dict):
+            payload = default
+        result = dict(default)
+        result.update({key: bool(payload.get(key, value)) for key, value in default.items()})
+        result["death_protocol"] = bool(payload.get("death_protocol", result["death_outcome"]))
+        return result
 
 class FullReportWorker(QThread):
     finished = Signal(list)

@@ -1,11 +1,13 @@
-import json
-import os
 import re
-import tempfile
 import threading
 from typing import Dict, Any, Tuple, List, Optional
 from datetime import datetime, timedelta
-from rem_card.app.paths import SEED_DIR, USER_DICT_DIR
+
+from rem_card.services.settings.settings_service import (
+    DRUG_CATALOG_KEY,
+    ORDER_TEMPLATES_KEY,
+    get_settings_service,
+)
 
 TEMPLATE_ORDER_KEY = "template_order"
 
@@ -53,47 +55,14 @@ class PrescriptionEngine:
         return True
 
     def _current_signature(self):
-        paths = [os.path.join(SEED_DIR, f"{dict_name}.seed.json") for _attr, dict_name in self._DATASETS]
-        paths.append(os.path.join(USER_DICT_DIR, "user_overrides.json"))
-        result = []
-        for path in paths:
-            try:
-                stat = os.stat(path)
-                result.append((path, int(stat.st_mtime_ns), int(stat.st_size)))
-            except OSError:
-                result.append((path, None, None))
-        return tuple(result)
-
-    def _load_json_dict(self, path: str) -> Dict[str, Any]:
-        if not os.path.exists(path):
-            return {}
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                payload = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
+        service = get_settings_service()
+        return (
+            service.get_catalog_version(DRUG_CATALOG_KEY),
+            service.get_catalog_version(ORDER_TEMPLATES_KEY),
+        )
 
     def _load_all(self) -> Dict[str, Dict[str, Any]]:
-        overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
-        overrides_data = self._load_json_dict(overrides_path)
-        loaded: Dict[str, Dict[str, Any]] = {}
-
-        for attr_name, dict_name in self._DATASETS:
-            seed_path = os.path.join(SEED_DIR, f"{dict_name}.seed.json")
-            data = self._load_json_dict(seed_path)
-            overrides = overrides_data.get(dict_name, {})
-            if isinstance(overrides, dict):
-                for k, v in overrides.items():
-                    if isinstance(v, dict) and v.get("_deleted"):
-                        data.pop(k, None)
-                    else:
-                        data[k] = v
-            if attr_name == "templates":
-                data = self._ordered_templates(data, overrides_data.get(TEMPLATE_ORDER_KEY))
-            loaded[attr_name] = data
-
-        return loaded
+        return get_settings_service().load_prescription_datasets()
 
     def _ordered_templates(self, templates: Dict[str, Any], order_keys: Any = None) -> Dict[str, Any]:
         if isinstance(order_keys, list):
@@ -114,83 +83,38 @@ class PrescriptionEngine:
         return list(self.templates.items())
 
     def _load_merged(self, name: str) -> Dict[str, Any]:
-        """Загружает seed файл и обновляет его данными из user_overrides.json (upsert + delete)"""
+        """Возвращает справочник из центральной settings DB."""
         with self._lock:
-            seed_path = os.path.join(SEED_DIR, f"{name}.seed.json")
-            overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
-            data = self._load_json_dict(seed_path)
-            overrides_data = self._load_json_dict(overrides_path)
-            overrides = overrides_data.get(name, {})
-            if isinstance(overrides, dict):
-                for k, v in overrides.items():
-                    if isinstance(v, dict) and v.get("_deleted"):
-                        data.pop(k, None)
-                    else:
-                        data[k] = v
-            return data
+            loaded = get_settings_service().load_prescription_datasets()
+            attr_name = {
+                "diluents": "dilutions",
+            }.get(name, name)
+            return dict(loaded.get(attr_name, {}))
 
     def _save_override(self, name: str, key: str, data: Dict[str, Any]):
-        """Сохраняет правки в единый файл user_overrides.json"""
+        """Сохраняет правки в settings DB."""
         with self._lock:
             self._save_override_locked(name, key, data)
 
     def _save_override_locked(self, name: str, key: str, data: Dict[str, Any]):
-        overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
-        os.makedirs(USER_DICT_DIR, exist_ok=True)
-
-        overrides_data = self._load_json_dict(overrides_path)
-                    
-        if not isinstance(overrides_data.get(name), dict):
-            overrides_data[name] = {}
-            
-        overrides_data[name][key] = data
-        self._write_json_atomic(overrides_path, overrides_data)
+        get_settings_service().save_prescription_item(name, key, dict(data or {}))
         self._last_loaded_signature = None
 
     def _delete_override(self, name: str, key: str):
         """
-        Помечает элемент как удаленный в user_overrides.json.
-        Если элемент был в seed-файле, он перестанет отображаться.
+        Скрывает элемент справочника в settings DB.
         """
         with self._lock:
             self._delete_override_locked(name, key)
 
     def _delete_override_locked(self, name: str, key: str):
-        overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
-        os.makedirs(USER_DICT_DIR, exist_ok=True)
-
-        overrides_data = self._load_json_dict(overrides_path)
-                    
-        if not isinstance(overrides_data.get(name), dict):
-            overrides_data[name] = {}
-            
-        # Добавляем метку удаления
-        overrides_data[name][key] = {"_deleted": True}
-        self._write_json_atomic(overrides_path, overrides_data)
+        get_settings_service().delete_prescription_item(name, key)
         self._last_loaded_signature = None
-
-    def _write_json_atomic(self, path: str, payload: Dict[str, Any]):
-        directory = os.path.dirname(path) or "."
-        os.makedirs(directory, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=".user_overrides_", suffix=".json", dir=directory)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.write("\n")
-            os.replace(tmp_path, path)
-        except Exception:
-            try:
-                os.remove(tmp_path)
-            except OSError:
-                pass
-            raise
 
     def _save_and_update(self, attr_name: str, dict_name: str, key: str, data: Dict[str, Any]):
         with self._lock:
             self._save_override_locked(dict_name, key, data)
-            current = dict(getattr(self, attr_name, {}) or {})
-            current[key] = data
-            setattr(self, attr_name, current)
+            self._reload_locked(force=True)
 
     def _delete_and_reload(self, dict_name: str, key: str):
         with self._lock:
@@ -211,11 +135,7 @@ class PrescriptionEngine:
                     valid_order.append(key)
                     seen.add(key)
 
-            overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
-            os.makedirs(USER_DICT_DIR, exist_ok=True)
-            overrides_data = self._load_json_dict(overrides_path)
-            overrides_data[TEMPLATE_ORDER_KEY] = valid_order
-            self._write_json_atomic(overrides_path, overrides_data)
+            get_settings_service().save_template_order(valid_order)
             self.templates = self._ordered_templates(self.templates, valid_order)
             self._last_loaded_signature = None
 

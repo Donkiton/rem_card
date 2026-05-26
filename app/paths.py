@@ -84,16 +84,17 @@ def _copy_missing_json_files(source_dir: str, target_dir: str):
 
 def ensure_external_dictionaries_initialized() -> str:
     """
-    В compiled-режиме _internal хранит базовые словари из сборки, а рабочие
-    словари лежат рядом с exe и могут редактироваться пользователем.
+    В compiled-режиме _internal хранит seed-словари для первого импорта в
+    settings DB. Внешние JSON рядом с exe больше не создаются и не являются
+    runtime-хранилищем.
     """
     if not is_compiled():
         return _project_dictionaries_dir()
 
-    target_dir = _compiled_external_dictionaries_dir()
-    os.makedirs(target_dir, exist_ok=True)
-    _copy_missing_json_files(_compiled_bundled_dictionaries_dir(), target_dir)
-    return target_dir
+    bundled_dir = _compiled_bundled_dictionaries_dir()
+    if os.path.isdir(bundled_dir):
+        return bundled_dir
+    return _compiled_external_dictionaries_dir()
 
 def get_seed_dir() -> str:
     if is_compiled():
@@ -117,6 +118,9 @@ def get_patient_assets_dir() -> str:
     return os.path.join(get_resources_dir(), "rem_card", "data", "patient_assets")
 
 def get_user_dict_dir() -> str:
+    if is_compiled():
+        # Legacy-only source for one-time migration of old external overrides.
+        return _compiled_external_dictionaries_dir()
     return get_seed_dir()
 
 NETWORK_ROOT = get_base_dir()
@@ -150,6 +154,8 @@ SHARED_DB_QUARANTINE_DIR = os.path.join(QUARANTINE_DIR, "shared_db")
 SNAPSHOT_QUARANTINE_DIR = os.path.join(QUARANTINE_DIR, "snapshots")
 ROLE_LOCKS_DIR = os.path.join(BAZA_DIR, "session_locks")
 DB_CYCLE_ARCHIVE_DIR = os.path.join(ARCHIV_DIR, "db_cycle_archive")
+SETTINGS_DIR = os.path.join(BAZA_DIR, "settings")
+SETTINGS_BACKUPS_DIR = os.path.join(SETTINGS_DIR, "backups")
 
 SEED_DIR = get_seed_dir()
 USER_DICT_DIR = get_user_dict_dir()
@@ -203,6 +209,8 @@ def ensure_directories():
         SNAPSHOT_QUARANTINE_DIR,
         ROLE_LOCKS_DIR,
         DB_CYCLE_ARCHIVE_DIR,
+        SETTINGS_DIR,
+        SETTINGS_BACKUPS_DIR,
     ]
 
     for directory in shared_dirs:

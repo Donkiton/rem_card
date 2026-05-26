@@ -137,6 +137,58 @@ def _check_recovery_lock_guard() -> dict[str, Any]:
     return {"name": "recovery_lock_guard_present", "ok": ok}
 
 
+def _check_settings_db_guardrails() -> dict[str, Any]:
+    findings: list[str] = []
+    paths_text = (PROJECT_ROOT / "app" / "settings_db_paths.py").read_text(encoding="utf-8")
+    db_text = (PROJECT_ROOT / "data" / "settings" / "settings_db.py").read_text(encoding="utf-8")
+    runtime_paths_text = (PROJECT_ROOT / "app" / "runtime_paths.py").read_text(encoding="utf-8")
+    app_paths_text = (PROJECT_ROOT / "app" / "paths.py").read_text(encoding="utf-8")
+
+    if "SETTINGS_DIR_NAME = \"settings\"" not in paths_text:
+        findings.append("settings DB path must use <BAZA_DIR>/settings")
+    if "\"archiv\"" in paths_text:
+        findings.append("settings DB path module must not route settings DB through archiv")
+    for token in ("profile=\"network\"", "SQLiteWriteController", "get_settings_lock_path"):
+        if token not in db_text:
+            findings.append(f"settings DB safety token missing: {token}")
+    if "profile=\"wal\"" in db_text.lower() or "journal_mode = WAL" in db_text:
+        findings.append("settings DB must not enable WAL")
+    if "settings_local_db_used=false" not in db_text:
+        findings.append("startup log must explicitly report no local settings DB")
+    sync_start = runtime_paths_text.find("def sync_external_settings_from_bundle")
+    sync_body = runtime_paths_text[sync_start: runtime_paths_text.find("\ndef ", sync_start + 1)]
+    if "return 0" not in sync_body or "_copy_file_atomic(" in sync_body:
+        findings.append("compiled startup must not copy runtime settings JSON next to exe")
+    ensure_start = app_paths_text.find("def ensure_external_dictionaries_initialized")
+    ensure_body = app_paths_text[ensure_start: app_paths_text.find("\ndef ", ensure_start + 1)]
+    if "_copy_missing_json_files" in ensure_body or "os.makedirs(target_dir" in ensure_body:
+        findings.append("compiled startup must not create external dictionary JSON files")
+    return {"name": "settings_db_guardrails", "ok": not findings, "findings": findings}
+
+
+def _check_settings_runtime_catalog_boundaries() -> dict[str, Any]:
+    findings: list[str] = []
+    sources = {
+        "services/prescription_engine.py": (PROJECT_ROOT / "services" / "prescription_engine.py").read_text(encoding="utf-8"),
+        "services/order_domain_service.py": (PROJECT_ROOT / "services" / "order_domain_service.py").read_text(encoding="utf-8"),
+        "services/lab_analysis_catalog_service.py": (PROJECT_ROOT / "services" / "lab_analysis_catalog_service.py").read_text(encoding="utf-8"),
+        "services/diet_service.py": (PROJECT_ROOT / "services" / "diet_service.py").read_text(encoding="utf-8"),
+        "services/doctor_list_service.py": (PROJECT_ROOT / "services" / "doctor_list_service.py").read_text(encoding="utf-8"),
+    }
+    for token in ("user_overrides.json", ".seed.json", "json.load"):
+        if token in sources["services/prescription_engine.py"]:
+            findings.append(f"PrescriptionEngine runtime still references {token}")
+    if ".seed.json" in sources["services/order_domain_service.py"] or "json.load" in sources["services/order_domain_service.py"]:
+        findings.append("OrderDomainService must read drug/group priority from settings DB, not seed JSON")
+    if "self.file_store = file_store or" in sources["services/lab_analysis_catalog_service.py"]:
+        findings.append("LabAnalysisCatalogService default must not create JSON file store")
+    if "self.file_store = file_store or" in sources["services/diet_service.py"]:
+        findings.append("DietTemplateService default must not create JSON file store")
+    if "self.path = path or" in sources["services/doctor_list_service.py"]:
+        findings.append("DoctorListStore default must not point at JSON runtime storage")
+    return {"name": "settings_runtime_catalog_boundaries", "ok": not findings, "findings": findings}
+
+
 def main() -> int:
     started = time.perf_counter()
     checks = [
@@ -146,6 +198,8 @@ def main() -> int:
         _check_required_contract_files(),
         _check_backup_api_guard(),
         _check_recovery_lock_guard(),
+        _check_settings_db_guardrails(),
+        _check_settings_runtime_catalog_boundaries(),
     ]
     failed = [check for check in checks if not check.get("ok")]
     report = {

@@ -24,6 +24,7 @@ class DataUpdateMonitor(QThread):
         self._force_emit = False
         self._force_sources: list[str] = []
         self._last_seen_id: Optional[int] = None
+        self._last_seen_settings_id: Optional[int] = None
         self._last_seen_observed_monotonic: float = 0.0
         self._refresh_request_seq: int = 0
         self._last_observed_refresh_seq: int = 0
@@ -41,6 +42,7 @@ class DataUpdateMonitor(QThread):
     def reset(self):
         with self._state_lock:
             self._last_seen_id = None
+            self._last_seen_settings_id = None
             self._last_seen_observed_monotonic = 0.0
             self._force_emit = False
             self._force_sources = []
@@ -68,6 +70,10 @@ class DataUpdateMonitor(QThread):
                 self._last_observed_refresh_seq,
                 int(observed_refresh_seq),
             )
+
+    def _set_last_seen_settings_id(self, change_id: int) -> None:
+        with self._state_lock:
+            self._last_seen_settings_id = int(change_id)
 
     def _increment_state_epoch(self) -> None:
         with self._state_lock:
@@ -121,24 +127,39 @@ class DataUpdateMonitor(QThread):
 
         with self._state_lock:
             previous_change_id = self._last_seen_id
+            previous_settings_change_id = self._last_seen_settings_id
             observed_refresh_seq = int(self._refresh_request_seq)
 
         current_change_id = int(self._data_service.get_latest_change_id())
+        current_settings_change_id = self._latest_settings_change_id()
 
         if self._stop_evt.is_set():
             return
 
         if previous_change_id is None:
             self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
             if force_emit:
                 self._emit_payload(
                     current_change_id=current_change_id,
                     previous_change_id=current_change_id,
+                    current_settings_change_id=current_settings_change_id,
+                    previous_settings_change_id=current_settings_change_id,
                     changes=[],
                     forced=True,
                     force_sources=force_sources,
                 )
             return
+
+        if previous_settings_change_id is None:
+            previous_settings_change_id = current_settings_change_id
+            self._set_last_seen_settings_id(current_settings_change_id)
+
+        settings_changes: list[dict[str, Any]] = []
+        settings_changed = current_settings_change_id > int(previous_settings_change_id or 0)
+        if settings_changed:
+            rows = self._fetch_settings_changes_since(int(previous_settings_change_id or 0))
+            settings_changes = [self._normalize_settings_row(row) for row in rows]
 
         if current_change_id < previous_change_id:
             logger.warning(
@@ -148,9 +169,12 @@ class DataUpdateMonitor(QThread):
             )
             self._increment_state_epoch()
             self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
             self._emit_payload(
                 current_change_id=current_change_id,
                 previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
                 changes=[],
                 forced=True,
                 gap_detected=True,
@@ -161,8 +185,9 @@ class DataUpdateMonitor(QThread):
 
         if current_change_id > previous_change_id:
             rows = self._data_service.fetch_changes_since(previous_change_id)
-            changes = [self._normalize_row(row) for row in rows]
+            changes = [self._normalize_row(row) for row in rows] + settings_changes
             self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
             if not changes:
                 logger.warning(
                     "Change-log gap suspected: previous=%s current=%s rows=0. Forcing full refresh.",
@@ -172,6 +197,8 @@ class DataUpdateMonitor(QThread):
                 self._emit_payload(
                     current_change_id=current_change_id,
                     previous_change_id=previous_change_id,
+                    current_settings_change_id=current_settings_change_id,
+                    previous_settings_change_id=int(previous_settings_change_id or 0),
                     changes=[],
                     forced=True,
                     gap_detected=True,
@@ -182,6 +209,8 @@ class DataUpdateMonitor(QThread):
             self._emit_payload(
                 current_change_id=current_change_id,
                 previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
                 changes=changes,
                 forced=force_emit,
                 force_sources=force_sources,
@@ -189,10 +218,24 @@ class DataUpdateMonitor(QThread):
             return
 
         self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+        self._set_last_seen_settings_id(current_settings_change_id)
+        if settings_changed:
+            self._emit_payload(
+                current_change_id=current_change_id,
+                previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
+                changes=settings_changes,
+                forced=force_emit,
+                force_sources=force_sources,
+            )
+            return
         if force_emit:
             self._emit_payload(
                 current_change_id=current_change_id,
                 previous_change_id=previous_change_id,
+                current_settings_change_id=current_settings_change_id,
+                previous_settings_change_id=int(previous_settings_change_id or 0),
                 changes=[],
                 forced=True,
                 force_sources=force_sources,
@@ -205,6 +248,8 @@ class DataUpdateMonitor(QThread):
         previous_change_id: int,
         changes: list[dict[str, Any]],
         forced: bool,
+        current_settings_change_id: int = 0,
+        previous_settings_change_id: int = 0,
         force_sources: list[str] | None = None,
         gap_detected: bool = False,
         reason: str = "",
@@ -227,6 +272,8 @@ class DataUpdateMonitor(QThread):
             "scope": "global",
             "previous_change_id": int(previous_change_id),
             "last_change_id": int(current_change_id),
+            "previous_settings_change_id": int(previous_settings_change_id or 0),
+            "last_settings_change_id": int(current_settings_change_id or 0),
             "forced": bool(forced),
             "gap_detected": bool(gap_detected),
             "reason": str(reason or ""),
@@ -244,7 +291,22 @@ class DataUpdateMonitor(QThread):
         lag_ms = self._change_log_lag_ms(changes)
         if lag_ms is not None:
             record_metric("change_log_lag_ms", lag_ms, last_change_id=int(current_change_id))
+        settings_lag_ms = self._change_log_lag_ms([change for change in changes if change.get("settings_change")])
+        if settings_lag_ms is not None:
+            record_metric("settings_change_lag_ms", settings_lag_ms, last_settings_change_id=int(current_settings_change_id or 0))
         self.changes_detected.emit(payload)
+
+    def _latest_settings_change_id(self) -> int:
+        method = getattr(self._data_service, "get_latest_settings_change_id", None)
+        if not callable(method):
+            return 0
+        return int(method() or 0)
+
+    def _fetch_settings_changes_since(self, last_change_id: int) -> list[Any]:
+        method = getattr(self._data_service, "fetch_settings_changes_since", None)
+        if not callable(method):
+            return []
+        return list(method(int(last_change_id or 0)) or [])
 
     @staticmethod
     def _change_log_lag_ms(changes: list[dict[str, Any]]) -> Optional[int]:
@@ -293,4 +355,38 @@ class DataUpdateMonitor(QThread):
             "changed_at": row[5] if len(row) > 5 else None,
             "changed_by": row[6] if len(row) > 6 else None,
             "version": row[7] if len(row) > 7 else None,
+        }
+
+    @staticmethod
+    def _normalize_settings_row(row: Any) -> dict[str, Any]:
+        if row is None:
+            return {}
+        if hasattr(row, "keys"):
+            return {
+                "id": int(row["id"]) if row["id"] is not None else None,
+                "entity_name": row["entity_type"],
+                "entity_id": row["entity_id"],
+                "admission_id": None,
+                "action": row["operation"],
+                "changed_at": row["changed_at"],
+                "changed_by": row["changed_by_user"] or row["changed_by_role"],
+                "version": row["version"],
+                "settings_change": True,
+                "settings_scope": row["scope"],
+                "source_client_id": row["source_client_id"],
+                "content_hash": row["content_hash"],
+            }
+        return {
+            "id": int(row[0]) if len(row) > 0 and row[0] is not None else None,
+            "entity_name": row[1] if len(row) > 1 else None,
+            "entity_id": row[2] if len(row) > 2 else None,
+            "admission_id": None,
+            "action": row[3] if len(row) > 3 else None,
+            "changed_at": row[6] if len(row) > 6 else None,
+            "changed_by": row[8] if len(row) > 8 else row[7] if len(row) > 7 else None,
+            "version": row[5] if len(row) > 5 else None,
+            "settings_change": True,
+            "settings_scope": row[4] if len(row) > 4 else None,
+            "source_client_id": row[9] if len(row) > 9 else None,
+            "content_hash": row[10] if len(row) > 10 else None,
         }

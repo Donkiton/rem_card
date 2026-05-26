@@ -244,20 +244,32 @@ class DietTemplateFileStore:
 
 
 class DietTemplateService:
-    def __init__(self, file_store: Optional[DietTemplateFileStore] = None):
-        self.file_store = file_store or DietTemplateFileStore()
-        self._ensure_file_initialized()
+    def __init__(self, file_store: Optional[DietTemplateFileStore] = None, settings_service: Any = None):
+        self.file_store = file_store
+        if self.file_store is not None:
+            self._ensure_file_initialized()
+            self.settings_service = None
+        else:
+            from rem_card.services.settings.settings_service import get_settings_service
+
+            self.settings_service = settings_service or get_settings_service()
 
     def list_templates(self) -> List[DietTemplateDTO]:
+        if self.settings_service is not None:
+            return self.settings_service.list_diet_templates()
         return self.file_store.list_templates()
 
     def get_template(self, template_id: int) -> DietTemplateDTO:
+        if self.settings_service is not None:
+            return self.settings_service.get_diet_template(template_id)
         template = self._find_template(template_id)
         if not template:
             raise ValueError("Шаблон питания не найден")
         return template
 
     def create_template(self, name: str, diet_text: str = "", schedule_json: Any = None, is_default: bool = False):
+        if self.settings_service is not None:
+            return self.settings_service.create_diet_template(name, diet_text, schedule_json, is_default)
         payload, templates = self.file_store.load()
         new_id = self.file_store.next_id(payload, templates)
         now = _now_text()
@@ -285,6 +297,15 @@ class DietTemplateService:
         is_default: bool = False,
         expected_version: Optional[int] = None,
     ):
+        if self.settings_service is not None:
+            return self.settings_service.update_diet_template(
+                template_id,
+                name,
+                diet_text,
+                schedule_json,
+                is_default,
+                expected_version=expected_version,
+            )
         payload, templates = self.file_store.load()
         current = self._find_template_in_list(templates, template_id)
         if not current:
@@ -307,6 +328,8 @@ class DietTemplateService:
         self.file_store.save_templates(updated, next_id=self.file_store.next_id(payload, templates))
 
     def delete_template(self, template_id: int, expected_version: Optional[int] = None):
+        if self.settings_service is not None:
+            return self.settings_service.delete_diet_template(template_id, expected_version=expected_version)
         payload, templates = self.file_store.load()
         current = self._find_template_in_list(templates, template_id)
         if not current:
@@ -317,6 +340,8 @@ class DietTemplateService:
         self.file_store.save_templates(remaining, next_id=self.file_store.next_id(payload, templates))
 
     def reorder_templates(self, ordered_template_ids: list[int]):
+        if self.settings_service is not None:
+            return self.settings_service.reorder_diet_templates(ordered_template_ids)
         payload, templates = self.file_store.load()
         templates_by_id = {int(t.id): t for t in templates if t.id is not None}
         ordered_ids: list[int] = []

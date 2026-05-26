@@ -1,5 +1,3 @@
-import os
-import json
 import uuid
 import sqlite3
 import threading
@@ -26,8 +24,6 @@ class OrderDomainService:
     _sanitize_guard = threading.Lock()
     _legacy_statuses_sanitized_global = False
     _legacy_statuses_retry_not_before = 0.0
-    _seed_cache_lock = threading.Lock()
-    _seed_cache: Dict[str, tuple[float, Dict]] = {}
 
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
@@ -1129,39 +1125,16 @@ class OrderDomainService:
             start -= timedelta(days=1)
         return start, start + timedelta(days=1)
 
-    @classmethod
-    def _load_seed_json_cached(cls, file_name: str) -> Dict:
-        from rem_card.app.paths import SEED_DIR
-
-        path = os.path.join(SEED_DIR, file_name)
-        try:
-            mtime = float(os.path.getmtime(path))
-        except Exception:
-            return {}
-
-        with cls._seed_cache_lock:
-            cached = cls._seed_cache.get(path)
-            if cached and cached[0] == mtime:
-                return dict(cached[1])
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return {}
-        except Exception:
-            return {}
-
-        with cls._seed_cache_lock:
-            cls._seed_cache[path] = (mtime, data)
-        return dict(data)
-
     def _load_groups_priority(self) -> Dict[str, int]:
-        data = self._load_seed_json_cached("groups.seed.json")
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        data = get_settings_service().load_prescription_datasets().get("groups", {})
         return {k: v.get("priority_level", 99) for k, v in data.items() if isinstance(v, dict)}
 
     def _load_drugs_groups(self) -> Dict[str, str]:
-        data = self._load_seed_json_cached("drugs.seed.json")
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        data = get_settings_service().load_prescription_datasets().get("drugs", {})
         return {k: v.get("group", "unknown") for k, v in data.items() if isinstance(v, dict)}
 
     def _create_chain(self, cursor, order: OrderDTO, start_time: datetime):

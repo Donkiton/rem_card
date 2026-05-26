@@ -26,8 +26,8 @@ from PySide6.QtWidgets import (
 
 from rem_card.app.update_checker import get_update_lock_path, update_lock_scope_id
 
-# Обновлятор запускается из пакета в UPD. Импорт общей темы приложения здесь
-# создает settings/color_scheme/style_settings.json рядом с этим exe.
+# Обновлятор запускается из пакета в UPD. Общую тему приложения сюда не
+# импортируем: runtime-настройки живут в central settings DB, а не в JSON рядом с exe.
 BG_LIGHT = "#e9ecef"
 COLOR_PRIMARY = "#6c757d"
 COLOR_PRIMARY_DARK = "#5c6770"

@@ -719,6 +719,14 @@ class SectorAnal(BaseSectorWidget):
 
     @classmethod
     def _read_lab_columns_settings(cls) -> dict[str, Any]:
+        if not os.environ.get(LAB_COLUMNS_SETTINGS_ENV):
+            try:
+                from rem_card.services.settings.settings_service import get_settings_service
+
+                payload = get_settings_service().get_app_setting("shared", "lab_orders_columns", default={})
+                return payload if isinstance(payload, dict) else {}
+            except Exception:
+                return {}
         path = cls._lab_columns_settings_path()
         try:
             with open(path, "r", encoding="utf-8") as fh:
@@ -731,6 +739,18 @@ class SectorAnal(BaseSectorWidget):
 
     @staticmethod
     def _write_lab_columns_settings(path: Path, payload: dict[str, Any]):
+        if not os.environ.get(LAB_COLUMNS_SETTINGS_ENV):
+            from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, get_settings_service
+
+            get_settings_service().set_app_setting(
+                "shared",
+                "lab_orders_columns",
+                payload,
+                catalog_key=DISPLAY_SETTINGS_KEY,
+                entity_type="display_settings",
+                operation="update",
+            )
+            return
         directory = path.parent
         directory.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")

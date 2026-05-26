@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QCheckBox, 
     QPushButton, QLabel, QFrame, QApplication
 )
-from PySide6.QtCore import Qt, QSettings, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal
 
 from rem_card.app.logger import logger
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -31,24 +31,41 @@ def _movement_comment_text(status_value, reason_text):
 
 class NursePrintConfig:
     def __init__(self):
-        self.settings = QSettings("NurseSectorPrint", "Config")
         self.version = "1.0"
         
     def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool, 
              ventilation: bool, labs: bool, procedures: bool):
-        self.settings.setValue("sector_print/version", self.version)
-        self.settings.setValue("sector_print/sections/vitals", vitals)
-        self.settings.setValue("sector_print/sections/balance", balance)
-        self.settings.setValue("sector_print/sections/prescriptions", prescriptions)
-        self.settings.setValue("sector_print/sections/events", events)
+        from rem_card.services.settings.settings_service import PRINT_SETTINGS_KEY, get_settings_service
+
+        get_settings_service().set_app_setting(
+            "nurse",
+            "print_config",
+            {
+                "vitals": bool(vitals),
+                "balance": bool(balance),
+                "prescriptions": bool(prescriptions),
+                "events": bool(events),
+            },
+            catalog_key=PRINT_SETTINGS_KEY,
+            entity_type="print_settings",
+            operation="update",
+        )
         
     def load(self):
-        return {
-            "vitals": self.settings.value("sector_print/sections/vitals", True, type=bool),
-            "balance": self.settings.value("sector_print/sections/balance", True, type=bool),
-            "prescriptions": self.settings.value("sector_print/sections/prescriptions", True, type=bool),
-            "events": self.settings.value("sector_print/sections/events", True, type=bool)
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        default = {
+            "vitals": True,
+            "balance": True,
+            "prescriptions": True,
+            "events": True,
         }
+        payload = get_settings_service().get_app_setting("nurse", "print_config", default=default)
+        if not isinstance(payload, dict):
+            payload = default
+        result = dict(default)
+        result.update({key: bool(payload.get(key, value)) for key, value in default.items()})
+        return result
 
 class FullReportWorker(QThread):
     finished = Signal(list)

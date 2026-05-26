@@ -46,6 +46,16 @@ class DataService(QObject):
             include_global=include_global,
         )
 
+    def get_latest_settings_change_id(self) -> int:
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        return get_settings_service().latest_change_id()
+
+    def fetch_settings_changes_since(self, last_change_id: int) -> list[dict[str, Any]]:
+        from rem_card.services.settings.settings_service import get_settings_service
+
+        return get_settings_service().fetch_changes_since(last_change_id)
+
     def get_changed_entities_since(
         self,
         last_change_id: int,
@@ -179,4 +189,11 @@ class DataService(QObject):
     def _emit_coordinated_changes(self, payload: dict):
         if self._shutting_down:
             return
+        if any((change or {}).get("settings_change") for change in (payload or {}).get("changes", [])):
+            try:
+                from rem_card.services.settings.settings_service import get_settings_service
+
+                get_settings_service().invalidate_cache()
+            except Exception as exc:
+                logger.warning("Не удалось инвалидировать кэш settings DB: %s", exc, exc_info=True)
         self.changes_detected.emit(self._sync_coordinator.classify(payload or {}))
