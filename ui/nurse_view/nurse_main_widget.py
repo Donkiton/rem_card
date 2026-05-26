@@ -531,10 +531,13 @@ class NurseMainWidget(QWidget):
         adm_id = getattr(self.layout_manager, "current_admission_id", None)
         if not adm_id:
             return
+        ensure_initial_status = bool(ensure_initial_status) and self._should_ensure_initial_status_for_date(
+            self._current_date
+        )
 
         if self._snapshot_worker is not None:
             self._snapshot_pending = {
-                "ensure_initial_status": bool(ensure_initial_status),
+                "ensure_initial_status": ensure_initial_status,
                 "load_scope": str(load_scope or "full"),
             }
             return
@@ -544,7 +547,7 @@ class NurseMainWidget(QWidget):
             "request_id": self._snapshot_request_id,
             "admission_id": int(adm_id),
             "shift_date": self._current_date,
-            "ensure_initial_status": bool(ensure_initial_status),
+            "ensure_initial_status": ensure_initial_status,
             "load_scope": str(load_scope or "full"),
             "context_key": self._current_snapshot_context_key(load_scope=load_scope),
         }
@@ -768,7 +771,8 @@ class NurseMainWidget(QWidget):
     def _on_card_snapshot_failed(self, exc: Exception):
         if self._is_closing:
             return
-        logger.error("NurseMainWidget snapshot load failed: %s", exc, exc_info=True)
+        exc_info = (type(exc), exc, exc.__traceback__) if isinstance(exc, BaseException) else None
+        logger.error("NurseMainWidget snapshot load failed: %s", exc, exc_info=exc_info)
 
     def _on_card_snapshot_finished(self):
         worker = self.sender()
@@ -1679,6 +1683,14 @@ class NurseMainWidget(QWidget):
         if not self._apply_balance_snapshot_if_available():
             self._request_card_snapshot(load_scope="full")
 
+    def _should_ensure_initial_status_for_date(self, value: datetime) -> bool:
+        try:
+            current_start, current_end = self.remcard_service.get_day_period(datetime.now())
+            return current_start <= value < current_end
+        except Exception as exc:
+            logger.warning("Failed to resolve current medical day for nurse initial status guard: %s", exc)
+            return False
+
     @property
     def current_date(self):
         return self._current_date
@@ -1802,20 +1814,22 @@ class NurseMainWidget(QWidget):
         if cached_vitals_snapshot:
             self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
         if cached_vitals_snapshot:
+            should_ensure_initial_status = self._should_ensure_initial_status_for_date(date)
             self._schedule_card_hydration_snapshot(
                 admission_id,
                 date,
-                ensure_initial_status=True,
+                ensure_initial_status=should_ensure_initial_status,
             )
         else:
+            should_ensure_initial_status = self._should_ensure_initial_status_for_date(date)
             self._request_card_snapshot(
-                ensure_initial_status=True,
+                ensure_initial_status=should_ensure_initial_status,
                 load_scope="patient_open_vitals",
             )
             self._schedule_card_hydration_snapshot(
                 admission_id,
                 date,
-                ensure_initial_status=True,
+                ensure_initial_status=should_ensure_initial_status,
             )
         if hasattr(self, 'layout_manager'):
             active_tab = self.layout_manager.set_active_tab("Витальные функции") or "Витальные функции"
@@ -2050,7 +2064,10 @@ class NurseMainWidget(QWidget):
 
         if is_card_mode:
             try:
-                self._request_card_snapshot(ensure_initial_status=True, force_emit=True)
+                self._request_card_snapshot(
+                    ensure_initial_status=self._should_ensure_initial_status_for_date(self._current_date),
+                    force_emit=True,
+                )
                 if hasattr(self.layout_manager, 'orders_widget') and self.layout_manager.orders_widget:
                     self.layout_manager.orders_widget.request_refresh(force=True)
                 if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:

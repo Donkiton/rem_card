@@ -4,6 +4,7 @@ import os
 import shutil
 import json
 import sys
+import subprocess
 from datetime import datetime
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -13,6 +14,7 @@ APP_ROOT = os.path.abspath(SPECPATH)
 PROJECT_ROOT = os.path.dirname(APP_ROOT)
 DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
 SETTINGS_TARGET = os.path.join("rem_card", "settings")
+SETTINGS_RELEASE_TARGET = os.path.join("rem_card", "settings_release")
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -71,6 +73,61 @@ def _settings_datas():
             raise RuntimeError(f"Settings file not found: {required_file}")
     return result
 
+
+def _read_source_version():
+    path = os.path.join(APP_ROOT, "VERSION")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except Exception:
+        return ""
+
+
+def _current_git_commit():
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=APP_ROOT,
+            check=True,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return str(result.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _settings_release_snapshot_datas():
+    if os.environ.get("REMCARD_SKIP_SETTINGS_RELEASE_EXPORT") == "1":
+        print("===> Settings release snapshot export skipped by REMCARD_SKIP_SETTINGS_RELEASE_EXPORT <===")
+        return []
+
+    from rem_card.app.runtime_paths import get_dev_baza_dir
+    from rem_card.data.settings.settings_release import (
+        SETTINGS_RELEASE_SNAPSHOT_FILE,
+        export_settings_release_snapshot,
+    )
+
+    source_baza = os.path.abspath(
+        os.environ.get("REMCARD_SETTINGS_RELEASE_SOURCE_BAZA")
+        or get_dev_baza_dir()
+    )
+    snapshot_dir = os.path.join(APP_ROOT, "build", "settings_release")
+    snapshot_path = os.path.join(snapshot_dir, SETTINGS_RELEASE_SNAPSHOT_FILE)
+    report = export_settings_release_snapshot(
+        source_baza,
+        snapshot_path,
+        release_version=_read_source_version(),
+        release_commit=_current_git_commit(),
+    )
+    print(
+        "===> Settings release snapshot exported: "
+        f"{report['snapshot_path']} hash={report['content_hash']} rows={report['row_counts']} <==="
+    )
+    return [(snapshot_path, SETTINGS_RELEASE_TARGET)]
+
 a = Analysis(
     [
         os.path.join(APP_ROOT, 'run_doctor.py'),
@@ -96,6 +153,9 @@ a = Analysis(
 		# settings: seed для первого импорта в settings DB внутри _internal.
 		# Runtime-источник истины: <BAZA_DIR>/settings/remcard_settings.db.
 		*_settings_datas(),
+
+		# snapshot актуальной dev settings DB: применяется к сетевой settings DB при запуске новой версии.
+		*_settings_release_snapshot_datas(),
 
 		# активные ресурсы управления пациентами и МКБ
 		_data_dir('data/mkb'),

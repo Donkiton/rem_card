@@ -1,4 +1,5 @@
 import os
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -19,31 +20,35 @@ class VitalService:
         self.patient_dao = patient_dao
         self.status_service = status_service
         self.shift_service = ShiftService()
-        self._settings_cache = None
+        self._settings_cache: Dict[Tuple[int, str], Dict[str, Any]] = {}
+        self._settings_cache_generation = 0
+        self._settings_cache_lock = threading.RLock()
 
     def invalidate_cache(self):
-        self._settings_cache = None
+        with self._settings_cache_lock:
+            self._settings_cache.clear()
+            self._settings_cache_generation += 1
 
     def get_vital_settings_cached(self, admission_id: int, date: datetime) -> Dict[str, Any]:
-        if self._settings_cache is None:
-            self._settings_cache = {}
-
         date_str = date.strftime("%Y-%m-%d")
         cache_key = (admission_id, date_str)
-        if cache_key in self._settings_cache:
-            return self._settings_cache[cache_key].copy()
+        with self._settings_cache_lock:
+            cache_generation = self._settings_cache_generation
+            cached = self._settings_cache.get(cache_key)
+            if cached is not None:
+                return cached.copy()
 
         settings = self.vitals_dao.get_vital_settings(admission_id, date_str)
         if not settings:
             settings = {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0}
 
-        self._settings_cache[cache_key] = settings
-        return settings.copy()
+        normalized = dict(settings)
+        with self._settings_cache_lock:
+            if cache_generation == self._settings_cache_generation:
+                self._settings_cache[cache_key] = normalized
+        return normalized.copy()
 
     def save_vital_settings(self, admission_id: int, date: datetime, settings: Dict[str, Any]):
-        if self._settings_cache is None:
-            self._settings_cache = {}
-
         date_str = date.strftime("%Y-%m-%d")
         clean_settings = {
             key: int(settings.get(key, 0))
@@ -78,7 +83,8 @@ class VitalService:
         with self.vitals_dao.db.remcard_transaction():
             self.vitals_dao.save_vital_settings(admission_id, date_str, merged_settings)
 
-        self._settings_cache[(admission_id, date_str)] = merged_settings.copy()
+        with self._settings_cache_lock:
+            self._settings_cache[(admission_id, date_str)] = merged_settings.copy()
 
     def get_vitals(self, admission_id: int, date: datetime) -> List[VitalDTO]:
         start, end = self.get_effective_bounds(admission_id, date)
@@ -174,9 +180,6 @@ class VitalService:
         return {slot: self._format_transfusion_vitals(values) for slot, values in slots.items()}
 
     def get_vital_settings_cached_bulk(self, admission_ids: Sequence[int], date: datetime) -> Dict[int, Dict[str, Any]]:
-        if self._settings_cache is None:
-            self._settings_cache = {}
-
         date_str = date.strftime("%Y-%m-%d")
         ids = [int(adm_id) for adm_id in admission_ids if adm_id is not None]
         if not ids:
@@ -184,17 +187,20 @@ class VitalService:
 
         result: Dict[int, Dict[str, Any]] = {}
         missing_ids: List[int] = []
-        for adm_id in ids:
-            cache_key = (adm_id, date_str)
-            cached = self._settings_cache.get(cache_key)
-            if cached is not None:
-                result[adm_id] = cached.copy()
-            else:
-                missing_ids.append(adm_id)
+        with self._settings_cache_lock:
+            cache_generation = self._settings_cache_generation
+            for adm_id in ids:
+                cache_key = (adm_id, date_str)
+                cached = self._settings_cache.get(cache_key)
+                if cached is not None:
+                    result[adm_id] = cached.copy()
+                else:
+                    missing_ids.append(adm_id)
 
         if missing_ids:
             fetched = self.vitals_dao.get_vital_settings_bulk(missing_ids, date_str)
             default_settings = {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0}
+            fetched_settings: Dict[Tuple[int, str], Dict[str, Any]] = {}
             for adm_id in missing_ids:
                 row = fetched.get(adm_id) or {}
                 merged = {
@@ -205,8 +211,11 @@ class VitalService:
                     "rr": int(row["rr"]) if row.get("rr") is not None else default_settings["rr"],
                     "cvp": int(row["cvp"]) if row.get("cvp") is not None else default_settings["cvp"],
                 }
-                self._settings_cache[(adm_id, date_str)] = merged
+                fetched_settings[(adm_id, date_str)] = merged
                 result[adm_id] = merged.copy()
+            with self._settings_cache_lock:
+                if cache_generation == self._settings_cache_generation:
+                    self._settings_cache.update(fetched_settings)
 
         for adm_id in ids:
             result.setdefault(adm_id, {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0})

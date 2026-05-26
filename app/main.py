@@ -766,6 +766,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
         server = QLocalServer()
         server.listen(server_name)
+        pending_single_instance_clients = []
 
         container = None
         if args.role in ("doctor", "nurse"):
@@ -850,16 +851,34 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         _startup_trace(logger, startup_started_at, "window_shown", role=args.role or "default")
 
         def on_new_connection():
-            client = server.nextPendingConnection()
-            if client.waitForReadyRead(500):
-                data = client.readAll().data().decode("utf-8")
-                if data == "SHOW":
-                    if window.isMinimized():
-                        window.showNormal()
-                    window.setWindowState(window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-                    window.activateWindow()
-                    window.raise_()
-            client.disconnectFromServer()
+            while server.hasPendingConnections():
+                client = server.nextPendingConnection()
+                if client is None:
+                    continue
+                pending_single_instance_clients.append(client)
+                try:
+                    client.setParent(server)
+                    if client.waitForReadyRead(500):
+                        data = bytes(client.readAll()).decode("utf-8", errors="replace")
+                        if data == "SHOW":
+                            if window.isMinimized():
+                                window.showNormal()
+                            window.setWindowState(window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+                            window.activateWindow()
+                            window.raise_()
+                except RuntimeError as exc:
+                    logger.warning("Single-instance socket handling failed: %s", exc)
+                finally:
+                    if client in pending_single_instance_clients:
+                        pending_single_instance_clients.remove(client)
+                    try:
+                        client.disconnectFromServer()
+                    except RuntimeError:
+                        pass
+                    try:
+                        client.deleteLater()
+                    except RuntimeError:
+                        pass
 
         server.newConnection.connect(on_new_connection)
 

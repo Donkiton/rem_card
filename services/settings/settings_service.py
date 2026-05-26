@@ -97,7 +97,7 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     DOCTORS_KEY: (("doctors", "id"),),
     PRINT_SETTINGS_KEY: (("print_templates", "template_key"), ("app_settings", "key")),
     DISPLAY_SETTINGS_KEY: (("app_settings", "key"),),
-    BACKGROUND_SETTINGS_KEY: (("ui_backgrounds", "background_key"),),
+    BACKGROUND_SETTINGS_KEY: (("ui_backgrounds", "background_key"), ("app_settings", "key")),
     STYLE_SETTINGS_KEY: (("app_settings", "key"),),
 }
 
@@ -105,6 +105,7 @@ APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
     LAB_ANALYSIS_KEY: ("lab_materials",),
     PRINT_SETTINGS_KEY: ("print_config",),
     DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns"),
+    BACKGROUND_SETTINGS_KEY: ("background_settings",),
     STYLE_SETTINGS_KEY: ("style_settings",),
 }
 
@@ -299,6 +300,9 @@ class SettingsService:
                 return dict(self._ready_info)
             info = self.db.ensure_ready()
             self._ensure_legacy_import()
+            release_report = self._apply_bundled_release_snapshot_if_needed()
+            if release_report:
+                info = {**info, "settings_release_snapshot": release_report}
             self._ready = True
             self._ready_info = dict(info)
             return dict(info)
@@ -386,6 +390,32 @@ class SettingsService:
             if not ok:
                 raise RuntimeError(f"settings DB integrity_check after import failed: {reason}")
         self._ensure_legacy_prescription_overrides_imported()
+
+    def _apply_bundled_release_snapshot_if_needed(self) -> dict[str, Any]:
+        from rem_card.app.runtime_paths import is_compiled
+        from rem_card.data.settings.settings_release import (
+            apply_settings_release_snapshot,
+            find_release_snapshot_path,
+        )
+
+        should_apply = is_compiled() or os.environ.get("REMCARD_APPLY_SETTINGS_RELEASE_SNAPSHOT") == "1"
+        if not should_apply:
+            return {}
+        snapshot_path = find_release_snapshot_path()
+        if not snapshot_path:
+            return {}
+        try:
+            report = apply_settings_release_snapshot(
+                self.db,
+                snapshot_path,
+                bump_catalog_version=self._bump_catalog_version,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Не удалось применить пакет обновления настроек: {exc}") from exc
+        if report.get("applied"):
+            self.invalidate_cache()
+        logger.info("Settings release snapshot result: %s", report)
+        return report
 
     def _import_legacy_sources(self, cursor) -> dict[str, Any]:
         started = time.perf_counter()

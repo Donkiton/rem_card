@@ -44,6 +44,24 @@ RemCard хранит общие справочники и пользовател
 
 Compiled build не должен создавать или требовать внешние dictionary/settings JSON рядом с exe.
 
+## Release snapshot
+
+Dev-редактор справочников пишет в dev settings DB:
+
+```text
+C:\Test\Baza_rao3_jurnal\settings\remcard_settings.db
+```
+
+При сборке `RemCard.spec` экспортирует из этой БД встроенный пакет:
+
+```text
+_internal\rem_card\settings_release\settings_release_snapshot.json
+```
+
+Это не runtime-хранилище и не внешний JSON рядом с exe. Это immutable release snapshot. При первом запуске новой compiled-версии snapshot применяется к сетевой settings DB через `SettingsDatabase.transaction`: с `settings.db.lock`, validated pre-write backup, `settings_change_log` и bump `settings_catalog_versions`. Повторный запуск той же версии не применяет snapshot повторно, потому что в `settings_meta` хранится applied hash.
+
+Если врач в dev добавил фон, препарат, группу, шаблон, материал анализа, настройки печати или отображения, эти строки попадают в snapshot при компиляции и затем upsert-ятся в сетевую `remcard_settings.db`.
+
 ## Safety profile
 
 Settings DB использует тот же сетевой профиль SQLite:

@@ -144,6 +144,7 @@ def _check_settings_db_guardrails() -> dict[str, Any]:
     runtime_paths_text = (PROJECT_ROOT / "app" / "runtime_paths.py").read_text(encoding="utf-8")
     app_paths_text = (PROJECT_ROOT / "app" / "paths.py").read_text(encoding="utf-8")
     settings_service_text = (PROJECT_ROOT / "services" / "settings" / "settings_service.py").read_text(encoding="utf-8")
+    spec_text = (PROJECT_ROOT / "RemCard.spec").read_text(encoding="utf-8")
 
     if "SETTINGS_DIR_NAME = \"settings\"" not in paths_text:
         findings.append("settings DB path must use <BAZA_DIR>/settings")
@@ -170,6 +171,10 @@ def _check_settings_db_guardrails() -> dict[str, Any]:
         findings.append("compiled runtime must not read dictionary JSON from Prog/rem_card/data/dictionaries")
     if 'get_executable_dir(), "settings"' in settings_service_text:
         findings.append("settings import must not read JSON from Prog/settings")
+    if "export_settings_release_snapshot" not in spec_text or "SETTINGS_RELEASE_TARGET" not in spec_text:
+        findings.append("release build must bundle a dev settings DB snapshot")
+    if "apply_settings_release_snapshot" not in settings_service_text:
+        findings.append("compiled startup must apply bundled settings release snapshot")
     return {"name": "settings_db_guardrails", "ok": not findings, "findings": findings}
 
 

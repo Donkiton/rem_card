@@ -635,10 +635,13 @@ class DoctorRemCardWidget(QWidget):
             return
         if not self.admission_id:
             return
+        ensure_initial_status = bool(ensure_initial_status) and self._should_ensure_initial_status_for_date(
+            self._current_date
+        )
 
         if self._snapshot_worker is not None:
             self._snapshot_pending = {
-                "ensure_initial_status": bool(ensure_initial_status),
+                "ensure_initial_status": ensure_initial_status,
                 "show_empty_message": bool(show_empty_message),
                 "load_scope": str(load_scope or "full"),
             }
@@ -649,7 +652,7 @@ class DoctorRemCardWidget(QWidget):
             "request_id": self._snapshot_request_id,
             "admission_id": int(self.admission_id),
             "shift_date": self._current_date,
-            "ensure_initial_status": bool(ensure_initial_status),
+            "ensure_initial_status": ensure_initial_status,
             "show_empty_message": bool(show_empty_message),
             "load_scope": str(load_scope or "full"),
             "context_key": self._current_snapshot_context_key(load_scope=load_scope),
@@ -853,7 +856,8 @@ class DoctorRemCardWidget(QWidget):
     def _on_card_snapshot_failed(self, exc: Exception):
         if self._is_closing:
             return
-        logger.error("DoctorRemCardWidget snapshot load failed: %s", exc, exc_info=True)
+        exc_info = (type(exc), exc, exc.__traceback__) if isinstance(exc, BaseException) else None
+        logger.error("DoctorRemCardWidget snapshot load failed: %s", exc, exc_info=exc_info)
 
     def _on_card_snapshot_finished(self):
         worker = self.sender()
@@ -1622,6 +1626,16 @@ class DoctorRemCardWidget(QWidget):
         except Exception:
             return left == right
 
+    def _should_ensure_initial_status_for_date(self, value: datetime) -> bool:
+        if getattr(self, "_archive_read_only_mode", False):
+            return False
+        try:
+            current_start, current_end = self.service.get_day_period(datetime.now())
+            return current_start <= value < current_end
+        except Exception as exc:
+            logger.warning("Failed to resolve current medical day for initial status guard: %s", exc)
+            return False
+
     def load_patient_card(
         self,
         admission_id,
@@ -1723,7 +1737,7 @@ class DoctorRemCardWidget(QWidget):
             self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
         if request_snapshot:
             should_ensure_initial_status = (
-                not self._archive_read_only_mode
+                self._should_ensure_initial_status_for_date(date)
                 if ensure_initial_status is None
                 else bool(ensure_initial_status)
             )
@@ -2423,19 +2437,18 @@ class DoctorRemCardWidget(QWidget):
                 ow.blockSignals(True)
                 ow.stop_timer()
             
-            if target_id and self.service.status_service and not self._archive_read_only_mode:
-                current_start, current_end = self.service.get_day_period(datetime.now())
-                if current_start <= selected_date < current_end:
-                    s_start, _ = self.service.get_day_period(selected_date)
-                    patient = self.service.get_patient(target_id)
-                    adm_dt = patient.admission_datetime if patient else None
-                    self.service.status_service.ensure_initial_status(target_id, s_start, adm_dt)
-                else:
-                    logger.info(
-                        "[ARCHIVE] skip initial status write for historical card admission_id=%s date=%s",
-                        target_id,
-                        selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
-                    )
+            should_ensure_initial_status = self._should_ensure_initial_status_for_date(selected_date)
+            if target_id and self.service.status_service and should_ensure_initial_status:
+                s_start, _ = self.service.get_day_period(selected_date)
+                patient = self.service.get_patient(target_id)
+                adm_dt = patient.admission_datetime if patient else None
+                self.service.status_service.ensure_initial_status(target_id, s_start, adm_dt)
+            elif target_id and self.service.status_service and not self._archive_read_only_mode:
+                logger.info(
+                    "[ARCHIVE] skip initial status write for historical card admission_id=%s date=%s",
+                    target_id,
+                    selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
+                )
 
             if admission_id is not None:
                 self.admission_id = admission_id
@@ -2450,7 +2463,7 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:
                 self._bind_nurse_orders_balance_signals()
                 self.layout_manager.nurse_orders_manager.set_context(target_id, self._current_date)
-            self.force_reload_all()
+            self.force_reload_all(ensure_initial_status=should_ensure_initial_status)
             self._update_yesterday_button_state()
             self._apply_archive_read_only_state()
         except Exception as e:
@@ -2469,18 +2482,23 @@ class DoctorRemCardWidget(QWidget):
                 selected_date.isoformat() if hasattr(selected_date, "isoformat") else selected_date,
             )
 
-    def force_reload_all(self):
+    def force_reload_all(self, *_, ensure_initial_status=None):
         self._ensure_card_widgets_initialized()
         from ...app.logger import logger
         logger.debug("[RELOAD] --- Beginning full reload sequence ---")
         try:
+            should_ensure_initial_status = (
+                self._should_ensure_initial_status_for_date(self._current_date)
+                if ensure_initial_status is None
+                else bool(ensure_initial_status)
+            )
             if hasattr(self, 'balance_controller'):
                 self.balance_controller.shift_date = self._current_date
                 if hasattr(self.balance_controller, "set_patient_period_manual_mode"):
                     self.balance_controller.set_patient_period_manual_mode(self._balance_patient_period_manual_mode)
                 
             self._request_card_snapshot(
-                ensure_initial_status=not self._archive_read_only_mode,
+                ensure_initial_status=should_ensure_initial_status,
                 show_empty_message=False,
                 force_emit=True,
             )
@@ -2855,7 +2873,7 @@ class DoctorRemCardWidget(QWidget):
         if is_card_mode:
             try:
                 self._request_card_snapshot(
-                    ensure_initial_status=not self._archive_read_only_mode,
+                    ensure_initial_status=self._should_ensure_initial_status_for_date(self._current_date),
                     show_empty_message=False,
                     force_emit=True,
                 )

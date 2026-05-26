@@ -12334,6 +12334,171 @@ def _check_legacy_overrides_do_not_reapply_after_settings_import(temp_root: str)
         app_paths.get_executable_dir = original_get_executable_dir
 
 
+def _check_settings_release_snapshot_applies_dev_settings_to_target_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_release import (
+        SETTINGS_RELEASE_APPLIED_HASH_KEY,
+        apply_settings_release_snapshot,
+        export_settings_release_snapshot,
+    )
+    from rem_card.services.settings.settings_service import (
+        BACKGROUND_SETTINGS_KEY,
+        DISPLAY_SETTINGS_KEY,
+        PRINT_SETTINGS_KEY,
+        SettingsService,
+    )
+
+    source_baza = os.path.join(temp_root, "dev_rel")
+    target_baza = os.path.join(temp_root, "net_rel")
+    marker = f"release_snapshot_{os.getpid()}"
+    source_service = SettingsService(SettingsDatabase(baza_dir=source_baza))
+    source_service.ensure_ready()
+    source_service.save_prescription_item(
+        "groups",
+        f"group_{marker}",
+        {"name": "Релизная группа", "display_name": "Релизная группа"},
+    )
+    source_service.save_prescription_item(
+        "drugs",
+        f"drug_{marker}",
+        {
+            "name": "Релизный препарат",
+            "latin": "Releasei",
+            "group": f"group_{marker}",
+            "unit": "mg",
+            "default_dose": "1",
+        },
+    )
+    source_service.set_app_setting(
+        "shared",
+        "display_settings",
+        {"release_marker": marker},
+        catalog_key=DISPLAY_SETTINGS_KEY,
+        entity_type="display_settings",
+        operation="release_probe",
+    )
+    source_service.set_app_setting(
+        "doctor",
+        "print_config",
+        {"release_marker": marker, "vitals": True},
+        catalog_key=PRINT_SETTINGS_KEY,
+        entity_type="print_config",
+        operation="release_probe",
+    )
+    source_service.set_app_setting(
+        "shared",
+        "background_settings",
+        {
+            "version": 1,
+            "backgrounds": [
+                {
+                    "id": f"background_{marker}",
+                    "name": "Релизный фон",
+                    "file": "",
+                    "start": "01-01",
+                    "end": "12-31",
+                }
+            ],
+        },
+        catalog_key=BACKGROUND_SETTINGS_KEY,
+        entity_type="background_settings",
+        operation="release_probe",
+    )
+
+    snapshot_path = os.path.join(temp_root, "rel_snapshot.json")
+    export_report = export_settings_release_snapshot(
+        source_baza,
+        snapshot_path,
+        release_version="9.9.9",
+        release_commit="regression",
+    )
+    target_service = SettingsService(SettingsDatabase(baza_dir=target_baza))
+    target_service.ensure_ready()
+    apply_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    if not apply_report.get("applied") or int(apply_report.get("changed_rows") or 0) <= 0:
+        return False, f"release snapshot did not apply changes: {apply_report}"
+
+    with target_service.db.read_connection() as conn:
+        drug = conn.execute("SELECT payload_json FROM drugs WHERE code = ?", (f"drug_{marker}",)).fetchone()
+        group = conn.execute("SELECT payload_json FROM drug_groups WHERE code = ?", (f"group_{marker}",)).fetchone()
+        display = conn.execute(
+            "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = 'display_settings'"
+        ).fetchone()
+        print_config = conn.execute(
+            "SELECT value_json FROM app_settings WHERE scope = 'doctor' AND key = 'print_config'"
+        ).fetchone()
+        background = conn.execute(
+            "SELECT value_json FROM ui_backgrounds WHERE background_key = ?",
+            (f"background_{marker}",),
+        ).fetchone()
+        meta = conn.execute(
+            "SELECT value FROM settings_meta WHERE key = ?",
+            (SETTINGS_RELEASE_APPLIED_HASH_KEY,),
+        ).fetchone()
+        changes = conn.execute(
+            """
+            SELECT scope, source_client_id
+            FROM settings_change_log
+            WHERE entity_type = 'settings_release_snapshot'
+            ORDER BY id
+            """
+        ).fetchall()
+    if not drug or marker not in str(drug["payload_json"]):
+        return False, "release snapshot did not copy dev drug catalog"
+    if not group or "Релизная группа" not in str(group["payload_json"]):
+        return False, "release snapshot did not copy dev drug group"
+    if not display or marker not in str(display["value_json"]):
+        return False, "release snapshot did not copy display settings"
+    if not print_config or marker not in str(print_config["value_json"]):
+        return False, "release snapshot did not copy print settings"
+    if not background or marker not in str(background["value_json"]):
+        return False, "release snapshot did not copy background rows"
+    if not meta or str(meta["value"]) != str(export_report["content_hash"]):
+        return False, "release snapshot applied hash meta was not stored"
+    if not changes:
+        return False, "release snapshot did not write settings_change_log events"
+    if any(not str(row["source_client_id"] or "").startswith("settings_release:") for row in changes):
+        return False, "release snapshot change_log source_client_id is missing"
+
+    second_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    if second_report.get("applied") or second_report.get("reason") != "already_applied":
+        return False, f"release snapshot should be idempotent, got: {second_report}"
+
+    saved_apply_env = os.environ.get("REMCARD_APPLY_SETTINGS_RELEASE_SNAPSHOT")
+    saved_snapshot_env = os.environ.get("REMCARD_SETTINGS_RELEASE_SNAPSHOT")
+    try:
+        os.environ["REMCARD_APPLY_SETTINGS_RELEASE_SNAPSHOT"] = "1"
+        os.environ["REMCARD_SETTINGS_RELEASE_SNAPSHOT"] = snapshot_path
+        startup_target = os.path.join(temp_root, "net_start")
+        startup_service = SettingsService(SettingsDatabase(baza_dir=startup_target))
+        startup_info = startup_service.ensure_ready()
+        startup_report = startup_info.get("settings_release_snapshot") or {}
+        if not startup_report.get("applied"):
+            return False, f"startup did not apply bundled release snapshot: {startup_report}"
+        with startup_service.db.read_connection() as conn:
+            startup_drug = conn.execute("SELECT 1 FROM drugs WHERE code = ?", (f"drug_{marker}",)).fetchone()
+        if not startup_drug:
+            return False, "startup release snapshot did not copy dev drug catalog"
+    finally:
+        if saved_apply_env is None:
+            os.environ.pop("REMCARD_APPLY_SETTINGS_RELEASE_SNAPSHOT", None)
+        else:
+            os.environ["REMCARD_APPLY_SETTINGS_RELEASE_SNAPSHOT"] = saved_apply_env
+        if saved_snapshot_env is None:
+            os.environ.pop("REMCARD_SETTINGS_RELEASE_SNAPSHOT", None)
+        else:
+            os.environ["REMCARD_SETTINGS_RELEASE_SNAPSHOT"] = saved_snapshot_env
+    return True, "ok"
+
+
 def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.diet_service import DietTemplateService
     from rem_card.services.doctor_list_service import DoctorListStore
@@ -12770,6 +12935,7 @@ def main():
         ("compiled_bundled_overrides_repair_seed_only_settings_db", _check_compiled_bundled_overrides_repair_seed_only_settings_db),
         ("compiled_external_dictionary_json_does_not_shadow_settings_seed", _check_compiled_external_dictionary_json_does_not_shadow_settings_seed),
         ("legacy_overrides_do_not_reapply_after_settings_import", _check_legacy_overrides_do_not_reapply_after_settings_import),
+        ("settings_release_snapshot_applies_dev_settings_to_target_db", _check_settings_release_snapshot_applies_dev_settings_to_target_db),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
         ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),
         ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),
