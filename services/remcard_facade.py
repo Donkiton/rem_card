@@ -1419,6 +1419,9 @@ class RemCardService(QObject):
     def clear_order_drafts(self, admission_id: int, shift_date: datetime, expected_revisions=None):
         self._orders.clear_drafts(admission_id, shift_date, expected_revisions=expected_revisions)
 
+    def repair_order_draft_integrity(self, admission_id: int, shift_date: Optional[datetime] = None):
+        return self._orders.repair_draft_integrity(admission_id, shift_date)
+
     def soft_delete_order_row(self, order_id: int, is_committed: bool, expected_revision: Optional[int] = None):
         self._orders.soft_delete_order_row(order_id, is_committed, expected_revision=expected_revision)
 

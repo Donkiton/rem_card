@@ -2105,6 +2105,122 @@ class OrdersWidget(QWidget):
         self._soft_update_message = ""
         self._set_refresh_status("")
 
+    @staticmethod
+    def _is_foreign_key_error(exc: Exception) -> bool:
+        if isinstance(exc, sqlite3.IntegrityError) and "foreign key" in str(exc).lower():
+            return True
+        return "foreign key" in str(exc).lower()
+
+    def _patient_error_label(self, admission_id) -> str:
+        try:
+            patient = self.service.get_patient(int(admission_id)) if self.service else None
+        except Exception:
+            patient = None
+        if not patient:
+            return f"госпитализация #{admission_id}"
+
+        name = str(getattr(patient, "full_name", "") or "").strip() or f"госпитализация #{admission_id}"
+        details = []
+        history = str(getattr(patient, "history_number", "") or "").strip()
+        bed = getattr(patient, "bed_number", None)
+        if history:
+            details.append(f"ИБ {history}")
+        if bed not in (None, ""):
+            details.append(f"койка {bed}")
+        return f"{name} ({', '.join(details)})" if details else name
+
+    @staticmethod
+    def _description_target_admission_id(description: str, fallback):
+        parts = str(description or "").split(":")
+        if len(parts) >= 2 and parts[0] == "orders_clear_drafts":
+            try:
+                return int(parts[1])
+            except Exception:
+                return fallback
+        return fallback
+
+    def _format_foreign_key_write_error(self, description: str, exc: Exception) -> str:
+        target_admission_id = self._description_target_admission_id(description, self.admission_id)
+        patient_label = self._patient_error_label(target_admission_id)
+
+        if str(description or "").startswith("orders_clear_drafts:"):
+            action = "очистка черновиков назначений при открытии или смене карты"
+            reason = (
+                "в карте есть назначение, которое база считает черновиком, "
+                "но к нему уже привязаны сохраненные отметки выполнения."
+            )
+            next_step = "Нажмите «Исправить карту»: программа проверит назначения этого пациента и сохранит такие строки корректно."
+        else:
+            action = "сохранение данных карты"
+            reason = "одна из сохраняемых строк ссылается на запись, которую база не нашла."
+            next_step = "Обновите карту. Если сообщение повторится, передайте разработчику это окно."
+
+        return (
+            f"Не удалось выполнить действие: {action}.\n\n"
+            f"Пациент: {patient_label}\n"
+            f"Причина: {reason}\n\n"
+            f"{next_step}\n\n"
+            f"Техническая деталь: {exc}"
+        )
+
+    def _repair_order_draft_integrity(self, admission_id, shift_date):
+        if not self.service or admission_id is None:
+            return
+
+        target_admission_id = int(admission_id)
+        target_shift_date = shift_date
+        result_holder = {}
+
+        def operation():
+            result_holder["result"] = self.service.repair_order_draft_integrity(
+                target_admission_id,
+                target_shift_date,
+            )
+
+        def on_success():
+            result = result_holder.get("result") or {}
+            rescued = int(result.get("rescued_orders", 0) or 0)
+            removed_admins = int(result.get("removed_admins", 0) or 0)
+            self.request_refresh(force=True)
+            self._show_info(
+                "Проверка назначений выполнена.\n\n"
+                f"Исправлено назначений: {rescued}\n"
+                f"Удалено черновых отметок выполнения: {removed_admins}"
+            )
+
+        def on_error(exc):
+            self._show_warning(
+                "Автоматическое исправление не выполнено.\n\n"
+                f"Пациент: {self._patient_error_label(target_admission_id)}\n"
+                f"Причина: {exc}"
+            )
+
+        self._enqueue_write(
+            f"orders_repair_integrity:{target_admission_id}",
+            operation=operation,
+            on_success=on_success,
+            on_error=on_error,
+            show_error=False,
+        )
+
+    def _show_write_error(self, description: str, exc: Exception):
+        if not self._is_foreign_key_error(exc):
+            self._show_warning(f"Ошибка сохранения: {exc}")
+            return
+
+        target_admission_id = self._description_target_admission_id(description, self.admission_id)
+        result = CustomMessageBox.warning_with_actions(
+            self,
+            "Проверка назначений",
+            self._format_foreign_key_write_error(description, exc),
+            [
+                ("Исправить карту", 1),
+                ("Закрыть", CustomMessageBox.Cancel),
+            ],
+        )
+        if result == 1:
+            self._repair_order_draft_integrity(target_admission_id, self.shift_date)
+
     def _enqueue_write(
         self,
         description: str,
@@ -2158,7 +2274,7 @@ class OrdersWidget(QWidget):
                     on_error(exc)
             finally:
                 if show_error:
-                    self._show_warning(f"Ошибка сохранения: {exc}")
+                    self._show_write_error(description, exc)
 
         self.service.enqueue_write(
             description=description,
@@ -3076,11 +3192,10 @@ class OrdersWidget(QWidget):
         local_order = copy(updated_order)
         local_order.id = order_id
         local_order.admission_id = self.admission_id
-        local_order.is_committed = 0
         self.model.orders[target_row] = local_order
         if hasattr(self.model, "_recompute_draft_flag"):
             self.model._recompute_draft_flag(emit_order_column=True)
-        self._cached_has_drafts = True
+        self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
         self._cached_has_orders = any(
             item and item.status != OrderStatus.DELETED
             for item in self.model.orders

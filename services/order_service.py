@@ -101,6 +101,10 @@ class OrderService:
 
             text_rep = f"{dto.latin} {float(dto.dose_value or 0):g} {dto.dose_unit or ''}".strip()
             admission_id = int(current["admission_id"])
+            # У уже сохраненного назначения нет снапшота прежних полей для
+            # отката, поэтому редактирование не должно превращать его в
+            # удаляемый черновик.
+            next_is_committed = 1 if int(current["is_committed"] or 0) else 0
             cursor.execute(
                 """
                 UPDATE orders
@@ -117,7 +121,7 @@ class OrderService:
                     rate_ml_h = ?,
                     volume_total = ?,
                     duration_min = ?,
-                    is_committed = 0,
+                    is_committed = ?,
                     comment = ?,
                     last_modified_by = 'doctor',
                     revision = COALESCE(revision, 0) + 1,
@@ -137,6 +141,7 @@ class OrderService:
                     dto.rate_ml_h,
                     dto.volume_total,
                     dto.duration_min,
+                    next_is_committed,
                     dto.comment,
                     int(order_id),
                 ),
@@ -436,6 +441,68 @@ class OrderService:
                 pass
         return self._shifts.get_day_period(datetime.now())
 
+    def _repair_clearable_draft_integrity(self, cursor, admission_id: int, start: datetime, end: datetime) -> dict[str, int]:
+        """
+        Чинит старые/сбойные черновики перед откатом.
+
+        Если назначение уже имеет зафиксированные выполнения, его нельзя
+        удалять как черновик: SQLite справедливо остановит это внешним ключом.
+        В таком случае сохраняем назначение как зафиксированное. Оставшиеся
+        чистые черновики удаляются вместе со всеми своими незавершенными
+        строками выполнения.
+        """
+        cursor.execute(
+            """
+            UPDATE orders
+            SET is_committed = 1,
+                revision = COALESCE(revision, 0) + 1,
+                last_modified_by = COALESCE(last_modified_by, 'doctor'),
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE is_committed = 0
+              AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+              AND admission_id = ?
+              AND datetime >= ? AND datetime < ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM administrations committed_admin
+                  WHERE committed_admin.order_id = orders.id
+                    AND committed_admin.is_committed = 1
+              )
+            """,
+            (admission_id, start.isoformat(), end.isoformat()),
+        )
+        rescued_orders = int(cursor.rowcount or 0)
+
+        cursor.execute(
+            """
+            DELETE FROM administrations
+            WHERE order_id IN (
+                SELECT draft_orders.id
+                FROM orders draft_orders
+                WHERE draft_orders.is_committed = 0
+                  AND draft_orders.admission_id = ?
+                  AND draft_orders.datetime >= ? AND draft_orders.datetime < ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM administrations committed_admin
+                      WHERE committed_admin.order_id = draft_orders.id
+                        AND committed_admin.is_committed = 1
+                  )
+            )
+            """,
+            (admission_id, start.isoformat(), end.isoformat()),
+        )
+        removed_admins = int(cursor.rowcount or 0)
+        return {
+            "rescued_orders": rescued_orders,
+            "removed_admins": removed_admins,
+        }
+
+    def repair_draft_integrity(self, admission_id: int, shift_date: Optional[datetime]) -> dict[str, int]:
+        with self.dao.db.remcard_transaction() as cursor:
+            start, end = self._resolve_shift_bounds(cursor, admission_id, shift_date)
+            return self._repair_clearable_draft_integrity(cursor, admission_id, start, end)
+
     def save_draft_order_sort(
         self,
         admission_id: int,
@@ -558,12 +625,18 @@ class OrderService:
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
             )
+            self._repair_clearable_draft_integrity(cursor, admission_id, start, end)
             cursor.execute(
                 """
                 DELETE FROM orders
                 WHERE is_committed = 0
                   AND admission_id = ?
                   AND datetime >= ? AND datetime < ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM administrations remaining_admin
+                      WHERE remaining_admin.order_id = orders.id
+                  )
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
             )

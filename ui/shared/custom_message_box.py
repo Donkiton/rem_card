@@ -204,6 +204,11 @@ class CustomMessageBox(QDialog):
         return dialog.exec()
 
     @classmethod
+    def warning_with_actions(cls, parent, title, message, action_buttons):
+        dialog = cls(title, message, "warning", None, parent, action_buttons)
+        return dialog.exec()
+
+    @classmethod
     def question(cls, parent, title, message, buttons=None, defaultButton=None):
         # Опциональные аргументы buttons/defaultButton добавлены для совместимости
         dialog = cls(title, message, "question", None, parent)
