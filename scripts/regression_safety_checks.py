@@ -12499,6 +12499,104 @@ def _check_settings_release_snapshot_applies_dev_settings_to_target_db(temp_root
     return True, "ok"
 
 
+def _check_settings_release_snapshot_preserves_runtime_template_edits(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_release import (
+        SETTINGS_RELEASE_APPLIED_AT_KEY,
+        SETTINGS_RELEASE_APPLIED_HASH_KEY,
+        SETTINGS_RELEASE_VERSION_KEY,
+        apply_settings_release_snapshot,
+        export_settings_release_snapshot,
+    )
+    from rem_card.services.settings.settings_service import SettingsService
+
+    source_baza = os.path.join(temp_root, "dev_release")
+    target_baza = os.path.join(temp_root, "network_target")
+    template_key = f"release_runtime_edit_{os.getpid()}"
+    release_payload = {
+        "name": "Регрессия runtime edit",
+        "template_type": "simple",
+        "drugs": [
+            {
+                "drug": "fizrastvor",
+                "dose": 250.0,
+                "unit": "ml",
+                "admin_type": "infusion",
+                "duration_min": 30,
+            }
+        ],
+    }
+    runtime_payload = json.loads(json.dumps(release_payload, ensure_ascii=False))
+    runtime_payload["drugs"][0]["dose"] = 200.0
+
+    source_service = SettingsService(SettingsDatabase(baza_dir=source_baza))
+    source_service.ensure_ready()
+    source_service.save_prescription_item("templates", template_key, release_payload)
+
+    snapshot_path = os.path.join(temp_root, "settings_release_snapshot.json")
+    export_settings_release_snapshot(
+        source_baza,
+        snapshot_path,
+        release_version="runtime-edit-regression",
+        release_commit="regression",
+    )
+
+    target_service = SettingsService(SettingsDatabase(baza_dir=target_baza))
+    target_service.ensure_ready()
+    first_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    if not first_report.get("applied"):
+        return False, f"release snapshot did not apply initial template: {first_report}"
+    first_payload = target_service.load_prescription_datasets()["templates"].get(template_key) or {}
+    if float((first_payload.get("drugs") or [{}])[0].get("dose") or 0) != 250.0:
+        return False, "release snapshot did not seed template value 250"
+
+    target_service.save_prescription_item("templates", template_key, runtime_payload)
+    with target_service.db.transaction("regression_missing_release_meta") as cursor:
+        cursor.execute(
+            "UPDATE order_templates SET source = 'manual', updated_at = ? WHERE template_key = ?",
+            ("2999-01-01 00:00:00", template_key),
+        )
+        cursor.execute(
+            "DELETE FROM settings_meta WHERE key IN (?, ?, ?)",
+            (
+                SETTINGS_RELEASE_APPLIED_HASH_KEY,
+                SETTINGS_RELEASE_APPLIED_AT_KEY,
+                SETTINGS_RELEASE_VERSION_KEY,
+            ),
+        )
+    target_service.invalidate_cache()
+
+    second_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    if not second_report.get("applied"):
+        return False, f"release snapshot should store missing apply marker: {second_report}"
+    table_report = (second_report.get("tables") or {}).get("order_templates") or {}
+    if int(table_report.get("preserved") or 0) < 1:
+        return False, f"runtime-edited template was not preserved: {second_report}"
+
+    restarted = SettingsService(SettingsDatabase(baza_dir=target_baza))
+    restarted.ensure_ready()
+    final_payload = restarted.load_prescription_datasets()["templates"].get(template_key) or {}
+    final_dose = float((final_payload.get("drugs") or [{}])[0].get("dose") or 0)
+    if final_dose != 200.0:
+        return False, f"runtime template edit was overwritten by release snapshot: dose={final_dose}"
+    with restarted.db.read_connection() as conn:
+        meta = conn.execute(
+            "SELECT value FROM settings_meta WHERE key = ?",
+            (SETTINGS_RELEASE_APPLIED_HASH_KEY,),
+        ).fetchone()
+    if not meta:
+        return False, "release snapshot applied hash meta was not restored after preserving runtime edit"
+    return True, "ok"
+
+
 def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.diet_service import DietTemplateService
     from rem_card.services.doctor_list_service import DoctorListStore
@@ -12936,6 +13034,7 @@ def main():
         ("compiled_external_dictionary_json_does_not_shadow_settings_seed", _check_compiled_external_dictionary_json_does_not_shadow_settings_seed),
         ("legacy_overrides_do_not_reapply_after_settings_import", _check_legacy_overrides_do_not_reapply_after_settings_import),
         ("settings_release_snapshot_applies_dev_settings_to_target_db", _check_settings_release_snapshot_applies_dev_settings_to_target_db),
+        ("settings_release_snapshot_preserves_runtime_template_edits", _check_settings_release_snapshot_preserves_runtime_template_edits),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
         ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),
         ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),

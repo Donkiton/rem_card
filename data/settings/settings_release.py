@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
 from rem_card.app.runtime_paths import get_resources_dir
@@ -234,13 +235,45 @@ def _rows_equal(left: dict[str, Any] | None, right: dict[str, Any]) -> bool:
     return _stable_json(_comparable_row(left)) == _stable_json(_comparable_row(right))
 
 
-def _upsert_release_row(cursor: sqlite3.Cursor, table: ReleaseTable, row: dict[str, Any]) -> str:
+def _parse_settings_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("T", " ").replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _manual_row_is_newer_than_snapshot(existing: dict[str, Any] | None, snapshot_exported_at: Any) -> bool:
+    if not existing:
+        return False
+    if str(existing.get("source") or "") != "manual":
+        return False
+    existing_updated_at = _parse_settings_datetime(existing.get("updated_at"))
+    snapshot_time = _parse_settings_datetime(snapshot_exported_at)
+    return bool(existing_updated_at and snapshot_time and existing_updated_at > snapshot_time)
+
+
+def _upsert_release_row(
+    cursor: sqlite3.Cursor,
+    table: ReleaseTable,
+    row: dict[str, Any],
+    *,
+    snapshot_exported_at: Any,
+) -> str:
     values = _row_key(row, table.key_columns)
     if any(value is None or str(value) == "" for value in values):
         return "skipped"
     existing = _fetch_existing_row(cursor, table, row)
     if _rows_equal(existing, row):
         return "unchanged"
+    if _manual_row_is_newer_than_snapshot(existing, snapshot_exported_at):
+        return "preserved"
 
     columns = list(row.keys())
     placeholders = ", ".join("?" for _ in columns)
@@ -293,7 +326,9 @@ def apply_settings_release_snapshot(
         "tables": {},
         "changed_rows": 0,
         "skipped_rows": 0,
+        "preserved_rows": 0,
     }
+    snapshot_exported_at = snapshot.get("exported_at")
     table_by_name = {table.name: table for table in RELEASE_TABLES}
     with db.transaction("settings_release_snapshot_apply") as cursor:
         for table_name, rows_raw in tables_raw.items():
@@ -301,13 +336,18 @@ def apply_settings_release_snapshot(
             if table is None:
                 continue
             rows = rows_raw if isinstance(rows_raw, list) else []
-            table_report = {"inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0}
+            table_report = {"inserted": 0, "updated": 0, "unchanged": 0, "skipped": 0, "preserved": 0}
             for raw_row in rows:
                 if not isinstance(raw_row, dict):
                     table_report["skipped"] += 1
                     continue
                 row = _decode_row(raw_row)
-                status = _upsert_release_row(cursor, table, row)
+                status = _upsert_release_row(
+                    cursor,
+                    table,
+                    row,
+                    snapshot_exported_at=snapshot_exported_at,
+                )
                 table_report[status] += 1
                 if status in {"inserted", "updated"}:
                     catalog_key = _catalog_key_for_row(table.name, row)
@@ -316,6 +356,8 @@ def apply_settings_release_snapshot(
                     report["changed_rows"] += 1
                 elif status == "skipped":
                     report["skipped_rows"] += 1
+                elif status == "preserved":
+                    report["preserved_rows"] += 1
             report["tables"][table.name] = table_report
 
         now = now_text()
