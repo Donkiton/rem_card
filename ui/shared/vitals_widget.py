@@ -240,6 +240,11 @@ class VitalsWidget(QWidget):
             self.grid_layout.addWidget(self.time_edit, row, 0, 1, 2); self.time_edit.show()
             row += 1
 
+            if settings.get('temp'):
+                lbl_t = QLabel("Темп:"); self.grid_layout.addWidget(lbl_t, row, 0); lbl_t.show()
+                self.grid_layout.addWidget(self.temp, row, 1); self.temp.show()
+                row += 1
+
             if settings.get('ad'):
                 lbl_ad = QLabel("АД:"); self.grid_layout.addWidget(lbl_ad, row, 0); lbl_ad.show()
                 ad_layout = QHBoxLayout(); ad_layout.setContentsMargins(0,0,0,0)
@@ -251,11 +256,6 @@ class VitalsWidget(QWidget):
             if settings.get('pulse'):
                 lbl_p = QLabel("Пульс:"); self.grid_layout.addWidget(lbl_p, row, 0); lbl_p.show()
                 self.grid_layout.addWidget(self.pulse, row, 1); self.pulse.show()
-                row += 1
-
-            if settings.get('temp'):
-                lbl_t = QLabel("Темп:"); self.grid_layout.addWidget(lbl_t, row, 0); lbl_t.show()
-                self.grid_layout.addWidget(self.temp, row, 1); self.temp.show()
                 row += 1
 
             if settings.get('rr'):
@@ -279,9 +279,9 @@ class VitalsWidget(QWidget):
 
             # 3. Устанавливаем порядок табуляции (Tab order) для всех видимых полей
             tab_chain = [self.time_edit]
+            if settings.get('temp'): tab_chain.append(self.temp)
             if settings.get('ad'): tab_chain.extend([self.sys, self.dia])
             if settings.get('pulse'): tab_chain.append(self.pulse)
-            if settings.get('temp'): tab_chain.append(self.temp)
             if settings.get('rr'): tab_chain.append(self.rr)
             if settings.get('spo2'): tab_chain.append(self.spo2)
             if settings.get('cvp'): tab_chain.append(self.cvp)
@@ -295,7 +295,7 @@ class VitalsWidget(QWidget):
                 focused_widget.setFocus()
 
             # Высота
-            visible_fields = sum(1 for k in ['ad', 'pulse', 'temp', 'rr', 'spo2', 'cvp'] if settings.get(k))
+            visible_fields = sum(1 for k in ['temp', 'ad', 'pulse', 'rr', 'spo2', 'cvp'] if settings.get(k))
             picker_height = max(190, self.time_edit.sizeHint().height())
             calculated_height = 100 + picker_height + (visible_fields * 34)
             
@@ -479,7 +479,10 @@ class VitalsWidget(QWidget):
             def on_success(_):
                 for field in [self.sys, self.dia, self.pulse, self.temp, self.spo2, self.rr, self.cvp]:
                     field.clear()
-                self.sys.setFocus()
+                for field in [self.temp, self.sys, self.pulse, self.rr, self.spo2, self.cvp]:
+                    if field.isVisible() and field.isEnabled() and not field.isReadOnly():
+                        field.setFocus()
+                        break
 
                 if has_real_data:
                     next_hour = self.service.next_full_hour(current_time, self.shift_date)

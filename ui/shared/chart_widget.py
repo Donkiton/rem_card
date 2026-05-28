@@ -442,6 +442,10 @@ class ChartWidget(QWidget):
                         return f"{v:.1f}"
                     except: return "-"
                 
+                if closest_vital.temp is not None:
+                    temp_v = f_val(closest_vital.temp)
+                    html += f"<span style='color: {self.colors['temp']};'>Temp: {temp_v}</span><br>"
+
                 if closest_vital.sys is not None or closest_vital.dia is not None:
                     sys_v = f_val(closest_vital.sys)
                     dia_v = f_val(closest_vital.dia)
@@ -450,10 +454,6 @@ class ChartWidget(QWidget):
                 if closest_vital.pulse is not None:
                     pulse_v = f_val(closest_vital.pulse)
                     html += f"<span style='color: {self.colors['pulse']};'>ЧСС: {pulse_v}</span><br>"
-                
-                if closest_vital.temp is not None:
-                    temp_v = f_val(closest_vital.temp)
-                    html += f"<span style='color: {self.colors['temp']};'>Temp: {temp_v}</span><br>"
                 
                 rr_v = getattr(closest_vital, 'rr', None)
                 if rr_v is not None:

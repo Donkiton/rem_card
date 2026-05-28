@@ -418,9 +418,9 @@ class Sector4v(BaseSectorWidget):
         self.badges_layout.setSpacing(5)
         
         self.badges = {
+            'temp': self.badge_temp,
             'ad': self.badge_ad,
             'pulse': self.badge_pulse,
-            'temp': self.badge_temp,
             'rr': self.badge_rr,
             'spo2': self.badge_spo2,
             'cvp': self.badge_cvp

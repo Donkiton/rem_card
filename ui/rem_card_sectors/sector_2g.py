@@ -39,9 +39,9 @@ class Sector2g(BaseSectorWidget):
         self.legend_items = {}
         
         items_data = [
+            ("temp", "Температура (°C)", COLOR_VITAL_TEMP_BG, COLOR_VITAL_TEMP),
             ("ad", "АД (мм.рт.ст)", COLOR_VITAL_AD_BG, COLOR_VITAL_AD_LINE),
             ("pulse", "ЧСС (уд/мин)", COLOR_VITAL_PULSE_BG, COLOR_VITAL_PULSE),
-            ("temp", "Температура (°C)", COLOR_VITAL_TEMP_BG, COLOR_VITAL_TEMP),
             ("rr", "ЧДД (в мин)", COLOR_VITAL_RESP_BG, COLOR_VITAL_RESP),
             ("spo2", "SpO2 (%)", COLOR_VITAL_SPO2_BG, COLOR_VITAL_SPO2),
             ("cvp", "ЦВД (см.вод.ст)", COLOR_VITAL_CVP_BG, COLOR_VITAL_CVP)
