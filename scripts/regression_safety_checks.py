@@ -8131,6 +8131,31 @@ def _check_order_row_edit_updates_existing_order(temp_root: str) -> tuple[bool, 
         service.finalize_order_card(admission_id, shift_date=shift_date)
 
         baseline = next(item for item in service.get_orders(admission_id, shift_date) if item.id == order.id)
+        noop_edit = OrderDTO(
+            admission_id=admission_id,
+            drug_key=baseline.drug_key,
+            latin=baseline.latin,
+            type=baseline.type,
+            status=baseline.status,
+            dose_value=baseline.dose_value,
+            dose_unit=baseline.dose_unit,
+            is_per_kg=baseline.is_per_kg,
+            frequency=baseline.frequency,
+            specific_times=list(baseline.specific_times or []),
+            duration_min=baseline.duration_min,
+            rate_ml_h=baseline.rate_ml_h,
+            volume_total=baseline.volume_total,
+            created_at=baseline.created_at,
+            comment=baseline.comment,
+            last_modified_by="doctor",
+        )
+        noop_result = service.update_order(order.id, noop_edit, expected_revision=baseline.revision)
+        noop_snapshot = service.build_orders_snapshot(admission_id, shift_date, only_committed=False)
+        if noop_result.id != order.id:
+            return False, f"no-op edit changed order id: {noop_result.id}"
+        if int(noop_result.is_committed or 0) != 1 or noop_snapshot["has_any_draft"]:
+            return False, "no-op edit must not create an unsaved draft"
+
         edited = OrderDTO(
             admission_id=admission_id,
             drug_key="regression_edit_updated",
@@ -9511,6 +9536,73 @@ def _check_report_pdf_opening_uses_shared_helper(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _ast_contains_name(node, name: str) -> bool:
+    return any(isinstance(child, ast.Name) and child.id == name for child in ast.walk(node))
+
+
+def _w1_helper_has_initial_status_day_guard(helper_method: ast.FunctionDef) -> bool:
+    for node in ast.walk(helper_method):
+        if not isinstance(node, ast.Compare):
+            continue
+        if not isinstance(node.left, ast.Name) or node.left.id != "current_start":
+            continue
+        if len(node.ops) != 2 or not isinstance(node.ops[0], ast.LtE) or not isinstance(node.ops[1], ast.Lt):
+            continue
+        if len(node.comparators) != 2:
+            continue
+        left_bound, right_bound = node.comparators
+        if (
+            isinstance(left_bound, ast.Name)
+            and left_bound.id == "value"
+            and isinstance(right_bound, ast.Name)
+            and right_bound.id == "current_end"
+        ):
+            return True
+    return False
+
+
+def _w1_archive_assigns_initial_status_helper_result(archive_method: ast.FunctionDef) -> bool:
+    for node in ast.walk(archive_method):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "should_ensure_initial_status" for target in node.targets):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Attribute):
+            continue
+        if value.func.attr != "_should_ensure_initial_status_for_date":
+            continue
+        if len(value.args) == 1 and isinstance(value.args[0], ast.Name) and value.args[0].id == "selected_date":
+            return True
+    return False
+
+
+def _w1_archive_status_writes_guarded_by_helper_result(archive_method: ast.FunctionDef) -> bool:
+    parent_by_id = {}
+    for parent in ast.walk(archive_method):
+        for child in ast.iter_child_nodes(parent):
+            parent_by_id[id(child)] = parent
+
+    ensure_calls = [
+        node
+        for node in ast.walk(archive_method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "ensure_initial_status"
+    ]
+    if not ensure_calls:
+        return False
+    for call in ensure_calls:
+        parent = parent_by_id.get(id(call))
+        while parent is not None:
+            if isinstance(parent, ast.If) and _ast_contains_name(parent.test, "should_ensure_initial_status"):
+                break
+            parent = parent_by_id.get(id(parent))
+        else:
+            return False
+    return True
+
+
 def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     source_path = Path(__file__).resolve().parents[1] / "ui" / "doctor_view" / "doctor_remcard_widget.py"
@@ -9545,9 +9637,22 @@ def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tu
     if "ensure_initial_status=False" not in open_w1_source:
         return False, "W1 yesterday card must skip initial status writes"
 
-    archive_source = ast.get_source_segment(source_text, methods.get("safe_load_archived_card")) or ""
-    if "current_start <= selected_date < current_end" not in archive_source:
-        return False, "safe_load_archived_card must only write initial status for the current card day"
+    helper_method = methods.get("_should_ensure_initial_status_for_date")
+    if helper_method is None:
+        return False, "_should_ensure_initial_status_for_date helper not found"
+    if not _w1_helper_has_initial_status_day_guard(helper_method):
+        return False, "_should_ensure_initial_status_for_date must guard current_start <= value < current_end"
+
+    archive_method = methods.get("safe_load_archived_card")
+    if archive_method is None:
+        return False, "safe_load_archived_card not found"
+    archive_source = ast.get_source_segment(source_text, archive_method) or ""
+
+    if not _w1_archive_assigns_initial_status_helper_result(archive_method):
+        return False, "safe_load_archived_card must assign helper result for selected_date"
+    if not _w1_archive_status_writes_guarded_by_helper_result(archive_method):
+        return False, "safe_load_archived_card status write must be guarded by helper result"
+
     if "skip initial status write for historical card" not in archive_source:
         return False, "safe_load_archived_card must log skipped historical status writes"
 
@@ -12072,6 +12177,261 @@ def _check_settings_write_creates_validated_pre_write_backup(temp_root: str) -> 
     return True, "ok"
 
 
+def _settings_last_migration_at(db) -> str:
+    with db.read_connection() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings_meta WHERE key = 'last_migration_at'"
+        ).fetchone()
+    return str(row[0] if row else "")
+
+
+def _settings_pre_write_backups(baza_dir: str) -> set[str]:
+    from rem_card.app.settings_db_paths import get_settings_backup_dir
+
+    return set(glob.glob(os.path.join(get_settings_backup_dir(baza_dir), "settings_pre_*.db")))
+
+
+def _check_settings_schema_fastpath_current_schema_no_write(temp_root: str) -> tuple[bool, str]:
+    import rem_card.data.settings.settings_db as settings_db_module
+    from rem_card.data.settings import settings_schema
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    before_last_migration = _settings_last_migration_at(service.db)
+    before_backups = _settings_pre_write_backups(baza_dir)
+
+    calls = {"apply_schema": 0, "integrity": 0}
+    original_apply_schema = settings_schema.apply_schema
+    original_integrity = settings_db_module.run_integrity_check
+
+    def counted_apply_schema(conn):
+        calls["apply_schema"] += 1
+        return original_apply_schema(conn)
+
+    def counted_integrity(conn):
+        calls["integrity"] += 1
+        return original_integrity(conn)
+
+    try:
+        settings_schema.apply_schema = counted_apply_schema
+        settings_db_module.run_integrity_check = counted_integrity
+        restarted_db = SettingsDatabase(baza_dir=baza_dir)
+        info = restarted_db.ensure_ready()
+    finally:
+        settings_schema.apply_schema = original_apply_schema
+        settings_db_module.run_integrity_check = original_integrity
+
+    after_last_migration = _settings_last_migration_at(SettingsDatabase(baza_dir=baza_dir))
+    after_backups = _settings_pre_write_backups(baza_dir)
+    if not info.get("settings_schema_fastpath_used"):
+        return False, f"current schema did not use fastpath: {info}"
+    if calls["apply_schema"] != 0:
+        return False, "fastpath called settings_schema.apply_schema"
+    if calls["integrity"] != 0:
+        return False, "fastpath ran post-write integrity_check"
+    if before_last_migration != after_last_migration:
+        return False, "fastpath changed settings_meta.last_migration_at"
+    if after_backups != before_backups:
+        return False, "fastpath created settings_pre backup"
+    return True, "ok"
+
+
+def _check_settings_schema_missing_table_uses_migration_path(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings import settings_schema
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    conn = service.db.connect(readonly=False)
+    try:
+        conn.execute("DROP TABLE diet_templates")
+    finally:
+        conn.close()
+
+    calls = {"apply_schema": 0}
+    original_apply_schema = settings_schema.apply_schema
+
+    def counted_apply_schema(conn):
+        calls["apply_schema"] += 1
+        return original_apply_schema(conn)
+
+    try:
+        settings_schema.apply_schema = counted_apply_schema
+        info = SettingsDatabase(baza_dir=baza_dir).ensure_ready()
+    finally:
+        settings_schema.apply_schema = original_apply_schema
+
+    with SettingsDatabase(baza_dir=baza_dir).read_connection() as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'diet_templates'"
+        ).fetchone()
+    if info.get("settings_schema_fastpath_used"):
+        return False, "missing table incorrectly used fastpath"
+    if calls["apply_schema"] <= 0:
+        return False, "missing table did not call apply_schema"
+    if not row:
+        return False, "missing table was not recreated"
+    return True, "ok"
+
+
+def _check_settings_schema_outdated_version_uses_migration_path(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings import settings_schema
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    conn = service.db.connect(readonly=False)
+    try:
+        conn.execute(
+            "UPDATE settings_meta SET value = '0' WHERE key = ?",
+            (settings_schema.SCHEMA_VERSION_KEY,),
+        )
+    finally:
+        conn.close()
+
+    calls = {"apply_schema": 0}
+    original_apply_schema = settings_schema.apply_schema
+
+    def counted_apply_schema(conn):
+        calls["apply_schema"] += 1
+        return original_apply_schema(conn)
+
+    try:
+        settings_schema.apply_schema = counted_apply_schema
+        info = SettingsDatabase(baza_dir=baza_dir).ensure_ready()
+    finally:
+        settings_schema.apply_schema = original_apply_schema
+
+    with SettingsDatabase(baza_dir=baza_dir).read_connection() as conn:
+        version = settings_schema.get_schema_version(conn)
+    if info.get("settings_schema_fastpath_used"):
+        return False, "outdated schema_version incorrectly used fastpath"
+    if calls["apply_schema"] <= 0:
+        return False, "outdated schema_version did not call apply_schema"
+    if version != settings_schema.SCHEMA_VERSION:
+        return False, f"schema_version was not repaired: {version}"
+    return True, "ok"
+
+
+def _check_settings_schema_first_init_and_second_fastpath(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_schema import REQUIRED_CATALOG_KEYS, REQUIRED_TABLES
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    first_info = service.ensure_ready()
+    if not first_info.get("settings_db_created"):
+        return False, f"first init did not create settings DB: {first_info}"
+    with service.db.read_connection() as conn:
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+        }
+        catalog_keys = {
+            str(row[0])
+            for row in conn.execute("SELECT catalog_key FROM settings_catalog_versions").fetchall()
+        }
+    missing_tables = sorted(set(REQUIRED_TABLES) - tables)
+    if missing_tables:
+        return False, f"first init missing tables: {missing_tables}"
+    missing_catalogs = sorted(set(REQUIRED_CATALOG_KEYS) - catalog_keys)
+    if missing_catalogs:
+        return False, f"first import missing catalog versions: {missing_catalogs}"
+
+    before_last_migration = _settings_last_migration_at(service.db)
+    second_info = SettingsDatabase(baza_dir=baza_dir).ensure_ready()
+    after_last_migration = _settings_last_migration_at(SettingsDatabase(baza_dir=baza_dir))
+    if not second_info.get("settings_schema_fastpath_used"):
+        return False, f"second ensure_ready did not use fastpath: {second_info}"
+    if before_last_migration != after_last_migration:
+        return False, "second ensure_ready changed last_migration_at"
+    return True, "ok"
+
+
+def _check_settings_schema_invalid_marker_uses_migration_path(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings import settings_schema
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    conn = service.db.connect(readonly=False)
+    try:
+        conn.execute(
+            "UPDATE settings_meta SET value = 'not-an-int' WHERE key = ?",
+            (settings_schema.SCHEMA_VERSION_KEY,),
+        )
+    finally:
+        conn.close()
+
+    calls = {"apply_schema": 0}
+    original_apply_schema = settings_schema.apply_schema
+
+    def counted_apply_schema(conn):
+        calls["apply_schema"] += 1
+        return original_apply_schema(conn)
+
+    try:
+        settings_schema.apply_schema = counted_apply_schema
+        info = SettingsDatabase(baza_dir=baza_dir).ensure_ready()
+    finally:
+        settings_schema.apply_schema = original_apply_schema
+
+    with SettingsDatabase(baza_dir=baza_dir).read_connection() as conn:
+        version = settings_schema.get_schema_version(conn)
+    if info.get("settings_schema_fastpath_used"):
+        return False, "invalid schema marker incorrectly used fastpath"
+    if calls["apply_schema"] <= 0:
+        return False, "invalid schema marker did not call apply_schema"
+    if version != settings_schema.SCHEMA_VERSION:
+        return False, f"invalid schema marker was not repaired: {version}"
+    return True, "ok"
+
+
+def _check_settings_schema_locked_write_is_controlled_error(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+    from rem_card.data.settings import settings_schema
+    from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    conn = service.db.connect(readonly=False)
+    try:
+        conn.execute(
+            "UPDATE settings_meta SET value = '0' WHERE key = ?",
+            (settings_schema.SCHEMA_VERSION_KEY,),
+        )
+    finally:
+        conn.close()
+
+    lock = FileWriteLock(service.db.lock_path, stale_timeout_sec=60)
+    if not lock.acquire(owner_id="settings_schema_locked_regression", source="regression"):
+        return False, "test setup failed: could not acquire settings write lock"
+    try:
+        db = SettingsDatabase(baza_dir=baza_dir)
+        db.write_controller.max_retries = 2
+        try:
+            db.ensure_ready()
+        except SettingsDbError as exc:
+            if "БД настроек временно занята" not in str(exc):
+                return False, f"unexpected locked settings error: {exc}"
+            return True, "ok"
+        return False, "locked settings schema write unexpectedly succeeded"
+    finally:
+        lock.release()
+
+
 def _check_edited_drug_catalog_preserved_after_restart(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -13029,6 +13389,12 @@ def main():
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
+        ("settings_schema_fastpath_current_schema_no_write", _check_settings_schema_fastpath_current_schema_no_write),
+        ("settings_schema_missing_table_uses_migration_path", _check_settings_schema_missing_table_uses_migration_path),
+        ("settings_schema_outdated_version_uses_migration_path", _check_settings_schema_outdated_version_uses_migration_path),
+        ("settings_schema_first_init_and_second_fastpath", _check_settings_schema_first_init_and_second_fastpath),
+        ("settings_schema_invalid_marker_uses_migration_path", _check_settings_schema_invalid_marker_uses_migration_path),
+        ("settings_schema_locked_write_is_controlled_error", _check_settings_schema_locked_write_is_controlled_error),
         ("edited_drug_catalog_preserved_after_restart", _check_edited_drug_catalog_preserved_after_restart),
         ("compiled_bundled_overrides_repair_seed_only_settings_db", _check_compiled_bundled_overrides_repair_seed_only_settings_db),
         ("compiled_external_dictionary_json_does_not_shadow_settings_seed", _check_compiled_external_dictionary_json_does_not_shadow_settings_seed),

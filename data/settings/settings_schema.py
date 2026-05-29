@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -8,11 +9,14 @@ SCHEMA_VERSION = 1
 SCHEMA_VERSION_KEY = "schema_version"
 SEED_IMPORT_VERSION = "central_settings_v1"
 
-REQUIRED_TABLES = (
+TECHNICAL_TABLES = (
     "settings_meta",
     "settings_change_log",
     "settings_catalog_versions",
     "settings_audit_log",
+)
+
+CATALOG_TABLES = (
     "drug_groups",
     "dosage_forms",
     "administration_routes",
@@ -26,6 +30,70 @@ REQUIRED_TABLES = (
     "print_templates",
     "app_settings",
 )
+
+REQUIRED_INDEXES = (
+    "idx_drugs_enabled_sort",
+    "idx_drugs_group_enabled",
+    "idx_order_templates_scope_enabled_sort",
+    "idx_lab_analysis_enabled_frequent_sort",
+    "idx_lab_analysis_category_enabled",
+    "idx_doctors_enabled_sort",
+    "idx_diet_templates_enabled_sort",
+    "idx_app_settings_scope_key",
+    "idx_settings_change_log_id",
+    "idx_settings_change_log_entity_changed_at",
+)
+
+REQUIRED_UNIQUE_CONSTRAINTS = (
+    ("settings_meta", ("key",)),
+    ("settings_catalog_versions", ("catalog_key",)),
+    ("drug_groups", ("code",)),
+    ("dosage_forms", ("code",)),
+    ("administration_routes", ("code",)),
+    ("solvents", ("code",)),
+    ("drugs", ("code",)),
+    ("order_templates", ("template_key",)),
+    ("doctors", ("code",)),
+    ("diet_templates", ("template_key",)),
+    ("lab_analysis_templates", ("analysis_code",)),
+    ("ui_backgrounds", ("background_key",)),
+    ("print_templates", ("template_key",)),
+    ("app_settings", ("scope", "key")),
+)
+
+REQUIRED_CATALOG_KEYS = (
+    "drug_catalog",
+    "order_templates",
+    "lab_analysis",
+    "diet_templates",
+    "doctors",
+    "print_settings",
+    "display_settings",
+    "background_settings",
+    "style_settings",
+)
+
+MIGRATION_MARKER_KEYS = (
+    "settings_schema_migration_pending",
+    "settings_schema_migration_failed",
+)
+
+REQUIRED_TABLES = (
+    *TECHNICAL_TABLES,
+    *CATALOG_TABLES,
+)
+
+
+@dataclass(frozen=True)
+class SettingsSchemaStatus:
+    fastpath_ready: bool
+    reason: str
+    schema_version: int = 0
+    missing_tables: tuple[str, ...] = ()
+    missing_indexes: tuple[str, ...] = ()
+    missing_unique_constraints: tuple[str, ...] = ()
+    missing_catalog_keys: tuple[str, ...] = ()
+    active_migration_markers: tuple[str, ...] = ()
 
 
 def now_text() -> str:
@@ -54,6 +122,140 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
         return int(row[0])
     except Exception:
         return 0
+
+
+def _quote_identifier(name: str) -> str:
+    if not name.replace("_", "").isalnum():
+        raise ValueError(f"unsafe SQLite identifier: {name!r}")
+    return f'"{name}"'
+
+
+def _row_value(row, key: str, index: int):
+    try:
+        return row[key]
+    except Exception:
+        return row[index]
+
+
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    }
+
+
+def _index_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+    }
+
+
+def _unique_constraint_exists(conn: sqlite3.Connection, table: str, columns: tuple[str, ...]) -> bool:
+    table_sql = _quote_identifier(table)
+    for index_row in conn.execute(f"PRAGMA index_list({table_sql})").fetchall():
+        try:
+            unique = int(_row_value(index_row, "unique", 2) or 0)
+            index_name = str(_row_value(index_row, "name", 1) or "")
+        except Exception:
+            continue
+        if not unique or not index_name:
+            continue
+        index_sql = _quote_identifier(index_name)
+        index_columns = tuple(
+            str(_row_value(info_row, "name", 2) or "")
+            for info_row in conn.execute(f"PRAGMA index_info({index_sql})").fetchall()
+        )
+        if index_columns == columns:
+            return True
+    return False
+
+
+def _active_marker_value(value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized not in {"", "0", "false", "ok", "done", "complete", "completed"}
+
+
+def inspect_schema_status(conn: sqlite3.Connection) -> SettingsSchemaStatus:
+    tables = _table_names(conn)
+    missing_tables = tuple(table for table in REQUIRED_TABLES if table not in tables)
+    if missing_tables:
+        return SettingsSchemaStatus(False, "missing_tables", missing_tables=missing_tables)
+
+    row = conn.execute(
+        "SELECT value FROM settings_meta WHERE key = ?",
+        (SCHEMA_VERSION_KEY,),
+    ).fetchone()
+    if not row:
+        return SettingsSchemaStatus(False, "missing_schema_version")
+    raw_version = row[0]
+    try:
+        schema_version = int(raw_version)
+    except Exception:
+        return SettingsSchemaStatus(False, "invalid_schema_version")
+    if schema_version != SCHEMA_VERSION:
+        reason = "schema_version_newer" if schema_version > SCHEMA_VERSION else "schema_version_outdated"
+        return SettingsSchemaStatus(False, reason, schema_version=schema_version)
+
+    indexes = _index_names(conn)
+    missing_indexes = tuple(index for index in REQUIRED_INDEXES if index not in indexes)
+    if missing_indexes:
+        return SettingsSchemaStatus(
+            False,
+            "missing_indexes",
+            schema_version=schema_version,
+            missing_indexes=missing_indexes,
+        )
+
+    missing_unique_constraints = tuple(
+        f"{table}({','.join(columns)})"
+        for table, columns in REQUIRED_UNIQUE_CONSTRAINTS
+        if not _unique_constraint_exists(conn, table, columns)
+    )
+    if missing_unique_constraints:
+        return SettingsSchemaStatus(
+            False,
+            "missing_unique_constraints",
+            schema_version=schema_version,
+            missing_unique_constraints=missing_unique_constraints,
+        )
+
+    placeholders = ",".join("?" for _ in REQUIRED_CATALOG_KEYS)
+    catalog_rows = conn.execute(
+        f"SELECT catalog_key FROM settings_catalog_versions WHERE catalog_key IN ({placeholders})",
+        tuple(REQUIRED_CATALOG_KEYS),
+    ).fetchall()
+    present_catalog_keys = {str(row[0]) for row in catalog_rows}
+    missing_catalog_keys = tuple(
+        key for key in REQUIRED_CATALOG_KEYS if key not in present_catalog_keys
+    )
+    if missing_catalog_keys:
+        return SettingsSchemaStatus(
+            False,
+            "missing_catalog_versions",
+            schema_version=schema_version,
+            missing_catalog_keys=missing_catalog_keys,
+        )
+
+    marker_placeholders = ",".join("?" for _ in MIGRATION_MARKER_KEYS)
+    marker_rows = conn.execute(
+        f"SELECT key, value FROM settings_meta WHERE key IN ({marker_placeholders})",
+        tuple(MIGRATION_MARKER_KEYS),
+    ).fetchall()
+    active_markers = tuple(
+        str(row[0])
+        for row in marker_rows
+        if _active_marker_value(row[1])
+    )
+    if active_markers:
+        return SettingsSchemaStatus(
+            False,
+            "active_migration_marker",
+            schema_version=schema_version,
+            active_migration_markers=active_markers,
+        )
+
+    return SettingsSchemaStatus(True, "current", schema_version=schema_version)
 
 
 def apply_schema(conn: sqlite3.Connection) -> None:

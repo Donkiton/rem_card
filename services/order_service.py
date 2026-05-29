@@ -84,6 +84,49 @@ class OrderService:
             self._assign_next_sort_order_if_needed(dto)
             return self.dao.add_order(dto)
 
+    @staticmethod
+    def _nullable_float(value) -> Optional[float]:
+        return None if value is None else float(value)
+
+    @staticmethod
+    def _order_type_value(value) -> str:
+        return getattr(value, "value", value)
+
+    def _order_edit_values(self, row, dto: OrderDTO) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        current_times = json.loads(row["specific_times"] or "[]")
+        proposed_times = list(dto.specific_times or [])
+        current = (
+            row["drug_key"],
+            row["latin"],
+            row["type"],
+            row["status"],
+            float(row["dose_value"] or 0),
+            row["dose_unit"],
+            1 if row["is_per_kg"] else 0,
+            int(row["frequency"] or 0),
+            tuple(current_times),
+            self._nullable_float(row["rate_ml_h"]),
+            self._nullable_float(row["volume_total"]),
+            None if row["duration_min"] is None else int(row["duration_min"]),
+            row["comment"] or "",
+        )
+        proposed = (
+            dto.drug_key,
+            dto.latin,
+            self._order_type_value(dto.type),
+            "active",
+            float(dto.dose_value or 0),
+            dto.dose_unit,
+            1 if dto.is_per_kg else 0,
+            int(dto.frequency or 0),
+            tuple(proposed_times),
+            self._nullable_float(dto.rate_ml_h),
+            self._nullable_float(dto.volume_total),
+            None if dto.duration_min is None else int(dto.duration_min),
+            dto.comment or "",
+        )
+        return current, proposed
+
     def update_order(self, order_id: int, dto: OrderDTO, expected_revision: Optional[int] = None) -> OrderDTO:
         with self.dao.db.remcard_transaction() as cursor:
             self._assert_order_revision(cursor, order_id, expected_revision)
@@ -101,10 +144,12 @@ class OrderService:
 
             text_rep = f"{dto.latin} {float(dto.dose_value or 0):g} {dto.dose_unit or ''}".strip()
             admission_id = int(current["admission_id"])
-            # У уже сохраненного назначения нет снапшота прежних полей для
-            # отката, поэтому редактирование не должно превращать его в
-            # удаляемый черновик.
-            next_is_committed = 1 if int(current["is_committed"] or 0) else 0
+            current_values, proposed_values = self._order_edit_values(current, dto)
+            if current_values == proposed_values:
+                result = self.dao._map_order_row(current)
+                result.admission_id = admission_id
+                return result
+            next_is_committed = 0
             cursor.execute(
                 """
                 UPDATE orders
