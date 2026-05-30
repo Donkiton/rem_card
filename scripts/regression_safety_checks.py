@@ -2484,7 +2484,7 @@ def _check_startup_block_dialogs_do_not_use_settings_theme(temp_root: str) -> tu
         "def _show_emergency_startup_password(",
         "def _configure_emergency_settings_for_startup(",
         "_configure_emergency_settings_for_startup(session.runtime_context)",
-        "_show_startup_warning_without_settings(\"База данных недоступна\", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)",
+        "_show_startup_warning_without_settings(\"Аварийный режим недоступен\", decision.user_message)",
         "_show_startup_warning_without_settings(\"База данных недоступна\", result.user_message)",
     )
     missing = [token for token in required if token not in text]
@@ -13805,6 +13805,38 @@ def _check_emergency_startup_only_available_for_nurse(temp_root: str) -> tuple[b
     return True, "ok"
 
 
+def _check_emergency_startup_doctor_resumes_active_session_only(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    nurse_decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    nurse_session = start_or_resume_emergency_session(nurse_decision, root=store.resolve_root())
+
+    doctor_decision = prepare_emergency_startup("doctor", root=store.resolve_root())
+    if not doctor_decision.allowed or doctor_decision.status != "active_session_available":
+        return False, f"doctor did not see active emergency session: {doctor_decision}"
+    if doctor_decision.standby_metadata is not None:
+        return False, "doctor decision must not expose standby creation metadata"
+    doctor_session = start_or_resume_emergency_session(doctor_decision, root=store.resolve_root())
+    if not doctor_session.resumed:
+        return False, "doctor startup created a new session instead of resuming active session"
+    if doctor_session.metadata.emergency_session_id != nurse_session.metadata.emergency_session_id:
+        return False, "doctor did not attach to the nurse emergency session"
+    if doctor_session.runtime_context.mode != "emergency":
+        return False, f"doctor runtime is not emergency: {doctor_session.runtime_context.mode}"
+
+    blocked_root = os.path.join(temp_root, "doctor_without_active")
+    _write_emergency_startup_allow_marker(blocked_root)
+    blocked = prepare_emergency_startup("doctor", root=blocked_root)
+    if blocked.allowed or blocked.status != "role_not_allowed":
+        return False, f"doctor without active session was not blocked: {blocked}"
+    created = list(Path(blocked_root).rglob("rao_journal_emergency.db"))
+    if created:
+        return False, f"doctor created emergency DB without active session: {created[:3]}"
+    return True, "ok"
+
+
 def _check_emergency_startup_doctor_network_unavailable_shows_controlled_block(temp_root: str) -> tuple[bool, str]:
     from types import SimpleNamespace
 
@@ -17090,6 +17122,7 @@ def main():
         ("emergency_standby_scheduler_no_direct_file_copy_live_db", _check_emergency_standby_scheduler_no_direct_file_copy_live_db),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
+        ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),
         ("emergency_startup_doctor_network_unavailable_shows_controlled_block", _check_emergency_startup_doctor_network_unavailable_shows_controlled_block),
         ("emergency_startup_requires_authorized_workstation", _check_emergency_startup_requires_authorized_workstation),
         ("emergency_startup_requires_valid_standby_pair", _check_emergency_startup_requires_valid_standby_pair),

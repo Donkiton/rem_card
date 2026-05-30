@@ -264,28 +264,7 @@ def find_resumable_active_session(store: EmergencyLocalStore) -> tuple[Emergency
 
 
 def prepare_emergency_startup(role: str | None, root: str | None = None) -> EmergencyStartupDecision:
-    if role != "nurse":
-        record_emergency_startup_metric("emergency_startup_doctor_blocked", role=role or "")
-        return EmergencyStartupDecision(
-            role=role,
-            allowed=False,
-            status="role_not_allowed",
-            user_message=DOCTOR_NETWORK_UNAVAILABLE_MESSAGE,
-            root=resolve_emergency_root(root),
-            technical_reason="emergency startup is only available for nurse role",
-        )
-
     resolved_root = resolve_emergency_root(root)
-    if not is_authorized_emergency_workstation(resolved_root):
-        return EmergencyStartupDecision(
-            role=role,
-            allowed=False,
-            status="workstation_not_authorized",
-            user_message=NOT_AUTHORIZED_MESSAGE,
-            root=resolved_root,
-            technical_reason="emergency workstation marker is missing",
-        )
-
     store = EmergencyLocalStore(root=resolved_root, source_role=role)
     active_metadata, active_reason = find_resumable_active_session(store)
     if active_metadata is not None:
@@ -306,6 +285,27 @@ def prepare_emergency_startup(role: str | None, root: str | None = None) -> Emer
             user_message=ACTIVE_SESSION_INVALID_MESSAGE,
             root=resolved_root,
             technical_reason=active_reason,
+        )
+
+    if role != "nurse":
+        record_emergency_startup_metric("emergency_startup_doctor_blocked", role=role or "")
+        return EmergencyStartupDecision(
+            role=role,
+            allowed=False,
+            status="role_not_allowed",
+            user_message=DOCTOR_NETWORK_UNAVAILABLE_MESSAGE,
+            root=resolved_root,
+            technical_reason="emergency startup creation is only available for nurse role",
+        )
+
+    if not is_authorized_emergency_workstation(resolved_root):
+        return EmergencyStartupDecision(
+            role=role,
+            allowed=False,
+            status="workstation_not_authorized",
+            user_message=NOT_AUTHORIZED_MESSAGE,
+            root=resolved_root,
+            technical_reason="emergency workstation marker is missing",
         )
 
     manager = EmergencyStandbyManager(root=resolved_root, store=store)

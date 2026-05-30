@@ -666,11 +666,6 @@ def _try_emergency_startup_after_network_failure(
     record_emergency_startup_metric("emergency_startup_network_unavailable", role=role or "")
     _call_startup_message_callback(before_user_message)
 
-    if role != "nurse":
-        record_emergency_startup_metric("emergency_startup_doctor_blocked", role=role or "")
-        _show_startup_warning_without_settings("База данных недоступна", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)
-        return False
-
     startup_request_payload = None
     if emergency_startup_request:
         validation = validate_runtime_outage_startup_request_marker(emergency_startup_request)
