@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
+from rem_card.data.settings.settings_db import SettingsDatabase
 from rem_card.services.settings.settings_service import (
     DEFAULT_EMERGENCY_PASSWORD,
     EMERGENCY_PASSWORD_CATALOG_KEY,
@@ -42,10 +43,13 @@ def _resolve_settings_service(
     settings_service: SettingsService | None = None,
     *,
     runtime_context: DbRuntimeContext | None = None,
+    settings_db_path: str | None = None,
     readonly: bool | None = None,
 ) -> SettingsService:
     if settings_service is not None:
         return settings_service
+    if settings_db_path:
+        return SettingsService(SettingsDatabase(settings_db_path=settings_db_path, readonly=True if readonly is None else readonly))
     if runtime_context is not None or readonly is not None:
         return get_settings_service(runtime_context=runtime_context, readonly=readonly)
     return get_settings_service()
@@ -55,11 +59,13 @@ def get_emergency_password(
     settings_service: SettingsService | None = None,
     *,
     runtime_context: DbRuntimeContext | None = None,
+    settings_db_path: str | None = None,
     readonly: bool | None = None,
 ) -> str:
     service = _resolve_settings_service(
         settings_service,
         runtime_context=runtime_context,
+        settings_db_path=settings_db_path,
         readonly=readonly,
     )
     value = service.get_app_setting(
@@ -80,12 +86,14 @@ def verify_emergency_password(
     settings_service: SettingsService | None = None,
     *,
     runtime_context: DbRuntimeContext | None = None,
+    settings_db_path: str | None = None,
     readonly: bool | None = None,
 ) -> bool:
     try:
         expected = get_emergency_password(
             settings_service,
             runtime_context=runtime_context,
+            settings_db_path=settings_db_path,
             readonly=readonly,
         )
         provided = normalize_emergency_password(candidate)

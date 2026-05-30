@@ -569,16 +569,60 @@ def _show_emergency_startup_offer(message: str) -> bool:
         return True
     open_code = 1
     close_code = 0
-    result = _show_startup_action_without_settings(
-        "Аварийный режим",
-        message,
-        [
-            ("Открыть аварийный режим", open_code),
-            ("Закрыть RemCard", close_code),
-        ],
-        default_code=close_code,
-    )
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.instance() or QApplication(sys.argv)
+        from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
+
+        result = EmergencyActionDialog.ask(
+            None,
+            "Аварийный режим",
+            message,
+            [
+                ("Открыть аварийный режим", open_code),
+                ("Закрыть RemCard", close_code),
+            ],
+            default_code=close_code,
+        )
+    except Exception:
+        result = _show_startup_action_without_settings(
+            "Аварийный режим",
+            message,
+            [
+                ("Открыть аварийный режим", open_code),
+                ("Закрыть RemCard", close_code),
+            ],
+            default_code=close_code,
+        )
     return int(result) == open_code
+
+
+def _show_emergency_startup_password(settings_db_path: str | None) -> bool:
+    if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
+        return True
+    if os.environ.get("REMCARD_EMERGENCY_STARTUP_AUTO_ACCEPT") == "1":
+        return True
+    if not settings_db_path:
+        return False
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.instance() or QApplication(sys.argv)
+        from rem_card.app.emergency_password import verify_emergency_password
+        from rem_card.ui.shared.emergency_dialogs import EmergencyPasswordDialog
+
+        return EmergencyPasswordDialog.verify(
+            None,
+            "Аварийный пароль",
+            "Для перехода в аварийный режим врач должен ввести аварийный пароль.",
+            lambda value: verify_emergency_password(value, settings_db_path=settings_db_path, readonly=True),
+            confirm_text="Перейти в аварийный режим",
+            cancel_text="Закрыть RemCard",
+            error_text="Пароль неверный. Аварийный режим не будет открыт без подтверждения врача.",
+        )
+    except Exception:
+        return False
 
 
 def _configure_emergency_settings_for_startup(runtime_context) -> None:
@@ -656,6 +700,12 @@ def _try_emergency_startup_after_network_failure(
     if not _show_emergency_startup_offer(offer_message):
         record_emergency_startup_metric("emergency_startup_user_cancelled", status=decision.status)
         return False
+
+    if decision.standby_metadata is not None:
+        settings_db_path = str(decision.standby_metadata.settings_db_path or "")
+        if not _show_emergency_startup_password(settings_db_path):
+            record_emergency_startup_metric("emergency_startup_password_rejected", status=decision.status)
+            return False
 
     record_emergency_startup_metric("emergency_startup_user_accepted", status=decision.status)
     try:

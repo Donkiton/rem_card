@@ -2481,6 +2481,7 @@ def _check_startup_block_dialogs_do_not_use_settings_theme(temp_root: str) -> tu
     required = (
         "def _show_startup_warning_without_settings(",
         "def _show_startup_action_without_settings(",
+        "def _show_emergency_startup_password(",
         "def _configure_emergency_settings_for_startup(",
         "_configure_emergency_settings_for_startup(session.runtime_context)",
         "_show_startup_warning_without_settings(\"База данных недоступна\", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)",
@@ -2496,7 +2497,7 @@ def _check_startup_block_dialogs_do_not_use_settings_theme(temp_root: str) -> tu
     if "CustomMessageBox" in offer_body or "_show_custom_warning" in offer_body:
         return False, "emergency startup offer can load themed/settings-backed dialogs before medical green"
     if "_show_startup_action_without_settings(" not in offer_body:
-        return False, "emergency startup offer does not use no-settings action dialog"
+        return False, "emergency startup offer does not keep no-settings action fallback"
     return True, "ok"
 
 
@@ -12634,6 +12635,8 @@ def _check_emergency_password_defaults_and_catalog(temp_root: str) -> tuple[bool
         return False, "emergency password change result is incorrect"
     if not verify_emergency_password("new-safe-password", service):
         return False, "changed emergency password verification failed"
+    if not verify_emergency_password("new-safe-password", settings_db_path=service.db.db_path, readonly=True):
+        return False, "emergency password verification by readonly settings path failed"
     with service.db.read_connection() as conn:
         audit_row = conn.execute(
             """
@@ -13846,6 +13849,38 @@ def _check_emergency_startup_requires_valid_standby_pair(temp_root: str) -> tupl
     decision = prepare_emergency_startup("nurse", root=root)
     if decision.allowed or decision.status != "no_valid_standby":
         return False, f"missing standby pair did not block emergency startup: {decision}"
+    return True, "ok"
+
+
+def _check_emergency_startup_password_gate_before_activation(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    password_func_start = main_text.find("def _show_emergency_startup_password(")
+    if password_func_start < 0:
+        return False, "emergency startup password prompt is missing"
+    password_func_end = main_text.find("\ndef ", password_func_start + 1)
+    password_body = main_text[password_func_start: password_func_end if password_func_end > password_func_start else len(main_text)]
+    for token in (
+        "EmergencyPasswordDialog.verify",
+        "verify_emergency_password",
+        "settings_db_path=settings_db_path",
+        "readonly=True",
+        "REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT",
+    ):
+        if token not in password_body:
+            return False, f"password prompt token missing: {token}"
+
+    flow_start = main_text.find("def _try_emergency_startup_after_network_failure(")
+    flow_end = main_text.find("\ndef ", flow_start + 1)
+    flow_body = main_text[flow_start: flow_end if flow_end > flow_start else len(main_text)]
+    gate_index = flow_body.find("if decision.standby_metadata is not None:")
+    start_index = flow_body.find("session = start_or_resume_emergency_session(")
+    if gate_index < 0 or start_index < 0 or gate_index > start_index:
+        return False, "password gate is not before emergency session activation"
+    if "emergency_startup_password_rejected" not in flow_body:
+        return False, "password rejection metric is missing"
+    if "decision.active_session_metadata" in flow_body[gate_index:start_index]:
+        return False, "password gate must not block active emergency session resume"
     return True, "ok"
 
 
@@ -17058,6 +17093,7 @@ def main():
         ("emergency_startup_doctor_network_unavailable_shows_controlled_block", _check_emergency_startup_doctor_network_unavailable_shows_controlled_block),
         ("emergency_startup_requires_authorized_workstation", _check_emergency_startup_requires_authorized_workstation),
         ("emergency_startup_requires_valid_standby_pair", _check_emergency_startup_requires_valid_standby_pair),
+        ("emergency_startup_password_gate_before_activation", _check_emergency_startup_password_gate_before_activation),
         ("emergency_startup_creates_active_session_from_standby", _check_emergency_startup_creates_active_session_from_standby),
         ("emergency_startup_uses_emergency_runtime_context", _check_emergency_startup_uses_emergency_runtime_context),
         ("emergency_startup_uses_readonly_settings_snapshot", _check_emergency_startup_uses_readonly_settings_snapshot),
