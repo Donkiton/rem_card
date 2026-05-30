@@ -2604,7 +2604,6 @@ def _check_no_merge_changes(temp_root: str) -> tuple[bool, str]:
     forbidden = {
         "app/emergency_merge_mode_a.py",
         "app/emergency_merge_dry_run.py",
-        "app/emergency_restore_probe.py",
     }
     changed = {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
     touched = sorted(changed & forbidden)
@@ -14575,18 +14574,20 @@ def _run_restore_probe_rounds(probe, count: int) -> dict:
     return status
 
 
-def _check_restore_probe_only_runs_in_nurse_emergency_mode(temp_root: str) -> tuple[bool, str]:
+def _check_restore_probe_runs_in_any_emergency_role(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_restore_probe import EmergencyRestoreProbe
 
     if not EmergencyRestoreProbe.is_enabled_for_runtime("nurse", "emergency"):
         return False, "nurse emergency mode must enable restore probe"
-    for role, mode in (("doctor", "emergency"), ("nurse", "network"), ("doctor", "network")):
+    if not EmergencyRestoreProbe.is_enabled_for_runtime("doctor", "emergency"):
+        return False, "doctor emergency mode must enable restore probe"
+    for role, mode in (("admin", "emergency"), ("nurse", "network"), ("doctor", "network")):
         if EmergencyRestoreProbe.is_enabled_for_runtime(role, mode):
             return False, f"restore probe unexpectedly enabled for role={role} mode={mode}"
     fixture = _prepare_restore_probe_fixture(temp_root, role="doctor")
     status = fixture["probe"].run_probe_once()
-    if status.get("status") != "disabled":
-        return False, f"doctor emergency probe did not stay disabled: {status}"
+    if status.get("status") != "merge_ready_mode_a":
+        return False, f"doctor emergency probe did not run normally: {status}"
     return True, "ok"
 
 
@@ -14790,13 +14791,23 @@ def _check_restore_probe_shutdown_stops_worker(temp_root: str) -> tuple[bool, st
 def _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE, REMOTE_CHANGED_CONFLICT_MESSAGE
 
-    _ = temp_root
+    main_window_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     if "закрыть RemCard" not in MERGE_READY_MODE_A_MESSAGE:
         return False, "merge-ready dialog must tell user to close RemCard"
     if "Не запускайте RemCard на других компьютерах" not in MERGE_READY_MODE_A_MESSAGE:
         return False, "merge-ready dialog must warn about other PCs"
     if "сетевая база изменилась" not in REMOTE_CHANGED_CONFLICT_MESSAGE:
         return False, "remote-changed warning text missing"
+    for token in (
+        "EmergencyActionDialog.ask",
+        "Да, объединить",
+        "Без объединения",
+        "time.monotonic() + 60.0",
+        "_close_for_emergency_discard",
+        "remote_changed_conflict_pending",
+    ):
+        if token not in main_window_text:
+            return False, f"restore prompt action token missing: {token}"
     return True, "ok"
 
 
@@ -17163,7 +17174,7 @@ def main():
         ("runtime_outage_no_merge_code", _check_runtime_outage_no_merge_code),
         ("runtime_outage_dialog_text_mentions_one_pc_nurse", _check_runtime_outage_dialog_text_mentions_one_pc_nurse),
         ("runtime_outage_emergency_startup_marker_expires", _check_runtime_outage_emergency_startup_marker_expires),
-        ("restore_probe_only_runs_in_nurse_emergency_mode", _check_restore_probe_only_runs_in_nurse_emergency_mode),
+        ("restore_probe_runs_in_any_emergency_role", _check_restore_probe_runs_in_any_emergency_role),
         ("restore_probe_requires_active_emergency_session", _check_restore_probe_requires_active_emergency_session),
         ("restore_probe_checks_medical_and_settings_db", _check_restore_probe_checks_medical_and_settings_db),
         ("restore_probe_requires_multiple_success_rounds", _check_restore_probe_requires_multiple_success_rounds),

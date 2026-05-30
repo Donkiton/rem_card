@@ -178,7 +178,8 @@ class EmergencyRestoreProbe:
 
     @staticmethod
     def is_enabled_for_runtime(role: str | None, mode: str | None) -> bool:
-        return str(role or "").strip().lower() == "nurse" and str(mode or "").strip().lower() == "emergency"
+        normalized_role = str(role or "").strip().lower()
+        return normalized_role in {"doctor", "nurse"} and str(mode or "").strip().lower() == "emergency"
 
     @property
     def enabled(self) -> bool:

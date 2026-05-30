@@ -368,9 +368,9 @@ class MainWindow(QMainWindow):
         if time.monotonic() < float(self._restore_probe_notice_deferred_until or 0.0):
             return
         if status == "merge_ready_mode_a" and payload.get("merge_ready"):
-            self._show_restore_probe_merge_ready_dialog()
+            self._show_restore_probe_merge_ready_dialog(payload)
         elif status == "remote_changed_conflict_pending" and payload.get("network_stable"):
-            self._show_restore_probe_conflict_warning()
+            self._show_restore_probe_merge_ready_dialog(payload)
 
     def _update_restore_probe_status_label(self, status: str):
         label = getattr(self, "_restore_probe_status_label", None)
@@ -379,7 +379,7 @@ class MainWindow(QMainWindow):
         mapping = {
             "running": "Сетевая база проверяется",
             "merge_ready_mode_a": "Сеть восстановлена, требуется закрытие для объединения",
-            "remote_changed_conflict_pending": "Сетевая база изменилась, автоматическое объединение недоступно",
+            "remote_changed_conflict_pending": "Сеть восстановлена, требуется решение по аварийному режиму",
         }
         if status.startswith("round_success_"):
             text = "Сетевая база проверяется"
@@ -389,27 +389,38 @@ class MainWindow(QMainWindow):
             text = mapping.get(status, "Ожидание восстановления сетевой базы")
         label.setText(text)
 
-    def _show_restore_probe_merge_ready_dialog(self):
-        from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+    def _show_restore_probe_merge_ready_dialog(self, payload: dict | None = None):
+        from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE, REMOTE_CHANGED_CONFLICT_MESSAGE
+        from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
+
+        payload = dict(payload or {})
+        status = str(payload.get("status") or "")
+        message = MERGE_READY_MODE_A_MESSAGE
+        if status == "remote_changed_conflict_pending":
+            message = f"{REMOTE_CHANGED_CONFLICT_MESSAGE}\n\nВыберите дальнейшее действие."
 
         self._restore_probe_dialog_active = True
         try:
-            result = CustomMessageBox.information_with_actions(
+            result = EmergencyActionDialog.ask(
                 self,
                 "Сетевая база восстановлена",
-                MERGE_READY_MODE_A_MESSAGE,
+                message,
                 [
-                    ("Закрыть для объединения", 1),
-                    ("Продолжить аварийную работу", 0),
+                    ("Да, объединить", 1),
+                    ("Нет", 0),
+                    ("Без объединения", 2),
                 ],
+                default_code=0,
             )
         finally:
             self._restore_probe_dialog_active = False
         if int(result or 0) == 1:
             self._close_for_emergency_merge()
             return
-        self._restore_probe_notice_deferred_until = time.monotonic() + 300.0
+        if int(result or 0) == 2:
+            self._close_for_emergency_discard()
+            return
+        self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
 
     def _show_restore_probe_conflict_warning(self):
         if self._restore_probe_conflict_notified:
@@ -443,6 +454,16 @@ class MainWindow(QMainWindow):
             CustomMessageBox.warning(self, "Аварийный режим", f"Не удалось подготовить объединение:\n{exc}")
             return
         self.close()
+
+    def _close_for_emergency_discard(self):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        CustomMessageBox.warning(
+            self,
+            "Аварийный режим",
+            "Выход без объединения будет доступен после подтверждения аварийным паролем.",
+        )
+        self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
 
     def _start_event_loop_watchdog(self):
         if os.environ.get("REMCARD_UI_WATCHDOG_ENABLED", "1") == "0":
