@@ -12691,6 +12691,56 @@ def _check_emergency_password_not_written_to_ordinary_logs(temp_root: str) -> tu
     return True, "ok"
 
 
+def _check_emergency_password_doctor_settings_ui(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    import rem_card.ui.admin_view.emergency_password_dialog as dialog_module
+    from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
+
+    admin_text = (PROJECT_ROOT / "ui" / "admin_view" / "admin_main_widget.py").read_text(encoding="utf-8")
+    dialog_text = (PROJECT_ROOT / "ui" / "admin_view" / "emergency_password_dialog.py").read_text(encoding="utf-8")
+    required = (
+        "btn_emergency_password",
+        "Аварийный пароль",
+        "open_emergency_password",
+        "EmergencyPasswordSettingsDialog",
+        "get_emergency_password",
+        "set_emergency_password",
+        "new_password_edit",
+        "repeat_password_edit",
+    )
+    missing = [token for token in required if token not in admin_text and token not in dialog_text]
+    if missing:
+        return False, f"emergency password settings UI tokens missing: {missing}"
+
+    app = QApplication.instance() or QApplication([])
+    saved_get = dialog_module.get_emergency_password
+    saved_set = dialog_module.set_emergency_password
+    saved_info = dialog_module.CustomMessageBox.__dict__["information"]
+    saved_passwords: list[str] = []
+    try:
+        dialog_module.get_emergency_password = lambda: "2u1x8dxgeD"
+        dialog_module.set_emergency_password = lambda value, **kwargs: saved_passwords.append(str(value))
+        dialog_module.CustomMessageBox.information = staticmethod(lambda *args, **kwargs: None)
+        widget = AdminMainWidget(role="doctor")
+        if not hasattr(widget, "btn_emergency_password") or widget.btn_emergency_password.text() != "Аварийный пароль":
+            return False, "doctor settings panel does not expose emergency password button"
+        dialog = dialog_module.EmergencyPasswordSettingsDialog()
+        dialog.new_password_edit.setText("new-doctor-password")
+        dialog.repeat_password_edit.setText("new-doctor-password")
+        dialog.save_password()
+        app.processEvents()
+        if saved_passwords != ["new-doctor-password"]:
+            return False, f"dialog did not save the repeated new password: {saved_passwords}"
+    finally:
+        dialog_module.get_emergency_password = saved_get
+        dialog_module.set_emergency_password = saved_set
+        dialog_module.CustomMessageBox.information = saved_info
+    return True, "ok"
+
+
 def _check_emergency_dialogs_require_explicit_action(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -17335,6 +17385,7 @@ def main():
         ("emergency_password_defaults_and_catalog", _check_emergency_password_defaults_and_catalog),
         ("emergency_password_readonly_snapshot", _check_emergency_password_readonly_snapshot),
         ("emergency_password_not_written_to_ordinary_logs", _check_emergency_password_not_written_to_ordinary_logs),
+        ("emergency_password_doctor_settings_ui", _check_emergency_password_doctor_settings_ui),
         ("emergency_dialogs_require_explicit_action", _check_emergency_dialogs_require_explicit_action),
         ("no_sqlite_safety_changes", _check_no_sqlite_safety_changes),
         ("no_emergency_startup_enabled_yet", _check_no_emergency_startup_enabled_yet),

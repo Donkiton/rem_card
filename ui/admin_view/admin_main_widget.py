@@ -28,6 +28,7 @@ class AdminMainWidget(QWidget):
         self.theme_dialog = None
         self.display_settings_dialog = None
         self.background_settings_dialog = None
+        self.emergency_password_dialog = None
 
         self.setup_ui()
 
@@ -61,6 +62,7 @@ class AdminMainWidget(QWidget):
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
         self.btn_background_settings = QPushButton("Изменение фона")
+        self.btn_emergency_password = QPushButton("Аварийный пароль")
 
         def prepare_button(btn: QPushButton):
             btn.setObjectName("DialogOkBtn")
@@ -85,6 +87,8 @@ class AdminMainWidget(QWidget):
 
         self.btn_style.setVisible(False)
         program_buttons = [self.btn_print, self.btn_display_settings, self.btn_background_settings]
+        if self.role == "doctor":
+            program_buttons.append(self.btn_emergency_password)
 
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(22)
@@ -133,6 +137,7 @@ class AdminMainWidget(QWidget):
         self.btn_print.clicked.connect(self.open_print)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
+        self.btn_emergency_password.clicked.connect(self.open_emergency_password)
 
     def _show_page(self, widget):
         if widget is not None:
@@ -282,6 +287,12 @@ class AdminMainWidget(QWidget):
 
         dialog = BackgroundSettingsDialog(parent=self)
         dialog.exec()
+
+    def open_emergency_password(self):
+        from .emergency_password_dialog import EmergencyPasswordSettingsDialog
+
+        self.emergency_password_dialog = EmergencyPasswordSettingsDialog(parent=self)
+        self.emergency_password_dialog.exec()
 
     def set_print_context(self, service, admission_id, date):
         self.service = service
