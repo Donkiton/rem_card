@@ -54,6 +54,17 @@ class EmergencySessionMetadata:
     validation_error: str | None
     stale_gap_detected: bool = False
     outage_detected_at: str | None = None
+    last_dry_run_at: str | None = None
+    last_dry_run_status: str | None = None
+    last_dry_run_report_path: str | None = None
+    last_dry_run_mode: str | None = None
+    last_dry_run_error: str | None = None
+    last_merge_report_path: str | None = None
+    remote_backup_path: str | None = None
+    local_backup_path: str | None = None
+    merge_result: str | None = None
+    final_remote_last_change_id: int | None = None
+    final_remote_hash: str | None = None
 
     def __post_init__(self) -> None:
         _validate_status(self.status)

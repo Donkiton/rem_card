@@ -14246,6 +14246,809 @@ def _check_restore_probe_no_sqlite_profile_changes(temp_root: str) -> tuple[bool
     return _check_no_sqlite_safety_changes(temp_root)
 
 
+def _prepare_merge_dry_run_fixture(
+    temp_root: str,
+    *,
+    marker: bool = True,
+    status: str = "merge_pending",
+    role: str = "nurse",
+):
+    from rem_card.app.emergency_merge_dry_run import EmergencyMergeDryRunService
+    from rem_card.app.emergency_restore_probe import write_merge_ready_marker
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1, role="nurse")
+    store = fixture["store"]
+    session = fixture["session"]
+    marker_path = ""
+    if marker:
+        marker_path = write_merge_ready_marker(
+            store.resolve_root(),
+            session,
+            remote_last_change_id=session.base_last_change_id,
+            remote_fingerprint=dict(session.base_remote_fingerprint or {}),
+        )
+    if status != session.status:
+        store.mark_session_status(session.emergency_session_id, status)
+    service = EmergencyMergeDryRunService(
+        role=role,
+        runtime_context=store.build_active_runtime_context(session.emergency_session_id),
+        store=store,
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+    )
+    fixture["marker_path"] = marker_path
+    fixture["service"] = service
+    return fixture
+
+
+def _run_merge_dry_run_fixture(fixture: dict) -> object:
+    service = fixture["service"]
+    session = fixture["session"]
+    marker_path = fixture.get("marker_path") or None
+    return service.run_dry_run(session.emergency_session_id, marker_path)
+
+
+def _read_json(path: str) -> dict:
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _file_hash(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _check_merge_dry_run_requires_merge_ready_marker(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root, marker=False, status="active")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_marker_required":
+        return False, f"missing marker did not block dry-run: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_rejects_expired_marker(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    marker_path = fixture["marker_path"]
+    payload = _read_json(marker_path)
+    payload["requested_at"] = "2000-01-01T00:00:00+00:00"
+    Path(marker_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_marker_invalid":
+        return False, f"expired marker was accepted: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_validates_active_session(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    metadata_path = os.path.join(
+        fixture["store"].resolve_root(),
+        "active",
+        fixture["session"].emergency_session_id,
+        "emergency_session.json",
+    )
+    Path(metadata_path).write_text("{not-json", encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_local_invalid":
+        return False, f"corrupt emergency_session.json did not block: {result.to_dict()}"
+    if not os.path.isfile(result.report_path):
+        return False, "dry-run did not write local report for corrupt session metadata"
+    return True, "ok"
+
+
+def _check_merge_dry_run_validates_base_snapshot_hash(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    with open(fixture["session"].base_snapshot_path, "ab") as fh:
+        fh.write(b"hash mismatch")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_local_invalid":
+        return False, f"base hash mismatch did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_validates_local_emergency_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    Path(fixture["session"].local_db_path).write_bytes(b"not sqlite")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_local_invalid":
+        return False, f"corrupt local emergency DB did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_validates_settings_snapshot(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    os.remove(str(fixture["session"].settings_snapshot_path))
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_local_invalid":
+        return False, f"missing settings snapshot did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_validates_remote_medical_and_settings_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    os.remove(fixture["medical_path"])
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_remote_invalid":
+        return False, f"missing remote medical DB did not block: {result.to_dict()}"
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    Path(fixture["settings_path"]).write_bytes(b"not sqlite")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_remote_invalid":
+        return False, f"corrupt remote settings DB did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_acquires_or_checks_remote_db_lock(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "archiv", "db.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_locks":
+        return False, f"active remote db.lock did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_checks_emergency_merge_lock(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "locks", "emergency_merge.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_locks":
+        return False, f"active emergency_merge.lock did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_checks_role_session_locks(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "session_locks", "nurse.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_locks":
+        return False, f"role/session lock did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_remote_unchanged_ready_mode_a(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "ready_mode_a" or result.merge_mode != "remote_unchanged_mode_a":
+        return False, f"remote unchanged was not ready Mode A: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_remote_changed_blocked(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    before_hash = _file_hash(fixture["medical_path"])
+    _append_emergency_medical_change(fixture["medical_path"], entity_id=707)
+    changed_hash = _file_hash(fixture["medical_path"])
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_remote_changed":
+        return False, f"remote changed did not block: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != changed_hash or changed_hash == before_hash:
+        return False, "remote changed blocker unexpectedly modified remote DB"
+    return True, "ok"
+
+
+def _check_merge_dry_run_remote_less_than_base_blocked(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    _append_emergency_medical_change(fixture["session"].base_snapshot_path, entity_id=1001)
+    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=1001)
+    session = replace(
+        fixture["session"],
+        base_last_change_id=1,
+        base_snapshot_hash=compute_file_hash(fixture["session"].base_snapshot_path),
+    )
+    fixture["store"].write_active_session(session)
+    fixture["session"] = session
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_marker_invalid":
+        return False, f"marker should reject base mismatch before inconsistent remote: {result.to_dict()}"
+    marker_path = fixture["marker_path"]
+    payload = _read_json(marker_path)
+    payload["base_last_change_id"] = 1
+    Path(marker_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_inconsistent":
+        return False, f"remote < base did not block as inconsistent: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_never_writes_remote_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    before_medical = _file_hash(fixture["medical_path"])
+    before_settings = _file_hash(fixture["settings_path"])
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "ready_mode_a":
+        return False, f"fixture did not reach ready Mode A: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_medical:
+        return False, "dry-run changed remote medical DB"
+    if _file_hash(fixture["settings_path"]) != before_settings:
+        return False, "dry-run changed remote settings DB"
+    return True, "ok"
+
+
+def _check_merge_dry_run_no_remote_replacement_code(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_merge_dry_run.py").read_text(encoding="utf-8").lower()
+    forbidden = ("os.replace", "shutil.copy", "copy2(", "restore_database(", "backup_connection(")
+    for token in forbidden:
+        if token in text:
+            return False, f"dry-run module contains remote replacement/backup token: {token}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_writes_local_report(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    result = _run_merge_dry_run_fixture(fixture)
+    if not os.path.isfile(result.report_path):
+        return False, f"report was not written: {result.report_path}"
+    report = _read_json(result.report_path)
+    if report.get("emergency_session_id") != fixture["session"].emergency_session_id:
+        return False, f"report session mismatch: {report}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_updates_local_session_metadata_only(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    before_medical = _file_hash(fixture["medical_path"])
+    before_settings = _file_hash(fixture["settings_path"])
+    result = _run_merge_dry_run_fixture(fixture)
+    loaded = fixture["store"].read_active_session(fixture["session"].emergency_session_id)
+    if loaded.last_dry_run_status != result.result_status or not loaded.last_dry_run_report_path:
+        return False, f"session dry-run metadata was not updated: {loaded}"
+    if _file_hash(fixture["medical_path"]) != before_medical or _file_hash(fixture["settings_path"]) != before_settings:
+        return False, "dry-run metadata update touched remote DB"
+    return True, "ok"
+
+
+def _check_merge_dry_run_change_summary_counts_tables(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=808)
+    result = _run_merge_dry_run_fixture(fixture)
+    summary = result.change_summary.changed_tables_summary
+    if not summary or "regression" not in summary:
+        return False, f"change summary missing table counts: {result.to_dict()}"
+    if int(result.change_summary.emergency_change_count or 0) <= 0:
+        return False, f"emergency change count not positive: {result.change_summary}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_backup_readiness_blocker(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    backup_dir = os.path.join(fixture["network_baza"], "backups", "valid")
+    os.makedirs(os.path.dirname(backup_dir), exist_ok=True)
+    if os.path.isdir(backup_dir):
+        shutil.rmtree(backup_dir)
+    Path(backup_dir).write_text("not a directory", encoding="utf-8")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_backup_not_ready":
+        return False, f"backup readiness failure did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_no_recovery_on_unavailable(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_merge_dry_run.py").read_text(encoding="utf-8")
+    forbidden = ("recover_shared_db", "recover_shared_db_with_locks", "_recover_shared_db", "run_startup_db_guard")
+    for token in forbidden:
+        if token in text:
+            return False, f"dry-run references recovery: {token}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_merge_dry_run_no_doctor_emergency_path(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root, role="doctor")
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_role_not_allowed":
+        return False, f"doctor dry-run was not blocked: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_dry_run_no_conflict_authoritative_merge(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=909)
+    _append_emergency_medical_change(fixture["medical_path"], entity_id=910)
+    before_remote = _file_hash(fixture["medical_path"])
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_remote_changed":
+        return False, f"remote changed did not block conflict merge: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_remote:
+        return False, "conflict dry-run applied emergency rows to remote DB"
+    return True, "ok"
+
+
+def _check_merge_dry_run_preserves_emergency_db_on_failure(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    before_local = _file_hash(fixture["session"].local_db_path)
+    os.remove(fixture["medical_path"])
+    result = _run_merge_dry_run_fixture(fixture)
+    if result.result_status != "blocked_remote_invalid":
+        return False, f"fixture did not fail on missing remote: {result.to_dict()}"
+    if _file_hash(fixture["session"].local_db_path) != before_local:
+        return False, "failed dry-run modified local emergency DB"
+    return True, "ok"
+
+
+def _check_merge_dry_run_status_ready_does_not_switch_network(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root)
+    result = _run_merge_dry_run_fixture(fixture)
+    loaded = fixture["store"].read_active_session(fixture["session"].emergency_session_id)
+    if result.result_status != "ready_mode_a":
+        return False, f"fixture did not reach ready status: {result.to_dict()}"
+    if loaded.status == "merged":
+        return False, "ready dry-run marked session merged"
+    text = (PROJECT_ROOT / "app" / "emergency_merge_dry_run.py").read_text(encoding="utf-8")
+    for token in ("bootstrap(", "launch_emergency_restart", "runtime_context=build_network"):
+        if token in text:
+            return False, f"dry-run contains network switch token: {token}"
+    return True, "ok"
+
+
+def _prepare_mode_a_merge_fixture(
+    temp_root: str,
+    *,
+    marker: bool = True,
+    dry_run: bool = True,
+    role: str = "nurse",
+    local_change: bool = True,
+    before_replace_hook=None,
+    after_temp_created_hook=None,
+):
+    from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
+
+    fixture = _prepare_merge_dry_run_fixture(temp_root, marker=marker, status="merge_pending")
+    if local_change:
+        _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=2000 + (uuid.uuid4().int % 1000))
+    dry_run_result = _run_merge_dry_run_fixture(fixture) if dry_run else None
+    service = EmergencyModeAMergeService(
+        role=role,
+        runtime_context=fixture["store"].build_active_runtime_context(fixture["session"].emergency_session_id),
+        store=fixture["store"],
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+        before_replace_hook=before_replace_hook,
+        after_temp_created_hook=after_temp_created_hook,
+    )
+    fixture["mode_a_service"] = service
+    fixture["dry_run_result"] = dry_run_result
+    return fixture
+
+
+def _run_mode_a_merge_fixture(fixture: dict):
+    service = fixture["mode_a_service"]
+    session = fixture["session"]
+    dry_run_result = fixture.get("dry_run_result")
+    return service.run_merge(
+        session.emergency_session_id,
+        None if dry_run_result is None else dry_run_result.report_path,
+        fixture.get("marker_path") or None,
+    )
+
+
+def _archived_session_metadata(result) -> dict:
+    return _read_json(os.path.join(result.archive_path, "emergency_session.json"))
+
+
+def _check_mode_a_merge_requires_dry_run_ready_report(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root, dry_run=False)
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "dry_run_ready_report_required":
+        return False, f"missing dry-run report did not block: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != _file_hash(fixture["session"].base_snapshot_path):
+        return False, "remote changed when dry-run report was missing"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_merge_ready_marker(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    os.remove(fixture["marker_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "merge_ready_marker_required":
+        return False, f"missing marker did not block: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_rejects_remote_changed(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    _append_emergency_medical_change(fixture["medical_path"], entity_id=3001)
+    before_hash = _file_hash(fixture["medical_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "blocked_remote_changed":
+        return False, f"remote changed was not blocked: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_hash:
+        return False, "remote changed blocker overwrote remote DB"
+    return True, "ok"
+
+
+def _check_mode_a_merge_rejects_remote_inconsistent(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+    from rem_card.app.emergency_restore_probe import write_merge_ready_marker
+    from rem_card.app.emergency_validation import compute_file_hash, validate_medical_db_snapshot
+
+    fixture = _prepare_merge_dry_run_fixture(temp_root, marker=False, status="merge_pending")
+    _append_emergency_medical_change(fixture["session"].base_snapshot_path, entity_id=3101)
+    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=3101)
+    _append_emergency_medical_change(fixture["medical_path"], entity_id=3101)
+    remote_validation = validate_medical_db_snapshot(fixture["medical_path"])
+    session = replace(
+        fixture["session"],
+        base_last_change_id=1,
+        base_snapshot_hash=compute_file_hash(fixture["session"].base_snapshot_path),
+        base_remote_fingerprint=dict(remote_validation.fingerprint),
+    )
+    fixture["store"].write_active_session(session)
+    fixture["session"] = session
+    fixture["marker_path"] = write_merge_ready_marker(
+        fixture["store"].resolve_root(),
+        session,
+        remote_last_change_id=1,
+        remote_fingerprint=dict(remote_validation.fingerprint),
+    )
+    fixture["service"] = fixture["service"].__class__(
+        role="nurse",
+        runtime_context=fixture["store"].build_active_runtime_context(session.emergency_session_id),
+        store=fixture["store"],
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+    )
+    dry_run_result = _run_merge_dry_run_fixture(fixture)
+    if dry_run_result.result_status != "ready_mode_a":
+        return False, f"inconsistent fixture did not start ready: {dry_run_result.to_dict()}"
+    lower_remote = os.path.join(os.path.dirname(fixture["medical_path"]), "remote_lower.db")
+    _create_valid_emergency_medical_db(lower_remote)
+    os.replace(lower_remote, fixture["medical_path"])
+    mode_fixture = _prepare_mode_a_merge_fixture(temp_root, marker=True, dry_run=True)
+    mode_fixture.update(fixture)
+    from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
+    mode_fixture["dry_run_result"] = dry_run_result
+    mode_fixture["mode_a_service"] = EmergencyModeAMergeService(
+        role="nurse",
+        runtime_context=fixture["store"].build_active_runtime_context(session.emergency_session_id),
+        store=fixture["store"],
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+    )
+    result = _run_mode_a_merge_fixture(mode_fixture)
+    if result.result_status != "blocked" or result.error_code != "blocked_remote_inconsistent":
+        return False, f"remote < base was not blocked: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_base_snapshot_hash_match(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    with open(fixture["session"].base_snapshot_path, "ab") as fh:
+        fh.write(b"hash mismatch after dry-run")
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "local_invalid":
+        return False, f"base hash mismatch did not block merge: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_local_emergency_quick_check(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    before_remote = _file_hash(fixture["medical_path"])
+    Path(fixture["session"].local_db_path).write_bytes(b"not sqlite")
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "local_invalid":
+        return False, f"corrupt local DB did not block merge: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_remote:
+        return False, "corrupt local DB path overwrote remote"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_remote_quick_check(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    Path(fixture["medical_path"]).write_bytes(b"not sqlite")
+    before_remote = _file_hash(fixture["medical_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "remote_invalid":
+        return False, f"corrupt remote DB did not block merge: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_remote:
+        return False, "corrupt remote DB was overwritten"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_settings_validation(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    Path(fixture["settings_path"]).write_bytes(b"not sqlite")
+    before_settings = _file_hash(fixture["settings_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "remote_invalid":
+        return False, f"corrupt remote settings DB did not block merge: {result.to_dict()}"
+    if _file_hash(fixture["settings_path"]) != before_settings:
+        return False, "merge wrote remote settings DB"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_no_role_session_locks(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "session_locks", "doctor.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "active_session_lock":
+        return False, f"role/session lock did not block merge: {result.to_dict()}"
+    if os.path.exists(os.path.join(fixture["network_baza"], "archiv", "db.lock")):
+        return False, "remote db.lock was not released after session lock blocker"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_remote_db_lock(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "archiv", "db.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "locks_unavailable":
+        return False, f"remote db.lock did not block merge: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_requires_emergency_merge_lock(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "locks", "emergency_merge.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "locks_unavailable":
+        return False, f"emergency_merge.lock did not block merge: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_creates_remote_pre_merge_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    validation = validate_medical_db_snapshot(result.remote_backup_path)
+    if result.result_status != "success" or not validation.ok:
+        return False, f"remote backup invalid/missing: {result.to_dict()} {validation}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_creates_local_emergency_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    validation = validate_medical_db_snapshot(result.local_backup_path)
+    if result.result_status != "success" or not validation.ok:
+        return False, f"local emergency backup invalid/missing: {result.to_dict()} {validation}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_creates_temp_db_from_local_via_sqlite_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    local_last = validate_medical_db_snapshot(fixture["session"].local_db_path).last_change_id
+    result = _run_mode_a_merge_fixture(fixture)
+    remote_last = validate_medical_db_snapshot(fixture["medical_path"]).last_change_id
+    text = (PROJECT_ROOT / "app" / "emergency_merge_mode_a.py").read_text(encoding="utf-8")
+    if "backup_connection(" not in text or "temp_from_local_backup_api" not in text:
+        return False, "Mode A temp DB must be created through SQLite Backup API"
+    if "copy2(" in text or "copyfile(" in text:
+        return False, "Mode A module must not use plain file copy for DB merge"
+    if result.result_status != "success" or int(remote_last or 0) != int(local_last or 0):
+        return False, f"temp/local merge result mismatch: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_validates_temp_before_replace(temp_root: str) -> tuple[bool, str]:
+    def corrupt_temp(path: str) -> None:
+        Path(path).write_bytes(b"not sqlite")
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root, after_temp_created_hook=corrupt_temp)
+    before_remote = _file_hash(fixture["medical_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "failed" or "temp DB validation failed" not in str(result.error):
+        return False, f"invalid temp did not fail before replacement: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_remote:
+        return False, "invalid temp changed remote DB"
+    return True, "ok"
+
+
+def _check_mode_a_merge_rechecks_remote_last_change_before_replace(temp_root: str) -> tuple[bool, str]:
+    holder: dict[str, str] = {}
+
+    def change_remote() -> None:
+        _append_emergency_medical_change(holder["medical_path"], entity_id=3201)
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root, before_replace_hook=change_remote)
+    holder["medical_path"] = fixture["medical_path"]
+    before_hash = _file_hash(fixture["medical_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    after_hash = _file_hash(fixture["medical_path"])
+    if result.result_status not in {"blocked", "failed"} or "Сетевая база изменилась" not in str(result.error):
+        return False, f"remote last_change recheck did not abort: {result.to_dict()}"
+    if after_hash == before_hash:
+        return False, "test hook did not change remote before replacement"
+    return True, "ok"
+
+
+def _check_mode_a_merge_replaces_remote_only_after_backups_and_locks(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "success":
+        return False, f"fixture did not merge: {result.to_dict()}"
+    if not result.locks_acquired.get("ok"):
+        return False, f"locks were not recorded as acquired: {result.locks_acquired}"
+    for path in (result.remote_backup_path, result.local_backup_path):
+        if not os.path.isfile(path):
+            return False, f"backup missing before replacement success: {path}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_final_remote_matches_local_last_change_id(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    local_last = validate_medical_db_snapshot(fixture["session"].local_db_path).last_change_id
+    result = _run_mode_a_merge_fixture(fixture)
+    remote_last = validate_medical_db_snapshot(fixture["medical_path"]).last_change_id
+    if result.result_status != "success" or int(remote_last or 0) != int(local_last or 0):
+        return False, f"final remote last_change_id mismatch: local={local_last} remote={remote_last} result={result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_post_quick_check_required(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "success" or result.post_quick_check_status != "ok":
+        return False, f"post quick_check status missing: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_rollback_restores_remote_on_final_validation_failure(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    before_remote = _file_hash(fixture["medical_path"])
+    fixture["mode_a_service"].validate_final_remote_db = lambda *args, **kwargs: {
+        "ok": False,
+        "reason": "forced final validation failure",
+    }
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "rolled_back" or result.rollback_status != "restored":
+        return False, f"final validation failure did not rollback: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_remote:
+        return False, "rollback did not restore original remote DB"
+    if not os.path.isfile(fixture["session"].local_db_path):
+        return False, "rollback deleted local emergency DB"
+    return True, "ok"
+
+
+def _check_mode_a_merge_marks_session_merged_on_success(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    metadata = _archived_session_metadata(result)
+    if metadata.get("status") != "merged" or metadata.get("merge_result") != "success":
+        return False, f"merged session metadata mismatch: {metadata}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_marks_session_merge_failed_on_failure(temp_root: str) -> tuple[bool, str]:
+    def corrupt_temp(path: str) -> None:
+        Path(path).write_bytes(b"not sqlite")
+
+    fixture = _prepare_mode_a_merge_fixture(temp_root, after_temp_created_hook=corrupt_temp)
+    result = _run_mode_a_merge_fixture(fixture)
+    loaded = fixture["store"].read_active_session(fixture["session"].emergency_session_id)
+    if result.result_status != "failed" or loaded.status != "merge_failed":
+        return False, f"failed merge did not mark session merge_failed: {result.to_dict()} {loaded}"
+    if not os.path.isfile(fixture["session"].local_db_path):
+        return False, "failed merge deleted local emergency DB"
+    return True, "ok"
+
+
+def _check_mode_a_merge_clears_merge_ready_marker_on_success(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "success":
+        return False, f"fixture did not merge: {result.to_dict()}"
+    if os.path.exists(fixture["marker_path"]):
+        return False, f"merge-ready marker still exists: {fixture['marker_path']}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_does_not_delete_emergency_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    archived_db = os.path.join(result.archive_path, "rao_journal_emergency.db")
+    if result.result_status != "success" or not os.path.isfile(archived_db):
+        return False, f"archived emergency DB missing: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_next_startup_network_not_emergency(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    active_dir_path = os.path.join(fixture["store"].resolve_root(), "active", fixture["session"].emergency_session_id)
+    if result.result_status != "success" or os.path.exists(active_dir_path):
+        return False, f"merged session should not remain active for emergency resume: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_does_not_write_remote_settings_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    before_settings = _file_hash(fixture["settings_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "success":
+        return False, f"fixture did not merge: {result.to_dict()}"
+    if _file_hash(fixture["settings_path"]) != before_settings:
+        return False, "Mode A merge modified remote settings DB"
+    return True, "ok"
+
+
+def _check_mode_a_merge_no_conflict_authoritative_merge(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    _append_emergency_medical_change(fixture["medical_path"], entity_id=3301)
+    before_remote = _file_hash(fixture["medical_path"])
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "blocked_remote_changed":
+        return False, f"remote changed conflict was not blocked: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) != before_remote:
+        return False, "remote changed conflict applied emergency rows"
+    return True, "ok"
+
+
+def _check_mode_a_merge_no_change_log_replay(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_merge_mode_a.py").read_text(encoding="utf-8").lower()
+    forbidden = ("from change_log", "insert into", "update ", "delete from")
+    for token in forbidden:
+        if token in text:
+            return False, f"Mode A merge module contains row-level replay/write token: {token}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_mode_a_merge_no_doctor_path(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root, role="doctor")
+    result = _run_mode_a_merge_fixture(fixture)
+    if result.result_status != "blocked" or result.error_code != "role_not_allowed":
+        return False, f"doctor triggered Mode A merge: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_report_written(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    if not os.path.isfile(result.report_path):
+        return False, f"merge report was not written: {result.report_path}"
+    report = _read_json(result.report_path)
+    if report.get("result_status") != "success" or report.get("mode") != "mode_a_remote_unchanged_authoritative_replacement":
+        return False, f"merge report contents mismatch: {report}"
+    return True, "ok"
+
+
+def _check_mode_a_merge_preserves_reports_and_backups_in_archive(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_mode_a_merge_fixture(temp_root)
+    result = _run_mode_a_merge_fixture(fixture)
+    expected = [
+        os.path.join(result.archive_path, "base_snapshot.db"),
+        os.path.join(result.archive_path, "rao_journal_emergency.db"),
+        os.path.join(result.archive_path, "remcard_settings_snapshot.db"),
+        os.path.join(result.archive_path, "emergency_session.json"),
+        result.report_path,
+        result.local_backup_path,
+    ]
+    missing = [path for path in expected if not os.path.isfile(path)]
+    if result.result_status != "success" or missing:
+        return False, f"archive did not preserve expected files: missing={missing} result={result.to_dict()}"
+    return True, "ok"
+
+
 def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_db_path, get_settings_dir, get_settings_lock_path
 
@@ -15682,6 +16485,63 @@ def main():
         ("restore_probe_shutdown_stops_worker", _check_restore_probe_shutdown_stops_worker),
         ("restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs", _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs),
         ("restore_probe_no_sqlite_profile_changes", _check_restore_probe_no_sqlite_profile_changes),
+        ("merge_dry_run_requires_merge_ready_marker", _check_merge_dry_run_requires_merge_ready_marker),
+        ("merge_dry_run_rejects_expired_marker", _check_merge_dry_run_rejects_expired_marker),
+        ("merge_dry_run_validates_active_session", _check_merge_dry_run_validates_active_session),
+        ("merge_dry_run_validates_base_snapshot_hash", _check_merge_dry_run_validates_base_snapshot_hash),
+        ("merge_dry_run_validates_local_emergency_db", _check_merge_dry_run_validates_local_emergency_db),
+        ("merge_dry_run_validates_settings_snapshot", _check_merge_dry_run_validates_settings_snapshot),
+        ("merge_dry_run_validates_remote_medical_and_settings_db", _check_merge_dry_run_validates_remote_medical_and_settings_db),
+        ("merge_dry_run_acquires_or_checks_remote_db_lock", _check_merge_dry_run_acquires_or_checks_remote_db_lock),
+        ("merge_dry_run_checks_emergency_merge_lock", _check_merge_dry_run_checks_emergency_merge_lock),
+        ("merge_dry_run_checks_role_session_locks", _check_merge_dry_run_checks_role_session_locks),
+        ("merge_dry_run_remote_unchanged_ready_mode_a", _check_merge_dry_run_remote_unchanged_ready_mode_a),
+        ("merge_dry_run_remote_changed_blocked", _check_merge_dry_run_remote_changed_blocked),
+        ("merge_dry_run_remote_less_than_base_blocked", _check_merge_dry_run_remote_less_than_base_blocked),
+        ("merge_dry_run_never_writes_remote_db", _check_merge_dry_run_never_writes_remote_db),
+        ("merge_dry_run_no_remote_replacement_code", _check_merge_dry_run_no_remote_replacement_code),
+        ("merge_dry_run_writes_local_report", _check_merge_dry_run_writes_local_report),
+        ("merge_dry_run_updates_local_session_metadata_only", _check_merge_dry_run_updates_local_session_metadata_only),
+        ("merge_dry_run_change_summary_counts_tables", _check_merge_dry_run_change_summary_counts_tables),
+        ("merge_dry_run_backup_readiness_blocker", _check_merge_dry_run_backup_readiness_blocker),
+        ("merge_dry_run_no_recovery_on_unavailable", _check_merge_dry_run_no_recovery_on_unavailable),
+        ("merge_dry_run_no_sqlite_profile_changes", _check_merge_dry_run_no_sqlite_profile_changes),
+        ("merge_dry_run_no_doctor_emergency_path", _check_merge_dry_run_no_doctor_emergency_path),
+        ("merge_dry_run_no_conflict_authoritative_merge", _check_merge_dry_run_no_conflict_authoritative_merge),
+        ("merge_dry_run_preserves_emergency_db_on_failure", _check_merge_dry_run_preserves_emergency_db_on_failure),
+        ("merge_dry_run_status_ready_does_not_switch_network", _check_merge_dry_run_status_ready_does_not_switch_network),
+        ("mode_a_merge_requires_dry_run_ready_report", _check_mode_a_merge_requires_dry_run_ready_report),
+        ("mode_a_merge_requires_merge_ready_marker", _check_mode_a_merge_requires_merge_ready_marker),
+        ("mode_a_merge_rejects_remote_changed", _check_mode_a_merge_rejects_remote_changed),
+        ("mode_a_merge_rejects_remote_inconsistent", _check_mode_a_merge_rejects_remote_inconsistent),
+        ("mode_a_merge_requires_base_snapshot_hash_match", _check_mode_a_merge_requires_base_snapshot_hash_match),
+        ("mode_a_merge_requires_local_emergency_quick_check", _check_mode_a_merge_requires_local_emergency_quick_check),
+        ("mode_a_merge_requires_remote_quick_check", _check_mode_a_merge_requires_remote_quick_check),
+        ("mode_a_merge_requires_settings_validation", _check_mode_a_merge_requires_settings_validation),
+        ("mode_a_merge_requires_no_role_session_locks", _check_mode_a_merge_requires_no_role_session_locks),
+        ("mode_a_merge_requires_remote_db_lock", _check_mode_a_merge_requires_remote_db_lock),
+        ("mode_a_merge_requires_emergency_merge_lock", _check_mode_a_merge_requires_emergency_merge_lock),
+        ("mode_a_merge_creates_remote_pre_merge_backup", _check_mode_a_merge_creates_remote_pre_merge_backup),
+        ("mode_a_merge_creates_local_emergency_backup", _check_mode_a_merge_creates_local_emergency_backup),
+        ("mode_a_merge_creates_temp_db_from_local_via_sqlite_backup", _check_mode_a_merge_creates_temp_db_from_local_via_sqlite_backup),
+        ("mode_a_merge_validates_temp_before_replace", _check_mode_a_merge_validates_temp_before_replace),
+        ("mode_a_merge_rechecks_remote_last_change_before_replace", _check_mode_a_merge_rechecks_remote_last_change_before_replace),
+        ("mode_a_merge_replaces_remote_only_after_backups_and_locks", _check_mode_a_merge_replaces_remote_only_after_backups_and_locks),
+        ("mode_a_merge_final_remote_matches_local_last_change_id", _check_mode_a_merge_final_remote_matches_local_last_change_id),
+        ("mode_a_merge_post_quick_check_required", _check_mode_a_merge_post_quick_check_required),
+        ("mode_a_merge_rollback_restores_remote_on_final_validation_failure", _check_mode_a_merge_rollback_restores_remote_on_final_validation_failure),
+        ("mode_a_merge_marks_session_merged_on_success", _check_mode_a_merge_marks_session_merged_on_success),
+        ("mode_a_merge_marks_session_merge_failed_on_failure", _check_mode_a_merge_marks_session_merge_failed_on_failure),
+        ("mode_a_merge_clears_merge_ready_marker_on_success", _check_mode_a_merge_clears_merge_ready_marker_on_success),
+        ("mode_a_merge_does_not_delete_emergency_db", _check_mode_a_merge_does_not_delete_emergency_db),
+        ("mode_a_merge_next_startup_network_not_emergency", _check_mode_a_merge_next_startup_network_not_emergency),
+        ("mode_a_merge_does_not_write_remote_settings_db", _check_mode_a_merge_does_not_write_remote_settings_db),
+        ("mode_a_merge_no_conflict_authoritative_merge", _check_mode_a_merge_no_conflict_authoritative_merge),
+        ("mode_a_merge_no_change_log_replay", _check_mode_a_merge_no_change_log_replay),
+        ("mode_a_merge_no_sqlite_profile_changes", _check_mode_a_merge_no_sqlite_profile_changes),
+        ("mode_a_merge_no_doctor_path", _check_mode_a_merge_no_doctor_path),
+        ("mode_a_merge_report_written", _check_mode_a_merge_report_written),
+        ("mode_a_merge_preserves_reports_and_backups_in_archive", _check_mode_a_merge_preserves_reports_and_backups_in_archive),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
