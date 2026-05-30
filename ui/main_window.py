@@ -1,5 +1,5 @@
-from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox
-from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel
+from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot
 
 from .shared.navigation_widgets import WelcomeWidget
 from .shared.custom_title_bar import CustomTitleBar
@@ -112,8 +112,10 @@ class MainWindow(QMainWindow):
         self._role_lock_owner_id = f"{socket.gethostname()}:{os.getpid()}:rem_card_ui"
         self._initial_role_ui_ready = False
         self._initial_role_auto_refresh_started = False
+        self._runtime_outage_handling = False
         
         self.setup_base_ui()
+        self._connect_runtime_outage_signal()
 
         if role:
             self.init_with_role(role)
@@ -157,6 +159,28 @@ class MainWindow(QMainWindow):
         
         self.title_bar = CustomTitleBar(self)
         self.main_layout.addWidget(self.title_bar)
+
+        self._emergency_banner = None
+        runtime_context = getattr(self.container, "runtime_context", None)
+        if getattr(runtime_context, "mode", "") == "emergency":
+            self._emergency_banner = QLabel(
+                "Аварийный режим: работа ведется на локальной базе этого ПК. "
+                "До восстановления сети работайте только здесь."
+            )
+            self._emergency_banner.setObjectName("EmergencyModeBanner")
+            self._emergency_banner.setWordWrap(True)
+            self._emergency_banner.setStyleSheet(
+                """
+                QLabel#EmergencyModeBanner {
+                    background-color: #fff3cd;
+                    color: #5f4300;
+                    border-bottom: 1px solid #e0b849;
+                    padding: 8px 14px;
+                    font-weight: 700;
+                }
+                """
+            )
+            self.main_layout.addWidget(self._emergency_banner)
         
         self.stack = QStackedWidget()
         self.main_layout.addWidget(self.stack)
@@ -199,6 +223,104 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() == self.admin_main:
             return "admin"
         return str(self._role_lock_key or self._initial_role or "unknown")
+
+    def _connect_runtime_outage_signal(self):
+        data_service = getattr(getattr(self.container, "data_service", None), "network_outage_detected", None)
+        if data_service is None:
+            return
+        try:
+            data_service.connect(self._handle_runtime_network_outage, Qt.QueuedConnection)
+        except Exception as exc:
+            logger.warning("Failed to connect runtime outage signal: %s", exc)
+
+    def _runtime_outage_change_ids(self) -> tuple[int, int]:
+        data_service = getattr(self.container, "data_service", None)
+        observed = 0
+        if data_service is not None:
+            try:
+                state = data_service.get_observed_change_state() or {}
+                observed = int(state.get("change_id") or 0)
+            except Exception:
+                observed = 0
+        standby = 0
+        scheduler = getattr(data_service, "_emergency_standby_scheduler", None) if data_service is not None else None
+        manager = getattr(scheduler, "manager", None)
+        store = getattr(manager, "store", None)
+        if store is not None:
+            try:
+                metadata = store.get_latest_valid_standby()
+                standby = int(getattr(metadata, "remote_last_change_id", 0) or 0)
+            except Exception:
+                standby = 0
+        return observed, standby
+
+    @Slot(dict)
+    def _handle_runtime_network_outage(self, payload: dict):
+        if self._runtime_outage_handling or self._is_closing:
+            return
+        self._runtime_outage_handling = True
+        data_service = getattr(self.container, "data_service", None)
+        role = str((payload or {}).get("role") or self._initial_role or self._current_role_key() or "").lower()
+        try:
+            self.stack.setEnabled(False)
+        except Exception:
+            pass
+
+        if role != "nurse":
+            from rem_card.app.runtime_outage import build_doctor_runtime_outage_message
+            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+            CustomMessageBox.warning(None, "База данных недоступна", build_doctor_runtime_outage_message())
+            if data_service is not None:
+                data_service.prepare_runtime_outage_shutdown(timeout=5.0)
+            self.close()
+            return
+
+        from rem_card.app.runtime_outage import (
+            build_runtime_outage_dialog_message,
+            launch_emergency_restart,
+            write_runtime_outage_startup_request,
+        )
+        from rem_card.services.settings.settings_service import reset_settings_service
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        queue_state = data_service.get_write_queue_state() if data_service is not None else {}
+        observed_change_id, standby_change_id = self._runtime_outage_change_ids()
+        unconfirmed = int(queue_state.get("unconfirmed_write_count") or 0) > 0
+        unknown_active = bool(queue_state.get("active_write_in_progress") or queue_state.get("unknown_active_write"))
+        stale_standby = int(observed_change_id or 0) > int(standby_change_id or 0)
+        marker_path, marker_payload = write_runtime_outage_startup_request(
+            source_role="nurse",
+            last_observed_remote_change_id=observed_change_id,
+            standby_last_change_id=standby_change_id,
+            unconfirmed_writes=bool(unconfirmed or unknown_active),
+        )
+        message = build_runtime_outage_dialog_message(
+            unconfirmed_writes=bool(unconfirmed),
+            unknown_active_write=bool(unknown_active),
+            stale_standby=bool(marker_payload.get("stale_gap_detected") or stale_standby),
+        )
+        result = CustomMessageBox.warning_with_actions(
+            None,
+            "Сетевая база недоступна",
+            message,
+            [
+                ("Перейти в аварийный режим", 1),
+                ("Закрыть RemCard", 0),
+            ],
+        )
+        if data_service is not None:
+            data_service.prepare_runtime_outage_shutdown(timeout=5.0)
+        reset_settings_service()
+        if int(result or 0) == 1:
+            launched = launch_emergency_restart(marker_path, role="nurse")
+            if not launched:
+                CustomMessageBox.warning(
+                    None,
+                    "Аварийный режим",
+                    "RemCard будет закрыта. Запустите RemCard медсестры снова, чтобы открыть аварийный режим.",
+                )
+        self.close()
 
     def _start_event_loop_watchdog(self):
         if os.environ.get("REMCARD_UI_WATCHDOG_ENABLED", "1") == "0":

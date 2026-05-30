@@ -841,7 +841,7 @@ def _check_main_ui_waits_for_startup_gate(temp_root: str) -> tuple[bool, str]:
         return False, "app/main.py must define _main_impl"
     body = source[main_start:]
     guard_idx = body.find("_validate_compiled_role_startup(")
-    bootstrap_idx = body.find("container = bootstrap()")
+    bootstrap_idx = body.find("_bootstrap_container_with_emergency_fallback(")
     window_idx = body.find("window = MainWindow(")
     show_idx = body.find("window.show()")
     if min(guard_idx, bootstrap_idx, window_idx, show_idx) < 0:
@@ -12920,6 +12920,1012 @@ def _check_emergency_standby_does_not_touch_doctor_nurse_business_logic(temp_roo
     return True, "ok"
 
 
+class _FakeEmergencyStandbyManager:
+    def __init__(
+        self,
+        root: str,
+        *,
+        should_refresh: bool = True,
+        refresh_ok: bool = True,
+        delay_sec: float = 0.0,
+        source_ok: bool = True,
+    ):
+        from types import SimpleNamespace
+
+        self.root = root
+        self.should_refresh = bool(should_refresh)
+        self.refresh_ok = bool(refresh_ok)
+        self.delay_sec = float(delay_sec or 0.0)
+        self.source_ok = bool(source_ok)
+        self.refresh_calls = 0
+        self.should_calls = 0
+        self.check_calls = 0
+        self.metadata = SimpleNamespace(
+            remote_last_change_id=10,
+            medical_db_size=123,
+            settings_db_size=45,
+        )
+        self.store = SimpleNamespace(get_latest_valid_standby=lambda: self.metadata)
+
+    def check_network_sources(self):
+        from types import SimpleNamespace
+
+        from rem_card.app.emergency_standby import EmergencyStandbyRefreshResult
+
+        self.check_calls += 1
+        if not self.source_ok:
+            return EmergencyStandbyRefreshResult(ok=False, status="source_unavailable", reason="database is locked")
+        return EmergencyStandbyRefreshResult(
+            ok=True,
+            status="ready",
+            reason="ok",
+            medical_validation=SimpleNamespace(last_change_id=11, schema_version=17),
+            settings_validation=SimpleNamespace(fingerprint={"settings": "v1"}),
+        )
+
+    def should_refresh_standby(self, *_args, **_kwargs):
+        self.should_calls += 1
+        return self.should_refresh
+
+    def create_or_refresh_standby(self, *, forced: bool = False):
+        from rem_card.app.emergency_standby import EmergencyStandbyRefreshResult
+
+        self.refresh_calls += 1
+        if self.delay_sec:
+            time.sleep(self.delay_sec)
+        if not self.refresh_ok:
+            return EmergencyStandbyRefreshResult(ok=False, status="source_unavailable", reason="database is locked")
+        return EmergencyStandbyRefreshResult(ok=True, status="valid", reason="ok", metadata=self.metadata)
+
+
+def _wait_for_emergency_scheduler_idle(scheduler, timeout_sec: float = 3.0) -> bool:
+    deadline = time.time() + float(timeout_sec)
+    while time.time() < deadline:
+        if not scheduler.is_refresh_running():
+            return True
+        time.sleep(0.01)
+    return not scheduler.is_refresh_running()
+
+
+def _check_emergency_standby_scheduler_only_enabled_for_nurse_network_mode(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    _ = temp_root
+    if not EmergencyStandbyScheduler.is_enabled_for_runtime("nurse", "network"):
+        return False, "nurse network runtime must enable standby scheduler"
+    disabled_cases = [("doctor", "network"), ("nurse", "emergency"), ("nurse", "snapshot"), ("", "network")]
+    for role, mode in disabled_cases:
+        if EmergencyStandbyScheduler.is_enabled_for_runtime(role, mode):
+            return False, f"scheduler enabled unexpectedly for role={role!r} mode={mode!r}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_not_started_for_doctor(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import create_emergency_standby_scheduler_for_runtime
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"))
+    scheduler = create_emergency_standby_scheduler_for_runtime(
+        role="doctor",
+        mode="network",
+        manager=manager,
+    )
+    if scheduler is not None:
+        return False, "doctor network runtime created emergency standby scheduler"
+    doctor_sources = [
+        PROJECT_ROOT / "ui" / "doctor_view" / "doctor_main_widget.py",
+        PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+    ]
+    for path in doctor_sources:
+        text = path.read_text(encoding="utf-8")
+        if "EmergencyStandbyScheduler" in text or "emergency_standby_scheduler" in text:
+            return False, f"doctor UI references standby scheduler: {path.relative_to(PROJECT_ROOT)}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_requests_refresh_after_nurse_startup(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    scheduler_text = (PROJECT_ROOT / "app" / "emergency_standby_scheduler.py").read_text(encoding="utf-8")
+    required = (
+        "bootstrap_func(role=role)",
+        "scheduler.request_refresh(\"startup\")",
+        "threading.Thread(",
+    )
+    combined = "\n".join((bootstrap_text, main_text, scheduler_text))
+    missing = [token for token in required if token not in combined]
+    if missing:
+        return False, f"startup scheduler request wiring missing: {missing}"
+    if "create_or_refresh_standby" in bootstrap_text:
+        return False, "bootstrap must not run standby refresh synchronously"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_requests_refresh_after_successful_write(temp_root: str) -> tuple[bool, str]:
+    from types import SimpleNamespace
+
+    from rem_card.services.data_service import DataService
+
+    class FakeScheduler:
+        def __init__(self):
+            self.requests = []
+
+        def request_refresh_after_write(self, reason):
+            self.requests.append(reason)
+            return True
+
+    fake_scheduler = FakeScheduler()
+    service = SimpleNamespace(_shutting_down=False, _emergency_standby_scheduler=fake_scheduler)
+    DataService._request_emergency_standby_after_write(service, "write_ok")
+    if fake_scheduler.requests != ["after_write_commit"]:
+        return False, f"write success did not request standby refresh: {fake_scheduler.requests}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_does_not_refresh_when_write_queue_busy(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"))
+    scheduler = EmergencyStandbyScheduler(
+        role="nurse",
+        mode="network",
+        manager=manager,
+        is_write_queue_idle=lambda: False,
+        cooldown_sec=0,
+    )
+    scheduler.start()
+    scheduler.request_refresh("startup")
+    time.sleep(0.05)
+    status = scheduler.get_status()
+    if manager.refresh_calls:
+        return False, "scheduler refreshed while write queue was busy"
+    if status.get("last_reason") != "write_queue_busy":
+        return False, f"busy write queue reason mismatch: {status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_does_not_refresh_when_foreground_busy(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"))
+    scheduler = EmergencyStandbyScheduler(
+        role="nurse",
+        mode="network",
+        manager=manager,
+        is_foreground_busy=lambda: True,
+        cooldown_sec=0,
+    )
+    scheduler.start()
+    scheduler.request_refresh("startup")
+    time.sleep(0.05)
+    status = scheduler.get_status()
+    if manager.refresh_calls:
+        return False, "scheduler refreshed while foreground activity was busy"
+    if status.get("last_reason") != "foreground_busy":
+        return False, f"foreground busy reason mismatch: {status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_coalesces_duplicate_requests(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"), delay_sec=0.15)
+    scheduler = EmergencyStandbyScheduler(role="nurse", mode="network", manager=manager, cooldown_sec=0)
+    scheduler.start()
+    scheduler.request_refresh("startup")
+    for idx in range(10):
+        scheduler.request_refresh(f"duplicate_{idx}")
+    if not _wait_for_emergency_scheduler_idle(scheduler):
+        return False, "scheduler worker did not finish"
+    status = scheduler.get_status()
+    if manager.refresh_calls != 1:
+        return False, f"duplicate requests started {manager.refresh_calls} refreshes"
+    if int(status.get("coalesced_count") or 0) <= 0 or not status.get("pending"):
+        return False, f"duplicate requests were not coalesced/pending: {status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_uses_backoff_after_failure(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"), refresh_ok=False)
+    scheduler = EmergencyStandbyScheduler(
+        role="nurse",
+        mode="network",
+        manager=manager,
+        cooldown_sec=0,
+        failure_backoff_sec=60,
+        max_backoff_sec=60,
+    )
+    scheduler.start()
+    scheduler.request_refresh("startup")
+    if not _wait_for_emergency_scheduler_idle(scheduler):
+        return False, "scheduler worker did not finish after failure"
+    first_status = scheduler.get_status()
+    scheduler.request_refresh("retry_immediately")
+    time.sleep(0.05)
+    second_status = scheduler.get_status()
+    if manager.refresh_calls != 1:
+        return False, f"backoff allowed immediate retry: refresh_calls={manager.refresh_calls}"
+    if float(first_status.get("next_allowed_ts") or 0.0) <= time.monotonic():
+        return False, f"failure did not set future backoff: {first_status}"
+    if second_status.get("last_reason") != "cooldown":
+        return False, f"immediate retry did not report cooldown: {second_status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_preserves_old_valid_standby_on_failure(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby import EmergencyStandbyRefreshResult
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    manager, source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    first = manager.create_or_refresh_standby(forced=True)
+    if not first.ok or not first.metadata:
+        return False, f"initial standby refresh failed: {first}"
+    old_medical_hash = compute_file_hash(first.metadata.medical_db_path)
+    old_settings_hash = compute_file_hash(str(first.metadata.settings_db_path))
+    _append_emergency_medical_change(source_medical, entity_id=44)
+    original_refresh = manager.create_or_refresh_standby
+
+    def fail_refresh(*, forced: bool = False):
+        return EmergencyStandbyRefreshResult(ok=False, status="source_unavailable", reason="database is locked")
+
+    try:
+        manager.create_or_refresh_standby = fail_refresh
+        scheduler = EmergencyStandbyScheduler(
+            role="nurse",
+            mode="network",
+            manager=manager,
+            cooldown_sec=0,
+            failure_backoff_sec=1,
+        )
+        scheduler.start()
+        scheduler.request_refresh("change_log_advanced")
+        if not _wait_for_emergency_scheduler_idle(scheduler):
+            return False, "scheduler worker did not finish after forced failure"
+    finally:
+        manager.create_or_refresh_standby = original_refresh
+
+    current = manager.store.read_standby_metadata()
+    if compute_file_hash(current.medical_db_path) != old_medical_hash:
+        return False, "failed scheduler refresh replaced old medical standby"
+    if compute_file_hash(str(current.settings_db_path)) != old_settings_hash:
+        return False, "failed scheduler refresh replaced old settings standby"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_no_blocking_ui(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    files = [
+        PROJECT_ROOT / "app" / "emergency_standby_scheduler.py",
+        PROJECT_ROOT / "app" / "bootstrap.py",
+        PROJECT_ROOT / "services" / "data_service.py",
+    ]
+    forbidden = ("QMessageBox", "CustomMessageBox", "QDialog", "exec_(", ".exec()")
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                return False, f"blocking UI token in scheduler changes: {path.relative_to(PROJECT_ROOT)} {token}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_no_emergency_startup_activation(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    forbidden = (
+        "create_active_session_from_standby",
+        "build_active_runtime_context",
+        "build_emergency_runtime_context",
+        "emergency_session.json",
+    )
+    for token in forbidden:
+        if token in bootstrap_text or token in main_text:
+            return False, f"emergency startup activation token unexpectedly present: {token}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_no_recovery_on_unavailable(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    text = (PROJECT_ROOT / "app" / "emergency_standby_scheduler.py").read_text(encoding="utf-8")
+    if "recover_shared_db" in text or "startup_db_guard" in text:
+        return False, "standby scheduler must not call recovery"
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"), source_ok=False)
+    scheduler = EmergencyStandbyScheduler(
+        role="nurse",
+        mode="network",
+        manager=manager,
+        cooldown_sec=0,
+        failure_backoff_sec=1,
+    )
+    scheduler.start()
+    scheduler.request_refresh("startup")
+    if not _wait_for_emergency_scheduler_idle(scheduler):
+        return False, "scheduler worker did not finish unavailable source check"
+    status = scheduler.get_status()
+    if manager.refresh_calls:
+        return False, "scheduler tried refresh after unavailable source health check"
+    if status.get("last_status") != "source_unavailable":
+        return False, f"unavailable source was not controlled: {status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_emergency_standby_scheduler_no_direct_file_copy_live_db(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    for relative in ("app/emergency_standby_scheduler.py", "app/emergency_standby.py"):
+        text = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+        for token in ("shutil.copy", "copy2(", "copyfile("):
+            if token in text:
+                return False, f"direct file copy token in {relative}: {token}"
+    return True, "ok"
+
+
+def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"), delay_sec=0.05)
+    scheduler = EmergencyStandbyScheduler(role="nurse", mode="network", manager=manager, cooldown_sec=0)
+    scheduler.start()
+    scheduler.request_refresh("startup")
+    stopped = scheduler.stop(timeout=2.0)
+    if not stopped:
+        return False, f"scheduler did not stop cleanly: {scheduler.get_status()}"
+    before = manager.refresh_calls
+    requested = scheduler.request_refresh("after_stop")
+    time.sleep(0.05)
+    if requested:
+        return False, "scheduler accepted refresh after stop"
+    if manager.refresh_calls != before:
+        return False, "scheduler ran refresh after stop"
+    return True, "ok"
+
+
+def _write_emergency_startup_allow_marker(root: str) -> str:
+    from rem_card.app.emergency_startup import emergency_workstation_marker_path
+
+    path = emergency_workstation_marker_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Path(path).write_text("allowed\n", encoding="utf-8")
+    return path
+
+
+def _check_emergency_startup_only_available_for_nurse(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    doctor = prepare_emergency_startup("doctor", root=store.resolve_root())
+    if doctor.allowed or doctor.status != "role_not_allowed":
+        return False, f"doctor emergency decision mismatch: {doctor}"
+    nurse = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if not nurse.allowed:
+        return False, f"nurse with valid standby was not allowed: {nurse}"
+    return True, "ok"
+
+
+def _check_emergency_startup_doctor_network_unavailable_shows_controlled_block(temp_root: str) -> tuple[bool, str]:
+    from types import SimpleNamespace
+
+    from rem_card.app.emergency_startup import (
+        DOCTOR_NETWORK_UNAVAILABLE_MESSAGE,
+        classify_startup_failure,
+        prepare_emergency_startup,
+    )
+
+    _ = temp_root
+    failure = SimpleNamespace(user_message="База временно недоступна", technical_reason="unable to open database file")
+    if classify_startup_failure(failure) != "network_unavailable":
+        return False, "network unavailable startup failure was not classified"
+    decision = prepare_emergency_startup("doctor", root=os.path.join(temp_root, "er"))
+    if decision.user_message != DOCTOR_NETWORK_UNAVAILABLE_MESSAGE:
+        return False, f"doctor controlled block text changed: {decision.user_message!r}"
+    if "Не запускайте отдельную локальную копию" not in decision.user_message:
+        return False, "doctor block message does not forbid local copy"
+    return True, "ok"
+
+
+def _check_emergency_startup_requires_authorized_workstation(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import EMERGENCY_WORKSTATION_ALLOW_ENV, prepare_emergency_startup
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    saved = os.environ.pop(EMERGENCY_WORKSTATION_ALLOW_ENV, None)
+    try:
+        decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    finally:
+        if saved is not None:
+            os.environ[EMERGENCY_WORKSTATION_ALLOW_ENV] = saved
+    if decision.allowed or decision.status != "workstation_not_authorized":
+        return False, f"missing marker did not block emergency startup: {decision}"
+    return True, "ok"
+
+
+def _check_emergency_startup_requires_valid_standby_pair(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    root = os.path.join(temp_root, "er")
+    _write_emergency_startup_allow_marker(root)
+    decision = prepare_emergency_startup("nurse", root=root)
+    if decision.allowed or decision.status != "no_valid_standby":
+        return False, f"missing standby pair did not block emergency startup: {decision}"
+    return True, "ok"
+
+
+def _check_emergency_startup_creates_active_session_from_standby(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    session = start_or_resume_emergency_session(decision)
+    if session.resumed:
+        return False, "fresh standby startup was marked as resumed"
+    for path in (session.metadata.local_db_path, session.metadata.base_snapshot_path, session.metadata.settings_snapshot_path):
+        if not path or not os.path.isfile(path):
+            return False, f"active session file missing: {path}"
+    return True, "ok"
+
+
+def _check_emergency_startup_uses_emergency_runtime_context(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    session = start_or_resume_emergency_session(prepare_emergency_startup("nurse", root=store.resolve_root()))
+    ctx = session.runtime_context
+    if ctx.mode != "emergency" or not ctx.is_emergency or ctx.is_network or ctx.is_snapshot:
+        return False, f"runtime flags mismatch: {ctx}"
+    if not ctx.medical_db_path.endswith("rao_journal_emergency.db"):
+        return False, f"emergency medical DB path mismatch: {ctx.medical_db_path}"
+    if ctx.emergency_session_id != session.metadata.emergency_session_id:
+        return False, "runtime context does not carry emergency session id"
+    return True, "ok"
+
+
+def _check_emergency_startup_uses_readonly_settings_snapshot(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+    from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    session = start_or_resume_emergency_session(prepare_emergency_startup("nurse", root=store.resolve_root()))
+    ctx = session.runtime_context
+    if not ctx.settings_readonly or not ctx.settings_db_path.endswith("remcard_settings_snapshot.db"):
+        return False, f"settings snapshot context mismatch: {ctx.settings_db_path}"
+    db = SettingsDatabase(context=ctx)
+    info = db.ensure_ready()
+    if not info.get("settings_readonly"):
+        return False, f"settings DB is not readonly: {info}"
+    try:
+        with db.transaction("emergency_settings_write"):
+            pass
+    except SettingsDbError:
+        return True, "ok"
+    return False, "readonly emergency settings snapshot allowed transaction"
+
+
+def _check_emergency_startup_does_not_use_network_settings_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+    from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service, reset_settings_service
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    session = start_or_resume_emergency_session(prepare_emergency_startup("nurse", root=store.resolve_root()))
+    ctx = session.runtime_context
+    try:
+        configured = configure_settings_service(runtime_context=ctx, readonly=True)
+        if get_settings_service() is not configured:
+            return False, "emergency settings service was not installed as default"
+        if os.path.abspath(get_settings_service().db.db_path) != os.path.abspath(ctx.settings_db_path):
+            return False, "default settings service does not point to emergency snapshot"
+        if not _path_is_under(get_settings_service().db.db_path, os.path.join(store.resolve_root(), "active")):
+            return False, f"settings DB is not local emergency path: {get_settings_service().db.db_path}"
+    finally:
+        reset_settings_service()
+    return True, "ok"
+
+
+def _check_emergency_startup_disables_standby_scheduler(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import create_emergency_standby_scheduler_for_runtime
+
+    manager = _FakeEmergencyStandbyManager(os.path.join(temp_root, "er"))
+    scheduler = create_emergency_standby_scheduler_for_runtime(role="nurse", mode="emergency", manager=manager)
+    if scheduler is not None:
+        return False, "emergency runtime created standby scheduler"
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    if 'mode=mode' not in bootstrap_text or 'scheduler.request_refresh("startup")' not in bootstrap_text:
+        return False, "bootstrap scheduler wiring no longer depends on runtime mode"
+    return True, "ok"
+
+
+def _check_emergency_startup_shows_banner(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    for token in ("EmergencyModeBanner", "Аварийный режим", 'mode", "") == "emergency"'):
+        if token not in text:
+            return False, f"emergency banner token missing: {token}"
+    return True, "ok"
+
+
+def _check_emergency_startup_no_recovery_on_network_unavailable(temp_root: str) -> tuple[bool, str]:
+    from types import SimpleNamespace
+
+    from rem_card.app.emergency_startup import classify_startup_failure
+
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_startup.py").read_text(encoding="utf-8")
+    forbidden = ("recover_shared_db", "recover_shared_db_with_locks", "_recover_shared_db")
+    for token in forbidden:
+        if token in text:
+            return False, f"emergency startup references recovery code: {token}"
+    failure = SimpleNamespace(technical_reason="database is locked")
+    if classify_startup_failure(failure) != "network_unavailable":
+        return False, "locked network DB was not treated as unavailable"
+    return True, "ok"
+
+
+def _check_emergency_startup_does_not_mask_corruption(temp_root: str) -> tuple[bool, str]:
+    from types import SimpleNamespace
+
+    from rem_card.app.emergency_startup import classify_startup_failure
+
+    _ = temp_root
+    failure = SimpleNamespace(technical_reason="database disk image is malformed")
+    if classify_startup_failure(failure) != "corruption_or_incompatible":
+        return False, "confirmed corruption was masked as network unavailable"
+    return True, "ok"
+
+
+def _check_emergency_startup_no_empty_db_creation(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    root = os.path.join(temp_root, "er")
+    _write_emergency_startup_allow_marker(root)
+    decision = prepare_emergency_startup("nurse", root=root)
+    if decision.allowed:
+        return False, "missing standby unexpectedly allowed emergency startup"
+    created = list(Path(root).rglob("rao_journal_emergency.db"))
+    if created:
+        return False, f"empty emergency DB was created without valid standby: {created[:3]}"
+    return True, "ok"
+
+
+def _check_emergency_startup_resume_active_session(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    active = store.create_active_session_from_standby(standby, session_id="resume_me")
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if decision.active_session_metadata is None:
+        return False, f"active session was not selected for resume: {decision}"
+    session = start_or_resume_emergency_session(decision)
+    if not session.resumed or session.metadata.emergency_session_id != active.emergency_session_id:
+        return False, f"active session resume mismatch: {session}"
+    return True, "ok"
+
+
+def _check_emergency_startup_merged_session_not_resumed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    active = store.create_active_session_from_standby(standby, session_id="merged_session")
+    store.mark_session_status(active.emergency_session_id, "merged")
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if decision.active_session_metadata is not None or decision.status == "active_session_available":
+        return False, f"merged session was selected for resume: {decision}"
+    if decision.status != "standby_available":
+        return False, f"valid standby was not offered after merged session skip: {decision}"
+    return True, "ok"
+
+
+def _check_emergency_startup_no_merge_code(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_startup.py").read_text(encoding="utf-8")
+    forbidden = ("merge_attempt_count", "mark_session_status(", "archive_session(", "restore_shared", "outbox")
+    for token in forbidden:
+        if token in text:
+            return False, f"emergency startup contains merge/restore token: {token}"
+    return True, "ok"
+
+
+def _check_emergency_startup_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_emergency_startup_doctor_nurse_network_mode_unchanged(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    required = (
+        "return bootstrap_func(role=role)",
+        "runtime_context is None",
+        "ensure_directories()",
+        "get_settings_service()",
+    )
+    combined = "\n".join((main_text, bootstrap_text))
+    missing = [token for token in required if token not in combined]
+    if missing:
+        return False, f"normal network startup tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_startup_no_json_fallback(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_startup.py").read_text(encoding="utf-8")
+    forbidden = ("json.load", "json.loads", ".json", "fallback")
+    for token in forbidden:
+        if token in text:
+            return False, f"emergency startup contains JSON fallback token: {token}"
+    return True, "ok"
+
+
+def _check_emergency_banner_cannot_be_hidden_by_normal_refresh(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    banner_idx = text.find("self.main_layout.addWidget(self._emergency_banner)")
+    stack_idx = text.find("self.stack = QStackedWidget()")
+    if banner_idx < 0 or stack_idx < 0 or banner_idx > stack_idx:
+        return False, "emergency banner is not mounted above the refreshable stacked widget"
+    if "self.stack.addWidget(self._emergency_banner)" in text:
+        return False, "emergency banner was added to refreshable stack"
+    return True, "ok"
+
+
+class _RuntimeOutageFakeDb:
+    def __init__(self):
+        self.write_calls = 0
+
+    def run_write_operation(self, operation, source: str = ""):
+        self.write_calls += 1
+        return operation()
+
+    def get_data_version(self) -> int:
+        return 0
+
+    def get_latest_change_id(self, admission_id=None, include_global: bool = True) -> int:
+        return 0
+
+    def fetch_changes_since(self, last_change_id: int, admission_id=None, include_global: bool = True):
+        return []
+
+    def get_changed_entities_since(self, last_change_id: int, admission_id=None, include_global: bool = True):
+        return set()
+
+
+def _make_runtime_outage_data_service():
+    from rem_card.services.data_service import DataService
+
+    service = DataService(_RuntimeOutageFakeDb())
+    service.set_runtime_role("nurse")
+    service.stop_data_update_monitor(timeout=1.0)
+    return service
+
+
+def _check_runtime_outage_nurse_network_unavailable_requests_emergency_restart(temp_root: str) -> tuple[bool, str]:
+    import sqlite3
+
+    from rem_card.app.runtime_outage import (
+        runtime_outage_startup_request_path,
+        validate_runtime_outage_startup_request_marker,
+        write_runtime_outage_startup_request,
+    )
+
+    service = _make_runtime_outage_data_service()
+    try:
+        category = service._handle_database_access_failure(
+            sqlite3.OperationalError("unable to open database file"),
+            source="regression_runtime_outage",
+        )
+        if category != "network_unavailable" or not service.is_network_outage_detected():
+            return False, f"network unavailable did not set outage flag: {category}"
+        marker_path, payload = write_runtime_outage_startup_request(root=temp_root, source_role="nurse")
+        if os.path.abspath(marker_path) != os.path.abspath(runtime_outage_startup_request_path(temp_root)):
+            return False, f"marker path mismatch: {marker_path}"
+        validation = validate_runtime_outage_startup_request_marker(marker_path)
+        if not validation.ok:
+            return False, f"marker was not valid: {validation}"
+        if payload.get("reason") != "runtime_network_outage" or payload.get("source_role") != "nurse":
+            return False, f"marker payload mismatch: {payload}"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_doctor_gets_block_message_no_emergency(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.runtime_outage import build_doctor_runtime_outage_message
+
+    root = os.path.join(temp_root, "er")
+    message = build_doctor_runtime_outage_message()
+    if "ПК медсестры" not in message:
+        return False, f"doctor message must direct work to nurse PC: {message}"
+    if list(Path(root).rglob("rao_journal_emergency.db")):
+        return False, "doctor outage created emergency DB unexpectedly"
+    main_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    if 'role != "nurse"' not in main_text or "write_runtime_outage_startup_request" not in main_text:
+        return False, "runtime outage UI branch does not separate doctor and nurse"
+    return True, "ok"
+
+
+def _check_runtime_outage_does_not_trigger_recovery(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    for relative in ("app/runtime_outage.py", "services/data_service.py", "ui/main_window.py"):
+        text = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+        for token in ("recover_shared_db", "recover_shared_db_with_locks", "_recover_shared_db"):
+            if token in text:
+                return False, f"runtime outage path references recovery in {relative}: {token}"
+    return True, "ok"
+
+
+def _check_runtime_outage_does_not_mask_corruption(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_access_classifier import classify_database_access_error
+    from rem_card.app.runtime_outage import runtime_outage_transition_allowed
+
+    _ = temp_root
+    category = classify_database_access_error(RuntimeError("database disk image is malformed"))
+    if category != "corruption":
+        return False, f"corruption category mismatch: {category}"
+    if runtime_outage_transition_allowed(category):
+        return False, "corruption was allowed to transition to emergency runtime outage"
+    return True, "ok"
+
+
+def _check_runtime_outage_blocks_new_writes(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+    ran = []
+    try:
+        service.block_new_writes_for_runtime_outage({"category": "network_unavailable"})
+        accepted = service.enqueue_write("blocked_write", lambda: ran.append(True))
+        if accepted:
+            return False, "write was accepted after runtime outage flag"
+        if ran:
+            return False, "blocked write operation ran"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_unconfirmed_write_not_marked_saved(temp_root: str) -> tuple[bool, str]:
+    import sqlite3
+
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+    success = []
+    try:
+        service.enqueue_write(
+            "network_fail_write",
+            lambda: (_ for _ in ()).throw(sqlite3.OperationalError("unable to open database file")),
+            on_success=lambda result: success.append(result),
+        )
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not service.is_write_queue_idle():
+            time.sleep(0.01)
+        if success:
+            return False, f"unconfirmed write called success callback: {success}"
+        if not service.is_network_outage_detected():
+            return False, "network write failure did not set outage flag"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_confirmed_commit_can_report_success(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+    try:
+        result = service.run_write("confirmed_write", lambda: "committed")
+        if result != "committed":
+            return False, f"confirmed write result mismatch: {result}"
+        service.block_new_writes_for_runtime_outage({"category": "network_unavailable"})
+        if service.db.write_calls != 1:
+            return False, f"confirmed write count changed after outage: {service.db.write_calls}"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_write_queue_shutdown_is_bounded(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import LocalWriteQueue
+
+    _ = temp_root
+    queue = LocalWriteQueue()
+    queue.submit(lambda: time.sleep(1.0), "slow_runtime_outage_write")
+    started = time.perf_counter()
+    drained = queue.shutdown(timeout=0.05)
+    elapsed = time.perf_counter() - started
+    if drained:
+        return False, "slow queue unexpectedly drained inside tiny timeout"
+    if elapsed > 0.75:
+        return False, f"queue shutdown was not bounded: {elapsed:.3f}s"
+    return True, "ok"
+
+
+def _check_runtime_outage_stops_standby_scheduler(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+
+    class FakeScheduler:
+        def __init__(self):
+            self.stopped = False
+
+        def stop(self, timeout: float = 5.0):
+            self.stopped = True
+            return True
+
+    scheduler = FakeScheduler()
+    service._emergency_standby_scheduler = scheduler
+    try:
+        service.prepare_runtime_outage_shutdown(timeout=0.2)
+        if not scheduler.stopped:
+            return False, "runtime outage shutdown did not stop standby scheduler"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_stops_data_update_monitor(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+    try:
+        stopped = service.prepare_runtime_outage_shutdown(timeout=0.2)
+        if service._monitor and service._monitor.isRunning():
+            return False, "runtime outage shutdown left DataUpdateMonitor running"
+        if not stopped:
+            return False, "runtime outage shutdown failed with idle queue and stopped monitor"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_no_live_db_swap(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    start = text.find("def _handle_runtime_network_outage")
+    end = text.find("def _get_resize_edge", start)
+    body = text[start:end]
+    for token in ("bootstrap(", "DatabaseManager(", "runtime_context=", "window.container"):
+        if token in body:
+            return False, f"runtime outage UI performs live DB swap token: {token}"
+    return True, "ok"
+
+
+def _check_runtime_outage_uses_startup_emergency_path(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    runtime_text = (PROJECT_ROOT / "app" / "runtime_outage.py").read_text(encoding="utf-8")
+    required = (
+        "--emergency-startup-request",
+        "validate_runtime_outage_startup_request_marker",
+        "launch_emergency_restart",
+        "emergency_startup_request.json",
+    )
+    combined = "\n".join((main_text, runtime_text))
+    missing = [token for token in required if token not in combined]
+    if missing:
+        return False, f"startup emergency path tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_runtime_outage_stale_standby_warning_recorded(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+    from rem_card.app.runtime_outage import STALE_STANDBY_WARNING, write_runtime_outage_startup_request
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    marker_path, payload = write_runtime_outage_startup_request(
+        root=store.resolve_root(),
+        source_role="nurse",
+        last_observed_remote_change_id=99,
+        standby_last_change_id=1,
+        unconfirmed_writes=True,
+    )
+    if not os.path.isfile(marker_path) or not payload.get("stale_gap_detected"):
+        return False, f"stale marker was not written: {payload}"
+    session = start_or_resume_emergency_session(
+        prepare_emergency_startup("nurse", root=store.resolve_root()),
+        startup_request=payload,
+    )
+    loaded = store.read_active_session(session.metadata.emergency_session_id)
+    if not loaded.stale_gap_detected or int(loaded.last_observed_remote_change_id or 0) != 99:
+        return False, f"stale gap was not recorded in emergency_session.json: {loaded}"
+    if "Аварийная копия" not in STALE_STANDBY_WARNING:
+        return False, "stale standby warning text missing"
+    return True, "ok"
+
+
+def _check_runtime_outage_no_empty_db_creation(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+    from rem_card.app.runtime_outage import write_runtime_outage_startup_request
+
+    root = os.path.join(temp_root, "er")
+    _write_emergency_startup_allow_marker(root)
+    write_runtime_outage_startup_request(root=root, source_role="nurse")
+    decision = prepare_emergency_startup("nurse", root=root)
+    if decision.allowed:
+        return False, "runtime outage without standby unexpectedly allowed emergency startup"
+    created = list(Path(root).rglob("rao_journal_emergency.db"))
+    if created:
+        return False, f"runtime outage created empty emergency DB: {created[:3]}"
+    return True, "ok"
+
+
+def _check_runtime_outage_no_json_fallback(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    files = ("app/runtime_outage.py", "services/data_service.py", "ui/main_window.py")
+    forbidden = ("settings.json", "user_overrides.json", "seed.json", "fallback_settings", "json fallback")
+    for relative in files:
+        text = (PROJECT_ROOT / relative).read_text(encoding="utf-8").lower()
+        for token in forbidden:
+            if token in text:
+                return False, f"runtime outage path contains JSON fallback token in {relative}: {token}"
+    return True, "ok"
+
+
+def _check_runtime_outage_shutdown_prevents_late_ui_callbacks(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+    called = []
+    try:
+        service.set_shutting_down()
+        service._dispatch_success_callback(lambda result: called.append(result), "late_success")
+        service._dispatch_error_callback(lambda exc: called.append(exc), RuntimeError("late_error"))
+        if called:
+            return False, f"late callbacks ran after shutdown: {called}"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_runtime_outage_no_merge_code(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    for relative in ("app/runtime_outage.py", "services/data_service.py", "ui/main_window.py"):
+        text = (PROJECT_ROOT / relative).read_text(encoding="utf-8").lower()
+        for token in ("merge_session", "merge_attempt", "merge dry", "dry-run", "dry_run", "remote replace", "replace remote", "restore probe"):
+            if token in text:
+                return False, f"runtime outage path contains merge/restore token in {relative}: {token}"
+    return True, "ok"
+
+
+def _check_runtime_outage_dialog_text_mentions_one_pc_nurse(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.runtime_outage import NURSE_RUNTIME_OUTAGE_MESSAGE
+
+    _ = temp_root
+    if "только на этом компьютере" not in NURSE_RUNTIME_OUTAGE_MESSAGE:
+        return False, "runtime outage nurse dialog must say work continues only on this PC"
+    if "Сообщите врачу" not in NURSE_RUNTIME_OUTAGE_MESSAGE:
+        return False, "runtime outage nurse dialog must instruct nurse to inform doctor"
+    return True, "ok"
+
+
+def _check_runtime_outage_emergency_startup_marker_expires(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.runtime_outage import (
+        validate_runtime_outage_startup_request_marker,
+        write_runtime_outage_startup_request,
+    )
+
+    marker_path, payload = write_runtime_outage_startup_request(root=temp_root, source_role="nurse")
+    validation = validate_runtime_outage_startup_request_marker(
+        marker_path,
+        now_epoch=float(payload["requested_at_epoch"]) + 3600,
+        ttl_sec=60,
+    )
+    if validation.ok or "expired" not in validation.reason:
+        return False, f"old marker was accepted: {validation}"
+    return True, "ok"
+
+
 def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_db_path, get_settings_dir, get_settings_lock_path
 
@@ -14281,6 +15287,61 @@ def main():
         ("emergency_standby_no_startup_activation_yet", _check_emergency_standby_no_startup_activation_yet),
         ("emergency_standby_no_sqlite_profile_changes", _check_emergency_standby_no_sqlite_profile_changes),
         ("emergency_standby_does_not_touch_doctor_nurse_business_logic", _check_emergency_standby_does_not_touch_doctor_nurse_business_logic),
+        ("emergency_standby_scheduler_only_enabled_for_nurse_network_mode", _check_emergency_standby_scheduler_only_enabled_for_nurse_network_mode),
+        ("emergency_standby_scheduler_not_started_for_doctor", _check_emergency_standby_scheduler_not_started_for_doctor),
+        ("emergency_standby_scheduler_requests_refresh_after_nurse_startup", _check_emergency_standby_scheduler_requests_refresh_after_nurse_startup),
+        ("emergency_standby_scheduler_requests_refresh_after_successful_write", _check_emergency_standby_scheduler_requests_refresh_after_successful_write),
+        ("emergency_standby_scheduler_does_not_refresh_when_write_queue_busy", _check_emergency_standby_scheduler_does_not_refresh_when_write_queue_busy),
+        ("emergency_standby_scheduler_does_not_refresh_when_foreground_busy", _check_emergency_standby_scheduler_does_not_refresh_when_foreground_busy),
+        ("emergency_standby_scheduler_coalesces_duplicate_requests", _check_emergency_standby_scheduler_coalesces_duplicate_requests),
+        ("emergency_standby_scheduler_uses_backoff_after_failure", _check_emergency_standby_scheduler_uses_backoff_after_failure),
+        ("emergency_standby_scheduler_preserves_old_valid_standby_on_failure", _check_emergency_standby_scheduler_preserves_old_valid_standby_on_failure),
+        ("emergency_standby_scheduler_no_blocking_ui", _check_emergency_standby_scheduler_no_blocking_ui),
+        ("emergency_standby_scheduler_no_emergency_startup_activation", _check_emergency_standby_scheduler_no_emergency_startup_activation),
+        ("emergency_standby_scheduler_no_recovery_on_unavailable", _check_emergency_standby_scheduler_no_recovery_on_unavailable),
+        ("emergency_standby_scheduler_no_sqlite_profile_changes", _check_emergency_standby_scheduler_no_sqlite_profile_changes),
+        ("emergency_standby_scheduler_no_direct_file_copy_live_db", _check_emergency_standby_scheduler_no_direct_file_copy_live_db),
+        ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
+        ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
+        ("emergency_startup_doctor_network_unavailable_shows_controlled_block", _check_emergency_startup_doctor_network_unavailable_shows_controlled_block),
+        ("emergency_startup_requires_authorized_workstation", _check_emergency_startup_requires_authorized_workstation),
+        ("emergency_startup_requires_valid_standby_pair", _check_emergency_startup_requires_valid_standby_pair),
+        ("emergency_startup_creates_active_session_from_standby", _check_emergency_startup_creates_active_session_from_standby),
+        ("emergency_startup_uses_emergency_runtime_context", _check_emergency_startup_uses_emergency_runtime_context),
+        ("emergency_startup_uses_readonly_settings_snapshot", _check_emergency_startup_uses_readonly_settings_snapshot),
+        ("emergency_startup_does_not_use_network_settings_db", _check_emergency_startup_does_not_use_network_settings_db),
+        ("emergency_startup_disables_standby_scheduler", _check_emergency_startup_disables_standby_scheduler),
+        ("emergency_startup_shows_banner", _check_emergency_startup_shows_banner),
+        ("emergency_startup_no_recovery_on_network_unavailable", _check_emergency_startup_no_recovery_on_network_unavailable),
+        ("emergency_startup_does_not_mask_corruption", _check_emergency_startup_does_not_mask_corruption),
+        ("emergency_startup_no_empty_db_creation", _check_emergency_startup_no_empty_db_creation),
+        ("emergency_startup_resume_active_session", _check_emergency_startup_resume_active_session),
+        ("emergency_startup_merged_session_not_resumed", _check_emergency_startup_merged_session_not_resumed),
+        ("emergency_startup_no_merge_code", _check_emergency_startup_no_merge_code),
+        ("emergency_startup_no_sqlite_profile_changes", _check_emergency_startup_no_sqlite_profile_changes),
+        ("emergency_startup_doctor_nurse_network_mode_unchanged", _check_emergency_startup_doctor_nurse_network_mode_unchanged),
+        ("emergency_startup_no_json_fallback", _check_emergency_startup_no_json_fallback),
+        ("emergency_banner_cannot_be_hidden_by_normal_refresh", _check_emergency_banner_cannot_be_hidden_by_normal_refresh),
+        ("runtime_outage_nurse_network_unavailable_requests_emergency_restart", _check_runtime_outage_nurse_network_unavailable_requests_emergency_restart),
+        ("runtime_outage_doctor_gets_block_message_no_emergency", _check_runtime_outage_doctor_gets_block_message_no_emergency),
+        ("runtime_outage_does_not_trigger_recovery", _check_runtime_outage_does_not_trigger_recovery),
+        ("runtime_outage_does_not_mask_corruption", _check_runtime_outage_does_not_mask_corruption),
+        ("runtime_outage_blocks_new_writes", _check_runtime_outage_blocks_new_writes),
+        ("runtime_outage_unconfirmed_write_not_marked_saved", _check_runtime_outage_unconfirmed_write_not_marked_saved),
+        ("runtime_outage_confirmed_commit_can_report_success", _check_runtime_outage_confirmed_commit_can_report_success),
+        ("runtime_outage_write_queue_shutdown_is_bounded", _check_runtime_outage_write_queue_shutdown_is_bounded),
+        ("runtime_outage_stops_standby_scheduler", _check_runtime_outage_stops_standby_scheduler),
+        ("runtime_outage_stops_data_update_monitor", _check_runtime_outage_stops_data_update_monitor),
+        ("runtime_outage_no_live_db_swap", _check_runtime_outage_no_live_db_swap),
+        ("runtime_outage_uses_startup_emergency_path", _check_runtime_outage_uses_startup_emergency_path),
+        ("runtime_outage_stale_standby_warning_recorded", _check_runtime_outage_stale_standby_warning_recorded),
+        ("runtime_outage_no_empty_db_creation", _check_runtime_outage_no_empty_db_creation),
+        ("runtime_outage_no_json_fallback", _check_runtime_outage_no_json_fallback),
+        ("runtime_outage_shutdown_prevents_late_ui_callbacks", _check_runtime_outage_shutdown_prevents_late_ui_callbacks),
+        ("runtime_outage_no_sqlite_profile_changes", _check_runtime_outage_no_sqlite_profile_changes),
+        ("runtime_outage_no_merge_code", _check_runtime_outage_no_merge_code),
+        ("runtime_outage_dialog_text_mentions_one_pc_nurse", _check_runtime_outage_dialog_text_mentions_one_pc_nurse),
+        ("runtime_outage_emergency_startup_marker_expires", _check_runtime_outage_emergency_startup_marker_expires),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),

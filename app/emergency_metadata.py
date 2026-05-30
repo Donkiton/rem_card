@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, fields
+from dataclasses import MISSING, asdict, dataclass, fields
 from typing import Any, TypeVar
 
 
@@ -52,6 +52,8 @@ class EmergencySessionMetadata:
     last_merge_error: str | None
     validation_status: str
     validation_error: str | None
+    stale_gap_detected: bool = False
+    outage_detected_at: str | None = None
 
     def __post_init__(self) -> None:
         _validate_status(self.status)
@@ -94,7 +96,17 @@ def _validate_status(status: str) -> None:
 def _coerce_dataclass(cls: type[T], payload: dict[str, Any]) -> T:
     allowed = {field.name for field in fields(cls)}
     filtered = {key: value for key, value in payload.items() if key in allowed}
-    missing = [field.name for field in fields(cls) if field.name not in filtered]
+    missing = []
+    for field in fields(cls):
+        if field.name in filtered:
+            continue
+        if field.default is not MISSING:
+            filtered[field.name] = field.default
+            continue
+        if field.default_factory is not MISSING:  # type: ignore[attr-defined]
+            filtered[field.name] = field.default_factory()  # type: ignore[misc]
+            continue
+        missing.append(field.name)
     if missing:
         raise EmergencyMetadataError(f"Metadata не содержит обязательные поля: {', '.join(missing)}")
     try:

@@ -2387,6 +2387,30 @@ def get_settings_service(
     return _DEFAULT_SERVICE
 
 
+def configure_settings_service(
+    context: DbRuntimeContext | None = None,
+    *,
+    runtime_context: DbRuntimeContext | None = None,
+    settings_db_path: str | None = None,
+    settings_db_lock_path: str | None = None,
+    settings_backups_dir: str | None = None,
+    settings_backup_health_dir: str | None = None,
+    readonly: bool | None = None,
+) -> SettingsService:
+    global _DEFAULT_SERVICE
+    reset_settings_database()
+    _DEFAULT_SERVICE = SettingsService(
+        context=context,
+        runtime_context=runtime_context,
+        settings_db_path=settings_db_path,
+        settings_db_lock_path=settings_db_lock_path,
+        settings_backups_dir=settings_backups_dir,
+        settings_backup_health_dir=settings_backup_health_dir,
+        readonly=readonly,
+    )
+    return _DEFAULT_SERVICE
+
+
 def reset_settings_service() -> None:
     global _DEFAULT_SERVICE
     _DEFAULT_SERVICE = None

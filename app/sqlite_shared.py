@@ -900,6 +900,17 @@ class LocalWriteQueue:
             active_count = int(self._active_count)
         return active_count <= 0 and self._queue.empty()
 
+    def pending_count(self) -> int:
+        return int(self._queue.qsize())
+
+    def active_count(self) -> int:
+        with self._active_lock:
+            return int(self._active_count)
+
+    def is_accepting(self) -> bool:
+        with self._accepting_lock:
+            return bool(self._accepting)
+
     def _worker(self):
         while True:
             task = self._queue.get()

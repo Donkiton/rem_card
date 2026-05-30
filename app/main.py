@@ -5,6 +5,7 @@ import os
 import socket
 import sys
 import time
+from functools import partial
 from typing import Callable, Optional
 
 from rem_card.app.runtime_paths import (
@@ -515,11 +516,205 @@ def _call_startup_message_callback(callback: Optional[Callable[[], None]]):
         pass
 
 
+def _call_startup_failure_callback(callback: Optional[Callable[[object], object]], failure: object) -> Optional[bool]:
+    if not callback:
+        return None
+    try:
+        outcome = callback(failure)
+    except Exception:
+        return None
+    if outcome is None:
+        return None
+    return bool(outcome)
+
+
+def _show_emergency_startup_offer(message: str) -> bool:
+    if os.environ.get("REMCARD_EMERGENCY_STARTUP_AUTO_ACCEPT") == "1":
+        return True
+    open_code = 1
+    close_code = 0
+    try:
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        result = CustomMessageBox.warning_with_actions(
+            None,
+            "Аварийный режим",
+            message,
+            [
+                ("Открыть аварийный режим", open_code),
+                ("Закрыть RemCard", close_code),
+            ],
+        )
+        return int(result) == open_code
+    except Exception:
+        try:
+            from PySide6.QtWidgets import QMessageBox
+
+            box = QMessageBox()
+            box.setWindowTitle("Аварийный режим")
+            box.setText(message)
+            open_button = box.addButton("Открыть аварийный режим", QMessageBox.AcceptRole)
+            box.addButton("Закрыть RemCard", QMessageBox.RejectRole)
+            box.exec()
+            return box.clickedButton() == open_button
+        except Exception:
+            return False
+
+
+def _try_emergency_startup_after_network_failure(
+    role: Optional[str],
+    failure: object,
+    *,
+    before_user_message: Optional[Callable[[], None]] = None,
+    emergency_startup_request: str | None = None,
+):
+    try:
+        from rem_card.app.emergency_startup import (
+            DOCTOR_NETWORK_UNAVAILABLE_MESSAGE,
+            classify_startup_failure,
+            prepare_emergency_startup,
+            record_emergency_startup_metric,
+            start_or_resume_emergency_session,
+        )
+        from rem_card.app.runtime_outage import (
+            startup_request_stale_warning,
+            validate_runtime_outage_startup_request_marker,
+        )
+    except Exception:
+        return None
+
+    classification = classify_startup_failure(failure)
+    if classification != "network_unavailable":
+        return None
+
+    record_emergency_startup_metric("emergency_startup_network_unavailable", role=role or "")
+    _call_startup_message_callback(before_user_message)
+
+    if role != "nurse":
+        record_emergency_startup_metric("emergency_startup_doctor_blocked", role=role or "")
+        _show_custom_warning("База данных недоступна", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)
+        return False
+
+    startup_request_payload = None
+    if emergency_startup_request:
+        validation = validate_runtime_outage_startup_request_marker(emergency_startup_request)
+        if not validation.ok:
+            record_emergency_startup_metric(
+                "emergency_startup_failed",
+                status="runtime_startup_request_invalid",
+                reason=validation.reason,
+            )
+            _show_custom_warning(
+                "Аварийный режим недоступен",
+                "Запрос аварийного запуска устарел или повреждён. Запустите RemCard заново с рабочего места медсестры.",
+            )
+            return False
+        startup_request_payload = validation.payload
+
+    decision = prepare_emergency_startup(role)
+    if not decision.allowed:
+        _show_custom_warning("Аварийный режим недоступен", decision.user_message)
+        return False
+
+    record_emergency_startup_metric("emergency_startup_offered", status=decision.status)
+    offer_message = decision.user_message
+    stale_warning = startup_request_stale_warning(startup_request_payload)
+    if stale_warning and stale_warning not in offer_message:
+        offer_message = f"{offer_message}\n\n{stale_warning}"
+    if not _show_emergency_startup_offer(offer_message):
+        record_emergency_startup_metric("emergency_startup_user_cancelled", status=decision.status)
+        return False
+
+    record_emergency_startup_metric("emergency_startup_user_accepted", status=decision.status)
+    try:
+        return start_or_resume_emergency_session(decision, startup_request=startup_request_payload)
+    except Exception as exc:
+        record_emergency_startup_metric("emergency_startup_failed", status="session_start_failed", reason=str(exc))
+        _show_custom_warning(
+            "Аварийный режим недоступен",
+            "Не удалось открыть аварийный режим на этом ПК. RemCard будет закрыт.",
+        )
+        return False
+
+
+def _handle_emergency_startup_guard_failure(
+    role: Optional[str],
+    failure: object,
+    *,
+    before_user_message: Optional[Callable[[], None]] = None,
+    emergency_startup_request: str | None = None,
+) -> tuple[Optional[bool], object | None]:
+    outcome = _try_emergency_startup_after_network_failure(
+        role,
+        failure,
+        before_user_message=before_user_message,
+        emergency_startup_request=emergency_startup_request,
+    )
+    if outcome is None:
+        return None, None
+    if outcome is False:
+        return False, None
+    return True, outcome.runtime_context
+
+
+def _compiled_startup_failure_handler(
+    failure: object,
+    *,
+    role: Optional[str],
+    before_user_message: Optional[Callable[[], None]],
+    state: dict,
+    emergency_startup_request: str | None = None,
+):
+    handled, runtime_context = _handle_emergency_startup_guard_failure(
+        role,
+        failure,
+        before_user_message=before_user_message,
+        emergency_startup_request=emergency_startup_request,
+    )
+    if runtime_context is not None:
+        state["runtime_context"] = runtime_context
+    return handled
+
+
+def _bootstrap_container_with_emergency_fallback(
+    bootstrap_func,
+    *,
+    role: Optional[str],
+    emergency_runtime_context,
+    before_user_message: Optional[Callable[[], None]] = None,
+    role_lock=None,
+    emergency_startup_request: str | None = None,
+):
+    if emergency_runtime_context is not None:
+        return bootstrap_func(role=role, runtime_context=emergency_runtime_context), emergency_runtime_context, role_lock
+    try:
+        return bootstrap_func(role=role), emergency_runtime_context, role_lock
+    except Exception as exc:
+        outcome = _try_emergency_startup_after_network_failure(
+            role,
+            exc,
+            before_user_message=before_user_message,
+            emergency_startup_request=emergency_startup_request,
+        )
+        if outcome is None:
+            raise
+        if outcome is False:
+            sys.exit(1)
+        if role_lock:
+            try:
+                role_lock.release()
+            except Exception:
+                pass
+            role_lock = None
+        return bootstrap_func(role=role, runtime_context=outcome.runtime_context), outcome.runtime_context, role_lock
+
+
 def _validate_compiled_role_startup(
     role: Optional[str],
     *,
     before_user_message: Optional[Callable[[], None]] = None,
     on_success: Optional[Callable[[object], None]] = None,
+    on_failure: Optional[Callable[[object], object]] = None,
 ) -> bool:
     if not is_compiled() or role not in ("doctor", "nurse"):
         return True
@@ -530,6 +725,9 @@ def _validate_compiled_role_startup(
         result = run_startup_db_guard(role=role)
     except Exception as exc:
         _write_startup_local_log(f"startup db guard crashed for role={role}: {exc}")
+        handled = _call_startup_failure_callback(on_failure, exc)
+        if handled is not None:
+            return handled
         _call_startup_message_callback(before_user_message)
         _show_custom_warning(
             "База данных недоступна",
@@ -555,6 +753,9 @@ def _validate_compiled_role_startup(
     _write_startup_local_log(
         f"startup blocked for role={role}: {result.user_message}; technical={result.technical_reason}"
     )
+    handled = _call_startup_failure_callback(on_failure, result)
+    if handled is not None:
+        return handled
     update_candidate = None
     if _startup_block_requires_update(result.user_message, result.technical_reason):
         update_candidate = _find_startup_update_candidate()
@@ -653,6 +854,20 @@ def _acquire_initial_role_lock(role: Optional[str]):
     return None
 
 
+def _acquire_role_lock_for_startup(
+    role: Optional[str],
+    emergency_runtime_context,
+    close_startup_splash: Callable[[], None],
+):
+    if role not in ("doctor", "nurse") or emergency_runtime_context is not None:
+        return None
+    role_lock = _acquire_initial_role_lock(role)
+    if role_lock is None:
+        close_startup_splash()
+        sys.exit(0)
+    return role_lock
+
+
 def _shutdown_window_resources(window, logger):
     if not window:
         return
@@ -705,6 +920,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     parser = argparse.ArgumentParser(description=APP_DISPLAY_TITLE)
     parser.add_argument("--role", choices=["doctor", "nurse"], help="Начальная роль пользователя")
     parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
+    parser.add_argument("--emergency-startup-request", default="", help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args()
     if forced_role:
         args.role = forced_role
@@ -725,13 +941,24 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         nonlocal splash
         splash = _close_startup_splash(app, splash)
 
+    emergency_startup_state = {"runtime_context": None}
+
     if not _validate_compiled_role_startup(
         args.role,
         before_user_message=close_startup_splash,
         on_success=_remember_startup_guard_quickcheck_ok,
+        on_failure=partial(
+            _compiled_startup_failure_handler,
+            role=args.role,
+            before_user_message=close_startup_splash,
+            state=emergency_startup_state,
+            emergency_startup_request=args.emergency_startup_request,
+        ),
     ):
         close_startup_splash()
         sys.exit(1)
+
+    emergency_runtime_context = emergency_startup_state.get("runtime_context")
 
     role_suffix = args.role if args.role else "default"
     server_name = f"rem_card_single_instance_server_{role_suffix}"
@@ -746,10 +973,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if BASE_DIR not in sys.path:
         sys.path.insert(0, BASE_DIR)
 
-    role_lock = _acquire_initial_role_lock(args.role)
-    if args.role in ("doctor", "nurse") and role_lock is None:
-        close_startup_splash()
-        sys.exit(0)
+    role_lock = _acquire_role_lock_for_startup(args.role, emergency_runtime_context, close_startup_splash)
 
     window = None
     logger = None
@@ -771,7 +995,14 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         container = None
         if args.role in ("doctor", "nurse"):
             bootstrap_started = time.perf_counter()
-            container = bootstrap()
+            container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
+                bootstrap,
+                role=args.role,
+                emergency_runtime_context=emergency_runtime_context,
+                before_user_message=close_startup_splash,
+                role_lock=role_lock,
+                emergency_startup_request=args.emergency_startup_request,
+            )
             bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
             _startup_trace(
                 logger,
@@ -798,7 +1029,14 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
         if container is None:
             bootstrap_started = time.perf_counter()
-            container = bootstrap()
+            container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
+                bootstrap,
+                role=args.role,
+                emergency_runtime_context=emergency_runtime_context,
+                before_user_message=close_startup_splash,
+                role_lock=role_lock,
+                emergency_startup_request=args.emergency_startup_request,
+            )
             bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
             window.container = container
             _startup_trace(
