@@ -12696,6 +12696,69 @@ def _check_emergency_password_not_written_to_ordinary_logs(temp_root: str) -> tu
     return True, "ok"
 
 
+def _check_emergency_dialogs_require_explicit_action(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog, EmergencyPasswordDialog
+
+    app = QApplication.instance() or QApplication([])
+    password_dialog = EmergencyPasswordDialog(
+        "Аварийный режим",
+        "Введите пароль врача.",
+        lambda value: value == "secret",
+    )
+    try:
+        password_dialog.show()
+        app.processEvents()
+        password_dialog.reject()
+        app.processEvents()
+        if not password_dialog.isVisible() or int(password_dialog.result()) != 0:
+            return False, "password dialog closed through reject()"
+        password_dialog.close()
+        app.processEvents()
+        if not password_dialog.isVisible() or int(password_dialog.result()) != 0:
+            return False, "password dialog closed through window close"
+        password_dialog.password_edit.setText("bad")
+        password_dialog.submit_password()
+        app.processEvents()
+        if not password_dialog.isVisible() or not password_dialog.error_label.isVisible():
+            return False, "bad password did not keep dialog open with visible error"
+        password_dialog.password_edit.setText("secret")
+        password_dialog.submit_password()
+        app.processEvents()
+        if int(password_dialog.result()) != QDialog.Accepted:
+            return False, "valid password did not accept dialog"
+    finally:
+        password_dialog.finish_with_code(QDialog.Rejected)
+        password_dialog.deleteLater()
+        app.processEvents()
+
+    action_dialog = EmergencyActionDialog(
+        "Восстановление сети",
+        "Выберите действие.",
+        [("Да, объединить", 10), ("Нет", 20), ("Без объединения", 30)],
+    )
+    try:
+        action_dialog.show()
+        app.processEvents()
+        action_dialog.reject()
+        action_dialog.close()
+        app.processEvents()
+        if not action_dialog.isVisible() or int(action_dialog.result()) != 0:
+            return False, "action dialog closed without explicit button"
+        action_dialog.finish_with_code(30)
+        app.processEvents()
+        if int(action_dialog.result()) != 30:
+            return False, "action dialog did not return explicit action code"
+    finally:
+        action_dialog.finish_with_code(QDialog.Rejected)
+        action_dialog.deleteLater()
+        app.processEvents()
+    return True, "ok"
+
+
 def _check_no_sqlite_safety_changes(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.sqlite_shared import _resolve_sqlite_profile_settings
 
@@ -16944,6 +17007,7 @@ def main():
         ("emergency_password_defaults_and_catalog", _check_emergency_password_defaults_and_catalog),
         ("emergency_password_readonly_snapshot", _check_emergency_password_readonly_snapshot),
         ("emergency_password_not_written_to_ordinary_logs", _check_emergency_password_not_written_to_ordinary_logs),
+        ("emergency_dialogs_require_explicit_action", _check_emergency_dialogs_require_explicit_action),
         ("no_sqlite_safety_changes", _check_no_sqlite_safety_changes),
         ("no_emergency_startup_enabled_yet", _check_no_emergency_startup_enabled_yet),
         ("emergency_store_root_is_programdata_by_default", _check_emergency_store_root_is_programdata_by_default),
