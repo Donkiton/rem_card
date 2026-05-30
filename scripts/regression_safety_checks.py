@@ -47,7 +47,7 @@ def _prepare_import_environment(temp_root: str):
     os.environ["LOCALAPPDATA"] = os.path.join(temp_root, "localappdata")
     os.environ["REMCARD_BAZA_DIR"] = os.path.join(temp_root, "Baza_rao3_jurnal")
     os.environ["REMCARD_LOCAL_LOGS_DIR"] = os.path.join(temp_root, "logs")
-    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "1"
+    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_SYNC_INTERVAL_SEC"] = "999"
     os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_CACHE_RETENTION_DAYS"] = "3"
@@ -662,6 +662,8 @@ def _check_transaction_isolation(temp_root: str) -> tuple[bool, str]:
 def _check_read_your_writes_inside_transaction(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.dao.db_manager import DatabaseManager
 
+    saved_local_first = os.environ.get("REMCARD_LOCAL_FIRST_SYNC")
+    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "1"
     db_path = os.path.join(temp_root, "read_your_writes.db")
     manager = DatabaseManager(db_path, db_path)
     try:
@@ -685,6 +687,10 @@ def _check_read_your_writes_inside_transaction(temp_root: str) -> tuple[bool, st
         return True, "ok"
     finally:
         manager.close()
+        if saved_local_first is None:
+            os.environ.pop("REMCARD_LOCAL_FIRST_SYNC", None)
+        else:
+            os.environ["REMCARD_LOCAL_FIRST_SYNC"] = saved_local_first
 
 
 def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bool, str]:
@@ -12578,6 +12584,118 @@ def _check_settings_service_context_reset_prevents_network_singleton_reuse(temp_
     return True, "ok"
 
 
+def _check_emergency_password_defaults_and_catalog(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_password import (
+        get_emergency_password,
+        set_emergency_password,
+        validate_emergency_password_value,
+        verify_emergency_password,
+    )
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import (
+        DEFAULT_EMERGENCY_PASSWORD,
+        EMERGENCY_PASSWORD_CATALOG_KEY,
+        EMERGENCY_PASSWORD_KEY,
+        SettingsService,
+    )
+
+    service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
+    service.ensure_ready()
+    if get_emergency_password(service) != DEFAULT_EMERGENCY_PASSWORD:
+        return False, "default emergency password was not readable from settings service"
+    with service.db.read_connection() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = ?",
+            (EMERGENCY_PASSWORD_KEY,),
+        ).fetchone()
+        version_row = conn.execute(
+            "SELECT version, content_hash FROM settings_catalog_versions WHERE catalog_key = ?",
+            (EMERGENCY_PASSWORD_CATALOG_KEY,),
+        ).fetchone()
+    if not row or json.loads(row["value_json"]) != DEFAULT_EMERGENCY_PASSWORD:
+        return False, "default emergency password was not persisted in app_settings"
+    if not version_row or int(version_row["version"] or 0) < 1 or not str(version_row["content_hash"] or ""):
+        return False, "emergency password catalog version/hash is missing"
+    if not verify_emergency_password(DEFAULT_EMERGENCY_PASSWORD, service):
+        return False, "default emergency password verification failed"
+    if verify_emergency_password("wrong-password", service):
+        return False, "wrong emergency password was accepted"
+
+    for bad_value in ("", "12345", None):
+        try:
+            validate_emergency_password_value(bad_value)
+        except ValueError:
+            pass
+        else:
+            return False, f"invalid emergency password was accepted: {bad_value!r}"
+
+    changed = set_emergency_password("new-safe-password", service, changed_by_user="regression")
+    if not changed.changed or changed.length != len("new-safe-password"):
+        return False, "emergency password change result is incorrect"
+    if not verify_emergency_password("new-safe-password", service):
+        return False, "changed emergency password verification failed"
+    with service.db.read_connection() as conn:
+        audit_row = conn.execute(
+            """
+            SELECT id FROM settings_audit_log
+            WHERE entity_type = 'app_settings'
+              AND entity_id = ?
+              AND operation = 'update'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (f"shared:{EMERGENCY_PASSWORD_KEY}",),
+        ).fetchone()
+        change_row = conn.execute(
+            """
+            SELECT id FROM settings_change_log
+            WHERE scope = ?
+              AND entity_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (EMERGENCY_PASSWORD_CATALOG_KEY, f"shared:{EMERGENCY_PASSWORD_KEY}"),
+        ).fetchone()
+    if not audit_row or not change_row:
+        return False, "emergency password change was not audited"
+    return True, "ok"
+
+
+def _check_emergency_password_readonly_snapshot(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_runtime_context import build_settings_snapshot_context
+    from rem_card.app.emergency_password import get_emergency_password, set_emergency_password
+    from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError
+    from rem_card.services.settings.settings_service import SettingsService
+
+    source_baza = os.path.join(temp_root, "source_baza")
+    source_service = SettingsService(SettingsDatabase(baza_dir=source_baza))
+    source_service.ensure_ready()
+    set_emergency_password("snapshot-password", source_service)
+
+    ctx = build_settings_snapshot_context(os.path.join(temp_root, "session"))
+    os.makedirs(os.path.dirname(ctx.settings_db_path), exist_ok=True)
+    shutil.copy2(source_service.db.db_path, ctx.settings_db_path)
+    snapshot_service = SettingsService(SettingsDatabase(context=ctx))
+    if get_emergency_password(snapshot_service, readonly=True) != "snapshot-password":
+        return False, "readonly settings snapshot did not expose emergency password"
+    try:
+        set_emergency_password("another-password", snapshot_service)
+    except SettingsDbError:
+        pass
+    else:
+        return False, "readonly settings snapshot allowed emergency password write"
+    return True, "ok"
+
+
+def _check_emergency_password_not_written_to_ordinary_logs(temp_root: str) -> tuple[bool, str]:
+    module_text = (PROJECT_ROOT / "app" / "emergency_password.py").read_text(encoding="utf-8")
+    forbidden_tokens = ("logger.", "record_metric", "traceback")
+    leaked = [token for token in forbidden_tokens if token in module_text]
+    if leaked:
+        return False, f"emergency password module writes ordinary logs/metrics: {leaked}"
+    return True, "ok"
+
+
 def _check_no_sqlite_safety_changes(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.sqlite_shared import _resolve_sqlite_profile_settings
 
@@ -16823,6 +16941,9 @@ def main():
         ("settings_database_network_default_unchanged", _check_settings_database_network_default_unchanged),
         ("settings_database_snapshot_readonly_rejects_writes", _check_settings_database_snapshot_readonly_rejects_writes),
         ("settings_service_context_reset_prevents_network_singleton_reuse", _check_settings_service_context_reset_prevents_network_singleton_reuse),
+        ("emergency_password_defaults_and_catalog", _check_emergency_password_defaults_and_catalog),
+        ("emergency_password_readonly_snapshot", _check_emergency_password_readonly_snapshot),
+        ("emergency_password_not_written_to_ordinary_logs", _check_emergency_password_not_written_to_ordinary_logs),
         ("no_sqlite_safety_changes", _check_no_sqlite_safety_changes),
         ("no_emergency_startup_enabled_yet", _check_no_emergency_startup_enabled_yet),
         ("emergency_store_root_is_programdata_by_default", _check_emergency_store_root_is_programdata_by_default),

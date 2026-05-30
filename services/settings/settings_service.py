@@ -32,6 +32,10 @@ PRINT_SETTINGS_KEY = "print_settings"
 DISPLAY_SETTINGS_KEY = "display_settings"
 BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
+EMERGENCY_PASSWORD_KEY = "emergency_password"
+EMERGENCY_PASSWORD_CATALOG_KEY = "emergency_password"
+DEFAULT_EMERGENCY_PASSWORD = "2u1x8dxgeD"
+MIN_EMERGENCY_PASSWORD_LENGTH = 6
 PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
 
@@ -100,6 +104,7 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     DISPLAY_SETTINGS_KEY: (("app_settings", "key"),),
     BACKGROUND_SETTINGS_KEY: (("ui_backgrounds", "background_key"), ("app_settings", "key")),
     STYLE_SETTINGS_KEY: (("app_settings", "key"),),
+    EMERGENCY_PASSWORD_CATALOG_KEY: (("app_settings", "key"),),
 }
 
 APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
@@ -108,6 +113,7 @@ APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
     DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns"),
     BACKGROUND_SETTINGS_KEY: ("background_settings",),
     STYLE_SETTINGS_KEY: ("style_settings",),
+    EMERGENCY_PASSWORD_CATALOG_KEY: (EMERGENCY_PASSWORD_KEY,),
 }
 
 PRESCRIPTION_DATASET_TABLES = {
@@ -383,6 +389,15 @@ class SettingsService:
                 catalog_key=DISPLAY_SETTINGS_KEY,
                 log_change=False,
             )
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                EMERGENCY_PASSWORD_KEY,
+                DEFAULT_EMERGENCY_PASSWORD,
+                changed_by_role="system",
+                catalog_key=EMERGENCY_PASSWORD_CATALOG_KEY,
+                log_change=False,
+            )
             for catalog_key in (
                 DRUG_CATALOG_KEY,
                 ORDER_TEMPLATES_KEY,
@@ -393,6 +408,7 @@ class SettingsService:
                 DISPLAY_SETTINGS_KEY,
                 BACKGROUND_SETTINGS_KEY,
                 STYLE_SETTINGS_KEY,
+                EMERGENCY_PASSWORD_CATALOG_KEY,
             ):
                 self._bump_catalog_version(
                     cursor,
