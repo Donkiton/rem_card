@@ -52,6 +52,15 @@ def _prepare_import_environment(temp_root: str):
     os.environ["REMCARD_LOCAL_CACHE_MAX_FILES"] = "200"
 
 
+def _path_is_under(path: str, root: str) -> bool:
+    try:
+        path_abs = os.path.normcase(os.path.abspath(path))
+        root_abs = os.path.normcase(os.path.abspath(root))
+        return os.path.commonpath([path_abs, root_abs]) == root_abs
+    except Exception:
+        return False
+
+
 def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool, str]:
     from rem_card.app import runtime_paths
 
@@ -12062,6 +12071,228 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
     return True, "ok"
 
 
+def _check_db_runtime_context_network_paths_match_existing_constants(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import paths as app_paths
+    from rem_card.app.db_runtime_context import build_network_runtime_context
+    from rem_card.app.settings_db_paths import get_settings_backup_dir, get_settings_db_path, get_settings_lock_path
+
+    ctx = build_network_runtime_context()
+    expected = {
+        "medical_db_path": app_paths.REMCARD_DB_PATH,
+        "medical_db_lock_path": app_paths.DB_LOCK_PATH,
+        "medical_backups_valid_dir": app_paths.BACKUPS_VALID_DIR,
+        "medical_backup_health_dir": app_paths.BACKUP_HEALTH_DIR,
+        "recovery_lock_path": app_paths.RECOVERY_LOCK_PATH,
+        "session_locks_dir": app_paths.ROLE_LOCKS_DIR,
+        "settings_db_path": get_settings_db_path(app_paths.BAZA_DIR),
+        "settings_db_lock_path": get_settings_lock_path(app_paths.BAZA_DIR),
+        "settings_backups_dir": get_settings_backup_dir(app_paths.BAZA_DIR),
+    }
+    for attr, expected_path in expected.items():
+        actual = os.path.abspath(getattr(ctx, attr))
+        if actual != os.path.abspath(expected_path):
+            return False, f"{attr} mismatch: {actual} != {expected_path}"
+    if not ctx.is_network or ctx.is_emergency or ctx.is_snapshot or ctx.settings_readonly:
+        return False, f"network context flags mismatch: {ctx}"
+    return True, "ok"
+
+
+def _check_db_runtime_context_emergency_paths_are_local(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import paths as app_paths
+    from rem_card.app.db_runtime_context import build_emergency_runtime_context, build_settings_snapshot_context
+
+    emergency_dir = os.path.join(temp_root, "emergency_session")
+    ctx = build_emergency_runtime_context(emergency_dir)
+    network_root = os.path.abspath(app_paths.BAZA_DIR)
+    local_paths = {
+        "medical_db_path": ctx.medical_db_path,
+        "medical_db_lock_path": ctx.medical_db_lock_path,
+        "medical_backups_valid_dir": ctx.medical_backups_valid_dir,
+        "medical_backup_health_dir": ctx.medical_backup_health_dir,
+        "settings_db_path": ctx.settings_db_path,
+        "settings_db_lock_path": ctx.settings_db_lock_path,
+        "session_locks_dir": ctx.session_locks_dir,
+        "recovery_lock_path": ctx.recovery_lock_path,
+    }
+    for attr, path in local_paths.items():
+        if not _path_is_under(path, emergency_dir):
+            return False, f"{attr} is not inside emergency dir: {path}"
+        if _path_is_under(path, network_root):
+            return False, f"{attr} points to network BAZA_DIR: {path}"
+    snapshot_ctx = build_settings_snapshot_context(emergency_dir)
+    if not snapshot_ctx.is_snapshot or not snapshot_ctx.settings_readonly:
+        return False, f"settings snapshot context flags mismatch: {snapshot_ctx}"
+    if snapshot_ctx.settings_db_path != ctx.settings_db_path:
+        return False, "settings snapshot path must match emergency settings snapshot path"
+    return True, "ok"
+
+
+def _check_database_manager_uses_context_lock_and_backup_dirs(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_runtime_context import build_emergency_runtime_context
+    from rem_card.data.dao import db_manager as dbm
+
+    ctx = build_emergency_runtime_context(os.path.join(temp_root, "emergency_session"))
+    patched = {
+        "_maybe_rotate_db_lifecycle": dbm.DatabaseManager._maybe_rotate_db_lifecycle,
+        "_measure_startup_phase": dbm.DatabaseManager._measure_startup_phase,
+        "_verify_quick_integrity_or_restore": dbm.DatabaseManager._verify_quick_integrity_or_restore,
+        "_ensure_cycle_meta_initialized": dbm.DatabaseManager._ensure_cycle_meta_initialized,
+        "_cleanup_local_cache_artifacts": dbm.DatabaseManager._cleanup_local_cache_artifacts,
+        "_start_outbox_replay": dbm.DatabaseManager._start_outbox_replay,
+        "_start_local_replica_sync": dbm.DatabaseManager._start_local_replica_sync,
+        "_start_integrity_monitor": dbm.DatabaseManager._start_integrity_monitor,
+        "_start_startup_quickcheck_updater": dbm.DatabaseManager._start_startup_quickcheck_updater,
+    }
+    try:
+        dbm.DatabaseManager._maybe_rotate_db_lifecycle = lambda self: None
+        dbm.DatabaseManager._measure_startup_phase = lambda self, name, func: None
+        dbm.DatabaseManager._verify_quick_integrity_or_restore = lambda self: None
+        dbm.DatabaseManager._ensure_cycle_meta_initialized = lambda self: None
+        dbm.DatabaseManager._cleanup_local_cache_artifacts = lambda self, force=False: None
+        dbm.DatabaseManager._start_outbox_replay = lambda self: None
+        dbm.DatabaseManager._start_local_replica_sync = lambda self: None
+        dbm.DatabaseManager._start_integrity_monitor = lambda self: None
+        dbm.DatabaseManager._start_startup_quickcheck_updater = lambda self: None
+        manager = dbm.DatabaseManager("ignored.db", "ignored.db", runtime_context=ctx)
+    finally:
+        for name, value in patched.items():
+            setattr(dbm.DatabaseManager, name, value)
+
+    checks = {
+        "db_path": (manager.db_path, ctx.medical_db_path),
+        "lock_path": (manager.write_controller.lock_path, ctx.medical_db_lock_path),
+        "backup_dir": (manager.medical_backups_valid_dir, ctx.medical_backups_valid_dir),
+        "backup_health": (manager.medical_backup_health_dir, ctx.medical_backup_health_dir),
+        "invalid_dir": (manager.medical_invalid_backups_dir, ctx.medical_invalid_backups_dir),
+    }
+    for label, (actual, expected) in checks.items():
+        if os.path.abspath(actual) != os.path.abspath(expected):
+            return False, f"{label} mismatch: {actual} != {expected}"
+    forbidden = {
+        os.path.abspath(dbm.DB_LOCK_PATH),
+        os.path.abspath(dbm.BACKUPS_VALID_DIR),
+        os.path.abspath(dbm.BACKUP_HEALTH_DIR),
+    }
+    for label, (actual, _expected) in checks.items():
+        if os.path.abspath(actual) in forbidden:
+            return False, f"{label} unexpectedly uses network path: {actual}"
+    return True, "ok"
+
+
+def _check_settings_database_network_default_unchanged(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.settings_db_paths import get_settings_backup_dir, get_settings_db_path, get_settings_lock_path
+    from rem_card.data.settings.settings_db import SettingsDatabase
+
+    db = SettingsDatabase()
+    if os.path.abspath(db.db_path) != os.path.abspath(get_settings_db_path()):
+        return False, f"default settings DB path changed: {db.db_path}"
+    if os.path.abspath(db.lock_path) != os.path.abspath(get_settings_lock_path()):
+        return False, f"default settings lock path changed: {db.lock_path}"
+    if os.path.abspath(db.backups_dir) != os.path.abspath(get_settings_backup_dir()):
+        return False, f"default settings backup dir changed: {db.backups_dir}"
+    if db.settings_readonly:
+        return False, "default settings DB must remain writable"
+    return True, "ok"
+
+
+def _check_settings_database_snapshot_readonly_rejects_writes(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_runtime_context import build_settings_snapshot_context
+    from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError
+    from rem_card.services.settings.settings_service import SettingsService
+
+    source_baza = os.path.join(temp_root, "network_baza")
+    source_service = SettingsService(SettingsDatabase(baza_dir=source_baza))
+    source_service.ensure_ready()
+
+    ctx = build_settings_snapshot_context(os.path.join(temp_root, "emergency_session"))
+    os.makedirs(os.path.dirname(ctx.settings_db_path), exist_ok=True)
+    shutil.copy2(source_service.db.db_path, ctx.settings_db_path)
+
+    snapshot_db = SettingsDatabase(context=ctx)
+    info = snapshot_db.ensure_ready()
+    if not info.get("settings_readonly") or not info.get("settings_local_db_used"):
+        return False, f"readonly snapshot ensure_ready returned unexpected info: {info}"
+    if not snapshot_db.settings_readonly:
+        return False, "snapshot DB is not marked readonly"
+    try:
+        snapshot_db.connect(readonly=False)
+    except SettingsDbError as exc:
+        if "только чтения" not in str(exc):
+            return False, f"unexpected readonly connect error: {exc}"
+    else:
+        return False, "readonly snapshot allowed writable connection"
+    try:
+        with snapshot_db.transaction("readonly_regression"):
+            pass
+    except SettingsDbError as exc:
+        if "только чтения" not in str(exc):
+            return False, f"unexpected readonly transaction error: {exc}"
+    else:
+        return False, "readonly snapshot allowed settings transaction"
+
+    missing_ctx = build_settings_snapshot_context(os.path.join(temp_root, "missing_snapshot"))
+    missing_db = SettingsDatabase(context=missing_ctx)
+    try:
+        missing_db.ensure_ready()
+    except SettingsDbError:
+        pass
+    else:
+        return False, "missing readonly snapshot unexpectedly initialized"
+    if os.path.exists(missing_ctx.settings_db_path):
+        return False, "missing readonly snapshot path was created"
+    return True, "ok"
+
+
+def _check_settings_service_context_reset_prevents_network_singleton_reuse(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_runtime_context import build_settings_snapshot_context
+    from rem_card.services.settings.settings_service import get_settings_service, reset_settings_service
+
+    reset_settings_service()
+    network_service = get_settings_service()
+    network_path = network_service.db.db_path
+    ctx = build_settings_snapshot_context(os.path.join(temp_root, "emergency_session"))
+    context_service = get_settings_service(context=ctx)
+    if context_service is network_service:
+        return False, "context settings service reused default network singleton"
+    if os.path.abspath(context_service.db.db_path) != os.path.abspath(ctx.settings_db_path):
+        return False, f"context service path mismatch: {context_service.db.db_path}"
+    reset_settings_service()
+    reset_network_service = get_settings_service()
+    if reset_network_service is network_service:
+        return False, "reset_settings_service did not clear default singleton"
+    if os.path.abspath(reset_network_service.db.db_path) != os.path.abspath(network_path):
+        return False, "default service path changed after reset"
+    reset_settings_service()
+    return True, "ok"
+
+
+def _check_no_sqlite_safety_changes(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import _resolve_sqlite_profile_settings
+
+    network_profile = _resolve_sqlite_profile_settings("network")
+    if network_profile.get("journal_mode") != "DELETE":
+        return False, f"network journal_mode changed: {network_profile}"
+    if network_profile.get("synchronous") != "EXTRA":
+        return False, f"network synchronous changed: {network_profile}"
+    if int(network_profile.get("mmap_mb") or 0) != 0:
+        return False, f"network mmap changed: {network_profile}"
+    return True, "ok"
+
+
+def _check_no_emergency_startup_enabled_yet(temp_root: str) -> tuple[bool, str]:
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    forbidden = (
+        "build_emergency_runtime_context",
+        "build_settings_snapshot_context",
+        "emergency_session_dir",
+    )
+    for token in forbidden:
+        if token in bootstrap_text or token in main_text:
+            return False, f"emergency startup token unexpectedly present: {token}"
+    return True, "ok"
+
+
 def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_db_path, get_settings_dir, get_settings_lock_path
 
@@ -13386,6 +13617,14 @@ def main():
         ("sync_coordinator_classifies_targeted_refresh", _check_sync_coordinator_classifies_targeted_refresh),
         ("orders_delta_expected_fallbacks_are_info", _check_orders_delta_expected_fallbacks_are_info),
         ("orders_balance_adapter_uses_local_state", _check_orders_balance_adapter_uses_local_state),
+        ("db_runtime_context_network_paths_match_existing_constants", _check_db_runtime_context_network_paths_match_existing_constants),
+        ("db_runtime_context_emergency_paths_are_local", _check_db_runtime_context_emergency_paths_are_local),
+        ("database_manager_uses_context_lock_and_backup_dirs", _check_database_manager_uses_context_lock_and_backup_dirs),
+        ("settings_database_network_default_unchanged", _check_settings_database_network_default_unchanged),
+        ("settings_database_snapshot_readonly_rejects_writes", _check_settings_database_snapshot_readonly_rejects_writes),
+        ("settings_service_context_reset_prevents_network_singleton_reuse", _check_settings_service_context_reset_prevents_network_singleton_reuse),
+        ("no_sqlite_safety_changes", _check_no_sqlite_safety_changes),
+        ("no_emergency_startup_enabled_yet", _check_no_emergency_startup_enabled_yet),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),

@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterator
 
+from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
 from rem_card.app.settings_db_paths import (
@@ -40,11 +41,53 @@ def _is_sqlite_busy_error(exc: sqlite3.OperationalError) -> bool:
 
 
 class SettingsDatabase:
-    def __init__(self, baza_dir: str | None = None):
-        self.baza_dir = baza_dir
-        self.settings_dir = get_settings_dir(baza_dir)
-        self.db_path = get_settings_db_path(baza_dir)
-        self.lock_path = get_settings_lock_path(baza_dir)
+    def __init__(
+        self,
+        baza_dir: str | None = None,
+        *,
+        context: DbRuntimeContext | None = None,
+        runtime_context: DbRuntimeContext | None = None,
+        settings_db_path: str | None = None,
+        settings_db_lock_path: str | None = None,
+        settings_backups_dir: str | None = None,
+        settings_backup_health_dir: str | None = None,
+        readonly: bool | None = None,
+    ):
+        effective_context = context or runtime_context
+        if effective_context is not None:
+            self.baza_dir = effective_context.baza_dir
+            self.db_path = os.path.abspath(os.path.normpath(settings_db_path or effective_context.settings_db_path))
+            self.lock_path = os.path.abspath(os.path.normpath(settings_db_lock_path or effective_context.settings_db_lock_path))
+            self.backups_dir = os.path.abspath(os.path.normpath(settings_backups_dir or effective_context.settings_backups_dir))
+            self.backup_health_dir = os.path.abspath(
+                os.path.normpath(settings_backup_health_dir or effective_context.settings_backup_health_dir)
+            )
+            self.settings_readonly = bool(effective_context.settings_readonly if readonly is None else readonly)
+        else:
+            self.baza_dir = baza_dir
+            self.db_path = os.path.abspath(os.path.normpath(settings_db_path or get_settings_db_path(baza_dir)))
+            default_settings_dir = os.path.dirname(self.db_path) if settings_db_path else get_settings_dir(baza_dir)
+            default_lock_path = (
+                os.path.join(default_settings_dir, "settings.db.lock")
+                if settings_db_path
+                else get_settings_lock_path(baza_dir)
+            )
+            default_backups_dir = (
+                os.path.join(default_settings_dir, "backups")
+                if settings_db_path
+                else get_settings_backup_dir(baza_dir)
+            )
+            self.lock_path = os.path.abspath(
+                os.path.normpath(settings_db_lock_path or default_lock_path)
+            )
+            self.backups_dir = os.path.abspath(
+                os.path.normpath(settings_backups_dir or default_backups_dir)
+            )
+            self.backup_health_dir = os.path.abspath(
+                os.path.normpath(settings_backup_health_dir or os.path.join(default_settings_dir, "backup_health"))
+            )
+            self.settings_readonly = bool(readonly)
+        self.settings_dir = os.path.abspath(os.path.normpath(os.path.dirname(self.db_path)))
         owner_id = f"{socket.gethostname()}:{os.getpid()}:settings_db"
         self.write_controller = SQLiteWriteController(
             db_path=self.db_path,
@@ -57,6 +100,9 @@ class SettingsDatabase:
         )
 
     def ensure_ready(self) -> dict[str, object]:
+        if self.settings_readonly:
+            return self._ensure_readonly_ready()
+
         started = time.perf_counter()
         created = False
         try:
@@ -238,7 +284,55 @@ class SettingsDatabase:
         finally:
             conn.close()
 
+    def _ensure_readonly_ready(self) -> dict[str, object]:
+        started = time.perf_counter()
+        if not os.path.exists(self.db_path):
+            raise SettingsDbError(f"Readonly settings DB snapshot отсутствует: {self.db_path}")
+        conn = None
+        try:
+            conn = self.connect(readonly=True)
+            ok, reason = run_quick_check(conn)
+            if not ok:
+                raise SettingsDbError(f"settings DB quick_check failed: {reason}")
+            schema_status = settings_schema.inspect_schema_status(conn)
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_busy_error(exc):
+                raise SettingsDbError(
+                    "БД настроек временно занята другим рабочим местом. Повторите действие позже."
+                ) from exc
+            raise
+        finally:
+            if conn is not None:
+                conn.close()
+        if schema_status.schema_version > settings_schema.SCHEMA_VERSION:
+            raise SettingsDbError(
+                "Версия БД настроек новее текущей программы. Обновите программу."
+            )
+        if not schema_status.fastpath_ready:
+            raise SettingsDbError(
+                f"Readonly settings DB snapshot не готов к запуску: {schema_status.reason}"
+            )
+        logger.info(
+            "settings_db_path=%s settings_db_created=false settings_schema_version=%s "
+            "settings_profile=network_safe settings_local_db_used=true "
+            "settings_schema_fastpath_used=true settings_readonly=true",
+            self.db_path,
+            schema_status.schema_version,
+        )
+        return {
+            "settings_db_path": self.db_path,
+            "settings_db_created": False,
+            "settings_schema_version": schema_status.schema_version,
+            "settings_profile": "network_safe",
+            "settings_local_db_used": True,
+            "settings_schema_fastpath_used": True,
+            "settings_readonly": True,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 3),
+        }
+
     def connect(self, *, readonly: bool = False) -> sqlite3.Connection:
+        if self.settings_readonly and not readonly:
+            raise SettingsDbError("БД настроек открыта в режиме только чтения. Изменения запрещены.")
         if readonly:
             uri = f"file:{self.db_path}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
@@ -268,6 +362,8 @@ class SettingsDatabase:
 
     @contextmanager
     def transaction(self, source: str = "settings_write") -> Iterator[sqlite3.Cursor]:
+        if self.settings_readonly:
+            raise SettingsDbError("БД настроек открыта в режиме только чтения. Изменения запрещены.")
         started = time.perf_counter()
         status = "error"
         conn = self.connect(readonly=False)
@@ -298,8 +394,7 @@ class SettingsDatabase:
 
     def _backup_before_migration(self, conn: sqlite3.Connection) -> None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = get_settings_backup_dir(self.baza_dir)
-        backup_path = os.path.join(backup_dir, f"settings_migration_{stamp}.db")
+        backup_path = os.path.join(self.backups_dir, f"settings_migration_{stamp}.db")
         backup_connection(
             conn,
             backup_path,
@@ -313,7 +408,7 @@ class SettingsDatabase:
 
     def _backup_before_write(self, conn: sqlite3.Connection, source: str) -> None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        backup_dir = get_settings_backup_dir(self.baza_dir)
+        backup_dir = self.backups_dir
         backup_path = os.path.join(backup_dir, f"settings_pre_{stamp}.db")
         backup_connection(
             conn,
@@ -329,8 +424,40 @@ class SettingsDatabase:
 _DEFAULT_DB: SettingsDatabase | None = None
 
 
-def get_settings_database() -> SettingsDatabase:
+def get_settings_database(
+    context: DbRuntimeContext | None = None,
+    *,
+    runtime_context: DbRuntimeContext | None = None,
+    settings_db_path: str | None = None,
+    settings_db_lock_path: str | None = None,
+    settings_backups_dir: str | None = None,
+    settings_backup_health_dir: str | None = None,
+    readonly: bool | None = None,
+) -> SettingsDatabase:
     global _DEFAULT_DB
+    if (
+        context is not None
+        or runtime_context is not None
+        or settings_db_path is not None
+        or settings_db_lock_path is not None
+        or settings_backups_dir is not None
+        or settings_backup_health_dir is not None
+        or readonly is not None
+    ):
+        return SettingsDatabase(
+            context=context,
+            runtime_context=runtime_context,
+            settings_db_path=settings_db_path,
+            settings_db_lock_path=settings_db_lock_path,
+            settings_backups_dir=settings_backups_dir,
+            settings_backup_health_dir=settings_backup_health_dir,
+            readonly=readonly,
+        )
     if _DEFAULT_DB is None:
         _DEFAULT_DB = SettingsDatabase()
     return _DEFAULT_DB
+
+
+def reset_settings_database() -> None:
+    global _DEFAULT_DB
+    _DEFAULT_DB = None

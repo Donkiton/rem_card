@@ -6,11 +6,13 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY, maybe_rotate_database_if_due
+from rem_card.app.db_runtime_context import DbRuntimeContext, build_network_runtime_context
 from rem_card.app.durable_sql_outbox import (
     DeferredWriteCursor,
     DurableSqlOutbox,
@@ -28,18 +30,9 @@ from rem_card.app.logger import logger
 from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import (
-    BAZA_DIR,
-    BACKUP_HEALTH_DIR,
-    BACKUPS_RC_DIR,
-    BACKUPS_VALID_DIR,
-    CLIENT_POLICY_PATH,
-    DB_LOCK_PATH,
-    DB_ROTATION_LOCK_PATH,
-    INVALID_BACKUPS_DIR,
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
     LOCAL_REMCARD_REPLICA_PATH,
-    QUARANTINE_DIR,
 )
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
 from rem_card.app.startup_db_guard import (
@@ -65,6 +58,17 @@ from rem_card.app.sqlite_shared import (
 )
 from rem_card.app.version import APP_VERSION
 
+
+_NETWORK_RUNTIME_CONTEXT = build_network_runtime_context()
+BAZA_DIR = _NETWORK_RUNTIME_CONTEXT.baza_dir
+BACKUP_HEALTH_DIR = _NETWORK_RUNTIME_CONTEXT.medical_backup_health_dir
+BACKUPS_RC_DIR = _NETWORK_RUNTIME_CONTEXT.medical_backups_root_dir
+BACKUPS_VALID_DIR = _NETWORK_RUNTIME_CONTEXT.medical_backups_valid_dir
+CLIENT_POLICY_PATH = _NETWORK_RUNTIME_CONTEXT.medical_client_policy_path
+DB_LOCK_PATH = _NETWORK_RUNTIME_CONTEXT.medical_db_lock_path
+DB_ROTATION_LOCK_PATH = _NETWORK_RUNTIME_CONTEXT.medical_db_rotation_lock_path
+INVALID_BACKUPS_DIR = _NETWORK_RUNTIME_CONTEXT.medical_invalid_backups_dir
+QUARANTINE_DIR = _NETWORK_RUNTIME_CONTEXT.medical_quarantine_dir
 
 GLOBAL_CHANGELOG_ENTITIES = ("patients", "admissions", "beds", "operations", "diet_templates")
 RUNTIME_BACKUP_PREFIXES = ("startup_", "periodic_", "backup_", "shutdown_")
@@ -194,10 +198,26 @@ def _is_local_cache_path_writable(db_path: str) -> bool:
 
 
 class DatabaseManager:
-    def __init__(self, journal_db_path, remcard_db_path):
-        self.journal_db_path = journal_db_path
-        self.remcard_db_path = remcard_db_path or journal_db_path
-        self.db_path = self.remcard_db_path
+    def __init__(
+        self,
+        journal_db_path,
+        remcard_db_path=None,
+        runtime_context: DbRuntimeContext | None = None,
+    ):
+        self.runtime_context = self._resolve_runtime_context(journal_db_path, remcard_db_path, runtime_context)
+        self.journal_db_path = self.runtime_context.medical_db_path
+        self.remcard_db_path = self.runtime_context.medical_db_path
+        self.db_path = self.runtime_context.medical_db_path
+        self.medical_db_lock_path = self.runtime_context.medical_db_lock_path
+        self.medical_backups_valid_dir = self.runtime_context.medical_backups_valid_dir
+        self.medical_backups_root_dir = self.runtime_context.medical_backups_root_dir
+        self.medical_backup_health_dir = self.runtime_context.medical_backup_health_dir
+        self.medical_invalid_backups_dir = self.runtime_context.medical_invalid_backups_dir
+        self.medical_quarantine_dir = self.runtime_context.medical_quarantine_dir
+        self.medical_db_rotation_lock_path = self.runtime_context.medical_db_rotation_lock_path
+        self.medical_client_policy_path = self.runtime_context.medical_client_policy_path
+        self.medical_startup_quickcheck_state_path = self.runtime_context.medical_startup_quickcheck_state_path
+        self.baza_dir = self.runtime_context.baza_dir
         self._periodic_backup_interval_sec = PERIODIC_BACKUP_INTERVAL_SEC
         self._last_backup_ts = time.time()
         self._integrity_stop_evt = threading.Event()
@@ -249,7 +269,7 @@ class DatabaseManager:
         owner_id = f"{socket.gethostname()}:{os.getpid()}:rem_card"
         self.write_controller = SQLiteWriteController(
             db_path=self.db_path,
-            lock_path=DB_LOCK_PATH,
+            lock_path=self.medical_db_lock_path,
             owner_id=owner_id,
             logger=logger,
         )
@@ -269,6 +289,21 @@ class DatabaseManager:
         self._start_startup_quickcheck_updater()
         if CHANGELOG_LIVE_TRIM_ON_STARTUP:
             self._maybe_trim_change_log_live(force=True)
+
+    @staticmethod
+    def _resolve_runtime_context(
+        journal_db_path,
+        remcard_db_path=None,
+        runtime_context: DbRuntimeContext | None = None,
+    ) -> DbRuntimeContext:
+        if runtime_context is not None:
+            return runtime_context
+        context = build_network_runtime_context()
+        requested_db_path = remcard_db_path or journal_db_path or context.medical_db_path
+        requested_db_path = os.path.abspath(os.path.normpath(str(requested_db_path)))
+        if os.path.normcase(requested_db_path) == os.path.normcase(context.medical_db_path):
+            return context
+        return replace(context, medical_db_path=requested_db_path)
 
     def _record_startup_metric(self, name: str, value_ms: float):
         try:
@@ -385,8 +420,8 @@ class DatabaseManager:
         result = maybe_rotate_database_if_due(
             db_path=self.db_path,
             archive_dir=os.path.dirname(self.db_path),
-            rotation_lock_path=DB_ROTATION_LOCK_PATH,
-            db_lock_path=DB_LOCK_PATH,
+            rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
+            db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
             logger=logger,
             max_age_days=180,
         )
@@ -401,7 +436,11 @@ class DatabaseManager:
     def _init_connections(self):
         logger.info("Initializing unified DB connection at %s", self.db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        profile_lock = FileWriteLock(DB_LOCK_PATH, stale_timeout_sec=10 * 60, logger=logger)
+        profile_lock = FileWriteLock(
+            getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
+            stale_timeout_sec=10 * 60,
+            logger=logger,
+        )
         owner_id = f"{socket.gethostname()}:{os.getpid()}:remcard_init"
         self._acquire_connection_profile_lock(profile_lock, owner_id)
         try:
@@ -719,13 +758,14 @@ class DatabaseManager:
 
     def _startup_failure_marker_mtime_ns(self) -> int:
         return max(
-            self._latest_mtime_ns_under(INVALID_BACKUPS_DIR),
-            self._latest_mtime_ns_under(QUARANTINE_DIR),
+            self._latest_mtime_ns_under(getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR)),
+            self._latest_mtime_ns_under(getattr(self, "medical_quarantine_dir", QUARANTINE_DIR)),
         )
 
     def _read_startup_quickcheck_state(self) -> Optional[dict[str, Any]]:
+        state_path = getattr(self, "medical_startup_quickcheck_state_path", STARTUP_QUICKCHECK_STATE_PATH)
         try:
-            with open(STARTUP_QUICKCHECK_STATE_PATH, "r", encoding="utf-8") as fh:
+            with open(state_path, "r", encoding="utf-8") as fh:
                 payload = json.load(fh)
         except FileNotFoundError:
             return None
@@ -738,6 +778,7 @@ class DatabaseManager:
         fingerprint = self._startup_quickcheck_fingerprint(prefer_pre_connect=False)
         if not fingerprint:
             return
+        state_path = getattr(self, "medical_startup_quickcheck_state_path", STARTUP_QUICKCHECK_STATE_PATH)
         payload = {
             **fingerprint,
             "checked_at_epoch": int(checked_at_epoch),
@@ -746,14 +787,14 @@ class DatabaseManager:
             "failure_marker_mtime_ns": self._startup_failure_marker_mtime_ns(),
         }
         try:
-            os.makedirs(os.path.dirname(STARTUP_QUICKCHECK_STATE_PATH), exist_ok=True)
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
             temp_path = (
-                f"{STARTUP_QUICKCHECK_STATE_PATH}.tmp_"
+                f"{state_path}.tmp_"
                 f"{os.getpid()}_{threading.get_ident()}_{int(time.time() * 1000)}"
             )
             with open(temp_path, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
-            os.replace(temp_path, STARTUP_QUICKCHECK_STATE_PATH)
+            os.replace(temp_path, state_path)
         except Exception as exc:
             logger.debug("Failed to write startup quick_check state: %s", exc)
 
@@ -869,7 +910,7 @@ class DatabaseManager:
         logger.error("SQLite quick_check failed for %s: %s", self.db_path, result)
         self._close_connections_for_restore()
         recovery_result = recover_shared_db_with_locks(
-            baza_dir=BAZA_DIR,
+            baza_dir=getattr(self, "baza_dir", BAZA_DIR),
             db_path=self.db_path,
             role=None,
             failure_reason=f"startup quick_check failed: {result}",
@@ -902,11 +943,11 @@ class DatabaseManager:
         ensure_unified_schema_with_migration_backup(
             self._remcard_conn,
             db_path=self.db_path,
-            backup_dir=BACKUPS_VALID_DIR,
-            invalid_dir=INVALID_BACKUPS_DIR,
-            policy_path=CLIENT_POLICY_PATH,
+            backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
+            invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
+            policy_path=getattr(self, "medical_client_policy_path", CLIENT_POLICY_PATH),
             role=None,
-            baza_dir=BAZA_DIR,
+            baza_dir=getattr(self, "baza_dir", BAZA_DIR),
             logger=logger,
             controller=self.write_controller,
             source="schema_init",
@@ -1652,7 +1693,7 @@ class DatabaseManager:
                 logger.info("Background integrity_check passed for %s", self.db_path)
                 return
 
-            latest_backup = find_latest_backup(BACKUPS_RC_DIR)
+            latest_backup = find_latest_backup(getattr(self, "medical_backups_root_dir", BACKUPS_RC_DIR))
             logger.critical(
                 "Background integrity_check failed for %s: %s. Latest backup: %s",
                 self.db_path,
@@ -1672,19 +1713,22 @@ class DatabaseManager:
         if not self._remcard_conn:
             return None
 
-        os.makedirs(BACKUPS_VALID_DIR, exist_ok=True)
+        backup_dir = getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR)
+        invalid_dir = getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR)
+        lock_path = getattr(self, "medical_db_lock_path", DB_LOCK_PATH)
+        os.makedirs(backup_dir, exist_ok=True)
         db_name = os.path.splitext(os.path.basename(self.db_path))[0]
         backup_name = f"{prefix}_{db_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        backup_path = os.path.join(BACKUPS_VALID_DIR, backup_name)
+        backup_path = os.path.join(backup_dir, backup_name)
         try:
             with self._central_io_lock:
                 with self.write_controller.connection_guard(self._remcard_conn):
                     backup_connection(
                         self._remcard_conn,
                         backup_path,
-                        invalid_dir=INVALID_BACKUPS_DIR,
+                        invalid_dir=invalid_dir,
                         logger=logger,
-                        lock_path=DB_LOCK_PATH,
+                        lock_path=lock_path,
                         source=f"{prefix}_backup",
                     )
             self._rotate_backups()
@@ -1793,19 +1837,17 @@ class DatabaseManager:
             except Exception as exc:
                 logger.warning("Failed to remove old backup %s: %s", old_file, exc)
 
-    @staticmethod
-    def _find_latest_runtime_backup_by_prefix(prefix: str) -> Optional[str]:
-        candidates = list_backup_candidates(BACKUPS_RC_DIR, prefix=prefix)
+    def _find_latest_runtime_backup_by_prefix(self, prefix: str) -> Optional[str]:
+        candidates = list_backup_candidates(getattr(self, "medical_backups_root_dir", BACKUPS_RC_DIR), prefix=prefix)
         if not candidates:
             return None
         candidates.sort(key=os.path.getmtime, reverse=True)
         return candidates[0]
 
-    @staticmethod
-    def _list_runtime_backups() -> list[str]:
+    def _list_runtime_backups(self) -> list[str]:
         return [
             path
-            for path in list_backup_candidates(BACKUPS_RC_DIR)
+            for path in list_backup_candidates(getattr(self, "medical_backups_root_dir", BACKUPS_RC_DIR))
             if os.path.basename(path).startswith(RUNTIME_BACKUP_PREFIXES)
         ]
 

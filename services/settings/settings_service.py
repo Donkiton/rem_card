@@ -12,12 +12,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
+from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import run_integrity_check, run_quick_check
 from rem_card.data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabMaterial
 from rem_card.data.dto.remcard_dto import DietTemplateDTO
-from rem_card.data.settings.settings_db import SettingsDatabase, get_settings_database
+from rem_card.data.settings.settings_db import SettingsDatabase, get_settings_database, reset_settings_database
 from rem_card.data.settings.settings_schema import SEED_IMPORT_VERSION, now_text
 from rem_card.services.shift_service import ShiftService
 
@@ -284,8 +285,27 @@ def _normalize_diet_schedule(schedule: Any) -> str:
 
 
 class SettingsService:
-    def __init__(self, db: SettingsDatabase | None = None):
-        self.db = db or get_settings_database()
+    def __init__(
+        self,
+        db: SettingsDatabase | None = None,
+        *,
+        context: DbRuntimeContext | None = None,
+        runtime_context: DbRuntimeContext | None = None,
+        settings_db_path: str | None = None,
+        settings_db_lock_path: str | None = None,
+        settings_backups_dir: str | None = None,
+        settings_backup_health_dir: str | None = None,
+        readonly: bool | None = None,
+    ):
+        self.db = db or get_settings_database(
+            context=context,
+            runtime_context=runtime_context,
+            settings_db_path=settings_db_path,
+            settings_db_lock_path=settings_db_lock_path,
+            settings_backups_dir=settings_backups_dir,
+            settings_backup_health_dir=settings_backup_health_dir,
+            readonly=readonly,
+        )
         self._ready_lock = threading.RLock()
         self._ready = False
         self._ready_info: dict[str, Any] = {}
@@ -299,6 +319,10 @@ class SettingsService:
             if self._ready:
                 return dict(self._ready_info)
             info = self.db.ensure_ready()
+            if self.db.settings_readonly:
+                self._ready = True
+                self._ready_info = dict(info)
+                return dict(info)
             self._ensure_legacy_import()
             release_report = self._apply_bundled_release_snapshot_if_needed()
             if release_report:
@@ -2329,8 +2353,41 @@ class SettingsService:
 _DEFAULT_SERVICE: SettingsService | None = None
 
 
-def get_settings_service() -> SettingsService:
+def get_settings_service(
+    context: DbRuntimeContext | None = None,
+    *,
+    runtime_context: DbRuntimeContext | None = None,
+    settings_db_path: str | None = None,
+    settings_db_lock_path: str | None = None,
+    settings_backups_dir: str | None = None,
+    settings_backup_health_dir: str | None = None,
+    readonly: bool | None = None,
+) -> SettingsService:
     global _DEFAULT_SERVICE
+    if (
+        context is not None
+        or runtime_context is not None
+        or settings_db_path is not None
+        or settings_db_lock_path is not None
+        or settings_backups_dir is not None
+        or settings_backup_health_dir is not None
+        or readonly is not None
+    ):
+        return SettingsService(
+            context=context,
+            runtime_context=runtime_context,
+            settings_db_path=settings_db_path,
+            settings_db_lock_path=settings_db_lock_path,
+            settings_backups_dir=settings_backups_dir,
+            settings_backup_health_dir=settings_backup_health_dir,
+            readonly=readonly,
+        )
     if _DEFAULT_SERVICE is None:
         _DEFAULT_SERVICE = SettingsService()
     return _DEFAULT_SERVICE
+
+
+def reset_settings_service() -> None:
+    global _DEFAULT_SERVICE
+    _DEFAULT_SERVICE = None
+    reset_settings_database()
