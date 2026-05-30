@@ -304,6 +304,42 @@ def _show_custom_warning(title: str, message: str):
         _show_native_warning(title, message)
 
 
+def _show_startup_warning_without_settings(title: str, message: str):
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.warning(None, title, message)
+    except Exception:
+        _show_native_warning(title, message)
+
+
+def _show_startup_action_without_settings(
+    title: str,
+    message: str,
+    actions: list[tuple[str, int]],
+    *,
+    default_code: int = 0,
+) -> int:
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        QApplication.instance() or QApplication(sys.argv)
+        box = QMessageBox()
+        box.setWindowTitle(title)
+        box.setText(message)
+        button_codes = {}
+        for index, (button_text, result_code) in enumerate(actions):
+            role = QMessageBox.AcceptRole if index == 0 else QMessageBox.RejectRole
+            button = box.addButton(str(button_text), role)
+            button_codes[button] = int(result_code)
+        box.exec()
+        return int(button_codes.get(box.clickedButton(), default_code))
+    except Exception:
+        _show_native_warning(title, message)
+        return int(default_code)
+
+
 def _show_custom_info(title: str, message: str):
     try:
         from PySide6.QtWidgets import QApplication
@@ -344,7 +380,7 @@ def _show_update_in_progress_if_needed() -> bool:
         payload = _active_update_lock_payload_for_startup()
         if not payload:
             return False
-        _show_custom_warning("Обновление программы", _describe_startup_update_lock(payload))
+        _show_startup_warning_without_settings("Обновление программы", _describe_startup_update_lock(payload))
         return True
     except Exception:
         return False
@@ -533,32 +569,28 @@ def _show_emergency_startup_offer(message: str) -> bool:
         return True
     open_code = 1
     close_code = 0
+    result = _show_startup_action_without_settings(
+        "Аварийный режим",
+        message,
+        [
+            ("Открыть аварийный режим", open_code),
+            ("Закрыть RemCard", close_code),
+        ],
+        default_code=close_code,
+    )
+    return int(result) == open_code
+
+
+def _configure_emergency_settings_for_startup(runtime_context) -> None:
     try:
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from rem_card.services.settings.settings_service import configure_settings_service
 
-        result = CustomMessageBox.warning_with_actions(
-            None,
-            "Аварийный режим",
-            message,
-            [
-                ("Открыть аварийный режим", open_code),
-                ("Закрыть RemCard", close_code),
-            ],
+        configure_settings_service(
+            runtime_context=runtime_context,
+            readonly=bool(getattr(runtime_context, "settings_readonly", True)),
         )
-        return int(result) == open_code
     except Exception:
-        try:
-            from PySide6.QtWidgets import QMessageBox
-
-            box = QMessageBox()
-            box.setWindowTitle("Аварийный режим")
-            box.setText(message)
-            open_button = box.addButton("Открыть аварийный режим", QMessageBox.AcceptRole)
-            box.addButton("Закрыть RemCard", QMessageBox.RejectRole)
-            box.exec()
-            return box.clickedButton() == open_button
-        except Exception:
-            return False
+        pass
 
 
 def _try_emergency_startup_after_network_failure(
@@ -592,7 +624,7 @@ def _try_emergency_startup_after_network_failure(
 
     if role != "nurse":
         record_emergency_startup_metric("emergency_startup_doctor_blocked", role=role or "")
-        _show_custom_warning("База данных недоступна", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)
+        _show_startup_warning_without_settings("База данных недоступна", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)
         return False
 
     startup_request_payload = None
@@ -604,7 +636,7 @@ def _try_emergency_startup_after_network_failure(
                 status="runtime_startup_request_invalid",
                 reason=validation.reason,
             )
-            _show_custom_warning(
+            _show_startup_warning_without_settings(
                 "Аварийный режим недоступен",
                 "Запрос аварийного запуска устарел или повреждён. Запустите RemCard заново с рабочего места медсестры.",
             )
@@ -613,7 +645,7 @@ def _try_emergency_startup_after_network_failure(
 
     decision = prepare_emergency_startup(role)
     if not decision.allowed:
-        _show_custom_warning("Аварийный режим недоступен", decision.user_message)
+        _show_startup_warning_without_settings("Аварийный режим недоступен", decision.user_message)
         return False
 
     record_emergency_startup_metric("emergency_startup_offered", status=decision.status)
@@ -627,10 +659,12 @@ def _try_emergency_startup_after_network_failure(
 
     record_emergency_startup_metric("emergency_startup_user_accepted", status=decision.status)
     try:
-        return start_or_resume_emergency_session(decision, startup_request=startup_request_payload)
+        session = start_or_resume_emergency_session(decision, startup_request=startup_request_payload)
+        _configure_emergency_settings_for_startup(session.runtime_context)
+        return session
     except Exception as exc:
         record_emergency_startup_metric("emergency_startup_failed", status="session_start_failed", reason=str(exc))
-        _show_custom_warning(
+        _show_startup_warning_without_settings(
             "Аварийный режим недоступен",
             "Не удалось открыть аварийный режим на этом ПК. RemCard будет закрыт.",
         )
@@ -729,7 +763,7 @@ def _validate_compiled_role_startup(
         if handled is not None:
             return handled
         _call_startup_message_callback(before_user_message)
-        _show_custom_warning(
+        _show_startup_warning_without_settings(
             "База данных недоступна",
             "Не удалось проверить базу данных. Работа временно недоступна. Сообщите ответственному.",
         )
@@ -766,11 +800,11 @@ def _validate_compiled_role_startup(
             f"После нажатия \"Понятно\" будет запущено обновление до версии {update_candidate.version}."
         )
         _call_startup_message_callback(before_user_message)
-        _show_custom_warning("Требуется обновление", message)
+        _show_startup_warning_without_settings("Требуется обновление", message)
         _launch_startup_update(update_candidate, role=role, reason=result.technical_reason)
     else:
         _call_startup_message_callback(before_user_message)
-        _show_custom_warning("База данных недоступна", result.user_message)
+        _show_startup_warning_without_settings("База данных недоступна", result.user_message)
     return False
 
 

@@ -2125,6 +2125,7 @@ def _prepare_recovery_baza(temp_root: str) -> dict[str, str]:
     paths = {
         "baza_dir": baza_dir,
         "db_path": os.path.join(baza_dir, "archiv", "rao_journal.db"),
+        "settings_db_path": os.path.join(baza_dir, "settings", "remcard_settings.db"),
         "backup_dir": os.path.join(baza_dir, "backups", "valid"),
         "locks_dir": os.path.join(baza_dir, "locks"),
         "session_locks_dir": os.path.join(baza_dir, "session_locks"),
@@ -2136,12 +2137,27 @@ def _prepare_recovery_baza(temp_root: str) -> dict[str, str]:
         paths["backup_dir"],
         paths["locks_dir"],
         paths["session_locks_dir"],
+        os.path.dirname(paths["settings_db_path"]),
+        os.path.join(baza_dir, "settings", "backups"),
+        os.path.join(baza_dir, "settings", "backup_health"),
         os.path.join(baza_dir, "backup_health", "invalid_backups"),
         os.path.join(baza_dir, "quarantine", "shared_db"),
         os.path.join(baza_dir, "logs"),
     ):
         os.makedirs(path, exist_ok=True)
     return paths
+
+
+def _with_baza_dir(baza_dir: str, callback):
+    saved = os.environ.get("REMCARD_BAZA_DIR")
+    os.environ["REMCARD_BAZA_DIR"] = baza_dir
+    try:
+        return callback()
+    finally:
+        if saved is None:
+            os.environ.pop("REMCARD_BAZA_DIR", None)
+        else:
+            os.environ["REMCARD_BAZA_DIR"] = saved
 
 
 def _write_corrupt_file(path: str):
@@ -2293,6 +2309,300 @@ def _check_recovery_selects_next_valid_backup(temp_root: str) -> tuple[bool, str
         return False, f"restored DB is invalid: {reason}"
     if os.path.exists(bad_backup):
         return False, "corrupt latest backup was not quarantined"
+    return True, "ok"
+
+
+def _check_doctor_startup_offline_does_not_auto_recover(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+    from rem_card.app.emergency_startup import classify_startup_failure
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+    recovery_calls: list[dict] = []
+    original_recover = guard._recover_shared_db
+    try:
+        guard._recover_shared_db = lambda **kwargs: recovery_calls.append(kwargs) or guard.StartupGuardResult(ok=True, recovered=True)
+
+        def run():
+            return guard.run_startup_db_guard(role="doctor")
+
+        result = _with_baza_dir(paths["baza_dir"], run)
+    finally:
+        guard._recover_shared_db = original_recover
+
+    if result.ok:
+        return False, "doctor missing DB startup was allowed"
+    if recovery_calls:
+        return False, f"recovery was called for missing DB: {recovery_calls}"
+    if os.path.exists(paths["db_path"]):
+        return False, "missing medical DB was recreated"
+    if classify_startup_failure(result) != "network_unavailable":
+        return False, f"doctor block result is not network_unavailable: {result}"
+    return True, "ok"
+
+
+def _check_doctor_startup_offline_does_not_create_settings_db(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+
+    def run():
+        return guard.run_startup_db_guard(role="doctor")
+
+    result = _with_baza_dir(paths["baza_dir"], run)
+    if result.ok:
+        return False, "doctor missing medical DB startup unexpectedly passed"
+    if os.path.exists(paths["settings_db_path"]):
+        return False, "settings DB was created while medical startup was unavailable"
+    return True, "ok"
+
+
+def _check_doctor_startup_missing_medical_db_blocks_before_recovery(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+    result = guard.recover_shared_db_with_locks(
+        baza_dir=paths["baza_dir"],
+        db_path=paths["db_path"],
+        role="doctor",
+        failure_reason="database file does not exist",
+    )
+    if result.ok or result.recovered:
+        return False, "missing DB was treated as recoverable corruption"
+    if os.path.exists(paths["db_path"]):
+        return False, "missing DB recovery created medical DB"
+    return True, "ok"
+
+
+def _check_doctor_startup_locked_busy_does_not_recover(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(paths["db_path"])
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+    recovery_calls: list[dict] = []
+    original_quick = guard._check_quick_with_retries
+    original_recover = guard._recover_shared_db
+    try:
+        guard._check_quick_with_retries = lambda *args, **kwargs: (False, "database is locked", False)
+        guard._recover_shared_db = lambda **kwargs: recovery_calls.append(kwargs) or guard.StartupGuardResult(ok=True, recovered=True)
+
+        def run():
+            return guard.run_startup_db_guard(role="doctor")
+
+        result = _with_baza_dir(paths["baza_dir"], run)
+    finally:
+        guard._check_quick_with_retries = original_quick
+        guard._recover_shared_db = original_recover
+
+    if result.ok:
+        return False, "locked/busy startup was allowed"
+    if recovery_calls:
+        return False, "locked/busy startup triggered recovery"
+    return True, "ok"
+
+
+def _check_doctor_startup_corruption_does_not_use_emergency_fallback(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import classify_startup_failure
+
+    failure = RuntimeError("quick_check failed: database disk image is malformed")
+    if classify_startup_failure(failure) != "corruption_or_incompatible":
+        return False, "confirmed corruption was classified as emergency/offline"
+    return True, "ok"
+
+
+def _check_nurse_startup_offline_still_uses_emergency_path(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import emergency_workstation_marker_path, prepare_emergency_startup, start_or_resume_emergency_session
+
+    store, _metadata = _prepare_emergency_store_fixture(temp_root)
+    marker = emergency_workstation_marker_path(store.resolve_root())
+    os.makedirs(os.path.dirname(marker), exist_ok=True)
+    Path(marker).write_text("allowed\n", encoding="utf-8")
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if not decision.allowed or decision.status != "standby_available":
+        return False, f"nurse emergency decision failed: {decision}"
+    session = start_or_resume_emergency_session(decision, root=store.resolve_root())
+    if session.runtime_context.mode != "emergency":
+        return False, f"nurse did not enter emergency runtime: {session.runtime_context.mode}"
+    if not os.path.isfile(session.metadata.local_db_path):
+        return False, "local emergency DB was not created from standby"
+    return True, "ok"
+
+
+def _check_nurse_startup_offline_does_not_recover_network_db(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(os.path.join(paths["backup_dir"], "healthy.db"))
+    recovery_calls: list[dict] = []
+    original_recover = guard._recover_shared_db
+    try:
+        guard._recover_shared_db = lambda **kwargs: recovery_calls.append(kwargs) or guard.StartupGuardResult(ok=True, recovered=True)
+
+        def run():
+            return guard.run_startup_db_guard(role="nurse")
+
+        result = _with_baza_dir(paths["baza_dir"], run)
+    finally:
+        guard._recover_shared_db = original_recover
+
+    if result.ok:
+        return False, "nurse missing network DB startup passed instead of emergency decision path"
+    if recovery_calls:
+        return False, "nurse missing network DB triggered recovery"
+    if os.path.exists(paths["db_path"]):
+        return False, "nurse missing network DB was recreated"
+    return True, "ok"
+
+
+def _check_settings_ensure_ready_runs_only_after_medical_green(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    db_index = text.find("db_manager = DatabaseManager(")
+    settings_index = text.find("settings_info = settings_service.ensure_ready()")
+    if db_index < 0 or settings_index < 0:
+        return False, "bootstrap ordering tokens not found"
+    if settings_index < db_index:
+        return False, "settings ensure_ready runs before DatabaseManager medical startup"
+    return True, "ok"
+
+
+def _check_startup_block_dialogs_do_not_use_settings_theme(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    required = (
+        "def _show_startup_warning_without_settings(",
+        "def _show_startup_action_without_settings(",
+        "def _configure_emergency_settings_for_startup(",
+        "_configure_emergency_settings_for_startup(session.runtime_context)",
+        "_show_startup_warning_without_settings(\"База данных недоступна\", DOCTOR_NETWORK_UNAVAILABLE_MESSAGE)",
+        "_show_startup_warning_without_settings(\"База данных недоступна\", result.user_message)",
+    )
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"startup no-settings dialog tokens missing: {missing}"
+
+    offer_start = text.find("def _show_emergency_startup_offer(")
+    next_func = text.find("\ndef ", offer_start + 1)
+    offer_body = text[offer_start: next_func if next_func > offer_start else len(text)]
+    if "CustomMessageBox" in offer_body or "_show_custom_warning" in offer_body:
+        return False, "emergency startup offer can load themed/settings-backed dialogs before medical green"
+    if "_show_startup_action_without_settings(" not in offer_body:
+        return False, "emergency startup offer does not use no-settings action dialog"
+    return True, "ok"
+
+
+def _check_healthy_network_missing_settings_still_allowed_if_existing_policy(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    paths = _prepare_recovery_baza(temp_root)
+    _create_sqlite_file(paths["db_path"])
+
+    def run():
+        return guard.run_startup_db_guard(role="doctor")
+
+    result = _with_baza_dir(paths["baza_dir"], run)
+    if not result.ok:
+        return False, f"healthy medical DB did not pass startup guard: {result}"
+    if os.path.exists(paths["settings_db_path"]):
+        return False, "startup guard created settings DB before bootstrap"
+    service = SettingsService(SettingsDatabase(baza_dir=paths["baza_dir"]))
+    service.ensure_ready()
+    if not os.path.isfile(paths["settings_db_path"]):
+        return False, "healthy network first-init did not create settings DB"
+    return True, "ok"
+
+
+def _check_compiled_doctor_offline_no_db_creation_contract(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.startup_db_guard as guard
+
+    paths = _prepare_recovery_baza(temp_root)
+    before_db_files = set(glob.glob(os.path.join(paths["baza_dir"], "**", "*.db"), recursive=True))
+
+    def run():
+        return guard.run_startup_db_guard(role="doctor")
+
+    result = _with_baza_dir(paths["baza_dir"], run)
+    after_db_files = set(glob.glob(os.path.join(paths["baza_dir"], "**", "*.db"), recursive=True))
+    if result.ok:
+        return False, "doctor offline startup passed"
+    if after_db_files != before_db_files:
+        return False, f"doctor offline startup created DB files: {sorted(after_db_files - before_db_files)}"
+    return True, "ok"
+
+
+def _check_startup_auto_recovery_missing_db_forbidden(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.startup_db_guard import startup_auto_recovery_allowed
+
+    db_path = os.path.join(temp_root, "missing", "rao_journal.db")
+    if startup_auto_recovery_allowed(db_path, "database file does not exist"):
+        return False, "missing DB was allowed for startup auto-recovery"
+    return True, "ok"
+
+
+def _check_startup_auto_recovery_unavailable_forbidden(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.startup_db_guard import startup_auto_recovery_allowed
+
+    db_path = os.path.join(temp_root, "existing.db")
+    _create_sqlite_file(db_path)
+    for reason in ("unable to open database file", "database is locked", "disk I/O error"):
+        if startup_auto_recovery_allowed(db_path, reason):
+            return False, f"unavailable startup reason was allowed for recovery: {reason}"
+    return True, "ok"
+
+
+def _check_startup_auto_recovery_confirmed_corruption_still_guarded(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import validate_sqlite_file
+    from rem_card.app.startup_db_guard import recover_shared_db_with_locks, startup_auto_recovery_allowed
+
+    paths = _prepare_recovery_baza(temp_root)
+    backup = os.path.join(paths["backup_dir"], "healthy.db")
+    _create_sqlite_file(backup)
+    _write_corrupt_file(paths["db_path"])
+    reason = "quick_check failed: database disk image is malformed"
+    if not startup_auto_recovery_allowed(paths["db_path"], reason):
+        return False, "confirmed corruption was not allowed through guarded recovery gate"
+    result = recover_shared_db_with_locks(
+        baza_dir=paths["baza_dir"],
+        db_path=paths["db_path"],
+        role="doctor",
+        failure_reason=reason,
+    )
+    if not result.ok:
+        return False, f"guarded corruption recovery failed: {result.technical_reason}"
+    ok, validation_reason = validate_sqlite_file(paths["db_path"])
+    if not ok:
+        return False, f"recovered DB invalid: {validation_reason}"
+    return True, "ok"
+
+
+def _check_no_merge_changes(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    result = subprocess.run(
+        ["git", "diff", "--name-only"],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        return False, f"git diff failed: {result.stderr[-300:]}"
+    forbidden = {
+        "app/emergency_merge_mode_a.py",
+        "app/emergency_merge_dry_run.py",
+        "app/emergency_restore_probe.py",
+    }
+    changed = {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
+    touched = sorted(changed & forbidden)
+    if touched:
+        return False, f"merge/restore files changed unexpectedly: {touched}"
     return True, "ok"
 
 
@@ -16384,6 +16694,21 @@ def main():
         ("recovery_lock_busy_blocks_restore", _check_recovery_lock_busy_blocks_restore),
         ("dbmanager_locked_quickcheck_does_not_restore", _check_dbmanager_locked_quickcheck_does_not_restore),
         ("recovery_selects_next_valid_backup", _check_recovery_selects_next_valid_backup),
+        ("doctor_startup_offline_does_not_auto_recover", _check_doctor_startup_offline_does_not_auto_recover),
+        ("doctor_startup_offline_does_not_create_settings_db", _check_doctor_startup_offline_does_not_create_settings_db),
+        ("doctor_startup_missing_medical_db_blocks_before_recovery", _check_doctor_startup_missing_medical_db_blocks_before_recovery),
+        ("doctor_startup_locked_busy_does_not_recover", _check_doctor_startup_locked_busy_does_not_recover),
+        ("doctor_startup_corruption_does_not_use_emergency_fallback", _check_doctor_startup_corruption_does_not_use_emergency_fallback),
+        ("nurse_startup_offline_still_uses_emergency_path", _check_nurse_startup_offline_still_uses_emergency_path),
+        ("nurse_startup_offline_does_not_recover_network_db", _check_nurse_startup_offline_does_not_recover_network_db),
+        ("settings_ensure_ready_runs_only_after_medical_green", _check_settings_ensure_ready_runs_only_after_medical_green),
+        ("startup_block_dialogs_do_not_use_settings_theme", _check_startup_block_dialogs_do_not_use_settings_theme),
+        ("healthy_network_missing_settings_still_allowed_if_existing_policy", _check_healthy_network_missing_settings_still_allowed_if_existing_policy),
+        ("compiled_doctor_offline_no_db_creation_contract", _check_compiled_doctor_offline_no_db_creation_contract),
+        ("startup_auto_recovery_missing_db_forbidden", _check_startup_auto_recovery_missing_db_forbidden),
+        ("startup_auto_recovery_unavailable_forbidden", _check_startup_auto_recovery_unavailable_forbidden),
+        ("startup_auto_recovery_confirmed_corruption_still_guarded", _check_startup_auto_recovery_confirmed_corruption_still_guarded),
+        ("no_merge_changes", _check_no_merge_changes),
         ("local_metrics_written_locally", _check_local_metrics_written_locally),
         ("local_metrics_are_buffered", _check_local_metrics_are_buffered),
         ("latest_change_metric_throttles_unchanged_values", _check_latest_change_metric_throttles_unchanged_values),

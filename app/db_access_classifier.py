@@ -9,6 +9,11 @@ from rem_card.app.db_availability import DatabaseUnavailableError
 
 DatabaseAccessCategory = Literal[
     "network_unavailable",
+    "network_unavailable_or_missing",
+    "missing_db",
+    "settings_unavailable_before_medical_ready",
+    "settings_missing_healthy_network",
+    "path_inaccessible",
     "locked_busy",
     "corruption",
     "schema_incompatible",

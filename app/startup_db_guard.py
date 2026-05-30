@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
 
+from rem_card.app.db_access_classifier import classify_database_access_error
 from rem_card.app.jsonl_audit_log import write_audit_event
 from rem_card.app.runtime_paths import (
     DataPathConfigurationError,
@@ -50,6 +51,15 @@ class StartupGuardResult:
 
 
 StartupDbGuardResult = StartupGuardResult
+
+
+STARTUP_UNAVAILABLE_CATEGORIES = {
+    "network_unavailable",
+    "network_unavailable_or_missing",
+    "missing_db",
+    "locked_busy",
+    "path_inaccessible",
+}
 
 
 class _LockHeartbeat:
@@ -202,6 +212,61 @@ def _lock_timeout_user_message(reason: str) -> str:
 def _is_missing_db_file(reason: str) -> bool:
     text = str(reason or "").lower()
     return "database file does not exist" in text
+
+
+def _startup_access_category(reason: str, *, confirmed_corruption: bool = False) -> str:
+    if _is_missing_db_file(reason):
+        return "missing_db"
+    if _is_retryable_availability_error(reason):
+        return "locked_busy"
+    if confirmed_corruption or _is_confirmed_corruption(reason):
+        return "corruption"
+    category = classify_database_access_error(RuntimeError(str(reason or "")))
+    if category == "network_unavailable":
+        return "network_unavailable"
+    if category == "locked_busy":
+        return "locked_busy"
+    if category in {"policy_block", "schema_incompatible"}:
+        return str(category)
+    return "unknown"
+
+
+def _is_startup_unavailable_category(category: str) -> bool:
+    return str(category or "") in STARTUP_UNAVAILABLE_CATEGORIES
+
+
+def startup_auto_recovery_allowed(db_path: str, failure_reason: str, *, confirmed_corruption: bool | None = None) -> bool:
+    if not db_path or not os.path.isfile(db_path):
+        return False
+    reason = str(failure_reason or "")
+    if confirmed_corruption is None:
+        confirmed_corruption = _is_confirmed_corruption(reason)
+    if _is_missing_db_file(reason) or _is_retryable_availability_error(reason):
+        return False
+    if classify_database_access_error(RuntimeError(reason)) in {"network_unavailable", "locked_busy"}:
+        return False
+    return bool(confirmed_corruption)
+
+
+def _startup_unavailable_result(
+    *,
+    role: Optional[str],
+    baza_dir: str,
+    reason: str,
+    category: str,
+) -> StartupGuardResult:
+    write_audit_event(
+        "shared_db_startup_unavailable",
+        baza_dir=baza_dir,
+        role=role,
+        details={"reason": reason, "category": category, "recovery_allowed": False},
+    )
+    return StartupGuardResult(
+        ok=False,
+        user_message=_availability_user_message(reason),
+        technical_reason=reason,
+        baza_dir=baza_dir,
+    )
 
 
 def _ensure_guard_dirs(baza_dir: str):
@@ -783,6 +848,26 @@ def _recover_shared_db(
     role: Optional[str],
     failure_reason: str,
 ) -> StartupGuardResult:
+    if not startup_auto_recovery_allowed(db_path, failure_reason):
+        category = _startup_access_category(failure_reason)
+        write_audit_event(
+            "shared_db_auto_recovery_blocked",
+            baza_dir=baza_dir,
+            role=role,
+            details={
+                "reason": failure_reason,
+                "category": category,
+                "recovery_allowed": False,
+                "db_exists": os.path.isfile(db_path),
+            },
+        )
+        return StartupGuardResult(
+            ok=False,
+            user_message=_availability_user_message(failure_reason),
+            technical_reason=failure_reason,
+            baza_dir=baza_dir,
+        )
+
     owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
     db_lock_path = os.path.join(baza_dir, "archiv", "db.lock")
     db_lock = None
@@ -819,14 +904,17 @@ def _recover_shared_db(
             return StartupGuardResult(ok=True, baza_dir=baza_dir)
 
         failure_reason = check_after_lock or failure_reason
-        if not confirmed_after_lock and not _is_missing_db_file(failure_reason):
+        if not startup_auto_recovery_allowed(db_path, failure_reason, confirmed_corruption=confirmed_after_lock):
             write_audit_event(
                 "shared_db_auto_recovery_skipped",
                 baza_dir=baza_dir,
                 role=role,
                 details={
                     "reason": failure_reason,
-                    "classification": "availability_or_lock",
+                    "classification": _startup_access_category(
+                        failure_reason,
+                        confirmed_corruption=confirmed_after_lock,
+                    ),
                 },
             )
             return StartupGuardResult(
@@ -935,6 +1023,26 @@ def recover_shared_db_with_locks(
     role: Optional[str],
     failure_reason: str,
 ) -> StartupGuardResult:
+    if not startup_auto_recovery_allowed(db_path, failure_reason):
+        category = _startup_access_category(failure_reason)
+        write_audit_event(
+            "shared_db_auto_recovery_blocked",
+            baza_dir=baza_dir,
+            role=role,
+            details={
+                "reason": failure_reason,
+                "category": category,
+                "recovery_allowed": False,
+                "db_exists": os.path.isfile(db_path),
+            },
+        )
+        return StartupGuardResult(
+            ok=False,
+            user_message=_availability_user_message(failure_reason),
+            technical_reason=failure_reason,
+            baza_dir=baza_dir,
+        )
+
     recovery_lock = None
     recovery_heartbeat = None
     owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
@@ -1017,22 +1125,9 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             baza_dir=baza_dir,
         )
 
-    recovery_lock = None
-    recovery_heartbeat = None
     owner_id = f"{socket.gethostname()}:{os.getpid()}:startup_db_guard"
-    recovery_lock_path = os.path.join(baza_dir, "locks", "recovery.lock")
     db_path = get_journal_db_path(baza_dir)
     try:
-        recovery_lock, recovery_heartbeat = _acquire_lock_with_wait(
-            recovery_lock_path,
-            stale_timeout_sec=RECOVERY_LOCK_STALE_SEC,
-            wait_sec=RECOVERY_LOCK_WAIT_SEC,
-            owner_id=owner_id,
-            source="recovery",
-            role=role,
-            baza_dir=baza_dir,
-        )
-
         ok, result, confirmed_corruption = _check_quick_with_retries(
             db_path,
             baza_dir=baza_dir,
@@ -1053,20 +1148,20 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             )
             return StartupGuardResult(ok=True, baza_dir=baza_dir)
 
-        if _is_missing_db_file(result):
+        category = _startup_access_category(result, confirmed_corruption=confirmed_corruption)
+        if _is_startup_unavailable_category(category):
             write_audit_event(
-                "shared_db_missing_detected",
+                "shared_db_missing_detected" if category == "missing_db" else "shared_db_unavailable",
                 baza_dir=baza_dir,
                 role=role,
-                details={"db_path": db_path, "reason": result},
+                details={"db_path": db_path, "reason": result, "category": category},
             )
-            write_audit_event(
-                "shared_db_auto_recovery_start",
-                baza_dir=baza_dir,
+            return _startup_unavailable_result(
                 role=role,
-                details={"db_path": db_path, "reason": result, "missing_db": True},
+                baza_dir=baza_dir,
+                reason=result,
+                category=category,
             )
-            return _recover_shared_db(baza_dir=baza_dir, db_path=db_path, role=role, failure_reason=result)
 
         if not confirmed_corruption:
             write_audit_event(
@@ -1094,7 +1189,7 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             role=role,
             details={"db_path": db_path, "reason": result},
         )
-        return _recover_shared_db(baza_dir=baza_dir, db_path=db_path, role=role, failure_reason=result)
+        return recover_shared_db_with_locks(baza_dir=baza_dir, db_path=db_path, role=role, failure_reason=result)
     except TimeoutError as exc:
         write_audit_event(
             "db_guard_failed",
@@ -1121,5 +1216,3 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             technical_reason=str(exc),
             baza_dir=baza_dir,
         )
-    finally:
-        _release_lock(recovery_lock, recovery_heartbeat)

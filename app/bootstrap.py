@@ -139,6 +139,17 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
         logger.info("[DB PATH] runtime medical -> %s", runtime_context.medical_db_path)
         logger.info("[SETTINGS DB] runtime settings -> %s", runtime_context.settings_db_path)
 
+    if os.environ.get("REMCARD_BOOTSTRAP_DEBUG") == "1":
+        if runtime_context is None:
+            print(f"[NETWORK ROOT] {NETWORK_ROOT}")
+            print(f"[BAZA PATH] {BAZA_DIR}")
+            print(f"[DB PATH] rao_journal.db -> {JOURNAL_DB_PATH}")
+            print(f"[DB PATH] unified_runtime.db -> {REMCARD_DB_PATH}")
+        else:
+            print(f"[RUNTIME MODE] {runtime_mode}")
+            print(f"[DB PATH] runtime medical -> {runtime_context.medical_db_path}")
+
+    db_manager = DatabaseManager(medical_db_path, remcard_db_path, runtime_context=runtime_context)
     from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service
 
     if runtime_context is not None:
@@ -153,17 +164,7 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
         "[SETTINGS DB] remcard_settings.db -> %s",
         settings_info.get("settings_db_path"),
     )
-
     if os.environ.get("REMCARD_BOOTSTRAP_DEBUG") == "1":
-        if runtime_context is None:
-            print(f"[NETWORK ROOT] {NETWORK_ROOT}")
-            print(f"[BAZA PATH] {BAZA_DIR}")
-            print(f"[DB PATH] rao_journal.db -> {JOURNAL_DB_PATH}")
-            print(f"[DB PATH] unified_runtime.db -> {REMCARD_DB_PATH}")
-        else:
-            print(f"[RUNTIME MODE] {runtime_mode}")
-            print(f"[DB PATH] runtime medical -> {runtime_context.medical_db_path}")
         print(f"[SETTINGS DB] remcard_settings.db -> {settings_info.get('settings_db_path')}")
 
-    db_manager = DatabaseManager(medical_db_path, remcard_db_path, runtime_context=runtime_context)
     return Container(db_manager, role=role)
