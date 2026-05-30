@@ -28,6 +28,9 @@ from rem_card.app.sqlite_shared import backup_connection, configure_connection
 from rem_card.app.version import APP_VERSION
 
 
+DEFAULT_STANDBY_MAX_AGE_DAYS = max(1, int(float(os.environ.get("REMCARD_EMERGENCY_STANDBY_MAX_AGE_DAYS", "3"))))
+
+
 class EmergencyStandbyError(RuntimeError):
     pass
 
@@ -40,6 +43,39 @@ class EmergencyStandbyRefreshResult:
     metadata: EmergencyStandbyMetadata | None = None
     medical_validation: SnapshotValidationResult | None = None
     settings_validation: SnapshotValidationResult | None = None
+
+
+def _parse_metadata_time(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def standby_metadata_age_seconds(metadata: EmergencyStandbyMetadata, *, now: datetime | None = None) -> float:
+    stamp = _parse_metadata_time(metadata.updated_at) or _parse_metadata_time(metadata.created_at)
+    if stamp is None:
+        return float("inf")
+    current = now
+    if current is None:
+        current = datetime.now(stamp.tzinfo) if stamp.tzinfo is not None else datetime.now()
+    elif stamp.tzinfo is not None and current.tzinfo is None:
+        current = current.replace(tzinfo=stamp.tzinfo)
+    elif stamp.tzinfo is None and current.tzinfo is not None:
+        current = current.replace(tzinfo=None)
+    return max(0.0, (current - stamp).total_seconds())
+
+
+def standby_metadata_expired(
+    metadata: EmergencyStandbyMetadata,
+    *,
+    max_age_days: int | float = DEFAULT_STANDBY_MAX_AGE_DAYS,
+    now: datetime | None = None,
+) -> bool:
+    return standby_metadata_age_seconds(metadata, now=now) > float(max_age_days) * 86400.0
 
 
 class EmergencyStandbyManager:
@@ -99,6 +135,7 @@ class EmergencyStandbyManager:
         self.store.ensure_root_dirs()
         if not self.is_safe_to_refresh():
             return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason="refresh is not safe now")
+        self.cleanup_expired_standby()
 
         source_status = self.check_network_sources()
         if not source_status.ok:
@@ -138,6 +175,14 @@ class EmergencyStandbyManager:
             metadata = self.store.read_standby_metadata()
         except EmergencyMetadataError as exc:
             return EmergencyStandbyRefreshResult(ok=False, status="metadata_error", reason=str(exc))
+        if standby_metadata_expired(metadata):
+            removed = self.store.delete_standby_files(metadata)
+            return EmergencyStandbyRefreshResult(
+                ok=False,
+                status="expired",
+                reason=f"standby is older than {DEFAULT_STANDBY_MAX_AGE_DAYS} days; removed_files={removed}",
+                metadata=metadata,
+            )
 
         medical_validation = validate_medical_db_snapshot(metadata.medical_db_path)
         settings_validation = None
@@ -182,6 +227,8 @@ class EmergencyStandbyManager:
         metadata = self.store.get_latest_valid_standby()
         if metadata is None:
             return True
+        if standby_metadata_expired(metadata):
+            return True
         if int(current_remote_last_change_id or 0) > int(metadata.remote_last_change_id or 0):
             return True
         if source_schema_version is not None and int(source_schema_version or 0) != int(metadata.schema_version or 0):
@@ -216,6 +263,15 @@ class EmergencyStandbyManager:
             except OSError:
                 pass
         return cleanup_count
+
+    def cleanup_expired_standby(self) -> int:
+        try:
+            metadata = self.store.read_standby_metadata()
+        except EmergencyMetadataError:
+            return 0
+        if not standby_metadata_expired(metadata):
+            return 0
+        return self.store.delete_standby_files(metadata)
 
     def _refresh_pair(self, source_status: EmergencyStandbyRefreshResult) -> EmergencyStandbyRefreshResult:
         final_medical_path = standby_medical_db_path(self.root)

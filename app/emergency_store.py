@@ -32,7 +32,9 @@ from rem_card.app.emergency_paths import (
     emergency_client_id_path,
     resolve_emergency_root,
     standby_dir,
+    standby_medical_db_path,
     standby_metadata_path,
+    standby_settings_db_path,
 )
 from rem_card.app.emergency_validation import (
     compute_file_hash,
@@ -72,6 +74,15 @@ def _map_optional_session_path(path: str | None, active_dir_path: str, archive_d
     if path is None:
         return None
     return _map_session_path(path, active_dir_path, archive_dir_path)
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    try:
+        path_abs = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+        root_abs = os.path.normcase(os.path.abspath(os.path.normpath(root)))
+        return os.path.commonpath([path_abs, root_abs]) == root_abs
+    except Exception:
+        return False
 
 
 def get_local_machine_name() -> str:
@@ -189,6 +200,27 @@ class EmergencyLocalStore:
             return None
         candidates.sort(key=lambda item: item.updated_at, reverse=True)
         return candidates[0]
+
+    def delete_standby_files(self, metadata: EmergencyStandbyMetadata | None = None) -> int:
+        directory = standby_dir(self.root)
+        candidates = {
+            standby_metadata_path(self.root),
+            standby_medical_db_path(self.root),
+            standby_settings_db_path(self.root),
+        }
+        if metadata is not None:
+            for path in (metadata.medical_db_path, metadata.settings_db_path):
+                if path and _path_is_under(str(path), directory):
+                    candidates.add(str(path))
+        removed = 0
+        for path in sorted(candidates, key=lambda item: len(str(item)), reverse=True):
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+        return removed
 
     def create_active_session_from_standby(
         self,

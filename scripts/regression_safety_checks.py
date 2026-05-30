@@ -13392,6 +13392,61 @@ def _check_emergency_standby_should_not_refresh_when_current(temp_root: str) -> 
     return (False, "current standby requested refresh") if should else (True, "ok")
 
 
+def _old_iso_timestamp(days: int) -> str:
+    return datetime.fromtimestamp(time.time() - days * 86400).replace(microsecond=0).isoformat()
+
+
+def _check_emergency_standby_should_refresh_when_expired(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    result = manager.create_or_refresh_standby(forced=True)
+    if not result.ok or not result.metadata:
+        return False, f"standby refresh failed: {result}"
+    old = _old_iso_timestamp(4)
+    manager.store.write_standby_metadata(replace(result.metadata, updated_at=old))
+    should = manager.should_refresh_standby(
+        result.metadata.remote_last_change_id,
+        settings_fingerprint=dict(result.metadata.source_settings_fingerprint or {}),
+        source_schema_version=result.metadata.schema_version,
+    )
+    return (True, "ok") if should else (False, "expired standby did not request refresh")
+
+
+def _check_emergency_standby_expiry_uses_updated_at(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    result = manager.create_or_refresh_standby(forced=True)
+    if not result.ok or not result.metadata:
+        return False, f"standby refresh failed: {result}"
+    metadata = replace(result.metadata, created_at=_old_iso_timestamp(10), updated_at=datetime.now().replace(microsecond=0).isoformat())
+    manager.store.write_standby_metadata(metadata)
+    status = manager.validate_standby()
+    if not status.ok:
+        return False, f"fresh updated_at standby was treated as expired: {status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_expired_pair_is_deleted(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    result = manager.create_or_refresh_standby(forced=True)
+    if not result.ok or not result.metadata:
+        return False, f"standby refresh failed: {result}"
+    old = _old_iso_timestamp(4)
+    metadata = replace(result.metadata, created_at=old, updated_at=old)
+    manager.store.write_standby_metadata(metadata)
+    status = manager.validate_standby()
+    if status.ok or status.status != "expired":
+        return False, f"expired standby was not rejected: {status}"
+    for path in (metadata.medical_db_path, metadata.settings_db_path):
+        if path and os.path.exists(path):
+            return False, f"expired standby file was not deleted: {path}"
+    return True, "ok"
+
+
 def _check_emergency_standby_unavailable_source_does_not_trigger_recovery(temp_root: str) -> tuple[bool, str]:
     import rem_card.app.emergency_standby as standby_module
 
@@ -13936,6 +13991,23 @@ def _check_emergency_startup_requires_valid_standby_pair(temp_root: str) -> tupl
     decision = prepare_emergency_startup("nurse", root=root)
     if decision.allowed or decision.status != "no_valid_standby":
         return False, f"missing standby pair did not block emergency startup: {decision}"
+    return True, "ok"
+
+
+def _check_emergency_startup_blocks_expired_standby_pair(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    old = _old_iso_timestamp(4)
+    store.write_standby_metadata(replace(standby, created_at=old, updated_at=old))
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if decision.allowed or decision.status != "no_valid_standby":
+        return False, f"expired standby did not block emergency startup: {decision}"
+    if "older than 3 days" not in decision.technical_reason:
+        return False, f"expired standby reason mismatch: {decision.technical_reason}"
     return True, "ok"
 
 
@@ -17290,6 +17362,9 @@ def main():
         ("emergency_standby_metadata_updates_after_success", _check_emergency_standby_metadata_updates_after_success),
         ("emergency_standby_should_refresh_when_remote_change_id_advances", _check_emergency_standby_should_refresh_when_remote_change_id_advances),
         ("emergency_standby_should_not_refresh_when_current", _check_emergency_standby_should_not_refresh_when_current),
+        ("emergency_standby_should_refresh_when_expired", _check_emergency_standby_should_refresh_when_expired),
+        ("emergency_standby_expiry_uses_updated_at", _check_emergency_standby_expiry_uses_updated_at),
+        ("emergency_standby_expired_pair_is_deleted", _check_emergency_standby_expired_pair_is_deleted),
         ("emergency_standby_unavailable_source_does_not_trigger_recovery", _check_emergency_standby_unavailable_source_does_not_trigger_recovery),
         ("emergency_standby_no_empty_db_creation", _check_emergency_standby_no_empty_db_creation),
         ("emergency_standby_pair_is_consistent", _check_emergency_standby_pair_is_consistent),
@@ -17316,6 +17391,7 @@ def main():
         ("emergency_startup_doctor_network_unavailable_shows_controlled_block", _check_emergency_startup_doctor_network_unavailable_shows_controlled_block),
         ("emergency_startup_requires_authorized_workstation", _check_emergency_startup_requires_authorized_workstation),
         ("emergency_startup_requires_valid_standby_pair", _check_emergency_startup_requires_valid_standby_pair),
+        ("emergency_startup_blocks_expired_standby_pair", _check_emergency_startup_blocks_expired_standby_pair),
         ("emergency_startup_password_gate_before_activation", _check_emergency_startup_password_gate_before_activation),
         ("emergency_startup_creates_active_session_from_standby", _check_emergency_startup_creates_active_session_from_standby),
         ("emergency_startup_uses_emergency_runtime_context", _check_emergency_startup_uses_emergency_runtime_context),
