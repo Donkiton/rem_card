@@ -495,15 +495,11 @@ def scenario_full_mode_a_path(temp_root: Path) -> ScenarioResult:
     )
 
 
-def scenario_remote_changed_block(temp_root: Path) -> ScenarioResult:
-    paths = _build_network_fixture(temp_root, "remote_changed_block")
+def scenario_remote_changed_authoritative(temp_root: Path) -> ScenarioResult:
+    paths = _build_network_fixture(temp_root, "remote_changed_authoritative")
     store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
     _apply_controlled_local_emergency_writes(startup_session.metadata.local_db_path)
-    session = store.read_active_session(startup_session.metadata.emergency_session_id)
-    marker_path = _write_manual_merge_ready_marker(paths, store, session)
-
-    ready_dry_run = _run_dry_run(paths, store, session.emergency_session_id, marker_path)
-    _require(ready_dry_run.result_status == "ready_mode_a", f"initial dry-run was not ready: {ready_dry_run.to_dict()}")
+    settings_hash_before = _file_hash(paths["settings_path"])
     changed_last = _apply_remote_change_after_base(paths["medical_path"])
     remote_hash_after_change = _file_hash(paths["medical_path"])
 
@@ -513,30 +509,38 @@ def scenario_remote_changed_block(temp_root: Path) -> ScenarioResult:
         status.get("status") == "remote_changed_conflict_pending",
         f"restore probe did not report remote_changed: {status}",
     )
+    marker_path = probe_payload["probe"].mark_merge_ready()
 
-    blocked_dry_run = _run_dry_run(paths, store, session.emergency_session_id, marker_path)
+    dry_run = _run_dry_run(paths, store, startup_session.metadata.emergency_session_id, marker_path)
     _require(
-        blocked_dry_run.result_status == "blocked_remote_changed",
-        f"dry-run did not block remote_changed: {blocked_dry_run.to_dict()}",
+        dry_run.result_status == "ready_emergency_authoritative",
+        f"dry-run did not allow remote_changed authoritative merge: {dry_run.to_dict()}",
     )
 
-    merge_result = _run_mode_a_merge(paths, store, session.emergency_session_id, ready_dry_run.report_path, marker_path)
-    _require(
-        not merge_result.ok and merge_result.error_code == "blocked_remote_changed",
-        f"Mode A merge did not block remote_changed: {merge_result.to_dict()}",
+    merge_result = _run_mode_a_merge(
+        paths,
+        store,
+        startup_session.metadata.emergency_session_id,
+        dry_run.report_path,
+        marker_path,
     )
-    _require(_file_hash(paths["medical_path"]) == remote_hash_after_change, "remote DB changed during blocked merge")
-    _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) == 0, "emergency rows were applied to changed remote")
-    _require(os.path.isfile(session.local_db_path), "local emergency DB was not preserved")
+    _require(merge_result.ok, f"authoritative merge failed: {merge_result.to_dict()}")
+    _require(_file_hash(paths["medical_path"]) != remote_hash_after_change, "remote DB was not replaced by emergency DB")
+    _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) > 0, "emergency rows were not applied")
+    _require(_count_table_rows_by(paths["medical_path"], "vitals", REMOTE_CHANGED_BY) == 0, "remote-only row survived")
+    _assert_settings_untouched(paths["settings_path"], settings_hash_before)
+    _require(os.path.isfile(merge_result.remote_backup_path), "remote pre-merge backup missing")
+    _require(os.path.isfile(merge_result.local_backup_path), "local emergency backup missing")
 
-    report = _read_json(blocked_dry_run.report_path)
+    dry_run_report_path = merge_result.dry_run_report_path or dry_run.report_path
+    report = _read_json(dry_run_report_path)
     report_text = json.dumps(report, ensure_ascii=False)
-    _require("remote_changed" in report_text, "dry-run report does not mention remote_changed")
+    _require("remote_changed_emergency_authoritative" in report_text, "dry-run report does not mention authoritative mode")
     return ScenarioResult(
-        name="remote_changed_block",
+        name="remote_changed_authoritative",
         ok=True,
-        details=f"remote_changed blocked at change_id={changed_last}",
-        artifacts={"dry_run_report": blocked_dry_run.report_path, "merge_report": merge_result.report_path},
+        details=f"remote_changed authoritative merge applied over change_id={changed_last}",
+        artifacts={"dry_run_report": dry_run_report_path, "merge_report": merge_result.report_path},
     )
 
 
@@ -699,7 +703,7 @@ def scenario_unconfirmed_write(temp_root: Path) -> ScenarioResult:
 
 SCENARIOS: tuple[tuple[str, Callable[[Path], ScenarioResult]], ...] = (
     ("full_mode_a_path", scenario_full_mode_a_path),
-    ("remote_changed_block", scenario_remote_changed_block),
+    ("remote_changed_authoritative", scenario_remote_changed_authoritative),
     ("failure_rollback", scenario_failure_rollback),
     ("no_standby_no_settings_block", scenario_no_standby_no_settings_block),
     ("doctor_blocked", scenario_doctor_blocked),

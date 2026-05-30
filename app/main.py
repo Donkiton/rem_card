@@ -991,6 +991,46 @@ def _shutdown_window_resources(window, logger):
     logger.info("Application resource shutdown finished")
 
 
+def _run_pending_emergency_merge_before_startup(close_startup_splash, logger=None) -> None:
+    if logger is None:
+        import logging
+
+        logger = logging.getLogger("RemCard")
+    try:
+        from rem_card.app.emergency_pending_merge import run_pending_emergency_merge
+
+        result = run_pending_emergency_merge()
+    except Exception as exc:
+        close_startup_splash()
+        logger.warning("Pending emergency merge check failed: %s", exc, exc_info=True)
+        _show_custom_warning(
+            "Аварийное объединение",
+            f"Не удалось проверить pending merge аварийной сессии:\n{exc}",
+        )
+        sys.exit(1)
+    if not result.attempted:
+        return
+    if result.ok:
+        logger.info(
+            "Pending emergency merge completed session_id=%s report=%s",
+            result.session_id,
+            result.merge_report_path,
+        )
+        return
+    close_startup_splash()
+    logger.warning(
+        "Pending emergency merge failed session_id=%s error=%s details=%s",
+        result.session_id,
+        result.error,
+        result.details,
+    )
+    message = result.user_message or "Аварийное объединение не завершено. Аварийная база сохранена."
+    if result.error:
+        message = f"{message}\n\nТехническая причина: {result.error}"
+    _show_custom_warning("Аварийное объединение не завершено", message)
+    sys.exit(1)
+
+
 def main(forced_role: Optional[str] = None, path_setup: bool = False):
     try:
         _main_impl(forced_role=forced_role, path_setup=path_setup)
@@ -1031,6 +1071,8 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     def close_startup_splash():
         nonlocal splash
         splash = _close_startup_splash(app, splash)
+
+    _run_pending_emergency_merge_before_startup(close_startup_splash)
 
     emergency_startup_state = {"runtime_context": None}
 

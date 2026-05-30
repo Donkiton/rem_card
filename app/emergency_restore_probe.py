@@ -46,8 +46,9 @@ MERGE_READY_MODE_A_MESSAGE = (
 
 REMOTE_CHANGED_CONFLICT_MESSAGE = (
     "Доступ к сетевой базе восстановлен, но сетевая база изменилась после создания аварийной копии.\n\n"
-    "Автоматическое объединение требует дополнительной проверки.\n"
-    "Аварийная база сохранена, продолжайте работу в аварийном режиме."
+    "Если выбрать объединение, аварийная база этого ПК будет главной и заменит сетевую медицинскую БД "
+    "после обязательных резервных копий и проверок.\n"
+    "БД настроек на сетевой папке заменяться не будет."
 )
 
 DEFAULT_SUCCESS_ROUNDS_REQUIRED = max(1, int(os.environ.get("REMCARD_RESTORE_PROBE_SUCCESS_ROUNDS", "3")))
@@ -121,12 +122,13 @@ def write_merge_ready_marker(
     *,
     remote_last_change_id: int,
     remote_fingerprint: dict[str, Any],
+    marker_mode: str = "mode_a_remote_unchanged",
 ) -> str:
     path = merge_ready_marker_path(root, session.emergency_session_id)
     payload = {
         "emergency_session_id": session.emergency_session_id,
         "requested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "mode": "mode_a_remote_unchanged",
+        "mode": str(marker_mode or "mode_a_remote_unchanged"),
         "remote_last_change_id": int(remote_last_change_id or 0),
         "base_last_change_id": int(session.base_last_change_id or 0),
         "remote_fingerprint": dict(remote_fingerprint or {}),
@@ -217,7 +219,12 @@ class EmergencyRestoreProbe:
     def mark_merge_ready(self) -> str:
         session = self._load_session()
         status = self.get_status()
-        if status.get("status") != "merge_ready_mode_a" or not status.get("merge_ready"):
+        status_name = str(status.get("status") or "")
+        can_merge = (
+            (status_name == "merge_ready_mode_a" and bool(status.get("merge_ready")))
+            or (status_name == "remote_changed_conflict_pending" and bool(status.get("network_stable")))
+        )
+        if not can_merge:
             raise RuntimeError("Сетевая база еще не готова к закрытию для объединения")
         marker_path = self.write_merge_ready_marker()
         self.store.mark_session_status(session.emergency_session_id, "merge_pending")
@@ -234,13 +241,19 @@ class EmergencyRestoreProbe:
     def write_merge_ready_marker(self) -> str:
         session = self._load_session()
         status = self.get_status()
-        if str(status.get("merge_mode") or "") != "mode_a_remote_unchanged":
-            raise RuntimeError("Merge-ready marker разрешен только для неизмененной сетевой базы")
+        merge_mode = str(status.get("merge_mode") or "")
+        marker_mode = {
+            "mode_a_remote_unchanged": "mode_a_remote_unchanged",
+            "remote_changed_conflict_pending": "remote_changed_emergency_authoritative",
+        }.get(merge_mode)
+        if marker_mode is None:
+            raise RuntimeError("Merge-ready marker разрешен только после стабильного восстановления сети")
         return write_merge_ready_marker(
             self.store.resolve_root(),
             session,
             remote_last_change_id=int(status.get("remote_last_change_id") or 0),
             remote_fingerprint=dict(status.get("remote_fingerprint") or {}),
+            marker_mode=marker_mode,
         )
 
     def clear_merge_ready_marker(self) -> bool:

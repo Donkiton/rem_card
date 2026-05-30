@@ -45,7 +45,7 @@ from rem_card.app.version import APP_VERSION
 
 
 MODE_A_MERGE_REPORT_VERSION = 1
-MODE_A_MERGE_MODE = "mode_a_remote_unchanged_authoritative_replacement"
+MODE_A_MERGE_MODE = "emergency_authoritative_replacement"
 DEFAULT_DRY_RUN_REPORT_TTL_SEC = max(
     60,
     int(float(os.environ.get("REMCARD_MERGE_DRY_RUN_REPORT_TTL_SEC", "86400"))),
@@ -60,10 +60,11 @@ MERGE_FAILURE_MESSAGE = (
     "Аварийная база сохранена.\n"
     "Работа остаётся в аварийном режиме."
 )
-REMOTE_CHANGED_BLOCKED_MESSAGE = (
+REMOTE_CHANGED_AUTHORITATIVE_MESSAGE = (
     "Сетевая база изменилась после создания аварийной копии.\n"
-    "Автоматическое объединение Mode A невозможно.\n"
-    "Аварийная база сохранена."
+    "Будет выполнено emergency-authoritative объединение: локальная аварийная медицинская БД "
+    "заменит сетевую медицинскую БД после резервных копий и проверок.\n"
+    "Сетевая БД настроек заменяться не будет."
 )
 
 
@@ -447,6 +448,7 @@ class EmergencyModeAMergeService:
         marker = self._load_marker(session, marker_file, blockers)
         dry_report_file = dry_run_report_path or self._latest_dry_run_report_path(session.emergency_session_id)
         dry_report = self._load_dry_run_report(session, dry_report_file, blockers)
+        warnings.extend(str(item) for item in (dry_report.get("warnings") or []) if item)
 
         local_ok, local_payload, local_blockers = self._dry_run_service.validate_local_emergency_side(session)
         if not local_ok:
@@ -770,14 +772,14 @@ class EmergencyModeAMergeService:
     ) -> None:
         if str(report.get("emergency_session_id") or "") != session.emergency_session_id:
             blockers.append(_blocker("dry_run_report_invalid", "dry-run report session id mismatch"))
-        if str(report.get("result_status") or "") != "ready_mode_a":
+        if str(report.get("result_status") or "") not in {"ready_mode_a", "ready_emergency_authoritative"}:
             blockers.append(_blocker("dry_run_report_not_ready", "Сначала нужна проверка объединения."))
-        if str(report.get("merge_mode") or "") != "remote_unchanged_mode_a":
-            blockers.append(_blocker("dry_run_report_not_mode_a", "dry-run report is not Mode A"))
+        if str(report.get("merge_mode") or "") not in {"remote_unchanged_mode_a", "remote_changed_emergency_authoritative"}:
+            blockers.append(_blocker("dry_run_report_not_mode_a", "dry-run report is not an allowed emergency merge mode"))
         if _int_value(report.get("base_last_change_id"), default=-1) != int(session.base_last_change_id or 0):
             blockers.append(_blocker("dry_run_report_invalid", "dry-run base_last_change_id mismatch"))
-        if _int_value(report.get("remote_last_change_id"), default=-1) != int(session.base_last_change_id or 0):
-            blockers.append(_blocker("dry_run_report_invalid", "dry-run remote_last_change_id mismatch"))
+        if _int_value(report.get("remote_last_change_id"), default=-1) < int(session.base_last_change_id or 0):
+            blockers.append(_blocker("dry_run_report_invalid", "dry-run remote_last_change_id is below base"))
         if report.get("blockers"):
             blockers.append(_blocker("dry_run_report_invalid", "dry-run report contains blockers"))
         if _report_expired(report.get("created_at"), self.dry_run_report_ttl_sec):
@@ -820,14 +822,6 @@ class EmergencyModeAMergeService:
             return {"ok": False, "code": "local_invalid", "reason": local_validation.reason}
         remote_last = int(remote_validation.last_change_id or 0)
         base_last = int(session.base_last_change_id or 0)
-        if remote_last > base_last:
-            return {
-                "ok": False,
-                "code": "blocked_remote_changed",
-                "reason": REMOTE_CHANGED_BLOCKED_MESSAGE,
-                "remote_last_change_id": remote_last,
-                "local_last_change_id": int(local_validation.last_change_id or 0),
-            }
         if remote_last < base_last:
             return {
                 "ok": False,
@@ -842,6 +836,7 @@ class EmergencyModeAMergeService:
             "local_last_change_id": int(local_validation.last_change_id or 0),
             "remote_hash": remote_validation.file_hash,
             "local_hash": local_validation.file_hash,
+            "remote_changed_after_base": remote_last > base_last,
         }
 
     def _sqlite_backup(
@@ -963,6 +958,9 @@ class EmergencyModeAMergeService:
         started: float,
     ) -> EmergencyModeAMergeResult:
         warnings = list(prereq.warnings)
+        if bool(remote_before.get("remote_changed_after_base")):
+            warnings.append("remote medical DB changed after emergency base; local emergency medical DB replaced it")
+            warnings.append("remote settings DB was not replaced")
         if not fresh_standby.get("ok"):
             warnings.append(f"fresh standby creation warning: {fresh_standby.get('reason')}")
         return self._result(
@@ -1067,8 +1065,6 @@ class EmergencyModeAMergeService:
         finished_at = _now_text()
         status_value = status.value
         message = MERGE_SUCCESS_MESSAGE if status is EmergencyModeAMergeStatus.SUCCESS else MERGE_FAILURE_MESSAGE
-        if error_code == "blocked_remote_changed":
-            message = REMOTE_CHANGED_BLOCKED_MESSAGE
         return EmergencyModeAMergeResult(
             ok=status is EmergencyModeAMergeStatus.SUCCESS,
             result_status=status_value,

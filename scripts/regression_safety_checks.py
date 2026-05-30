@@ -2589,26 +2589,19 @@ def _check_startup_auto_recovery_confirmed_corruption_still_guarded(temp_root: s
 
 def _check_no_merge_changes(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
-    result = subprocess.run(
-        ["git", "diff", "--name-only"],
-        cwd=str(PROJECT_ROOT),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=15,
-    )
-    if result.returncode != 0:
-        return False, f"git diff failed: {result.stderr[-300:]}"
-    forbidden = {
-        "app/emergency_merge_mode_a.py",
-        "app/emergency_merge_dry_run.py",
+    texts = {
+        "app/emergency_merge_mode_a.py": (PROJECT_ROOT / "app" / "emergency_merge_mode_a.py").read_text(encoding="utf-8"),
+        "app/emergency_merge_dry_run.py": (PROJECT_ROOT / "app" / "emergency_merge_dry_run.py").read_text(encoding="utf-8"),
     }
-    changed = {line.strip().replace("\\", "/") for line in result.stdout.splitlines() if line.strip()}
-    touched = sorted(changed & forbidden)
-    if touched:
-        return False, f"merge/restore files changed unexpectedly: {touched}"
+    forbidden = (
+        "blocked_remote_changed",
+        "REMOTE_CHANGED_BLOCKED_MESSAGE",
+        "conflict_authoritative_merge_required",
+        "mode_a_remote_unchanged_authoritative_replacement",
+    )
+    hits = [f"{path}:{token}" for path, text in texts.items() for token in forbidden if token in text]
+    if hits:
+        return False, f"legacy remote-changed merge blocker tokens remain: {hits}"
     return True, "ok"
 
 
@@ -12828,6 +12821,21 @@ def _append_emergency_medical_change(db_path: str, entity_id: int = 1) -> int:
         conn.close()
 
 
+def _count_emergency_medical_change(db_path: str, entity_id: int) -> int:
+    from rem_card.app.sqlite_shared import configure_connection
+
+    conn = sqlite3.connect(db_path)
+    try:
+        configure_connection(conn, profile="network")
+        row = conn.execute(
+            "SELECT COUNT(*) FROM change_log WHERE entity_name = ? AND entity_id = ? AND changed_by = ?",
+            ("regression", int(entity_id), "regression"),
+        ).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
 def _build_emergency_standby_metadata(
     root: str,
     *,
@@ -14769,22 +14777,23 @@ def _check_restore_probe_checks_probe_file_write_delete(temp_root: str) -> tuple
     return True, "ok"
 
 
-def _check_restore_probe_writes_merge_ready_marker_only_for_mode_a(temp_root: str) -> tuple[bool, str]:
+def _check_restore_probe_writes_merge_ready_marker_for_stable_merge_modes(temp_root: str) -> tuple[bool, str]:
     conflict = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
     _append_emergency_medical_change(conflict["medical_path"], entity_id=303)
-    conflict["probe"].run_probe_once()
-    try:
-        conflict["probe"].write_merge_ready_marker()
-    except RuntimeError:
-        pass
-    else:
-        return False, "conflict-pending probe wrote merge-ready marker"
+    conflict_status = conflict["probe"].run_probe_once()
+    conflict_marker_path = conflict["probe"].write_merge_ready_marker()
+    conflict_marker = _read_json(conflict_marker_path)
+    if conflict_status.get("status") != "remote_changed_conflict_pending":
+        return False, f"fixture did not become remote_changed: {conflict_status}"
+    if conflict_marker.get("mode") != "remote_changed_emergency_authoritative":
+        return False, f"remote_changed marker mode mismatch: {conflict_marker}"
 
     mode_a = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
     mode_a["probe"].run_probe_once()
     marker_path = mode_a["probe"].write_merge_ready_marker()
-    if not os.path.isfile(marker_path):
-        return False, f"mode A marker was not written: {marker_path}"
+    marker = _read_json(marker_path)
+    if not os.path.isfile(marker_path) or marker.get("mode") != "mode_a_remote_unchanged":
+        return False, f"mode A marker mismatch: {marker_path} {marker}"
     return True, "ok"
 
 
@@ -14907,6 +14916,22 @@ def _prepare_merge_dry_run_fixture(
     fixture["marker_path"] = marker_path
     fixture["service"] = service
     return fixture
+
+
+def _write_current_merge_ready_marker(fixture: dict, marker_mode: str) -> str:
+    from rem_card.app.emergency_restore_probe import write_merge_ready_marker
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    validation = validate_medical_db_snapshot(fixture["medical_path"])
+    marker_path = write_merge_ready_marker(
+        fixture["store"].resolve_root(),
+        fixture["session"],
+        remote_last_change_id=int(validation.last_change_id or 0),
+        remote_fingerprint=dict(validation.fingerprint or {}),
+        marker_mode=marker_mode,
+    )
+    fixture["marker_path"] = marker_path
+    return marker_path
 
 
 def _run_merge_dry_run_fixture(fixture: dict) -> object:
@@ -15045,16 +15070,19 @@ def _check_merge_dry_run_remote_unchanged_ready_mode_a(temp_root: str) -> tuple[
     return True, "ok"
 
 
-def _check_merge_dry_run_remote_changed_blocked(temp_root: str) -> tuple[bool, str]:
-    fixture = _prepare_merge_dry_run_fixture(temp_root)
+def _check_merge_dry_run_remote_changed_ready_authoritative(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root, marker=False)
     before_hash = _file_hash(fixture["medical_path"])
     _append_emergency_medical_change(fixture["medical_path"], entity_id=707)
+    _write_current_merge_ready_marker(fixture, "remote_changed_emergency_authoritative")
     changed_hash = _file_hash(fixture["medical_path"])
     result = _run_merge_dry_run_fixture(fixture)
-    if result.result_status != "blocked_remote_changed":
-        return False, f"remote changed did not block: {result.to_dict()}"
+    if result.result_status != "ready_emergency_authoritative" or result.merge_mode != "remote_changed_emergency_authoritative":
+        return False, f"remote changed was not ready authoritative: {result.to_dict()}"
     if _file_hash(fixture["medical_path"]) != changed_hash or changed_hash == before_hash:
-        return False, "remote changed blocker unexpectedly modified remote DB"
+        return False, "remote changed dry-run unexpectedly modified remote DB"
+    if not any("local emergency medical DB is authoritative" in item for item in result.warnings):
+        return False, f"authoritative warning missing: {result.warnings}"
     return True, "ok"
 
 
@@ -15078,6 +15106,7 @@ def _check_merge_dry_run_remote_less_than_base_blocked(temp_root: str) -> tuple[
     marker_path = fixture["marker_path"]
     payload = _read_json(marker_path)
     payload["base_last_change_id"] = 1
+    payload["remote_last_change_id"] = 1
     Path(marker_path).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     result = _run_merge_dry_run_fixture(fixture)
     if result.result_status != "blocked_inconsistent":
@@ -15180,16 +15209,17 @@ def _check_merge_dry_run_no_doctor_emergency_path(temp_root: str) -> tuple[bool,
     return True, "ok"
 
 
-def _check_merge_dry_run_no_conflict_authoritative_merge(temp_root: str) -> tuple[bool, str]:
-    fixture = _prepare_merge_dry_run_fixture(temp_root)
+def _check_merge_dry_run_remote_changed_authoritative_no_remote_write(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_merge_dry_run_fixture(temp_root, marker=False)
     _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=909)
     _append_emergency_medical_change(fixture["medical_path"], entity_id=910)
+    _write_current_merge_ready_marker(fixture, "remote_changed_emergency_authoritative")
     before_remote = _file_hash(fixture["medical_path"])
     result = _run_merge_dry_run_fixture(fixture)
-    if result.result_status != "blocked_remote_changed":
-        return False, f"remote changed did not block conflict merge: {result.to_dict()}"
+    if result.result_status != "ready_emergency_authoritative":
+        return False, f"remote changed did not become authoritative dry-run: {result.to_dict()}"
     if _file_hash(fixture["medical_path"]) != before_remote:
-        return False, "conflict dry-run applied emergency rows to remote DB"
+        return False, "authoritative dry-run applied emergency rows to remote DB"
     return True, "ok"
 
 
@@ -15285,15 +15315,23 @@ def _check_mode_a_merge_requires_merge_ready_marker(temp_root: str) -> tuple[boo
     return True, "ok"
 
 
-def _check_mode_a_merge_rejects_remote_changed(temp_root: str) -> tuple[bool, str]:
+def _check_mode_a_merge_replaces_remote_when_remote_changed(temp_root: str) -> tuple[bool, str]:
     fixture = _prepare_mode_a_merge_fixture(temp_root)
     _append_emergency_medical_change(fixture["medical_path"], entity_id=3001)
     before_hash = _file_hash(fixture["medical_path"])
     result = _run_mode_a_merge_fixture(fixture)
-    if result.result_status != "blocked" or result.error_code != "blocked_remote_changed":
-        return False, f"remote changed was not blocked: {result.to_dict()}"
-    if _file_hash(fixture["medical_path"]) != before_hash:
-        return False, "remote changed blocker overwrote remote DB"
+    if result.result_status != "success":
+        return False, f"remote changed authoritative merge failed: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) == before_hash:
+        return False, "remote changed DB was not replaced by emergency DB"
+    if _count_emergency_medical_change(fixture["medical_path"], 3001) != 0:
+        return False, "remote-only change survived authoritative replacement"
+    if int(result.remote_last_change_id_after or 0) != int(result.local_last_change_id or 0):
+        return False, f"authoritative merge last_change mismatch: {result.to_dict()}"
+    if not os.path.isfile(result.remote_backup_path) or not os.path.isfile(result.local_backup_path):
+        return False, f"authoritative merge backups missing: {result.to_dict()}"
+    if not any("remote medical DB changed after emergency base" in item for item in result.warnings):
+        return False, f"authoritative merge warning missing: {result.warnings}"
     return True, "ok"
 
 
@@ -15495,10 +15533,14 @@ def _check_mode_a_merge_rechecks_remote_last_change_before_replace(temp_root: st
     before_hash = _file_hash(fixture["medical_path"])
     result = _run_mode_a_merge_fixture(fixture)
     after_hash = _file_hash(fixture["medical_path"])
-    if result.result_status not in {"blocked", "failed"} or "Сетевая база изменилась" not in str(result.error):
-        return False, f"remote last_change recheck did not abort: {result.to_dict()}"
+    if result.result_status != "success":
+        return False, f"remote last_change recheck did not allow authoritative merge: {result.to_dict()}"
+    if _count_emergency_medical_change(fixture["medical_path"], 3201) != 0:
+        return False, "late remote-only change survived authoritative replacement"
+    if int(result.remote_last_change_id_after or 0) != int(result.local_last_change_id or 0):
+        return False, f"authoritative merge last_change mismatch after late remote change: {result.to_dict()}"
     if after_hash == before_hash:
-        return False, "test hook did not change remote before replacement"
+        return False, "test hook did not exercise remote replacement"
     return True, "ok"
 
 
@@ -15614,15 +15656,22 @@ def _check_mode_a_merge_does_not_write_remote_settings_db(temp_root: str) -> tup
     return True, "ok"
 
 
-def _check_mode_a_merge_no_conflict_authoritative_merge(temp_root: str) -> tuple[bool, str]:
+def _check_mode_a_merge_remote_changed_authoritative_merge(temp_root: str) -> tuple[bool, str]:
     fixture = _prepare_mode_a_merge_fixture(temp_root)
     _append_emergency_medical_change(fixture["medical_path"], entity_id=3301)
     before_remote = _file_hash(fixture["medical_path"])
+    before_settings = _file_hash(fixture["settings_path"])
     result = _run_mode_a_merge_fixture(fixture)
-    if result.result_status != "blocked" or result.error_code != "blocked_remote_changed":
-        return False, f"remote changed conflict was not blocked: {result.to_dict()}"
-    if _file_hash(fixture["medical_path"]) != before_remote:
-        return False, "remote changed conflict applied emergency rows"
+    if result.result_status != "success":
+        return False, f"remote changed authoritative merge failed: {result.to_dict()}"
+    if _file_hash(fixture["medical_path"]) == before_remote:
+        return False, "remote changed authoritative merge did not apply local emergency DB"
+    if _count_emergency_medical_change(fixture["medical_path"], 3301) != 0:
+        return False, "remote-only change survived authoritative merge"
+    if int(result.remote_last_change_id_after or 0) != int(result.local_last_change_id or 0):
+        return False, f"authoritative merge last_change mismatch: {result.to_dict()}"
+    if _file_hash(fixture["settings_path"]) != before_settings:
+        return False, "authoritative merge modified remote settings DB"
     return True, "ok"
 
 
@@ -15654,7 +15703,7 @@ def _check_mode_a_merge_report_written(temp_root: str) -> tuple[bool, str]:
     if not os.path.isfile(result.report_path):
         return False, f"merge report was not written: {result.report_path}"
     report = _read_json(result.report_path)
-    if report.get("result_status") != "success" or report.get("mode") != "mode_a_remote_unchanged_authoritative_replacement":
+    if report.get("result_status") != "success" or report.get("mode") != "emergency_authoritative_replacement":
         return False, f"merge report contents mismatch: {report}"
     return True, "ok"
 
@@ -15703,10 +15752,81 @@ def _check_emergency_acceptance_runner_has_full_mode_a_scenario(temp_root: str) 
     return True, "ok"
 
 
-def _check_emergency_acceptance_runner_has_remote_changed_block_scenario(temp_root: str) -> tuple[bool, str]:
+def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_pending_merge import find_pending_emergency_merge_session, run_pending_emergency_merge
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=3401)
+    local_last = validate_medical_db_snapshot(fixture["session"].local_db_path).last_change_id
+    before_settings = _file_hash(fixture["settings_path"])
+    fixture["probe"].run_probe_once()
+    marker_path = fixture["probe"].mark_merge_ready()
+    if not os.path.isfile(marker_path):
+        return False, f"merge-ready marker was not written: {marker_path}"
+    pending_id = find_pending_emergency_merge_session(fixture["store"])
+    if pending_id != fixture["session"].emergency_session_id:
+        return False, f"pending session was not found: {pending_id}"
+    result = run_pending_emergency_merge(
+        root=fixture["store"].resolve_root(),
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+    )
+    remote_last = validate_medical_db_snapshot(fixture["medical_path"]).last_change_id
+    if not result.attempted or not result.ok:
+        return False, f"pending merge did not complete: {result}"
+    if int(remote_last or 0) != int(local_last or 0):
+        return False, f"pending merge remote last_change mismatch: local={local_last} remote={remote_last}"
+    if _file_hash(fixture["settings_path"]) != before_settings:
+        return False, "pending merge modified remote settings DB"
+    own_active_dir = os.path.join(
+        fixture["store"].resolve_root(),
+        "active",
+        fixture["session"].emergency_session_id,
+    )
+    if os.path.exists(own_active_dir):
+        return False, "merged pending session remained active after successful merge"
+    if not os.path.isfile(result.dry_run_report_path):
+        return False, f"pending dry-run report missing: {result.dry_run_report_path}"
+    if not os.path.isfile(result.merge_report_path):
+        return False, f"pending merge report missing: {result.merge_report_path}"
+    return True, "ok"
+
+
+def _check_pending_emergency_merge_startup_gate_exists(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    pending_text = (PROJECT_ROOT / "app" / "emergency_pending_merge.py").read_text(encoding="utf-8")
+    main_required = (
+        "_run_pending_emergency_merge_before_startup",
+        "run_pending_emergency_merge()",
+        "Аварийное объединение не завершено",
+        "sys.exit(1)",
+    )
+    pending_required = (
+        "find_pending_emergency_merge_session",
+        "merge_pending",
+        "EmergencyMergeDryRunService",
+        "EmergencyModeAMergeService",
+        'role="nurse"',
+    )
+    missing = [token for token in main_required if token not in main_text]
+    missing.extend(token for token in pending_required if token not in pending_text)
+    if missing:
+        return False, f"pending emergency merge startup tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_has_remote_changed_authoritative_scenario(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = _emergency_acceptance_runner_text()
-    required = ("scenario_remote_changed_block", "remote_changed_conflict_pending", "blocked_remote_changed")
+    required = (
+        "scenario_remote_changed_authoritative",
+        "remote_changed_conflict_pending",
+        "ready_emergency_authoritative",
+        "remote_changed_authoritative",
+    )
     missing = [token for token in required if token not in text]
     if missing:
         return False, f"remote changed scenario tokens missing: {missing}"
@@ -17246,7 +17366,7 @@ def main():
         ("restore_probe_checks_session_locks", _check_restore_probe_checks_session_locks),
         ("restore_probe_checks_merge_lock", _check_restore_probe_checks_merge_lock),
         ("restore_probe_checks_probe_file_write_delete", _check_restore_probe_checks_probe_file_write_delete),
-        ("restore_probe_writes_merge_ready_marker_only_for_mode_a", _check_restore_probe_writes_merge_ready_marker_only_for_mode_a),
+        ("restore_probe_writes_merge_ready_marker_for_stable_merge_modes", _check_restore_probe_writes_merge_ready_marker_for_stable_merge_modes),
         ("restore_probe_close_for_merge_sets_session_merge_pending", _check_restore_probe_close_for_merge_sets_session_merge_pending),
         ("restore_probe_continue_emergency_does_not_write_marker", _check_restore_probe_continue_emergency_does_not_write_marker),
         ("restore_probe_worker_does_not_update_qwidget_directly", _check_restore_probe_worker_does_not_update_qwidget_directly),
@@ -17264,7 +17384,7 @@ def main():
         ("merge_dry_run_checks_emergency_merge_lock", _check_merge_dry_run_checks_emergency_merge_lock),
         ("merge_dry_run_checks_role_session_locks", _check_merge_dry_run_checks_role_session_locks),
         ("merge_dry_run_remote_unchanged_ready_mode_a", _check_merge_dry_run_remote_unchanged_ready_mode_a),
-        ("merge_dry_run_remote_changed_blocked", _check_merge_dry_run_remote_changed_blocked),
+        ("merge_dry_run_remote_changed_ready_authoritative", _check_merge_dry_run_remote_changed_ready_authoritative),
         ("merge_dry_run_remote_less_than_base_blocked", _check_merge_dry_run_remote_less_than_base_blocked),
         ("merge_dry_run_never_writes_remote_db", _check_merge_dry_run_never_writes_remote_db),
         ("merge_dry_run_no_remote_replacement_code", _check_merge_dry_run_no_remote_replacement_code),
@@ -17275,12 +17395,12 @@ def main():
         ("merge_dry_run_no_recovery_on_unavailable", _check_merge_dry_run_no_recovery_on_unavailable),
         ("merge_dry_run_no_sqlite_profile_changes", _check_merge_dry_run_no_sqlite_profile_changes),
         ("merge_dry_run_no_doctor_emergency_path", _check_merge_dry_run_no_doctor_emergency_path),
-        ("merge_dry_run_no_conflict_authoritative_merge", _check_merge_dry_run_no_conflict_authoritative_merge),
+        ("merge_dry_run_remote_changed_authoritative_no_remote_write", _check_merge_dry_run_remote_changed_authoritative_no_remote_write),
         ("merge_dry_run_preserves_emergency_db_on_failure", _check_merge_dry_run_preserves_emergency_db_on_failure),
         ("merge_dry_run_status_ready_does_not_switch_network", _check_merge_dry_run_status_ready_does_not_switch_network),
         ("mode_a_merge_requires_dry_run_ready_report", _check_mode_a_merge_requires_dry_run_ready_report),
         ("mode_a_merge_requires_merge_ready_marker", _check_mode_a_merge_requires_merge_ready_marker),
-        ("mode_a_merge_rejects_remote_changed", _check_mode_a_merge_rejects_remote_changed),
+        ("mode_a_merge_replaces_remote_when_remote_changed", _check_mode_a_merge_replaces_remote_when_remote_changed),
         ("mode_a_merge_rejects_remote_inconsistent", _check_mode_a_merge_rejects_remote_inconsistent),
         ("mode_a_merge_requires_base_snapshot_hash_match", _check_mode_a_merge_requires_base_snapshot_hash_match),
         ("mode_a_merge_requires_local_emergency_quick_check", _check_mode_a_merge_requires_local_emergency_quick_check),
@@ -17304,15 +17424,17 @@ def main():
         ("mode_a_merge_does_not_delete_emergency_db", _check_mode_a_merge_does_not_delete_emergency_db),
         ("mode_a_merge_next_startup_network_not_emergency", _check_mode_a_merge_next_startup_network_not_emergency),
         ("mode_a_merge_does_not_write_remote_settings_db", _check_mode_a_merge_does_not_write_remote_settings_db),
-        ("mode_a_merge_no_conflict_authoritative_merge", _check_mode_a_merge_no_conflict_authoritative_merge),
+        ("mode_a_merge_remote_changed_authoritative_merge", _check_mode_a_merge_remote_changed_authoritative_merge),
         ("mode_a_merge_no_change_log_replay", _check_mode_a_merge_no_change_log_replay),
         ("mode_a_merge_no_sqlite_profile_changes", _check_mode_a_merge_no_sqlite_profile_changes),
         ("mode_a_merge_no_doctor_path", _check_mode_a_merge_no_doctor_path),
         ("mode_a_merge_report_written", _check_mode_a_merge_report_written),
         ("mode_a_merge_preserves_reports_and_backups_in_archive", _check_mode_a_merge_preserves_reports_and_backups_in_archive),
+        ("pending_emergency_merge_runner_runs_merge_pending_session", _check_pending_emergency_merge_runner_runs_merge_pending_session),
+        ("pending_emergency_merge_startup_gate_exists", _check_pending_emergency_merge_startup_gate_exists),
         ("emergency_acceptance_runner_exists", _check_emergency_acceptance_runner_exists),
         ("emergency_acceptance_runner_has_full_mode_a_scenario", _check_emergency_acceptance_runner_has_full_mode_a_scenario),
-        ("emergency_acceptance_runner_has_remote_changed_block_scenario", _check_emergency_acceptance_runner_has_remote_changed_block_scenario),
+        ("emergency_acceptance_runner_has_remote_changed_authoritative_scenario", _check_emergency_acceptance_runner_has_remote_changed_authoritative_scenario),
         ("emergency_acceptance_runner_has_rollback_scenario", _check_emergency_acceptance_runner_has_rollback_scenario),
         ("emergency_acceptance_runner_does_not_use_production_baza_dir", _check_emergency_acceptance_runner_does_not_use_production_baza_dir),
         ("emergency_acceptance_runner_does_not_require_real_smb", _check_emergency_acceptance_runner_does_not_require_real_smb),

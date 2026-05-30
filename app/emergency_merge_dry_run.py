@@ -43,16 +43,17 @@ READY_MODE_A_MESSAGE = (
     "Сетевая база не изменялась с момента перехода в аварийный режим.\n"
     "Можно выполнить автоматическое объединение на следующем этапе."
 )
-REMOTE_CHANGED_BLOCKED_MESSAGE = (
+REMOTE_CHANGED_AUTHORITATIVE_MESSAGE = (
     "Сетевая база изменилась после создания аварийной копии.\n"
-    "Автоматическое объединение в текущем режиме заблокировано.\n"
-    "Аварийная база сохранена."
+    "Проверка разрешила emergency-authoritative объединение: локальная аварийная медицинская БД "
+    "будет главной и заменит сетевую медицинскую БД после резервных копий и проверок.\n"
+    "Сетевая БД настроек заменяться не будет."
 )
 
 
 class EmergencyMergeMode(str, Enum):
     REMOTE_UNCHANGED_MODE_A = "remote_unchanged_mode_a"
-    REMOTE_CHANGED_CONFLICT_PENDING = "remote_changed_conflict_pending"
+    REMOTE_CHANGED_EMERGENCY_AUTHORITATIVE = "remote_changed_emergency_authoritative"
     REMOTE_INCONSISTENT = "remote_inconsistent"
     UNKNOWN_REMOTE_STATE = "unknown_remote_state"
     BLOCKED = "blocked"
@@ -160,12 +161,19 @@ def validate_merge_ready_marker(
         return False, "marker session id mismatch"
     if str(marker.get("status") or "") != "merge_ready_requested":
         return False, "marker status is not merge_ready_requested"
-    if str(marker.get("mode") or "") != "mode_a_remote_unchanged":
-        return False, "marker mode is not mode_a_remote_unchanged"
+    marker_mode = str(marker.get("mode") or "")
+    if marker_mode not in {"mode_a_remote_unchanged", "remote_changed_emergency_authoritative"}:
+        return False, "marker mode is not allowed"
     if str(marker.get("source_role") or "").lower() != "nurse":
         return False, "marker source role is not nurse"
-    if _int_value(marker.get("base_last_change_id"), default=-1) != int(session.base_last_change_id or 0):
+    base_last = int(session.base_last_change_id or 0)
+    if _int_value(marker.get("base_last_change_id"), default=-1) != base_last:
         return False, "marker base_last_change_id mismatch"
+    marker_remote_last = _int_value(marker.get("remote_last_change_id"), default=-1)
+    if marker_remote_last < base_last:
+        return False, "marker remote_last_change_id is below base"
+    if marker_mode == "mode_a_remote_unchanged" and marker_remote_last != base_last:
+        return False, "mode A marker remote_last_change_id mismatch"
     requested_at = _parse_marker_time(marker.get("requested_at"))
     if requested_at is None:
         return False, "marker requested_at is invalid"
@@ -270,9 +278,9 @@ class EmergencyMergeDryRunService:
             return "ready_mode_a", EmergencyMergeMode.REMOTE_UNCHANGED_MODE_A.value, []
         if remote_last > base_last:
             return (
-                "blocked_remote_changed",
-                EmergencyMergeMode.REMOTE_CHANGED_CONFLICT_PENDING.value,
-                [_blocker(EmergencyMergeBlocker.REMOTE_CHANGED, "remote DB changed after emergency base")],
+                "ready_emergency_authoritative",
+                EmergencyMergeMode.REMOTE_CHANGED_EMERGENCY_AUTHORITATIVE.value,
+                [],
             )
         return (
             "blocked_inconsistent",
@@ -489,7 +497,7 @@ class EmergencyMergeDryRunService:
         remote_medical = (remote_payload or {}).get("medical", {})
         local_medical = (local_payload or {}).get("local", {})
         return EmergencyMergeDryRunResult(
-            ok=result_status == "ready_mode_a",
+            ok=result_status in {"ready_mode_a", "ready_emergency_authoritative"},
             result_status=result_status,
             merge_mode=merge_mode,
             blockers=blockers,
@@ -878,23 +886,24 @@ def _local_summary_possible(session: EmergencySessionMetadata) -> bool:
 
 def _warnings_for_result(result_status: str) -> list[str]:
     warnings = ["change_log is index only, not full replay log"]
-    if result_status == "blocked_remote_changed":
-        warnings.append("conflict-authoritative merge is not implemented")
+    if result_status == "ready_emergency_authoritative":
+        warnings.append("remote medical DB changed after emergency base; local emergency medical DB is authoritative")
+        warnings.append("remote settings DB will not be replaced")
     return warnings
 
 
 def _user_message(result_status: str) -> str:
     if result_status == "ready_mode_a":
         return READY_MODE_A_MESSAGE
-    if result_status == "blocked_remote_changed":
-        return REMOTE_CHANGED_BLOCKED_MESSAGE
+    if result_status == "ready_emergency_authoritative":
+        return REMOTE_CHANGED_AUTHORITATIVE_MESSAGE
     return "Проверка объединения заблокирована. Аварийная база сохранена."
 
 
 def _next_action(result_status: str) -> str:
     mapping = {
         "ready_mode_a": "run_real_merge_mode_a",
-        "blocked_remote_changed": "conflict_authoritative_merge_required",
+        "ready_emergency_authoritative": "run_real_merge_emergency_authoritative",
         "blocked_marker_required": "continue_emergency",
         "blocked_marker_invalid": "manual_support_required",
         "blocked_inconsistent": "manual_support_required",
