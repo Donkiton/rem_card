@@ -19,6 +19,7 @@ class DataService(QObject):
     write_finished = Signal(str)
     changes_detected = Signal(dict)
     network_outage_detected = Signal(dict)
+    restore_probe_status = Signal(dict)
     _success_callback_requested = Signal(object, object)
     _error_callback_requested = Signal(object, object)
 
@@ -30,6 +31,7 @@ class DataService(QObject):
         self._sync_coordinator = SyncCoordinator()
         self._poll_maintenance_tasks: list[Callable[[], Any]] = []
         self._emergency_standby_scheduler = None
+        self._emergency_restore_probe_scheduler = None
         self._shutting_down = False
         self._runtime_role = None
         self._network_outage_detected = False
@@ -119,6 +121,17 @@ class DataService(QObject):
         self.write_finished.connect(self._request_emergency_standby_after_write, Qt.QueuedConnection)
         self.changes_detected.connect(self._request_emergency_standby_after_changes, Qt.QueuedConnection)
         self.add_poll_maintenance_task(self._request_emergency_standby_on_idle)
+
+    def set_emergency_restore_probe_scheduler(self, scheduler):
+        self._emergency_restore_probe_scheduler = scheduler
+        if scheduler is None:
+            return
+        self.write_finished.connect(self._request_emergency_restore_probe_after_write, Qt.QueuedConnection)
+
+    def emit_restore_probe_status(self, payload: dict[str, Any]):
+        if self._shutting_down:
+            return
+        self.restore_probe_status.emit(dict(payload or {}))
 
     def run_poll_maintenance_tasks(self):
         for task in list(self._poll_maintenance_tasks):
@@ -240,16 +253,9 @@ class DataService(QObject):
         self._shutting_down = True
 
     def prepare_runtime_outage_shutdown(self, timeout: float = 5.0) -> bool:
-        logger.info("Runtime outage shutdown: stopping scheduler, monitor and write queue")
+        logger.info("Runtime outage shutdown: stopping schedulers, monitor and write queue")
         self.set_shutting_down()
-        scheduler_stopped = True
-        scheduler = getattr(self, "_emergency_standby_scheduler", None)
-        if scheduler is not None:
-            try:
-                scheduler_stopped = bool(scheduler.stop(timeout=timeout))
-            except Exception as exc:
-                scheduler_stopped = False
-                logger.warning("Emergency standby scheduler runtime-outage stop failed: %s", exc, exc_info=True)
+        schedulers_stopped = self._stop_emergency_schedulers(timeout=timeout)
         monitor_stopped = self.stop_data_update_monitor(timeout=timeout)
         queue_drained = self._queue.shutdown(timeout=timeout)
         if not queue_drained:
@@ -262,7 +268,7 @@ class DataService(QObject):
             flush_metrics(timeout=1.0)
         except Exception:
             pass
-        return bool(scheduler_stopped and monitor_stopped and queue_drained)
+        return bool(schedulers_stopped and monitor_stopped and queue_drained)
 
     def stop_data_update_monitor(self, timeout: float = 5.0) -> bool:
         if not self._monitor or not self._monitor.isRunning():
@@ -273,12 +279,7 @@ class DataService(QObject):
     def shutdown(self) -> bool:
         logger.info("DataService shutdown: stopping monitor and write queue")
         self.set_shutting_down()
-        scheduler = getattr(self, "_emergency_standby_scheduler", None)
-        if scheduler is not None:
-            try:
-                scheduler.stop(timeout=5.0)
-            except Exception as exc:
-                logger.warning("Emergency standby scheduler shutdown failed: %s", exc, exc_info=True)
+        schedulers_stopped = self._stop_emergency_schedulers(timeout=5.0)
         monitor_stopped = True
         if self._monitor and self._monitor.isRunning():
             self._monitor.stop()
@@ -293,11 +294,12 @@ class DataService(QObject):
         except Exception:
             pass
         logger.info(
-            "DataService shutdown result monitor_stopped=%s queue_drained=%s",
+            "DataService shutdown result schedulers_stopped=%s monitor_stopped=%s queue_drained=%s",
+            schedulers_stopped,
             monitor_stopped,
             drained,
         )
-        return bool(monitor_stopped and drained)
+        return bool(schedulers_stopped and monitor_stopped and drained)
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
         if self._monitor and not self._shutting_down and not self._network_outage_detected:
@@ -349,6 +351,30 @@ class DataService(QObject):
         if scheduler is not None:
             scheduler.request_refresh_on_idle("idle_periodic")
             self._check_standby_scheduler_outage_status(scheduler)
+
+    @Slot(str)
+    def _request_emergency_restore_probe_after_write(self, description: str):
+        if self._shutting_down:
+            return
+        scheduler = getattr(self, "_emergency_restore_probe_scheduler", None)
+        if scheduler is not None:
+            scheduler.request_probe("after_local_write")
+
+    def _stop_emergency_schedulers(self, *, timeout: float = 5.0) -> bool:
+        stopped = True
+        for attr, label in (
+            ("_emergency_standby_scheduler", "Emergency standby scheduler"),
+            ("_emergency_restore_probe_scheduler", "Emergency restore probe scheduler"),
+        ):
+            scheduler = getattr(self, attr, None)
+            if scheduler is None:
+                continue
+            try:
+                stopped = bool(scheduler.stop(timeout=timeout)) and stopped
+            except Exception as exc:
+                stopped = False
+                logger.warning("%s shutdown failed: %s", label, exc, exc_info=True)
+        return stopped
 
     @Slot(str)
     def _handle_monitor_error(self, message: str):

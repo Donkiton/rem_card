@@ -37,6 +37,7 @@ class Container:
         if hasattr(self.db_manager, "set_write_queue_idle_probe"):
             self.db_manager.set_write_queue_idle_probe(self.data_service.is_write_queue_idle)
         self.emergency_standby_scheduler = self._create_emergency_standby_scheduler(role)
+        self.emergency_restore_probe_scheduler = self._create_emergency_restore_probe_scheduler(role)
 
         # DAOs
         self.patient_dao = PatientDAO(db_manager)
@@ -91,6 +92,29 @@ class Container:
         if scheduler.start():
             scheduler.request_refresh("startup")
             logger.info("Emergency standby scheduler started for role=%s mode=%s", role, mode)
+        return scheduler
+
+    def _create_emergency_restore_probe_scheduler(self, role: str | None):
+        from rem_card.app.emergency_restore_probe import create_emergency_restore_probe_scheduler_for_runtime
+
+        runtime_context = getattr(self.db_manager, "runtime_context", None)
+        mode = getattr(runtime_context, "mode", "network")
+        scheduler = create_emergency_restore_probe_scheduler_for_runtime(
+            role=role,
+            runtime_context=runtime_context,
+            is_local_write_idle=self.data_service.is_write_queue_idle,
+            is_shutdown=lambda: bool(
+                getattr(self.data_service, "_shutting_down", False)
+                or getattr(self.db_manager, "_closed", False)
+                or getattr(self.db_manager, "_closing", False)
+            ),
+            on_status=self.data_service.emit_restore_probe_status,
+        )
+        if scheduler is None:
+            return None
+        self.data_service.set_emergency_restore_probe_scheduler(scheduler)
+        if scheduler.start():
+            logger.info("Emergency restore probe scheduler started for role=%s mode=%s", role, mode)
         return scheduler
 
 

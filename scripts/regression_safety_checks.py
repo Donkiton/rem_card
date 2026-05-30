@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -13892,7 +13893,7 @@ def _check_runtime_outage_no_merge_code(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     for relative in ("app/runtime_outage.py", "services/data_service.py", "ui/main_window.py"):
         text = (PROJECT_ROOT / relative).read_text(encoding="utf-8").lower()
-        for token in ("merge_session", "merge_attempt", "merge dry", "dry-run", "dry_run", "remote replace", "replace remote", "restore probe"):
+        for token in ("merge_session", "merge_attempt", "merge dry", "dry-run", "dry_run", "remote replace", "replace remote"):
             if token in text:
                 return False, f"runtime outage path contains merge/restore token in {relative}: {token}"
     return True, "ok"
@@ -13924,6 +13925,325 @@ def _check_runtime_outage_emergency_startup_marker_expires(temp_root: str) -> tu
     if validation.ok or "expired" not in validation.reason:
         return False, f"old marker was accepted: {validation}"
     return True, "ok"
+
+
+def _write_restore_probe_client_policy(path: str) -> None:
+    from rem_card.app.sqlite_shared import NETWORK_SAFE_DB_PROFILE
+    from rem_card.app.version import APP_VERSION
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "min_client_version": APP_VERSION,
+        "required_db_profile": NETWORK_SAFE_DB_PROFILE,
+        "wal_allowed_on_shared_db": False,
+    }
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _prepare_restore_probe_fixture(
+    temp_root: str,
+    *,
+    success_rounds_required: int = 1,
+    role: str = "nurse",
+    mode: str = "emergency",
+    write_idle: bool = True,
+    maintenance_idle: bool = True,
+):
+    from dataclasses import replace
+
+    from rem_card.app.emergency_restore_probe import EmergencyRestoreProbe
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    session_id = f"restore_probe_{uuid.uuid4().hex[:10]}"
+    session = store.create_active_session_from_standby(standby, session_id=session_id)
+    network_baza = os.path.join(temp_root, "restore_probe_network", session_id)
+    medical_path = os.path.join(network_baza, "archiv", "rao_journal.db")
+    settings_path = os.path.join(network_baza, "settings", "remcard_settings.db")
+    for directory in (
+        os.path.dirname(medical_path),
+        os.path.dirname(settings_path),
+        os.path.join(network_baza, "backup_health"),
+        os.path.join(network_baza, "session_locks"),
+        os.path.join(network_baza, "locks"),
+        os.path.join(network_baza, "config"),
+    ):
+        os.makedirs(directory, exist_ok=True)
+    shutil.copy2(session.base_snapshot_path, medical_path)
+    shutil.copy2(str(session.settings_snapshot_path), settings_path)
+    _write_restore_probe_client_policy(os.path.join(network_baza, "config", "client_policy.json"))
+    remote_validation = validate_medical_db_snapshot(medical_path)
+    session = replace(
+        session,
+        base_remote_db_path=medical_path,
+        base_remote_fingerprint=dict(remote_validation.fingerprint),
+        base_last_change_id=int(remote_validation.last_change_id or 0),
+        standby_last_change_id=int(remote_validation.last_change_id or 0),
+        last_observed_remote_change_id=int(remote_validation.last_change_id or 0),
+    )
+    store.write_active_session(session)
+    runtime_context = store.build_active_runtime_context(session.emergency_session_id)
+    if mode != "emergency":
+        runtime_context = replace(runtime_context, mode=mode, is_network=(mode == "network"), is_emergency=False, is_snapshot=False)
+    probe = EmergencyRestoreProbe(
+        role=role,
+        runtime_context=runtime_context,
+        store=store,
+        session_metadata=session,
+        success_rounds_required=success_rounds_required,
+        stability_window_sec=60.0,
+        source_medical_db_path=medical_path,
+        source_settings_db_path=settings_path,
+        network_baza_dir=network_baza,
+        is_local_write_idle=lambda: write_idle,
+        is_local_maintenance_idle=lambda: maintenance_idle,
+        is_shutdown=lambda: False,
+    )
+    return {
+        "store": store,
+        "session": session,
+        "probe": probe,
+        "network_baza": network_baza,
+        "medical_path": medical_path,
+        "settings_path": settings_path,
+    }
+
+
+def _run_restore_probe_rounds(probe, count: int) -> dict:
+    status = {}
+    for _ in range(count):
+        status = probe.run_probe_once()
+    return status
+
+
+def _check_restore_probe_only_runs_in_nurse_emergency_mode(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_restore_probe import EmergencyRestoreProbe
+
+    if not EmergencyRestoreProbe.is_enabled_for_runtime("nurse", "emergency"):
+        return False, "nurse emergency mode must enable restore probe"
+    for role, mode in (("doctor", "emergency"), ("nurse", "network"), ("doctor", "network")):
+        if EmergencyRestoreProbe.is_enabled_for_runtime(role, mode):
+            return False, f"restore probe unexpectedly enabled for role={role} mode={mode}"
+    fixture = _prepare_restore_probe_fixture(temp_root, role="doctor")
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "disabled":
+        return False, f"doctor emergency probe did not stay disabled: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_requires_active_emergency_session(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    store = fixture["store"]
+    session = fixture["session"]
+    store.mark_session_status(session.emergency_session_id, "merge_pending")
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "active_emergency_session_required":
+        return False, f"inactive session was accepted: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_checks_medical_and_settings_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    os.remove(fixture["settings_path"])
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "network_settings_db_missing":
+        return False, f"missing settings DB was not detected: {status}"
+    os.remove(fixture["medical_path"])
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "network_medical_db_missing":
+        return False, f"missing medical DB was not detected: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_requires_multiple_success_rounds(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=3)
+    first = fixture["probe"].run_probe_once()
+    if first.get("status") == "merge_ready_mode_a" or first.get("merge_ready"):
+        return False, f"probe became stable after one round: {first}"
+    final = _run_restore_probe_rounds(fixture["probe"], 2)
+    if final.get("status") != "merge_ready_mode_a" or not final.get("merge_ready"):
+        return False, f"probe did not become stable after three rounds: {final}"
+    return True, "ok"
+
+
+def _check_restore_probe_resets_stability_on_failure(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=3)
+    first = fixture["probe"].run_probe_once()
+    if int(first.get("consecutive_successes") or 0) != 1:
+        return False, f"first success was not counted: {first}"
+    os.remove(fixture["settings_path"])
+    failed = fixture["probe"].run_probe_once()
+    if int(failed.get("consecutive_successes") or 0) != 0:
+        return False, f"failure did not reset stability: {failed}"
+    return True, "ok"
+
+
+def _check_restore_probe_no_recovery_on_unavailable(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_restore_probe.py").read_text(encoding="utf-8")
+    forbidden = ("recover_shared_db", "recover_shared_db_with_locks", "_recover_shared_db", "run_startup_db_guard")
+    for token in forbidden:
+        if token in text:
+            return False, f"restore probe references recovery path: {token}"
+    return True, "ok"
+
+
+def _check_restore_probe_no_merge_code(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_restore_probe.py").read_text(encoding="utf-8").lower()
+    forbidden = ("dry_run", "dry-run", "restore_database(", "replace remote", "remote replace", "archive_session(")
+    for token in forbidden:
+        if token in text:
+            return False, f"restore probe contains forbidden merge/replace token: {token}"
+    return True, "ok"
+
+
+def _check_restore_probe_remote_unchanged_sets_mode_a_ready(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "merge_ready_mode_a" or status.get("merge_mode") != "mode_a_remote_unchanged":
+        return False, f"remote unchanged was not mode A ready: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_remote_changed_sets_conflict_pending(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    _append_emergency_medical_change(fixture["medical_path"], entity_id=202)
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "remote_changed_conflict_pending" or status.get("merge_ready"):
+        return False, f"remote changed did not become conflict-pending: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_remote_less_than_base_is_inconsistent(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    store = fixture["store"]
+    session = replace(fixture["session"], base_last_change_id=99)
+    store.write_active_session(session)
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "remote_inconsistent":
+        return False, f"remote < base was not inconsistent: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_checks_session_locks(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "session_locks", "doctor.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "session_lock_active":
+        return False, f"session lock was not detected: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_checks_merge_lock(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    lock_path = os.path.join(fixture["network_baza"], "locks", "emergency_merge.lock")
+    Path(lock_path).write_text("busy", encoding="utf-8")
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "emergency_merge_lock_active":
+        return False, f"merge lock was not detected: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_checks_probe_file_write_delete(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    status = fixture["probe"].run_probe_once()
+    probe_file = os.path.join(fixture["network_baza"], "backup_health", "emergency_restore_probe.tmp")
+    if os.path.exists(probe_file):
+        return False, f"probe file was not deleted: {probe_file}"
+    if status.get("status") != "merge_ready_mode_a":
+        return False, f"healthy probe did not pass probe-file check: {status}"
+    return True, "ok"
+
+
+def _check_restore_probe_writes_merge_ready_marker_only_for_mode_a(temp_root: str) -> tuple[bool, str]:
+    conflict = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    _append_emergency_medical_change(conflict["medical_path"], entity_id=303)
+    conflict["probe"].run_probe_once()
+    try:
+        conflict["probe"].write_merge_ready_marker()
+    except RuntimeError:
+        pass
+    else:
+        return False, "conflict-pending probe wrote merge-ready marker"
+
+    mode_a = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    mode_a["probe"].run_probe_once()
+    marker_path = mode_a["probe"].write_merge_ready_marker()
+    if not os.path.isfile(marker_path):
+        return False, f"mode A marker was not written: {marker_path}"
+    return True, "ok"
+
+
+def _check_restore_probe_close_for_merge_sets_session_merge_pending(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    fixture["probe"].run_probe_once()
+    marker_path = fixture["probe"].mark_merge_ready()
+    loaded = fixture["store"].read_active_session(fixture["session"].emergency_session_id)
+    if loaded.status != "merge_pending":
+        return False, f"session was not marked merge_pending: {loaded.status}"
+    if not os.path.isfile(marker_path):
+        return False, f"merge-ready marker missing: {marker_path}"
+    return True, "ok"
+
+
+def _check_restore_probe_continue_emergency_does_not_write_marker(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    status = fixture["probe"].run_probe_once()
+    marker_path = status.get("merge_ready_marker_path")
+    if os.path.exists(str(marker_path)):
+        return False, f"marker exists before explicit close-for-merge: {marker_path}"
+    loaded = fixture["store"].read_active_session(fixture["session"].emergency_session_id)
+    if loaded.status != "active":
+        return False, f"continue emergency changed session status: {loaded.status}"
+    return True, "ok"
+
+
+def _check_restore_probe_worker_does_not_update_qwidget_directly(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    probe_text = (PROJECT_ROOT / "app" / "emergency_restore_probe.py").read_text(encoding="utf-8")
+    for token in ("PySide6", "QWidget", "QLabel", "QMessageBox", "CustomMessageBox"):
+        if token in probe_text:
+            return False, f"restore probe worker references UI token: {token}"
+    ui_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
+    if "restore_probe_status" not in ui_text or "Qt.QueuedConnection" not in ui_text:
+        return False, "restore probe UI path must use queued Qt signal delivery"
+    return True, "ok"
+
+
+def _check_restore_probe_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_restore_probe import EmergencyRestoreProbeScheduler
+
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    scheduler = EmergencyRestoreProbeScheduler(fixture["probe"], interval_sec=60.0, on_status=lambda payload: None)
+    if not scheduler.start():
+        return False, "restore probe scheduler did not start"
+    if not scheduler.stop(timeout=2.0):
+        return False, f"restore probe scheduler did not stop: {scheduler.get_status()}"
+    if scheduler.get_status().get("running"):
+        return False, "restore probe scheduler reports running after stop"
+    return True, "ok"
+
+
+def _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE, REMOTE_CHANGED_CONFLICT_MESSAGE
+
+    _ = temp_root
+    if "закрыть RemCard" not in MERGE_READY_MODE_A_MESSAGE:
+        return False, "merge-ready dialog must tell user to close RemCard"
+    if "Не запускайте RemCard на других компьютерах" not in MERGE_READY_MODE_A_MESSAGE:
+        return False, "merge-ready dialog must warn about other PCs"
+    if "сетевая база изменилась" not in REMOTE_CHANGED_CONFLICT_MESSAGE:
+        return False, "remote-changed warning text missing"
+    return True, "ok"
+
+
+def _check_restore_probe_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
 
 
 def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
@@ -15342,6 +15662,26 @@ def main():
         ("runtime_outage_no_merge_code", _check_runtime_outage_no_merge_code),
         ("runtime_outage_dialog_text_mentions_one_pc_nurse", _check_runtime_outage_dialog_text_mentions_one_pc_nurse),
         ("runtime_outage_emergency_startup_marker_expires", _check_runtime_outage_emergency_startup_marker_expires),
+        ("restore_probe_only_runs_in_nurse_emergency_mode", _check_restore_probe_only_runs_in_nurse_emergency_mode),
+        ("restore_probe_requires_active_emergency_session", _check_restore_probe_requires_active_emergency_session),
+        ("restore_probe_checks_medical_and_settings_db", _check_restore_probe_checks_medical_and_settings_db),
+        ("restore_probe_requires_multiple_success_rounds", _check_restore_probe_requires_multiple_success_rounds),
+        ("restore_probe_resets_stability_on_failure", _check_restore_probe_resets_stability_on_failure),
+        ("restore_probe_no_recovery_on_unavailable", _check_restore_probe_no_recovery_on_unavailable),
+        ("restore_probe_no_merge_code", _check_restore_probe_no_merge_code),
+        ("restore_probe_remote_unchanged_sets_mode_a_ready", _check_restore_probe_remote_unchanged_sets_mode_a_ready),
+        ("restore_probe_remote_changed_sets_conflict_pending", _check_restore_probe_remote_changed_sets_conflict_pending),
+        ("restore_probe_remote_less_than_base_is_inconsistent", _check_restore_probe_remote_less_than_base_is_inconsistent),
+        ("restore_probe_checks_session_locks", _check_restore_probe_checks_session_locks),
+        ("restore_probe_checks_merge_lock", _check_restore_probe_checks_merge_lock),
+        ("restore_probe_checks_probe_file_write_delete", _check_restore_probe_checks_probe_file_write_delete),
+        ("restore_probe_writes_merge_ready_marker_only_for_mode_a", _check_restore_probe_writes_merge_ready_marker_only_for_mode_a),
+        ("restore_probe_close_for_merge_sets_session_merge_pending", _check_restore_probe_close_for_merge_sets_session_merge_pending),
+        ("restore_probe_continue_emergency_does_not_write_marker", _check_restore_probe_continue_emergency_does_not_write_marker),
+        ("restore_probe_worker_does_not_update_qwidget_directly", _check_restore_probe_worker_does_not_update_qwidget_directly),
+        ("restore_probe_shutdown_stops_worker", _check_restore_probe_shutdown_stops_worker),
+        ("restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs", _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs),
+        ("restore_probe_no_sqlite_profile_changes", _check_restore_probe_no_sqlite_profile_changes),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),

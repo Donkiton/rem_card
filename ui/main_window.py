@@ -113,9 +113,13 @@ class MainWindow(QMainWindow):
         self._initial_role_ui_ready = False
         self._initial_role_auto_refresh_started = False
         self._runtime_outage_handling = False
+        self._restore_probe_dialog_active = False
+        self._restore_probe_conflict_notified = False
+        self._restore_probe_notice_deferred_until = 0.0
         
         self.setup_base_ui()
         self._connect_runtime_outage_signal()
+        self._connect_restore_probe_signal()
 
         if role:
             self.init_with_role(role)
@@ -181,6 +185,23 @@ class MainWindow(QMainWindow):
                 """
             )
             self.main_layout.addWidget(self._emergency_banner)
+
+            self._restore_probe_status_label = QLabel("Ожидание восстановления сетевой базы")
+            self._restore_probe_status_label.setObjectName("EmergencyRestoreProbeStatus")
+            self._restore_probe_status_label.setStyleSheet(
+                """
+                QLabel#EmergencyRestoreProbeStatus {
+                    background-color: #e8f2ff;
+                    color: #174264;
+                    border-bottom: 1px solid #9fc4e8;
+                    padding: 5px 14px;
+                    font-weight: 600;
+                }
+                """
+            )
+            self.main_layout.addWidget(self._restore_probe_status_label)
+        else:
+            self._restore_probe_status_label = None
         
         self.stack = QStackedWidget()
         self.main_layout.addWidget(self.stack)
@@ -232,6 +253,19 @@ class MainWindow(QMainWindow):
             data_service.connect(self._handle_runtime_network_outage, Qt.QueuedConnection)
         except Exception as exc:
             logger.warning("Failed to connect runtime outage signal: %s", exc)
+
+    def _connect_restore_probe_signal(self):
+        data_service = getattr(getattr(self.container, "data_service", None), "restore_probe_status", None)
+        if data_service is None:
+            return
+        try:
+            data_service.connect(self._handle_restore_probe_status, Qt.QueuedConnection)
+        except Exception as exc:
+            logger.warning("Failed to connect restore probe signal: %s", exc)
+
+    def _is_emergency_runtime(self) -> bool:
+        runtime_context = getattr(self.container, "runtime_context", None)
+        return getattr(runtime_context, "mode", "") == "emergency"
 
     def _runtime_outage_change_ids(self) -> tuple[int, int]:
         data_service = getattr(self.container, "data_service", None)
@@ -322,6 +356,94 @@ class MainWindow(QMainWindow):
                 )
         self.close()
 
+    @Slot(dict)
+    def _handle_restore_probe_status(self, payload: dict):
+        if self._is_closing or not self._is_emergency_runtime():
+            return
+        payload = dict(payload or {})
+        status = str(payload.get("status") or "")
+        self._update_restore_probe_status_label(status)
+        if self._restore_probe_dialog_active:
+            return
+        if time.monotonic() < float(self._restore_probe_notice_deferred_until or 0.0):
+            return
+        if status == "merge_ready_mode_a" and payload.get("merge_ready"):
+            self._show_restore_probe_merge_ready_dialog()
+        elif status == "remote_changed_conflict_pending" and payload.get("network_stable"):
+            self._show_restore_probe_conflict_warning()
+
+    def _update_restore_probe_status_label(self, status: str):
+        label = getattr(self, "_restore_probe_status_label", None)
+        if label is None:
+            return
+        mapping = {
+            "running": "Сетевая база проверяется",
+            "merge_ready_mode_a": "Сеть восстановлена, требуется закрытие для объединения",
+            "remote_changed_conflict_pending": "Сетевая база изменилась, автоматическое объединение недоступно",
+        }
+        if status.startswith("round_success_"):
+            text = "Сетевая база проверяется"
+        elif status in {"disabled", "shutdown", "stopped"}:
+            text = "Ожидание восстановления сетевой базы"
+        else:
+            text = mapping.get(status, "Ожидание восстановления сетевой базы")
+        label.setText(text)
+
+    def _show_restore_probe_merge_ready_dialog(self):
+        from rem_card.app.emergency_restore_probe import MERGE_READY_MODE_A_MESSAGE
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        self._restore_probe_dialog_active = True
+        try:
+            result = CustomMessageBox.information_with_actions(
+                self,
+                "Сетевая база восстановлена",
+                MERGE_READY_MODE_A_MESSAGE,
+                [
+                    ("Закрыть для объединения", 1),
+                    ("Продолжить аварийную работу", 0),
+                ],
+            )
+        finally:
+            self._restore_probe_dialog_active = False
+        if int(result or 0) == 1:
+            self._close_for_emergency_merge()
+            return
+        self._restore_probe_notice_deferred_until = time.monotonic() + 300.0
+
+    def _show_restore_probe_conflict_warning(self):
+        if self._restore_probe_conflict_notified:
+            return
+        from rem_card.app.emergency_restore_probe import REMOTE_CHANGED_CONFLICT_MESSAGE
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        self._restore_probe_dialog_active = True
+        try:
+            CustomMessageBox.warning(
+                self,
+                "Сетевая база изменилась",
+                REMOTE_CHANGED_CONFLICT_MESSAGE,
+            )
+        finally:
+            self._restore_probe_dialog_active = False
+            self._restore_probe_conflict_notified = True
+            self._restore_probe_notice_deferred_until = time.monotonic() + 300.0
+
+    def _close_for_emergency_merge(self):
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        scheduler = getattr(self.container, "emergency_restore_probe_scheduler", None)
+        if scheduler is None:
+            CustomMessageBox.warning(self, "Аварийный режим", "Не удалось подготовить закрытие для объединения.")
+            return
+        try:
+            scheduler.mark_merge_ready()
+        except Exception as exc:
+            logger.warning("Failed to mark emergency merge-ready state: %s", exc, exc_info=True)
+            CustomMessageBox.warning(self, "Аварийный режим", f"Не удалось подготовить объединение:\n{exc}")
+            return
+        self.close()
+
     def _start_event_loop_watchdog(self):
         if os.environ.get("REMCARD_UI_WATCHDOG_ENABLED", "1") == "0":
             return
@@ -401,6 +523,8 @@ class MainWindow(QMainWindow):
 
     def _acquire_role_lock(self, role_key: str) -> bool:
         if role_key not in ("doctor", "nurse"):
+            return True
+        if self._is_emergency_runtime():
             return True
 
         if self._role_lock and self._role_lock_key == role_key:
