@@ -15049,6 +15049,125 @@ def _check_mode_a_merge_preserves_reports_and_backups_in_archive(temp_root: str)
     return True, "ok"
 
 
+def _emergency_acceptance_runner_path() -> Path:
+    return PROJECT_ROOT / "scripts" / "emergency_db_acceptance_runner.py"
+
+
+def _emergency_acceptance_runner_text() -> str:
+    path = _emergency_acceptance_runner_path()
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def _check_emergency_acceptance_runner_exists(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    path = _emergency_acceptance_runner_path()
+    if not path.is_file():
+        return False, f"runner missing: {path}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_has_full_mode_a_scenario(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("scenario_full_mode_a_path", "ready_mode_a", "EmergencyModeAMergeService", "find_resumable_active_session")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"full Mode A scenario tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_has_remote_changed_block_scenario(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("scenario_remote_changed_block", "remote_changed_conflict_pending", "blocked_remote_changed")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"remote changed scenario tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_has_rollback_scenario(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("scenario_failure_rollback", "acceptance forced final validation failure", "rolled_back", "merge_failed")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"rollback scenario tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_does_not_use_production_baza_dir(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    forbidden = (
+        "from rem_card.app import paths",
+        "import rem_card.app.paths",
+        "REMCARD_DB_PATH",
+        "JOURNAL_DB_PATH",
+        "get_dev_baza_dir",
+        "resolve_baza_dir(",
+        "build_network_runtime_context()",
+    )
+    hits = [token for token in forbidden if token in text]
+    if hits:
+        return False, f"runner must not use production/default BAZA_DIR tokens: {hits}"
+    if "guard_network_baza_not_used" not in text:
+        return False, "runner must isolate REMCARD_BAZA_DIR to a temp guard path"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_does_not_require_real_smb(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text().lower()
+    forbidden = ("smb://", "net use", "winsock", "\\\\\\\\")
+    hits = [token for token in forbidden if token in text]
+    if hits:
+        return False, f"runner appears to require real SMB/network share tokens: {hits}"
+    if "network_baza" not in text or "tempfile.mkdtemp" not in text:
+        return False, "runner must build a temporary local network fixture"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_checks_no_json_fallback(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("scenario_no_standby_no_settings_block", "no_valid_standby", "active_session_invalid", "NO_JSON_FALLBACK_MARKER")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"no JSON fallback checks missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_checks_doctor_block(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("scenario_doctor_blocked", "prepare_emergency_startup(\"doctor\"", "role=\"doctor\"", "role_not_allowed")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"doctor block checks missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_checks_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("_assert_network_sqlite_profile_unchanged", "_resolve_sqlite_profile_settings", "\"DELETE\"", "\"EXTRA\"", "mmap_mb")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"SQLite profile guard tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_acceptance_runner_checks_remote_settings_untouched(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = _emergency_acceptance_runner_text()
+    required = ("_assert_settings_untouched", "settings_hash_before", "remote settings DB was modified")
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"remote settings untouched guard missing: {missing}"
+    return True, "ok"
+
+
 def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_db_path, get_settings_dir, get_settings_lock_path
 
@@ -16542,6 +16661,16 @@ def main():
         ("mode_a_merge_no_doctor_path", _check_mode_a_merge_no_doctor_path),
         ("mode_a_merge_report_written", _check_mode_a_merge_report_written),
         ("mode_a_merge_preserves_reports_and_backups_in_archive", _check_mode_a_merge_preserves_reports_and_backups_in_archive),
+        ("emergency_acceptance_runner_exists", _check_emergency_acceptance_runner_exists),
+        ("emergency_acceptance_runner_has_full_mode_a_scenario", _check_emergency_acceptance_runner_has_full_mode_a_scenario),
+        ("emergency_acceptance_runner_has_remote_changed_block_scenario", _check_emergency_acceptance_runner_has_remote_changed_block_scenario),
+        ("emergency_acceptance_runner_has_rollback_scenario", _check_emergency_acceptance_runner_has_rollback_scenario),
+        ("emergency_acceptance_runner_does_not_use_production_baza_dir", _check_emergency_acceptance_runner_does_not_use_production_baza_dir),
+        ("emergency_acceptance_runner_does_not_require_real_smb", _check_emergency_acceptance_runner_does_not_require_real_smb),
+        ("emergency_acceptance_runner_checks_no_json_fallback", _check_emergency_acceptance_runner_checks_no_json_fallback),
+        ("emergency_acceptance_runner_checks_doctor_block", _check_emergency_acceptance_runner_checks_doctor_block),
+        ("emergency_acceptance_runner_checks_no_sqlite_profile_changes", _check_emergency_acceptance_runner_checks_no_sqlite_profile_changes),
+        ("emergency_acceptance_runner_checks_remote_settings_untouched", _check_emergency_acceptance_runner_checks_remote_settings_untouched),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
