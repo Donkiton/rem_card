@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 
@@ -12293,6 +12294,632 @@ def _check_no_emergency_startup_enabled_yet(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _create_valid_emergency_medical_db(path: str) -> None:
+    from rem_card.app.sqlite_shared import configure_connection
+    from rem_card.app.unified_db_schema import ensure_unified_schema
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        configure_connection(conn, profile="network")
+        ensure_unified_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _create_valid_emergency_settings_db(baza_dir: str) -> str:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
+    service.ensure_ready()
+    return service.db.db_path
+
+
+def _append_emergency_medical_change(db_path: str, entity_id: int = 1) -> int:
+    from rem_card.app.sqlite_shared import configure_connection
+
+    conn = sqlite3.connect(db_path)
+    try:
+        configure_connection(conn, profile="network")
+        conn.execute(
+            "INSERT INTO change_log(entity_name, entity_id, action, changed_by) VALUES (?, ?, ?, ?)",
+            ("regression", int(entity_id), "update", "regression"),
+        )
+        conn.commit()
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
+def _build_emergency_standby_metadata(
+    root: str,
+    *,
+    medical_db_path: str | None = None,
+    settings_db_path: str | None = None,
+    validation_status: str = "ok",
+) -> object:
+    from rem_card.app.emergency_metadata import EmergencyStandbyMetadata
+    from rem_card.app.emergency_validation import validate_medical_db_snapshot, validate_settings_db_snapshot
+    from rem_card.app.version import APP_VERSION
+
+    now = datetime.now().replace(microsecond=0).isoformat()
+    medical_path = medical_db_path or os.path.join(root, "standby", "rao_journal_standby.db")
+    settings_path = settings_db_path
+    medical_validation = validate_medical_db_snapshot(medical_path)
+    settings_validation = validate_settings_db_snapshot(settings_path) if settings_path else None
+    return EmergencyStandbyMetadata(
+        standby_id=f"standby_{os.getpid()}",
+        created_at=now,
+        updated_at=now,
+        source_remote_db_path=r"\\fixture\Baza_rao3_jurnal\archiv\rao_journal.db",
+        source_remote_fingerprint=dict(medical_validation.fingerprint),
+        source_settings_db_path=None if settings_path is None else r"\\fixture\Baza_rao3_jurnal\settings\remcard_settings.db",
+        source_settings_fingerprint=None if settings_validation is None else dict(settings_validation.fingerprint),
+        remote_last_change_id=int(medical_validation.last_change_id or 0),
+        schema_version=int(medical_validation.schema_version or 0),
+        app_version=APP_VERSION,
+        medical_db_path=os.path.abspath(medical_path),
+        medical_db_hash=medical_validation.file_hash,
+        medical_db_size=medical_validation.file_size,
+        medical_db_mtime=medical_validation.file_mtime,
+        settings_db_path=None if settings_path is None else os.path.abspath(settings_path),
+        settings_db_hash=None if settings_validation is None else settings_validation.file_hash,
+        settings_db_size=None if settings_validation is None else settings_validation.file_size,
+        settings_db_mtime=None if settings_validation is None else settings_validation.file_mtime,
+        quick_check_status=medical_validation.reason,
+        settings_quick_check_status=None if settings_validation is None else settings_validation.reason,
+        validation_status=validation_status,
+        validation_error=None if validation_status == "ok" else "fixture validation error",
+    )
+
+
+def _prepare_emergency_store_fixture(temp_root: str):
+    from rem_card.app.emergency_paths import standby_medical_db_path, standby_settings_db_path
+    from rem_card.app.emergency_store import EmergencyLocalStore
+
+    root = os.path.join(temp_root, "er")
+    store = EmergencyLocalStore(root=root)
+    store.ensure_root_dirs()
+    medical_path = standby_medical_db_path(root)
+    settings_path = standby_settings_db_path(root)
+    _create_valid_emergency_medical_db(medical_path)
+    source_settings = _create_valid_emergency_settings_db(os.path.join(temp_root, "settings_source_baza"))
+    shutil.copy2(source_settings, settings_path)
+    metadata = _build_emergency_standby_metadata(root, medical_db_path=medical_path, settings_db_path=settings_path)
+    store.write_standby_metadata(metadata)
+    return store, metadata
+
+
+def _check_emergency_store_root_is_programdata_by_default(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_paths import resolve_emergency_root
+    from rem_card.app.emergency_store import EmergencyLocalStore
+
+    default_root = resolve_emergency_root()
+    parts_lower = [part.lower() for part in Path(default_root).parts]
+    if "remcard" not in parts_lower or "emergency_db" not in parts_lower:
+        return False, f"default emergency root mismatch: {default_root}"
+    store = EmergencyLocalStore(root=os.path.join(temp_root, "local_emergency"))
+    if not _path_is_under(store.resolve_root(), temp_root):
+        return False, f"test emergency root is not isolated: {store.resolve_root()}"
+    return True, "ok"
+
+
+def _check_emergency_store_creates_expected_directory_structure(temp_root: str) -> tuple[bool, str]:
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_structure")
+    root = store.resolve_root()
+    expected = [
+        os.path.join(root, "standby"),
+        os.path.join(root, "active"),
+        os.path.join(root, "archived"),
+        os.path.join(root, "active", session.emergency_session_id),
+        os.path.join(root, "active", session.emergency_session_id, "locks"),
+        os.path.join(root, "active", session.emergency_session_id, "backups"),
+        os.path.join(root, "active", session.emergency_session_id, "backup_health"),
+        os.path.join(root, "active", session.emergency_session_id, "quarantine"),
+        os.path.join(root, "active", session.emergency_session_id, "snapshots"),
+        os.path.join(root, "active", session.emergency_session_id, "logs"),
+    ]
+    missing = [path for path in expected if not os.path.isdir(path)]
+    if missing:
+        return False, f"missing emergency dirs: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_metadata_roundtrip_is_atomic(temp_root: str) -> tuple[bool, str]:
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    loaded = store.read_standby_metadata()
+    if loaded != standby:
+        return False, "standby metadata roundtrip mismatch"
+    session = store.create_active_session_from_standby(standby, session_id="session_metadata_roundtrip")
+    loaded_session = store.read_active_session(session.emergency_session_id)
+    if loaded_session != session:
+        return False, "active session metadata roundtrip mismatch"
+    temp_files = list(Path(store.resolve_root()).rglob("*.tmp"))
+    if temp_files:
+        return False, f"atomic metadata temp files were left behind: {temp_files[:3]}"
+    return True, "ok"
+
+
+def _check_emergency_metadata_corruption_is_controlled_error(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_metadata import EmergencyMetadataError
+    from rem_card.app.emergency_paths import standby_metadata_path
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    medical_path = standby.medical_db_path
+    Path(standby_metadata_path(store.resolve_root())).write_text("{not-json", encoding="utf-8")
+    try:
+        store.read_standby_metadata()
+    except EmergencyMetadataError:
+        pass
+    else:
+        return False, "corrupt standby metadata was not a controlled error"
+    if not os.path.exists(medical_path):
+        return False, "corrupt metadata handling deleted standby medical DB"
+    return True, "ok"
+
+
+def _check_emergency_active_session_requires_valid_standby_medical_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_paths import standby_settings_db_path
+    from rem_card.app.emergency_store import EmergencyLocalStore, EmergencyStoreError
+
+    root = os.path.join(temp_root, "emergency_root")
+    store = EmergencyLocalStore(root=root)
+    store.ensure_root_dirs()
+    settings_path = standby_settings_db_path(root)
+    shutil.copy2(_create_valid_emergency_settings_db(os.path.join(temp_root, "settings_source_baza")), settings_path)
+    missing_medical = os.path.join(root, "standby", "missing_medical.db")
+    metadata = _build_emergency_standby_metadata(root, medical_db_path=missing_medical, settings_db_path=settings_path)
+    try:
+        store.create_active_session_from_standby(metadata, session_id="missing_medical")
+    except EmergencyStoreError:
+        pass
+    else:
+        return False, "active session was created without valid standby medical DB"
+    if os.path.exists(os.path.join(root, "active", "missing_medical", "base_snapshot.db")):
+        return False, "base snapshot was created after missing medical DB failure"
+    return True, "ok"
+
+
+def _check_emergency_active_session_requires_valid_settings_snapshot(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_paths import standby_medical_db_path
+    from rem_card.app.emergency_store import EmergencyLocalStore, EmergencyStoreError
+
+    root = os.path.join(temp_root, "emergency_root")
+    store = EmergencyLocalStore(root=root, settings_required=True)
+    store.ensure_root_dirs()
+    medical_path = standby_medical_db_path(root)
+    _create_valid_emergency_medical_db(medical_path)
+    missing_settings = os.path.join(root, "standby", "missing_settings.db")
+    metadata = _build_emergency_standby_metadata(root, medical_db_path=medical_path, settings_db_path=missing_settings)
+    try:
+        store.create_active_session_from_standby(metadata, session_id="missing_settings")
+    except EmergencyStoreError:
+        pass
+    else:
+        return False, "active session was created without required settings snapshot"
+    if os.path.exists(missing_settings):
+        return False, "missing settings snapshot was created unexpectedly"
+    return True, "ok"
+
+
+def _check_emergency_active_session_creates_base_and_local_copies(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_copies")
+    for path in (
+        session.base_snapshot_path,
+        session.local_db_path,
+        session.settings_snapshot_path,
+        os.path.join(store.resolve_root(), "active", session.emergency_session_id, "emergency_session.json"),
+    ):
+        if not path or not os.path.isfile(path):
+            return False, f"active session file missing: {path}"
+    if session.base_snapshot_hash != compute_file_hash(session.base_snapshot_path):
+        return False, "base snapshot hash mismatch"
+    return True, "ok"
+
+
+def _check_emergency_base_snapshot_is_frozen(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import compute_file_hash
+    from rem_card.app.sqlite_shared import configure_connection
+
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_frozen")
+    before_hash = compute_file_hash(session.base_snapshot_path)
+    conn = sqlite3.connect(session.local_db_path)
+    try:
+        configure_connection(conn, profile="network")
+        conn.execute("CREATE TABLE IF NOT EXISTS local_emergency_mutation (id INTEGER PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO local_emergency_mutation(value) VALUES ('changed')")
+        conn.commit()
+    finally:
+        conn.close()
+    after_hash = compute_file_hash(session.base_snapshot_path)
+    if after_hash != before_hash:
+        return False, "base_snapshot changed after local emergency DB mutation"
+    if compute_file_hash(session.local_db_path) == before_hash:
+        return False, "local emergency DB did not change in fixture"
+    try:
+        store.create_active_session_from_standby(metadata, session_id="session_frozen")
+    except Exception:
+        pass
+    else:
+        return False, "repeat active session creation overwrote existing base_snapshot"
+    return True, "ok"
+
+
+def _check_emergency_active_runtime_context_paths_are_local(temp_root: str) -> tuple[bool, str]:
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_context")
+    ctx = store.build_active_runtime_context(session.emergency_session_id)
+    expected = {
+        "medical_db_path": "rao_journal_emergency.db",
+        "medical_db_lock_path": os.path.join("locks", "db.lock"),
+        "medical_backups_valid_dir": "backups",
+        "medical_backup_health_dir": "backup_health",
+        "medical_logs_dir": "logs",
+        "settings_db_path": "remcard_settings_snapshot.db",
+        "settings_db_lock_path": os.path.join("locks", "settings.db.lock"),
+    }
+    session_dir = os.path.join(store.resolve_root(), "active", session.emergency_session_id)
+    for attr, suffix in expected.items():
+        path = getattr(ctx, attr)
+        if not _path_is_under(path, session_dir):
+            return False, f"{attr} is not local to active session: {path}"
+        if not os.path.normpath(path).endswith(os.path.normpath(suffix)):
+            return False, f"{attr} suffix mismatch: {path}"
+    if not ctx.is_emergency or ctx.is_network or ctx.is_snapshot:
+        return False, f"active runtime context flags mismatch: {ctx}"
+    return True, "ok"
+
+
+def _check_emergency_settings_snapshot_is_readonly(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDbError
+
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_settings_readonly")
+    service = store.build_readonly_settings_service_for_session(session.emergency_session_id)
+    info = service.ensure_ready()
+    if not info.get("settings_readonly"):
+        return False, f"settings snapshot service is not readonly: {info}"
+    try:
+        service.db.connect(readonly=False)
+    except SettingsDbError:
+        pass
+    else:
+        return False, "readonly emergency settings snapshot allowed writable connect"
+    missing_session_id = "missing_settings_session"
+    os.makedirs(os.path.join(store.resolve_root(), "active", missing_session_id), exist_ok=True)
+    missing_service = store.build_readonly_settings_service_for_session(missing_session_id)
+    try:
+        missing_service.ensure_ready()
+    except SettingsDbError:
+        pass
+    else:
+        return False, "missing emergency settings snapshot created an empty DB"
+    return True, "ok"
+
+
+def _check_emergency_store_does_not_touch_network_paths(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import paths as app_paths
+
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_network_isolation")
+    network_root = os.path.abspath(app_paths.BAZA_DIR)
+    inspected_paths = [
+        metadata.medical_db_path,
+        metadata.settings_db_path,
+        session.base_snapshot_path,
+        session.local_db_path,
+        session.settings_snapshot_path,
+        store.build_active_runtime_context(session.emergency_session_id).medical_db_lock_path,
+    ]
+    for path in inspected_paths:
+        if path and _path_is_under(path, network_root):
+            return False, f"emergency store path points to network BAZA_DIR: {path}"
+    if _path_is_under(store.resolve_root(), network_root):
+        return False, f"emergency root points to network BAZA_DIR: {store.resolve_root()}"
+    return True, "ok"
+
+
+def _check_emergency_client_id_is_stable(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_store import get_or_create_local_emergency_client_id
+
+    root = os.path.join(temp_root, "emergency_root")
+    first = get_or_create_local_emergency_client_id(root)
+    second = get_or_create_local_emergency_client_id(root)
+    if not first or first != second:
+        return False, f"emergency client id is not stable: {first!r} {second!r}"
+    return True, "ok"
+
+
+def _check_emergency_no_sqlite_safety_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_emergency_no_startup_activation_yet(temp_root: str) -> tuple[bool, str]:
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    forbidden = (
+        "EmergencyLocalStore(",
+        "build_active_runtime_context",
+        "emergency_session.json",
+    )
+    for token in forbidden:
+        if token in bootstrap_text or token in main_text:
+            return False, f"emergency startup activation token unexpectedly present: {token}"
+    return True, "ok"
+
+
+def _prepare_emergency_standby_manager_fixture(temp_root: str):
+    from rem_card.app.emergency_standby import EmergencyStandbyManager
+
+    root = os.path.join(temp_root, "er")
+    source_medical = os.path.join(temp_root, "n", "a.db")
+    source_settings_baza = os.path.join(temp_root, "s")
+    source_settings = _create_valid_emergency_settings_db(source_settings_baza)
+    _create_valid_emergency_medical_db(source_medical)
+    manager = EmergencyStandbyManager(
+        root=root,
+        source_medical_db_path=source_medical,
+        source_settings_db_path=source_settings,
+    )
+    return manager, source_medical, source_settings
+
+
+def _check_emergency_standby_refresh_requires_existing_network_medical_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_paths import standby_medical_db_path
+    from rem_card.app.emergency_standby import EmergencyStandbyManager
+
+    source_settings = _create_valid_emergency_settings_db(os.path.join(temp_root, "settings_baza"))
+    manager = EmergencyStandbyManager(
+        root=os.path.join(temp_root, "emergency_root"),
+        source_medical_db_path=os.path.join(temp_root, "missing", "rao_journal.db"),
+        source_settings_db_path=source_settings,
+    )
+    result = manager.create_or_refresh_standby(forced=True)
+    if result.ok or result.status != "source_unavailable":
+        return False, f"missing medical source was not controlled: {result}"
+    final_path = standby_medical_db_path(manager.root)
+    if os.path.exists(final_path):
+        return False, f"missing source created standby DB: {final_path}"
+    return True, "ok"
+
+
+def _check_emergency_standby_refresh_requires_existing_network_settings_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_paths import standby_settings_db_path
+    from rem_card.app.emergency_standby import EmergencyStandbyManager
+
+    source_medical = os.path.join(temp_root, "source", "archiv", "rao_journal.db")
+    _create_valid_emergency_medical_db(source_medical)
+    manager = EmergencyStandbyManager(
+        root=os.path.join(temp_root, "emergency_root"),
+        source_medical_db_path=source_medical,
+        source_settings_db_path=os.path.join(temp_root, "missing", "settings.db"),
+    )
+    result = manager.create_or_refresh_standby(forced=True)
+    if result.ok or result.status != "source_unavailable":
+        return False, f"missing settings source was not controlled: {result}"
+    final_path = standby_settings_db_path(manager.root)
+    if os.path.exists(final_path):
+        return False, f"missing source created settings standby DB: {final_path}"
+    return True, "ok"
+
+
+def _check_emergency_standby_refresh_uses_sqlite_backup_api(temp_root: str) -> tuple[bool, str]:
+    text = (PROJECT_ROOT / "app" / "emergency_standby.py").read_text(encoding="utf-8")
+    if "backup_connection(" not in text or "conn.backup" not in (PROJECT_ROOT / "app" / "sqlite_shared.py").read_text(encoding="utf-8"):
+        return False, "EmergencyStandbyManager must use SQLite Backup API helper"
+    forbidden = ("shutil.copy", "copy2(", "copyfile(")
+    for token in forbidden:
+        if token in text:
+            return False, f"EmergencyStandbyManager must not direct-copy live DB: {token}"
+    return True, "ok"
+
+
+def _check_emergency_standby_refresh_writes_temp_then_atomic_replace(temp_root: str) -> tuple[bool, str]:
+    text = (PROJECT_ROOT / "app" / "emergency_standby.py").read_text(encoding="utf-8")
+    required = (
+        ".tmp.",
+        "os.replace(temp_medical_path, final_medical_path)",
+        "os.replace(temp_settings_path, final_settings_path)",
+        "_temp_standby_path",
+    )
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"temp/atomic replace tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_emergency_standby_refresh_validates_before_replace(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    first = manager.create_or_refresh_standby(forced=True)
+    if not first.ok or not first.metadata:
+        return False, f"initial standby refresh failed: {first}"
+    old_hash = compute_file_hash(first.metadata.medical_db_path)
+    original_backup = manager._backup_sqlite_to_temp
+
+    def invalid_medical_backup(source_path, temp_target_path, *, source):
+        Path(temp_target_path).write_bytes(b"not sqlite")
+        return temp_target_path
+
+    try:
+        manager._backup_sqlite_to_temp = invalid_medical_backup
+        result = manager.create_or_refresh_standby(forced=True)
+    finally:
+        manager._backup_sqlite_to_temp = original_backup
+    if result.ok or result.status != "validation_failed":
+        return False, f"invalid temp DB did not fail validation: {result}"
+    if compute_file_hash(first.metadata.medical_db_path) != old_hash:
+        return False, "invalid temp DB replaced existing valid medical standby"
+    return True, "ok"
+
+
+def _check_emergency_standby_refresh_preserves_old_valid_pair_on_settings_failure(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    manager, source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    first = manager.create_or_refresh_standby(forced=True)
+    if not first.ok or not first.metadata:
+        return False, f"initial standby refresh failed: {first}"
+    old_medical_hash = compute_file_hash(first.metadata.medical_db_path)
+    old_settings_hash = compute_file_hash(str(first.metadata.settings_db_path))
+    old_change_id = first.metadata.remote_last_change_id
+    _append_emergency_medical_change(source_medical, entity_id=22)
+    original_backup = manager._backup_sqlite_to_temp
+
+    def fail_settings_backup(source_path, temp_target_path, *, source):
+        if "settings" in source:
+            Path(temp_target_path).write_bytes(b"not sqlite")
+            return temp_target_path
+        return original_backup(source_path, temp_target_path, source=source)
+
+    try:
+        manager._backup_sqlite_to_temp = fail_settings_backup
+        result = manager.create_or_refresh_standby(forced=True)
+    finally:
+        manager._backup_sqlite_to_temp = original_backup
+    if result.ok or result.status != "validation_failed":
+        return False, f"settings temp failure did not stop refresh: {result}"
+    current = manager.store.read_standby_metadata()
+    if current.remote_last_change_id != old_change_id:
+        return False, "metadata advanced after failed settings refresh"
+    if compute_file_hash(current.medical_db_path) != old_medical_hash:
+        return False, "medical standby was replaced after settings failure"
+    if compute_file_hash(str(current.settings_db_path)) != old_settings_hash:
+        return False, "settings standby changed after settings failure"
+    return True, "ok"
+
+
+def _check_emergency_standby_metadata_updates_after_success(temp_root: str) -> tuple[bool, str]:
+    manager, source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    expected_change_id = _append_emergency_medical_change(source_medical, entity_id=33)
+    result = manager.create_or_refresh_standby(forced=True)
+    if not result.ok or not result.metadata:
+        return False, f"standby refresh failed: {result}"
+    metadata = result.metadata
+    if metadata.validation_status != "valid":
+        return False, f"metadata status mismatch: {metadata.validation_status}"
+    if metadata.remote_last_change_id != expected_change_id:
+        return False, f"metadata change id mismatch: {metadata.remote_last_change_id} != {expected_change_id}"
+    for path in (metadata.medical_db_path, metadata.settings_db_path):
+        if not path or not os.path.isfile(path):
+            return False, f"metadata path missing: {path}"
+    if not metadata.medical_db_hash or not metadata.settings_db_hash:
+        return False, "metadata hashes were not written"
+    return True, "ok"
+
+
+def _check_emergency_standby_should_refresh_when_remote_change_id_advances(temp_root: str) -> tuple[bool, str]:
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    result = manager.create_or_refresh_standby(forced=True)
+    if not result.ok or not result.metadata:
+        return False, f"standby refresh failed: {result}"
+    should = manager.should_refresh_standby(
+        result.metadata.remote_last_change_id + 1,
+        settings_fingerprint=dict(result.metadata.source_settings_fingerprint or {}),
+    )
+    return (True, "ok") if should else (False, "remote change id advance did not request refresh")
+
+
+def _check_emergency_standby_should_not_refresh_when_current(temp_root: str) -> tuple[bool, str]:
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    result = manager.create_or_refresh_standby(forced=True)
+    if not result.ok or not result.metadata:
+        return False, f"standby refresh failed: {result}"
+    should = manager.should_refresh_standby(
+        result.metadata.remote_last_change_id,
+        settings_fingerprint=dict(result.metadata.source_settings_fingerprint or {}),
+        source_schema_version=result.metadata.schema_version,
+    )
+    return (False, "current standby requested refresh") if should else (True, "ok")
+
+
+def _check_emergency_standby_unavailable_source_does_not_trigger_recovery(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.emergency_standby as standby_module
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    original_validate = standby_module.validate_medical_db_snapshot
+    try:
+        standby_module.validate_medical_db_snapshot = lambda path: standby_module.SnapshotValidationResult(False, "database is locked")
+        result = manager.create_or_refresh_standby(forced=True)
+    finally:
+        standby_module.validate_medical_db_snapshot = original_validate
+    if result.ok or result.status != "source_unavailable":
+        return False, f"locked source was not controlled: {result}"
+    text = (PROJECT_ROOT / "app" / "emergency_standby.py").read_text(encoding="utf-8")
+    if "recover_shared_db" in text or "startup_db_guard" in text:
+        return False, "standby refresh must not trigger recovery"
+    return True, "ok"
+
+
+def _check_emergency_standby_no_empty_db_creation(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_paths import standby_medical_db_path, standby_settings_db_path
+    from rem_card.app.emergency_standby import EmergencyStandbyManager
+
+    manager = EmergencyStandbyManager(
+        root=os.path.join(temp_root, "emergency_root"),
+        source_medical_db_path=os.path.join(temp_root, "missing_medical.db"),
+        source_settings_db_path=os.path.join(temp_root, "missing_settings.db"),
+    )
+    result = manager.create_or_refresh_standby(forced=True)
+    if result.ok:
+        return False, "missing sources unexpectedly created standby"
+    for path in (standby_medical_db_path(manager.root), standby_settings_db_path(manager.root)):
+        if os.path.exists(path) and os.path.getsize(path) == 0:
+            return False, f"zero-byte standby was created: {path}"
+    return True, "ok"
+
+
+def _check_emergency_standby_pair_is_consistent(temp_root: str) -> tuple[bool, str]:
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    refresh = manager.create_or_refresh_standby(forced=True)
+    if not refresh.ok:
+        return False, f"standby refresh failed: {refresh}"
+    status = manager.validate_standby()
+    if not status.ok or not status.metadata:
+        return False, f"standby pair is not valid: {status}"
+    if not status.medical_validation or not status.medical_validation.ok:
+        return False, f"medical standby invalid: {status.medical_validation}"
+    if not status.settings_validation or not status.settings_validation.ok:
+        return False, f"settings standby invalid: {status.settings_validation}"
+    if status.metadata.validation_status != "valid":
+        return False, f"valid pair has non-valid metadata: {status.metadata.validation_status}"
+    return True, "ok"
+
+
+def _check_emergency_standby_no_startup_activation_yet(temp_root: str) -> tuple[bool, str]:
+    bootstrap_text = (PROJECT_ROOT / "app" / "bootstrap.py").read_text(encoding="utf-8")
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    forbidden = ("EmergencyStandbyManager", "create_or_refresh_standby", "refresh_medical_standby")
+    for token in forbidden:
+        if token in bootstrap_text or token in main_text:
+            return False, f"standby startup activation token unexpectedly present: {token}"
+    return True, "ok"
+
+
+def _check_emergency_standby_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_no_sqlite_safety_changes(temp_root)
+
+
+def _check_emergency_standby_does_not_touch_doctor_nurse_business_logic(temp_root: str) -> tuple[bool, str]:
+    forbidden = ("EmergencyStandbyManager", "emergency_standby", "create_or_refresh_standby")
+    ui_files = list((PROJECT_ROOT / "ui" / "doctor_view").rglob("*.py")) + list((PROJECT_ROOT / "ui" / "nurse_view").rglob("*.py"))
+    for path in ui_files:
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden:
+            if token in text:
+                return False, f"{path.relative_to(PROJECT_ROOT)} unexpectedly references standby manager"
+    return True, "ok"
+
+
 def _check_settings_db_path_is_network_data_root_settings_folder(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_db_path, get_settings_dir, get_settings_lock_path
 
@@ -13625,6 +14252,35 @@ def main():
         ("settings_service_context_reset_prevents_network_singleton_reuse", _check_settings_service_context_reset_prevents_network_singleton_reuse),
         ("no_sqlite_safety_changes", _check_no_sqlite_safety_changes),
         ("no_emergency_startup_enabled_yet", _check_no_emergency_startup_enabled_yet),
+        ("emergency_store_root_is_programdata_by_default", _check_emergency_store_root_is_programdata_by_default),
+        ("emergency_store_creates_expected_directory_structure", _check_emergency_store_creates_expected_directory_structure),
+        ("emergency_metadata_roundtrip_is_atomic", _check_emergency_metadata_roundtrip_is_atomic),
+        ("emergency_metadata_corruption_is_controlled_error", _check_emergency_metadata_corruption_is_controlled_error),
+        ("emergency_active_session_requires_valid_standby_medical_db", _check_emergency_active_session_requires_valid_standby_medical_db),
+        ("emergency_active_session_requires_valid_settings_snapshot", _check_emergency_active_session_requires_valid_settings_snapshot),
+        ("emergency_active_session_creates_base_and_local_copies", _check_emergency_active_session_creates_base_and_local_copies),
+        ("emergency_base_snapshot_is_frozen", _check_emergency_base_snapshot_is_frozen),
+        ("emergency_active_runtime_context_paths_are_local", _check_emergency_active_runtime_context_paths_are_local),
+        ("emergency_settings_snapshot_is_readonly", _check_emergency_settings_snapshot_is_readonly),
+        ("emergency_store_does_not_touch_network_paths", _check_emergency_store_does_not_touch_network_paths),
+        ("emergency_client_id_is_stable", _check_emergency_client_id_is_stable),
+        ("emergency_no_sqlite_safety_changes", _check_emergency_no_sqlite_safety_changes),
+        ("emergency_no_startup_activation_yet", _check_emergency_no_startup_activation_yet),
+        ("emergency_standby_refresh_requires_existing_network_medical_db", _check_emergency_standby_refresh_requires_existing_network_medical_db),
+        ("emergency_standby_refresh_requires_existing_network_settings_db", _check_emergency_standby_refresh_requires_existing_network_settings_db),
+        ("emergency_standby_refresh_uses_sqlite_backup_api", _check_emergency_standby_refresh_uses_sqlite_backup_api),
+        ("emergency_standby_refresh_writes_temp_then_atomic_replace", _check_emergency_standby_refresh_writes_temp_then_atomic_replace),
+        ("emergency_standby_refresh_validates_before_replace", _check_emergency_standby_refresh_validates_before_replace),
+        ("emergency_standby_refresh_preserves_old_valid_pair_on_settings_failure", _check_emergency_standby_refresh_preserves_old_valid_pair_on_settings_failure),
+        ("emergency_standby_metadata_updates_after_success", _check_emergency_standby_metadata_updates_after_success),
+        ("emergency_standby_should_refresh_when_remote_change_id_advances", _check_emergency_standby_should_refresh_when_remote_change_id_advances),
+        ("emergency_standby_should_not_refresh_when_current", _check_emergency_standby_should_not_refresh_when_current),
+        ("emergency_standby_unavailable_source_does_not_trigger_recovery", _check_emergency_standby_unavailable_source_does_not_trigger_recovery),
+        ("emergency_standby_no_empty_db_creation", _check_emergency_standby_no_empty_db_creation),
+        ("emergency_standby_pair_is_consistent", _check_emergency_standby_pair_is_consistent),
+        ("emergency_standby_no_startup_activation_yet", _check_emergency_standby_no_startup_activation_yet),
+        ("emergency_standby_no_sqlite_profile_changes", _check_emergency_standby_no_sqlite_profile_changes),
+        ("emergency_standby_does_not_touch_doctor_nurse_business_logic", _check_emergency_standby_does_not_touch_doctor_nurse_business_logic),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
