@@ -13121,6 +13121,54 @@ def _check_emergency_store_does_not_touch_network_paths(temp_root: str) -> tuple
     return True, "ok"
 
 
+def _check_emergency_discard_archives_session_without_merge(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_metadata import read_json_file
+    from rem_card.app.emergency_standby import EmergencyStandbyManager
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+    from rem_card.app.emergency_startup import find_resumable_active_session
+
+    store, metadata = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(metadata, session_id="session_discard")
+    active_dir_path = os.path.join(store.resolve_root(), "active", session.emergency_session_id)
+    local_db_path = session.local_db_path
+
+    marked = store.mark_session_discarded(
+        session.emergency_session_id,
+        reason="regression_without_merge",
+        requested_by_role="doctor",
+    )
+    if marked.status != "discarded" or marked.merge_result != "discarded_without_merge":
+        return False, f"discard metadata mismatch before archive: {marked}"
+    if not os.path.isdir(active_dir_path) or not os.path.isfile(local_db_path):
+        return False, "discard marker must not delete or move active DB before shutdown"
+    if not marked.discard_report_path or not os.path.isfile(marked.discard_report_path):
+        return False, f"discard report was not written: {marked.discard_report_path}"
+
+    resumable, reason = find_resumable_active_session(store)
+    if resumable is not None:
+        return False, f"discarded session is still resumable: {resumable} reason={reason}"
+
+    manager = EmergencyStandbyManager(root=store.resolve_root())
+    scheduler = EmergencyStandbyScheduler(role="nurse", mode="network", manager=manager)
+    if scheduler._has_active_emergency_session():
+        return False, "discarded active session must not block standby refresh"
+
+    archive_path = store.archive_discarded_session(session.emergency_session_id)
+    if os.path.exists(active_dir_path):
+        return False, "discard archive left active session directory behind"
+    archived_db = os.path.join(archive_path, "rao_journal_emergency.db")
+    if not os.path.isfile(archived_db):
+        return False, "discard archive did not preserve local emergency DB"
+    archived_metadata = read_json_file(os.path.join(archive_path, "emergency_session.json"))
+    if archived_metadata.get("status") != "discarded":
+        return False, f"archived discard status mismatch: {archived_metadata.get('status')}"
+    for key in ("local_db_path", "base_snapshot_path", "settings_snapshot_path", "discard_report_path"):
+        value = str(archived_metadata.get(key) or "")
+        if value and not _path_is_under(value, archive_path):
+            return False, f"{key} does not point into archive: {value}"
+    return True, "ok"
+
+
 def _check_emergency_client_id_is_stable(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_store import get_or_create_local_emergency_client_id
 
@@ -14347,7 +14395,9 @@ def _check_runtime_outage_no_live_db_swap(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     start = text.find("def _handle_runtime_network_outage")
-    end = text.find("def _get_resize_edge", start)
+    end = text.find("def _handle_restore_probe_status", start)
+    if end < 0:
+        end = text.find("def _get_resize_edge", start)
     body = text[start:end]
     for token in ("bootstrap(", "DatabaseManager(", "runtime_context=", "window.container"):
         if token in body:
@@ -14805,9 +14855,17 @@ def _check_restore_probe_dialog_text_mentions_close_for_merge_and_no_other_pcs(t
         "time.monotonic() + 60.0",
         "_close_for_emergency_discard",
         "remote_changed_conflict_pending",
+        "EmergencyPasswordDialog.verify",
+        "verify_emergency_password",
+        "mark_session_discarded",
+        "finalize_pending_emergency_discard",
+        "Вернуться в аварийный режим",
     ):
         if token not in main_window_text:
             return False, f"restore prompt action token missing: {token}"
+    main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    if "finalize_pending_emergency_discard" not in main_text or "db_shutdown_ok" not in main_text:
+        return False, "discard finalization must run after DB shutdown"
     return True, "ok"
 
 
@@ -17099,6 +17157,7 @@ def main():
         ("emergency_active_runtime_context_paths_are_local", _check_emergency_active_runtime_context_paths_are_local),
         ("emergency_settings_snapshot_is_readonly", _check_emergency_settings_snapshot_is_readonly),
         ("emergency_store_does_not_touch_network_paths", _check_emergency_store_does_not_touch_network_paths),
+        ("emergency_discard_archives_session_without_merge", _check_emergency_discard_archives_session_without_merge),
         ("emergency_client_id_is_stable", _check_emergency_client_id_is_stable),
         ("emergency_no_sqlite_safety_changes", _check_emergency_no_sqlite_safety_changes),
         ("emergency_no_startup_activation_yet", _check_emergency_no_startup_activation_yet),

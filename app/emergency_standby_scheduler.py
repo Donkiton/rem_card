@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+from rem_card.app.emergency_metadata import read_json_file
 from rem_card.app.emergency_paths import active_dir, active_session_metadata_path
 from rem_card.app.emergency_standby import EmergencyStandbyManager, EmergencyStandbyRefreshResult
 from rem_card.app.foreground_activity import should_defer_background_io
@@ -352,7 +353,13 @@ class EmergencyStandbyScheduler:
         try:
             for name in os.listdir(directory):
                 session_path = active_session_metadata_path(root, name)
-                if os.path.isfile(session_path):
+                if not os.path.isfile(session_path):
+                    continue
+                try:
+                    payload = read_json_file(session_path)
+                    if str(payload.get("status") or "") in {"active", "merge_failed", "merge_pending", "merging"}:
+                        return True
+                except Exception:
                     return True
         except OSError:
             return True

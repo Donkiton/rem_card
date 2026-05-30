@@ -54,6 +54,26 @@ def _normalize_path(path: str) -> str:
     return os.path.abspath(os.path.normpath(str(path)))
 
 
+def _map_session_path(path: str, active_dir_path: str, archive_dir_path: str) -> str:
+    if not path:
+        return path
+    try:
+        path_abs = os.path.abspath(os.path.normpath(path))
+        active_abs = os.path.abspath(os.path.normpath(active_dir_path))
+        if os.path.commonpath([os.path.normcase(path_abs), os.path.normcase(active_abs)]) == os.path.normcase(active_abs):
+            rel_path = os.path.relpath(path_abs, active_abs)
+            return _normalize_path(os.path.join(archive_dir_path, rel_path))
+    except Exception:
+        pass
+    return path
+
+
+def _map_optional_session_path(path: str | None, active_dir_path: str, archive_dir_path: str) -> str | None:
+    if path is None:
+        return None
+    return _map_session_path(path, active_dir_path, archive_dir_path)
+
+
 def get_local_machine_name() -> str:
     return socket.gethostname() or "unknown"
 
@@ -257,7 +277,7 @@ class EmergencyLocalStore:
         metadata = replace(
             metadata,
             status=status,
-            ended_at=now if status in {"merge_pending", "merged", "merge_failed", "archived"} else metadata.ended_at,
+            ended_at=now if status in {"merge_pending", "merged", "merge_failed", "archived", "discarded"} else metadata.ended_at,
             merged_at=now if status == "merged" else metadata.merged_at,
             last_merge_error=error if error is not None else metadata.last_merge_error,
             validation_status="error" if error else metadata.validation_status,
@@ -277,6 +297,88 @@ class EmergencyLocalStore:
         os.makedirs(os.path.dirname(target_dir), exist_ok=True)
         shutil.move(source_dir, target_dir)
         return target_dir
+
+    def mark_session_discarded(
+        self,
+        session_id: str,
+        *,
+        reason: str = "user_requested_without_merge",
+        requested_by_role: str = "unknown",
+    ) -> EmergencySessionMetadata:
+        metadata = self.read_active_session(session_id)
+        if metadata.status == "discarded":
+            return metadata
+        if metadata.status not in {"active", "merge_failed"}:
+            raise EmergencyStoreError(f"Emergency session нельзя завершить без объединения из статуса: {metadata.status}")
+        source_dir = active_session_dir(self.root, metadata.emergency_session_id)
+        if not os.path.isdir(source_dir):
+            raise EmergencyStoreError(f"Active session не найдена: {source_dir}")
+
+        now = _now_text()
+        report_path = os.path.join(source_dir, "logs", "emergency_discard_report.json")
+        report = {
+            "status": "discarded",
+            "emergency_session_id": metadata.emergency_session_id,
+            "discarded_at": now,
+            "reason": str(reason or "user_requested_without_merge"),
+            "requested_by_role": str(requested_by_role or "unknown"),
+            "source_machine": metadata.source_machine,
+            "source_client_id": metadata.source_client_id,
+            "network_merge_performed": False,
+            "local_emergency_db_preserved": True,
+        }
+        atomic_write_json(report_path, report)
+        updated = replace(
+            metadata,
+            status="discarded",
+            ended_at=now,
+            discarded_at=now,
+            discard_reason=str(reason or "user_requested_without_merge"),
+            discard_report_path=_normalize_path(report_path),
+            merge_result="discarded_without_merge",
+            last_merge_error=None,
+        )
+        self.write_active_session(updated)
+        return updated
+
+    def archive_discarded_session(self, session_id: str) -> str:
+        metadata = self.read_active_session(session_id)
+        if metadata.status != "discarded":
+            raise EmergencyStoreError(f"Emergency session не помечена как discarded: {metadata.status}")
+        source_dir = active_session_dir(self.root, metadata.emergency_session_id)
+        target_dir = archived_session_dir(self.root, metadata.emergency_session_id)
+        if not os.path.isdir(source_dir):
+            raise EmergencyStoreError(f"Active session не найдена: {source_dir}")
+        if os.path.exists(target_dir):
+            raise EmergencyStoreError(f"Archived session уже существует: {target_dir}")
+        updated = replace(
+            metadata,
+            local_db_path=_map_session_path(metadata.local_db_path, source_dir, target_dir),
+            base_snapshot_path=_map_session_path(metadata.base_snapshot_path, source_dir, target_dir),
+            settings_snapshot_path=_map_optional_session_path(metadata.settings_snapshot_path, source_dir, target_dir),
+            last_dry_run_report_path=_map_optional_session_path(metadata.last_dry_run_report_path, source_dir, target_dir),
+            last_merge_report_path=_map_optional_session_path(metadata.last_merge_report_path, source_dir, target_dir),
+            local_backup_path=_map_optional_session_path(metadata.local_backup_path, source_dir, target_dir),
+            discard_report_path=_map_optional_session_path(metadata.discard_report_path, source_dir, target_dir),
+        )
+        self.write_active_session(updated)
+        os.makedirs(os.path.dirname(target_dir), exist_ok=True)
+        shutil.move(source_dir, target_dir)
+        return target_dir
+
+    def discard_active_session(
+        self,
+        session_id: str,
+        *,
+        reason: str = "user_requested_without_merge",
+        requested_by_role: str = "unknown",
+    ) -> str:
+        self.mark_session_discarded(
+            session_id,
+            reason=reason,
+            requested_by_role=requested_by_role,
+        )
+        return self.archive_discarded_session(session_id)
 
     def build_active_runtime_context(self, session_id: str) -> DbRuntimeContext:
         return self._build_session_runtime_context(session_id, mode="emergency", source_label="emergency")

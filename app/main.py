@@ -956,6 +956,7 @@ def _shutdown_window_resources(window, logger):
 
     logger.info("Application resource shutdown started")
     data_service_shutdown_ok = True
+    db_shutdown_ok = True
     data_service = getattr(container, "data_service", None)
     if data_service:
         try:
@@ -973,9 +974,20 @@ def _shutdown_window_resources(window, logger):
             if not db_shutdown_ok:
                 logger.warning("DB manager close did not complete cleanly")
         except Exception as exc:
+            db_shutdown_ok = False
             logger.warning("DB manager close failed: %s", exc)
     elif db_manager:
+        db_shutdown_ok = False
         logger.warning("DB manager close skipped because DataService shutdown did not complete cleanly")
+    if hasattr(window, "finalize_pending_emergency_discard"):
+        if db_shutdown_ok:
+            try:
+                if not window.finalize_pending_emergency_discard():
+                    logger.warning("Pending emergency discard finalization did not complete")
+            except Exception as exc:
+                logger.warning("Pending emergency discard finalization failed: %s", exc)
+        else:
+            logger.warning("Pending emergency discard finalization skipped because DB shutdown was incomplete")
     logger.info("Application resource shutdown finished")
 
 

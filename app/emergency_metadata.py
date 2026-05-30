@@ -17,6 +17,7 @@ SESSION_STATUSES = {
     "merged",
     "merge_failed",
     "archived",
+    "discarded",
 }
 
 
@@ -65,6 +66,9 @@ class EmergencySessionMetadata:
     merge_result: str | None = None
     final_remote_last_change_id: int | None = None
     final_remote_hash: str | None = None
+    discarded_at: str | None = None
+    discard_reason: str | None = None
+    discard_report_path: str | None = None
 
     def __post_init__(self) -> None:
         _validate_status(self.status)

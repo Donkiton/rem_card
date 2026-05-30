@@ -116,6 +116,7 @@ class MainWindow(QMainWindow):
         self._restore_probe_dialog_active = False
         self._restore_probe_conflict_notified = False
         self._restore_probe_notice_deferred_until = 0.0
+        self._pending_emergency_discard = None
         
         self.setup_base_ui()
         self._connect_runtime_outage_signal()
@@ -443,6 +444,16 @@ class MainWindow(QMainWindow):
     def _close_for_emergency_merge(self):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
+        if not self._confirm_emergency_password_for_exit(
+            "Подтверждение объединения",
+            (
+                "Для выхода из аварийного режима и объединения с сетевой базой "
+                "введите аварийный пароль."
+            ),
+        ):
+            self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
+            return
+
         scheduler = getattr(self.container, "emergency_restore_probe_scheduler", None)
         if scheduler is None:
             CustomMessageBox.warning(self, "Аварийный режим", "Не удалось подготовить закрытие для объединения.")
@@ -458,12 +469,109 @@ class MainWindow(QMainWindow):
     def _close_for_emergency_discard(self):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
-        CustomMessageBox.warning(
+        if not self._confirm_emergency_password_for_exit(
+            "Выход без объединения",
+            (
+                "Аварийные изменения не будут перенесены в сетевую базу.\n\n"
+                "Локальная аварийная сессия будет сохранена в архиве, "
+                "после закрытия RemCard следующий запуск перейдет на обычную сетевую базу.\n\n"
+                "Введите аварийный пароль, чтобы подтвердить выход без объединения."
+            ),
+        ):
+            self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
+            return
+
+        runtime_context = getattr(self.container, "runtime_context", None)
+        session_id = str(getattr(runtime_context, "emergency_session_id", "") or "").strip()
+        store = self._emergency_store_for_runtime()
+        if not session_id or store is None:
+            CustomMessageBox.warning(self, "Аварийный режим", "Не удалось определить активную аварийную сессию.")
+            return
+        try:
+            store.mark_session_discarded(
+                session_id,
+                reason="user_requested_without_merge",
+                requested_by_role=self._current_role_key(),
+            )
+            self._pending_emergency_discard = {
+                "store": store,
+                "session_id": session_id,
+            }
+        except Exception as exc:
+            logger.warning("Failed to discard emergency session: %s", exc, exc_info=True)
+            CustomMessageBox.warning(self, "Аварийный режим", f"Не удалось выйти без объединения:\n{exc}")
+            return
+
+        CustomMessageBox.information(
             self,
             "Аварийный режим",
-            "Выход без объединения будет доступен после подтверждения аварийным паролем.",
+            "Аварийная сессия будет сохранена в архиве без объединения. RemCard будет закрыта.",
         )
-        self._restore_probe_notice_deferred_until = time.monotonic() + 60.0
+        self.close()
+
+    def finalize_pending_emergency_discard(self) -> bool:
+        pending = self._pending_emergency_discard
+        if not pending:
+            return True
+        store = pending.get("store")
+        session_id = str(pending.get("session_id") or "")
+        if store is None or not session_id:
+            return False
+        try:
+            store.archive_discarded_session(session_id)
+            self._pending_emergency_discard = None
+            return True
+        except Exception as exc:
+            logger.warning("Failed to archive discarded emergency session: %s", exc, exc_info=True)
+            return False
+
+    def _confirm_emergency_password_for_exit(self, title: str, message: str) -> bool:
+        if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
+            return True
+
+        from rem_card.app.emergency_password import verify_emergency_password
+        from rem_card.ui.shared.emergency_dialogs import EmergencyPasswordDialog
+
+        runtime_context = getattr(self.container, "runtime_context", None)
+        settings_db_path = str(getattr(runtime_context, "settings_db_path", "") or "")
+
+        def _verify(password: str) -> bool:
+            if settings_db_path:
+                return verify_emergency_password(password, settings_db_path=settings_db_path, readonly=True)
+            return verify_emergency_password(password, runtime_context=runtime_context, readonly=True)
+
+        return EmergencyPasswordDialog.verify(
+            self,
+            title,
+            message,
+            _verify,
+            confirm_text="Подтвердить",
+            cancel_text="Вернуться в аварийный режим",
+        )
+
+    def _emergency_store_for_runtime(self):
+        scheduler = getattr(self.container, "emergency_restore_probe_scheduler", None)
+        probe = getattr(scheduler, "probe", None)
+        store = getattr(probe, "store", None)
+        if store is not None:
+            return store
+        runtime_context = getattr(self.container, "runtime_context", None)
+        root = self._emergency_root_from_runtime_context(runtime_context)
+        if not root:
+            return None
+        from rem_card.app.emergency_store import EmergencyLocalStore
+
+        return EmergencyLocalStore(root=root)
+
+    @staticmethod
+    def _emergency_root_from_runtime_context(runtime_context) -> str:
+        baza_dir = str(getattr(runtime_context, "baza_dir", "") or "")
+        if not baza_dir:
+            return ""
+        active_parent = os.path.dirname(os.path.abspath(os.path.normpath(baza_dir)))
+        if os.path.basename(active_parent).lower() != "active":
+            return ""
+        return os.path.dirname(active_parent)
 
     def _start_event_loop_watchdog(self):
         if os.environ.get("REMCARD_UI_WATCHDOG_ENABLED", "1") == "0":
