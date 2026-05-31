@@ -90,8 +90,13 @@ class PatientService:
         result = self.dao.get_active_patients()
         return result
 
-    def get_archived_patients(self) -> List[PatientDTO]:
-        return self.dao.get_archived_patients()
+    def get_archived_patients(self, start_dt: str | None = None, end_dt: str | None = None) -> List[PatientDTO]:
+        return self.dao.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
+
+    def get_archive_db_paths_for_period(self, start_dt: str | None, end_dt: str | None) -> list[str]:
+        if hasattr(self.dao, "get_archive_db_paths_for_period"):
+            return self.dao.get_archive_db_paths_for_period(start_dt, end_dt)
+        return []
 
     def get_patient(self, admission_id: int) -> Optional[PatientDTO]:
         return self.dao.get_patient_by_id(admission_id)

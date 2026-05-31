@@ -29,6 +29,7 @@ class AdminMainWidget(QWidget):
         self.display_settings_dialog = None
         self.background_settings_dialog = None
         self.emergency_password_dialog = None
+        self.db_rotation_dialog = None
 
         self.setup_ui()
 
@@ -63,6 +64,7 @@ class AdminMainWidget(QWidget):
         self.btn_display_settings = QPushButton("Отображение")
         self.btn_background_settings = QPushButton("Изменение фона")
         self.btn_emergency_password = QPushButton("Аварийный пароль")
+        self.btn_db_rotation = QPushButton("Ручная ротация БД")
 
         def prepare_button(btn: QPushButton):
             btn.setObjectName("DialogOkBtn")
@@ -89,6 +91,7 @@ class AdminMainWidget(QWidget):
         program_buttons = [self.btn_print, self.btn_display_settings, self.btn_background_settings]
         if self.role == "doctor":
             program_buttons.append(self.btn_emergency_password)
+            program_buttons.append(self.btn_db_rotation)
 
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(22)
@@ -138,6 +141,7 @@ class AdminMainWidget(QWidget):
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
         self.btn_emergency_password.clicked.connect(self.open_emergency_password)
+        self.btn_db_rotation.clicked.connect(self.open_db_rotation)
 
     def _show_page(self, widget):
         if widget is not None:
@@ -293,6 +297,44 @@ class AdminMainWidget(QWidget):
 
         self.emergency_password_dialog = EmergencyPasswordSettingsDialog(parent=self)
         self.emergency_password_dialog.exec()
+
+    def open_db_rotation(self):
+        from .db_rotation_dialog import DbRotationDialog
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            db_manager = self._resolve_db_manager()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ротация БД", f"Не удалось открыть управление БД:\n{exc}")
+            return
+        self.db_rotation_dialog = DbRotationDialog(
+            db_manager,
+            parent=self,
+            on_rotated=self._on_db_rotated,
+        )
+        self.db_rotation_dialog.exec()
+
+    def _resolve_db_manager(self):
+        candidates = [
+            ("orders_dao", "db"),
+            ("patient_dao", "db"),
+            ("vitals_dao", "db"),
+            ("data_service", "db"),
+        ]
+        for outer_attr, inner_attr in candidates:
+            owner = getattr(self.service, outer_attr, None)
+            candidate = getattr(owner, inner_attr, None)
+            if candidate is not None:
+                return candidate
+        candidate = getattr(self.service, "db_manager", None)
+        if candidate is not None:
+            return candidate
+        raise RuntimeError("Менеджер БД недоступен.")
+
+    def _on_db_rotated(self):
+        data_service = getattr(self.service, "data_service", None)
+        if data_service and hasattr(data_service, "request_immediate_refresh"):
+            data_service.request_immediate_refresh(force_emit=True)
 
     def set_print_context(self, service, admission_id, date):
         self.service = service

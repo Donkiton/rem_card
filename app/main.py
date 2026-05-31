@@ -949,10 +949,10 @@ def _acquire_role_lock_for_startup(
 
 def _shutdown_window_resources(window, logger):
     if not window:
-        return
+        return True
     container = getattr(window, "container", None)
     if not container:
-        return
+        return True
 
     logger.info("Application resource shutdown started")
     data_service_shutdown_ok = True
@@ -988,7 +988,48 @@ def _shutdown_window_resources(window, logger):
                 logger.warning("Pending emergency discard finalization failed: %s", exc)
         else:
             logger.warning("Pending emergency discard finalization skipped because DB shutdown was incomplete")
-    logger.info("Application resource shutdown finished")
+    resources_ok = bool(data_service_shutdown_ok and db_shutdown_ok)
+    logger.info("Application resource shutdown finished result=%s", "ok" if resources_ok else "incomplete")
+    return resources_ok
+
+
+def _window_exit_role(window, startup_role: Optional[str]) -> str:
+    if startup_role in ("doctor", "nurse"):
+        return str(startup_role)
+    if window is None:
+        return ""
+    role = getattr(window, "_exit_role_key", None)
+    if role:
+        return str(role)
+    current_role = getattr(window, "_current_role_key", None)
+    if callable(current_role):
+        try:
+            return str(current_role())
+        except Exception:
+            return ""
+    return ""
+
+
+def _run_doctor_exit_db_rotation(window, startup_role: Optional[str], logger) -> None:
+    if _window_exit_role(window, startup_role) != "doctor":
+        return
+    container = getattr(window, "container", None) if window is not None else None
+    db_manager = getattr(container, "db_manager", None) if container is not None else None
+    if db_manager is None or not hasattr(db_manager, "maybe_rotate_database_after_doctor_exit"):
+        return
+    try:
+        result = db_manager.maybe_rotate_database_after_doctor_exit()
+    except Exception as exc:
+        logger.warning("Doctor-exit DB rotation check failed: %s", exc, exc_info=True)
+        return
+
+    status = result.get("status") if isinstance(result, dict) else None
+    if status == "rotated":
+        logger.warning("Doctor-exit DB rotation completed: %s", result)
+    elif status in ("deferred_active_beds", "deferred_active_role_lock"):
+        logger.warning("Doctor-exit DB rotation deferred: %s", result)
+    elif status not in ("missing", "not_due", "rotation_lock_busy", "rotation_forbidden_runtime"):
+        logger.info("Doctor-exit DB rotation status: %s | %s", status, result)
 
 
 def _run_pending_emergency_merge_before_startup(close_startup_splash, logger=None) -> None:
@@ -1271,8 +1312,9 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             pass
         exit_code = 1
     finally:
+        resources_shutdown_ok = False
         if window and logger:
-            _shutdown_window_resources(window, logger)
+            resources_shutdown_ok = _shutdown_window_resources(window, logger)
         try:
             if window and hasattr(window, "release_role_lock"):
                 window.release_role_lock()
@@ -1280,6 +1322,8 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 role_lock.release()
         except Exception:
             pass
+        if exit_code == 0 and window and logger and resources_shutdown_ok:
+            _run_doctor_exit_db_rotation(window, args.role, logger)
         if logger:
             try:
                 from rem_card.app.logger import finalize_crash_handler

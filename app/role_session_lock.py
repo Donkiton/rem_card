@@ -276,6 +276,34 @@ class RoleSessionLock:
         except Exception as exc:
             self.logger.warning("Failed to release role lock %s: %s", self.lock_path, exc)
 
+    def refresh(self) -> bool:
+        """
+        Обновляет mtime удерживаемого lock и перезапускает heartbeat, если он
+        остановился после временной недоступности сетевой папки.
+        """
+        with self._mutex:
+            token = dict(self._token) if self._token else None
+        if not token:
+            return False
+
+        current = self._read_payload()
+        if current is _ROLE_LOCK_READ_UNAVAILABLE or not current:
+            return False
+        if current.get("nonce") != token.get("nonce"):
+            return False
+
+        token["timestamp"] = time.time()
+        try:
+            os.utime(self.lock_path, None)
+            with self._mutex:
+                if self._token and self._token.get("nonce") == token.get("nonce"):
+                    self._token = token
+            self._start_heartbeat()
+            return True
+        except Exception as exc:
+            self.logger.warning("Role lock refresh failed for %s: %s", self.lock_path, exc)
+            return False
+
     def describe_holder(self) -> str:
         holder = self._last_holder or self._read_payload()
         if holder is _ROLE_LOCK_READ_UNAVAILABLE:

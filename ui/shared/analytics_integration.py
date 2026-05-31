@@ -132,6 +132,7 @@ def _resolve_analytics_manager(
     end_dt: str | None,
     db_paths: list[str] | None,
 ) -> tuple[object, Callable[[], None] | None]:
+    requested_multi_db = bool(db_paths)
     normalized = _normalize_db_paths(db_paths or [])
     if not normalized:
         return _create_live_analytics_manager(base_db_manager)
@@ -150,6 +151,9 @@ def _resolve_analytics_manager(
         )
         return merged_manager, merged_manager.close_connection
     except Exception as exc:
+        if requested_multi_db:
+            logger.warning("Failed to build selected multi-DB analytics manager: %s", exc)
+            raise RuntimeError(f"Не удалось подготовить выбранные БД для аналитики: {exc}") from exc
         logger.warning("Failed to build multi-DB analytics manager, fallback to primary DB: %s", exc)
         return _create_live_analytics_manager(base_db_manager)
 

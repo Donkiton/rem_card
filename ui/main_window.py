@@ -117,6 +117,8 @@ class MainWindow(QMainWindow):
         self._restore_probe_conflict_notified = False
         self._restore_probe_notice_deferred_until = 0.0
         self._pending_emergency_discard = None
+        self._exit_role_key = None
+        self._last_active_role_key = role if role in ("doctor", "nurse") else None
         
         self.setup_base_ui()
         self._connect_runtime_outage_signal()
@@ -654,9 +656,11 @@ class MainWindow(QMainWindow):
         if role_key not in ("doctor", "nurse"):
             return True
         if self._is_emergency_runtime():
+            self._last_active_role_key = role_key
             return True
 
         if self._role_lock and self._role_lock_key == role_key:
+            self._last_active_role_key = role_key
             return True
 
         new_lock = self._build_role_lock(role_key)
@@ -672,6 +676,7 @@ class MainWindow(QMainWindow):
         old_lock = self._role_lock
         self._role_lock = new_lock
         self._role_lock_key = role_key
+        self._last_active_role_key = role_key
 
         if old_lock:
             try:
@@ -1065,6 +1070,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._is_closing = True
+        exit_role = self._current_role_key()
+        if exit_role not in ("doctor", "nurse"):
+            exit_role = self._last_active_role_key or exit_role
+        self._exit_role_key = exit_role
         try:
             logger.info("MainWindow closeEvent started")
             if (

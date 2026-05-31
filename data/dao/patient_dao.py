@@ -1,4 +1,3 @@
-import glob
 import os
 import sqlite3
 from typing import List, Optional
@@ -9,7 +8,7 @@ from ..dto.remcard_dto import PatientStatus
 from rem_card.app.patient_age import parse_date_value
 from rem_card.services.shift_service import ShiftService
 from ...app.logger import logger
-from ...app.paths import ARCHIV_DIR, DB_CYCLE_ARCHIVE_DIR
+from ...app.db_cycle_registry import discover_db_cycle_paths, select_db_paths_for_period
 from ...app.sqlite_shared import configure_connection
 
 class PatientDAO:
@@ -43,32 +42,36 @@ class PatientDAO:
         rows = self.db.fetch_all_remcard(query)
         return self._map_patients(rows)
 
-    def get_archived_patients(self) -> List[PatientDTO]:
+    def get_archived_patients(self, start_dt: str | None = None, end_dt: str | None = None) -> List[PatientDTO]:
         current_db_path = os.path.abspath(str(getattr(self.db, "db_path", "") or ""))
         rows: list[dict] = []
+        if start_dt and end_dt:
+            db_paths = self.get_archive_db_paths_for_period(start_dt, end_dt)
+        else:
+            db_paths = self._iter_archived_db_paths(current_db_path, include_current=True)
+        current_key = os.path.normcase(current_db_path)
 
-        # 1) Текущая рабочая БД.
-        try:
-            current_rows = self.db.fetch_all_remcard(self._build_archived_patients_query())
-            for row in current_rows:
-                data = dict(row)
-                data["source_db_path"] = current_db_path
-                data["source_db_name"] = os.path.basename(current_db_path) if current_db_path else "rao_journal.db"
-                data["source_admission_id"] = data.get("admission_id")
-                data["is_external_archive"] = False
-                rows.append(data)
-        except Exception as exc:
-            logger.warning("Failed to load archived patients from current DB: %s", exc)
-
-        # 2) Ротационные архивы (старые циклы БД).
-        for archived_db_path in self._iter_archived_db_paths(current_db_path):
+        for archived_db_path in db_paths:
             try:
-                archived_rows = self._fetch_archived_rows_from_db(archived_db_path)
+                abs_path = os.path.abspath(archived_db_path)
+                if current_key and os.path.normcase(abs_path) == current_key:
+                    query, params = self._build_archived_patients_query(
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                    )
+                    archived_rows = [
+                        dict(row)
+                        for row in self.db.fetch_all_remcard(query, params)
+                    ]
+                    is_external = False
+                else:
+                    archived_rows = self._fetch_archived_rows_from_db(abs_path, start_dt=start_dt, end_dt=end_dt)
+                    is_external = True
                 for data in archived_rows:
-                    data["source_db_path"] = archived_db_path
+                    data["source_db_path"] = abs_path
                     data["source_db_name"] = os.path.basename(archived_db_path)
                     data["source_admission_id"] = data.get("admission_id")
-                    data["is_external_archive"] = True
+                    data["is_external_archive"] = is_external
                     rows.append(data)
             except Exception as exc:
                 logger.warning("Skipping archived DB %s due to read error: %s", archived_db_path, exc)
@@ -355,7 +358,9 @@ class PatientDAO:
         patient_columns: Optional[set[str]] = None,
         admission_columns: Optional[set[str]] = None,
         has_operations_table: bool = True,
-    ) -> str:
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+    ) -> tuple[str, tuple]:
         patient_columns = patient_columns or {"last_name", "first_name", "middle_name", "full_name", "birth_date"}
         admission_columns = admission_columns or {
             "history_number",
@@ -401,8 +406,13 @@ class PatientDAO:
             operation_expr = operation_subquery
 
         order_expr = "a.admission_datetime DESC" if "admission_datetime" in admission_columns else "a.id DESC"
+        where_sql = ""
+        params: tuple = ()
+        if start_dt and end_dt and "admission_datetime" in admission_columns:
+            where_sql = "WHERE a.admission_datetime BETWEEN ? AND ?"
+            params = (start_dt, end_dt)
 
-        return f"""
+        query = f"""
             SELECT
                 a.id as admission_id,
                 {p_col('last_name')} as last_name,
@@ -424,44 +434,30 @@ class PatientDAO:
                 {operation_expr} as operation_info
             FROM admissions a
             JOIN patients p ON a.patient_id = p.id
+            {where_sql}
             ORDER BY {order_expr}
         """
+        return query, params
 
     @staticmethod
-    def _iter_archived_db_paths(current_db_path: str) -> list[str]:
-        patterns = [
-            os.path.join(ARCHIV_DIR, "rao_journal_archived_*.db"),
-            os.path.join(ARCHIV_DIR, "rao_journal_cycle_*.db"),
-            os.path.join(ARCHIV_DIR, "rao-*.db"),
-            os.path.join(DB_CYCLE_ARCHIVE_DIR, "*.db"),  # legacy path compatibility
-        ]
+    def _iter_archived_db_paths(current_db_path: str, *, include_current: bool = False) -> list[str]:
+        return discover_db_cycle_paths(current_db_path=current_db_path, include_current=include_current)
 
-        seen = set()
-        found = []
-        current_abs = os.path.abspath(current_db_path) if current_db_path else ""
+    def get_archive_db_paths_for_period(self, start_dt: str | None, end_dt: str | None) -> list[str]:
+        current_db_path = os.path.abspath(str(getattr(self.db, "db_path", "") or ""))
+        if not start_dt or not end_dt:
+            return self._iter_archived_db_paths(current_db_path, include_current=True)
+        return select_db_paths_for_period(
+            current_db_path=current_db_path,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
 
-        for pattern in patterns:
-            for path in glob.glob(pattern):
-                if not path.lower().endswith(".db"):
-                    continue
-                abs_path = os.path.abspath(path)
-                if current_abs and abs_path == current_abs:
-                    continue
-                if abs_path in seen:
-                    continue
-                if not os.path.isfile(abs_path):
-                    continue
-                seen.add(abs_path)
-                found.append(abs_path)
-
-        found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-        return found
-
-    def _fetch_archived_rows_from_db(self, db_path: str) -> list[dict]:
+    def _fetch_archived_rows_from_db(self, db_path: str, *, start_dt: str | None = None, end_dt: str | None = None) -> list[dict]:
         uri = f"file:{db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
-            configure_connection(conn)
+            configure_connection(conn, readonly=True)
             tables = {
                 row[0]
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -479,11 +475,13 @@ class PatientDAO:
             }
             has_operations = "operations" in tables
 
-            query = self._build_archived_patients_query(
+            query, params = self._build_archived_patients_query(
                 patient_columns=patient_columns,
                 admission_columns=admission_columns,
                 has_operations_table=has_operations,
+                start_dt=start_dt,
+                end_dt=end_dt,
             )
-            return [dict(row) for row in conn.execute(query).fetchall()]
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
         finally:
             conn.close()

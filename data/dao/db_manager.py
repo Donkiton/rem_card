@@ -11,7 +11,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY, maybe_rotate_database_if_due
+from rem_card.app.db_lifecycle import (
+    DB_CYCLE_META_KEY,
+    find_active_emergency_nurse_sessions,
+    find_active_rotation_role_locks,
+    maybe_rotate_database_if_due,
+    rotate_database_now,
+)
 from rem_card.app.db_runtime_context import DbRuntimeContext, build_network_runtime_context
 from rem_card.app.durable_sql_outbox import (
     DeferredWriteCursor,
@@ -264,8 +270,6 @@ class DatabaseManager:
         self._last_heavy_maintenance_ts = 0.0
         self._last_heavy_maintenance_source = ""
 
-        self._maybe_rotate_db_lifecycle()
-
         owner_id = f"{socket.gethostname()}:{os.getpid()}:rem_card"
         self.write_controller = SQLiteWriteController(
             db_path=self.db_path,
@@ -416,7 +420,47 @@ class DatabaseManager:
         self._last_heavy_maintenance_ts = time.time()
         self._last_heavy_maintenance_source = str(source or "maintenance")
 
-    def _maybe_rotate_db_lifecycle(self):
+    def _rotation_blocking_role_lock_paths(self) -> dict[str, str]:
+        session_locks_dir = os.path.join(str(getattr(self, "baza_dir", BAZA_DIR)), "session_locks")
+        return {
+            "nurse": os.path.join(session_locks_dir, "nurse.lock"),
+            "nurse_emergency": os.path.join(session_locks_dir, "nurse_emergency.lock"),
+        }
+
+    def _rotation_blocking_emergency_roots(self) -> list[str]:
+        roots: list[str] = []
+        try:
+            from rem_card.app.emergency_paths import resolve_emergency_root
+
+            roots.append(resolve_emergency_root())
+        except Exception:
+            pass
+        network_candidate = os.path.join(str(getattr(self, "baza_dir", BAZA_DIR)), "emergency_db")
+        roots.append(network_candidate)
+
+        result: list[str] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = os.path.normcase(os.path.abspath(root))
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(os.path.abspath(root))
+        return result
+
+    def active_rotation_role_locks(self) -> list[dict[str, str]]:
+        return find_active_rotation_role_locks(
+            self._rotation_blocking_role_lock_paths(),
+            logger=logger,
+        )
+
+    def active_rotation_emergency_sessions(self) -> list[dict[str, str]]:
+        return find_active_emergency_nurse_sessions(
+            self._rotation_blocking_emergency_roots(),
+            logger=logger,
+        )
+
+    def _maybe_rotate_db_lifecycle(self, *, source: str = "auto_rotation") -> dict:
         result = maybe_rotate_database_if_due(
             db_path=self.db_path,
             archive_dir=os.path.dirname(self.db_path),
@@ -424,14 +468,92 @@ class DatabaseManager:
             db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
             logger=logger,
             max_age_days=180,
+            backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
+            invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
+            runtime_mode=getattr(self.runtime_context, "mode", "network"),
+            source=source,
+            blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
+            blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
         )
         status = result.get("status")
-        if status in ("rotated", "deferred_active_beds"):
+        if status in (
+            "rotated",
+            "deferred_active_beds",
+            "deferred_active_role_lock",
+            "deferred_active_emergency_session",
+        ):
             logger.warning("DB lifecycle status: %s | %s", status, result)
-        elif status not in ("missing", "not_due", "rotation_lock_busy"):
+        elif status not in ("missing", "not_due", "rotation_lock_busy", "rotation_forbidden_runtime"):
             logger.info("DB lifecycle status: %s | %s", status, result)
-        if status not in ("not_due", "rotation_lock_busy", "deferred_active_beds"):
+        if status not in (
+            "not_due",
+            "rotation_lock_busy",
+            "deferred_active_beds",
+            "deferred_active_role_lock",
+            "deferred_active_emergency_session",
+            "rotation_forbidden_runtime",
+        ):
             self._startup_pre_connect_fingerprint = None
+        return result
+
+    def maybe_rotate_database_after_doctor_exit(self) -> dict:
+        return self._maybe_rotate_db_lifecycle(source="doctor_exit_auto_rotation")
+
+    def rotate_database_manually(self) -> dict:
+        if getattr(self.runtime_context, "mode", "network") != "network":
+            return {
+                "status": "rotation_forbidden_runtime",
+                "runtime_mode": getattr(self.runtime_context, "mode", ""),
+            }
+
+        active_role_locks = self.active_rotation_role_locks()
+        if active_role_locks:
+            return {
+                "status": "deferred_active_role_lock",
+                "blocked_roles": active_role_locks,
+            }
+
+        active_emergency_sessions = self.active_rotation_emergency_sessions()
+        if active_emergency_sessions:
+            return {
+                "status": "deferred_active_emergency_session",
+                "blocked_emergency_sessions": active_emergency_sessions,
+            }
+
+        with self._central_io_lock:
+            self._close_central_read_connection()
+            if self._remcard_conn:
+                with self.write_controller.connection_guard(self._remcard_conn):
+                    self._remcard_conn.close()
+            self._remcard_conn = None
+            self._journal_conn = None
+
+            result = rotate_database_now(
+                db_path=self.db_path,
+                archive_dir=os.path.dirname(self.db_path),
+                rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
+                db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
+                logger=logger,
+                backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
+                invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
+                runtime_mode=getattr(self.runtime_context, "mode", "network"),
+                source="manual_rotation",
+                blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
+                blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
+            )
+            self._startup_pre_connect_fingerprint = None
+            status = result.get("status")
+            db_available = os.path.isfile(self.db_path)
+            if (status == "new_db_failed" and not result.get("current_preserved")) or (
+                status == "rotate_failed" and not db_available
+            ):
+                logger.critical("Manual DB rotation left current DB unavailable: %s", result)
+            else:
+                self._init_connections()
+
+        if self._local_replica:
+            self._local_replica.trigger_fast_sync()
+        return result
 
     def _init_connections(self):
         logger.info("Initializing unified DB connection at %s", self.db_path)

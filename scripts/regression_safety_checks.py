@@ -503,6 +503,17 @@ def _check_role_lock_heartbeat_uses_mtime(temp_root: str) -> tuple[bool, str]:
             other.release()
             lock.release()
             return False, f"{role}: active heartbeat lock was acquired by another owner"
+        lock._stop_evt.set()  # type: ignore[attr-defined]
+        thread = lock._heartbeat_thread  # type: ignore[attr-defined]
+        if thread and thread.is_alive():
+            thread.join(timeout=1.0)
+        if not lock.refresh():
+            lock.release()
+            return False, f"{role}: explicit refresh did not recover heartbeat"
+        refreshed_thread = lock._heartbeat_thread  # type: ignore[attr-defined]
+        if not refreshed_thread or not refreshed_thread.is_alive():
+            lock.release()
+            return False, f"{role}: refresh did not restart heartbeat"
         lock.release()
         if os.path.exists(lock_path):
             return False, f"{role}: lock file remained after release"
@@ -14878,6 +14889,31 @@ def _check_restore_probe_checks_session_locks(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_restore_probe_marks_network_emergency_nurse_role(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    fixture = _prepare_restore_probe_fixture(temp_root)
+    marker_path = os.path.join(fixture["network_baza"], "session_locks", "nurse_emergency.lock")
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "merge_ready_mode_a":
+        return False, f"restore probe did not reach network marker path: {status}"
+    if not os.path.isfile(marker_path):
+        return False, "network emergency nurse marker was not created"
+    checker = RoleSessionLock(
+        lock_path=marker_path,
+        role="nurse_emergency",
+        owner_id=f"{socket.gethostname()}:{os.getpid()}:regression_rotation_check",
+        stale_timeout_sec=75.0,
+        heartbeat_sec=60.0,
+    )
+    if not checker.is_held_by_other():
+        return False, "network emergency nurse marker is not seen as active"
+    fixture["probe"].release_network_emergency_role_marker()
+    if os.path.exists(marker_path):
+        return False, "network emergency nurse marker was not released"
+    return True, "ok"
+
+
 def _check_restore_probe_checks_merge_lock(temp_root: str) -> tuple[bool, str]:
     fixture = _prepare_restore_probe_fixture(temp_root)
     lock_path = os.path.join(fixture["network_baza"], "locks", "emergency_merge.lock")
@@ -17216,6 +17252,482 @@ def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _create_db_cycle_fixture(path: str, *, admission_dt: str, active_bed: bool = False, cycle_days_old: int = 200) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for candidate in (path, f"{path}-journal", f"{path}-wal", f"{path}-shm"):
+        try:
+            os.remove(candidate)
+        except FileNotFoundError:
+            pass
+    conn = sqlite3.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE patients (
+                id INTEGER PRIMARY KEY,
+                last_name TEXT,
+                first_name TEXT,
+                middle_name TEXT,
+                full_name TEXT,
+                birth_date TEXT
+            );
+            CREATE TABLE admissions (
+                id INTEGER PRIMARY KEY,
+                patient_id INTEGER,
+                history_number TEXT,
+                bed_number INTEGER,
+                admission_datetime TEXT,
+                transfer_datetime TEXT,
+                death_datetime TEXT,
+                outcome TEXT,
+                diagnosis_text TEXT,
+                patient_age INTEGER,
+                patient_months INTEGER,
+                patient_age_unit TEXT,
+                diagnosis_code TEXT,
+                operation_description TEXT,
+                emergency_notice_number TEXT,
+                emergency_notice_entered_at TEXT
+            );
+            CREATE TABLE beds (
+                id INTEGER PRIMARY KEY,
+                number INTEGER,
+                status TEXT,
+                current_admission_id INTEGER
+            );
+            """
+        )
+        cycle_started = int(time.time() - cycle_days_old * 86400)
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('db_cycle_started_at', ?)",
+            (str(cycle_started),),
+        )
+        conn.execute(
+            "INSERT INTO patients (id, last_name, first_name, middle_name, full_name) VALUES (1, 'Тестов', 'Пациент', '', 'Тестов Пациент')"
+        )
+        conn.execute(
+            """
+            INSERT INTO admissions (
+                id, patient_id, history_number, bed_number, admission_datetime,
+                transfer_datetime, outcome, diagnosis_text, patient_age, patient_age_unit
+            )
+            VALUES (1, 1, 'ИБ-1', 1, ?, ?, 'переведен', 'Тест', 40, 'л')
+            """,
+            (admission_dt, admission_dt),
+        )
+        conn.execute(
+            "INSERT INTO beds (id, number, status, current_admission_id) VALUES (1, 1, ?, ?)",
+            ("OCCUPIED" if active_bed else "FREE", 1 if active_bed else None),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _check_db_rotation_forbids_emergency_runtime(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
+
+    baza = os.path.join(temp_root, "Baza_rotation_emergency")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=False)
+    result = maybe_rotate_database_if_due(
+        db_path=db_path,
+        archive_dir=os.path.dirname(db_path),
+        rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+        db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+        backup_dir=os.path.join(baza, "backups", "valid"),
+        invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+        runtime_mode="emergency",
+        max_age_days=180,
+    )
+    if result.get("status") != "rotation_forbidden_runtime":
+        return False, f"unexpected status: {result}"
+    if glob.glob(os.path.join(baza, "archiv", "rao_journal_archived_*.db")):
+        return False, "emergency runtime rotated DB"
+    if glob.glob(os.path.join(baza, "backups", "valid", "*.db")):
+        return False, "emergency runtime created pre-rotation backup"
+    return True, "ok"
+
+
+def _check_db_rotation_creates_validated_backup(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
+    from rem_card.app.sqlite_shared import validate_sqlite_file
+
+    baza = os.path.join(temp_root, "Baza_rotation_backup")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    backup_dir = os.path.join(baza, "backups", "valid")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=False)
+    result = maybe_rotate_database_if_due(
+        db_path=db_path,
+        archive_dir=os.path.dirname(db_path),
+        rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+        db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+        backup_dir=backup_dir,
+        invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+        runtime_mode="network",
+        max_age_days=180,
+        source="regression_rotation",
+    )
+    if result.get("status") != "rotated":
+        return False, f"rotation failed: {result}"
+    backup_path = result.get("backup_path")
+    archived_path = result.get("archived_path")
+    if not backup_path or not os.path.isfile(backup_path):
+        return False, f"pre-rotation backup missing: {result}"
+    ok, reason = validate_sqlite_file(backup_path)
+    if not ok:
+        return False, f"pre-rotation backup invalid: {reason}"
+    if not archived_path or not os.path.isfile(archived_path):
+        return False, f"archived db missing: {result}"
+    if not os.path.isfile(db_path):
+        return False, "fresh current DB was not created"
+    meta_path = f"{backup_path}.meta.json"
+    meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
+    if meta.get("rotation", {}).get("source") != "regression_rotation":
+        return False, f"rotation context missing in backup meta: {meta}"
+    return True, "ok"
+
+
+def _check_db_rotation_blocks_active_beds(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
+
+    baza = os.path.join(temp_root, "Baza_rotation_active_beds")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    backup_dir = os.path.join(baza, "backups", "valid")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=True)
+    result = maybe_rotate_database_if_due(
+        db_path=db_path,
+        archive_dir=os.path.dirname(db_path),
+        rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+        db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+        backup_dir=backup_dir,
+        invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+        runtime_mode="network",
+        max_age_days=180,
+    )
+    if result.get("status") != "deferred_active_beds":
+        return False, f"active beds did not block rotation: {result}"
+    if glob.glob(os.path.join(baza, "archiv", "rao_journal_archived_*.db")):
+        return False, "active-bed rotation created archive"
+    if glob.glob(os.path.join(backup_dir, "*.db")):
+        return False, "active-bed rotation created backup before blocking"
+    return True, "ok"
+
+
+def _check_db_rotation_blocks_active_nurse_role(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    baza = os.path.join(temp_root, "Baza_rotation_active_nurse")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    backup_dir = os.path.join(baza, "backups", "valid")
+    nurse_lock_path = os.path.join(baza, "session_locks", "nurse.lock")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=False)
+    nurse_lock = RoleSessionLock(
+        lock_path=nurse_lock_path,
+        role="nurse",
+        owner_id=f"{socket.gethostname()}:{os.getpid()}:regression_nurse",
+        stale_timeout_sec=75.0,
+        heartbeat_sec=60.0,
+    )
+    if not nurse_lock.acquire():
+        return False, "failed to acquire nurse role lock"
+    try:
+        result = maybe_rotate_database_if_due(
+            db_path=db_path,
+            archive_dir=os.path.dirname(db_path),
+            rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+            db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+            backup_dir=backup_dir,
+            invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+            runtime_mode="network",
+            max_age_days=180,
+            blocked_role_lock_paths={"nurse": nurse_lock_path},
+        )
+    finally:
+        nurse_lock.release()
+    if result.get("status") != "deferred_active_role_lock":
+        return False, f"active nurse role did not block rotation: {result}"
+    blocked_roles = result.get("blocked_roles") or []
+    if not any((item or {}).get("role") == "nurse" for item in blocked_roles):
+        return False, f"nurse role not reported in blockers: {result}"
+    if glob.glob(os.path.join(baza, "archiv", "rao_journal_archived_*.db")):
+        return False, "active-nurse rotation created archive"
+    if glob.glob(os.path.join(backup_dir, "*.db")):
+        return False, "active-nurse rotation created backup before blocking"
+    return True, "ok"
+
+
+def _check_db_rotation_blocks_network_emergency_nurse_marker(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
+    from rem_card.app.role_session_lock import RoleSessionLock
+
+    baza = os.path.join(temp_root, "Baza_rotation_network_emergency_nurse")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    backup_dir = os.path.join(baza, "backups", "valid")
+    marker_path = os.path.join(baza, "session_locks", "nurse_emergency.lock")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=False)
+    marker_lock = RoleSessionLock(
+        lock_path=marker_path,
+        role="nurse_emergency",
+        owner_id=f"{socket.gethostname()}:{os.getpid()}:regression_nurse_emergency",
+        stale_timeout_sec=75.0,
+        heartbeat_sec=60.0,
+    )
+    if not marker_lock.acquire():
+        return False, "failed to acquire emergency nurse role marker"
+    try:
+        result = maybe_rotate_database_if_due(
+            db_path=db_path,
+            archive_dir=os.path.dirname(db_path),
+            rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+            db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+            backup_dir=backup_dir,
+            invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+            runtime_mode="network",
+            max_age_days=180,
+            blocked_role_lock_paths={"nurse_emergency": marker_path},
+        )
+    finally:
+        marker_lock.release()
+    if result.get("status") != "deferred_active_role_lock":
+        return False, f"network emergency nurse marker did not block rotation: {result}"
+    blocked_roles = result.get("blocked_roles") or []
+    if not any((item or {}).get("role") == "nurse_emergency" for item in blocked_roles):
+        return False, f"emergency nurse marker not reported in blockers: {result}"
+    if glob.glob(os.path.join(baza, "archiv", "rao_journal_archived_*.db")):
+        return False, "network emergency nurse marker rotation created archive"
+    if glob.glob(os.path.join(backup_dir, "*.db")):
+        return False, "network emergency nurse marker rotation created backup before blocking"
+    return True, "ok"
+
+
+def _check_db_rotation_blocks_active_emergency_nurse_session(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
+
+    baza = os.path.join(temp_root, "Baza_rotation_active_emergency_nurse")
+    emergency_root = os.path.join(temp_root, "emergency_root")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    backup_dir = os.path.join(baza, "backups", "valid")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=False)
+
+    session_id = "session_nurse_active"
+    session_dir = os.path.join(emergency_root, "active", session_id)
+    os.makedirs(session_dir, exist_ok=True)
+    metadata_path = os.path.join(session_dir, "emergency_session.json")
+    Path(metadata_path).write_text(
+        json.dumps(
+            {
+                "emergency_session_id": session_id,
+                "status": "active",
+                "source_role": "nurse",
+                "source_machine": "nurse-pc",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = maybe_rotate_database_if_due(
+        db_path=db_path,
+        archive_dir=os.path.dirname(db_path),
+        rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+        db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+        backup_dir=backup_dir,
+        invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+        runtime_mode="network",
+        max_age_days=180,
+        blocked_emergency_roots=[emergency_root],
+    )
+    if result.get("status") != "deferred_active_emergency_session":
+        return False, f"active emergency nurse did not block rotation: {result}"
+    blocked = result.get("blocked_emergency_sessions") or []
+    if not any((item or {}).get("session_id") == session_id for item in blocked):
+        return False, f"emergency session not reported in blockers: {result}"
+    if glob.glob(os.path.join(baza, "archiv", "rao_journal_archived_*.db")):
+        return False, "active emergency nurse rotation created archive"
+    if glob.glob(os.path.join(backup_dir, "*.db")):
+        return False, "active emergency nurse rotation created backup before blocking"
+    return True, "ok"
+
+
+def _check_db_rotation_new_db_failure_preserves_current(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.db_lifecycle as lifecycle
+
+    baza = os.path.join(temp_root, "Baza_rotation_new_db_failure")
+    db_path = os.path.join(baza, "archiv", "rao_journal.db")
+    backup_dir = os.path.join(baza, "backups", "valid")
+    _create_db_cycle_fixture(db_path, admission_dt="2026-01-10 08:00:00", active_bed=False)
+    original = Path(db_path).read_bytes()
+
+    original_schema_init = lifecycle.ensure_unified_schema_with_migration_backup
+
+    def fail_schema_init(*_args, **_kwargs):
+        raise RuntimeError("forced fresh db init failure")
+
+    lifecycle.ensure_unified_schema_with_migration_backup = fail_schema_init
+    try:
+        result = lifecycle.maybe_rotate_database_if_due(
+            db_path=db_path,
+            archive_dir=os.path.dirname(db_path),
+            rotation_lock_path=os.path.join(baza, "archiv", "db_rotation.lock"),
+            db_lock_path=os.path.join(baza, "archiv", "db.lock"),
+            backup_dir=backup_dir,
+            invalid_dir=os.path.join(baza, "backup_health", "invalid_backups"),
+            runtime_mode="network",
+            max_age_days=180,
+        )
+    finally:
+        lifecycle.ensure_unified_schema_with_migration_backup = original_schema_init
+
+    if result.get("status") != "new_db_failed":
+        return False, f"unexpected status after forced new DB failure: {result}"
+    if not result.get("current_preserved"):
+        return False, f"result does not report preserved current DB: {result}"
+    if not os.path.isfile(db_path):
+        return False, "current DB disappeared after fresh DB init failure"
+    if Path(db_path).read_bytes() != original:
+        return False, "current DB changed after fresh DB init failure"
+    if glob.glob(os.path.join(baza, "archiv", "rao_journal_archived_*.db")):
+        return False, "fresh DB init failure created archive"
+    if not glob.glob(os.path.join(backup_dir, "pre_rotation_*.db")):
+        return False, "pre-rotation backup was not created before fresh DB init failure"
+    return True, "ok"
+
+
+def _check_archive_patients_sql_period_filter(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.dao.patient_dao import PatientDAO
+
+    db_path = os.path.join(temp_root, "archive_period_filter.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE patients (
+                id INTEGER PRIMARY KEY,
+                last_name TEXT,
+                first_name TEXT,
+                middle_name TEXT,
+                full_name TEXT,
+                birth_date TEXT
+            );
+            CREATE TABLE admissions (
+                id INTEGER PRIMARY KEY,
+                patient_id INTEGER,
+                history_number TEXT,
+                bed_number INTEGER,
+                admission_datetime TEXT,
+                transfer_datetime TEXT,
+                death_datetime TEXT,
+                outcome TEXT,
+                diagnosis_text TEXT,
+                patient_age INTEGER,
+                patient_months INTEGER,
+                patient_age_unit TEXT,
+                diagnosis_code TEXT,
+                operation_description TEXT,
+                emergency_notice_number TEXT,
+                emergency_notice_entered_at TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO patients (id, last_name, first_name, middle_name, full_name) VALUES (1, 'Архивов', 'Январь', '', 'Архивов Январь')"
+        )
+        conn.execute(
+            "INSERT INTO patients (id, last_name, first_name, middle_name, full_name) VALUES (2, 'Архивов', 'Февраль', '', 'Архивов Февраль')"
+        )
+        conn.execute(
+            """
+            INSERT INTO admissions (id, patient_id, history_number, bed_number, admission_datetime, transfer_datetime, outcome)
+            VALUES (1, 1, 'JAN', 1, '2026-01-10 08:00:00', '2026-01-11 08:00:00', 'переведен')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO admissions (id, patient_id, history_number, bed_number, admission_datetime, transfer_datetime, outcome)
+            VALUES (2, 2, 'FEB', 2, '2026-02-10 08:00:00', '2026-02-11 08:00:00', 'переведен')
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dao = object.__new__(PatientDAO)
+    rows = dao._fetch_archived_rows_from_db(
+        db_path,
+        start_dt="2026-02-01 00:00:00",
+        end_dt="2026-02-28 23:59:59",
+    )
+    history_numbers = {row.get("history_number") for row in rows}
+    if history_numbers != {"FEB"}:
+        return False, f"SQL period filter returned unexpected rows: {history_numbers}"
+    return True, "ok"
+
+
+def _check_auto_rotation_after_doctor_exit_only(temp_root: str) -> tuple[bool, str]:
+    db_manager_path = PROJECT_ROOT / "data" / "dao" / "db_manager.py"
+    main_path = PROJECT_ROOT / "app" / "main.py"
+    db_manager_source = db_manager_path.read_text(encoding="utf-8")
+    tree = ast.parse(db_manager_source)
+    init_calls_rotation = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != "DatabaseManager":
+            continue
+        for item in node.body:
+            if not isinstance(item, ast.FunctionDef) or item.name != "__init__":
+                continue
+            for subnode in ast.walk(item):
+                if isinstance(subnode, ast.Call):
+                    func = subnode.func
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "_maybe_rotate_db_lifecycle"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "self"
+                    ):
+                        init_calls_rotation = True
+    if init_calls_rotation:
+        return False, "DatabaseManager.__init__ still triggers automatic rotation"
+
+    main_source = main_path.read_text(encoding="utf-8")
+    required_markers = (
+        "_run_doctor_exit_db_rotation",
+        "maybe_rotate_database_after_doctor_exit",
+        "exit_code == 0",
+        "resources_shutdown_ok",
+    )
+    missing = [marker for marker in required_markers if marker not in main_source]
+    if missing:
+        return False, f"doctor-exit auto-rotation markers missing in main.py: {missing}"
+    return True, "ok"
+
+
+def _check_db_cycle_period_selection(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.db_cycle_registry import select_db_paths_for_period
+
+    archiv = os.path.join(temp_root, "Baza_cycle_period", "archiv")
+    current = os.path.join(archiv, "rao_journal.db")
+    old = os.path.join(archiv, "rao_journal_archived_20240101_000000.db")
+    newer = os.path.join(archiv, "rao_journal_archived_20250101_000000.db")
+    _create_db_cycle_fixture(current, admission_dt="2026-05-10 08:00:00")
+    _create_db_cycle_fixture(old, admission_dt="2024-03-10 08:00:00")
+    _create_db_cycle_fixture(newer, admission_dt="2025-03-10 08:00:00")
+    selected = select_db_paths_for_period(
+        current_db_path=current,
+        start_dt="2025-01-01 00:00:00",
+        end_dt="2025-12-31 23:59:59",
+    )
+    selected_keys = {os.path.normcase(path) for path in selected}
+    if os.path.normcase(newer) not in selected_keys:
+        return False, f"period selection missed 2025 archive: {selected}"
+    if os.path.normcase(old) in selected_keys or os.path.normcase(current) in selected_keys:
+        return False, f"period selection included out-of-period DB: {selected}"
+    return True, "ok"
+
+
 def main():
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -17295,6 +17807,16 @@ def main():
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
+        ("db_rotation_forbids_emergency_runtime", _check_db_rotation_forbids_emergency_runtime),
+        ("db_rotation_creates_validated_backup", _check_db_rotation_creates_validated_backup),
+        ("db_rotation_blocks_active_beds", _check_db_rotation_blocks_active_beds),
+        ("db_rotation_blocks_active_nurse_role", _check_db_rotation_blocks_active_nurse_role),
+        ("db_rotation_blocks_network_emergency_nurse_marker", _check_db_rotation_blocks_network_emergency_nurse_marker),
+        ("db_rotation_blocks_active_emergency_nurse_session", _check_db_rotation_blocks_active_emergency_nurse_session),
+        ("db_rotation_new_db_failure_preserves_current", _check_db_rotation_new_db_failure_preserves_current),
+        ("archive_patients_sql_period_filter", _check_archive_patients_sql_period_filter),
+        ("auto_rotation_after_doctor_exit_only", _check_auto_rotation_after_doctor_exit_only),
+        ("db_cycle_period_selection", _check_db_cycle_period_selection),
         ("report_cleanup_uses_creation_age", _check_report_cleanup_uses_creation_age),
         ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
@@ -17491,6 +18013,7 @@ def main():
         ("restore_probe_remote_changed_sets_conflict_pending", _check_restore_probe_remote_changed_sets_conflict_pending),
         ("restore_probe_remote_less_than_base_is_inconsistent", _check_restore_probe_remote_less_than_base_is_inconsistent),
         ("restore_probe_checks_session_locks", _check_restore_probe_checks_session_locks),
+        ("restore_probe_marks_network_emergency_nurse_role", _check_restore_probe_marks_network_emergency_nurse_role),
         ("restore_probe_checks_merge_lock", _check_restore_probe_checks_merge_lock),
         ("restore_probe_checks_probe_file_write_delete", _check_restore_probe_checks_probe_file_write_delete),
         ("restore_probe_writes_merge_ready_marker_for_stable_merge_modes", _check_restore_probe_writes_merge_ready_marker_for_stable_merge_modes),

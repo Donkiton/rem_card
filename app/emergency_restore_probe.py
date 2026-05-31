@@ -36,6 +36,9 @@ from rem_card.app.version import APP_VERSION
 MERGE_READY_MARKER_FILE_NAME = "emergency_merge_ready.json"
 EMERGENCY_MERGE_LOCK_FILE_NAME = "emergency_merge.lock"
 RESTORE_PROBE_FILE_NAME = "emergency_restore_probe.tmp"
+EMERGENCY_NURSE_ROLE_LOCK_FILE_NAME = "nurse_emergency.lock"
+EMERGENCY_NURSE_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
+EMERGENCY_NURSE_ROLE_LOCK_HEARTBEAT_SEC = 8.0
 
 MERGE_READY_MODE_A_MESSAGE = (
     "Доступ к сетевой базе восстановлен.\n\n"
@@ -173,6 +176,7 @@ class EmergencyRestoreProbe:
         self.source_settings_db_path = _optional_path(source_settings_db_path)
         self.network_baza_dir = _optional_path(network_baza_dir)
         self._lock = threading.Lock()
+        self._network_emergency_role_lock = None
         self._status = EmergencyRestoreStatus(
             enabled=self.enabled,
             success_rounds_required=self.success_rounds_required,
@@ -279,6 +283,7 @@ class EmergencyRestoreProbe:
         path_failure = self._check_network_paths(context)
         if path_failure:
             return self._failure(path_failure[0], path_failure[1], session=session)
+        self._ensure_network_emergency_role_marker(context, session)
 
         medical_validation = validate_medical_db_snapshot(context.medical_db_path)
         settings_validation = validate_settings_db_snapshot(context.settings_db_path)
@@ -291,6 +296,62 @@ class EmergencyRestoreProbe:
             return self._failure(readiness_failure[0], readiness_failure[1], session=session)
 
         return self._record_remote_change_classification(session, medical_validation, context)
+
+    def _ensure_network_emergency_role_marker(
+        self,
+        context: DbRuntimeContext,
+        session: EmergencySessionMetadata,
+    ) -> None:
+        if self.role != "nurse":
+            return
+        lock_path = os.path.join(context.session_locks_dir, EMERGENCY_NURSE_ROLE_LOCK_FILE_NAME)
+        current_lock = self._network_emergency_role_lock
+        if current_lock is not None and getattr(current_lock, "lock_path", "") == lock_path:
+            try:
+                if current_lock.refresh():
+                    return
+            except Exception as exc:
+                logger.warning("Failed to refresh network emergency nurse marker %s: %s", lock_path, exc)
+            self.release_network_emergency_role_marker()
+        if current_lock is not None:
+            self.release_network_emergency_role_marker()
+        try:
+            from rem_card.app.role_session_lock import RoleSessionLock
+
+            owner_parts = [
+                socket.gethostname(),
+                str(os.getpid()),
+                "nurse_emergency",
+                str(session.emergency_session_id or ""),
+            ]
+            role_lock = RoleSessionLock(
+                lock_path=lock_path,
+                role="nurse_emergency",
+                owner_id=":".join(owner_parts),
+                stale_timeout_sec=EMERGENCY_NURSE_ROLE_LOCK_STALE_TIMEOUT_SEC,
+                heartbeat_sec=EMERGENCY_NURSE_ROLE_LOCK_HEARTBEAT_SEC,
+                logger=logger,
+            )
+            if role_lock.acquire():
+                self._network_emergency_role_lock = role_lock
+            else:
+                logger.warning(
+                    "Failed to acquire network emergency nurse marker %s: %s",
+                    lock_path,
+                    role_lock.describe_holder(),
+                )
+        except Exception as exc:
+            logger.warning("Failed to create network emergency nurse marker %s: %s", lock_path, exc, exc_info=True)
+
+    def release_network_emergency_role_marker(self) -> None:
+        role_lock = self._network_emergency_role_lock
+        self._network_emergency_role_lock = None
+        if role_lock is None:
+            return
+        try:
+            role_lock.release()
+        except Exception as exc:
+            logger.warning("Failed to release network emergency nurse marker: %s", exc, exc_info=True)
 
     def _runtime_guard_failure(self) -> EmergencyRestoreStatus | None:
         if not self.enabled:
@@ -603,6 +664,7 @@ class EmergencyRestoreProbeScheduler:
         self._wake_event.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=max(0.0, float(timeout or 0.0)))
+        self.probe.release_network_emergency_role_marker()
         with self._lock:
             stopped = not self._running
             return stopped

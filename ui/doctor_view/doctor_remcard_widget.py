@@ -1494,7 +1494,7 @@ class DoctorRemCardWidget(QWidget):
         CustomMessageBox.information(
             self,
             "Только чтение",
-            "Архивная карта открыта в режиме только чтения.",
+            "Запись прошлых периодов доступна только для просмотра.",
         )
 
     def _current_status_is_outcome(self) -> bool:
@@ -2942,12 +2942,10 @@ class DoctorRemCardWidget(QWidget):
 
     def on_patient_edit_requested_from_archive(self, patient):
         if getattr(patient, "is_external_archive", False):
-            db_name = getattr(patient, "source_db_name", None) or "архивная БД"
             CustomMessageBox.information(
                 self,
-                "Архивный цикл",
-                f"Запись находится в ротационной базе ({db_name}).\n"
-                "Редактирование таких архивных записей недоступно.",
+                "Только просмотр",
+                "Запись прошлых периодов доступна только для просмотра.",
             )
             return
 
@@ -3022,12 +3020,6 @@ class DoctorRemCardWidget(QWidget):
                 self.load_patient_card(int(source_admission_id), target_date)
                 self.layout_manager.set_patient_selection_mode("card")
                 self.layout_manager.sync_bottom_row_visibility_to_current_tab()
-                db_name = getattr(patient, "source_db_name", None) or "архивная БД"
-                CustomMessageBox.information(
-                    self,
-                    "Архивный цикл",
-                    f"Карта открыта из {db_name} в режиме только чтения.",
-                )
             except Exception as exc:
                 logger.error("Failed to open external archived card: %s", exc, exc_info=True)
                 CustomMessageBox.warning(self, "Ошибка", f"Не удалось открыть архивную карту:\n{exc}")

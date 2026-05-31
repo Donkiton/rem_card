@@ -35,6 +35,7 @@ class ArchiveWidget(QWidget):
         self._load_worker = None
         self._load_pending = False
         self._delete_pending = False
+        self._period_db_paths = []
         self.init_ui()
 
     def init_ui(self):
@@ -60,12 +61,12 @@ class ArchiveWidget(QWidget):
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate(2020, 1, 1))
-        self.date_from.dateChanged.connect(self.filter_data)
+        self.date_from.dateChanged.connect(self.load_data)
         
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
-        self.date_to.dateChanged.connect(self.filter_data)
+        self.date_to.dateChanged.connect(self.load_data)
         
         self.search_ib = QLineEdit()
         self.search_ib.setPlaceholderText("Номер ИБ")
@@ -212,7 +213,11 @@ class ArchiveWidget(QWidget):
             return
 
         self._load_pending = False
-        worker = AsyncCallThread(self.patient_service.get_archived_patients, parent=self)
+        start_dt, end_dt = self._get_archive_period_bounds()
+        worker = AsyncCallThread(
+            lambda: self.patient_service.get_archived_patients(start_dt=start_dt, end_dt=end_dt),
+            parent=self,
+        )
         self._load_worker = worker
         worker.succeeded.connect(self._apply_loaded_patients)
         worker.failed.connect(self._on_load_failed)
@@ -221,6 +226,7 @@ class ArchiveWidget(QWidget):
 
     def _apply_loaded_patients(self, patients):
         self.all_archived_patients = list(patients or [])
+        self._period_db_paths = self._collect_db_paths_for_archive_period()
         self.current_page = 1
         self.filter_data()
 
@@ -319,7 +325,7 @@ class ArchiveWidget(QWidget):
                 CustomMessageBox.warning(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
                 return
 
-            db_paths = self._collect_db_paths_for_current_filter()
+            db_paths = self._collect_db_paths_for_archive_period()
             if not db_paths:
                 CustomMessageBox.information(self, "Инфо", "Нет данных в выбранном архивном интервале.")
                 return
@@ -349,7 +355,7 @@ class ArchiveWidget(QWidget):
                 CustomMessageBox.warning(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
                 return
 
-            db_paths = self._collect_db_paths_for_current_filter()
+            db_paths = self._collect_db_paths_for_archive_period()
             if not db_paths:
                 CustomMessageBox.information(self, "Инфо", "Нет данных в выбранном архивном интервале.")
                 return
@@ -552,12 +558,6 @@ class ArchiveWidget(QWidget):
             item_adm = QTableWidgetItem(admitted_at)
             item_trn = QTableWidgetItem(transferred_at)
 
-            if patient.is_external_archive:
-                hint = f"Архивная БД: {patient.source_db_name or 'unknown'}"
-                item_name.setToolTip(hint)
-                item_ib.setToolTip(hint)
-                item_diag.setToolTip(hint)
-
             self.table.setItem(row, 0, item_name)
             self.table.setItem(row, 1, item_ib)
             self.table.setItem(row, 2, item_diag)
@@ -610,9 +610,9 @@ class ArchiveWidget(QWidget):
         self._set_page(int(raw))
 
     def _apply_action_buttons_state(self, patient):
-        has_any = bool(self.filtered_patients)
-        self.btn_report_stats.setEnabled(has_any)
-        self.btn_graphs.setEnabled(has_any)
+        has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
+        self.btn_report_stats.setEnabled(has_period_data)
+        self.btn_graphs.setEnabled(has_period_data)
 
         if not patient:
             self.btn_open.setEnabled(False)
@@ -653,11 +653,20 @@ class ArchiveWidget(QWidget):
             paths.append(abs_path)
         return paths
 
+    def _collect_db_paths_for_archive_period(self) -> list[str]:
+        start_dt, end_dt = self._get_archive_period_bounds()
+        try:
+            if hasattr(self.patient_service, "get_archive_db_paths_for_period"):
+                paths = self.patient_service.get_archive_db_paths_for_period(start_dt, end_dt)
+                return [os.path.abspath(path) for path in paths if path and os.path.isfile(path)]
+        except Exception:
+            pass
+        return self._collect_db_paths_for_current_filter()
+
     def _show_external_archive_info(self, patient):
-        db_name = patient.source_db_name or "архивная БД"
+        _ = patient
         CustomMessageBox.information(
             self,
-            "Архивный цикл",
-            f"Запись находится в ротационной базе ({db_name}).\n"
-            "Открытие карты доступно только в режиме чтения. Удаление из этого окна недоступно.",
+            "Только просмотр",
+            "Запись прошлых периодов доступна только для просмотра.",
         )
