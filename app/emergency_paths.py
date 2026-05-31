@@ -8,6 +8,7 @@ EMERGENCY_ROOT_DIR_NAME = "emergency_db"
 EMERGENCY_APP_DIR_NAME = "RemCard"
 
 STANDBY_DIR_NAME = "standby"
+STANDBY_GENERATIONS_DIR_NAME = "generations"
 ACTIVE_DIR_NAME = "active"
 ARCHIVED_DIR_NAME = "archived"
 
@@ -40,6 +41,14 @@ def standby_dir(root: str) -> str:
     return os.path.join(resolve_emergency_root(root), STANDBY_DIR_NAME)
 
 
+def standby_generations_dir(root: str) -> str:
+    return os.path.join(standby_dir(root), STANDBY_GENERATIONS_DIR_NAME)
+
+
+def standby_generation_dir(root: str, generation_id: str) -> str:
+    return os.path.join(standby_generations_dir(root), str(generation_id))
+
+
 def active_dir(root: str) -> str:
     return os.path.join(resolve_emergency_root(root), ACTIVE_DIR_NAME)
 
@@ -66,6 +75,18 @@ def standby_settings_db_path(root: str) -> str:
 
 def standby_metadata_path(root: str) -> str:
     return os.path.join(standby_dir(root), STANDBY_METADATA_FILE_NAME)
+
+
+def standby_generation_medical_db_path(root: str, generation_id: str) -> str:
+    return os.path.join(standby_generation_dir(root, generation_id), STANDBY_MEDICAL_DB_FILE_NAME)
+
+
+def standby_generation_settings_db_path(root: str, generation_id: str) -> str:
+    return os.path.join(standby_generation_dir(root, generation_id), STANDBY_SETTINGS_DB_FILE_NAME)
+
+
+def standby_generation_metadata_path(root: str, generation_id: str) -> str:
+    return os.path.join(standby_generation_dir(root, generation_id), STANDBY_METADATA_FILE_NAME)
 
 
 def active_base_snapshot_path(root: str, session_id: str) -> str:

@@ -40,6 +40,8 @@ class DataService(QObject):
         self._unconfirmed_write_count = 0
         self._unknown_active_write = False
         self._outage_signal_emitted = False
+        self._last_runtime_outage_shutdown_result = ""
+        self._last_runtime_outage_queue_settled = None
         self._monitor.changes_detected.connect(self._emit_coordinated_changes, Qt.QueuedConnection)
         self._monitor.monitor_error.connect(self._handle_monitor_error, Qt.QueuedConnection)
         self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
@@ -79,6 +81,8 @@ class DataService(QObject):
             "network_outage_detected": bool(self._network_outage_detected),
             "unconfirmed_write_count": int(self._unconfirmed_write_count),
             "unknown_active_write": bool(self._unknown_active_write),
+            "queue_shutdown_result": str(self._last_runtime_outage_shutdown_result or ""),
+            "queue_settled": self._last_runtime_outage_queue_settled,
         }
 
     def fetch_changes_since(self, last_change_id: int, admission_id: Optional[int] = None, include_global: bool = True):
@@ -262,6 +266,13 @@ class DataService(QObject):
             self._unknown_active_write = True
             self._unconfirmed_write_count = max(1, int(self._unconfirmed_write_count or 0))
             logger.warning("Runtime outage shutdown continued with unconfirmed queued write state")
+        self._last_runtime_outage_queue_settled = bool(queue_drained)
+        if queue_drained and schedulers_stopped and monitor_stopped:
+            self._last_runtime_outage_shutdown_result = "settled"
+        elif not queue_drained:
+            self._last_runtime_outage_shutdown_result = "timeout"
+        else:
+            self._last_runtime_outage_shutdown_result = "failed"
         try:
             from rem_card.app.local_metrics import flush_metrics
 

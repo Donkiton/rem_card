@@ -24,12 +24,19 @@ class PendingEmergencyMergeResult:
     details: dict[str, Any] | None = None
 
 
-def find_pending_emergency_merge_session(store: EmergencyLocalStore) -> str:
+@dataclass(frozen=True)
+class PendingEmergencyMergeCandidate:
+    session_id: str = ""
+    status: str = ""
+
+
+def find_pending_emergency_merge_candidate(store: EmergencyLocalStore) -> PendingEmergencyMergeCandidate:
     root = store.resolve_root()
     directory = active_dir(root)
     if not os.path.isdir(directory):
-        return ""
-    candidates: list[tuple[float, str]] = []
+        return PendingEmergencyMergeCandidate()
+    candidates: list[tuple[int, float, str, str]] = []
+    status_priority = {"merge_pending": 2, "merge_failed": 1}
     for name in os.listdir(directory):
         metadata_path = active_session_metadata_path(root, name)
         if not os.path.isfile(metadata_path):
@@ -38,12 +45,19 @@ def find_pending_emergency_merge_session(store: EmergencyLocalStore) -> str:
             metadata = store.read_active_session(name)
         except EmergencyMetadataError:
             continue
-        if metadata.status == "merge_pending":
-            candidates.append((os.path.getmtime(metadata_path), metadata.emergency_session_id))
+        status = str(metadata.status or "")
+        if status in status_priority:
+            candidates.append((status_priority[status], os.path.getmtime(metadata_path), metadata.emergency_session_id, status))
     if not candidates:
-        return ""
+        return PendingEmergencyMergeCandidate()
     candidates.sort(reverse=True)
-    return candidates[0][1]
+    _priority, _mtime, session_id, status = candidates[0]
+    return PendingEmergencyMergeCandidate(session_id=session_id, status=status)
+
+
+def find_pending_emergency_merge_session(store: EmergencyLocalStore) -> str:
+    candidate = find_pending_emergency_merge_candidate(store)
+    return candidate.session_id if candidate.status == "merge_pending" else ""
 
 
 def run_pending_emergency_merge(
@@ -54,9 +68,19 @@ def run_pending_emergency_merge(
     network_baza_dir: str | None = None,
 ) -> PendingEmergencyMergeResult:
     store = EmergencyLocalStore(root=root)
-    session_id = find_pending_emergency_merge_session(store)
+    candidate = find_pending_emergency_merge_candidate(store)
+    session_id = candidate.session_id
     if not session_id:
         return PendingEmergencyMergeResult(attempted=False, ok=True)
+    if candidate.status == "merge_failed":
+        return PendingEmergencyMergeResult(
+            attempted=False,
+            ok=False,
+            session_id=session_id,
+            user_message="Предыдущее аварийное объединение завершилось ошибкой. Аварийная база сохранена; требуется повторная проверка или сопровождение.",
+            error="merge_failed_unresolved",
+            details={"status": candidate.status},
+        )
 
     marker_path = merge_ready_marker_path(store.resolve_root(), session_id)
     runtime_context = store.build_active_runtime_context(session_id)

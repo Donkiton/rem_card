@@ -120,13 +120,13 @@ def get_db_last_change_id(path: str) -> int:
             conn.close()
 
 
-def get_db_fingerprint(path: str) -> dict[str, Any]:
+def get_db_fingerprint(path: str, *, file_hash: str | None = None) -> dict[str, Any]:
     stat_result = os.stat(path)
     fingerprint = {
         "path": os.path.abspath(path),
         "size_bytes": int(stat_result.st_size),
         "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
-        "sha256": compute_file_hash(path),
+        "sha256": file_hash or compute_file_hash(path),
     }
     try:
         fingerprint["schema_version"] = get_db_schema_version(path)
@@ -159,7 +159,7 @@ def _result_from_path(
         file_hash=file_hash,
         file_size=int(stat_result.st_size),
         file_mtime=float(stat_result.st_mtime),
-        fingerprint=get_db_fingerprint(path) if ok else {},
+        fingerprint=get_db_fingerprint(path, file_hash=file_hash) if ok else {},
     )
 
 

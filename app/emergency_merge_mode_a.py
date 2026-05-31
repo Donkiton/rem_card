@@ -25,6 +25,7 @@ from rem_card.app.emergency_metadata import (
     read_json_file,
 )
 from rem_card.app.emergency_paths import active_session_dir, archived_session_dir
+from rem_card.app.emergency_remote_identity import validate_remote_identity_error
 from rem_card.app.emergency_restore_probe import (
     clear_merge_ready_marker,
     emergency_merge_lock_path,
@@ -818,6 +819,9 @@ class EmergencyModeAMergeService:
         local_validation = validate_medical_db_snapshot(session.local_db_path)
         if not remote_validation.ok:
             return {"ok": False, "code": "remote_invalid", "reason": remote_validation.reason}
+        identity_error = validate_remote_identity_error(session, context.medical_db_path, remote_validation)
+        if identity_error:
+            return {"ok": False, "code": "blocked_remote_identity_mismatch", "reason": identity_error}
         if not local_validation.ok:
             return {"ok": False, "code": "local_invalid", "reason": local_validation.reason}
         remote_last = int(remote_validation.last_change_id or 0)

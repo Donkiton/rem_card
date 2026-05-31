@@ -321,16 +321,32 @@ class MainWindow(QMainWindow):
         from rem_card.services.settings.settings_service import reset_settings_service
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
+        shutdown_ok = False
+        if data_service is not None:
+            shutdown_ok = bool(data_service.prepare_runtime_outage_shutdown(timeout=5.0))
         queue_state = data_service.get_write_queue_state() if data_service is not None else {}
         observed_change_id, standby_change_id = self._runtime_outage_change_ids()
-        unconfirmed = int(queue_state.get("unconfirmed_write_count") or 0) > 0
-        unknown_active = bool(queue_state.get("active_write_in_progress") or queue_state.get("unknown_active_write"))
+        unconfirmed_count = int(queue_state.get("unconfirmed_write_count") or 0)
+        pending_count = int(queue_state.get("pending_count") or 0)
+        queue_shutdown_result = str(queue_state.get("queue_shutdown_result") or ("settled" if shutdown_ok else "failed"))
+        queue_settled = queue_state.get("queue_settled")
+        unconfirmed = unconfirmed_count > 0
+        unknown_active = bool(
+            queue_state.get("active_write_in_progress")
+            or queue_state.get("unknown_active_write")
+            or queue_shutdown_result in {"timeout", "failed"}
+        )
         stale_standby = int(observed_change_id or 0) > int(standby_change_id or 0)
         marker_path, marker_payload = write_runtime_outage_startup_request(
             source_role="nurse",
             last_observed_remote_change_id=observed_change_id,
             standby_last_change_id=standby_change_id,
             unconfirmed_writes=bool(unconfirmed or unknown_active),
+            pending_write_count=pending_count,
+            unconfirmed_write_count=unconfirmed_count,
+            unknown_active_write=bool(unknown_active),
+            queue_shutdown_result=queue_shutdown_result,
+            queue_settled=queue_settled,
         )
         message = build_runtime_outage_dialog_message(
             unconfirmed_writes=bool(unconfirmed),
@@ -346,8 +362,6 @@ class MainWindow(QMainWindow):
                 ("Закрыть RemCard", 0),
             ],
         )
-        if data_service is not None:
-            data_service.prepare_runtime_outage_shutdown(timeout=5.0)
         reset_settings_service()
         if int(result or 0) == 1:
             launched = launch_emergency_restart(marker_path, role="nurse")

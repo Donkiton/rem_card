@@ -13336,10 +13336,11 @@ def _check_emergency_standby_refresh_uses_sqlite_backup_api(temp_root: str) -> t
 def _check_emergency_standby_refresh_writes_temp_then_atomic_replace(temp_root: str) -> tuple[bool, str]:
     text = (PROJECT_ROOT / "app" / "emergency_standby.py").read_text(encoding="utf-8")
     required = (
-        ".tmp.",
-        "os.replace(temp_medical_path, final_medical_path)",
-        "os.replace(temp_settings_path, final_settings_path)",
-        "_temp_standby_path",
+        ".staging.",
+        "standby_generation_dir",
+        "standby_generation_medical_db_path",
+        "standby_generation_settings_db_path",
+        "self.store.write_standby_metadata(metadata)",
     )
     missing = [token for token in required if token not in text]
     if missing:
@@ -13558,6 +13559,83 @@ def _check_emergency_standby_pair_is_consistent(temp_root: str) -> tuple[bool, s
         return False, f"settings standby invalid: {status.settings_validation}"
     if status.metadata.validation_status != "valid":
         return False, f"valid pair has non-valid metadata: {status.metadata.validation_status}"
+    return True, "ok"
+
+
+def _check_standby_refresh_failure_after_medical_replace_preserves_previous_valid_pair(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    manager, source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    first = manager.create_or_refresh_standby(forced=True)
+    if not first.ok or not first.metadata:
+        return False, f"initial standby refresh failed: {first}"
+    old_metadata = manager.store.read_standby_metadata()
+    old_hash = compute_file_hash(old_metadata.medical_db_path)
+    _append_emergency_medical_change(source_medical, entity_id=6101)
+    original_write = manager.store.write_standby_metadata
+
+    def fail_metadata_write(metadata):
+        raise OSError("simulated metadata commit failure")
+
+    try:
+        manager.store.write_standby_metadata = fail_metadata_write
+        result = manager.create_or_refresh_standby(forced=True)
+    finally:
+        manager.store.write_standby_metadata = original_write
+    if result.ok:
+        return False, "failed metadata commit unexpectedly succeeded"
+    current = manager.validate_standby()
+    if not current.ok or not current.metadata:
+        return False, f"previous standby was not preserved as valid: {current}"
+    if compute_file_hash(current.metadata.medical_db_path) != old_hash:
+        return False, "previous standby medical DB changed after failed refresh"
+    return True, "ok"
+
+
+def _check_standby_refresh_failure_before_metadata_rejects_mixed_pair(temp_root: str) -> tuple[bool, str]:
+    return _check_standby_refresh_failure_after_medical_replace_preserves_previous_valid_pair(temp_root)
+
+
+def _check_validate_standby_rejects_mixed_generation(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    refresh = manager.create_or_refresh_standby(forced=True)
+    if not refresh.ok or not refresh.metadata:
+        return False, f"standby refresh failed: {refresh}"
+    mixed = replace(refresh.metadata, medical_db_hash="bad-hash")
+    manager.store.write_standby_metadata(mixed)
+    status = manager.validate_standby()
+    if status.ok or status.status != "invalid" or "hash mismatch" not in status.reason:
+        return False, f"mixed generation was not rejected: {status}"
+    return True, "ok"
+
+
+def _check_emergency_startup_uses_previous_valid_standby_after_failed_refresh(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+    from rem_card.app.emergency_validation import compute_file_hash
+
+    manager, source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    first = manager.create_or_refresh_standby(forced=True)
+    if not first.ok or not first.metadata:
+        return False, f"initial standby refresh failed: {first}"
+    old_hash = compute_file_hash(first.metadata.medical_db_path)
+    _append_emergency_medical_change(source_medical, entity_id=6102)
+    original_write = manager.store.write_standby_metadata
+    try:
+        manager.store.write_standby_metadata = lambda metadata: (_ for _ in ()).throw(OSError("simulated metadata failure"))
+        failed = manager.create_or_refresh_standby(forced=True)
+    finally:
+        manager.store.write_standby_metadata = original_write
+    if failed.ok:
+        return False, "failed refresh unexpectedly succeeded"
+    _write_emergency_startup_allow_marker(manager.store.resolve_root())
+    decision = prepare_emergency_startup("nurse", root=manager.store.resolve_root())
+    if not decision.allowed:
+        return False, f"startup did not use previous valid standby: {decision}"
+    session = start_or_resume_emergency_session(decision, root=manager.store.resolve_root())
+    if compute_file_hash(session.metadata.base_snapshot_path) != old_hash:
+        return False, "startup used a mixed/new standby instead of previous valid generation"
     return True, "ok"
 
 
@@ -14211,9 +14289,9 @@ def _check_emergency_startup_no_recovery_on_network_unavailable(temp_root: str) 
     for token in forbidden:
         if token in text:
             return False, f"emergency startup references recovery code: {token}"
-    failure = SimpleNamespace(technical_reason="database is locked")
+    failure = SimpleNamespace(technical_reason="unable to open database file")
     if classify_startup_failure(failure) != "network_unavailable":
-        return False, "locked network DB was not treated as unavailable"
+        return False, "network unavailable DB was not treated as unavailable"
     return True, "ok"
 
 
@@ -14226,6 +14304,57 @@ def _check_emergency_startup_does_not_mask_corruption(temp_root: str) -> tuple[b
     failure = SimpleNamespace(technical_reason="database disk image is malformed")
     if classify_startup_failure(failure) != "corruption_or_incompatible":
         return False, "confirmed corruption was masked as network unavailable"
+    return True, "ok"
+
+
+def _check_startup_locked_busy_does_not_offer_emergency(temp_root: str) -> tuple[bool, str]:
+    from types import SimpleNamespace
+
+    from rem_card.app.emergency_startup import classify_startup_failure
+    from rem_card.app.startup_db_guard import _is_startup_unavailable_category, _startup_access_category
+
+    _ = temp_root
+    failure = SimpleNamespace(technical_reason="database is locked", user_message="База сейчас занята")
+    if classify_startup_failure(failure) != "locked_busy":
+        return False, "locked/busy startup was not classified as locked_busy"
+    category = _startup_access_category("database is locked")
+    if category != "locked_busy" or _is_startup_unavailable_category(category):
+        return False, f"locked/busy startup is still emergency-unavailable category: {category}"
+    return True, "ok"
+
+
+def _check_startup_locked_busy_does_not_recover(temp_root: str) -> tuple[bool, str]:
+    return _check_doctor_startup_locked_busy_does_not_recover(temp_root)
+
+
+def _check_startup_network_path_inaccessible_can_offer_nurse_emergency(temp_root: str) -> tuple[bool, str]:
+    from types import SimpleNamespace
+
+    from rem_card.app.emergency_startup import classify_startup_failure, prepare_emergency_startup
+
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    failure = SimpleNamespace(technical_reason="unable to open database file")
+    if classify_startup_failure(failure) != "network_unavailable":
+        return False, "path inaccessible was not classified as network_unavailable"
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if not decision.allowed:
+        return False, f"nurse emergency was not offered with valid standby: {decision}"
+    return True, "ok"
+
+
+def _check_startup_corruption_does_not_fallback_emergency(temp_root: str) -> tuple[bool, str]:
+    return _check_emergency_startup_does_not_mask_corruption(temp_root)
+
+
+def _check_startup_schema_policy_block_does_not_fallback_emergency(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import classify_startup_failure
+
+    _ = temp_root
+    for reason in ("schema incompatible", "min_client_version blocks this client", "client_policy violation"):
+        classification = classify_startup_failure(RuntimeError(reason))
+        if classification != "corruption_or_incompatible":
+            return False, f"schema/policy error was not blocked from emergency fallback: {reason} -> {classification}"
     return True, "ok"
 
 
@@ -14270,6 +14399,63 @@ def _check_emergency_startup_merged_session_not_resumed(temp_root: str) -> tuple
         return False, f"merged session was selected for resume: {decision}"
     if decision.status != "standby_available":
         return False, f"valid standby was not offered after merged session skip: {decision}"
+    return True, "ok"
+
+
+def _check_older_app_version_standby_allowed_if_schema_compatible(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    store.write_standby_metadata(replace(standby, app_version="0.0.1"))
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if not decision.allowed:
+        return False, f"older compatible standby app_version was blocked: {decision}"
+    return True, "ok"
+
+
+def _check_older_app_version_active_session_resume_allowed_if_schema_compatible(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    session = store.create_active_session_from_standby(standby, session_id="older_active_session")
+    store.write_active_session(replace(session, app_version="0.0.1"))
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if not decision.allowed or decision.status != "active_session_available":
+        return False, f"older compatible active session was not resumable: {decision}"
+    return True, "ok"
+
+
+def _check_newer_app_version_standby_blocked(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    store.write_standby_metadata(replace(standby, app_version="999.0.0"))
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if decision.allowed or "newer" not in decision.technical_reason:
+        return False, f"newer standby app_version was not blocked: {decision}"
+    return True, "ok"
+
+
+def _check_incompatible_schema_blocks_even_if_app_version_ok(temp_root: str) -> tuple[bool, str]:
+    from dataclasses import replace
+
+    from rem_card.app.emergency_startup import prepare_emergency_startup
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    store.write_standby_metadata(replace(standby, schema_version=int(standby.schema_version or 0) + 1))
+    _write_emergency_startup_allow_marker(store.resolve_root())
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if decision.allowed or "schema" not in decision.technical_reason:
+        return False, f"incompatible schema did not block standby: {decision}"
     return True, "ok"
 
 
@@ -14493,6 +14679,76 @@ def _check_runtime_outage_write_queue_shutdown_is_bounded(temp_root: str) -> tup
     if elapsed > 0.75:
         return False, f"queue shutdown was not bounded: {elapsed:.3f}s"
     return True, "ok"
+
+
+def _check_runtime_outage_marker_written_after_queue_shutdown_state(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.runtime_outage import validate_runtime_outage_startup_request_marker, write_runtime_outage_startup_request
+
+    service = _make_runtime_outage_data_service()
+    try:
+        shutdown_ok = service.prepare_runtime_outage_shutdown(timeout=0.2)
+        state = service.get_write_queue_state()
+        marker_path, payload = write_runtime_outage_startup_request(
+            root=temp_root,
+            source_role="nurse",
+            queue_shutdown_result=str(state.get("queue_shutdown_result") or ("settled" if shutdown_ok else "failed")),
+            queue_settled=state.get("queue_settled"),
+            pending_write_count=int(state.get("pending_count") or 0),
+            unconfirmed_write_count=int(state.get("unconfirmed_write_count") or 0),
+            unknown_active_write=bool(state.get("unknown_active_write")),
+        )
+        validation = validate_runtime_outage_startup_request_marker(marker_path)
+        if not validation.ok:
+            return False, f"marker invalid: {validation}"
+        if payload.get("queue_shutdown_result") != "settled" or payload.get("queue_settled") is not True:
+            return False, f"marker did not include settled shutdown state: {payload}"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_marker_contains_unconfirmed_write_after_shutdown(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.runtime_outage import write_runtime_outage_startup_request
+
+    service = _make_runtime_outage_data_service()
+    try:
+        service._unconfirmed_write_count = 2
+        service._unknown_active_write = True
+        service.prepare_runtime_outage_shutdown(timeout=0.2)
+        state = service.get_write_queue_state()
+        _marker_path, payload = write_runtime_outage_startup_request(
+            root=temp_root,
+            source_role="nurse",
+            unconfirmed_write_count=int(state.get("unconfirmed_write_count") or 0),
+            unknown_active_write=bool(state.get("unknown_active_write")),
+            queue_shutdown_result=str(state.get("queue_shutdown_result") or ""),
+            queue_settled=state.get("queue_settled"),
+        )
+        if int(payload.get("unconfirmed_write_count") or 0) < 2 or not payload.get("unknown_active_write"):
+            return False, f"marker missed final unconfirmed state: {payload}"
+        if not payload.get("unconfirmed_writes"):
+            return False, f"marker did not set unconfirmed_writes: {payload}"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_timeout_sets_unknown_active_write(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    service = _make_runtime_outage_data_service()
+    try:
+        service.enqueue_write("slow_runtime_outage_write", lambda: time.sleep(1.0))
+        service.prepare_runtime_outage_shutdown(timeout=0.05)
+        state = service.get_write_queue_state()
+        if state.get("queue_shutdown_result") != "timeout" or not state.get("unknown_active_write"):
+            return False, f"timeout did not mark unknown active write: {state}"
+    finally:
+        service.shutdown()
+    return True, "ok"
+
+
+def _check_runtime_outage_late_callback_does_not_mark_saved(temp_root: str) -> tuple[bool, str]:
+    return _check_runtime_outage_shutdown_prevents_late_ui_callbacks(temp_root)
 
 
 def _check_runtime_outage_stops_standby_scheduler(temp_root: str) -> tuple[bool, str]:
@@ -14756,6 +15012,117 @@ def _prepare_restore_probe_fixture(
         "medical_path": medical_path,
         "settings_path": settings_path,
     }
+
+
+def _copy_restore_probe_network_fixture(fixture: dict, target_baza: str) -> tuple[str, str]:
+    medical_path = os.path.join(target_baza, "archiv", "rao_journal.db")
+    settings_path = os.path.join(target_baza, "settings", "remcard_settings.db")
+    for directory in (
+        os.path.dirname(medical_path),
+        os.path.dirname(settings_path),
+        os.path.join(target_baza, "backup_health"),
+        os.path.join(target_baza, "session_locks"),
+        os.path.join(target_baza, "locks"),
+        os.path.join(target_baza, "config"),
+    ):
+        os.makedirs(directory, exist_ok=True)
+    shutil.copy2(fixture["medical_path"], medical_path)
+    shutil.copy2(fixture["settings_path"], settings_path)
+    _write_restore_probe_client_policy(os.path.join(target_baza, "config", "client_policy.json"))
+    return medical_path, settings_path
+
+
+def _check_remote_identity_rejects_same_suffix_different_unc(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_merge_dry_run import _path_identity_compatible as dry_run_identity
+    from rem_card.app.emergency_restore_probe import _path_identity_compatible as restore_identity
+
+    _ = temp_root
+    left = r"\\serverA\Baza\archiv\rao_journal.db"
+    right = r"\\serverB\Baza\archiv\rao_journal.db"
+    if restore_identity(left, right) or dry_run_identity(left, right):
+        return False, "same suffix on different UNC servers was accepted as same identity"
+    if not restore_identity(left, left) or not dry_run_identity(left, left):
+        return False, "same exact remote path was not accepted"
+    return True, "ok"
+
+
+def _check_dry_run_blocks_remote_identity_mismatch(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_merge_dry_run import EmergencyMergeDryRunService
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    fixture["probe"].run_probe_once()
+    marker_path = fixture["probe"].mark_merge_ready()
+    other_baza = os.path.join(temp_root, "other_network", fixture["session"].emergency_session_id)
+    other_medical, other_settings = _copy_restore_probe_network_fixture(fixture, other_baza)
+    service = EmergencyMergeDryRunService(
+        role="nurse",
+        runtime_context=fixture["store"].build_active_runtime_context(fixture["session"].emergency_session_id),
+        store=fixture["store"],
+        source_medical_db_path=other_medical,
+        source_settings_db_path=other_settings,
+        network_baza_dir=other_baza,
+    )
+    result = service.run_dry_run(fixture["session"].emergency_session_id, marker_path)
+    if result.ok or not result.blockers:
+        return False, f"identity mismatch dry-run was not blocked: {result.to_dict()}"
+    reasons = " ".join(str(item.get("reason") or "") for item in result.blockers)
+    if "identity" not in reasons:
+        return False, f"dry-run blocker is not identity mismatch: {result.to_dict()}"
+    return True, "ok"
+
+
+def _check_merge_blocks_remote_identity_mismatch(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_merge_dry_run import EmergencyMergeDryRunService
+    from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=6201)
+    fixture["probe"].run_probe_once()
+    marker_path = fixture["probe"].mark_merge_ready()
+    dry_run = EmergencyMergeDryRunService(
+        role="nurse",
+        runtime_context=fixture["store"].build_active_runtime_context(fixture["session"].emergency_session_id),
+        store=fixture["store"],
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+    ).run_dry_run(fixture["session"].emergency_session_id, marker_path)
+    if not dry_run.ok:
+        return False, f"fixture dry-run failed before identity mismatch merge check: {dry_run.to_dict()}"
+    other_baza = os.path.join(temp_root, "other_network_merge", fixture["session"].emergency_session_id)
+    other_medical, other_settings = _copy_restore_probe_network_fixture(fixture, other_baza)
+    before_hash = _file_hash(other_medical)
+    merge = EmergencyModeAMergeService(
+        role="nurse",
+        runtime_context=fixture["store"].build_active_runtime_context(fixture["session"].emergency_session_id),
+        store=fixture["store"],
+        source_medical_db_path=other_medical,
+        source_settings_db_path=other_settings,
+        network_baza_dir=other_baza,
+    ).run_merge(fixture["session"].emergency_session_id, dry_run.report_path, marker_path)
+    if merge.ok or merge.error_code != "blocked_remote_identity_mismatch":
+        return False, f"identity mismatch merge was not blocked: {merge.to_dict()}"
+    if _file_hash(other_medical) != before_hash:
+        return False, "identity mismatch merge modified remote DB"
+    return True, "ok"
+
+
+def _check_restore_probe_does_not_write_merge_ready_on_identity_mismatch(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_restore_probe import merge_ready_marker_path
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    other_baza = os.path.join(temp_root, "other_network_probe", fixture["session"].emergency_session_id)
+    other_medical, other_settings = _copy_restore_probe_network_fixture(fixture, other_baza)
+    fixture["probe"].source_medical_db_path = other_medical
+    fixture["probe"].source_settings_db_path = other_settings
+    fixture["probe"].network_baza_dir = other_baza
+    status = fixture["probe"].run_probe_once()
+    if status.get("status") != "remote_identity_mismatch":
+        return False, f"restore probe did not report identity mismatch: {status}"
+    marker_path = merge_ready_marker_path(fixture["store"].resolve_root(), fixture["session"].emergency_session_id)
+    if os.path.exists(marker_path):
+        return False, "restore probe wrote merge-ready marker despite identity mismatch"
+    return True, "ok"
 
 
 def _run_restore_probe_rounds(probe, count: int) -> dict:
@@ -15949,6 +16316,74 @@ def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: 
         return False, f"pending dry-run report missing: {result.dry_run_report_path}"
     if not os.path.isfile(result.merge_report_path):
         return False, f"pending merge report missing: {result.merge_report_path}"
+    return True, "ok"
+
+
+def _check_pending_merge_handles_merge_failed_explicitly(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_pending_merge import find_pending_emergency_merge_candidate, run_pending_emergency_merge
+
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    session_id = fixture["session"].emergency_session_id
+    fixture["store"].mark_session_status(session_id, "merge_failed", "simulated previous failure")
+    candidate = find_pending_emergency_merge_candidate(fixture["store"])
+    if candidate.session_id != session_id or candidate.status != "merge_failed":
+        return False, f"merge_failed candidate was not found explicitly: {candidate}"
+    result = run_pending_emergency_merge(
+        root=fixture["store"].resolve_root(),
+        source_medical_db_path=fixture["medical_path"],
+        source_settings_db_path=fixture["settings_path"],
+        network_baza_dir=fixture["network_baza"],
+    )
+    if result.ok or result.attempted or result.error != "merge_failed_unresolved":
+        return False, f"merge_failed pending result was not controlled: {result}"
+    return True, "ok"
+
+
+def _check_merge_failed_does_not_silently_block_standby_forever(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    standby = manager.create_or_refresh_standby(forced=True)
+    if not standby.ok or not standby.metadata:
+        return False, f"standby refresh failed: {standby}"
+    session = manager.store.create_active_session_from_standby(standby.metadata, session_id="failed_session")
+    manager.store.mark_session_status(session.emergency_session_id, "merge_failed", "simulated previous failure")
+    scheduler = EmergencyStandbyScheduler(role="nurse", mode="network", manager=manager, cooldown_sec=0)
+    reason = scheduler._refresh_block_reason()
+    if reason != "merge_failed_unresolved":
+        return False, f"merge_failed block reason is not explicit: {reason}"
+    return True, "ok"
+
+
+def _check_merged_or_discarded_session_does_not_block_standby_refresh(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
+    standby = manager.create_or_refresh_standby(forced=True)
+    if not standby.ok or not standby.metadata:
+        return False, f"standby refresh failed: {standby}"
+    merged = manager.store.create_active_session_from_standby(standby.metadata, session_id="merged_session_for_scheduler")
+    manager.store.mark_session_status(merged.emergency_session_id, "merged")
+    scheduler = EmergencyStandbyScheduler(role="nurse", mode="network", manager=manager, cooldown_sec=0)
+    reason = scheduler._refresh_block_reason()
+    if reason in {"active_emergency_session", "merge_failed_unresolved"}:
+        return False, f"merged session blocked standby refresh: {reason}"
+    discarded = manager.store.create_active_session_from_standby(standby.metadata, session_id="discarded_session_for_scheduler")
+    manager.store.mark_session_discarded(discarded.emergency_session_id, reason="regression", requested_by_role="nurse")
+    reason = scheduler._refresh_block_reason()
+    if reason in {"active_emergency_session", "merge_failed_unresolved"}:
+        return False, f"discarded session blocked standby refresh: {reason}"
+    return True, "ok"
+
+
+def _check_merge_failed_preserves_local_emergency_db(temp_root: str) -> tuple[bool, str]:
+    fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
+    session_id = fixture["session"].emergency_session_id
+    local_db_path = fixture["session"].local_db_path
+    fixture["store"].mark_session_status(session_id, "merge_failed", "simulated previous failure")
+    loaded = fixture["store"].read_active_session(session_id)
+    if loaded.status != "merge_failed" or not os.path.isfile(local_db_path):
+        return False, f"merge_failed did not preserve local DB: {loaded}"
     return True, "ok"
 
 
@@ -17941,6 +18376,19 @@ def main():
         ("emergency_standby_unavailable_source_does_not_trigger_recovery", _check_emergency_standby_unavailable_source_does_not_trigger_recovery),
         ("emergency_standby_no_empty_db_creation", _check_emergency_standby_no_empty_db_creation),
         ("emergency_standby_pair_is_consistent", _check_emergency_standby_pair_is_consistent),
+        (
+            "standby_refresh_failure_after_medical_replace_preserves_previous_valid_pair",
+            _check_standby_refresh_failure_after_medical_replace_preserves_previous_valid_pair,
+        ),
+        (
+            "standby_refresh_failure_before_metadata_rejects_mixed_pair",
+            _check_standby_refresh_failure_before_metadata_rejects_mixed_pair,
+        ),
+        ("validate_standby_rejects_mixed_generation", _check_validate_standby_rejects_mixed_generation),
+        (
+            "emergency_startup_uses_previous_valid_standby_after_failed_refresh",
+            _check_emergency_startup_uses_previous_valid_standby_after_failed_refresh,
+        ),
         ("emergency_standby_no_startup_activation_yet", _check_emergency_standby_no_startup_activation_yet),
         ("emergency_standby_no_sqlite_profile_changes", _check_emergency_standby_no_sqlite_profile_changes),
         ("emergency_standby_does_not_touch_doctor_nurse_business_logic", _check_emergency_standby_does_not_touch_doctor_nurse_business_logic),
@@ -17974,9 +18422,27 @@ def main():
         ("emergency_startup_shows_banner", _check_emergency_startup_shows_banner),
         ("emergency_startup_no_recovery_on_network_unavailable", _check_emergency_startup_no_recovery_on_network_unavailable),
         ("emergency_startup_does_not_mask_corruption", _check_emergency_startup_does_not_mask_corruption),
+        ("startup_locked_busy_does_not_offer_emergency", _check_startup_locked_busy_does_not_offer_emergency),
+        ("startup_locked_busy_does_not_recover", _check_startup_locked_busy_does_not_recover),
+        (
+            "startup_network_path_inaccessible_can_offer_nurse_emergency",
+            _check_startup_network_path_inaccessible_can_offer_nurse_emergency,
+        ),
+        ("startup_corruption_does_not_fallback_emergency", _check_startup_corruption_does_not_fallback_emergency),
+        ("startup_schema_policy_block_does_not_fallback_emergency", _check_startup_schema_policy_block_does_not_fallback_emergency),
         ("emergency_startup_no_empty_db_creation", _check_emergency_startup_no_empty_db_creation),
         ("emergency_startup_resume_active_session", _check_emergency_startup_resume_active_session),
         ("emergency_startup_merged_session_not_resumed", _check_emergency_startup_merged_session_not_resumed),
+        (
+            "older_app_version_standby_allowed_if_schema_compatible",
+            _check_older_app_version_standby_allowed_if_schema_compatible,
+        ),
+        (
+            "older_app_version_active_session_resume_allowed_if_schema_compatible",
+            _check_older_app_version_active_session_resume_allowed_if_schema_compatible,
+        ),
+        ("newer_app_version_standby_blocked", _check_newer_app_version_standby_blocked),
+        ("incompatible_schema_blocks_even_if_app_version_ok", _check_incompatible_schema_blocks_even_if_app_version_ok),
         ("emergency_startup_no_merge_code", _check_emergency_startup_no_merge_code),
         ("emergency_startup_no_sqlite_profile_changes", _check_emergency_startup_no_sqlite_profile_changes),
         ("emergency_startup_doctor_nurse_network_mode_unchanged", _check_emergency_startup_doctor_nurse_network_mode_unchanged),
@@ -17990,6 +18456,16 @@ def main():
         ("runtime_outage_unconfirmed_write_not_marked_saved", _check_runtime_outage_unconfirmed_write_not_marked_saved),
         ("runtime_outage_confirmed_commit_can_report_success", _check_runtime_outage_confirmed_commit_can_report_success),
         ("runtime_outage_write_queue_shutdown_is_bounded", _check_runtime_outage_write_queue_shutdown_is_bounded),
+        (
+            "runtime_outage_marker_written_after_queue_shutdown_state",
+            _check_runtime_outage_marker_written_after_queue_shutdown_state,
+        ),
+        (
+            "runtime_outage_marker_contains_unconfirmed_write_after_shutdown",
+            _check_runtime_outage_marker_contains_unconfirmed_write_after_shutdown,
+        ),
+        ("runtime_outage_timeout_sets_unknown_active_write", _check_runtime_outage_timeout_sets_unknown_active_write),
+        ("runtime_outage_late_callback_does_not_mark_saved", _check_runtime_outage_late_callback_does_not_mark_saved),
         ("runtime_outage_stops_standby_scheduler", _check_runtime_outage_stops_standby_scheduler),
         ("runtime_outage_stops_data_update_monitor", _check_runtime_outage_stops_data_update_monitor),
         ("runtime_outage_no_live_db_swap", _check_runtime_outage_no_live_db_swap),
@@ -18002,6 +18478,13 @@ def main():
         ("runtime_outage_no_merge_code", _check_runtime_outage_no_merge_code),
         ("runtime_outage_dialog_text_mentions_one_pc_nurse", _check_runtime_outage_dialog_text_mentions_one_pc_nurse),
         ("runtime_outage_emergency_startup_marker_expires", _check_runtime_outage_emergency_startup_marker_expires),
+        ("remote_identity_rejects_same_suffix_different_unc", _check_remote_identity_rejects_same_suffix_different_unc),
+        ("dry_run_blocks_remote_identity_mismatch", _check_dry_run_blocks_remote_identity_mismatch),
+        ("merge_blocks_remote_identity_mismatch", _check_merge_blocks_remote_identity_mismatch),
+        (
+            "restore_probe_does_not_write_merge_ready_on_identity_mismatch",
+            _check_restore_probe_does_not_write_merge_ready_on_identity_mismatch,
+        ),
         ("restore_probe_runs_in_any_emergency_role", _check_restore_probe_runs_in_any_emergency_role),
         ("restore_probe_requires_active_emergency_session", _check_restore_probe_requires_active_emergency_session),
         ("restore_probe_checks_medical_and_settings_db", _check_restore_probe_checks_medical_and_settings_db),
@@ -18081,6 +18564,16 @@ def main():
         ("mode_a_merge_report_written", _check_mode_a_merge_report_written),
         ("mode_a_merge_preserves_reports_and_backups_in_archive", _check_mode_a_merge_preserves_reports_and_backups_in_archive),
         ("pending_emergency_merge_runner_runs_merge_pending_session", _check_pending_emergency_merge_runner_runs_merge_pending_session),
+        ("pending_merge_handles_merge_failed_explicitly", _check_pending_merge_handles_merge_failed_explicitly),
+        (
+            "merge_failed_does_not_silently_block_standby_forever",
+            _check_merge_failed_does_not_silently_block_standby_forever,
+        ),
+        (
+            "merged_or_discarded_session_does_not_block_standby_refresh",
+            _check_merged_or_discarded_session_does_not_block_standby_refresh,
+        ),
+        ("merge_failed_preserves_local_emergency_db", _check_merge_failed_preserves_local_emergency_db),
         ("pending_emergency_merge_startup_gate_exists", _check_pending_emergency_merge_startup_gate_exists),
         ("emergency_acceptance_runner_exists", _check_emergency_acceptance_runner_exists),
         ("emergency_acceptance_runner_has_full_mode_a_scenario", _check_emergency_acceptance_runner_has_full_mode_a_scenario),

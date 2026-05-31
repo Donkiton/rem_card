@@ -57,7 +57,6 @@ STARTUP_UNAVAILABLE_CATEGORIES = {
     "network_unavailable",
     "network_unavailable_or_missing",
     "missing_db",
-    "locked_busy",
     "path_inaccessible",
 }
 

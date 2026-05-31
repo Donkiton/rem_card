@@ -118,6 +118,11 @@ def build_runtime_outage_startup_request_payload(
     standby_last_change_id: int | None = None,
     outage_detected_at: str | None = None,
     unconfirmed_writes: bool = False,
+    pending_write_count: int = 0,
+    unconfirmed_write_count: int = 0,
+    unknown_active_write: bool = False,
+    queue_shutdown_result: str = "",
+    queue_settled: bool | None = None,
 ) -> dict[str, Any]:
     observed = int(last_observed_remote_change_id or 0)
     standby = int(standby_last_change_id or 0)
@@ -125,17 +130,30 @@ def build_runtime_outage_startup_request_payload(
     requested_at = _now_iso()
     return {
         "requested_at": requested_at,
+        "created_at": requested_at,
         "requested_at_epoch": time.time(),
+        "ttl_sec": float(RUNTIME_OUTAGE_STARTUP_REQUEST_TTL_SEC),
         "source_role": str(source_role or ""),
         "reason": str(reason or RUNTIME_OUTAGE_REASON),
         "source_pid": int(source_pid or os.getpid()),
         "source_client_id": str(source_client_id or ""),
         "app_version": APP_VERSION,
+        "metadata_schema_version": 1,
         "stale_gap_detected": bool(stale_gap),
         "last_observed_remote_change_id": observed,
         "standby_last_change_id": standby,
         "outage_detected_at": str(outage_detected_at or requested_at),
-        "unconfirmed_writes": bool(unconfirmed_writes),
+        "pending_write_count": max(0, int(pending_write_count or 0)),
+        "unconfirmed_write_count": max(0, int(unconfirmed_write_count or 0)),
+        "unknown_active_write": bool(unknown_active_write),
+        "queue_shutdown_result": str(queue_shutdown_result or ""),
+        "queue_settled": queue_settled,
+        "unconfirmed_writes": bool(
+            unconfirmed_writes
+            or int(unconfirmed_write_count or 0) > 0
+            or bool(unknown_active_write)
+            or str(queue_shutdown_result or "") in {"timeout", "failed"}
+        ),
     }
 
 
@@ -146,6 +164,11 @@ def write_runtime_outage_startup_request(
     last_observed_remote_change_id: int | None = None,
     standby_last_change_id: int | None = None,
     unconfirmed_writes: bool = False,
+    pending_write_count: int = 0,
+    unconfirmed_write_count: int = 0,
+    unknown_active_write: bool = False,
+    queue_shutdown_result: str = "",
+    queue_settled: bool | None = None,
 ) -> tuple[str, dict[str, Any]]:
     resolved_root = resolve_emergency_root(root)
     os.makedirs(resolved_root, exist_ok=True)
@@ -155,6 +178,11 @@ def write_runtime_outage_startup_request(
         last_observed_remote_change_id=last_observed_remote_change_id,
         standby_last_change_id=standby_last_change_id,
         unconfirmed_writes=unconfirmed_writes,
+        pending_write_count=pending_write_count,
+        unconfirmed_write_count=unconfirmed_write_count,
+        unknown_active_write=unknown_active_write,
+        queue_shutdown_result=queue_shutdown_result,
+        queue_settled=queue_settled,
     )
     marker_path = runtime_outage_startup_request_path(resolved_root)
     tmp_path = f"{marker_path}.{os.getpid()}.tmp"

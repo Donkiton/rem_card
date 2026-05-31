@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sqlite3
 import uuid
 from dataclasses import dataclass, replace
@@ -11,13 +12,21 @@ from rem_card.app.db_runtime_context import build_network_runtime_context
 from rem_card.app.emergency_metadata import (
     EmergencyMetadataError,
     EmergencyStandbyMetadata,
+    atomic_write_json,
+    metadata_to_dict,
 )
 from rem_card.app.emergency_paths import (
     resolve_emergency_root,
     standby_dir,
+    standby_generation_dir,
+    standby_generation_medical_db_path,
+    standby_generation_metadata_path,
+    standby_generation_settings_db_path,
+    standby_generations_dir,
     standby_medical_db_path,
     standby_settings_db_path,
 )
+from rem_card.app.emergency_compatibility import emergency_metadata_compatibility_error, emergency_metadata_compatible
 from rem_card.app.emergency_store import EmergencyLocalStore
 from rem_card.app.emergency_validation import (
     SnapshotValidationResult,
@@ -184,6 +193,14 @@ class EmergencyStandbyManager:
                 metadata=metadata,
             )
 
+        generation_error = self._standby_generation_error(metadata)
+        if generation_error:
+            return EmergencyStandbyRefreshResult(ok=False, status="invalid", reason=generation_error, metadata=metadata)
+
+        compatibility_error = emergency_metadata_compatibility_error(metadata)
+        if compatibility_error:
+            return EmergencyStandbyRefreshResult(ok=False, status="invalid", reason=compatibility_error, metadata=metadata)
+
         medical_validation = validate_medical_db_snapshot(metadata.medical_db_path)
         settings_validation = None
         if self.settings_required:
@@ -198,12 +215,15 @@ class EmergencyStandbyManager:
             settings_validation = validate_settings_db_snapshot(metadata.settings_db_path)
 
         ok = medical_validation.ok and (settings_validation.ok if settings_validation else True)
+        hash_error = self._standby_hash_error(metadata, medical_validation, settings_validation)
+        if hash_error:
+            ok = False
         if metadata.validation_status not in {"ok", "valid"}:
             ok = False
         return EmergencyStandbyRefreshResult(
             ok=ok,
             status="valid" if ok else "invalid",
-            reason="ok" if ok else metadata.validation_error or medical_validation.reason,
+            reason="ok" if ok else hash_error or metadata.validation_error or medical_validation.reason,
             metadata=metadata,
             medical_validation=medical_validation,
             settings_validation=settings_validation,
@@ -211,6 +231,51 @@ class EmergencyStandbyManager:
 
     def get_standby_status(self) -> EmergencyStandbyRefreshResult:
         return self.validate_standby()
+
+    def _standby_generation_error(self, metadata: EmergencyStandbyMetadata) -> str:
+        generation_id = str(getattr(metadata, "generation_id", "") or "").strip()
+        generation_dir_value = str(getattr(metadata, "generation_dir", "") or "").strip()
+        if not generation_id and not generation_dir_value:
+            return ""
+        expected_dir = os.path.abspath(standby_generation_dir(self.root, generation_id)) if generation_id else ""
+        actual_dir = os.path.abspath(os.path.normpath(generation_dir_value)) if generation_dir_value else expected_dir
+        if not generation_id:
+            return "standby generation_id is missing"
+        if os.path.normcase(actual_dir) != os.path.normcase(expected_dir):
+            return "standby generation_dir mismatch"
+        paths = [str(metadata.medical_db_path or "")]
+        if self.settings_required:
+            paths.append(str(metadata.settings_db_path or ""))
+        for path in paths:
+            try:
+                path_abs = os.path.normcase(os.path.abspath(os.path.normpath(path)))
+                root_abs = os.path.normcase(expected_dir)
+                if os.path.commonpath([path_abs, root_abs]) != root_abs:
+                    return "standby file is outside metadata generation"
+            except Exception:
+                return "standby generation path is invalid"
+        generation_metadata = standby_generation_metadata_path(self.root, generation_id)
+        if not os.path.isfile(generation_metadata):
+            return "standby generation metadata is missing"
+        return ""
+
+    @staticmethod
+    def _standby_hash_error(
+        metadata: EmergencyStandbyMetadata,
+        medical_validation: SnapshotValidationResult,
+        settings_validation: SnapshotValidationResult | None,
+    ) -> str:
+        if medical_validation.ok:
+            if metadata.medical_db_hash and metadata.medical_db_hash != medical_validation.file_hash:
+                return "medical standby hash mismatch"
+            if int(metadata.medical_db_size or 0) != int(medical_validation.file_size or 0):
+                return "medical standby size mismatch"
+        if settings_validation and settings_validation.ok:
+            if metadata.settings_db_hash and metadata.settings_db_hash != settings_validation.file_hash:
+                return "settings standby hash mismatch"
+            if metadata.settings_db_size is not None and int(metadata.settings_db_size or 0) != int(settings_validation.file_size or 0):
+                return "settings standby size mismatch"
+        return ""
 
     def should_refresh_standby(
         self,
@@ -233,7 +298,7 @@ class EmergencyStandbyManager:
             return True
         if source_schema_version is not None and int(source_schema_version or 0) != int(metadata.schema_version or 0):
             return True
-        if str(metadata.app_version or "") != str(APP_VERSION):
+        if not emergency_metadata_compatible(metadata):
             return True
         if settings_fingerprint is not None and dict(settings_fingerprint) != dict(metadata.source_settings_fingerprint or {}):
             return True
@@ -254,12 +319,14 @@ class EmergencyStandbyManager:
         if not os.path.isdir(directory):
             return 0
         for name in os.listdir(directory):
-            if ".tmp." not in name or not name.endswith(".db"):
-                continue
             path = os.path.join(directory, name)
             try:
-                os.remove(path)
-                cleanup_count += 1
+                if name.startswith(".staging.") and os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    cleanup_count += 1
+                elif ".tmp." in name and name.endswith(".db"):
+                    os.remove(path)
+                    cleanup_count += 1
             except OSError:
                 pass
         return cleanup_count
@@ -274,15 +341,21 @@ class EmergencyStandbyManager:
         return self.store.delete_standby_files(metadata)
 
     def _refresh_pair(self, source_status: EmergencyStandbyRefreshResult) -> EmergencyStandbyRefreshResult:
-        final_medical_path = standby_medical_db_path(self.root)
-        final_settings_path = standby_settings_db_path(self.root) if self.settings_required else None
-        temp_medical_path = self._temp_standby_path(final_medical_path)
-        temp_settings_path = self._temp_standby_path(final_settings_path) if final_settings_path else None
-        temp_paths = [path for path in (temp_medical_path, temp_settings_path) if path]
-
+        generation_id = self._new_generation_id()
+        staging_dir = self._new_staging_dir()
+        final_generation_dir = standby_generation_dir(self.root, generation_id)
+        staging_medical_path = os.path.join(staging_dir, os.path.basename(standby_medical_db_path(self.root)))
+        staging_settings_path = (
+            os.path.join(staging_dir, os.path.basename(standby_settings_db_path(self.root))) if self.settings_required else None
+        )
+        final_medical_path = standby_generation_medical_db_path(self.root, generation_id)
+        final_settings_path = standby_generation_settings_db_path(self.root, generation_id) if self.settings_required else None
+        committed = False
+        generation_moved = False
         try:
-            self._backup_sqlite_to_temp(self.source_medical_db_path, temp_medical_path, source="emergency_medical_standby")
-            medical_validation = validate_medical_db_snapshot(temp_medical_path)
+            os.makedirs(staging_dir, exist_ok=False)
+            self._backup_sqlite_to_temp(self.source_medical_db_path, staging_medical_path, source="emergency_medical_standby")
+            medical_validation = validate_medical_db_snapshot(staging_medical_path)
             if not medical_validation.ok:
                 return EmergencyStandbyRefreshResult(
                     ok=False,
@@ -296,10 +369,10 @@ class EmergencyStandbyManager:
             if self.settings_required:
                 self._backup_sqlite_to_temp(
                     self.source_settings_db_path,
-                    str(temp_settings_path),
+                    str(staging_settings_path),
                     source="emergency_settings_standby",
                 )
-                settings_validation = validate_settings_db_snapshot(str(temp_settings_path))
+                settings_validation = validate_settings_db_snapshot(str(staging_settings_path))
                 if not settings_validation.ok:
                     return EmergencyStandbyRefreshResult(
                         ok=False,
@@ -309,32 +382,35 @@ class EmergencyStandbyManager:
                         settings_validation=settings_validation,
                     )
 
-            os.replace(temp_medical_path, final_medical_path)
-            if temp_settings_path and final_settings_path:
-                os.replace(temp_settings_path, final_settings_path)
-
-            final_medical_validation = validate_medical_db_snapshot(final_medical_path)
-            final_settings_validation = (
-                validate_settings_db_snapshot(final_settings_path) if final_settings_path else None
-            )
-            if not final_medical_validation.ok or (final_settings_validation and not final_settings_validation.ok):
-                return EmergencyStandbyRefreshResult(
-                    ok=False,
-                    status="validation_failed",
-                    reason="final standby validation failed",
-                    medical_validation=final_medical_validation,
-                    settings_validation=final_settings_validation,
-                )
-
             metadata = self._build_success_metadata(
-                medical_validation=final_medical_validation,
-                settings_validation=final_settings_validation,
+                medical_validation=medical_validation,
+                settings_validation=settings_validation,
                 source_medical_validation=source_status.medical_validation,
                 source_settings_validation=source_status.settings_validation,
                 medical_db_path=final_medical_path,
                 settings_db_path=final_settings_path,
+                generation_id=generation_id,
+                generation_dir=final_generation_dir,
             )
+            atomic_write_json(os.path.join(staging_dir, os.path.basename(standby_generation_metadata_path(self.root, generation_id))), metadata_to_dict(metadata))
+            os.makedirs(standby_generations_dir(self.root), exist_ok=True)
+            os.replace(staging_dir, final_generation_dir)
+            generation_moved = True
+
+            final_medical_validation = validate_medical_db_snapshot(final_medical_path)
+            final_settings_validation = validate_settings_db_snapshot(final_settings_path) if final_settings_path else None
+            final_error = self._final_generation_error(metadata, final_medical_validation, final_settings_validation)
+            if final_error:
+                return EmergencyStandbyRefreshResult(
+                    ok=False,
+                    status="validation_failed",
+                    reason=final_error,
+                    medical_validation=final_medical_validation,
+                    settings_validation=final_settings_validation,
+                )
+
             self.store.write_standby_metadata(metadata)
+            committed = True
             return EmergencyStandbyRefreshResult(
                 ok=True,
                 status="valid",
@@ -346,12 +422,10 @@ class EmergencyStandbyManager:
         except Exception as exc:
             return EmergencyStandbyRefreshResult(ok=False, status="error", reason=str(exc))
         finally:
-            for path in temp_paths:
-                if path and os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except OSError:
-                        pass
+            if os.path.isdir(staging_dir):
+                shutil.rmtree(staging_dir, ignore_errors=True)
+            if generation_moved and not committed and os.path.isdir(final_generation_dir):
+                shutil.rmtree(final_generation_dir, ignore_errors=True)
 
     def _backup_sqlite_to_temp(self, source_path: str, temp_target_path: str, *, source: str) -> str:
         os.makedirs(os.path.dirname(temp_target_path), exist_ok=True)
@@ -379,6 +453,24 @@ class EmergencyStandbyManager:
                 except Exception:
                     pass
 
+    def _new_generation_id(self) -> str:
+        return f"gen_{uuid.uuid4().hex[:16]}"
+
+    def _new_staging_dir(self) -> str:
+        return os.path.join(standby_dir(self.root), f".staging.{uuid.uuid4().hex[:16]}")
+
+    def _final_generation_error(
+        self,
+        metadata: EmergencyStandbyMetadata,
+        medical_validation: SnapshotValidationResult,
+        settings_validation: SnapshotValidationResult | None,
+    ) -> str:
+        if not medical_validation.ok:
+            return f"final medical standby validation failed: {medical_validation.reason}"
+        if settings_validation and not settings_validation.ok:
+            return f"final settings standby validation failed: {settings_validation.reason}"
+        return self._standby_hash_error(metadata, medical_validation, settings_validation)
+
     def _build_success_metadata(
         self,
         *,
@@ -388,6 +480,8 @@ class EmergencyStandbyManager:
         source_settings_validation: SnapshotValidationResult | None,
         medical_db_path: str,
         settings_db_path: str | None,
+        generation_id: str = "",
+        generation_dir: str = "",
     ) -> EmergencyStandbyMetadata:
         now = datetime.now().replace(microsecond=0).isoformat()
         existing = self.store.get_latest_valid_standby()
@@ -416,6 +510,9 @@ class EmergencyStandbyManager:
             settings_quick_check_status=None if settings_validation is None else settings_validation.reason,
             validation_status="valid",
             validation_error=None,
+            metadata_schema_version=1,
+            generation_id=str(generation_id or ""),
+            generation_dir="" if not generation_dir else os.path.abspath(generation_dir),
         )
 
     @staticmethod

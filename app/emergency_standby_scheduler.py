@@ -321,8 +321,9 @@ class EmergencyStandbyScheduler:
     def _refresh_block_reason(self) -> str:
         if self._shutdown or bool(self.is_shutdown()):
             return "shutdown"
-        if self._has_active_emergency_session():
-            return "active_emergency_session"
+        emergency_block = self._active_emergency_session_block_reason()
+        if emergency_block:
+            return emergency_block
         try:
             if not bool(self.is_write_queue_idle()):
                 return "write_queue_busy"
@@ -343,13 +344,13 @@ class EmergencyStandbyScheduler:
             return "safety_probe_error"
         return ""
 
-    def _has_active_emergency_session(self) -> bool:
+    def _active_emergency_session_block_reason(self) -> str:
         root = getattr(self.manager, "root", None)
         if not root:
-            return False
+            return ""
         directory = active_dir(root)
         if not os.path.isdir(directory):
-            return False
+            return ""
         try:
             for name in os.listdir(directory):
                 session_path = active_session_metadata_path(root, name)
@@ -357,13 +358,19 @@ class EmergencyStandbyScheduler:
                     continue
                 try:
                     payload = read_json_file(session_path)
-                    if str(payload.get("status") or "") in {"active", "merge_failed", "merge_pending", "merging"}:
-                        return True
+                    status = str(payload.get("status") or "")
+                    if status == "merge_failed":
+                        return "merge_failed_unresolved"
+                    if status in {"active", "merge_pending", "merging"}:
+                        return "active_emergency_session"
                 except Exception:
-                    return True
+                    return "active_emergency_session_metadata_error"
         except OSError:
-            return True
-        return False
+            return "active_emergency_session_scan_error"
+        return ""
+
+    def _has_active_emergency_session(self) -> bool:
+        return bool(self._active_emergency_session_block_reason())
 
     @staticmethod
     def _default_foreground_busy() -> bool:

@@ -23,6 +23,7 @@ from rem_card.app.emergency_restore_probe import (
     emergency_merge_lock_path,
     merge_ready_marker_path,
 )
+from rem_card.app.emergency_remote_identity import remote_identity_paths_match, validate_remote_identity_error
 from rem_card.app.emergency_store import EmergencyLocalStore
 from rem_card.app.emergency_validation import (
     SnapshotValidationResult,
@@ -66,6 +67,7 @@ class EmergencyMergeBlocker(str, Enum):
     RUNTIME_MODE_NOT_ALLOWED = "runtime_mode_not_allowed"
     LOCAL_INVALID = "local_invalid"
     REMOTE_INVALID = "remote_invalid"
+    REMOTE_IDENTITY_MISMATCH = "blocked_remote_identity_mismatch"
     LOCKS = "locks"
     BACKUP_NOT_READY = "backup_not_ready"
     INCONSISTENT = "inconsistent"
@@ -249,7 +251,7 @@ class EmergencyMergeDryRunService:
             blockers.append(_blocker(EmergencyMergeBlocker.REMOTE_INVALID, policy_error))
         identity_error = _remote_identity_error(session, context.medical_db_path, medical)
         if identity_error:
-            blockers.append(_blocker(EmergencyMergeBlocker.REMOTE_INVALID, identity_error))
+            blockers.append(_blocker(EmergencyMergeBlocker.REMOTE_IDENTITY_MISMATCH, identity_error))
         return not blockers, _validation_payload(medical, settings), blockers, context
 
     def check_merge_locks(self, context: DbRuntimeContext | None = None) -> dict[str, Any]:
@@ -718,23 +720,11 @@ def _remote_identity_error(
 ) -> str:
     if not validation.ok:
         return ""
-    base_path = str(session.base_remote_db_path or session.base_remote_fingerprint.get("path") or "")
-    if base_path and not _path_identity_compatible(base_path, remote_path):
-        return f"remote path identity mismatch: {base_path} != {remote_path}"
-    fingerprint_path = str(session.base_remote_fingerprint.get("path") or "")
-    if fingerprint_path and not _path_identity_compatible(fingerprint_path, remote_path):
-        return f"remote fingerprint path mismatch: {fingerprint_path}"
-    return ""
+    return validate_remote_identity_error(session, remote_path, validation)
 
 
 def _path_identity_compatible(base_path: str, remote_path: str) -> bool:
-    base_norm = os.path.normcase(os.path.abspath(os.path.normpath(base_path)))
-    remote_norm = os.path.normcase(os.path.abspath(os.path.normpath(remote_path)))
-    if base_norm == remote_norm:
-        return True
-    base_parts = [part.lower() for part in os.path.normpath(base_path).split(os.sep) if part]
-    remote_parts = [part.lower() for part in os.path.normpath(remote_path).split(os.sep) if part]
-    return len(base_parts) >= 2 and len(remote_parts) >= 2 and base_parts[-2:] == remote_parts[-2:]
+    return remote_identity_paths_match(base_path, remote_path)
 
 
 def _probe_lock_file_available(lock_path: str) -> str:

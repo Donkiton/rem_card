@@ -69,6 +69,7 @@ class EmergencySessionMetadata:
     discarded_at: str | None = None
     discard_reason: str | None = None
     discard_report_path: str | None = None
+    metadata_schema_version: int = 1
 
     def __post_init__(self) -> None:
         _validate_status(self.status)
@@ -98,6 +99,9 @@ class EmergencyStandbyMetadata:
     settings_quick_check_status: str | None
     validation_status: str
     validation_error: str | None
+    metadata_schema_version: int = 1
+    generation_id: str = ""
+    generation_dir: str = ""
 
 
 T = TypeVar("T", EmergencySessionMetadata, EmergencyStandbyMetadata)

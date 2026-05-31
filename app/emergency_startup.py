@@ -4,7 +4,9 @@ import os
 from dataclasses import dataclass, replace
 from typing import Any
 
+from rem_card.app.db_access_classifier import classify_database_access_error
 from rem_card.app.db_runtime_context import DbRuntimeContext
+from rem_card.app.emergency_compatibility import emergency_metadata_compatibility_error
 from rem_card.app.emergency_metadata import (
     EmergencyMetadataError,
     EmergencySessionMetadata,
@@ -22,7 +24,6 @@ from rem_card.app.emergency_validation import (
     validate_settings_db_snapshot,
 )
 from rem_card.app.local_metrics import record_metric
-from rem_card.app.version import APP_VERSION
 
 
 EMERGENCY_WORKSTATION_ALLOW_FILE_NAME = "emergency_workstation.allow"
@@ -135,14 +136,13 @@ def is_corruption_or_incompatible_startup_error(failure: object) -> bool:
 def is_network_unavailable_startup_error(failure: object) -> bool:
     if is_corruption_or_incompatible_startup_error(failure):
         return False
+    category = classify_database_access_error(failure)
+    if category == "locked_busy":
+        return False
+    if category == "network_unavailable":
+        return True
     text = _failure_text(failure)
     markers = (
-        "database is locked",
-        "database table is locked",
-        "busy",
-        "locked",
-        "timeout",
-        "could not acquire",
         "unable to open database file",
         "cannot open",
         "database file does not exist",
@@ -171,8 +171,6 @@ def is_network_unavailable_startup_error(failure: object) -> bool:
         "отказано в доступе",
         "недоступ",
         "сетев",
-        "занят",
-        "заблок",
     )
     return any(marker in text for marker in markers)
 
@@ -180,6 +178,9 @@ def is_network_unavailable_startup_error(failure: object) -> bool:
 def classify_startup_failure(failure: object) -> str:
     if is_corruption_or_incompatible_startup_error(failure):
         return "corruption_or_incompatible"
+    category = classify_database_access_error(failure)
+    if category == "locked_busy":
+        return "locked_busy"
     if is_network_unavailable_startup_error(failure):
         return "network_unavailable"
     return "unknown"
@@ -196,8 +197,9 @@ def _standby_metadata_matches_files(metadata: EmergencyStandbyMetadata, result) 
         return False, "medical standby size mismatch"
     if int(metadata.schema_version or 0) != int(medical_validation.schema_version or 0):
         return False, "medical standby schema mismatch"
-    if str(metadata.app_version or "") != str(APP_VERSION):
-        return False, "standby app version mismatch"
+    compatibility_error = emergency_metadata_compatibility_error(metadata)
+    if compatibility_error:
+        return False, compatibility_error
     if metadata.settings_db_path:
         if settings_validation is None or not settings_validation.ok:
             return False, "settings standby validation failed"
@@ -223,8 +225,9 @@ def validate_active_session_for_startup(metadata: EmergencySessionMetadata) -> t
         base_validation = validate_medical_db_snapshot(metadata.base_snapshot_path)
         if not base_validation.ok:
             return False, f"base snapshot validation failed: {base_validation.reason}"
-    if str(metadata.app_version or "") != str(APP_VERSION):
-        return False, "active session app version mismatch"
+    compatibility_error = emergency_metadata_compatibility_error(metadata)
+    if compatibility_error:
+        return False, compatibility_error
     return True, "ok"
 
 

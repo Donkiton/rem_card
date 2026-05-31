@@ -277,7 +277,7 @@ def backup_connection(
 
     try:
         os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-        temp_path = f"{backup_path}.tmp_{os.getpid()}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        temp_path = f"{backup_path}.{random.getrandbits(32):08x}.tmp"
         backup_conn = sqlite3.connect(temp_path)
         try:
             with backup_conn:

@@ -20,6 +20,7 @@ from rem_card.app.emergency_paths import (
     ACTIVE_DIR_NAME,
     resolve_emergency_root,
 )
+from rem_card.app.emergency_remote_identity import remote_identity_paths_match, validate_remote_identity_error
 from rem_card.app.emergency_store import EmergencyLocalStore
 from rem_card.app.emergency_validation import (
     SnapshotValidationResult,
@@ -459,14 +460,9 @@ class EmergencyRestoreProbe:
         remote_path: str,
         medical_validation: SnapshotValidationResult,
     ) -> tuple[str, str] | None:
-        base_path = str(session.base_remote_db_path or session.base_remote_fingerprint.get("path") or "")
-        if not _path_identity_compatible(base_path, remote_path):
-            return "remote_identity_mismatch", f"remote path mismatch: {base_path} != {remote_path}"
-        base_fingerprint_path = str(session.base_remote_fingerprint.get("path") or "")
-        if base_fingerprint_path and not _path_identity_compatible(base_fingerprint_path, remote_path):
-            return "remote_identity_mismatch", f"remote fingerprint path mismatch: {base_fingerprint_path}"
-        if not medical_validation.fingerprint:
-            return "remote_identity_mismatch", "remote fingerprint is empty"
+        error = validate_remote_identity_error(session, remote_path, medical_validation)
+        if error:
+            return "remote_identity_mismatch", error
         return None
 
     def _check_locks(self, context: DbRuntimeContext) -> tuple[str, str] | None:
@@ -824,17 +820,7 @@ def _read_json_dict(path: str) -> dict[str, Any]:
 
 
 def _path_identity_compatible(base_path: str, remote_path: str) -> bool:
-    if not base_path:
-        return True
-    base_norm = os.path.normcase(os.path.abspath(os.path.normpath(base_path)))
-    remote_norm = os.path.normcase(os.path.abspath(os.path.normpath(remote_path)))
-    if base_norm == remote_norm:
-        return True
-    base_parts = [part.lower() for part in os.path.normpath(base_path).split(os.sep) if part]
-    remote_parts = [part.lower() for part in os.path.normpath(remote_path).split(os.sep) if part]
-    if len(base_parts) < 2 or len(remote_parts) < 2:
-        return os.path.basename(base_path).lower() == os.path.basename(remote_path).lower()
-    return base_parts[-2:] == remote_parts[-2:]
+    return remote_identity_paths_match(base_path, remote_path)
 
 
 def _probe_lock_file_available(lock_path: str) -> str:

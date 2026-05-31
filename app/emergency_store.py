@@ -134,7 +134,7 @@ def _copy_file_once(source_path: str, target_path: str) -> None:
     if not os.path.exists(source_path) or os.path.getsize(source_path) <= 0:
         raise EmergencyStoreError(f"Источник snapshot недоступен или пустой: {source_path}")
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
-    tmp_path = f"{target_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    tmp_path = f"{target_path}.{uuid.uuid4().hex[:12]}.tmp"
     try:
         shutil.copy2(source_path, tmp_path)
         try:
@@ -212,11 +212,17 @@ class EmergencyLocalStore:
             for path in (metadata.medical_db_path, metadata.settings_db_path):
                 if path and _path_is_under(str(path), directory):
                     candidates.add(str(path))
+            generation_dir = str(getattr(metadata, "generation_dir", "") or "")
+            if generation_dir and _path_is_under(generation_dir, directory):
+                candidates.add(generation_dir)
         removed = 0
         for path in sorted(candidates, key=lambda item: len(str(item)), reverse=True):
             try:
                 if os.path.isfile(path):
                     os.remove(path)
+                    removed += 1
+                elif os.path.isdir(path):
+                    shutil.rmtree(path)
                     removed += 1
             except OSError:
                 pass
