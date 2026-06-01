@@ -63,6 +63,8 @@ Actual style path: `settings/color_scheme/style_settings.json` (`ui/styles/theme
 
 Display settings path: `settings/display_settings/display_settings.json`; includes W1a/W1b enabled flags (`ui/shared/display_settings_storage.py`).
 
+Файлы фонов: загруженные пользователем изображения лежат в `<BAZA_DIR>\settings\backgrounds`, а не в `icon`. `ui/shared/background_settings.py` хранит в settings DB только безопасные имена файлов, сначала ищет общую папку, умеет переносить старые файлы из `icon` в `settings\backgrounds` и восстанавливать отсутствующие файлы из `ui_backgrounds.image_blob` после release snapshot/update. BLOB-страховка для фоновых файлов ограничена 32 МБ. `icon/fon.png` оставлять только как встроенный стандартный фон.
+
 ## W1/W1a/W1b status
 
 W1 is bed/patient selection. W1a is upcoming orders panel and uses dedicated read-model: `SectorW1a` → `build_w1a_upcoming_orders_snapshot()` → `get_upcoming_orders_across_active_admissions()` (`ui/rem_card_sectors/sector_w1a.py`, `services/remcard_facade.py:1082-1100`, `services/order_domain_service.py:1014-1098`). Do not rebuild via full cards.

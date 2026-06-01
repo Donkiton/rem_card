@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from rem_card.app.paths import get_icon_dir
+from rem_card.app.settings_db_paths import get_settings_backgrounds_dir
 from rem_card.ui.styles.theme_storage import get_style_settings_path
 
 
@@ -40,6 +41,19 @@ def get_background_settings_path() -> str:
 
 def invalidate_background_settings_cache() -> None:
     _ACTIVE_BACKGROUND_CACHE.clear()
+
+
+def get_background_files_dir() -> str:
+    override = os.environ.get(BACKGROUND_SETTINGS_ENV)
+    if override:
+        return str(Path(get_background_settings_path()).parent / "backgrounds")
+    return get_settings_backgrounds_dir()
+
+
+def ensure_background_files_dir() -> str:
+    directory = os.path.abspath(os.path.normpath(get_background_files_dir()))
+    os.makedirs(directory, exist_ok=True)
+    return directory
 
 
 def _default_background_entry(file_name: str = DEFAULT_BACKGROUND_FILE) -> dict[str, Any]:
@@ -199,15 +213,62 @@ def normalize_background_settings_payload(payload: Any) -> dict[str, Any]:
     }
 
 
+def background_storage_file_path(file_name: str) -> str:
+    return os.path.join(get_background_files_dir(), _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE)
+
+
+def background_legacy_file_path(file_name: str) -> str:
+    return os.path.join(get_icon_dir(), _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE)
+
+
 def background_file_path(file_name: str) -> str:
-    return os.path.join(get_icon_dir(), _safe_file_name(file_name))
+    safe_name = _safe_file_name(file_name) or DEFAULT_BACKGROUND_FILE
+    shared_path = background_storage_file_path(safe_name)
+    if os.path.isfile(shared_path):
+        return shared_path
+
+    legacy_path = background_legacy_file_path(safe_name)
+    if os.path.isfile(legacy_path):
+        return legacy_path
+    return shared_path
 
 
 def background_entry_file_path(entry: dict[str, Any]) -> str:
     return background_file_path(str(entry.get("file") or DEFAULT_BACKGROUND_FILE))
 
 
-def active_background_entry(payload: dict[str, Any] | None = None, today: date | None = None) -> dict[str, Any]:
+def ensure_background_file_available(entry: dict[str, Any]) -> str:
+    file_name = _safe_file_name(entry.get("file"))
+    if not file_name:
+        return ""
+
+    shared_path = background_storage_file_path(file_name)
+    if os.path.isfile(shared_path):
+        return shared_path
+
+    if _materialize_background_from_db(entry, shared_path) and os.path.isfile(shared_path):
+        return shared_path
+
+    legacy_path = background_legacy_file_path(file_name)
+    if os.path.isfile(legacy_path):
+        if file_name != DEFAULT_BACKGROUND_FILE:
+            try:
+                _copy_file_atomic(legacy_path, shared_path)
+                if os.path.isfile(shared_path):
+                    return shared_path
+            except Exception:
+                pass
+        return legacy_path
+
+    return shared_path
+
+
+def active_background_entry(
+    payload: dict[str, Any] | None = None,
+    today: date | None = None,
+    *,
+    require_file: bool = True,
+) -> dict[str, Any]:
     settings = normalize_background_settings_payload(payload or BackgroundSettingsStorage().load())
     current_date = today or date.today()
     backgrounds = list(settings.get("backgrounds") or [])
@@ -218,8 +279,10 @@ def active_background_entry(payload: dict[str, Any] | None = None, today: date |
             continue
         if not date_in_background_range(current_date, str(entry.get("start")), str(entry.get("end"))):
             continue
-        path = background_entry_file_path(entry)
-        if os.path.isfile(path) or _materialize_background_from_db(entry, path):
+        if not require_file:
+            return entry
+        path = ensure_background_file_available(entry)
+        if os.path.isfile(path):
             return entry
 
     return default_entry
@@ -247,7 +310,7 @@ def get_active_background_path(today: date | None = None) -> str:
 
     payload = storage.load()
     entry = active_background_entry(payload, current_date)
-    path = background_entry_file_path(entry)
+    path = ensure_background_file_available(entry)
     if not os.path.isfile(path):
         path = background_file_path(DEFAULT_BACKGROUND_FILE)
     _ACTIVE_BACKGROUND_CACHE["key"] = cache_key
@@ -255,7 +318,21 @@ def get_active_background_path(today: date | None = None) -> str:
     return path
 
 
-def copy_background_to_icon_dir(source_path: str) -> str:
+def _copy_file_atomic(source_path: str, target_path: str) -> None:
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    tmp_path = f"{target_path}.{os.getpid()}.tmp"
+    try:
+        shutil.copy2(source_path, tmp_path)
+        os.replace(tmp_path, target_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def copy_background_to_backgrounds_dir(source_path: str) -> str:
     source = os.path.abspath(os.path.normpath(str(source_path or "").strip().strip('"')))
     if not os.path.isfile(source):
         raise FileNotFoundError("Файл фона не найден.")
@@ -264,10 +341,9 @@ def copy_background_to_icon_dir(source_path: str) -> str:
     if extension not in SUPPORTED_BACKGROUND_EXTENSIONS:
         raise ValueError("Поддерживаются только изображения PNG, JPG, JPEG, BMP, GIF или WEBP.")
 
-    icon_dir = os.path.abspath(get_icon_dir())
-    os.makedirs(icon_dir, exist_ok=True)
+    backgrounds_dir = ensure_background_files_dir()
 
-    existing = os.path.abspath(os.path.join(icon_dir, os.path.basename(source)))
+    existing = os.path.abspath(os.path.join(backgrounds_dir, os.path.basename(source)))
     if os.path.normcase(source) == os.path.normcase(existing):
         return os.path.basename(source)
 
@@ -276,14 +352,18 @@ def copy_background_to_icon_dir(source_path: str) -> str:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"fon_{stamp}_{safe_stem}"
 
-    target = os.path.join(icon_dir, f"{base_name}{extension}")
+    target = os.path.join(backgrounds_dir, f"{base_name}{extension}")
     counter = 2
     while os.path.exists(target):
-        target = os.path.join(icon_dir, f"{base_name}_{counter}{extension}")
+        target = os.path.join(backgrounds_dir, f"{base_name}_{counter}{extension}")
         counter += 1
 
-    shutil.copy2(source, target)
+    _copy_file_atomic(source, target)
     return os.path.basename(target)
+
+
+def copy_background_to_icon_dir(source_path: str) -> str:
+    return copy_background_to_backgrounds_dir(source_path)
 
 
 class BackgroundSettingsStorage:

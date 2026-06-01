@@ -317,9 +317,13 @@ class SectorIvl(BaseSectorWidget):
         extubation_row = QHBoxLayout()
         extubation_row.setSpacing(6)
         self.lbl_extubation_reason = QLabel("Показания к экстубации:")
-        self.extubation_reason_edit = QLineEdit()
-        self.extubation_reason_edit.setPlaceholderText("Показания к экстубации")
-        self._set_default_extubation_reason()
+        self.extubation_reason_edit = QComboBox()
+        self.extubation_reason_edit.setEditable(True)
+        self.extubation_reason_edit.addItem(self.DEFAULT_EXTUBATION_REASON)
+        extubation_reason_line = self.extubation_reason_edit.lineEdit()
+        if extubation_reason_line:
+            extubation_reason_line.setPlaceholderText("Показания к экстубации")
+        self._clear_extubation_reason()
         self.lbl_extubation_o2 = QLabel("Поток O<sub>2</sub>:")
         self.lbl_extubation_o2.setTextFormat(Qt.RichText)
         self.extubation_o2_flow_edit = QLineEdit()
@@ -1065,7 +1069,7 @@ class SectorIvl(BaseSectorWidget):
             CustomMessageBox.warning(self, "ИВЛ", "Нет активного случая ИВЛ.")
             return
 
-        extubation_reason = self.extubation_reason_edit.text().strip() or None
+        extubation_reason = self.extubation_reason_edit.currentText().strip() or None
         o2_flow = self._read_extubation_o2_flow()
         if not extubation_reason and o2_flow is None:
             answer = CustomMessageBox.question(
@@ -1092,7 +1096,7 @@ class SectorIvl(BaseSectorWidget):
             )
 
         def on_success(_event):
-            self._set_default_extubation_reason()
+            self._clear_extubation_reason()
             self.extubation_o2_flow_edit.clear()
 
         self._enqueue_ivl_write(
@@ -1164,9 +1168,12 @@ class SectorIvl(BaseSectorWidget):
             return
         self.lbl_tube_duration.setText(f"Длительность текущей трубки: {duration_text}")
 
-    def _set_default_extubation_reason(self):
-        self.extubation_reason_edit.setText(self.DEFAULT_EXTUBATION_REASON)
-        self.extubation_reason_edit.setCursorPosition(0)
+    def _clear_extubation_reason(self):
+        self.extubation_reason_edit.setCurrentIndex(-1)
+        self.extubation_reason_edit.setEditText("")
+        line_edit = self.extubation_reason_edit.lineEdit()
+        if line_edit:
+            line_edit.setCursorPosition(0)
 
     @staticmethod
     def _format_o2_flow(value) -> str:

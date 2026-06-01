@@ -18071,6 +18071,142 @@ def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _check_background_files_use_shared_settings_folder(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.settings_db_paths import get_settings_backgrounds_dir
+    from rem_card.data.settings.settings_release import (
+        apply_settings_release_snapshot,
+        export_settings_release_snapshot,
+    )
+    from rem_card.services.settings.settings_service import (
+        BACKGROUND_SETTINGS_KEY,
+        configure_settings_service,
+        reset_settings_service,
+    )
+    from rem_card.ui.shared import background_settings as bg
+
+    saved_baza_dir = os.environ.get("REMCARD_BAZA_DIR")
+    original_get_icon_dir = bg.get_icon_dir
+    original_materialize = bg._materialize_background_from_db
+    try:
+        baza_dir = os.path.join(temp_root, "Baza")
+        os.environ["REMCARD_BAZA_DIR"] = baza_dir
+        reset_settings_service()
+        service = configure_settings_service(
+            settings_db_path=os.path.join(baza_dir, "settings", "remcard_settings.db")
+        )
+        service.ensure_ready()
+
+        source_bytes = b"\x89PNG\r\n\x1a\n" + (b"x" * ((2 * 1024 * 1024) + 256))
+        source_dir = os.path.join(temp_root, "source")
+        os.makedirs(source_dir, exist_ok=True)
+        source_path = os.path.join(source_dir, "new_background.png")
+        Path(source_path).write_bytes(source_bytes)
+
+        file_name = bg.copy_background_to_backgrounds_dir(source_path)
+        expected_dir = get_settings_backgrounds_dir(baza_dir)
+        expected_path = os.path.join(expected_dir, file_name)
+        if not os.path.isfile(expected_path):
+            return False, "загруженный фон не скопирован в settings/backgrounds"
+        if os.path.normcase(bg.background_storage_file_path(file_name)) != os.path.normcase(expected_path):
+            return False, "background_storage_file_path не указывает на settings/backgrounds"
+        if os.path.normcase(bg.background_file_path(file_name)) != os.path.normcase(expected_path):
+            return False, "background_file_path не выбирает settings/backgrounds первым"
+
+        background_key = "background_shared_storage_regression"
+        payload = bg.normalize_background_settings_payload(
+            {
+                "backgrounds": [
+                    {
+                        "id": background_key,
+                        "name": "Регрессионный фон",
+                        "file": file_name,
+                        "start": "01-01",
+                        "end": "12-31",
+                    }
+                ]
+            }
+        )
+        service.set_app_setting(
+            "shared",
+            "background_settings",
+            payload,
+            catalog_key=BACKGROUND_SETTINGS_KEY,
+            entity_type="background_settings",
+            operation="regression",
+        )
+        with service.db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT image_blob FROM ui_backgrounds WHERE background_key = ?",
+                (background_key,),
+            ).fetchone()
+        if not row or row["image_blob"] != source_bytes:
+            return False, "ui_backgrounds не сохранил BLOB загруженного изображения"
+
+        os.remove(expected_path)
+        materialized = bg.ensure_background_file_available(
+            {"id": background_key, "file": file_name, "start": "01-01", "end": "12-31"}
+        )
+        if os.path.normcase(materialized) != os.path.normcase(expected_path):
+            return False, "восстановление из БД не пишет файл в settings/backgrounds"
+        if not os.path.isfile(expected_path) or Path(expected_path).read_bytes() != source_bytes:
+            return False, "восстановление из БД не вернуло файл фона в общую папку"
+
+        snapshot_path = os.path.join(temp_root, "settings_release_snapshot.json")
+        export_settings_release_snapshot(
+            baza_dir,
+            snapshot_path,
+            release_version="background-regression",
+            release_commit="regression",
+        )
+        target_baza_dir = os.path.join(temp_root, "TargetBaza")
+        os.environ["REMCARD_BAZA_DIR"] = target_baza_dir
+        reset_settings_service()
+        target_service = configure_settings_service(
+            settings_db_path=os.path.join(target_baza_dir, "settings", "remcard_settings.db")
+        )
+        target_service.ensure_ready()
+        apply_report = apply_settings_release_snapshot(
+            target_service.db,
+            snapshot_path,
+            bump_catalog_version=target_service._bump_catalog_version,
+        )
+        if not apply_report.get("applied"):
+            return False, f"release snapshot с фоном не применился: {apply_report}"
+        target_path = os.path.join(get_settings_backgrounds_dir(target_baza_dir), file_name)
+        target_materialized = bg.ensure_background_file_available(
+            {"id": background_key, "file": file_name, "start": "01-01", "end": "12-31"}
+        )
+        if os.path.normcase(target_materialized) != os.path.normcase(target_path):
+            return False, "release snapshot восстановил фон не в settings/backgrounds целевой базы"
+        if not os.path.isfile(target_path) or Path(target_path).read_bytes() != source_bytes:
+            return False, "release snapshot не перенес BLOB фона на целевую базу"
+
+        legacy_dir = os.path.join(temp_root, "legacy_icon")
+        os.makedirs(legacy_dir, exist_ok=True)
+        legacy_bytes = b"legacy-background"
+        legacy_file = os.path.join(legacy_dir, "legacy_background.png")
+        Path(legacy_file).write_bytes(legacy_bytes)
+        bg.get_icon_dir = lambda: legacy_dir
+        bg._materialize_background_from_db = lambda _entry, _path: False
+        legacy_result = bg.ensure_background_file_available({"id": "legacy", "file": "legacy_background.png"})
+        expected_legacy_path = os.path.join(get_settings_backgrounds_dir(target_baza_dir), "legacy_background.png")
+        if os.path.normcase(legacy_result) != os.path.normcase(expected_legacy_path):
+            return False, "старый фон из icon не перенесен в settings/backgrounds"
+        if not os.path.isfile(expected_legacy_path) or Path(expected_legacy_path).read_bytes() != legacy_bytes:
+            return False, "копия старого фона из icon отсутствует или повреждена"
+
+        return True, "ok"
+    finally:
+        bg.get_icon_dir = original_get_icon_dir
+        bg._materialize_background_from_db = original_materialize
+        bg.invalidate_background_settings_cache()
+        reset_settings_service()
+        if saved_baza_dir is None:
+            os.environ.pop("REMCARD_BAZA_DIR", None)
+        else:
+            os.environ["REMCARD_BAZA_DIR"] = saved_baza_dir
+
+
 def _create_db_cycle_fixture(path: str, *, admission_dt: str, active_bed: bool = False, cycle_days_old: int = 200) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     for candidate in (path, f"{path}-journal", f"{path}-wal", f"{path}-shm"):
@@ -19029,6 +19165,7 @@ def main():
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
+        ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
 

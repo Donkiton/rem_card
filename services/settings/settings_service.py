@@ -36,6 +36,7 @@ EMERGENCY_PASSWORD_KEY = "emergency_password"
 EMERGENCY_PASSWORD_CATALOG_KEY = "emergency_password"
 DEFAULT_EMERGENCY_PASSWORD = "2u1x8dxgeD"
 MIN_EMERGENCY_PASSWORD_LENGTH = 6
+MAX_BACKGROUND_IMAGE_BLOB_BYTES = 32 * 1024 * 1024
 PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
 
@@ -2353,7 +2354,7 @@ class SettingsService:
         try:
             from rem_card.ui.shared.background_settings import active_background_entry
 
-            active_key = str(active_background_entry(payload).get("id") or "")
+            active_key = str(active_background_entry(payload, require_file=False).get("id") or "")
         except Exception:
             active_key = ""
         for index, raw in enumerate(backgrounds, start=1):
@@ -2375,11 +2376,18 @@ class SettingsService:
             if image_path and os.path.isfile(image_path):
                 try:
                     size = os.path.getsize(image_path)
-                    if size <= 2 * 1024 * 1024:
+                    if size <= MAX_BACKGROUND_IMAGE_BLOB_BYTES:
                         with open(image_path, "rb") as fh:
                             image_blob = fh.read()
                         image_hash = hashlib.sha256(image_blob).hexdigest()
                         image_mime = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
+                    else:
+                        logger.warning(
+                            "Background image is too large for settings DB blob: %s (%s bytes, max %s)",
+                            image_path,
+                            size,
+                            MAX_BACKGROUND_IMAGE_BLOB_BYTES,
+                        )
                 except Exception:
                     image_blob = None
             cursor.execute(

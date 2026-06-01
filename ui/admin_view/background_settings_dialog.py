@@ -26,9 +26,9 @@ from rem_card.ui.shared.background_settings import (
     DEFAULT_BACKGROUND_ID,
     BackgroundSettingsStorage,
     active_background_entry,
-    background_entry_file_path,
     background_ranges_overlap,
-    copy_background_to_icon_dir,
+    copy_background_to_backgrounds_dir,
+    ensure_background_file_available,
     month_day_to_label,
     normalize_background_settings_payload,
     normalize_month_day,
@@ -401,7 +401,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
             self.preview_label.show_preview_message("Файл не выбран")
             return
 
-        path = background_entry_file_path(entry)
+        path = ensure_background_file_available(entry)
         self.file_label.setText(f"Файл: {file_name}")
         pixmap = _load_preview_pixmap(path)
         if pixmap.isNull():
@@ -449,7 +449,7 @@ class BackgroundSettingsDialog(BaseStyledDialog):
             CustomMessageBox.warning(self, "Изменение фона", "Выбранный файл не является изображением.")
             return
         try:
-            file_name = copy_background_to_icon_dir(source_path)
+            file_name = copy_background_to_backgrounds_dir(source_path)
         except Exception as exc:
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось загрузить фон: {exc}")
             return
@@ -493,12 +493,12 @@ class BackgroundSettingsDialog(BaseStyledDialog):
             if not file_name:
                 CustomMessageBox.warning(self, "Изменение фона", "У каждого фона должен быть выбран файл.")
                 return False
-            pixmap = QPixmap(background_entry_file_path(entry))
+            pixmap = QPixmap(ensure_background_file_available(entry))
             if pixmap.isNull():
                 CustomMessageBox.warning(
                     self,
                     "Изменение фона",
-                    f"Файл «{file_name}» не найден в папке icon или не является изображением.",
+                    f"Файл «{file_name}» не найден в общей папке фонов или не является изображением.",
                 )
                 return False
         overlap = self._find_custom_range_overlap(normalized["backgrounds"])

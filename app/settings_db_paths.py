@@ -6,6 +6,7 @@ from rem_card.app.runtime_paths import resolve_baza_dir
 SETTINGS_DIR_NAME = "settings"
 SETTINGS_DB_FILE_NAME = "remcard_settings.db"
 SETTINGS_LOCK_FILE_NAME = "settings.db.lock"
+SETTINGS_BACKGROUNDS_DIR_NAME = "backgrounds"
 
 
 def get_settings_dir(baza_dir: str | None = None) -> str:
@@ -23,3 +24,7 @@ def get_settings_lock_path(baza_dir: str | None = None) -> str:
 
 def get_settings_backup_dir(baza_dir: str | None = None) -> str:
     return os.path.join(get_settings_dir(baza_dir), "backups")
+
+
+def get_settings_backgrounds_dir(baza_dir: str | None = None) -> str:
+    return os.path.join(get_settings_dir(baza_dir), SETTINGS_BACKGROUNDS_DIR_NAME)
