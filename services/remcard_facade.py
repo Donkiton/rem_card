@@ -2240,10 +2240,30 @@ class RemCardService(QObject):
         return self._procedures.save_transfusion_procedure(procedure, transfusion, consent)
 
     def get_transfusion_observation_values(self, admission_id: int, started_at, finished_at):
-        return self._vitals.get_transfusion_observation_values(admission_id, started_at, finished_at)
+        values = self._vitals.get_transfusion_observation_values(admission_id, started_at, finished_at)
+        try:
+            diuresis_values = self._fluids.get_transfusion_diuresis_values(admission_id, started_at, finished_at)
+        except Exception:
+            diuresis_values = {}
+        for slot, diuresis in (diuresis_values or {}).items():
+            values.setdefault(slot, {})
+            if diuresis:
+                values[slot]["diuresis"] = diuresis
+        return values
 
     def get_transfusion_registration_sheet(self, admission_id: int, *, start_dt=None, end_dt=None):
         return self._procedures.get_transfusion_registration_sheet(admission_id, start_dt=start_dt, end_dt=end_dt)
+
+    def get_unprinted_completed_transfusion_protocols(self, admission_id: int, *, start_dt=None, end_dt=None):
+        self._procedures.refresh_transfusion_statuses(admission_id)
+        return self._procedures_print.unprinted_completed_transfusion_protocols(
+            admission_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+
+    def mark_transfusion_protocols_printed(self, procedure_ids):
+        return self._procedures.mark_protocols_printed([int(value) for value in procedure_ids if value])
 
     def cancel_procedure(self, procedure_id: int, *, updated_by: str = "doctor"):
         return self._procedures.cancel_procedure(procedure_id, updated_by=updated_by)
@@ -2255,6 +2275,9 @@ class RemCardService(QObject):
         return self._procedures_print.build_pdf_path(procedure_id, document_kind)
 
     def build_procedure_pdf(self, procedure_id: int, document_kind: str, pdf_path):
-        return self._procedures_print.build_pdf(procedure_id, document_kind, pdf_path)
+        result = self._procedures_print.build_pdf(procedure_id, document_kind, pdf_path)
+        if str(document_kind or "").strip() == "transfusion_protocol":
+            self._procedures.mark_protocols_printed([int(procedure_id)])
+        return result
 
 

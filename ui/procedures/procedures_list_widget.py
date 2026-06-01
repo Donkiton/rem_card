@@ -161,6 +161,11 @@ class ProceduresListWidget(QTableWidget):
         status = str(getattr(procedure, "status", "") or "")
         if status == ProcedureStatus.DRAFT.value:
             return "Черновик"
+        if procedure.procedure_type == ProcedureType.TRANSFUSION.value:
+            if status == ProcedureStatus.ACTIVE.value:
+                return "В процессе"
+            if status == ProcedureStatus.COMPLETED.value:
+                return "Выполнено"
         performed_statuses = {ProcedureStatus.COMPLETED.value}
         if procedure.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value}:
             performed_statuses.add(ProcedureStatus.ACTIVE.value)

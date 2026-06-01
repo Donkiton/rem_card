@@ -74,6 +74,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         self._syncing_time_bounds = False
         self._pdf_worker = None
         self._print_buttons: list[QPushButton] = []
+        self._transfusion_times_user_changed = False
 
         self.setWindowTitle("Процедура пациента")
         self.setMinimumSize(860, 620)
@@ -245,7 +246,12 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         box = QGroupBox("Общие поля процедуры")
         form = QFormLayout(box)
         self.status_combo = QComboBox()
-        if self.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value}:
+        if self.procedure_type == ProcedureType.TRANSFUSION.value:
+            self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
+            self.status_combo.addItem("В процессе", ProcedureStatus.ACTIVE.value)
+            self.status_combo.addItem("Выполнено", ProcedureStatus.COMPLETED.value)
+            self.status_combo.setEnabled(False)
+        elif self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
             self.status_combo.addItem("Черновик", ProcedureStatus.DRAFT.value)
             self.status_combo.addItem("Выполнено", ProcedureStatus.COMPLETED.value)
         else:
@@ -418,8 +424,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
                 self.bundle.transfusion.observation_json if self.bundle.transfusion else "{}"
             )
             self._set_transfusion_observation_context()
-            if not procedure.id and not self.transfusion_observation_widget.has_measure_values():
-                self.transfusion_observation_widget.refresh_all()
+            self._sync_transfusion_status_display()
+            if self._transfusion_times_confirmed():
+                self.transfusion_observation_widget.refresh_missing()
         self._update_print_enabled()
 
     def _collect_procedure(self) -> ProcedureDTO:
@@ -427,21 +434,33 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             raise ValueError("Данные процедуры не загружены.")
         base = self.bundle.procedure
         doctor_name = self.doctor_combo.currentText().strip()
-        started_at = self.start_edit.dateTime().toPython()
+        times_unconfirmed = (
+            base.procedure_type == ProcedureType.TRANSFUSION.value
+            and not self._transfusion_times_user_changed
+            and not base.started_at
+            and not base.finished_at
+        )
+        started_at = None if times_unconfirmed else self.start_edit.dateTime().toPython()
         if base.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value:
             finished_at = started_at
             duration_minutes = 0
+        elif times_unconfirmed:
+            finished_at = None
+            duration_minutes = None
         else:
             finished_at = self.finish_edit.dateTime().toPython()
             if started_at > finished_at:
                 raise ValueError("Начало процедуры не может быть позже окончания.")
             duration_minutes = int(self.duration_label.text() or 0)
+        status = str(self.status_combo.currentData() or ProcedureStatus.DRAFT.value)
+        if base.procedure_type == ProcedureType.TRANSFUSION.value:
+            status = self._resolve_transfusion_status(started_at, finished_at)
         procedure = ProcedureDTO(
             id=base.id,
             patient_id=base.patient_id,
             admission_id=base.admission_id or self.admission_id,
             procedure_type=base.procedure_type,
-            status=str(self.status_combo.currentData() or ProcedureStatus.DRAFT.value),
+            status=status,
             created_at=base.created_at,
             updated_at=base.updated_at,
             started_at=started_at,
@@ -461,7 +480,7 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
         return procedure
 
     def _status_for_ui(self, status: str) -> str:
-        if self.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value} and status == ProcedureStatus.ACTIVE.value:
+        if self.procedure_type == ProcedureType.LUMBAR_PUNCTURE.value and status == ProcedureStatus.ACTIVE.value:
             return ProcedureStatus.COMPLETED.value
         return status
 
@@ -616,11 +635,21 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             button.setEnabled(enabled)
 
     def _on_general_time_changed(self):
+        sender = self.sender()
+        if (
+            self.procedure_type == ProcedureType.TRANSFUSION.value
+            and not self._syncing_time_bounds
+            and (sender is self.start_edit or sender is self.finish_edit)
+        ):
+            self._transfusion_times_user_changed = True
         if self.procedure_type != ProcedureType.TRANSFUSION.value:
             self._sync_general_time_bounds()
         self._recalculate_duration()
         if self.procedure_type == ProcedureType.TRANSFUSION.value:
             self._set_transfusion_observation_context()
+            self._sync_transfusion_status_display()
+            if self.transfusion_observation_widget is not None and self._transfusion_times_confirmed():
+                self.transfusion_observation_widget.refresh_missing()
 
     def _sync_general_time_bounds(self):
         if self.procedure_type in {ProcedureType.LUMBAR_PUNCTURE.value, ProcedureType.TRANSFUSION.value} or self._syncing_time_bounds:
@@ -656,12 +685,9 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
 
     def _validate_transfusion_datetime_values(self, procedure: ProcedureDTO, transfusion) -> None:
         now = datetime.now().replace(second=59, microsecond=999999)
-        for label, value in (
-            ("Время подачи заявки", getattr(transfusion, "request_at", None)),
-            ("Начало трансфузии", procedure.started_at),
-        ):
-            if value and value > now:
-                raise ValueError(f"{label} не может быть в будущем.")
+        request_at = getattr(transfusion, "request_at", None)
+        if request_at and request_at > now:
+            raise ValueError("Время подачи заявки не может быть в будущем.")
 
     def _set_transfusion_observation_context(self):
         if self.procedure_type != ProcedureType.TRANSFUSION.value or self.transfusion_observation_widget is None:
@@ -672,6 +698,42 @@ class ProcedureEditorDialog(SavedFramelessDialogMixin, QDialog):
             self.start_edit.dateTime().toPython(),
             self.finish_edit.dateTime().toPython(),
         )
+
+    def _sync_transfusion_status_display(self):
+        if self.procedure_type != ProcedureType.TRANSFUSION.value:
+            return
+        status = self._resolve_transfusion_status_for_ui()
+        self._set_combo_data(self.status_combo, status)
+
+    def _resolve_transfusion_status_for_ui(self) -> str:
+        if not self.bundle:
+            return ProcedureStatus.DRAFT.value
+        base = self.bundle.procedure
+        if not self._transfusion_times_user_changed and not base.started_at and not base.finished_at:
+            return ProcedureStatus.DRAFT.value
+        return self._resolve_transfusion_status(
+            self.start_edit.dateTime().toPython(),
+            self.finish_edit.dateTime().toPython(),
+        )
+
+    def _transfusion_times_confirmed(self) -> bool:
+        if self.procedure_type != ProcedureType.TRANSFUSION.value or not self.bundle:
+            return False
+        base = self.bundle.procedure
+        return bool(self._transfusion_times_user_changed or (base.started_at and base.finished_at))
+
+    @staticmethod
+    def _resolve_transfusion_status(started_at, finished_at) -> str:
+        if not started_at or not finished_at:
+            return ProcedureStatus.DRAFT.value
+        now = datetime.now().replace(second=0, microsecond=0)
+        start = started_at.replace(second=0, microsecond=0)
+        finish = finished_at.replace(second=0, microsecond=0)
+        if now < start:
+            return ProcedureStatus.DRAFT.value
+        if now <= finish:
+            return ProcedureStatus.ACTIVE.value
+        return ProcedureStatus.COMPLETED.value
 
     @staticmethod
     def _parse_snapshot_datetime(value) -> Optional[datetime]:

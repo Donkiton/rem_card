@@ -192,11 +192,12 @@ class ProceduresDAO:
         params: list[Any] = [
             ProcedureType.TRANSFUSION.value,
             ProcedureStatus.COMPLETED.value,
+            ProcedureStatus.ACTIVE.value,
             int(admission_id),
         ]
         where = [
             "p.procedure_type = ?",
-            "p.status = ?",
+            "p.status IN (?, ?)",
             "p.admission_id = ?",
             "COALESCE(p.is_deleted, 0) = 0",
         ]
@@ -226,6 +227,134 @@ class ProceduresDAO:
             tuple(params),
         )
         return [self._row_dict(row) for row in rows]
+
+    def list_unprinted_completed_transfusion_ids(
+        self,
+        admission_id: int,
+        *,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> list[int]:
+        params: list[Any] = [
+            ProcedureType.TRANSFUSION.value,
+            ProcedureStatus.COMPLETED.value,
+            int(admission_id),
+        ]
+        where = [
+            "p.procedure_type = ?",
+            "p.status = ?",
+            "p.admission_id = ?",
+            "p.protocol_printed_at IS NULL",
+            "COALESCE(p.is_deleted, 0) = 0",
+        ]
+        if start_dt is not None:
+            where.append("DATETIME(p.started_at) >= DATETIME(?)")
+            params.append(self._dt_value(start_dt))
+        if end_dt is not None:
+            where.append("DATETIME(p.started_at) < DATETIME(?)")
+            params.append(self._dt_value(end_dt))
+
+        rows = self.db.fetch_all_remcard(
+            f"""
+            SELECT p.id
+            FROM procedures p
+            JOIN procedure_transfusion t ON t.procedure_id = p.id
+            WHERE {" AND ".join(where)}
+            ORDER BY DATETIME(p.started_at) ASC, p.id ASC
+            """,
+            tuple(params),
+        )
+        return [int(row["id"]) for row in rows if row and row["id"] is not None]
+
+    def refresh_transfusion_statuses(self, cursor, admission_id: int, *, now: datetime):
+        now_value = self._dt_value(now.replace(second=0, microsecond=0))
+        common_where = """
+            admission_id = ?
+            AND procedure_type = ?
+            AND COALESCE(is_deleted, 0) = 0
+            AND started_at IS NOT NULL
+            AND finished_at IS NOT NULL
+        """
+        completed_where = f"""
+            {common_where}
+            AND CAST(STRFTIME('%s', finished_at) AS INTEGER) < CAST(STRFTIME('%s', ?) AS INTEGER)
+            AND status != ?
+        """
+        active_where = f"""
+            {common_where}
+            AND CAST(STRFTIME('%s', started_at) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+            AND CAST(STRFTIME('%s', finished_at) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+            AND status != ?
+        """
+        draft_where = f"""
+            {common_where}
+            AND CAST(STRFTIME('%s', started_at) AS INTEGER) > CAST(STRFTIME('%s', ?) AS INTEGER)
+            AND status != ?
+        """
+
+        def update(status: str, where_sql: str, params: tuple[Any, ...]):
+            cursor.execute(
+                f"""
+                UPDATE procedures
+                SET status = ?,
+                    updated_by = 'system',
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE {where_sql}
+                """,
+                (status, *params),
+            )
+
+        update(
+            ProcedureStatus.COMPLETED.value,
+            completed_where,
+            (
+                int(admission_id),
+                ProcedureType.TRANSFUSION.value,
+                now_value,
+                ProcedureStatus.COMPLETED.value,
+            ),
+        )
+        update(
+            ProcedureStatus.ACTIVE.value,
+            active_where,
+            (
+                int(admission_id),
+                ProcedureType.TRANSFUSION.value,
+                now_value,
+                now_value,
+                ProcedureStatus.ACTIVE.value,
+            ),
+        )
+        update(
+            ProcedureStatus.DRAFT.value,
+            draft_where,
+            (
+                int(admission_id),
+                ProcedureType.TRANSFUSION.value,
+                now_value,
+                ProcedureStatus.DRAFT.value,
+            ),
+        )
+
+    def mark_protocols_printed(self, cursor, procedure_ids: list[int]):
+        ids = [int(value) for value in procedure_ids if value]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        cursor.execute(
+            f"""
+            UPDATE procedures
+            SET protocol_printed_at = COALESCE(protocol_printed_at, STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+                updated_by = 'system',
+                revision = COALESCE(revision, 0) + 1,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+            WHERE id IN ({placeholders})
+              AND protocol_printed_at IS NULL
+            """,
+            tuple(ids),
+        )
+        return int(cursor.rowcount or 0)
 
     def save_procedure(self, cursor, dto: ProcedureDTO) -> int:
         if dto.id is None:
@@ -668,6 +797,7 @@ class ProceduresDAO:
             revision=int(r.get("revision") or 0),
             is_deleted=int(r.get("is_deleted") or 0),
             procedure_subtype=r.get("procedure_subtype") or "",
+            protocol_printed_at=self._parse_dt(r.get("protocol_printed_at")),
         )
 
     def _map_consent(self, row) -> ProcedureConsentDTO:

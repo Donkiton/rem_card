@@ -113,6 +113,38 @@ class _PrescriptionMarkFlowable(Flowable):
             canvas.line(x - radius * 0.40, y + radius * 0.40, x + radius * 0.40, y - radius * 0.40)
 
 
+class _RotatedProtocolFlowable(Flowable):
+    def __init__(self, inner: Flowable):
+        super().__init__()
+        self.inner = inner
+        self.inner_width = 1.0
+        self.inner_height = 1.0
+        self.scale = 1.0
+        self.width = 1.0
+        self.height = 1.0
+
+    def wrap(self, availWidth, availHeight):
+        self.inner_width, self.inner_height = self.inner.wrap(availHeight, availWidth)
+        self.scale = min(
+            1.0,
+            float(availWidth) / max(float(self.inner_height), 1.0),
+            float(availHeight) / max(float(self.inner_width), 1.0),
+        )
+        self.width = self.inner_height * self.scale
+        self.height = self.inner_width * self.scale
+        return self.width, self.height
+
+    def draw(self):
+        canvas = self.canv
+        canvas.saveState()
+        try:
+            canvas.scale(self.scale, self.scale)
+            canvas.rotate(90)
+            self.inner.drawOn(canvas, 0, -self.inner_height)
+        finally:
+            canvas.restoreState()
+
+
 class _TransfusionRegistrationSheetFlowable(Flowable):
     ROWS_PER_PAGE = 17
     HEADER_BG = colors.HexColor("#ccffff")
@@ -414,9 +446,11 @@ class ReportLabReportBuilder:
                     story.append(PageBreak())
                 story.extend(cls._build_day(day_data, config, table_width))
             story.extend(cls._transfusion_registration_flowables(data, config))
+            story.extend(cls._transfusion_protocol_flowables(data))
             return story
         story = cls._build_day(data, config, table_width)
         story.extend(cls._transfusion_registration_flowables(data, config))
+        story.extend(cls._transfusion_protocol_flowables(data))
         return story
 
     @classmethod
@@ -535,6 +569,34 @@ class ReportLabReportBuilder:
                 sheet["rows"] = rows
             return sheet
         return dict(data.get("transfusion_registration") or {})
+
+    @classmethod
+    def _transfusion_protocol_flowables(cls, data) -> list:
+        protocols = cls._resolve_pending_transfusion_protocols(data)
+        if not protocols:
+            return []
+        from rem_card.services.procedures_reportlab_builder import ProcedureReportLabBuilder
+
+        flowables = []
+        for protocol in protocols:
+            context = protocol.get("context") if isinstance(protocol, dict) else None
+            if not isinstance(context, dict):
+                continue
+            flowables.append(PageBreak())
+            flowables.extend(
+                _RotatedProtocolFlowable(flowable)
+                for flowable in ProcedureReportLabBuilder.transfusion_protocol_flowables(context)
+            )
+        return flowables
+
+    @staticmethod
+    def _resolve_pending_transfusion_protocols(data) -> list:
+        if isinstance(data, list):
+            protocols = []
+            for day in data:
+                protocols.extend(list((day or {}).get("pending_transfusion_protocols") or []))
+            return protocols
+        return list((data or {}).get("pending_transfusion_protocols") or [])
 
     @classmethod
     def _style(

@@ -301,6 +301,31 @@ class ProceduresPrintService:
         report_dir = Path(REPORT_DIR) / "procedures"
         return report_dir / f"{patient_name}_{proc_safe}_{document_kind}_{procedure.id}_{stamp}.pdf"
 
+    def unprinted_completed_transfusion_protocols(
+        self,
+        admission_id: int,
+        *,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        procedure_ids = self.dao.list_unprinted_completed_transfusion_ids(
+            int(admission_id),
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        protocols: list[dict[str, Any]] = []
+        for procedure_id in procedure_ids:
+            bundle = self.dao.get_bundle(int(procedure_id))
+            if not bundle or not bundle.transfusion:
+                continue
+            protocols.append(
+                {
+                    "procedure_id": int(procedure_id),
+                    "context": self._transfusion_protocol_context(bundle),
+                }
+            )
+        return protocols
+
     def _render_cvc_protocol(self, bundle: ProcedureBundle) -> str:
         template = self._load_template("cvc_protocol_v1.html")
         return self._fill(template, self._cvc_protocol_context(bundle))

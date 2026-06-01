@@ -24,6 +24,7 @@ class ProceduresService:
         self.data_service = data_service
 
     def list_procedures(self, admission_id: int) -> list[ProcedureDTO]:
+        self.refresh_transfusion_statuses(int(admission_id))
         return self.dao.list_by_admission(int(admission_id))
 
     def get_transfusion_registration_sheet(
@@ -33,6 +34,7 @@ class ProceduresService:
         start_dt: Optional[datetime] = None,
         end_dt: Optional[datetime] = None,
     ) -> dict[str, Any]:
+        self.refresh_transfusion_statuses(int(admission_id))
         snapshot = self._build_patient_snapshot(int(admission_id))
         raw_rows = self.dao.list_completed_transfusions_for_registration(
             int(admission_id),
@@ -51,7 +53,25 @@ class ProceduresService:
         }
 
     def get_procedure_bundle(self, procedure_id: int) -> Optional[ProcedureBundle]:
-        return self.dao.get_bundle(int(procedure_id))
+        bundle = self.dao.get_bundle(int(procedure_id))
+        if bundle and bundle.procedure.procedure_type == ProcedureType.TRANSFUSION.value:
+            self.refresh_transfusion_statuses(bundle.procedure.admission_id)
+            bundle = self.dao.get_bundle(int(procedure_id))
+        return bundle
+
+    def refresh_transfusion_statuses(self, admission_id: int):
+        if not admission_id:
+            return 0
+
+        def operation(cursor):
+            self.dao.refresh_transfusion_statuses(
+                cursor,
+                int(admission_id),
+                now=datetime.now().replace(second=0, microsecond=0),
+            )
+            return 0
+
+        return self._run_write(f"procedure_transfusion_status_refresh:{admission_id}", operation)
 
     def create_empty_cvc(self, admission_id: int, *, doctor_name: str = "") -> ProcedureBundle:
         snapshot = self._build_patient_snapshot(admission_id)
@@ -123,9 +143,6 @@ class ProceduresService:
             patient_id=snapshot.get("patient_id"),
             procedure_type=ProcedureType.TRANSFUSION.value,
             status=ProcedureStatus.DRAFT.value,
-            started_at=now,
-            finished_at=now,
-            duration_minutes=0,
             doctor_name_snapshot=doctor_name or "",
             department_snapshot=snapshot.get("department") or "",
             patient_snapshot_json=json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
@@ -245,6 +262,7 @@ class ProceduresService:
         self._normalize_duration(procedure)
         self._validate_transfusion_times(procedure, transfusion)
         self._validate_transfusion_expiration(transfusion)
+        procedure.status = self._resolve_transfusion_status(procedure)
         transfusion.operator_doctor_name = transfusion.operator_doctor_name or procedure.doctor_name_snapshot
         consent.consent_kind = ConsentKind.TRANSFUSION_CONSENT.value
         consent.diagnosis_snapshot = consent.diagnosis_snapshot or procedure.diagnosis_snapshot
@@ -266,6 +284,16 @@ class ProceduresService:
             return int(procedure_id)
 
         return self._run_write(f"procedure_cancel:{procedure_id}", operation)
+
+    def mark_protocols_printed(self, procedure_ids: list[int]):
+        ids = [int(value) for value in procedure_ids if value]
+        if not ids:
+            return 0
+
+        def operation(cursor):
+            return self.dao.mark_protocols_printed(cursor, ids)
+
+        return self._run_write("procedure_protocols_mark_printed", operation)
 
     def _run_write(self, description: str, operation: Callable):
         if self.data_service:
@@ -415,6 +443,23 @@ class ProceduresService:
         if start and finish:
             minutes = int(max(0, round((finish - start).total_seconds() / 60.0)))
             procedure.duration_minutes = minutes
+        else:
+            procedure.duration_minutes = None
+
+    @staticmethod
+    def _resolve_transfusion_status(procedure: ProcedureDTO, *, now: Optional[datetime] = None) -> str:
+        start = procedure.started_at
+        finish = procedure.finished_at
+        if not start or not finish:
+            return ProcedureStatus.DRAFT.value
+        now = (now or datetime.now()).replace(second=0, microsecond=0)
+        start = start.replace(second=0, microsecond=0)
+        finish = finish.replace(second=0, microsecond=0)
+        if now < start:
+            return ProcedureStatus.DRAFT.value
+        if now <= finish:
+            return ProcedureStatus.ACTIVE.value
+        return ProcedureStatus.COMPLETED.value
 
     @staticmethod
     def _apply_cvc_status(procedure: ProcedureDTO, cvc: ProcedureCvcDTO):
@@ -528,13 +573,8 @@ class ProceduresService:
 
     def _validate_transfusion_times(self, procedure: ProcedureDTO, transfusion: ProcedureTransfusionDTO) -> None:
         now = datetime.now().replace(second=59, microsecond=999999)
-        future_limited_times = [
-            ("время подачи заявки", transfusion.request_at),
-            ("начало трансфузии", procedure.started_at),
-        ]
-        for label, value in future_limited_times:
-            if value and value > now:
-                raise ValueError(f"{label.capitalize()} не может быть в будущем.")
+        if transfusion.request_at and transfusion.request_at > now:
+            raise ValueError("Время подачи заявки не может быть в будущем.")
 
         if procedure.started_at and procedure.finished_at and procedure.started_at > procedure.finished_at:
             raise ValueError("Начало трансфузии не может быть позже окончания.")

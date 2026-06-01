@@ -1,5 +1,5 @@
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from ..dto.remcard_dto import FluidDTO
 from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE
 from .sync_cursor import is_cursor_newer, make_sync_cursor, normalize_sync_cursor
@@ -74,6 +74,56 @@ class FluidsDAO:
             updated_at=r['updated_at'] if 'updated_at' in r.keys() else None,
             revision=r['revision'] if 'revision' in r.keys() else 0
         ) for r in rows]
+
+    def get_latest_urine_before(self, admission_id: int, target: datetime) -> Optional[float]:
+        row = self.db.fetch_one_remcard(
+            """
+            SELECT urine
+            FROM fluids
+            WHERE admission_id = ?
+              AND urine IS NOT NULL
+              AND urine > 0
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
+            LIMIT 1
+            """,
+            (int(admission_id), target.isoformat()),
+        )
+        return float(row["urine"]) if row and row["urine"] is not None else None
+
+    def get_transfusion_followup_urine(
+        self,
+        admission_id: int,
+        target: datetime,
+        now: datetime,
+        *,
+        before_window_minutes: int = 10,
+    ) -> Optional[float]:
+        if now < target:
+            return None
+        start = (target - timedelta(minutes=before_window_minutes)).isoformat()
+        end = now.isoformat()
+        target_value = target.isoformat()
+        row = self.db.fetch_one_remcard(
+            """
+            SELECT urine
+            FROM fluids
+            WHERE admission_id = ?
+              AND urine IS NOT NULL
+              AND urine > 0
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+            ORDER BY ABS(
+                         CAST(STRFTIME('%s', datetime) AS INTEGER)
+                         - CAST(STRFTIME('%s', ?) AS INTEGER)
+                     ) ASC,
+                     CAST(STRFTIME('%s', datetime) AS INTEGER) DESC,
+                     id DESC
+            LIMIT 1
+            """,
+            (int(admission_id), start, end, target_value),
+        )
+        return float(row["urine"]) if row and row["urine"] is not None else None
 
     def fetch_updated_fluids(self, admission_id: int, last_sync_time):
         """Возвращает измененные жидкости для поллинга и новое время синхронизации."""

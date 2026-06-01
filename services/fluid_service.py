@@ -23,6 +23,27 @@ class FluidService:
     def get_fluids_in_bounds(self, admission_id: int, start: datetime, end: datetime) -> List[FluidDTO]:
         return self.fluids_dao.get_fluids(admission_id, start, end)
 
+    def get_transfusion_diuresis_values(self, admission_id: int, started_at, finished_at) -> dict[str, str]:
+        started = self._coerce_datetime(started_at) or datetime.now().replace(second=0, microsecond=0)
+        finished = self._coerce_datetime(finished_at) or started
+        now = datetime.now()
+        values = {
+            "before": self.fluids_dao.get_latest_urine_before(int(admission_id), started),
+            "hour1": self.fluids_dao.get_transfusion_followup_urine(
+                int(admission_id),
+                finished + timedelta(hours=1),
+                now,
+                before_window_minutes=10,
+            ),
+            "hour2": self.fluids_dao.get_transfusion_followup_urine(
+                int(admission_id),
+                finished + timedelta(hours=2),
+                now,
+                before_window_minutes=10,
+            ),
+        }
+        return {slot: self._format_transfusion_diuresis(value) for slot, value in values.items()}
+
     def enqueue_write(
         self,
         description: str,
@@ -274,3 +295,24 @@ class FluidService:
                 "Время больше времени исхода "
                 f"({terminal_dt.strftime('%d.%m.%Y %H:%M')})"
             )
+
+    @staticmethod
+    def _coerce_datetime(value) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace(" ", "T"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_transfusion_diuresis(value) -> str:
+        if value is None:
+            return ""
+        amount = float(value)
+        if amount <= 0:
+            return ""
+        amount_text = f"{int(amount)}" if amount.is_integer() else f"{amount:g}"
+        return f"{amount_text} мл, желтая"

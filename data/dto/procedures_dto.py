@@ -77,6 +77,7 @@ class ProcedureDTO:
     revision: int = 0
     is_deleted: int = 0
     procedure_subtype: str = ""
+    protocol_printed_at: Optional[datetime] = None
 
 
 @dataclass

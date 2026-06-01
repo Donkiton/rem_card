@@ -157,8 +157,13 @@ class ProcedureReportLabBuilder:
     @classmethod
     def build_transfusion_protocol(cls, context: dict[str, str], output_path) -> None:
         cls._ensure_fonts()
-        story = [cls._transfusion_table(context)]
+        story = cls.transfusion_protocol_flowables(context)
         cls._build(story, output_path, framed=False)
+
+    @classmethod
+    def transfusion_protocol_flowables(cls, context: dict[str, str]) -> list:
+        cls._ensure_fonts()
+        return [cls._transfusion_table(context)]
 
     @classmethod
     def build_transfusion_consent(cls, context: dict[str, str], output_path) -> None:

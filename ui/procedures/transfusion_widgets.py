@@ -465,6 +465,7 @@ class TransfusionMedicalWidget(QWidget):
 
 
 class TransfusionObservationWidget(QWidget):
+    DEFAULT_DIURESIS_TEXT = "сохранен, желтая"
     SLOT_LABELS = (
         ("before", "Перед началом переливания"),
         ("hour1", "Через 1 час"),
@@ -483,6 +484,7 @@ class TransfusionObservationWidget(QWidget):
         self.pulse_edits: dict[str, QLineEdit] = {}
         self.temp_edits: dict[str, QLineEdit] = {}
         self.diuresis_edits: dict[str, QLineEdit] = {}
+        self._manual_fields: set[tuple[str, str]] = set()
         self._build_ui()
 
     def _build_ui(self):
@@ -526,6 +528,7 @@ class TransfusionObservationWidget(QWidget):
                 slot_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 edit = QLineEdit()
                 edit.setMinimumHeight(field_height)
+                edit.textEdited.connect(lambda _text, slot=slot, component=component: self._mark_manual(slot, component))
                 field_map[slot] = edit
                 refresh_btn = QPushButton("Обновить")
                 refresh_btn.setMinimumWidth(button_width)
@@ -547,8 +550,9 @@ class TransfusionObservationWidget(QWidget):
             slot_label = QLabel(label)
             slot_label.setMinimumHeight(field_height)
             slot_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            edit = QLineEdit("сохранен, желтая")
+            edit = QLineEdit(self.DEFAULT_DIURESIS_TEXT)
             edit.setMinimumHeight(field_height)
+            edit.textEdited.connect(lambda _text, slot=slot: self._mark_manual(slot, "diuresis"))
             self.diuresis_edits[slot] = edit
             diuresis_grid.setRowMinimumHeight(row, row_height)
             diuresis_grid.addWidget(slot_label, row, 0)
@@ -592,26 +596,38 @@ class TransfusionObservationWidget(QWidget):
             self.bp_edits[slot].setText(str(values.get("bp") or ""))
             self.pulse_edits[slot].setText(str(values.get("pulse") or ""))
             self.temp_edits[slot].setText(str(values.get("temp") or ""))
-            self.diuresis_edits[slot].setText(str(values.get("diuresis") or "сохранен, желтая"))
+            self.diuresis_edits[slot].setText(str(values.get("diuresis") or self.DEFAULT_DIURESIS_TEXT))
+        self._manual_fields.clear()
 
     def has_measure_values(self) -> bool:
         for maps in (self.bp_edits, self.pulse_edits, self.temp_edits):
             if any(edit.text().strip() for edit in maps.values()):
                 return True
+        if any(
+            edit.text().strip() and edit.text().strip() != self.DEFAULT_DIURESIS_TEXT
+            for edit in self.diuresis_edits.values()
+        ):
+            return True
         return False
 
     def refresh_all(self):
+        self._refresh_all(force=True)
+
+    def refresh_missing(self):
+        self._refresh_all(force=False)
+
+    def _refresh_all(self, *, force: bool):
         values = self._fetch_values()
         if not values:
             return
         for slot in ("before", "hour1", "hour2"):
-            self._apply_slot_values(slot, values.get(slot) or {}, component=None)
+            self._apply_slot_values(slot, values.get(slot) or {}, component=None, force=force)
 
     def refresh_slot(self, slot: str, component: str):
         values = self._fetch_values()
         if not values:
             return
-        self._apply_slot_values(slot, values.get(slot) or {}, component=component)
+        self._apply_slot_values(slot, values.get(slot) or {}, component=component, force=True)
 
     def _fetch_values(self) -> dict:
         if not self.remcard_service or not self.admission_id:
@@ -625,13 +641,42 @@ class TransfusionObservationWidget(QWidget):
         except Exception:
             return {}
 
-    def _apply_slot_values(self, slot: str, values: dict, *, component: str | None):
-        if component in (None, "bp") and values.get("bp"):
-            self.bp_edits[slot].setText(str(values.get("bp")))
-        if component in (None, "pulse") and values.get("pulse"):
-            self.pulse_edits[slot].setText(str(values.get("pulse")))
-        if component in (None, "temp") and values.get("temp"):
-            self.temp_edits[slot].setText(str(values.get("temp")))
+    def _apply_slot_values(self, slot: str, values: dict, *, component: str | None, force: bool):
+        field_maps = {
+            "bp": self.bp_edits,
+            "pulse": self.pulse_edits,
+            "temp": self.temp_edits,
+            "diuresis": self.diuresis_edits,
+        }
+        for name, edits in field_maps.items():
+            if component not in (None, name):
+                continue
+            value = str(values.get(name) or "").strip()
+            if not value:
+                continue
+            edit = edits.get(slot)
+            if edit is None or (not force and not self._can_auto_fill(slot, name, edit)):
+                continue
+            self._set_edit_text(edit, value)
+
+    def _mark_manual(self, slot: str, component: str):
+        self._manual_fields.add((str(slot), str(component)))
+
+    def _can_auto_fill(self, slot: str, component: str, edit: QLineEdit) -> bool:
+        if (slot, component) in self._manual_fields:
+            return False
+        text = edit.text().strip()
+        if not text:
+            return True
+        return component == "diuresis" and text == self.DEFAULT_DIURESIS_TEXT
+
+    @staticmethod
+    def _set_edit_text(edit: QLineEdit, value: str):
+        edit.blockSignals(True)
+        try:
+            edit.setText(value)
+        finally:
+            edit.blockSignals(False)
 
 
 class TransfusionConsentWidget(QWidget):

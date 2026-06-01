@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 17
-SCHEMA_MIN_MIGRATION_VERSION = 17
+SCHEMA_FASTPATH_REV = 18
+SCHEMA_MIN_MIGRATION_VERSION = 18
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -105,7 +105,17 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
     "diet_templates": {"name", "diet_text", "schedule_json", "is_default", "created_at", "version", "last_modified_by", "updated_at"},
     "diet_plan": {"admission_id", "shift_start", "template_id", "diet_text", "schedule_json", "created_at", "version", "last_modified_by", "updated_at"},
     "oral_intake_events": {"admission_id", "shift_start", "event_time", "amount_ml", "created_at", "version", "last_modified_by", "updated_at"},
-    "procedures": {"patient_id", "admission_id", "procedure_type", "status", "patient_snapshot_json", "diagnosis_snapshot", "revision", "is_deleted"},
+    "procedures": {
+        "patient_id",
+        "admission_id",
+        "procedure_type",
+        "status",
+        "patient_snapshot_json",
+        "diagnosis_snapshot",
+        "revision",
+        "is_deleted",
+        "protocol_printed_at",
+    },
     "lab_orders": {
         "patient_id",
         "admission_id",
@@ -989,6 +999,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             updated_by TEXT,
             revision INTEGER DEFAULT 0,
             is_deleted INTEGER DEFAULT 0,
+            protocol_printed_at DATETIME,
             FOREIGN KEY (patient_id) REFERENCES patients(id),
             FOREIGN KEY (admission_id) REFERENCES admissions(id)
         )
@@ -1367,6 +1378,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "lab_orders", "revision", "INTEGER DEFAULT 0", logger)
     _ensure_column(conn, "lab_orders", "created_at_db", "DATETIME", logger)
     _ensure_column(conn, "lab_orders", "updated_at", "DATETIME", logger)
+    _ensure_column(conn, "procedures", "protocol_printed_at", "DATETIME", logger)
     _ensure_column(conn, "procedure_transfusion", "request_at", "DATETIME", logger)
     _ensure_column(conn, "procedure_transfusion", "indication_code", "TEXT", logger)
     _ensure_column(conn, "procedure_transfusion", "donor_code", "TEXT", logger)
@@ -1487,6 +1499,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 14, "transfusion procedure")
     _mark_schema_migration(conn, 15, "schema contract satisfied")
     _mark_schema_migration(conn, 16, "admissions emergency notice fields")
+    _mark_schema_migration(conn, 17, "lab orders worklist")
 
     for table in (
         "vitals",
@@ -1917,5 +1930,5 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         ),
         use_updated_at_gate=True,
     )
-    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "lab orders worklist")
+    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "transfusion protocol print tracking")
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

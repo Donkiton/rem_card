@@ -118,6 +118,10 @@ class FullReportWorker(QThread):
                 results[0]["transfusion_registration_all"] = self.remcard_service.get_transfusion_registration_sheet(
                     self.admission_id
                 )
+            if results and hasattr(self.remcard_service, "get_unprinted_completed_transfusion_protocols"):
+                results[0]["pending_transfusion_protocols"] = (
+                    self.remcard_service.get_unprinted_completed_transfusion_protocols(self.admission_id)
+                )
 
             self.finished.emit(results)
         except Exception as e:
@@ -511,6 +515,14 @@ class DataCollectorWorker(QThread):
                     start_dt=start_dt,
                     end_dt=end_dt,
                 )
+            if hasattr(self.remcard_service, "get_unprinted_completed_transfusion_protocols"):
+                data["pending_transfusion_protocols"] = (
+                    self.remcard_service.get_unprinted_completed_transfusion_protocols(
+                        self.admission_id,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                    )
+                )
             self.finished.emit(data)
         except Exception as e:
             logger.error(f"Error in Print DataCollector: {str(e)}")
@@ -609,6 +621,7 @@ class SectorPrint(BaseSectorWidget):
         self.set_content(main_frame)
         self.last_generated_pdf = None
         self.pdf_worker = None
+        self._pending_transfusion_protocol_ids = []
 
     def set_context(self, remcard_service, admission_id, date):
         self.remcard_service, self.admission_id, self.card_date = remcard_service, admission_id, date
@@ -701,6 +714,7 @@ class SectorPrint(BaseSectorWidget):
         from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
 
         self.status_label.setText("Сборка PDF...")
+        self._pending_transfusion_protocol_ids = self._collect_pending_transfusion_protocol_ids(data)
         self.pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
         self.pdf_worker.completed.connect(lambda path: self._on_pdf_ready(path, open_after=open_after, ready_text=ready_text))
         self.pdf_worker.error.connect(self.on_error)
@@ -711,6 +725,7 @@ class SectorPrint(BaseSectorWidget):
         self.last_generated_pdf = pathlib.Path(pdf_path)
         self.status_label.setText(ready_text)
         self.btn_open.setEnabled(True)
+        self._mark_pending_transfusion_protocols_printed()
         if open_after:
             self.open_pdf()
 
@@ -720,3 +735,27 @@ class SectorPrint(BaseSectorWidget):
     def open_pdf(self):
         if self.last_generated_pdf and self.last_generated_pdf.exists():
             open_pdf_file(self.last_generated_pdf, parent=self)
+
+    @staticmethod
+    def _collect_pending_transfusion_protocol_ids(data) -> list[int]:
+        sources = data if isinstance(data, list) else [data]
+        result: list[int] = []
+        for item in sources:
+            for protocol in (item or {}).get("pending_transfusion_protocols") or []:
+                try:
+                    procedure_id = int(protocol.get("procedure_id") or 0)
+                except Exception:
+                    procedure_id = 0
+                if procedure_id:
+                    result.append(procedure_id)
+        return sorted(set(result))
+
+    def _mark_pending_transfusion_protocols_printed(self):
+        ids = list(self._pending_transfusion_protocol_ids or [])
+        self._pending_transfusion_protocol_ids = []
+        if not ids or not self.remcard_service or not hasattr(self.remcard_service, "mark_transfusion_protocols_printed"):
+            return
+        try:
+            self.remcard_service.mark_transfusion_protocols_printed(ids)
+        except Exception:
+            logger.exception("Не удалось отметить протоколы гемотрансфузии как распечатанные.")
