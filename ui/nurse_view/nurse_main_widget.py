@@ -1941,11 +1941,10 @@ class NurseMainWidget(QWidget):
             logger.warning("Failed to update emergency notice sector (nurse): %s", exc, exc_info=True)
 
     def on_tab_changed(self, tab_name):
-        tab_name = self.layout_manager.set_active_tab(tab_name) or tab_name
+        if hasattr(self.layout_manager, "sector_2b") and hasattr(self.layout_manager.sector_2b, "current_tab_name"):
+            tab_name = self.layout_manager.sector_2b.current_tab_name() or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
-        elif tab_name == "Анализы":
-            self._sync_lab_orders_context()
         elif tab_name == "Назначения":
             ow = self._ensure_orders_widget()
             if ow is None:

@@ -953,7 +953,7 @@ class SectorAnal(BaseSectorWidget):
                 int(self.admission_id),
                 self.card_date,
                 role=self.role_key,
-                force_refresh=True,
+                force_refresh=False,
             )
             return snapshot or {}
 

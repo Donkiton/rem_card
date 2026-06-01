@@ -2623,9 +2623,8 @@ class DoctorRemCardWidget(QWidget):
             sector_4a.update_balance(total_in_cur, total_out_cur, total_in_daily=total_in_day, total_out_daily=total_out_day)
 
     def on_tab_changed(self, tab_name):
-        tab_name = self.layout_manager.set_active_tab(tab_name, source="click") or tab_name
-        if tab_name == "Анализы":
-            self._sync_lab_orders_context()
+        if hasattr(self.layout_manager, "sector_2b") and hasattr(self.layout_manager.sector_2b, "current_tab_name"):
+            tab_name = self.layout_manager.sector_2b.current_tab_name() or tab_name
         if tab_name == "Баланс жидкости":
             self._ensure_balance_tab_ready()
         elif tab_name == "Назначения":
