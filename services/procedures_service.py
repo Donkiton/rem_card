@@ -62,14 +62,16 @@ class ProceduresService:
     def refresh_transfusion_statuses(self, admission_id: int):
         if not admission_id:
             return 0
+        now = datetime.now().replace(second=0, microsecond=0)
+        if not self.dao.has_transfusion_status_updates(int(admission_id), now=now):
+            return 0
 
         def operation(cursor):
-            self.dao.refresh_transfusion_statuses(
+            return self.dao.refresh_transfusion_statuses(
                 cursor,
                 int(admission_id),
-                now=datetime.now().replace(second=0, microsecond=0),
+                now=now,
             )
-            return 0
 
         return self._run_write(f"procedure_transfusion_status_refresh:{admission_id}", operation)
 

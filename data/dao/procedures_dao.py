@@ -304,8 +304,9 @@ class ProceduresDAO:
                 """,
                 (status, *params),
             )
+            return int(cursor.rowcount or 0)
 
-        update(
+        changed = update(
             ProcedureStatus.COMPLETED.value,
             completed_where,
             (
@@ -315,7 +316,7 @@ class ProceduresDAO:
                 ProcedureStatus.COMPLETED.value,
             ),
         )
-        update(
+        changed += update(
             ProcedureStatus.ACTIVE.value,
             active_where,
             (
@@ -326,7 +327,7 @@ class ProceduresDAO:
                 ProcedureStatus.ACTIVE.value,
             ),
         )
-        update(
+        changed += update(
             ProcedureStatus.DRAFT.value,
             draft_where,
             (
@@ -336,6 +337,49 @@ class ProceduresDAO:
                 ProcedureStatus.DRAFT.value,
             ),
         )
+        return changed
+
+    def has_transfusion_status_updates(self, admission_id: int, *, now: datetime) -> bool:
+        now_value = self._dt_value(now.replace(second=0, microsecond=0))
+        row = self.db.fetch_one_remcard(
+            """
+            SELECT 1
+            FROM procedures
+            WHERE admission_id = ?
+              AND procedure_type = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND started_at IS NOT NULL
+              AND finished_at IS NOT NULL
+              AND (
+                    (
+                        CAST(STRFTIME('%s', finished_at) AS INTEGER) < CAST(STRFTIME('%s', ?) AS INTEGER)
+                        AND status != ?
+                    )
+                 OR (
+                        CAST(STRFTIME('%s', started_at) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+                        AND CAST(STRFTIME('%s', finished_at) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+                        AND status != ?
+                    )
+                 OR (
+                        CAST(STRFTIME('%s', started_at) AS INTEGER) > CAST(STRFTIME('%s', ?) AS INTEGER)
+                        AND status != ?
+                    )
+              )
+            LIMIT 1
+            """,
+            (
+                int(admission_id),
+                ProcedureType.TRANSFUSION.value,
+                now_value,
+                ProcedureStatus.COMPLETED.value,
+                now_value,
+                now_value,
+                ProcedureStatus.ACTIVE.value,
+                now_value,
+                ProcedureStatus.DRAFT.value,
+            ),
+        )
+        return bool(row)
 
     def mark_protocols_printed(self, cursor, procedure_ids: list[int]):
         ids = [int(value) for value in procedure_ids if value]
