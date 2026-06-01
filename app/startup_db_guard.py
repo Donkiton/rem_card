@@ -16,6 +16,7 @@ from rem_card.app.runtime_paths import (
     DataPathConfigurationError,
     get_journal_db_path,
     get_required_baza_paths,
+    is_compiled,
     resolve_baza_dir,
 )
 from rem_card.app.version import APP_VERSION
@@ -269,8 +270,6 @@ def _startup_unavailable_result(
 
 
 def _ensure_guard_dirs(baza_dir: str):
-    for path in get_required_baza_paths(baza_dir):
-        os.makedirs(path, exist_ok=True)
     extra_dirs = (
         os.path.join(baza_dir, "config"),
         os.path.join(baza_dir, "locks"),
@@ -284,7 +283,13 @@ def _ensure_guard_dirs(baza_dir: str):
         os.path.join(baza_dir, "backup_health"),
         os.path.join(baza_dir, "backup_health", "invalid_backups"),
     )
-    for path in extra_dirs:
+    required_dirs = [*get_required_baza_paths(baza_dir), *extra_dirs]
+    if is_compiled():
+        for path in required_dirs:
+            if not os.path.isdir(path):
+                raise FileNotFoundError(f"Required shared directory is unavailable: {path}")
+        return
+    for path in required_dirs:
         os.makedirs(path, exist_ok=True)
 
 

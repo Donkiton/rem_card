@@ -1049,7 +1049,11 @@ def _run_pending_emergency_merge_before_startup(close_startup_splash, logger=Non
             f"Не удалось проверить pending merge аварийной сессии:\n{exc}",
         )
         sys.exit(1)
-    if not result.attempted:
+    _handle_pending_emergency_merge_startup_result(result, close_startup_splash, logger)
+
+
+def _handle_pending_emergency_merge_startup_result(result, close_startup_splash, logger) -> None:
+    if result.ok and not result.attempted:
         return
     if result.ok:
         logger.info(
@@ -1070,6 +1074,16 @@ def _run_pending_emergency_merge_before_startup(close_startup_splash, logger=Non
         message = f"{message}\n\nТехническая причина: {result.error}"
     _show_custom_warning("Аварийное объединение не завершено", message)
     sys.exit(1)
+
+
+def _should_run_pending_emergency_merge_before_runtime(emergency_runtime_context) -> bool:
+    return emergency_runtime_context is None
+
+
+def _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, close_startup_splash) -> None:
+    if not _should_run_pending_emergency_merge_before_runtime(emergency_runtime_context):
+        return
+    _run_pending_emergency_merge_before_startup(close_startup_splash)
 
 
 def main(forced_role: Optional[str] = None, path_setup: bool = False):
@@ -1113,8 +1127,6 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         nonlocal splash
         splash = _close_startup_splash(app, splash)
 
-    _run_pending_emergency_merge_before_startup(close_startup_splash)
-
     emergency_startup_state = {"runtime_context": None}
 
     if not _validate_compiled_role_startup(
@@ -1133,6 +1145,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         sys.exit(1)
 
     emergency_runtime_context = emergency_startup_state.get("runtime_context")
+    _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, close_startup_splash)
 
     role_suffix = args.role if args.role else "default"
     server_name = f"rem_card_single_instance_server_{role_suffix}"

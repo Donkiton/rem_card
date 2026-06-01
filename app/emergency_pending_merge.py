@@ -4,11 +4,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from rem_card.app.emergency_merge_dry_run import EmergencyMergeDryRunService
-from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
 from rem_card.app.emergency_metadata import EmergencyMetadataError
 from rem_card.app.emergency_paths import active_dir, active_session_metadata_path
-from rem_card.app.emergency_restore_probe import merge_ready_marker_path
 from rem_card.app.emergency_store import EmergencyLocalStore
 
 
@@ -81,6 +78,10 @@ def run_pending_emergency_merge(
             error="merge_failed_unresolved",
             details={"status": candidate.status},
         )
+
+    from rem_card.app.emergency_merge_dry_run import EmergencyMergeDryRunService
+    from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
+    from rem_card.app.emergency_restore_probe import merge_ready_marker_path
 
     marker_path = merge_ready_marker_path(store.resolve_root(), session_id)
     runtime_context = store.build_active_runtime_context(session_id)

@@ -9,8 +9,18 @@ from datetime import datetime
 from rem_card.app.paths import LOGS_DIR, ensure_directories
 from rem_card.app.runtime_paths import cleanup_old_local_logs, get_log_file_prefix
 
+
+def _ensure_logger_directories() -> str | None:
+    try:
+        ensure_directories()
+        return None
+    except (FileNotFoundError, OSError) as exc:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        return str(exc)
+
+
 def setup_logger():
-    ensure_directories()
+    shared_dir_warning = _ensure_logger_directories()
     os.makedirs(LOGS_DIR, exist_ok=True)
     cleanup_old_local_logs(LOGS_DIR)
 
@@ -36,6 +46,8 @@ def setup_logger():
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     logger._remcard_configured = True
+    if shared_dir_warning:
+        logger.warning("Shared directory unavailable during logger setup; using local logs only: %s", shared_dir_warning)
 
     return logger
 
@@ -78,7 +90,7 @@ def _archive_fault_log(fault_log_path: str, content: str, *, suffix: str = "") -
 def init_crash_handler():
     """Инициализация расширенного перехватчика фатальных сбоев (C++ и Python)."""
     global _FAULT_FILE, _FAULT_LOG_PATH
-    ensure_directories()
+    _ensure_logger_directories()
         
     fault_log_path = os.path.join(LOGS_DIR, "faults.log")
     reset_fault_log = True

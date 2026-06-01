@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import threading
@@ -28,10 +29,12 @@ from rem_card.app.emergency_validation import (
     validate_settings_db_snapshot,
 )
 from rem_card.app.local_metrics import record_metric
-from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import NETWORK_SAFE_DB_PROFILE
 from rem_card.app.startup_db_guard import _compare_client_versions
 from rem_card.app.version import APP_VERSION
+
+
+logger = logging.getLogger("RemCard")
 
 
 MERGE_READY_MARKER_FILE_NAME = "emergency_merge_ready.json"
