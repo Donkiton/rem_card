@@ -485,7 +485,13 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self.airway_text = self._resolve_airway_text()
         self.measure_edits: List[Tuple[str, QPlainTextEdit]] = []
         self.doctor_store = DoctorListStore()
-        self.doctor_names = self._load_doctor_names()
+        self.doctor_records = self._load_doctor_records()
+        self.doctor_names = [item["full_name"] for item in self.doctor_records]
+        self.doctor_positions = {
+            item["full_name"].strip().lower(): item.get("position", "")
+            for item in self.doctor_records
+            if item.get("full_name")
+        }
         self._last_auto_comment = ""
         self._comment_manually_changed = False
         self.setFixedWidth(874)
@@ -635,9 +641,9 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             self.measure_edits.append((label_text, edit))
         self.measures_layout.addLayout(grid)
 
-    def _load_doctor_names(self) -> List[str]:
+    def _load_doctor_records(self) -> List[dict[str, str]]:
         try:
-            return self.doctor_store.load_doctors()
+            return self.doctor_store.load_doctor_records()
         except Exception:
             return []
 
@@ -725,6 +731,14 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
         self.protocol_layout.addLayout(grid)
+        self.protocol_doctor_combo.currentTextChanged.connect(self._on_protocol_doctor_changed)
+        self._on_protocol_doctor_changed(self.protocol_doctor_combo.currentText())
+
+    def _on_protocol_doctor_changed(self, doctor_name: str):
+        key = str(doctor_name or "").strip().lower()
+        if key not in self.doctor_positions:
+            return
+        self.protocol_position_edit.setText(self.doctor_positions.get(key) or DEFAULT_DEATH_PROTOCOL_POSITION)
 
     def _protocol_payload(self) -> Dict[str, str]:
         biological_dt = self._resolve_picker_datetime(self.biological_time_picker)

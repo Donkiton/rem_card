@@ -6,7 +6,6 @@ from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -18,48 +17,73 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.db_cycle_registry import DB_CYCLE_MAX_AGE_DAYS, DbCycleInfo, list_db_cycles
+from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.styles.theme_tokens import token
 
 
-class DbRotationDialog(QDialog):
+class DbRotationDialog(BaseStyledDialog):
     def __init__(self, db_manager, parent=None, on_rotated: Callable[[], None] | None = None):
-        super().__init__(parent)
+        super().__init__("Ручная ротация БД", parent)
         self.db_manager = db_manager
         self.on_rotated = on_rotated
         self._cycles: list[DbCycleInfo] = []
         self.setWindowTitle("Ручная ротация БД")
-        self.setMinimumSize(880, 560)
+        self.setMinimumSize(900, 580)
+        self.main_frame.setMinimumSize(900, 580)
+        self.content_layout.setContentsMargins(18, 14, 18, 18)
         self._init_ui()
+        self._apply_local_style()
         self.reload_cycles()
 
     def _init_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
+        root = self.content_layout
         root.setSpacing(12)
 
-        title = QLabel("Ручная ротация БД")
-        title.setProperty("heading", "true")
-        root.addWidget(title)
+        header = QFrame()
+        header.setObjectName("DbRotationHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(12, 10, 12, 10)
+        header_layout.setSpacing(4)
+
+        title = QLabel("Управление циклами БД")
+        title.setObjectName("DbRotationHeaderTitle")
+        header_layout.addWidget(title)
+
+        hint = QLabel("Ручная ротация доступна только для текущей сетевой БД, когда нет пациентов на койках и активных рабочих сессий медсестры.")
+        hint.setObjectName("DbRotationHint")
+        hint.setWordWrap(True)
+        header_layout.addWidget(hint)
+        root.addWidget(header)
 
         body = QHBoxLayout()
         body.setSpacing(12)
 
         left = QFrame()
+        left.setObjectName("DbRotationPanel")
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(12, 12, 12, 12)
         left_layout.setSpacing(8)
-        left_layout.addWidget(QLabel("Циклы БД"))
+        left_title = QLabel("Циклы БД")
+        left_title.setObjectName("DbRotationSectionTitle")
+        left_layout.addWidget(left_title)
         self.list_widget = QListWidget()
+        self.list_widget.setObjectName("DbRotationCycleList")
         self.list_widget.currentRowChanged.connect(self._on_selection_changed)
         left_layout.addWidget(self.list_widget, 1)
         body.addWidget(left, 1)
 
         right = QFrame()
+        right.setObjectName("DbRotationPanel")
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(12, 12, 12, 12)
         right_layout.setSpacing(8)
-        right_layout.addWidget(QLabel("Сводка"))
+        right_title = QLabel("Сводка")
+        right_title.setObjectName("DbRotationSectionTitle")
+        right_layout.addWidget(right_title)
         self.summary = QTextEdit()
+        self.summary.setObjectName("DbRotationSummary")
         self.summary.setReadOnly(True)
         right_layout.addWidget(self.summary, 1)
         body.addWidget(right, 2)
@@ -69,17 +93,100 @@ class DbRotationDialog(QDialog):
         buttons = QHBoxLayout()
         buttons.addStretch()
         self.refresh_btn = QPushButton("Обновить")
+        self.refresh_btn.setObjectName("DialogOkBtn")
         self.refresh_btn.clicked.connect(self.reload_cycles)
         buttons.addWidget(self.refresh_btn)
 
         self.rotate_btn = QPushButton("Выполнить ручную ротацию")
+        self.rotate_btn.setObjectName("DbRotationPrimaryButton")
         self.rotate_btn.clicked.connect(self._on_rotate_clicked)
         buttons.addWidget(self.rotate_btn)
 
         self.close_btn = QPushButton("Закрыть")
+        self.close_btn.setObjectName("DialogOkBtn")
         self.close_btn.clicked.connect(self.accept)
         buttons.addWidget(self.close_btn)
         root.addLayout(buttons)
+
+    def _apply_local_style(self):
+        tokens = get_theme_manager().current_tokens()
+        t = lambda key, default="": token(tokens, key, default)
+        self.setStyleSheet(
+            self.styleSheet()
+            + f"""
+            QFrame#DbRotationHeader {{
+                background-color: {t("surface.subtle")};
+                border: 1px solid {t("border.subtle")};
+                border-radius: {t("radius.md")};
+            }}
+            QLabel#DbRotationHeaderTitle {{
+                color: {t("text.primary")};
+                font-size: 16px;
+                font-weight: bold;
+                background: transparent;
+            }}
+            QLabel#DbRotationHint {{
+                color: {t("text.secondary")};
+                font-size: 12px;
+                background: transparent;
+            }}
+            QFrame#DbRotationPanel {{
+                background-color: {t("surface.card")};
+                border: 1px solid {t("border.subtle")};
+                border-radius: {t("radius.md")};
+            }}
+            QLabel#DbRotationSectionTitle {{
+                color: {t("text.primary")};
+                font-size: 13px;
+                font-weight: bold;
+                background: transparent;
+            }}
+            QListWidget#DbRotationCycleList {{
+                background-color: {t("field.bg")};
+                color: {t("field.text")};
+                border: 1px solid {t("field.border")};
+                border-radius: {t("radius.sm")};
+                padding: 4px;
+                outline: none;
+            }}
+            QListWidget#DbRotationCycleList::item {{
+                padding: 8px 10px;
+                border-radius: {t("radius.sm")};
+            }}
+            QListWidget#DbRotationCycleList::item:selected {{
+                background-color: {t("surface.selected")};
+                color: {t("text.inverse")};
+            }}
+            QListWidget#DbRotationCycleList::item:hover:!selected {{
+                background-color: {t("surface.hover")};
+            }}
+            QTextEdit#DbRotationSummary {{
+                background-color: {t("field.bg")};
+                color: {t("field.text")};
+                border: 1px solid {t("field.border")};
+                border-radius: {t("radius.sm")};
+                padding: 8px;
+                selection-background-color: {t("surface.selected")};
+                selection-color: {t("text.inverse")};
+            }}
+            QPushButton#DbRotationPrimaryButton {{
+                background-color: {t("button.accent.bg")};
+                color: {t("button.accent.text")};
+                font-size: 13px;
+                font-weight: bold;
+                padding: 6px 20px;
+                border: 1px solid {t("dialog.border")};
+                border-radius: {t("radius.dialog")};
+            }}
+            QPushButton#DbRotationPrimaryButton:hover {{
+                background-color: {t("button.accent.hover")};
+            }}
+            QPushButton#DbRotationPrimaryButton:disabled {{
+                background-color: {t("field.disabled_bg")};
+                color: {t("text.disabled")};
+            }}
+            """
+        )
 
     def reload_cycles(self):
         current_path = self._current_db_path()

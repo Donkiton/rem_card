@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QFormLayout, QGroupBox, QLineEdit, QTextEdit, QVBoxLayout, QWidget
 
 from rem_card.data.dto.procedures_dto import ConsentKind, ProcedureConsentDTO
+from rem_card.ui.procedures.consent_doctor_combo import ConsentDoctorCombo
 
 
 class LumbarPunctureConsentWidget(QWidget):
@@ -36,12 +37,9 @@ class LumbarPunctureConsentWidget(QWidget):
         self.emergency_reason_edit.setFixedHeight(70)
         self.emergency_reason_edit.setPlaceholderText("Причина невозможности получить согласие")
 
-        self.consilium_1_edit = QLineEdit()
-        self.consilium_1_edit.setPlaceholderText("ФИО врача и должность")
-        self.consilium_2_edit = QLineEdit()
-        self.consilium_2_edit.setPlaceholderText("ФИО врача и должность")
-        self.consilium_3_edit = QLineEdit()
-        self.consilium_3_edit.setPlaceholderText("ФИО врача и должность")
+        self.consilium_1_edit = ConsentDoctorCombo()
+        self.consilium_2_edit = ConsentDoctorCombo()
+        self.consilium_3_edit = ConsentDoctorCombo()
         self.consilium_notes_edit = QTextEdit()
         self.consilium_notes_edit.setFixedHeight(70)
         self.consilium_notes_edit.setPlaceholderText("Особое мнение / примечание")
@@ -61,9 +59,9 @@ class LumbarPunctureConsentWidget(QWidget):
     def collect(self, procedure_id: int = 0, doctor_name: str = "", diagnosis: str = "") -> ProcedureConsentDTO:
         mode = str(self.mode_combo.currentData() or "patient")
         consilium = {
-            "doctor_1": self.consilium_1_edit.text().strip() if mode == "consilium" else "",
-            "doctor_2": self.consilium_2_edit.text().strip() if mode == "consilium" else "",
-            "doctor_3": self.consilium_3_edit.text().strip() if mode == "consilium" else "",
+            "doctor_1": self.consilium_1_edit.currentText().strip() if mode == "consilium" else "",
+            "doctor_2": self.consilium_2_edit.currentText().strip() if mode == "consilium" else "",
+            "doctor_3": self.consilium_3_edit.currentText().strip() if mode == "consilium" else "",
             "notes": self.consilium_notes_edit.toPlainText().strip() if mode == "consilium" else "",
         }
         return ProcedureConsentDTO(
@@ -91,9 +89,9 @@ class LumbarPunctureConsentWidget(QWidget):
             consilium = json.loads(dto.consilium_json or "{}")
         except Exception:
             consilium = {}
-        self.consilium_1_edit.setText(str(consilium.get("doctor_1") or ""))
-        self.consilium_2_edit.setText(str(consilium.get("doctor_2") or ""))
-        self.consilium_3_edit.setText(str(consilium.get("doctor_3") or ""))
+        self.consilium_1_edit.setEditText(str(consilium.get("doctor_1") or ""))
+        self.consilium_2_edit.setEditText(str(consilium.get("doctor_2") or ""))
+        self.consilium_3_edit.setEditText(str(consilium.get("doctor_3") or ""))
         self.consilium_notes_edit.setPlainText(str(consilium.get("notes") or ""))
         self._apply_mode()
 

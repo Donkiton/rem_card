@@ -885,7 +885,18 @@ class SettingsService:
         seen = set()
         count = 0
         for sort_order, item in enumerate(raw, start=1):
-            full_name = " ".join(str(item or "").split())
+            if isinstance(item, dict):
+                full_name = " ".join(str(
+                    item.get("full_name")
+                    or item.get("name")
+                    or item.get("doctor")
+                    or item.get("fio")
+                    or ""
+                ).split())
+                position = " ".join(str(item.get("position") or "").split())
+            else:
+                full_name = " ".join(str(item or "").split())
+                position = ""
             key = full_name.lower()
             if not full_name or key in seen:
                 continue
@@ -897,14 +908,26 @@ class SettingsService:
                     code, full_name, short_name, position, department, signature_text,
                     enabled, sort_order, revision, payload_json, source, created_at, updated_at
                 )
-                VALUES (?, ?, ?, '', '', ?, 1, ?, 1, ?, 'legacy_json', ?, ?)
+                VALUES (?, ?, ?, ?, '', ?, 1, ?, 1, ?, 'legacy_json', ?, ?)
                 ON CONFLICT(code) DO UPDATE SET
                     full_name = excluded.full_name,
+                    position = excluded.position,
+                    signature_text = excluded.signature_text,
                     sort_order = excluded.sort_order,
                     payload_json = excluded.payload_json,
                     updated_at = excluded.updated_at
                 """,
-                (code, full_name, full_name, full_name, sort_order, _stable_json({"full_name": full_name}), now_text(), now_text()),
+                (
+                    code,
+                    full_name,
+                    full_name,
+                    position,
+                    full_name,
+                    sort_order,
+                    _stable_json({"full_name": full_name, "position": position}),
+                    now_text(),
+                    now_text(),
+                ),
             )
             count += 1
         return count
@@ -2142,39 +2165,75 @@ class SettingsService:
             self._bump_catalog_version(cursor, DIET_TEMPLATES_KEY, "diet_templates", None, "reorder", after={"order": list(ordered_template_ids or [])})
 
     def load_doctors(self) -> list[str]:
+        return [item["full_name"] for item in self.load_doctor_records()]
+
+    def load_doctor_records(self) -> list[dict[str, str]]:
         self.ensure_ready()
         with self.db.read_connection() as conn:
             rows = conn.execute(
-                "SELECT full_name FROM doctors WHERE enabled = 1 ORDER BY sort_order ASC, full_name ASC"
+                """
+                SELECT full_name, position
+                FROM doctors
+                WHERE enabled = 1
+                ORDER BY sort_order ASC, full_name ASC
+                """
             ).fetchall()
-        return [str(row["full_name"]) for row in rows if str(row["full_name"] or "").strip()]
-
-    def save_doctors(self, doctors: list[str]) -> None:
-        self.ensure_ready()
-        normalized = []
+        result: list[dict[str, str]] = []
         seen = set()
-        for item in doctors or []:
-            text = " ".join(str(item or "").split())
-            key = text.lower()
-            if not text or key in seen:
+        for row in rows:
+            full_name = " ".join(str(row["full_name"] or "").split())
+            position = " ".join(str(row["position"] or "").split())
+            key = full_name.lower()
+            if not full_name or key in seen:
                 continue
             seen.add(key)
-            normalized.append(text)
+            result.append({"full_name": full_name, "position": position})
+        return result
+
+    def save_doctors(self, doctors: list[str]) -> None:
+        self.save_doctor_records([{"full_name": item, "position": ""} for item in doctors or []])
+
+    def save_doctor_records(self, doctors: list[dict[str, str]]) -> None:
+        self.ensure_ready()
+        normalized: list[dict[str, str]] = []
+        seen = set()
+        for item in doctors or []:
+            if isinstance(item, dict):
+                full_name = " ".join(str(
+                    item.get("full_name")
+                    or item.get("name")
+                    or item.get("doctor")
+                    or item.get("fio")
+                    or ""
+                ).split())
+                position = " ".join(str(item.get("position") or "").split())
+            else:
+                full_name = " ".join(str(item or "").split())
+                position = ""
+            key = full_name.lower()
+            if not full_name or key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"full_name": full_name, "position": position})
         with self.db.transaction("settings_doctors_save") as cursor:
             before_rows = [dict(row) for row in cursor.execute("SELECT * FROM doctors ORDER BY sort_order").fetchall()]
             cursor.execute("UPDATE doctors SET enabled = 0, updated_at = ?", (now_text(),))
-            for sort_order, full_name in enumerate(normalized, start=1):
+            for sort_order, item in enumerate(normalized, start=1):
+                full_name = item["full_name"]
+                position = item["position"]
                 code = _slug(full_name, f"doctor_{sort_order}")
+                payload = {"full_name": full_name, "position": position}
                 cursor.execute(
                     """
                     INSERT INTO doctors (
-                        code, full_name, short_name, signature_text, enabled, sort_order,
+                        code, full_name, short_name, position, signature_text, enabled, sort_order,
                         revision, payload_json, source, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, 1, ?, 1, ?, 'manual', ?, ?)
+                    VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, 'manual', ?, ?)
                     ON CONFLICT(code) DO UPDATE SET
                         full_name = excluded.full_name,
                         short_name = excluded.short_name,
+                        position = excluded.position,
                         signature_text = excluded.signature_text,
                         enabled = 1,
                         sort_order = excluded.sort_order,
@@ -2182,7 +2241,17 @@ class SettingsService:
                         payload_json = excluded.payload_json,
                         updated_at = excluded.updated_at
                     """,
-                    (code, full_name, full_name, full_name, sort_order, _stable_json({"full_name": full_name}), now_text(), now_text()),
+                    (
+                        code,
+                        full_name,
+                        full_name,
+                        position,
+                        full_name,
+                        sort_order,
+                        _stable_json(payload),
+                        now_text(),
+                        now_text(),
+                    ),
                 )
             self._bump_catalog_version(cursor, DOCTORS_KEY, "doctors", None, "replace", before=before_rows, after={"doctors": normalized})
 
