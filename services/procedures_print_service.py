@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from rem_card.app.paths import REPORT_DIR
 from rem_card.data.dao.procedures_dao import ProceduresDAO
@@ -231,8 +231,11 @@ TRANSFUSION_WAS_NOT_WAS = {
 
 
 class ProceduresPrintService:
-    def __init__(self, dao: ProceduresDAO):
+    DEFAULT_DIURESIS_TEXT = "сохранен, желтая"
+
+    def __init__(self, dao: ProceduresDAO, observation_provider: Callable[[int, Any, Any], dict] | None = None):
         self.dao = dao
+        self.observation_provider = observation_provider
         self.template_dir = Path(__file__).resolve().parents[1] / "procedure_templates"
 
     def render_document(self, procedure_id: int, document_kind: str) -> str:
@@ -545,7 +548,7 @@ class ProceduresPrintService:
         if transfusion is None:
             raise ValueError("Данные гемотрансфузии не найдены.")
         context = self._base_context(bundle)
-        observation = self._observation_dict(transfusion.observation_json)
+        observation = self._observation_for_print(bundle)
         scenario = transfusion.indication_code or ""
         context.update(
             {
@@ -886,6 +889,52 @@ class ProceduresPrintService:
             if isinstance(incoming, dict):
                 values.update({key: str(incoming.get(key) or "") for key in ("bp", "pulse", "temp", "diuresis")})
         return default
+
+    def _observation_for_print(self, bundle: ProcedureBundle) -> dict[str, dict[str, str]]:
+        transfusion = bundle.transfusion
+        observation = self._observation_dict(getattr(transfusion, "observation_json", "") if transfusion else "")
+        values = self._fetch_transfusion_observation_values(bundle)
+        self._merge_observation_values(observation, values)
+        return observation
+
+    def _fetch_transfusion_observation_values(self, bundle: ProcedureBundle) -> dict:
+        if not self.observation_provider:
+            return {}
+        procedure = bundle.procedure
+        admission_id = int(getattr(procedure, "admission_id", 0) or 0)
+        if not admission_id:
+            return {}
+        try:
+            values = self.observation_provider(
+                admission_id,
+                getattr(procedure, "started_at", None),
+                getattr(procedure, "finished_at", None),
+            )
+        except Exception:
+            return {}
+        return values if isinstance(values, dict) else {}
+
+    @classmethod
+    def _merge_observation_values(cls, observation: dict[str, dict[str, str]], values: dict) -> None:
+        if not isinstance(values, dict):
+            return
+        for slot in ("before", "hour1", "hour2"):
+            target = observation.setdefault(slot, {})
+            source = values.get(slot)
+            if not isinstance(source, dict):
+                continue
+            for key in ("bp", "pulse", "temp", "diuresis"):
+                value = str(source.get(key) or "").strip()
+                if not value or not cls._can_fill_observation_value(target.get(key), key):
+                    continue
+                target[key] = value
+
+    @classmethod
+    def _can_fill_observation_value(cls, current_value: Any, key: str) -> bool:
+        text = str(current_value or "").strip()
+        if not text:
+            return True
+        return key == "diuresis" and text == cls.DEFAULT_DIURESIS_TEXT
 
     @staticmethod
     def _safe_filename(value: str) -> str:

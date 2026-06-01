@@ -364,6 +364,10 @@ class MainWindow(QMainWindow):
         )
         reset_settings_service()
         if int(result or 0) == 1:
+            emergency_session_ready = self._prepare_runtime_outage_emergency_session(marker_payload)
+            if not emergency_session_ready:
+                self.close()
+                return
             launched = launch_emergency_restart(marker_path, role="nurse")
             if not launched:
                 CustomMessageBox.warning(
@@ -372,6 +376,54 @@ class MainWindow(QMainWindow):
                     "RemCard будет закрыта. Запустите RemCard медсестры снова, чтобы открыть аварийный режим.",
                 )
         self.close()
+
+    def _prepare_runtime_outage_emergency_session(self, marker_payload: dict) -> bool:
+        try:
+            from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+            decision = prepare_emergency_startup("nurse")
+            if not decision.allowed:
+                CustomMessageBox.warning(None, "Аварийный режим недоступен", decision.user_message)
+                return False
+            if decision.active_session_metadata is None:
+                if not self._confirm_emergency_password_for_transition(str(decision.password_settings_db_path or "")):
+                    return False
+            start_or_resume_emergency_session(decision, startup_request=marker_payload)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to prepare runtime outage emergency session: %s", exc, exc_info=True)
+            try:
+                from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+                CustomMessageBox.warning(
+                    None,
+                    "Аварийный режим недоступен",
+                    f"Не удалось подготовить аварийный режим:\n{exc}",
+                )
+            except Exception:
+                pass
+            return False
+
+    def _confirm_emergency_password_for_transition(self, settings_db_path: str) -> bool:
+        if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
+            return True
+
+        from rem_card.app.emergency_password import verify_emergency_password_for_offline_startup
+        from rem_card.ui.shared.emergency_dialogs import EmergencyPasswordDialog
+
+        return EmergencyPasswordDialog.verify(
+            self,
+            "Аварийный пароль",
+            "Для перехода в аварийный режим медсестра должна ввести аварийный пароль.",
+            lambda value: verify_emergency_password_for_offline_startup(
+                value,
+                settings_db_path=settings_db_path,
+            ),
+            confirm_text="Перейти в аварийный режим",
+            cancel_text="Закрыть RemCard",
+            error_text="Пароль неверный. Аварийный режим не будет открыт без подтверждения.",
+        )
 
     @Slot(dict)
     def _handle_restore_probe_status(self, payload: dict):

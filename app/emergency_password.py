@@ -102,6 +102,20 @@ def verify_emergency_password(
     return provided == expected
 
 
+def verify_emergency_password_for_offline_startup(
+    candidate: Any,
+    *,
+    settings_db_path: str | None = None,
+) -> bool:
+    if settings_db_path:
+        return verify_emergency_password(candidate, settings_db_path=settings_db_path, readonly=True)
+    try:
+        provided = normalize_emergency_password(candidate)
+    except ValueError:
+        return False
+    return provided == DEFAULT_EMERGENCY_PASSWORD
+
+
 def set_emergency_password(
     new_password: Any,
     settings_service: SettingsService | None = None,

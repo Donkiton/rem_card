@@ -4,6 +4,7 @@ import getpass
 import os
 import shutil
 import socket
+import sqlite3
 import uuid
 from dataclasses import replace
 from datetime import datetime
@@ -154,6 +155,14 @@ def _copy_file_once(source_path: str, target_path: str) -> None:
                 pass
 
 
+def _ensure_active_session_dirs(session_dir: str) -> None:
+    for name in ("locks", "backups", "backup_health", "quarantine", "snapshots", "logs", "config"):
+        os.makedirs(os.path.join(session_dir, name), exist_ok=True)
+    os.makedirs(os.path.join(session_dir, "backups", "settings"), exist_ok=True)
+    os.makedirs(os.path.join(session_dir, "backup_health", "settings"), exist_ok=True)
+    os.makedirs(os.path.join(session_dir, "backup_health", "invalid_backups"), exist_ok=True)
+
+
 class EmergencyLocalStore:
     def __init__(
         self,
@@ -256,8 +265,7 @@ class EmergencyLocalStore:
         if os.path.exists(base_snapshot_path):
             raise EmergencyStoreError(f"base_snapshot.db уже существует для active session: {effective_session_id}")
 
-        for name in ("locks", "backups", "backup_health", "quarantine", "snapshots", "logs"):
-            os.makedirs(os.path.join(session_dir, name), exist_ok=True)
+        _ensure_active_session_dirs(session_dir)
 
         _copy_file_once(standby_metadata.medical_db_path, base_snapshot_path)
         _copy_file_once(standby_metadata.medical_db_path, local_db_path)
@@ -298,6 +306,136 @@ class EmergencyLocalStore:
         )
         self.write_active_session(metadata)
         return metadata
+
+    def create_active_session_from_empty_database(
+        self,
+        *,
+        session_id: str | None = None,
+        settings_source_path: str | None = None,
+        reason: str = "standby unavailable",
+    ) -> EmergencySessionMetadata:
+        self.ensure_root_dirs()
+        effective_session_id = session_id or f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+        session_dir = active_session_dir(self.root, effective_session_id)
+        base_snapshot_path = active_base_snapshot_path(self.root, effective_session_id)
+        local_db_path = active_medical_db_path(self.root, effective_session_id)
+        settings_snapshot_path = active_settings_snapshot_path(self.root, effective_session_id) if self.settings_required else None
+
+        if os.path.exists(base_snapshot_path):
+            raise EmergencyStoreError(f"base_snapshot.db уже существует для active session: {effective_session_id}")
+        if os.path.exists(local_db_path):
+            raise EmergencyStoreError(f"rao_journal_emergency.db уже существует для active session: {effective_session_id}")
+
+        _ensure_active_session_dirs(session_dir)
+        self._create_empty_medical_snapshot(base_snapshot_path, session_dir)
+        _copy_file_once(base_snapshot_path, local_db_path)
+        if settings_snapshot_path:
+            self._copy_or_create_settings_snapshot(
+                settings_snapshot_path,
+                session_dir,
+                settings_source_path=settings_source_path,
+            )
+
+        base_validation = validate_medical_db_snapshot(base_snapshot_path)
+        if not base_validation.ok:
+            raise EmergencyStoreError(f"Пустая аварийная medical DB не прошла validation: {base_validation.reason}")
+        local_validation = validate_medical_db_snapshot(local_db_path)
+        if not local_validation.ok:
+            raise EmergencyStoreError(f"Пустая локальная аварийная DB не прошла validation: {local_validation.reason}")
+        settings_validation = None
+        if settings_snapshot_path:
+            settings_validation = validate_settings_db_snapshot(settings_snapshot_path)
+            if not settings_validation.ok:
+                raise EmergencyStoreError(f"Аварийная settings DB не прошла validation: {settings_validation.reason}")
+
+        base_hash = compute_file_hash(base_snapshot_path)
+        created_at = _now_text()
+        source_client_id, client_id_warning = get_or_create_local_emergency_client_id_with_warning(self.root)
+        metadata = EmergencySessionMetadata(
+            emergency_session_id=effective_session_id,
+            status="active",
+            created_at=created_at,
+            started_at=created_at,
+            ended_at=None,
+            merged_at=None,
+            source_machine=get_local_machine_name(),
+            source_windows_user=get_windows_user(),
+            source_client_id=source_client_id,
+            source_role=self.source_role,
+            app_version=APP_VERSION,
+            schema_version=int(base_validation.schema_version or 0),
+            base_remote_db_path="",
+            base_remote_fingerprint={},
+            base_last_change_id=0,
+            base_snapshot_hash=base_hash,
+            base_snapshot_created_at=created_at,
+            standby_last_change_id=0,
+            last_observed_remote_change_id=0,
+            local_db_path=_normalize_path(local_db_path),
+            base_snapshot_path=_normalize_path(base_snapshot_path),
+            settings_snapshot_path=None if settings_snapshot_path is None else _normalize_path(settings_snapshot_path),
+            merge_attempt_count=0,
+            last_merge_error=None,
+            validation_status="ok",
+            validation_error=client_id_warning,
+        )
+        self.write_active_session(metadata)
+        return metadata
+
+    def _create_empty_medical_snapshot(self, target_path: str, session_dir: str) -> None:
+        if os.path.exists(target_path):
+            raise EmergencyStoreError(f"Файл уже существует и не будет перезаписан: {target_path}")
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        conn = sqlite3.connect(target_path, check_same_thread=False, isolation_level=None, timeout=5.0)
+        try:
+            from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+            from rem_card.app.sqlite_shared import configure_connection, run_quick_check
+
+            configure_connection(conn, profile="network")
+            ensure_unified_schema_with_migration_backup(
+                conn,
+                db_path=target_path,
+                backup_dir=os.path.join(session_dir, "backups"),
+                invalid_dir=os.path.join(session_dir, "backup_health", "invalid_backups"),
+                policy_path=os.path.join(session_dir, "config", "client_policy.json"),
+                baza_dir=session_dir,
+                lock_path=os.path.join(session_dir, "locks", "db.lock"),
+                source="emergency_empty_schema_init",
+            )
+            ok, result = run_quick_check(conn)
+            if not ok:
+                raise EmergencyStoreError(f"Проверка пустой аварийной БД не пройдена: {result}")
+        finally:
+            conn.close()
+
+    def _copy_or_create_settings_snapshot(
+        self,
+        target_path: str,
+        session_dir: str,
+        *,
+        settings_source_path: str | None = None,
+    ) -> None:
+        source = str(settings_source_path or "").strip()
+        if source:
+            validation = validate_settings_db_snapshot(source)
+            if validation.ok:
+                _copy_file_once(source, target_path)
+                return
+        if os.path.exists(target_path):
+            raise EmergencyStoreError(f"settings snapshot уже существует: {target_path}")
+        from rem_card.data.settings.settings_db import SettingsDatabase
+        from rem_card.services.settings.settings_service import SettingsService
+
+        service = SettingsService(
+            SettingsDatabase(
+                settings_db_path=target_path,
+                settings_db_lock_path=os.path.join(session_dir, "locks", "settings.db.lock"),
+                settings_backups_dir=os.path.join(session_dir, "backups", "settings"),
+                settings_backup_health_dir=os.path.join(session_dir, "backup_health", "settings"),
+                readonly=False,
+            )
+        )
+        service.ensure_ready()
 
     def read_active_session(self, session_id: str) -> EmergencySessionMetadata:
         payload = read_json_file(active_session_metadata_path(self.root, session_id))

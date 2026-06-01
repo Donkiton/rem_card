@@ -117,7 +117,10 @@ class RemCardService(QObject):
 
         self.procedures_dao = ProceduresDAO(self.orders_dao.db)
         self._procedures = ProceduresService(self.procedures_dao, data_service=data_service)
-        self._procedures_print = ProceduresPrintService(self.procedures_dao)
+        self._procedures_print = ProceduresPrintService(
+            self.procedures_dao,
+            observation_provider=self.get_transfusion_observation_values,
+        )
         self.lab_orders_dao = LabOrdersDAO(self.orders_dao.db)
         self._lab_analysis_catalog = LabAnalysisCatalogService()
         self._lab_orders = LabOrdersService(

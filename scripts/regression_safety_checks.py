@@ -2431,12 +2431,9 @@ def _check_doctor_startup_corruption_does_not_use_emergency_fallback(temp_root: 
 
 
 def _check_nurse_startup_offline_still_uses_emergency_path(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import emergency_workstation_marker_path, prepare_emergency_startup, start_or_resume_emergency_session
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
     store, _metadata = _prepare_emergency_store_fixture(temp_root)
-    marker = emergency_workstation_marker_path(store.resolve_root())
-    os.makedirs(os.path.dirname(marker), exist_ok=True)
-    Path(marker).write_text("allowed\n", encoding="utf-8")
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     if not decision.allowed or decision.status != "standby_available":
         return False, f"nurse emergency decision failed: {decision}"
@@ -13629,7 +13626,6 @@ def _check_emergency_startup_uses_previous_valid_standby_after_failed_refresh(te
         manager.store.write_standby_metadata = original_write
     if failed.ok:
         return False, "failed refresh unexpectedly succeeded"
-    _write_emergency_startup_allow_marker(manager.store.resolve_root())
     decision = prepare_emergency_startup("nurse", root=manager.store.resolve_root())
     if not decision.allowed:
         return False, f"startup did not use previous valid standby: {decision}"
@@ -14031,20 +14027,10 @@ def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> 
     return True, "ok"
 
 
-def _write_emergency_startup_allow_marker(root: str) -> str:
-    from rem_card.app.emergency_startup import emergency_workstation_marker_path
-
-    path = emergency_workstation_marker_path(root)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    Path(path).write_text("allowed\n", encoding="utf-8")
-    return path
-
-
 def _check_emergency_startup_only_available_for_nurse(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_startup import prepare_emergency_startup
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     doctor = prepare_emergency_startup("doctor", root=store.resolve_root())
     if doctor.allowed or doctor.status != "role_not_allowed":
         return False, f"doctor emergency decision mismatch: {doctor}"
@@ -14058,7 +14044,6 @@ def _check_emergency_startup_doctor_resumes_active_session_only(temp_root: str) 
     from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     nurse_decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     nurse_session = start_or_resume_emergency_session(nurse_decision, root=store.resolve_root())
 
@@ -14076,7 +14061,6 @@ def _check_emergency_startup_doctor_resumes_active_session_only(temp_root: str) 
         return False, f"doctor runtime is not emergency: {doctor_session.runtime_context.mode}"
 
     blocked_root = os.path.join(temp_root, "doctor_without_active")
-    _write_emergency_startup_allow_marker(blocked_root)
     blocked = prepare_emergency_startup("doctor", root=blocked_root)
     if blocked.allowed or blocked.status != "role_not_allowed":
         return False, f"doctor without active session was not blocked: {blocked}"
@@ -14107,44 +14091,49 @@ def _check_emergency_startup_doctor_network_unavailable_shows_controlled_block(t
     return True, "ok"
 
 
-def _check_emergency_startup_requires_authorized_workstation(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import EMERGENCY_WORKSTATION_ALLOW_ENV, prepare_emergency_startup
-
-    store, _standby = _prepare_emergency_store_fixture(temp_root)
-    saved = os.environ.pop(EMERGENCY_WORKSTATION_ALLOW_ENV, None)
-    try:
-        decision = prepare_emergency_startup("nurse", root=store.resolve_root())
-    finally:
-        if saved is not None:
-            os.environ[EMERGENCY_WORKSTATION_ALLOW_ENV] = saved
-    if decision.allowed or decision.status != "workstation_not_authorized":
-        return False, f"missing marker did not block emergency startup: {decision}"
-    return True, "ok"
-
-
-def _check_emergency_startup_requires_valid_standby_pair(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_startup_does_not_require_authorized_workstation(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_startup import prepare_emergency_startup
 
-    root = os.path.join(temp_root, "er")
-    _write_emergency_startup_allow_marker(root)
-    decision = prepare_emergency_startup("nurse", root=root)
-    if decision.allowed or decision.status != "no_valid_standby":
-        return False, f"missing standby pair did not block emergency startup: {decision}"
+    store, _standby = _prepare_emergency_store_fixture(temp_root)
+    decision = prepare_emergency_startup("nurse", root=store.resolve_root())
+    if not decision.allowed or decision.status != "standby_available":
+        return False, f"nurse emergency startup still depends on workstation marker: {decision}"
     return True, "ok"
 
 
-def _check_emergency_startup_blocks_expired_standby_pair(temp_root: str) -> tuple[bool, str]:
+def _check_emergency_startup_missing_standby_uses_empty_database_fallback(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
+
+    root = os.path.join(temp_root, "er")
+    decision = prepare_emergency_startup("nurse", root=root)
+    if not decision.allowed or decision.status != "empty_database_available" or not decision.empty_database_allowed:
+        return False, f"missing standby did not offer empty emergency DB fallback: {decision}"
+    if list(Path(root).rglob("rao_journal_emergency.db")):
+        return False, "empty emergency DB was created before password/session activation"
+    session = start_or_resume_emergency_session(decision, root=root)
+    if session.resumed:
+        return False, "missing standby fallback was treated as resumed session"
+    for path in (session.metadata.local_db_path, session.metadata.base_snapshot_path, session.metadata.settings_snapshot_path):
+        if not path or not os.path.isfile(path):
+            return False, f"empty fallback session file missing: {path}"
+    with sqlite3.connect(session.metadata.local_db_path) as conn:
+        count = int(conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] or 0)
+    if count != 0:
+        return False, f"empty fallback DB contains patients: {count}"
+    return True, "ok"
+
+
+def _check_emergency_startup_expired_standby_uses_empty_database_fallback(temp_root: str) -> tuple[bool, str]:
     from dataclasses import replace
 
     from rem_card.app.emergency_startup import prepare_emergency_startup
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     old = _old_iso_timestamp(4)
     store.write_standby_metadata(replace(standby, created_at=old, updated_at=old))
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
-    if decision.allowed or decision.status != "no_valid_standby":
-        return False, f"expired standby did not block emergency startup: {decision}"
+    if not decision.allowed or decision.status != "empty_database_available" or not decision.empty_database_allowed:
+        return False, f"expired standby did not offer empty emergency DB fallback: {decision}"
     if "older than 3 days" not in decision.technical_reason:
         return False, f"expired standby reason mismatch: {decision.technical_reason}"
     return True, "ok"
@@ -14160,9 +14149,8 @@ def _check_emergency_startup_password_gate_before_activation(temp_root: str) -> 
     password_body = main_text[password_func_start: password_func_end if password_func_end > password_func_start else len(main_text)]
     for token in (
         "EmergencyPasswordDialog.verify",
-        "verify_emergency_password",
+        "verify_emergency_password_for_offline_startup",
         "settings_db_path=settings_db_path",
-        "readonly=True",
         "REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT",
     ):
         if token not in password_body:
@@ -14171,14 +14159,14 @@ def _check_emergency_startup_password_gate_before_activation(temp_root: str) -> 
     flow_start = main_text.find("def _try_emergency_startup_after_network_failure(")
     flow_end = main_text.find("\ndef ", flow_start + 1)
     flow_body = main_text[flow_start: flow_end if flow_end > flow_start else len(main_text)]
-    gate_index = flow_body.find("if decision.standby_metadata is not None:")
+    gate_index = flow_body.find("if decision.active_session_metadata is None:")
     start_index = flow_body.find("session = start_or_resume_emergency_session(")
     if gate_index < 0 or start_index < 0 or gate_index > start_index:
         return False, "password gate is not before emergency session activation"
     if "emergency_startup_password_rejected" not in flow_body:
         return False, "password rejection metric is missing"
-    if "decision.active_session_metadata" in flow_body[gate_index:start_index]:
-        return False, "password gate must not block active emergency session resume"
+    if "decision.active_session_metadata is None" not in flow_body[gate_index:start_index]:
+        return False, "password gate must skip already active emergency session resume"
     return True, "ok"
 
 
@@ -14186,7 +14174,6 @@ def _check_emergency_startup_creates_active_session_from_standby(temp_root: str)
     from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     session = start_or_resume_emergency_session(decision)
     if session.resumed:
@@ -14201,7 +14188,6 @@ def _check_emergency_startup_uses_emergency_runtime_context(temp_root: str) -> t
     from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     session = start_or_resume_emergency_session(prepare_emergency_startup("nurse", root=store.resolve_root()))
     ctx = session.runtime_context
     if ctx.mode != "emergency" or not ctx.is_emergency or ctx.is_network or ctx.is_snapshot:
@@ -14218,7 +14204,6 @@ def _check_emergency_startup_uses_readonly_settings_snapshot(temp_root: str) -> 
     from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     session = start_or_resume_emergency_session(prepare_emergency_startup("nurse", root=store.resolve_root()))
     ctx = session.runtime_context
     if not ctx.settings_readonly or not ctx.settings_db_path.endswith("remcard_settings_snapshot.db"):
@@ -14240,7 +14225,6 @@ def _check_emergency_startup_does_not_use_network_settings_db(temp_root: str) ->
     from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service, reset_settings_service
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     session = start_or_resume_emergency_session(prepare_emergency_startup("nurse", root=store.resolve_root()))
     ctx = session.runtime_context
     try:
@@ -14333,7 +14317,6 @@ def _check_startup_network_path_inaccessible_can_offer_nurse_emergency(temp_root
     from rem_card.app.emergency_startup import classify_startup_failure, prepare_emergency_startup
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     failure = SimpleNamespace(technical_reason="unable to open database file")
     if classify_startup_failure(failure) != "network_unavailable":
         return False, "path inaccessible was not classified as network_unavailable"
@@ -14358,17 +14341,24 @@ def _check_startup_schema_policy_block_does_not_fallback_emergency(temp_root: st
     return True, "ok"
 
 
-def _check_emergency_startup_no_empty_db_creation(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import prepare_emergency_startup
+def _check_emergency_startup_empty_db_created_only_after_activation(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
     root = os.path.join(temp_root, "er")
-    _write_emergency_startup_allow_marker(root)
     decision = prepare_emergency_startup("nurse", root=root)
-    if decision.allowed:
-        return False, "missing standby unexpectedly allowed emergency startup"
-    created = list(Path(root).rglob("rao_journal_emergency.db"))
-    if created:
-        return False, f"empty emergency DB was created without valid standby: {created[:3]}"
+    if not decision.allowed or decision.status != "empty_database_available":
+        return False, f"missing standby did not allow password-gated empty fallback: {decision}"
+    if list(Path(root).rglob("rao_journal_emergency.db")):
+        return False, "empty emergency DB was created before activation"
+    session = start_or_resume_emergency_session(decision, root=root)
+    if not os.path.isfile(session.metadata.local_db_path):
+        return False, "empty emergency DB was not created after activation"
+    if not os.path.isfile(str(session.metadata.settings_snapshot_path or "")):
+        return False, "empty emergency settings snapshot was not created after activation"
+    with sqlite3.connect(session.metadata.local_db_path) as conn:
+        count = int(conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] or 0)
+    if count != 0:
+        return False, f"empty emergency DB contains patients: {count}"
     return True, "ok"
 
 
@@ -14376,7 +14366,6 @@ def _check_emergency_startup_resume_active_session(temp_root: str) -> tuple[bool
     from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     active = store.create_active_session_from_standby(standby, session_id="resume_me")
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     if decision.active_session_metadata is None:
@@ -14391,7 +14380,6 @@ def _check_emergency_startup_merged_session_not_resumed(temp_root: str) -> tuple
     from rem_card.app.emergency_startup import prepare_emergency_startup
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     active = store.create_active_session_from_standby(standby, session_id="merged_session")
     store.mark_session_status(active.emergency_session_id, "merged")
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
@@ -14409,7 +14397,6 @@ def _check_older_app_version_standby_allowed_if_schema_compatible(temp_root: str
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
     store.write_standby_metadata(replace(standby, app_version="0.0.1"))
-    _write_emergency_startup_allow_marker(store.resolve_root())
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     if not decision.allowed:
         return False, f"older compatible standby app_version was blocked: {decision}"
@@ -14422,7 +14409,6 @@ def _check_older_app_version_active_session_resume_allowed_if_schema_compatible(
     from rem_card.app.emergency_startup import prepare_emergency_startup
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     session = store.create_active_session_from_standby(standby, session_id="older_active_session")
     store.write_active_session(replace(session, app_version="0.0.1"))
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
@@ -14438,7 +14424,6 @@ def _check_newer_app_version_standby_blocked(temp_root: str) -> tuple[bool, str]
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
     store.write_standby_metadata(replace(standby, app_version="999.0.0"))
-    _write_emergency_startup_allow_marker(store.resolve_root())
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     if decision.allowed or "newer" not in decision.technical_reason:
         return False, f"newer standby app_version was not blocked: {decision}"
@@ -14452,7 +14437,6 @@ def _check_incompatible_schema_blocks_even_if_app_version_ok(temp_root: str) -> 
 
     store, standby = _prepare_emergency_store_fixture(temp_root)
     store.write_standby_metadata(replace(standby, schema_version=int(standby.schema_version or 0) + 1))
-    _write_emergency_startup_allow_marker(store.resolve_root())
     decision = prepare_emergency_startup("nurse", root=store.resolve_root())
     if decision.allowed or "schema" not in decision.technical_reason:
         return False, f"incompatible schema did not block standby: {decision}"
@@ -14806,13 +14790,18 @@ def _check_runtime_outage_uses_startup_emergency_path(temp_root: str) -> tuple[b
     _ = temp_root
     main_text = (PROJECT_ROOT / "app" / "main.py").read_text(encoding="utf-8")
     runtime_text = (PROJECT_ROOT / "app" / "runtime_outage.py").read_text(encoding="utf-8")
+    main_window_text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     required = (
         "--emergency-startup-request",
         "validate_runtime_outage_startup_request_marker",
         "launch_emergency_restart",
         "emergency_startup_request.json",
+        "_prepare_runtime_outage_emergency_session",
+        "_confirm_emergency_password_for_transition",
+        "verify_emergency_password_for_offline_startup",
+        "start_or_resume_emergency_session",
     )
-    combined = "\n".join((main_text, runtime_text))
+    combined = "\n".join((main_text, runtime_text, main_window_text))
     missing = [token for token in required if token not in combined]
     if missing:
         return False, f"startup emergency path tokens missing: {missing}"
@@ -14824,7 +14813,6 @@ def _check_runtime_outage_stale_standby_warning_recorded(temp_root: str) -> tupl
     from rem_card.app.runtime_outage import STALE_STANDBY_WARNING, write_runtime_outage_startup_request
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     marker_path, payload = write_runtime_outage_startup_request(
         root=store.resolve_root(),
         source_role="nurse",
@@ -14846,19 +14834,20 @@ def _check_runtime_outage_stale_standby_warning_recorded(temp_root: str) -> tupl
     return True, "ok"
 
 
-def _check_runtime_outage_no_empty_db_creation(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.emergency_startup import prepare_emergency_startup
+def _check_runtime_outage_empty_db_created_only_after_activation(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
     from rem_card.app.runtime_outage import write_runtime_outage_startup_request
 
     root = os.path.join(temp_root, "er")
-    _write_emergency_startup_allow_marker(root)
-    write_runtime_outage_startup_request(root=root, source_role="nurse")
+    _marker_path, payload = write_runtime_outage_startup_request(root=root, source_role="nurse")
     decision = prepare_emergency_startup("nurse", root=root)
-    if decision.allowed:
-        return False, "runtime outage without standby unexpectedly allowed emergency startup"
-    created = list(Path(root).rglob("rao_journal_emergency.db"))
-    if created:
-        return False, f"runtime outage created empty emergency DB: {created[:3]}"
+    if not decision.allowed or decision.status != "empty_database_available":
+        return False, f"runtime outage without standby did not offer empty fallback: {decision}"
+    if list(Path(root).rglob("rao_journal_emergency.db")):
+        return False, "runtime outage created empty emergency DB before activation"
+    session = start_or_resume_emergency_session(decision, root=root, startup_request=payload)
+    if not os.path.isfile(session.metadata.local_db_path):
+        return False, "runtime outage did not create empty emergency DB after activation"
     return True, "ok"
 
 
@@ -16557,7 +16546,6 @@ def _check_nurse_offline_valid_standby_reaches_emergency_when_shared_rem_card_mi
     from rem_card.services.settings.settings_service import reset_settings_service
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     missing_baza = os.path.join(temp_root, "compiled_offline", "Baza_rao3_jurnal")
     for path in get_required_baza_paths(missing_baza):
         if os.path.basename(path).lower() != "rem_card":
@@ -16627,7 +16615,6 @@ def _check_doctor_offline_policy_preserved(temp_root: str) -> tuple[bool, str]:
     from rem_card.app import main as app_main
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    _write_emergency_startup_allow_marker(store.resolve_root())
     saved_root = os.environ.get("REMCARD_EMERGENCY_DB_ROOT")
     original_warning = app_main._show_startup_warning_without_settings
     warnings: list[tuple[str, str]] = []
@@ -16863,7 +16850,12 @@ def _check_emergency_acceptance_runner_does_not_require_real_smb(temp_root: str)
 def _check_emergency_acceptance_runner_checks_no_json_fallback(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = _emergency_acceptance_runner_text()
-    required = ("scenario_no_standby_no_settings_block", "no_valid_standby", "active_session_invalid", "NO_JSON_FALLBACK_MARKER")
+    required = (
+        "scenario_no_standby_empty_fallback_and_missing_settings_block",
+        "empty_database_available",
+        "active_session_invalid",
+        "NO_JSON_FALLBACK_MARKER",
+    )
     missing = [token for token in required if token not in text]
     if missing:
         return False, f"no JSON fallback checks missing: {missing}"
@@ -18802,9 +18794,9 @@ def main():
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),
         ("emergency_startup_doctor_network_unavailable_shows_controlled_block", _check_emergency_startup_doctor_network_unavailable_shows_controlled_block),
-        ("emergency_startup_requires_authorized_workstation", _check_emergency_startup_requires_authorized_workstation),
-        ("emergency_startup_requires_valid_standby_pair", _check_emergency_startup_requires_valid_standby_pair),
-        ("emergency_startup_blocks_expired_standby_pair", _check_emergency_startup_blocks_expired_standby_pair),
+        ("emergency_startup_does_not_require_authorized_workstation", _check_emergency_startup_does_not_require_authorized_workstation),
+        ("emergency_startup_missing_standby_uses_empty_database_fallback", _check_emergency_startup_missing_standby_uses_empty_database_fallback),
+        ("emergency_startup_expired_standby_uses_empty_database_fallback", _check_emergency_startup_expired_standby_uses_empty_database_fallback),
         ("emergency_startup_password_gate_before_activation", _check_emergency_startup_password_gate_before_activation),
         ("emergency_startup_creates_active_session_from_standby", _check_emergency_startup_creates_active_session_from_standby),
         ("emergency_startup_uses_emergency_runtime_context", _check_emergency_startup_uses_emergency_runtime_context),
@@ -18822,7 +18814,7 @@ def main():
         ),
         ("startup_corruption_does_not_fallback_emergency", _check_startup_corruption_does_not_fallback_emergency),
         ("startup_schema_policy_block_does_not_fallback_emergency", _check_startup_schema_policy_block_does_not_fallback_emergency),
-        ("emergency_startup_no_empty_db_creation", _check_emergency_startup_no_empty_db_creation),
+        ("emergency_startup_empty_db_created_only_after_activation", _check_emergency_startup_empty_db_created_only_after_activation),
         ("emergency_startup_resume_active_session", _check_emergency_startup_resume_active_session),
         ("emergency_startup_merged_session_not_resumed", _check_emergency_startup_merged_session_not_resumed),
         (
@@ -18863,7 +18855,7 @@ def main():
         ("runtime_outage_no_live_db_swap", _check_runtime_outage_no_live_db_swap),
         ("runtime_outage_uses_startup_emergency_path", _check_runtime_outage_uses_startup_emergency_path),
         ("runtime_outage_stale_standby_warning_recorded", _check_runtime_outage_stale_standby_warning_recorded),
-        ("runtime_outage_no_empty_db_creation", _check_runtime_outage_no_empty_db_creation),
+        ("runtime_outage_empty_db_created_only_after_activation", _check_runtime_outage_empty_db_created_only_after_activation),
         ("runtime_outage_no_json_fallback", _check_runtime_outage_no_json_fallback),
         ("runtime_outage_shutdown_prevents_late_ui_callbacks", _check_runtime_outage_shutdown_prevents_late_ui_callbacks),
         ("runtime_outage_no_sqlite_profile_changes", _check_runtime_outage_no_sqlite_profile_changes),

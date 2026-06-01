@@ -63,7 +63,6 @@ def _prepare_isolated_environment(temp_root: Path) -> None:
     os.environ["REMCARD_LOCAL_SYNC_INTERVAL_SEC"] = "999"
     os.environ["REMCARD_LOCAL_CACHE_RETENTION_DAYS"] = "1"
     os.environ["REMCARD_LOCAL_CACHE_MAX_FILES"] = "50"
-    os.environ.pop("REMCARD_EMERGENCY_WORKSTATION_ALLOWED", None)
     guard_baza.mkdir(parents=True, exist_ok=True)
 
 
@@ -212,15 +211,11 @@ def _move_temporarily(paths: list[str]) -> Callable[[], None]:
 
 def _start_nurse_emergency(paths: dict[str, str], *, simulate_unavailable: bool = True):
     from rem_card.app.emergency_startup import (
-        emergency_workstation_marker_path,
         prepare_emergency_startup,
         start_or_resume_emergency_session,
     )
 
     store, standby = _create_standby(paths)
-    marker = Path(emergency_workstation_marker_path(paths["emergency_root"]))
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("allowed\n", encoding="utf-8")
 
     restore_network = lambda: None
     if simulate_unavailable:
@@ -590,54 +585,57 @@ def _db_files(root: Path) -> dict[str, int]:
     return {str(path): path.stat().st_size for path in root.rglob("*.db") if path.is_file()}
 
 
-def scenario_no_standby_no_settings_block(temp_root: Path) -> ScenarioResult:
-    from rem_card.app.emergency_startup import emergency_workstation_marker_path, prepare_emergency_startup
+def scenario_no_standby_empty_fallback_and_missing_settings_block(temp_root: Path) -> ScenarioResult:
+    from rem_card.app.emergency_startup import prepare_emergency_startup, start_or_resume_emergency_session
 
-    paths = _build_network_fixture(temp_root, "no_standby_no_settings_block")
+    paths = _build_network_fixture(temp_root, "no_standby_empty_fallback")
     root = Path(paths["emergency_root"])
-    marker = Path(emergency_workstation_marker_path(str(root)))
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("allowed\n", encoding="utf-8")
     decision = prepare_emergency_startup("nurse", root=str(root))
-    _require(not decision.allowed and decision.status == "no_valid_standby", f"startup without standby was not blocked: {decision}")
-    _require(not list(root.rglob("*.db")), "startup without standby created a DB file", emergency_root=str(root))
+    _require(
+        decision.allowed and decision.status == "empty_database_available",
+        f"startup without standby did not offer empty fallback: {decision}",
+    )
+    _require(not list(root.rglob("*.db")), "startup without standby created a DB before activation", emergency_root=str(root))
+    empty_session = start_or_resume_emergency_session(decision, root=str(root))
+    _require(os.path.isfile(empty_session.metadata.local_db_path), "empty fallback DB was not created")
+    with sqlite3.connect(empty_session.metadata.local_db_path) as conn:
+        patient_count = int(conn.execute("SELECT COUNT(*) FROM patients").fetchone()[0] or 0)
+    _require(patient_count == 0, f"empty fallback DB contains patients: {patient_count}")
 
-    store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
+    invalid_paths = _build_network_fixture(temp_root, "missing_active_settings_block")
+    invalid_root = Path(invalid_paths["emergency_root"])
+    store, _standby, startup_session = _start_nurse_emergency(invalid_paths, simulate_unavailable=True)
     settings_snapshot = str(startup_session.metadata.settings_snapshot_path or "")
     _require(settings_snapshot and os.path.isfile(settings_snapshot), "settings snapshot fixture missing")
     os.remove(settings_snapshot)
-    before = _db_files(root)
-    decision = prepare_emergency_startup("nurse", root=str(root))
-    after = _db_files(root)
+    before = _db_files(invalid_root)
+    decision = prepare_emergency_startup("nurse", root=str(invalid_root))
+    after = _db_files(invalid_root)
     _require(
         not decision.allowed and decision.status == "active_session_invalid",
         f"startup without settings snapshot was not blocked: {decision}",
     )
     _require(before == after, "startup without settings snapshot created or changed DB files")
-    _require(not any(path.stat().st_size == 0 for path in root.rglob("*.db")), "empty DB file was created")
-    fallback_files = [str(path) for path in root.rglob("*fallback*")]
+    _require(not any(path.stat().st_size == 0 for path in invalid_root.rglob("*.db")), "empty DB file was created")
+    fallback_files = [str(path) for path in invalid_root.rglob("*fallback*")]
     _require(not fallback_files, f"{NO_JSON_FALLBACK_MARKER}: fallback files were created: {fallback_files}")
     loaded = store.read_active_session(startup_session.metadata.emergency_session_id)
     _require(loaded.settings_snapshot_path == settings_snapshot, "session metadata stopped pointing to missing settings snapshot")
     return ScenarioResult(
-        name="no_standby_no_settings_block",
+        name="no_standby_empty_fallback_and_missing_settings_block",
         ok=True,
-        details="missing standby and missing settings snapshot both blocked without fallback",
-        artifacts={"emergency_root": str(root)},
+        details="missing standby creates password-gated empty DB; damaged active settings snapshot remains blocked",
+        artifacts={"empty_root": str(root), "invalid_active_root": str(invalid_root)},
     )
 
 
 def scenario_doctor_blocked(temp_root: Path) -> ScenarioResult:
     from rem_card.app.emergency_startup import (
-        emergency_workstation_marker_path,
         prepare_emergency_startup,
     )
 
     paths = _build_network_fixture(temp_root, "doctor_blocked")
     store, _standby = _create_standby(paths)
-    marker = Path(emergency_workstation_marker_path(paths["emergency_root"]))
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("allowed\n", encoding="utf-8")
     decision = prepare_emergency_startup("doctor", root=paths["emergency_root"])
     _require(not decision.allowed and decision.status == "role_not_allowed", f"doctor emergency startup was not blocked: {decision}")
     _require(not list((Path(paths["emergency_root"]) / "active").glob("*")), "doctor startup created/opened an emergency DB")
@@ -705,7 +703,7 @@ SCENARIOS: tuple[tuple[str, Callable[[Path], ScenarioResult]], ...] = (
     ("full_mode_a_path", scenario_full_mode_a_path),
     ("remote_changed_authoritative", scenario_remote_changed_authoritative),
     ("failure_rollback", scenario_failure_rollback),
-    ("no_standby_no_settings_block", scenario_no_standby_no_settings_block),
+    ("no_standby_empty_fallback_and_missing_settings_block", scenario_no_standby_empty_fallback_and_missing_settings_block),
     ("doctor_blocked", scenario_doctor_blocked),
     ("unconfirmed_write", scenario_unconfirmed_write),
 )
