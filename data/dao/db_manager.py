@@ -136,6 +136,7 @@ STARTUP_QUICKCHECK_BACKGROUND_INTERVAL_SEC = max(
     60.0,
     float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_BACKGROUND_INTERVAL_SEC", str(STARTUP_QUICKCHECK_TTL_SEC))),
 )
+STARTUP_QUICKCHECK_BACKGROUND_ENABLED = os.environ.get("REMCARD_STARTUP_QUICKCHECK_BACKGROUND_ENABLED", "0") == "1"
 STARTUP_QUICKCHECK_IDLE_GRACE_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_IDLE_GRACE_SEC", "3")),
@@ -799,37 +800,40 @@ class DatabaseManager:
     def _startup_schema_migration_state(self) -> Optional[dict[str, Any]]:
         conn = None
         try:
-            conn = sqlite3.connect(
-                self._readonly_db_uri(),
-                uri=True,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
-            )
-            configure_connection(conn, readonly=True, profile="network")
-            schema_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
-            ).fetchone()
-            if schema_table:
-                migration_row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()
-                max_migration_version = int(migration_row[0] or 0) if migration_row else 0
-            else:
-                max_migration_version = 0
-
-            fastpath_value = None
-            meta_table = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
-            ).fetchone()
-            if meta_table:
-                fastpath_row = conn.execute(
-                    "SELECT value FROM meta WHERE key = ?",
-                    (SCHEMA_FASTPATH_META_KEY,),
+            with self._central_io_lock:
+                conn = sqlite3.connect(
+                    self._readonly_db_uri(),
+                    uri=True,
+                    check_same_thread=True,
+                    isolation_level=None,
+                    timeout=5.0,
+                )
+                configure_connection(conn, readonly=True, profile="network")
+                schema_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
                 ).fetchone()
-                if fastpath_row and fastpath_row[0] is not None:
-                    try:
-                        fastpath_value = int(fastpath_row[0])
-                    except Exception:
-                        fastpath_value = str(fastpath_row[0])
+                if schema_table:
+                    migration_row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()
+                    max_migration_version = int(migration_row[0] or 0) if migration_row else 0
+                else:
+                    max_migration_version = 0
+
+                fastpath_value = None
+                meta_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+                ).fetchone()
+                if meta_table:
+                    fastpath_row = conn.execute(
+                        "SELECT value FROM meta WHERE key = ?",
+                        (SCHEMA_FASTPATH_META_KEY,),
+                    ).fetchone()
+                    if fastpath_row and fastpath_row[0] is not None:
+                        try:
+                            fastpath_value = int(fastpath_row[0])
+                        except Exception:
+                            fastpath_value = str(fastpath_row[0])
+                conn.close()
+                conn = None
 
             return {
                 "required_min_migration_version": int(SCHEMA_MIN_MIGRATION_VERSION),
@@ -1129,6 +1133,12 @@ class DatabaseManager:
         self._local_replica = None
 
     def _start_startup_quickcheck_updater(self):
+        if not STARTUP_QUICKCHECK_BACKGROUND_ENABLED:
+            logger.info(
+                "Background startup quick_check updater is disabled by default; "
+                "set REMCARD_STARTUP_QUICKCHECK_BACKGROUND_ENABLED=1 to enable it."
+            )
+            return
         if self._startup_quickcheck_thread and self._startup_quickcheck_thread.is_alive():
             return
         self._startup_quickcheck_stop_evt.clear()
@@ -1175,17 +1185,27 @@ class DatabaseManager:
             return 1
 
         try:
-            conn = sqlite3.connect(
-                self._readonly_db_uri(),
-                uri=True,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
-            )
-            configure_connection(conn, readonly=True, profile="network")
-            conn.set_progress_handler(cancel_if_not_idle, 1000)
-            quick_started = time.perf_counter()
-            ok, result = run_quick_check(conn)
+            with self._central_io_lock:
+                if not self._is_startup_quickcheck_idle():
+                    return False
+                conn = sqlite3.connect(
+                    self._readonly_db_uri(),
+                    uri=True,
+                    check_same_thread=True,
+                    isolation_level=None,
+                    timeout=5.0,
+                )
+                configure_connection(conn, readonly=True, profile="network")
+                try:
+                    conn.set_progress_handler(cancel_if_not_idle, 1000)
+                    quick_started = time.perf_counter()
+                    ok, result = run_quick_check(conn)
+                finally:
+                    try:
+                        conn.set_progress_handler(None, 0)
+                        conn.close()
+                    finally:
+                        conn = None
             elapsed_ms = (time.perf_counter() - quick_started) * 1000.0
             if elapsed_ms >= STARTUP_QUICKCHECK_SLOW_MS:
                 self._startup_quickcheck_next_allowed_ts = time.time() + STARTUP_QUICKCHECK_SLOW_BACKOFF_SEC
@@ -1803,14 +1823,19 @@ class DatabaseManager:
     def _run_integrity_check_background_once(self):
         conn = None
         try:
-            conn = sqlite3.connect(
-                self.db_path,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
-            )
-            configure_connection(conn, readonly=True, profile="network")
-            ok, result = run_integrity_check(conn)
+            with self._central_io_lock:
+                conn = sqlite3.connect(
+                    self.db_path,
+                    check_same_thread=True,
+                    isolation_level=None,
+                    timeout=5.0,
+                )
+                configure_connection(conn, readonly=True, profile="network")
+                try:
+                    ok, result = run_integrity_check(conn)
+                finally:
+                    conn.close()
+                    conn = None
             if ok:
                 logger.info("Background integrity_check passed for %s", self.db_path)
                 return

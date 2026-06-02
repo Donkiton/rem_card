@@ -16,6 +16,8 @@ class TemplateSelectionDialog(BaseStyledDialog):
         
     def setup_ui_content(self):
         from rem_card.ui.styles.theme import BG_CARD, BORDER_RADIUS_SM, BORDER_LIGHT
+
+        engine.reload_if_changed(force_check=True)
         
         self.content_widget.setStyleSheet(f"""
             QLabel {{ font-size: 14px; font-weight: bold; color: #2c3e50; background-color: transparent; }}

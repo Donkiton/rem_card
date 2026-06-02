@@ -1,5 +1,7 @@
+import os
 import re
 import threading
+import time
 from typing import Dict, Any, Tuple, List, Optional
 from datetime import datetime, timedelta
 
@@ -10,6 +12,14 @@ from rem_card.services.settings.settings_service import (
 )
 
 TEMPLATE_ORDER_KEY = "template_order"
+
+
+def _float_env(name: str, default: float, *, minimum: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = float(default)
+    return max(minimum, value)
 
 
 class PrescriptionEngine:
@@ -32,16 +42,34 @@ class PrescriptionEngine:
         self.templates = {}
         self.forms = {}
         self.admin_types = {}
+        self._signature_check_interval_sec = _float_env(
+            "REMCARD_PRESCRIPTION_SETTINGS_CHECK_SEC",
+            2.0,
+            minimum=0.0,
+        )
+        self._last_signature_check_mono = 0.0
         self.reload(force=True)
 
     def reload(self, *, force: bool = True) -> bool:
         """Перезагрузка всех данных (сначала seed, потом накатываем overrides)"""
         with self._lock:
+            self._last_signature_check_mono = time.monotonic()
             return self._reload_locked(force=force)
 
-    def reload_if_changed(self) -> bool:
-        """Перезагружает справочники только если seed/override файлы изменились."""
-        return self.reload(force=False)
+    def reload_if_changed(self, *, force_check: bool = False) -> bool:
+        """Проверяет версии settings DB и перезагружает справочники, если они изменились."""
+        with self._lock:
+            if not force_check and self._last_loaded_signature is not None:
+                now_mono = time.monotonic()
+                if (now_mono - self._last_signature_check_mono) < self._signature_check_interval_sec:
+                    return False
+            self._last_signature_check_mono = time.monotonic()
+            try:
+                return self._reload_locked(force=False)
+            except Exception:
+                if self._last_loaded_signature is None:
+                    raise
+                return False
 
     def _reload_locked(self, *, force: bool) -> bool:
         signature = self._current_signature()
@@ -51,7 +79,7 @@ class PrescriptionEngine:
         loaded = self._load_all()
         for attr_name, _dict_name in self._DATASETS:
             setattr(self, attr_name, loaded.get(attr_name, {}))
-        self._last_loaded_signature = self._current_signature()
+        self._last_loaded_signature = signature
         return True
 
     def _current_signature(self):
@@ -80,6 +108,7 @@ class PrescriptionEngine:
         return dict(sorted(templates.items(), key=lambda x: x[1].get("name", x[0])))
 
     def ordered_templates_items(self) -> List[Tuple[str, Dict[str, Any]]]:
+        self.reload_if_changed()
         return list(self.templates.items())
 
     def _load_merged(self, name: str) -> Dict[str, Any]:
@@ -99,6 +128,7 @@ class PrescriptionEngine:
     def _save_override_locked(self, name: str, key: str, data: Dict[str, Any]):
         get_settings_service().save_prescription_item(name, key, dict(data or {}))
         self._last_loaded_signature = None
+        self._last_signature_check_mono = 0.0
 
     def _delete_override(self, name: str, key: str):
         """
@@ -110,6 +140,7 @@ class PrescriptionEngine:
     def _delete_override_locked(self, name: str, key: str):
         get_settings_service().delete_prescription_item(name, key)
         self._last_loaded_signature = None
+        self._last_signature_check_mono = 0.0
 
     def _save_and_update(self, attr_name: str, dict_name: str, key: str, data: Dict[str, Any]):
         with self._lock:
@@ -138,6 +169,7 @@ class PrescriptionEngine:
             get_settings_service().save_template_order(valid_order)
             self.templates = self._ordered_templates(self.templates, valid_order)
             self._last_loaded_signature = None
+            self._last_signature_check_mono = 0.0
 
     # --- CRUD operations for Admin Panel ---
     
@@ -184,6 +216,7 @@ class PrescriptionEngine:
 
     def detect_star_drug(self, text: str) -> Tuple[Optional[str], Optional[Dict]]:
         """Ищет препарат по star_alias (быстрый ввод)"""
+        self.reload_if_changed()
         text = self.normalize(text)
         for key, data in self.drugs.items():
             star = data.get("star_alias", "").replace("*", "") # Убираем звездочку для сравнения
@@ -196,6 +229,7 @@ class PrescriptionEngine:
 
     def detect_drug(self, text: str) -> Tuple[Optional[str], Optional[Dict]]:
         """Ищет препарат по обычным алиасам или латыни"""
+        self.reload_if_changed()
         text = self.normalize(text)
         # Разбиваем на слова для более точного поиска
         tokens = text.split()
@@ -242,6 +276,7 @@ class PrescriptionEngine:
 
     def build_full_prescription(self, drug_key: str, data: Dict[str, Any]):
         """Формирует строку на основе данных из DrugAssignmentDialog"""
+        self.reload_if_changed()
         drug = self.drugs.get(drug_key, {})
         latin = drug.get("latin", drug_key)
         
@@ -380,6 +415,7 @@ class PrescriptionEngine:
     
     def generate_schedule(self, template: Dict, start_time: datetime) -> List[Dict]:
         """Генерирует расписание по шаблону от времени start_time"""
+        self.reload_if_changed()
         result = []
         
         for d in template.get("drugs", []):

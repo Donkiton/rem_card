@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -10,14 +11,51 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 
 
+def _float_env(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return max(minimum, float(default))
+    try:
+        return max(minimum, float(raw))
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default %.3f", name, raw, default)
+        return max(minimum, float(default))
+
+
 class DataUpdateMonitor(QThread):
     changes_detected = Signal(dict)
     monitor_error = Signal(str)
 
-    def __init__(self, data_service, *, poll_interval_sec: float = 2.0):
+    def __init__(
+        self,
+        data_service,
+        *,
+        poll_interval_sec: float | None = None,
+        settings_poll_interval_sec: float | None = None,
+    ):
         super().__init__()
         self._data_service = data_service
-        self._poll_interval_sec = max(0.5, float(poll_interval_sec))
+        default_poll_interval_sec = _float_env("REMCARD_MONITOR_POLL_INTERVAL_SEC", 2.0, minimum=0.5)
+        self._poll_interval_sec = max(
+            0.5,
+            float(default_poll_interval_sec if poll_interval_sec is None else poll_interval_sec),
+        )
+        settings_interval_value = (
+            _float_env(
+                "REMCARD_SETTINGS_MONITOR_POLL_INTERVAL_SEC",
+                0.0,
+                minimum=0.0,
+            )
+            if settings_poll_interval_sec is None
+            else max(0.0, float(settings_poll_interval_sec))
+        )
+        self._settings_poll_enabled = settings_interval_value > 0.0
+        self._settings_poll_interval_sec = (
+            max(self._poll_interval_sec, settings_interval_value)
+            if self._settings_poll_enabled
+            else 0.0
+        )
+        self._next_settings_poll_monotonic: float = 0.0
         self._stop_evt = threading.Event()
         self._wake_evt = threading.Event()
         self._state_lock = threading.Lock()
@@ -35,6 +73,7 @@ class DataUpdateMonitor(QThread):
             self._refresh_request_seq += 1
             if force_emit:
                 self._force_emit = True
+                self._next_settings_poll_monotonic = 0.0
                 if source:
                     self._force_sources.append(str(source))
         self._wake_evt.set()
@@ -48,6 +87,7 @@ class DataUpdateMonitor(QThread):
             self._force_sources = []
             self._refresh_request_seq += 1
             self._state_epoch += 1
+            self._next_settings_poll_monotonic = 0.0
         self._wake_evt.set()
 
     def get_change_state(self) -> Optional[dict[str, Any]]:
@@ -129,9 +169,19 @@ class DataUpdateMonitor(QThread):
             previous_change_id = self._last_seen_id
             previous_settings_change_id = self._last_seen_settings_id
             observed_refresh_seq = int(self._refresh_request_seq)
+            settings_poll_due = self._settings_poll_enabled and (
+                previous_settings_change_id is None
+                or force_emit
+                or time.monotonic() >= self._next_settings_poll_monotonic
+            )
 
         current_change_id = int(self._data_service.get_latest_change_id())
-        current_settings_change_id = self._latest_settings_change_id()
+        if settings_poll_due:
+            current_settings_change_id = self._latest_settings_change_id()
+            with self._state_lock:
+                self._next_settings_poll_monotonic = time.monotonic() + self._settings_poll_interval_sec
+        else:
+            current_settings_change_id = int(previous_settings_change_id or 0)
 
         if self._stop_evt.is_set():
             return
@@ -156,7 +206,7 @@ class DataUpdateMonitor(QThread):
             self._set_last_seen_settings_id(current_settings_change_id)
 
         settings_changes: list[dict[str, Any]] = []
-        settings_changed = current_settings_change_id > int(previous_settings_change_id or 0)
+        settings_changed = settings_poll_due and current_settings_change_id > int(previous_settings_change_id or 0)
         if settings_changed:
             rows = self._fetch_settings_changes_since(int(previous_settings_change_id or 0))
             settings_changes = [self._normalize_settings_row(row) for row in rows]

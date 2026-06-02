@@ -3239,6 +3239,7 @@ class OrdersWidget(QWidget):
         )
         from rem_card.services.prescription_engine import engine
 
+        engine.reload_if_changed(force_check=True)
         drug_key = str(getattr(order, "drug_key", "") or "").strip()
         drug_data = engine.drugs.get(drug_key, {}) if drug_key else {}
         if drug_data.get("is_multicomp"):

@@ -609,6 +609,151 @@ def _check_change_log_lag_uses_utc_for_sqlite_timestamp(temp_root: str) -> tuple
     return True, "ok"
 
 
+def _check_data_update_monitor_settings_poll_is_opt_in(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.services.data_update_monitor import DataUpdateMonitor
+
+    class FakeService:
+        _shutting_down = False
+
+        def __init__(self):
+            self.change_id = 10
+            self.settings_change_id = 5
+            self.latest_change_calls = 0
+            self.latest_settings_calls = 0
+            self.fetch_settings_calls = 0
+
+        def run_poll_maintenance_tasks(self):
+            pass
+
+        def get_latest_change_id(self):
+            self.latest_change_calls += 1
+            return self.change_id
+
+        def get_latest_settings_change_id(self):
+            self.latest_settings_calls += 1
+            return self.settings_change_id
+
+        def fetch_changes_since(self, _last_change_id):
+            return []
+
+        def fetch_settings_changes_since(self, _last_change_id):
+            self.fetch_settings_calls += 1
+            return [
+                (
+                    self.settings_change_id,
+                    "settings_entity",
+                    "regression",
+                    "update",
+                    "global",
+                    1,
+                    "2026-05-03 08:00:00",
+                    "doctor",
+                    "regression",
+                    "client",
+                    "hash",
+                )
+            ]
+
+    saved_interval = os.environ.pop("REMCARD_SETTINGS_MONITOR_POLL_INTERVAL_SEC", None)
+    try:
+        service = FakeService()
+        monitor = DataUpdateMonitor(service, poll_interval_sec=2.0)
+        monitor._poll_once(force_emit=False, force_sources=[])
+        monitor._poll_once(force_emit=True, force_sources=["regression_settings_write"])
+        if service.latest_settings_calls != 0:
+            return False, f"default monitor read settings cursor: {service.latest_settings_calls}"
+        if service.fetch_settings_calls != 0:
+            return False, f"default monitor fetched settings changes: {service.fetch_settings_calls}"
+        if service.latest_change_calls != 2:
+            return False, f"main change cursor should still be polled every cycle: {service.latest_change_calls}"
+    finally:
+        if saved_interval is None:
+            os.environ.pop("REMCARD_SETTINGS_MONITOR_POLL_INTERVAL_SEC", None)
+        else:
+            os.environ["REMCARD_SETTINGS_MONITOR_POLL_INTERVAL_SEC"] = saved_interval
+
+    service = FakeService()
+    monitor = DataUpdateMonitor(service, poll_interval_sec=2.0, settings_poll_interval_sec=30.0)
+    monitor._poll_once(force_emit=False, force_sources=[])
+    if service.latest_settings_calls != 1:
+        return False, f"opt-in first poll did not read settings cursor: {service.latest_settings_calls}"
+
+    monitor._poll_once(force_emit=False, force_sources=[])
+    if service.latest_settings_calls != 1:
+        return False, f"settings cursor was read before throttle interval: {service.latest_settings_calls}"
+    if service.latest_change_calls != 2:
+        return False, f"main change cursor should still be polled every cycle: {service.latest_change_calls}"
+
+    service.settings_change_id = 6
+    monitor._poll_once(force_emit=True, force_sources=["regression_settings_write"])
+    if service.latest_settings_calls != 2:
+        return False, f"forced refresh did not bypass settings throttle: {service.latest_settings_calls}"
+    if service.fetch_settings_calls != 1:
+        return False, f"forced settings change was not fetched: {service.fetch_settings_calls}"
+
+    return True, "ok"
+
+
+def _check_prescription_engine_refreshes_settings_on_demand(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    import rem_card.services.prescription_engine as pe
+
+    class FakeSettingsService:
+        def __init__(self):
+            self.drug_version = (1, "drug-v1")
+            self.template_version = (1, "tpl-v1")
+            self.datasets = {
+                "drugs": {"old_drug": {"latin": "Oldi", "aliases": ["old"]}},
+                "groups": {},
+                "dilutions": {},
+                "templates": {},
+                "forms": {},
+                "admin_types": {},
+            }
+            self.version_calls = 0
+            self.load_calls = 0
+
+        def get_catalog_version(self, catalog_key: str):
+            self.version_calls += 1
+            if catalog_key == pe.DRUG_CATALOG_KEY:
+                return self.drug_version
+            if catalog_key == pe.ORDER_TEMPLATES_KEY:
+                return self.template_version
+            return (0, "")
+
+        def load_prescription_datasets(self):
+            self.load_calls += 1
+            return {key: dict(value) for key, value in self.datasets.items()}
+
+    fake = FakeSettingsService()
+    original_get_settings_service = pe.get_settings_service
+    try:
+        pe.get_settings_service = lambda: fake
+        engine = pe.PrescriptionEngine()
+        if "old_drug" not in engine.drugs:
+            return False, "initial prescription dataset was not loaded"
+
+        fake.drug_version = (2, "drug-v2")
+        fake.datasets["drugs"] = {"new_drug": {"latin": "Novi", "aliases": ["new"]}}
+        changed = engine.reload_if_changed(force_check=True)
+        if not changed:
+            return False, "forced on-demand version check did not reload changed prescription data"
+        if "new_drug" not in engine.drugs or "old_drug" in engine.drugs:
+            return False, f"prescription data was not replaced after version change: {engine.drugs}"
+
+        load_calls_after_change = fake.load_calls
+        changed_again = engine.reload_if_changed()
+        if changed_again:
+            return False, "unchanged prescription data reloaded unexpectedly"
+        if fake.load_calls != load_calls_after_change:
+            return False, "unchanged on-demand check reloaded full datasets"
+    finally:
+        pe.get_settings_service = original_get_settings_service
+
+    return True, "ok"
+
+
 def _check_startup_lock_timeout_messages(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from rem_card.app.startup_db_guard import _lock_timeout_user_message
@@ -1215,6 +1360,7 @@ def _check_startup_quickcheck_background_updater(temp_root: str) -> tuple[bool, 
         "quarantine_dir": dbm.QUARANTINE_DIR,
         "ttl": dbm.STARTUP_QUICKCHECK_TTL_SEC,
         "quick": dbm.run_quick_check,
+        "background_enabled": dbm.STARTUP_QUICKCHECK_BACKGROUND_ENABLED,
     }
     schema_state = {
         "required_min_migration_version": 11,
@@ -1234,6 +1380,7 @@ def _check_startup_quickcheck_background_updater(temp_root: str) -> tuple[bool, 
         manager._write_queue_idle_probe = lambda: True
         manager._startup_pre_connect_fingerprint = None
         manager._startup_schema_migration_state = lambda: dict(schema_state)
+        manager._central_io_lock = threading.RLock()
         return manager
 
     try:
@@ -1241,6 +1388,13 @@ def _check_startup_quickcheck_background_updater(temp_root: str) -> tuple[bool, 
         dbm.INVALID_BACKUPS_DIR = str(invalid_dir)
         dbm.QUARANTINE_DIR = str(quarantine_dir)
         dbm.STARTUP_QUICKCHECK_TTL_SEC = 60.0
+        dbm.STARTUP_QUICKCHECK_BACKGROUND_ENABLED = False
+
+        starter_manager = make_manager()
+        starter_manager._startup_quickcheck_thread = None
+        starter_manager._start_startup_quickcheck_updater()
+        if starter_manager._startup_quickcheck_thread is not None:
+            return False, "background startup quick_check updater started while disabled by default"
 
         manager = make_manager()
         if not manager._run_startup_quickcheck_background_once():
@@ -1272,11 +1426,48 @@ def _check_startup_quickcheck_background_updater(temp_root: str) -> tuple[bool, 
         if called["quick"]:
             return False, "background updater did not cancel before quick_check on non-idle write queue"
 
+        state_path.unlink(missing_ok=True)
+        called["quick"] = False
+        locked_manager = make_manager()
+        locked_result: dict[str, object] = {}
+        locked_manager._central_io_lock.acquire()
+
+        def run_locked_check():
+            try:
+                locked_result["value"] = locked_manager._run_startup_quickcheck_background_once()
+            except Exception as exc:
+                locked_result["error"] = exc
+
+        try:
+            locked_thread = threading.Thread(target=run_locked_check, daemon=True)
+            locked_thread.start()
+            time.sleep(0.15)
+            if called["quick"]:
+                return False, "background quick_check ran while central IO lock was held"
+            if not locked_thread.is_alive():
+                return False, f"background quick_check did not wait for central IO lock: {locked_result}"
+        finally:
+            locked_manager._central_io_lock.release()
+
+        locked_thread.join(timeout=2.0)
+        if locked_thread.is_alive():
+            return False, "background quick_check stayed blocked after central IO lock release"
+        if locked_result.get("error"):
+            return False, f"background quick_check failed after central IO lock release: {locked_result['error']}"
+        if locked_result.get("value") is not True:
+            return False, f"background quick_check did not finish after central IO lock release: {locked_result}"
+        if not called["quick"]:
+            return False, "background quick_check did not run after central IO lock release"
+
         source = (PROJECT_ROOT / "data" / "dao" / "db_manager.py").read_text(encoding="utf-8")
         if "set_progress_handler(cancel_if_not_idle" not in source:
             return False, "background quick_check must install a progress handler for cancellation"
         if "self._is_startup_quickcheck_idle()" not in source:
             return False, "background quick_check cancellation must check write queue idle state"
+        if "STARTUP_QUICKCHECK_BACKGROUND_ENABLED" not in source:
+            return False, "background startup quick_check must be guarded by an explicit enable flag"
+        if "check_same_thread=True" not in source:
+            return False, "background SQLite checks must use same-thread connections"
         return True, "ok"
     finally:
         dbm.STARTUP_QUICKCHECK_STATE_PATH = original_values["state_path"]
@@ -1284,6 +1475,7 @@ def _check_startup_quickcheck_background_updater(temp_root: str) -> tuple[bool, 
         dbm.QUARANTINE_DIR = original_values["quarantine_dir"]
         dbm.STARTUP_QUICKCHECK_TTL_SEC = original_values["ttl"]
         dbm.run_quick_check = original_values["quick"]
+        dbm.STARTUP_QUICKCHECK_BACKGROUND_ENABLED = original_values["background_enabled"]
 
 
 def _check_blood_plasma_key_ru_prescription_parse(temp_root: str) -> tuple[bool, str]:
@@ -16949,7 +17141,7 @@ def _check_settings_db_schema_and_no_wal(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _check_settings_write_creates_validated_pre_write_backup(temp_root: str) -> tuple[bool, str]:
+def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_backup_dir
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, SettingsService
@@ -16979,8 +17171,8 @@ def _check_settings_write_creates_validated_pre_write_backup(temp_root: str) -> 
     )
     after = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
     created = sorted(after - before)
-    if len(created) < 2:
-        return False, f"expected pre-write backup for each settings write, got {len(created)}"
+    if len(created) != 1:
+        return False, f"expected one coalesced pre-write backup for repeated settings writes, got {len(created)}"
 
     latest_backup = created[-1]
     meta_path = f"{latest_backup}.meta.json"
@@ -16989,6 +17181,8 @@ def _check_settings_write_creates_validated_pre_write_backup(temp_root: str) -> 
     meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
     if meta.get("quick_check") != "ok" or meta.get("integrity_check") != "ok":
         return False, f"backup was not validated: {meta}"
+    if meta.get("settings_source") != "settings_app_setting_display_settings":
+        return False, f"backup metadata lost settings source: {meta}"
 
     with sqlite3.connect(latest_backup) as backup_conn:
         row = backup_conn.execute(
@@ -16996,14 +17190,75 @@ def _check_settings_write_creates_validated_pre_write_backup(temp_root: str) -> 
             ("shared", "display_settings"),
         ).fetchone()
     raw_value = str(row[0] if row else "")
-    if first_marker not in raw_value:
-        return False, "latest pre-write backup does not contain state before the second write"
+    if first_marker in raw_value:
+        return False, "coalesced pre-write backup should contain state before the repeated write burst"
     if second_marker in raw_value:
-        return False, "latest pre-write backup contains data written after backup point"
+        return False, "coalesced pre-write backup contains data written after backup point"
 
     current = service.get_app_setting("shared", "display_settings", default={})
     if not isinstance(current, dict) or current.get("probe") != second_marker:
         return False, "live settings DB did not commit the second write"
+    return True, "ok"
+
+
+def _check_settings_backup_cleanup_rotates_old_files(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.settings_db_paths import get_settings_backup_dir
+    from rem_card.app.sqlite_shared import backup_connection
+    from rem_card.data.settings.settings_db import SETTINGS_BACKUP_MAX_COUNT, SettingsDatabase
+    from rem_card.services.settings.settings_service import SettingsService
+
+    baza_dir = os.path.join(temp_root, "Baza")
+    db = SettingsDatabase(baza_dir=baza_dir)
+    service = SettingsService(db)
+    service.ensure_ready()
+    backup_dir = get_settings_backup_dir(baza_dir)
+    os.makedirs(backup_dir, exist_ok=True)
+
+    files_to_create = int(SETTINGS_BACKUP_MAX_COUNT) + 6
+    now = time.time()
+    conn = db.connect(readonly=True)
+    try:
+        for idx in range(files_to_create):
+            path = os.path.join(backup_dir, f"settings_pre_regression_{idx:03d}.db")
+            backup_connection(
+                conn,
+                path,
+                invalid_dir=os.path.join(backup_dir, "invalid"),
+                validate=True,
+                source="settings_backup_cleanup_regression",
+            )
+            file_age_sec = float(files_to_create - idx) * 10.0
+            ts = now - file_age_sec
+            os.utime(path, (ts, ts))
+            meta_path = f"{path}.meta.json"
+            if os.path.exists(meta_path):
+                os.utime(meta_path, (ts, ts))
+    finally:
+        conn.close()
+
+    oldest = os.path.join(backup_dir, "settings_pre_regression_000.db")
+    oldest_meta = f"{oldest}.meta.json"
+    newest = os.path.join(backup_dir, f"settings_pre_regression_{files_to_create - 1:03d}.db")
+
+    conn = db.connect(readonly=True)
+    try:
+        db._cleanup_settings_backups(conn)
+    finally:
+        conn.close()
+
+    remaining = [
+        name
+        for name in os.listdir(backup_dir)
+        if name.startswith("settings_pre_regression_") and name.lower().endswith(".db")
+    ]
+    if len(remaining) > int(SETTINGS_BACKUP_MAX_COUNT):
+        return False, f"settings backup cleanup kept too many files: {len(remaining)} > {SETTINGS_BACKUP_MAX_COUNT}"
+    if os.path.exists(oldest):
+        return False, "oldest settings pre-write backup was not removed"
+    if os.path.exists(oldest_meta):
+        return False, "oldest settings pre-write backup metadata was not removed"
+    if not os.path.exists(newest):
+        return False, "newest settings pre-write backup was removed unexpectedly"
     return True, "ok"
 
 
@@ -18695,6 +18950,8 @@ def main():
         ("local_write_queue_shutdown_drains", _check_local_write_queue_shutdown_drains),
         ("sync_cursor_normalizes_timestamp_formats", _check_sync_cursor_normalizes_timestamp_formats),
         ("change_log_lag_uses_utc_for_sqlite_timestamp", _check_change_log_lag_uses_utc_for_sqlite_timestamp),
+        ("data_update_monitor_settings_poll_is_opt_in", _check_data_update_monitor_settings_poll_is_opt_in),
+        ("prescription_engine_refreshes_settings_on_demand", _check_prescription_engine_refreshes_settings_on_demand),
         ("startup_lock_timeout_messages", _check_startup_lock_timeout_messages),
         ("transaction_isolation", _check_transaction_isolation),
         ("read_your_writes_inside_tx", _check_read_your_writes_inside_transaction),
@@ -19143,7 +19400,8 @@ def main():
         ("emergency_acceptance_runner_checks_remote_settings_untouched", _check_emergency_acceptance_runner_checks_remote_settings_untouched),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
-        ("settings_write_creates_validated_pre_write_backup", _check_settings_write_creates_validated_pre_write_backup),
+        ("settings_write_coalesces_validated_pre_write_backup", _check_settings_write_coalesces_validated_pre_write_backup),
+        ("settings_backup_cleanup_rotates_old_files", _check_settings_backup_cleanup_rotates_old_files),
         ("settings_schema_fastpath_current_schema_no_write", _check_settings_schema_fastpath_current_schema_no_write),
         ("settings_schema_missing_table_uses_migration_path", _check_settings_schema_missing_table_uses_migration_path),
         ("settings_schema_outdated_version_uses_migration_path", _check_settings_schema_outdated_version_uses_migration_path),

@@ -8,6 +8,7 @@ class OrderInputHandler:
     
     @staticmethod
     def parse_input_to_dto(text: str, admission_id: int) -> OrderDTO:
+        engine.reload_if_changed(force_check=True)
         explicit_key_match = re.search(r'\[KEY:(.*?)\]', text)
         multicomp = OrderInputHandler._parse_multicomp(text, admission_id, explicit_key_match)
         if multicomp is not None:

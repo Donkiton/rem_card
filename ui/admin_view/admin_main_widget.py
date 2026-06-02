@@ -145,6 +145,15 @@ class AdminMainWidget(QWidget):
 
     def _show_page(self, widget):
         if widget is not None:
+            try:
+                from rem_card.services.prescription_engine import engine
+
+                engine.reload_if_changed(force_check=True)
+            except Exception:
+                pass
+            load_data = getattr(widget, "load_data", None)
+            if callable(load_data):
+                load_data()
             self.stack.setCurrentWidget(widget)
 
     def _connect_back(self, widget):

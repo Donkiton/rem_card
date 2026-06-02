@@ -24,6 +24,7 @@ _SQLITE_ALLOWED_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL
 _SQLITE_ALLOWED_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 _SQLITE_ALLOWED_TEMP_STORE = {"DEFAULT", "FILE", "MEMORY"}
 _LOCK_READ_UNAVAILABLE = object()
+_SQLITE_NATIVE_MAINTENANCE_LOCK = threading.RLock()
 
 
 def _safe_env_int(name: str) -> Optional[int]:
@@ -115,27 +116,29 @@ def configure_connection(
     profile: str = "network",
 ):
     settings = _resolve_sqlite_profile_settings(profile)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    if readonly:
-        conn.execute("PRAGMA query_only = ON")
-    else:
-        conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
-        conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
-    if settings["temp_store"] != "DEFAULT":
-        conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
-    if settings["cache_kb"]:
-        conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
-    if settings["mmap_mb"] is not None:
-        conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
-    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
+    with _SQLITE_NATIVE_MAINTENANCE_LOCK:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        if readonly:
+            conn.execute("PRAGMA query_only = ON")
+        else:
+            conn.execute(f"PRAGMA journal_mode = {settings['journal_mode']}")
+            conn.execute(f"PRAGMA synchronous = {settings['synchronous']}")
+        if settings["temp_store"] != "DEFAULT":
+            conn.execute(f"PRAGMA temp_store = {settings['temp_store']}")
+        if settings["cache_kb"]:
+            conn.execute(f"PRAGMA cache_size = {-int(settings['cache_kb'])}")
+        if settings["mmap_mb"] is not None:
+            conn.execute(f"PRAGMA mmap_size = {int(settings['mmap_mb']) * 1024 * 1024}")
+        conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
 
 
 def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
     started = time.perf_counter()
     ok = False
     try:
-        row = conn.execute("PRAGMA integrity_check").fetchone()
+        with _SQLITE_NATIVE_MAINTENANCE_LOCK:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
         if not row:
             return False, "integrity_check returned no result"
         result = row[0]
@@ -153,7 +156,8 @@ def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
     started = time.perf_counter()
     ok = False
     try:
-        row = conn.execute("PRAGMA quick_check").fetchone()
+        with _SQLITE_NATIVE_MAINTENANCE_LOCK:
+            row = conn.execute("PRAGMA quick_check").fetchone()
         if not row:
             return False, "quick_check returned no result"
         result = row[0]

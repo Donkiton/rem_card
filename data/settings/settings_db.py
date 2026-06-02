@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import glob
+import json
+import re
 import socket
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterator
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
@@ -18,11 +21,13 @@ from rem_card.app.settings_db_paths import (
     get_settings_lock_path,
 )
 from rem_card.app.sqlite_shared import (
+    FileWriteLock,
     SQLiteWriteController,
     backup_connection,
     configure_connection,
     run_integrity_check,
     run_quick_check,
+    validate_sqlite_file,
 )
 from rem_card.data.settings import settings_schema
 
@@ -38,6 +43,58 @@ def _is_sqlite_busy_error(exc: sqlite3.OperationalError) -> bool:
         or "busy" in message
         or "could not acquire sequential write lock" in message
     )
+
+
+SETTINGS_PRE_WRITE_BACKUP_COALESCE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_SETTINGS_PRE_WRITE_BACKUP_COALESCE_SEC", "900")),
+)
+SETTINGS_PRE_WRITE_BACKUP_SCAN_LIMIT = max(
+    1,
+    int(os.environ.get("REMCARD_SETTINGS_PRE_WRITE_BACKUP_SCAN_LIMIT", "5")),
+)
+SETTINGS_BACKUP_RETENTION_DAYS = max(
+    1,
+    int(os.environ.get("REMCARD_SETTINGS_BACKUP_RETENTION_DAYS", "14")),
+)
+SETTINGS_BACKUP_MAX_COUNT = max(
+    5,
+    int(os.environ.get("REMCARD_SETTINGS_BACKUP_MAX_COUNT", "30")),
+)
+SETTINGS_BACKUP_MAX_TOTAL_BYTES = max(
+    256 * 1024 * 1024,
+    int(float(os.environ.get("REMCARD_SETTINGS_BACKUP_MAX_TOTAL_GB", "1.0")) * 1024 * 1024 * 1024),
+)
+SETTINGS_BACKUP_MIN_VALID_RECENT = max(
+    1,
+    int(os.environ.get("REMCARD_SETTINGS_BACKUP_MIN_VALID_RECENT", "3")),
+)
+SETTINGS_BACKUP_HEALTH_CHECK_SCAN_LIMIT = max(
+    SETTINGS_BACKUP_MIN_VALID_RECENT,
+    int(os.environ.get("REMCARD_SETTINGS_BACKUP_HEALTH_CHECK_SCAN_LIMIT", "8")),
+)
+SETTINGS_BACKUP_CLEANUP_MIN_INTERVAL_SEC = max(
+    60.0,
+    float(os.environ.get("REMCARD_SETTINGS_BACKUP_CLEANUP_MIN_INTERVAL_SEC", "300")),
+)
+SETTINGS_BACKUP_FORCE_SOURCE_PREFIXES = (
+    "settings_schema_",
+    "settings_release_snapshot",
+    "settings_legacy_import",
+    "settings_legacy_prescription_overrides",
+)
+
+
+def _settings_backup_source_tag(source: str) -> str:
+    raw = str(source or "settings_write").strip().lower()
+    tag = re.sub(r"[^a-z0-9_]+", "_", raw).strip("_")
+    tag = re.sub(r"_+", "_", tag)
+    return (tag or "settings_write")[:96]
+
+
+def _settings_source_forces_backup(source: str) -> bool:
+    normalized = str(source or "").strip().lower()
+    return any(normalized.startswith(prefix) for prefix in SETTINGS_BACKUP_FORCE_SOURCE_PREFIXES)
 
 
 class SettingsDatabase:
@@ -98,6 +155,7 @@ class SettingsDatabase:
             retry_delay_ms=150,
             stale_timeout_sec=10 * 60,
         )
+        self._last_settings_backup_cleanup_ts = 0.0
 
     def ensure_ready(self) -> dict[str, object]:
         if self.settings_readonly:
@@ -223,7 +281,11 @@ class SettingsDatabase:
                 with self.write_controller.transaction(
                     conn,
                     source="settings_schema_init",
-                    before_begin=lambda: self._backup_before_write(conn, "settings_schema_init"),
+                    before_begin=lambda: self._backup_before_write(
+                        conn,
+                        "settings_schema_init",
+                        force=True,
+                    ),
                 ) as _cursor:
                     apply_schema_called = True
                     settings_schema.apply_schema(conn)
@@ -335,10 +397,10 @@ class SettingsDatabase:
             raise SettingsDbError("БД настроек открыта в режиме только чтения. Изменения запрещены.")
         if readonly:
             uri = f"file:{self.db_path}?mode=ro"
-            conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
+            conn = sqlite3.connect(uri, uri=True, check_same_thread=True, isolation_level=None, timeout=5.0)
             configure_connection(conn, readonly=True, profile="network")
             return conn
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, isolation_level=None, timeout=5.0)
+        conn = sqlite3.connect(self.db_path, check_same_thread=True, isolation_level=None, timeout=5.0)
         configure_connection(conn, profile="network")
         return conn
 
@@ -366,15 +428,22 @@ class SettingsDatabase:
             raise SettingsDbError("БД настроек открыта в режиме только чтения. Изменения запрещены.")
         started = time.perf_counter()
         status = "error"
+        backup_created = False
         conn = self.connect(readonly=False)
         try:
+            def before_begin() -> None:
+                nonlocal backup_created
+                backup_created = self._backup_before_write(conn, source) is not None
+
             with self.write_controller.transaction(
                 conn,
                 source=source,
-                before_begin=lambda: self._backup_before_write(conn, source),
+                before_begin=before_begin,
             ) as cursor:
                 yield cursor
             status = "ok"
+            if backup_created:
+                self._maybe_cleanup_settings_backups(conn)
         except sqlite3.OperationalError as exc:
             if _is_sqlite_busy_error(exc):
                 raise SettingsDbError(
@@ -405,12 +474,39 @@ class SettingsDatabase:
             source="settings_migration_backup",
             lock_wait_sec=20.0,
         )
+        self._annotate_settings_backup_meta(
+            backup_path,
+            backup_kind="settings_migration",
+            source="settings_migration_backup",
+        )
 
-    def _backup_before_write(self, conn: sqlite3.Connection, source: str) -> None:
+    def _backup_before_write(
+        self,
+        conn: sqlite3.Connection,
+        source: str,
+        *,
+        force: bool = False,
+    ) -> str | None:
+        if not force and not _settings_source_forces_backup(source):
+            recent_backup = self._find_recent_valid_pre_write_backup(source)
+            if recent_backup:
+                record_metric(
+                    "settings_backup_skipped_reason",
+                    "coalesced_recent_pre_write",
+                    source=source,
+                    backup_path=recent_backup,
+                )
+                logger.info(
+                    "Skipping settings pre-write backup for %s: recent validated backup exists: %s",
+                    source,
+                    recent_backup,
+                )
+                return None
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         backup_dir = self.backups_dir
-        backup_path = os.path.join(backup_dir, f"settings_pre_{stamp}.db")
-        backup_connection(
+        source_tag = _settings_backup_source_tag(source)
+        backup_path = os.path.join(backup_dir, f"settings_pre_{source_tag}_{stamp}.db")
+        created_path = backup_connection(
             conn,
             backup_path,
             invalid_dir=os.path.join(backup_dir, "invalid"),
@@ -419,6 +515,239 @@ class SettingsDatabase:
             lock_path=None,
             source=f"settings_pre_write_backup:{source or 'settings_write'}",
         )
+        self._annotate_settings_backup_meta(
+            created_path,
+            backup_kind="settings_pre_write",
+            source=source or "settings_write",
+        )
+        return created_path
+
+    def _find_recent_valid_pre_write_backup(self, source: str) -> str | None:
+        if SETTINGS_PRE_WRITE_BACKUP_COALESCE_SEC <= 0:
+            return None
+        source_tag = _settings_backup_source_tag(source)
+        pattern = os.path.join(self.backups_dir, f"settings_pre_{source_tag}_*.db")
+        candidates = [
+            path
+            for path in glob.glob(pattern)
+            if os.path.isfile(path)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        now = time.time()
+        for path in candidates[:SETTINGS_PRE_WRITE_BACKUP_SCAN_LIMIT]:
+            try:
+                age_sec = now - os.path.getmtime(path)
+            except OSError:
+                continue
+            if age_sec < 0 or age_sec > SETTINGS_PRE_WRITE_BACKUP_COALESCE_SEC:
+                continue
+            if not self._settings_backup_meta_is_valid(path):
+                continue
+            ok, reason = validate_sqlite_file(path)
+            if ok:
+                return path
+            logger.warning("Recent settings backup is not valid and will not be reused: %s (%s)", path, reason)
+        return None
+
+    @staticmethod
+    def _settings_backup_meta_is_valid(db_path: str) -> bool:
+        meta_path = f"{db_path}.meta.json"
+        if not os.path.isfile(meta_path):
+            return False
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                meta = json.load(handle)
+            size_bytes = int(meta.get("size_bytes") or 0)
+        except Exception:
+            return False
+        return (
+            meta.get("quick_check") == "ok"
+            and meta.get("integrity_check") == "ok"
+            and size_bytes > 0
+        )
+
+    def _annotate_settings_backup_meta(self, backup_path: str, *, backup_kind: str, source: str) -> None:
+        meta_path = f"{backup_path}.meta.json"
+        if not os.path.isfile(meta_path):
+            return
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                meta = json.load(handle)
+            meta["backup_kind"] = backup_kind
+            meta["settings_source"] = source
+            meta["settings_source_tag"] = _settings_backup_source_tag(source)
+            tmp_path = f"{meta_path}.{os.getpid()}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, meta_path)
+        except Exception as exc:
+            logger.warning("Failed to annotate settings backup metadata %s: %s", meta_path, exc)
+
+    def _maybe_cleanup_settings_backups(self, conn: sqlite3.Connection) -> None:
+        now = time.time()
+        if now - self._last_settings_backup_cleanup_ts < SETTINGS_BACKUP_CLEANUP_MIN_INTERVAL_SEC:
+            return
+        self._last_settings_backup_cleanup_ts = now
+        stamp_path = os.path.join(self.backup_health_dir, "settings_backup_cleanup.stamp")
+        try:
+            if os.path.exists(stamp_path):
+                stamp_age = now - os.path.getmtime(stamp_path)
+                if 0 <= stamp_age < SETTINGS_BACKUP_CLEANUP_MIN_INTERVAL_SEC:
+                    return
+        except OSError:
+            return
+
+        lock_path = os.path.join(self.backup_health_dir, "settings_backup_cleanup.lock")
+        cleanup_lock = FileWriteLock(lock_path, stale_timeout_sec=10 * 60, logger=logger)
+        owner_id = f"{socket.gethostname()}:{os.getpid()}:settings_backup_cleanup"
+        if not cleanup_lock.acquire(owner_id, "settings_backup_cleanup"):
+            return
+        try:
+            self._cleanup_settings_backups(conn)
+            os.makedirs(self.backup_health_dir, exist_ok=True)
+            with open(stamp_path, "w", encoding="utf-8") as handle:
+                handle.write(datetime.now().isoformat(timespec="seconds"))
+        except Exception as exc:
+            logger.warning("Settings backup cleanup skipped after error: %s", exc, exc_info=True)
+        finally:
+            cleanup_lock.release()
+
+    def _cleanup_settings_backups(self, conn: sqlite3.Connection) -> None:
+        if not os.path.isdir(self.backups_dir):
+            return
+        ok, reason = run_quick_check(conn)
+        if not ok:
+            logger.warning("Settings backup cleanup skipped: current settings DB quick_check failed: %s", reason)
+            return
+
+        files = self._list_settings_backup_files()
+        if not files:
+            return
+        valid_recent = self._valid_recent_settings_backups(files)
+        if len(valid_recent) < SETTINGS_BACKUP_MIN_VALID_RECENT:
+            logger.warning(
+                "Settings backup cleanup skipped: only %s valid recent backup(s), required %s",
+                len(valid_recent),
+                SETTINGS_BACKUP_MIN_VALID_RECENT,
+            )
+            return
+
+        protected = set(valid_recent[:SETTINGS_BACKUP_MIN_VALID_RECENT])
+        keep = self._select_settings_backups_to_keep(files, protected)
+        to_delete = [path for path in files if path not in keep]
+
+        remaining = [path for path in files if path not in set(to_delete)]
+        total_size = self._settings_backup_total_size(remaining)
+        if total_size > SETTINGS_BACKUP_MAX_TOTAL_BYTES:
+            for old_path in sorted(remaining, key=os.path.getmtime):
+                if total_size <= SETTINGS_BACKUP_MAX_TOTAL_BYTES:
+                    break
+                if old_path in protected:
+                    continue
+                if old_path in to_delete:
+                    continue
+                try:
+                    total_size -= os.path.getsize(old_path)
+                except OSError:
+                    pass
+                to_delete.append(old_path)
+
+        deleted = 0
+        for path in sorted(set(to_delete), key=os.path.getmtime):
+            if path in protected:
+                continue
+            if self._remove_settings_backup_with_meta(path):
+                deleted += 1
+        if deleted:
+            logger.info("Settings backup cleanup removed %s old backup(s) from %s", deleted, self.backups_dir)
+            record_metric("settings_backup_cleanup_deleted", deleted, backup_dir=self.backups_dir)
+
+    def _list_settings_backup_files(self) -> list[str]:
+        result: list[str] = []
+        for name in os.listdir(self.backups_dir):
+            if not name.lower().endswith(".db"):
+                continue
+            if not (name.startswith("settings_pre_") or name.startswith("settings_migration_")):
+                continue
+            path = os.path.join(self.backups_dir, name)
+            if os.path.isfile(path):
+                result.append(path)
+        result.sort(key=os.path.getmtime, reverse=True)
+        return result
+
+    def _valid_recent_settings_backups(self, files: list[str]) -> list[str]:
+        valid: list[str] = []
+        for path in files[:SETTINGS_BACKUP_HEALTH_CHECK_SCAN_LIMIT]:
+            if not self._settings_backup_meta_is_valid(path):
+                continue
+            ok, reason = validate_sqlite_file(path)
+            if ok:
+                valid.append(path)
+                if len(valid) >= SETTINGS_BACKUP_MIN_VALID_RECENT:
+                    break
+            else:
+                logger.warning("Settings backup failed cleanup validation: %s (%s)", path, reason)
+        return valid
+
+    def _select_settings_backups_to_keep(self, files: list[str], protected: set[str]) -> set[str]:
+        keep = set(protected)
+        pre_write = [path for path in files if os.path.basename(path).startswith("settings_pre_")]
+        migrations = [path for path in files if os.path.basename(path).startswith("settings_migration_")]
+
+        pre_write.sort(key=os.path.getmtime, reverse=True)
+        keep.update(pre_write[:SETTINGS_BACKUP_MAX_COUNT])
+
+        daily_cutoff = datetime.now() - timedelta(days=SETTINGS_BACKUP_RETENTION_DAYS)
+        days_seen: set[str] = set()
+        for path in pre_write:
+            try:
+                modified = datetime.fromtimestamp(os.path.getmtime(path))
+            except OSError:
+                continue
+            if modified < daily_cutoff:
+                continue
+            day_key = modified.strftime("%Y-%m-%d")
+            if day_key in days_seen:
+                continue
+            days_seen.add(day_key)
+            keep.add(path)
+
+        migration_cutoff = datetime.now() - timedelta(days=max(30, SETTINGS_BACKUP_RETENTION_DAYS))
+        for path in migrations:
+            try:
+                if datetime.fromtimestamp(os.path.getmtime(path)) >= migration_cutoff:
+                    keep.add(path)
+            except OSError:
+                continue
+        if migrations:
+            migrations.sort(key=os.path.getmtime, reverse=True)
+            keep.add(migrations[0])
+        return keep
+
+    @staticmethod
+    def _settings_backup_total_size(files: list[str]) -> int:
+        total = 0
+        for path in files:
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                continue
+        return total
+
+    @staticmethod
+    def _remove_settings_backup_with_meta(db_path: str) -> bool:
+        removed = False
+        for path in (db_path, f"{db_path}.meta.json"):
+            try:
+                os.remove(path)
+                removed = True
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                logger.warning("Failed to delete settings backup file %s: %s", path, exc)
+        return removed
 
 
 _DEFAULT_DB: SettingsDatabase | None = None

@@ -21,6 +21,7 @@ class PrescriptionInputWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.matches = []
+        self._settings_checked_for_current_query = False
         self.setup_ui()
         
     def focusOutEvent(self, event):
@@ -81,8 +82,12 @@ class PrescriptionInputWidget(QWidget):
         
     def on_text_changed(self, text):
         if not text:
+            self._settings_checked_for_current_query = False
             self.list_widget.hide()
             return
+
+        engine.reload_if_changed(force_check=not self._settings_checked_for_current_query)
+        self._settings_checked_for_current_query = True
             
         self.list_widget.clear()
         self.matches = []
@@ -136,6 +141,8 @@ class PrescriptionInputWidget(QWidget):
         text = self.input_field.text().strip()
         if not text:
             return
+
+        engine.reload_if_changed(force_check=True)
             
         # 1. Проверяем звездочку
         if "*" in text:
@@ -193,5 +200,6 @@ class PrescriptionInputWidget(QWidget):
             
     def finish_prescription(self, result_text):
         self.input_field.clear()
+        self._settings_checked_for_current_query = False
         self.list_widget.hide()
         self.prescription_generated.emit(result_text)
