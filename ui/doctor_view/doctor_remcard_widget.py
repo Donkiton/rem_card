@@ -3169,6 +3169,8 @@ class DoctorRemCardWidget(QWidget):
     def shutdown(self):
         self._is_closing = True
         self._shutdown_snapshot_worker()
+        if hasattr(self, "chart") and self.chart and hasattr(self.chart, "shutdown"):
+            self.chart.shutdown()
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):

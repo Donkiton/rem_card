@@ -18,6 +18,21 @@ CHART_ACTIVE_INTERVAL_LOOKBACK_DAYS = max(0, int(os.environ.get("REMCARD_CHART_A
 CHART_ACTIVE_INTERVAL_LOOKAHEAD_DAYS = max(0, int(os.environ.get("REMCARD_CHART_ACTIVE_LOOKAHEAD_DAYS", os.environ.get("REMCARD_CHART_LOOKAHEAD_DAYS", "1"))))
 
 
+def _qt_object_alive(obj) -> bool:
+    if obj is None:
+        return False
+    try:
+        import shiboken6  # type: ignore
+
+        return bool(shiboken6.isValid(obj))
+    except Exception:
+        return True
+
+
+def _ignore_pyqtgraph_hover_events(*_args, **_kwargs):
+    return None
+
+
 class TimeHeader(QWidget):
     hour_selected = Signal(int)
 
@@ -34,6 +49,8 @@ class TimeHeader(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
+        if getattr(self.chart, "_tearing_down", False) or not self.chart.is_plot_alive():
+            return
         if event.button() == Qt.LeftButton:
             vb = self.chart.plot_widget.getViewBox()
             view = self.chart.plot_widget
@@ -59,6 +76,9 @@ class TimeHeader(QWidget):
         self.style().drawPrimitive(QStyle.PE_Widget, opt, QPainter(self), self)
 
         painter = QPainter(self)
+        if getattr(self.chart, "_tearing_down", False) or not self.chart.is_plot_alive():
+            painter.end()
+            return
         
         # 1. РћС‚СЂРёСЃРѕРІРєР° РїРѕРґСЃРІРµС‚РєРё РІС‹РґРµР»РµРЅРЅРѕРіРѕ С‡Р°СЃР° (РЎРњР•Р©Р•РќРђ РЅР° 7px РґР»СЏ СЃРѕРІРїР°РґРµРЅРёСЏ СЃ РіСЂР°С„РёРєРѕРј)
         if self.highlighted_hour is not None:
@@ -133,6 +153,10 @@ class ChartWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._tearing_down = False
+        self._grid_lines = []
+        self._range_changed_handler = self._on_view_range_changed
+        self._original_send_hover_events = None
         
         # Р“Р»РѕР±Р°Р»СЊРЅРѕРµ РїРѕРґР°РІР»РµРЅРёРµ РІРѕСЂРЅРёРЅРіРѕРІ numpy РґР»СЏ СЌС‚РѕРіРѕ РІРёРґР¶РµС‚Р° (СЂРµС€Р°РµС‚ РїСЂРѕР±Р»РµРјСѓ All-NaN slice РІ pyqtgraph)
         # РџРѕРґР°РІР»СЏРµРј РІСЃРµ RuntimeWarning, С‚Р°Рє РєР°Рє pyqtgraph С‡Р°СЃС‚Рѕ РіРµРЅРµСЂРёСЂСѓРµС‚ РёС… РїСЂРё СЂР°Р±РѕС‚Рµ СЃ NaN
@@ -164,13 +188,16 @@ class ChartWidget(QWidget):
         
         # РџРѕРґРєР»СЋС‡Р°РµРј СЃРёРіРЅР°Р» РёР·РјРµРЅРµРЅРёСЏ РґРёР°РїР°Р·РѕРЅР° Рє РѕР±РЅРѕРІР»РµРЅРёСЋ Р·Р°РіРѕР»РѕРІРєР°, 
         # С‡С‚РѕР±С‹ РІСЂРµРјСЏ РІСЃРµРіРґР° "СЃР°РјРѕ" РІС‹СЂР°РІРЅРёРІР°Р»РѕСЃСЊ РїРѕ СЃРµС‚РєРµ РїРѕСЃР»Рµ СЂР°СЃС‡РµС‚РѕРІ РґРІРёР¶РєР°
-        vb.sigRangeChanged.connect(lambda *args: self.header_spacer.update())
+        vb.sigRangeChanged.connect(self._range_changed_handler)
 
         self.plot_widget.showGrid(x=False, y=True, alpha=0.5)
         self.plot_widget.setMouseEnabled(x=False, y=False)
         self.plot_widget.setMenuEnabled(False)
         self.plot_widget.hideButtons()
+        self.plot_widget.setMouseTracking(False)
+        self.plot_widget.viewport().setMouseTracking(False)
         self.plot_widget.viewport().installEventFilter(self)
+        self._disable_pyqtgraph_hover_events()
 
         self.plot_widget.hideAxis('bottom')
         self.plot_widget.hideAxis('top')
@@ -212,6 +239,7 @@ class ChartWidget(QWidget):
         self.slice_line = pg.InfiniteLine(angle=90, movable=False, 
                                           pen=pg.mkPen(color='#888', style=Qt.DashLine, width=2))
         self.slice_line.setZValue(100)
+        self.slice_line.setAcceptHoverEvents(False)
         self.slice_line.setOpacity(0) # РР·РЅР°С‡Р°Р»СЊРЅРѕ РїСЂРѕР·СЂР°С‡РЅРѕ
         self.slice_line.hide()
         self.plot_widget.addItem(self.slice_line)
@@ -220,6 +248,7 @@ class ChartWidget(QWidget):
         self.tooltip = TooltipItem(html="", anchor=(0, 1))
         self.tooltip.setParentItem(self.plot_widget.getPlotItem())
         self.tooltip.setZValue(1000) # РЈР»СЊС‚РёРјР°С‚РёРІРЅС‹Р№ Z-index РїРѕРІРµСЂС… СЃРµС‚РєРё (РѕСЃРµР№)
+        self.tooltip.setAcceptHoverEvents(False)
         self.tooltip.setOpacity(0)
         self.tooltip.hide()
         
@@ -237,8 +266,10 @@ class ChartWidget(QWidget):
         self.plot_widget.scene().sigMouseClicked.connect(self.on_scene_clicked)
 
         for i in range(25):
-            self.plot_widget.addItem(pg.InfiniteLine(pos=i, angle=90,
-                                                    pen=pg.mkPen(color=(0, 0, 0, 50))))
+            line = pg.InfiniteLine(pos=i, angle=90, pen=pg.mkPen(color=(0, 0, 0, 50)))
+            line.setAcceptHoverEvents(False)
+            self._grid_lines.append(line)
+            self.plot_widget.addItem(line)
 
         self.chart_layout.addWidget(self.plot_widget)
         self.layout.addWidget(self.chart_container)
@@ -267,6 +298,34 @@ class ChartWidget(QWidget):
             }}
         """)
 
+    def is_plot_alive(self) -> bool:
+        try:
+            return (
+                not self._tearing_down
+                and _qt_object_alive(self.plot_widget)
+                and _qt_object_alive(self.plot_widget.viewport())
+                and _qt_object_alive(self.plot_widget.scene())
+            )
+        except RuntimeError:
+            return False
+
+    def _on_view_range_changed(self, *_args):
+        if self._tearing_down or not _qt_object_alive(self.header_spacer):
+            return
+        self.header_spacer.update()
+
+    def _disable_pyqtgraph_hover_events(self):
+        try:
+            scene = self.plot_widget.scene()
+        except RuntimeError:
+            return
+        if scene is None:
+            return
+        # Срезы графика работают по клику; hover-hit-testing pyqtgraph здесь не нужен
+        # и в аварийных логах падал внутри GraphicsScene.sendHoverEvents().
+        self._original_send_hover_events = getattr(scene, "sendHoverEvents", None)
+        scene.sendHoverEvents = _ignore_pyqtgraph_hover_events
+
     def _init_reusable_plot_items(self):
         curve_specs = (
             ("sys", "ad", 2),
@@ -280,6 +339,7 @@ class ChartWidget(QWidget):
         for key, color_key, width in curve_specs:
             curve = pg.PlotDataItem(pen=pg.mkPen(self.colors[color_key], width=width))
             curve.setZValue(10)
+            curve.setAcceptHoverEvents(False)
             self.plot_widget.addItem(curve)
             self._curve_by_key[key] = curve
             self.curve_items.append(curve)
@@ -290,26 +350,31 @@ class ChartWidget(QWidget):
             brush=pg.mkBrush(self.colors["ad_fill"]),
         )
         fill.setZValue(-10)
+        fill.setAcceptHoverEvents(False)
         self.plot_widget.addItem(fill)
         self.fill_items.append(fill)
 
         self.scatter_vitals = pg.ScatterPlotItem(size=3, pen=None, brush=self.colors["ad"])
         self.scatter_vitals.setZValue(20)
+        self.scatter_vitals.setAcceptHoverEvents(False)
         self.plot_widget.addItem(self.scatter_vitals)
         self._scatter_items["ad"] = self.scatter_vitals
 
         for key in ("pulse", "spo2", "temp", "rr", "cvp"):
             scatter = pg.ScatterPlotItem(size=3, pen=None, brush=self.colors[key])
             scatter.setZValue(20)
+            scatter.setAcceptHoverEvents(False)
             self.plot_widget.addItem(scatter)
             self._scatter_items[key] = scatter
 
     def eventFilter(self, source, event):
-        if event.type() == QEvent.Wheel:
+        if event.type() in (QEvent.Wheel, QEvent.MouseMove):
             return True
         return super().eventFilter(source, event)
 
     def resizeEvent(self, event):
+        if self._tearing_down:
+            return
         super().resizeEvent(event)
         # РџСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ РѕР±РЅРѕРІР»СЏРµРј Р·Р°РіРѕР»РѕРІРѕРє РїСЂРё РёР·РјРµРЅРµРЅРёРё СЂР°Р·РјРµСЂРѕРІ, 
         # С‡С‚РѕР±С‹ РІСЂРµРјСЏ РІСЃРµРіРґР° Р±С‹Р»Рѕ РІС‹СЂРѕРІРЅРµРЅРѕ РїРѕ СЃРµС‚РєРµ РіСЂР°С„РёРєР°
@@ -317,6 +382,8 @@ class ChartWidget(QWidget):
         self._hide_slice_instant()
 
     def showEvent(self, event):
+        if self._tearing_down:
+            return
         super().showEvent(event)
         # РџСЂРё РїРµСЂРІРѕРј РїРѕРєР°Р·Рµ РёР»Рё РїРµСЂРµРєР»СЋС‡РµРЅРёРё РІРєР»Р°РґРѕРє РїСЂРёРЅСѓРґРёС‚РµР»СЊРЅРѕ 
         # РїРµСЂРµСЃС‡РёС‚С‹РІР°РµРј РєРѕРѕСЂРґРёРЅР°С‚С‹ С‡РµСЂРµР· РЅРµР±РѕР»СЊС€СѓСЋ РїР°СѓР·Сѓ, С‡С‚РѕР±С‹ 
@@ -330,6 +397,8 @@ class ChartWidget(QWidget):
         pass
 
     def _hide_slice_instant(self):
+        if self._tearing_down:
+            return
         if hasattr(self, 'fade_timeline'):
             self.fade_timeline.stop()
         self.slice_line.hide()
@@ -338,6 +407,8 @@ class ChartWidget(QWidget):
         self.tooltip.setOpacity(0)
 
     def _on_fade_step(self, value):
+        if self._tearing_down:
+            return
         op = value / 100.0
         if self._fade_action == "out":
             op = 1.0 - op
@@ -346,6 +417,8 @@ class ChartWidget(QWidget):
         self.tooltip.setOpacity(op)
 
     def _on_fade_finished(self):
+        if self._tearing_down:
+            return
         if self._fade_action == "out":
             self.slice_line.hide()
             self.tooltip.hide()
@@ -354,17 +427,23 @@ class ChartWidget(QWidget):
             self.tooltip.setOpacity(1.0)
 
     def _fade_out(self, duration=100):
+        if self._tearing_down:
+            return
         self.fade_timeline.stop()
         self._fade_action = "out"
         self.fade_timeline.start()
 
     def _apply_slice_state(self, exact_hour, tooltip_pos, anchor, html):
+        if self._tearing_down:
+            return
         self.slice_line.setPos(exact_hour)
         self.tooltip.setHtml(html)
         self.tooltip.setAnchor(anchor)
         self.tooltip.setPos(tooltip_pos)
 
     def _fade_in_to(self, exact_hour, tooltip_pos, anchor, html, is_update=False):
+        if self._tearing_down:
+            return
         self.fade_timeline.stop()
         
         self._apply_slice_state(exact_hour, tooltip_pos, anchor, html)
@@ -381,6 +460,8 @@ class ChartWidget(QWidget):
             self.fade_timeline.start()
 
     def on_scene_clicked(self, event):
+        if self._tearing_down or not self.is_plot_alive():
+            return
         if event.button() == Qt.LeftButton:
             pos = event.scenePos()
             vb = self.plot_widget.getViewBox()
@@ -491,6 +572,8 @@ class ChartWidget(QWidget):
 
     def clear_for_context(self, *, admission_id=None, start_time: datetime = None):
         """Immediately remove previous patient curves while a new snapshot is loading."""
+        if self._tearing_down or not self.is_plot_alive():
+            return
         self.admission_id = admission_id
         self.vitals_data = []
         self.current_vitals = []
@@ -518,6 +601,8 @@ class ChartWidget(QWidget):
 
     def _clear_fill_paths(self):
         for item in getattr(self, "fill_items", []):
+            if not _qt_object_alive(item):
+                continue
             item.setPath(QPainterPath())
             item.update()
 
@@ -568,6 +653,8 @@ class ChartWidget(QWidget):
         return (len(vitals), first_key, last_key, max_sync)
 
     def update_data(self, vitals, start_time: datetime, active_intervals=None):
+        if self._tearing_down or not self.is_plot_alive():
+            return
         if start_time is None:
             return
 
@@ -647,4 +734,79 @@ class ChartWidget(QWidget):
             item.setData(x=scatter_data[key]["x"], y=scatter_data[key]["y"])
 
         self.header_spacer.update()
+
+    def shutdown(self):
+        if self._tearing_down:
+            return
+        self._tearing_down = True
+        try:
+            self.setUpdatesEnabled(False)
+        except RuntimeError:
+            pass
+        try:
+            self.fade_timeline.stop()
+        except RuntimeError:
+            pass
+
+        plot_widget = getattr(self, "plot_widget", None)
+        if _qt_object_alive(plot_widget):
+            try:
+                plot_widget.viewport().removeEventFilter(self)
+            except RuntimeError:
+                pass
+            try:
+                scene = plot_widget.scene()
+                scene.sigMouseClicked.disconnect(self.on_scene_clicked)
+            except Exception:
+                pass
+            try:
+                scene = plot_widget.scene()
+                if self._original_send_hover_events is not None:
+                    scene.sendHoverEvents = self._original_send_hover_events
+            except RuntimeError:
+                pass
+            try:
+                plot_widget.getViewBox().sigRangeChanged.disconnect(self._range_changed_handler)
+            except Exception:
+                pass
+
+            items = []
+            items.extend(getattr(self, "fill_items", []))
+            items.extend(getattr(self, "curve_items", []))
+            items.extend(getattr(self, "_scatter_items", {}).values())
+            items.extend(getattr(self, "_grid_lines", []))
+            items.extend([
+                getattr(self, "slice_line", None),
+                getattr(self, "tooltip", None),
+            ])
+            seen = set()
+            for item in items:
+                if item is None:
+                    continue
+                item_id = id(item)
+                if item_id in seen:
+                    continue
+                seen.add(item_id)
+                if not _qt_object_alive(item):
+                    continue
+                try:
+                    item.setParentItem(None)
+                except Exception:
+                    pass
+                try:
+                    plot_widget.removeItem(item)
+                except Exception:
+                    pass
+
+        self.curve_items.clear()
+        self.fill_items.clear()
+        self._curve_by_key.clear()
+        self._scatter_items.clear()
+        self._grid_lines.clear()
+        self.current_vitals = []
+        self.vitals_data = []
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
