@@ -11620,7 +11620,7 @@ def _check_patient_snapshot_persistent_cache_invalidation(temp_root: str) -> tup
     from datetime import datetime
 
     from rem_card.services import persistent_snapshot_cache
-    from rem_card.services.read_coordinator import ReadCoordinator
+    from rem_card.services.read_coordinator import PATIENT_SNAPSHOT_CACHE_FORMAT_VERSION, ReadCoordinator
 
     shift_key = datetime(2026, 5, 22, 8, 0, 0).isoformat(timespec="seconds")
     card_key = ("live", 29, shift_key, "nurse", "live", "card_committed", "card-hash")
@@ -11650,7 +11650,7 @@ def _check_patient_snapshot_persistent_cache_invalidation(temp_root: str) -> tup
         "admission_id": 29,
         "version": 97702,
         "settings": {"cvp": 1},
-        "snapshot_cache_format_version": 2,
+        "snapshot_cache_format_version": PATIENT_SNAPSHOT_CACHE_FORMAT_VERSION,
     }
     persistent_snapshot_cache.store_snapshot("patient_card", card_key, current_snapshot)
     persistent_snapshot_cache.store_snapshot("patient_vitals", vitals_key, current_snapshot)
@@ -12328,6 +12328,7 @@ def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool
 
     from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderStatus, OrderType
     from rem_card.services.balance_calculator import BalanceCalculator
+    from rem_card.services.diet_service import normalize_schedule
     from rem_card.ui.shared.orders_balance_adapter import (
         apply_current_order_mark_overrides,
         build_balance_orders_from_orders_widget,
@@ -12507,6 +12508,79 @@ def _check_orders_balance_adapter_uses_local_state(temp_root: str) -> tuple[bool
     )
     if (oral_current, oral_daily) != (100.0, 300.0):
         return False, f"cached oral totals mismatch: {(oral_current, oral_daily)}"
+
+    oral_plan_schedule = [
+        {"time": "08:00", "amount": 200},
+        {"time": "12:00", "amount": 300},
+    ]
+    planned_current, planned_daily = oral_totals_from_runtime(
+        {
+            "oral_events": [],
+            "oral_plan_schedule": oral_plan_schedule,
+            "oral_shift_date": shift_start,
+            "oral_start_dt": shift_start,
+            "oral_end_dt": shift_start + timedelta(days=1),
+        },
+        shift_start + timedelta(hours=2),
+    )
+    if (planned_current, planned_daily) != (0.0, 500.0):
+        return False, f"planned oral totals mismatch without facts: {(planned_current, planned_daily)}"
+
+    planned_fact_current, planned_fact_daily = oral_totals_from_runtime(
+        {
+            "oral_events": [FakeOralEvent(shift_start, 200)],
+            "oral_plan_schedule": oral_plan_schedule,
+            "oral_shift_date": shift_start,
+            "oral_start_dt": shift_start,
+            "oral_end_dt": shift_start + timedelta(days=1),
+        },
+        shift_start + timedelta(hours=2),
+    )
+    if (planned_fact_current, planned_fact_daily) != (200.0, 500.0):
+        return False, f"planned oral totals mismatch with planned fact: {(planned_fact_current, planned_fact_daily)}"
+
+    unplanned_current, unplanned_daily = oral_totals_from_runtime(
+        {
+            "oral_events": [FakeOralEvent(shift_start + timedelta(hours=2), 100)],
+            "oral_plan_schedule": oral_plan_schedule,
+            "oral_shift_date": shift_start,
+            "oral_start_dt": shift_start,
+            "oral_end_dt": shift_start + timedelta(days=1),
+        },
+        shift_start + timedelta(hours=2),
+    )
+    if (unplanned_current, unplanned_daily) != (100.0, 600.0):
+        return False, f"planned oral totals mismatch with unplanned fact: {(unplanned_current, unplanned_daily)}"
+
+    explicit_local_plan_current, explicit_local_plan_daily = oral_totals_from_runtime(
+        {
+            "oral_events": [],
+            "oral_plan_schedule": oral_plan_schedule,
+            "oral_shift_date": shift_start,
+            "oral_start_dt": shift_start,
+            "oral_end_dt": shift_start + timedelta(days=1),
+        },
+        shift_start + timedelta(hours=2),
+        oral_events=[],
+        oral_plan={"schedule_json": normalize_schedule([{"time": "10:00", "amount": 150}])},
+    )
+    if (explicit_local_plan_current, explicit_local_plan_daily) != (0.0, 150.0):
+        return False, f"local oral plan did not override runtime plan: {(explicit_local_plan_current, explicit_local_plan_daily)}"
+
+    deleted_plan_current, deleted_plan_daily = oral_totals_from_runtime(
+        {
+            "oral_events": [],
+            "oral_plan_schedule": oral_plan_schedule,
+            "oral_shift_date": shift_start,
+            "oral_start_dt": shift_start,
+            "oral_end_dt": shift_start + timedelta(days=1),
+        },
+        shift_start + timedelta(hours=2),
+        oral_events=[],
+        oral_plan=None,
+    )
+    if (deleted_plan_current, deleted_plan_daily) != (0.0, 0.0):
+        return False, f"deleted local oral plan still used runtime plan: {(deleted_plan_current, deleted_plan_daily)}"
 
     fallback_current, fallback_daily = oral_totals_from_runtime(
         {"oral_totals": {"current": 10, "daily": 20}},
@@ -17143,6 +17217,7 @@ def _check_settings_db_schema_and_no_wal(temp_root: str) -> tuple[bool, str]:
 
 def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_backup_dir
+    from rem_card.app.sqlite_shared import backup_meta_path
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import DISPLAY_SETTINGS_KEY, SettingsService
 
@@ -17175,7 +17250,7 @@ def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -
         return False, f"expected one coalesced pre-write backup for repeated settings writes, got {len(created)}"
 
     latest_backup = created[-1]
-    meta_path = f"{latest_backup}.meta.json"
+    meta_path = backup_meta_path(latest_backup)
     if not os.path.isfile(meta_path):
         return False, f"missing backup metadata: {meta_path}"
     meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
@@ -17201,9 +17276,61 @@ def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -
     return True, "ok"
 
 
+def _check_sqlite_backup_handles_long_metadata_path(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import backup_connection, backup_meta_path, validate_sqlite_file
+
+    backup_dir = os.path.join(temp_root, "b")
+    os.makedirs(backup_dir, exist_ok=True)
+    prefix = "settings_pre_"
+    suffix = ".db"
+    backup_dir_abs = os.path.abspath(backup_dir)
+    target_backup_len = 248
+    filler_len = target_backup_len - len(backup_dir_abs) - 1 - len(prefix) - len(suffix)
+    if filler_len < 1:
+        return False, f"test backup directory is too long for this regression: {len(backup_dir_abs)}"
+    backup_name = prefix + ("x" * filler_len) + suffix
+    backup_path = os.path.join(backup_dir, backup_name)
+
+    old_temp_path = f"{backup_path}.12345678.tmp"
+    if len(os.path.abspath(backup_path)) >= 260:
+        return False, f"backup path unexpectedly exceeds Windows limit: {len(os.path.abspath(backup_path))}"
+    if len(os.path.abspath(old_temp_path)) <= 260:
+        return False, f"regression path is not long enough: {len(os.path.abspath(old_temp_path))}"
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE probe(id INTEGER PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO probe(value) VALUES ('ok')")
+        conn.commit()
+        created_path = backup_connection(
+            conn,
+            backup_path,
+            invalid_dir=os.path.join(backup_dir, "invalid"),
+            validate=True,
+            source="long_metadata_path_regression",
+        )
+    finally:
+        conn.close()
+
+    if created_path != backup_path or not os.path.isfile(backup_path):
+        return False, f"backup was not created at requested path: {created_path}"
+    ok, reason = validate_sqlite_file(backup_path)
+    if not ok:
+        return False, f"long-path backup is not valid: {reason}"
+    meta_path = backup_meta_path(backup_path)
+    if meta_path == f"{backup_path}.meta.json":
+        return False, "long backup metadata did not use shortened meta path"
+    if not os.path.isfile(meta_path):
+        return False, f"shortened metadata file missing: {meta_path}"
+    leftovers = [name for name in os.listdir(backup_dir) if name.startswith(".backup_") and name.endswith(".tmp")]
+    if leftovers:
+        return False, f"temporary backup files were left behind: {leftovers}"
+    return True, "ok"
+
+
 def _check_settings_backup_cleanup_rotates_old_files(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_backup_dir
-    from rem_card.app.sqlite_shared import backup_connection
+    from rem_card.app.sqlite_shared import backup_connection, backup_meta_path
     from rem_card.data.settings.settings_db import SETTINGS_BACKUP_MAX_COUNT, SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
 
@@ -17230,14 +17357,14 @@ def _check_settings_backup_cleanup_rotates_old_files(temp_root: str) -> tuple[bo
             file_age_sec = float(files_to_create - idx) * 10.0
             ts = now - file_age_sec
             os.utime(path, (ts, ts))
-            meta_path = f"{path}.meta.json"
+            meta_path = backup_meta_path(path)
             if os.path.exists(meta_path):
                 os.utime(meta_path, (ts, ts))
     finally:
         conn.close()
 
     oldest = os.path.join(backup_dir, "settings_pre_regression_000.db")
-    oldest_meta = f"{oldest}.meta.json"
+    oldest_meta = backup_meta_path(oldest)
     newest = os.path.join(backup_dir, f"settings_pre_regression_{files_to_create - 1:03d}.db")
 
     conn = db.connect(readonly=True)
@@ -19401,6 +19528,7 @@ def main():
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
         ("settings_write_coalesces_validated_pre_write_backup", _check_settings_write_coalesces_validated_pre_write_backup),
+        ("sqlite_backup_handles_long_metadata_path", _check_sqlite_backup_handles_long_metadata_path),
         ("settings_backup_cleanup_rotates_old_files", _check_settings_backup_cleanup_rotates_old_files),
         ("settings_schema_fastpath_current_schema_no_write", _check_settings_schema_fastpath_current_schema_no_write),
         ("settings_schema_missing_table_uses_migration_path", _check_settings_schema_missing_table_uses_migration_path),

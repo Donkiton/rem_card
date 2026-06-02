@@ -1405,6 +1405,12 @@ class DoctorRemCardWidget(QWidget):
         self.update_balance_data()
 
     def _local_oral_events_for_balance(self):
+        state = self._local_oral_state_for_balance()
+        if state is None:
+            return None
+        return state[0]
+
+    def _local_oral_state_for_balance(self):
         widget = getattr(self, "diet_intake_widget", None)
         if widget is None:
             return None
@@ -1415,7 +1421,10 @@ class DoctorRemCardWidget(QWidget):
             return None
         if getattr(widget, "shift_date", None) != self._current_date:
             return None
-        return list(getattr(widget, "_events", []) or [])
+        return (
+            list(getattr(widget, "_events", []) or []),
+            getattr(widget, "_plan", None),
+        )
 
     def _set_service_context(self, service):
         self.service = service
@@ -2584,11 +2593,12 @@ class DoctorRemCardWidget(QWidget):
         )
         
         cur, day = calc_res["current"], calc_res["daily"]
-        oral_cur, oral_day = oral_totals_from_runtime(
-            runtime,
-            calc_time,
-            oral_events=self._local_oral_events_for_balance(),
-        )
+        local_oral_state = self._local_oral_state_for_balance()
+        oral_kwargs = {}
+        if local_oral_state is not None:
+            oral_kwargs["oral_events"] = local_oral_state[0]
+            oral_kwargs["oral_plan"] = local_oral_state[1]
+        oral_cur, oral_day = oral_totals_from_runtime(runtime, calc_time, **oral_kwargs)
         total_in_cur, total_in_day = cur["total"] + oral_cur, day["total"] + oral_day
         total_out_cur = 0
         total_out_day = 0

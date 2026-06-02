@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 from copy import copy
 from datetime import datetime
+
+from rem_card.services.shift_service import ShiftService
 
 
 _INACTIVE_STATUSES = {"deleted", "cancelled"}
 _NURSE_MARKS = {"nurse_executed", "nurse_not_executed"}
+_UNSET = object()
 
 
 def _status_value(value) -> str:
@@ -94,25 +98,128 @@ def _event_value(event, name: str):
     return getattr(event, name, None)
 
 
-def oral_totals_from_runtime(runtime: dict | None, current_time, *, oral_events=None) -> tuple[float, float]:
+def _minute_key(value) -> str | None:
+    dt = _parse_datetime(value)
+    if dt is None:
+        return None
+    return dt.replace(second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+
+
+def _plan_schedule_source(plan):
+    if plan is None:
+        return None
+    if isinstance(plan, (list, tuple)):
+        return plan
+    if isinstance(plan, dict):
+        for key in ("schedule_json", "schedule", "items", "oral_plan_schedule"):
+            if key in plan:
+                return plan.get(key)
+        return None
+    return getattr(plan, "schedule_json", None)
+
+
+def _plan_items(plan) -> list[dict]:
+    source = _plan_schedule_source(plan)
+    if source is None:
+        return []
+    if isinstance(source, str):
+        try:
+            source = json.loads(source or "[]")
+        except Exception:
+            return []
+    if not isinstance(source, (list, tuple)):
+        return []
+
+    result = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        time_text = str(item.get("time") or "").strip()
+        if not ShiftService.is_time_input_valid(time_text):
+            continue
+        amount = _number(item.get("amount", item.get("amount_ml")))
+        if amount <= 0:
+            continue
+        result.append({"time": ShiftService.normalize_time(time_text), "amount": amount})
+    return result
+
+
+def _runtime_plan(runtime: dict):
+    if "oral_plan_schedule" in runtime:
+        return runtime.get("oral_plan_schedule")
+    if "oral_plan" in runtime:
+        return runtime.get("oral_plan")
+    return None
+
+
+def _plan_aware_oral_totals(runtime: dict, events, current_time, plan) -> tuple[float, float]:
+    current_limit = _parse_datetime(current_time)
+    if current_limit is not None:
+        current_limit = current_limit.replace(second=0, microsecond=0)
+
+    current = 0.0
+    for event in events or []:
+        event_time = _parse_datetime(_event_value(event, "event_time"))
+        if event_time is None or current_limit is None:
+            continue
+        if event_time.replace(second=0, microsecond=0) <= current_limit:
+            current += _number(_event_value(event, "amount_ml"))
+
+    items = _plan_items(plan)
+    if not items:
+        daily = sum(_number(_event_value(event, "amount_ml")) for event in events or [])
+        return round(current, 1), round(daily, 1)
+
+    shift_date = (
+        _parse_datetime(runtime.get("oral_shift_date"))
+        or _parse_datetime(runtime.get("start_dt"))
+        or current_limit
+        or datetime.now()
+    )
+    start_dt = _parse_datetime(runtime.get("oral_start_dt")) or _parse_datetime(runtime.get("start_dt"))
+    end_dt = _parse_datetime(runtime.get("oral_end_dt")) or _parse_datetime(runtime.get("end_dt"))
+
+    planned_by_time = {}
+    for item in items:
+        try:
+            planned_dt = ShiftService.resolve_datetime(str(item["time"]), shift_date)
+        except Exception:
+            continue
+        if start_dt is not None and planned_dt < start_dt:
+            continue
+        if end_dt is not None and planned_dt >= end_dt:
+            continue
+        key = _minute_key(planned_dt)
+        if key:
+            planned_by_time[key] = planned_by_time.get(key, 0.0) + _number(item.get("amount"))
+
+    unplanned_daily = 0.0
+    for event in events or []:
+        event_key = _minute_key(_event_value(event, "event_time"))
+        if event_key not in planned_by_time:
+            unplanned_daily += _number(_event_value(event, "amount_ml"))
+
+    daily = sum(planned_by_time.values()) + unplanned_daily
+    return round(current, 1), round(daily, 1)
+
+
+def oral_totals_from_runtime(
+    runtime: dict | None,
+    current_time,
+    *,
+    oral_events=_UNSET,
+    oral_plan=_UNSET,
+) -> tuple[float, float]:
     """
     Возвращает пероральный ввод из уже загруженных данных.
     Важно: этот путь вызывается из GUI-потока при кликах по назначениям, поэтому
     здесь нельзя делать синхронные чтения из сетевой БД.
     """
     runtime = runtime or {}
-    events = oral_events if oral_events is not None else runtime.get("oral_events")
+    events = runtime.get("oral_events") if oral_events is _UNSET else oral_events
     if events is not None:
-        current_limit = _parse_datetime(current_time)
-        current = 0.0
-        daily = 0.0
-        for event in events or []:
-            amount = _number(_event_value(event, "amount_ml"))
-            event_time = _parse_datetime(_event_value(event, "event_time"))
-            daily += amount
-            if current_limit is not None and event_time is not None and event_time <= current_limit:
-                current += amount
-        return round(current, 1), round(daily, 1)
+        plan = _runtime_plan(runtime) if oral_plan is _UNSET else oral_plan
+        return _plan_aware_oral_totals(runtime, events, current_time, plan)
 
     totals = runtime.get("oral_totals") or {}
     return round(_number(totals.get("current")), 1), round(_number(totals.get("daily")), 1)

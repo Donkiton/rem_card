@@ -24,6 +24,7 @@ from rem_card.app.sqlite_shared import (
     FileWriteLock,
     SQLiteWriteController,
     backup_connection,
+    backup_meta_path,
     configure_connection,
     run_integrity_check,
     run_quick_check,
@@ -553,7 +554,7 @@ class SettingsDatabase:
 
     @staticmethod
     def _settings_backup_meta_is_valid(db_path: str) -> bool:
-        meta_path = f"{db_path}.meta.json"
+        meta_path = backup_meta_path(db_path)
         if not os.path.isfile(meta_path):
             return False
         try:
@@ -569,7 +570,7 @@ class SettingsDatabase:
         )
 
     def _annotate_settings_backup_meta(self, backup_path: str, *, backup_kind: str, source: str) -> None:
-        meta_path = f"{backup_path}.meta.json"
+        meta_path = backup_meta_path(backup_path)
         if not os.path.isfile(meta_path):
             return
         try:
@@ -578,7 +579,10 @@ class SettingsDatabase:
             meta["backup_kind"] = backup_kind
             meta["settings_source"] = source
             meta["settings_source_tag"] = _settings_backup_source_tag(source)
-            tmp_path = f"{meta_path}.{os.getpid()}.tmp"
+            tmp_path = os.path.join(
+                os.path.dirname(meta_path),
+                f".settings_meta_{os.getpid()}_{int(time.time() * 1000000)}.tmp",
+            )
             with open(tmp_path, "w", encoding="utf-8") as handle:
                 json.dump(meta, handle, ensure_ascii=False, indent=2)
             os.replace(tmp_path, meta_path)
@@ -739,7 +743,7 @@ class SettingsDatabase:
     @staticmethod
     def _remove_settings_backup_with_meta(db_path: str) -> bool:
         removed = False
-        for path in (db_path, f"{db_path}.meta.json"):
+        for path in (db_path, backup_meta_path(db_path)):
             try:
                 os.remove(path)
                 removed = True

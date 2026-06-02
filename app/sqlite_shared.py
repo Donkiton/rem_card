@@ -254,6 +254,15 @@ def _write_backup_meta(meta_path: str, backup_path: str, sha256: str):
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
+def backup_meta_path(backup_path: str) -> str:
+    default_path = f"{backup_path}.meta.json"
+    if os.name != "nt" or len(os.path.abspath(default_path)) < 240:
+        return default_path
+    backup_dir = os.path.dirname(os.path.abspath(backup_path))
+    digest = hashlib.sha1(os.path.basename(backup_path).encode("utf-8", errors="replace")).hexdigest()[:16]
+    return os.path.join(backup_dir, f".{digest}.meta.json")
+
+
 def backup_connection(
     conn: sqlite3.Connection,
     backup_path: str,
@@ -280,8 +289,12 @@ def backup_connection(
             time.sleep(0.25)
 
     try:
-        os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-        temp_path = f"{backup_path}.{random.getrandbits(32):08x}.tmp"
+        backup_dir = os.path.dirname(backup_path)
+        os.makedirs(backup_dir, exist_ok=True)
+        temp_path = os.path.join(
+            backup_dir,
+            f".backup_{random.getrandbits(32):08x}.tmp",
+        )
         backup_conn = sqlite3.connect(temp_path)
         try:
             with backup_conn:
@@ -322,7 +335,7 @@ def backup_connection(
             sha256 = _sha256_file(temp_path)
 
         os.replace(temp_path, backup_path)
-        meta_path = f"{backup_path}.meta.json"
+        meta_path = backup_meta_path(backup_path)
         if validate:
             _write_backup_meta(meta_path, backup_path, sha256)
         _write_backup_audit(

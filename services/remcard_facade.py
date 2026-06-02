@@ -25,7 +25,7 @@ from ..data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabOrderStatus
 from .patient_service import PatientService
 from .vital_service import VitalService
 from .fluid_service import FluidService
-from .diet_service import DietPlanService, DietTemplateService, OralIntakeService
+from .diet_service import DietPlanService, DietTemplateService, OralIntakeService, schedule_items
 from .order_service import OrderService
 from .shift_service import ShiftService
 from .ventilation_service import VentilationService
@@ -953,11 +953,23 @@ class RemCardService(QObject):
         now = datetime.now()
         calc_time = now if start_dt <= now < end_dt else end_dt
         oral_events = []
+        oral_plan_schedule = []
         oral_totals = {"current": 0.0, "daily": 0.0}
+        oral_start_dt, oral_end_dt = start_dt, end_dt
+        try:
+            if hasattr(self._vitals, "get_effective_bounds_for_patient"):
+                oral_start_dt, oral_end_dt = self._vitals.get_effective_bounds_for_patient(
+                    patient,
+                    shift_date,
+                    default_bounds=(start_dt, end_dt),
+                )
+        except Exception as exc:
+            logger.warning("Failed to resolve oral intake bounds for balance snapshot: %s", exc)
         try:
             loaded_oral_events = self.get_oral_intake_events(admission_id, shift_date)
-            oral_current = 0.0
-            oral_daily = 0.0
+            oral_plan = self.get_diet_plan(admission_id, shift_date)
+            if oral_plan is not None:
+                oral_plan_schedule = schedule_items(getattr(oral_plan, "schedule_json", "[]"))
             for event in loaded_oral_events:
                 amount = float(getattr(event, "amount_ml", 0.0) or 0.0)
                 event_time = getattr(event, "event_time", None)
@@ -967,10 +979,14 @@ class RemCardService(QObject):
                         "amount_ml": amount,
                     }
                 )
-                oral_daily += amount
-                if event_time is not None and event_time <= calc_time:
-                    oral_current += amount
-            oral_totals = {"current": round(oral_current, 1), "daily": round(oral_daily, 1)}
+            oral_totals = self._oral_intake._calculate_totals(
+                loaded_oral_events,
+                oral_plan,
+                shift_date,
+                oral_start_dt,
+                oral_end_dt,
+                calc_time,
+            )
         except Exception as exc:
             logger.warning("Failed to load oral intake runtime for balance snapshot: %s", exc)
         balance_calc = BalanceCalculator.calculate(
@@ -993,6 +1009,10 @@ class RemCardService(QObject):
                 "active_intervals": active_intervals,
                 "outcome_time": outcome_time,
                 "oral_events": oral_events,
+                "oral_plan_schedule": oral_plan_schedule,
+                "oral_shift_date": shift_date,
+                "oral_start_dt": oral_start_dt,
+                "oral_end_dt": oral_end_dt,
                 "oral_totals": oral_totals,
             },
             "balance_calc": balance_calc,
