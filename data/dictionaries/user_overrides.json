@@ -3353,6 +3353,35 @@
         "payload": {}
       },
       {
+        "preset_id": "manual:gas:desflurane",
+        "source_drug_id": null,
+        "label": "Desflurane",
+        "display_name": "Десфлюран",
+        "latin": null,
+        "aliases": [],
+        "kind": "gas",
+        "group": "Газы",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "0,7 МАК",
+          "0,8 МАК"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": null,
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": null,
+        "payload": {}
+      },
+      {
         "preset_id": "manual:gas:sevoflurane",
         "source_drug_id": null,
         "label": "Sevoflurane",

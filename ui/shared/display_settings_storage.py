@@ -16,6 +16,7 @@ DISPLAY_SETTINGS_VERSION = 1
 DISPLAY_SETTINGS_RELATIVE_PATH = os.path.join("settings", "display_settings", "display_settings.json")
 W1A_UPCOMING_ORDERS_DEFAULT_ENABLED = True
 W1B_LOWER_SECTOR_DEFAULT_ENABLED = True
+DISPLAY_ROLES = ("doctor", "nurse", "operblock")
 
 
 SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
@@ -37,6 +38,12 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
+        {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
+        {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
+    ),
+    "operblock": (
+        {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
+        {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),
@@ -63,6 +70,10 @@ REMCARD_TABS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "labs", "label": "Анализы", "default_visible": True},
         {"id": "print", "label": "Печать", "default_visible": False},
     ),
+    "operblock": (
+        {"id": "vitals", "label": "Витальные функции", "default_visible": True},
+        {"id": "orders", "label": "Назначения", "default_visible": True},
+    ),
 }
 
 
@@ -72,6 +83,9 @@ ROLE_ALIASES = {
     "nurse": "nurse",
     "медсестра": "nurse",
     "медицинская сестра": "nurse",
+    "operblock": "operblock",
+    "операционный блок": "operblock",
+    "оперблок": "operblock",
 }
 
 
@@ -125,8 +139,8 @@ def default_display_settings_payload() -> dict[str, Any]:
     return {
         "version": DISPLAY_SETTINGS_VERSION,
         "active": {
-            "doctor": default_role_display_settings("doctor"),
-            "nurse": default_role_display_settings("nurse"),
+            role: default_role_display_settings(role)
+            for role in DISPLAY_ROLES
         },
     }
 
@@ -355,7 +369,7 @@ class DisplaySettingsStorage:
         active = payload.get("active")
         if not isinstance(active, dict):
             return result
-        for role in ("doctor", "nurse"):
+        for role in DISPLAY_ROLES:
             base_role_settings = (result.get("active") or {}).get(role)
             result["active"][role] = normalize_role_display_settings(
                 role,

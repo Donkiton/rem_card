@@ -14,13 +14,10 @@ from rem_card.app.db_access_classifier import classify_database_access_error
 from rem_card.app.jsonl_audit_log import write_audit_event
 from rem_card.app.runtime_paths import (
     DataPathConfigurationError,
-    OPERBLOCK_DB_NOT_FOUND_MESSAGE,
     get_journal_db_path,
     get_required_baza_paths,
     is_compiled,
-    resolve_operblock_baza_dir,
     resolve_baza_dir,
-    validate_operblock_baza_dir,
 )
 from rem_card.app.version import APP_VERSION
 from rem_card.app.sqlite_shared import (
@@ -1099,17 +1096,6 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
             technical_reason=str(exc),
         )
 
-    if str(role or "").strip().lower() == "operblock":
-        ok, message = validate_operblock_baza_dir(baza_dir)
-        if not ok:
-            return StartupGuardResult(
-                ok=False,
-                user_message=message,
-                technical_reason=message,
-                baza_dir=baza_dir,
-            )
-        baza_dir = resolve_operblock_baza_dir(baza_dir)
-
     if not os.path.isdir(baza_dir):
         return StartupGuardResult(
             ok=False,
@@ -1174,14 +1160,6 @@ def run_startup_db_guard(role: Optional[str] = None) -> StartupGuardResult:
                 role=role,
                 details={"db_path": db_path, "reason": result, "category": category},
             )
-            if str(role or "").strip().lower() == "operblock":
-                message = f"{OPERBLOCK_DB_NOT_FOUND_MESSAGE}: {db_path}"
-                return StartupGuardResult(
-                    ok=False,
-                    user_message=message,
-                    technical_reason=message,
-                    baza_dir=baza_dir,
-                )
             return _startup_unavailable_result(
                 role=role,
                 baza_dir=baza_dir,

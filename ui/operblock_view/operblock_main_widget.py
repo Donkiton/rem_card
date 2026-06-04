@@ -77,6 +77,12 @@ from rem_card.services.operblock_medication_presets import (
     operblock_medication_preset_display_name,
     save_operblock_medication_presets,
 )
+from rem_card.services.operblock_icon_defaults import (
+    default_drug_icon_file,
+    drug_icon_candidate_keys_from_payload,
+    edit_icon_key,
+    type_icon_key,
+)
 from rem_card.services.operblock_anesthesia_types import (
     load_operblock_anesthesia_types,
     normalize_operblock_anesthesia_type_label,
@@ -100,6 +106,8 @@ from rem_card.ui.rem_card_sectors.sector_2v import Sector2v
 from rem_card.ui.rem_card_sectors.sector_8 import Sector8
 from rem_card.ui.shared.chart_widget import ChartWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
+from rem_card.ui.shared.operblock_icon_settings import load_operblock_icon_pixmap
 from rem_card.ui.shared.vitals_widget import VitalsWidget
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.shared_styles import apply_custom_dialog_style
@@ -1482,31 +1490,36 @@ class OperBlockSector8Panel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.icon_dir = get_icon_dir()
+        self._protocol_mode = False
+        self._launcher_back = False
+        self._display_visible: dict[str, bool] = {}
+        self._display_order: list[str] = []
         self._init_ui()
 
     def _init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 0, 10, 0)
-        layout.setSpacing(10)
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(10, 0, 10, 0)
+        self.layout.setSpacing(10)
 
-        title = QLabel("Оперблок")
-        title.setStyleSheet(
+        self.title_label = QLabel("Оперблок")
+        self.title_label.setStyleSheet(
             f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; "
             "background: transparent; border: none;"
         )
-        layout.addWidget(title)
-        layout.addStretch(1)
 
         self.btn_archive = self._button(" Архив", "binder.png")
         self.btn_refresh = self._button(" Обновить", "refresh.png")
         self.btn_settings = self._button(" Настройки", "settings.png")
         self.btn_back = self._button(" Назад", "back.png")
         self.btn_exit = self._button(" Выход", "exit.png")
-        layout.addWidget(self.btn_archive)
-        layout.addWidget(self.btn_refresh)
-        layout.addWidget(self.btn_settings)
-        layout.addWidget(self.btn_back)
-        layout.addWidget(self.btn_exit)
+        self.btn_settings.setVisible(False)
+        self._button_widgets = {
+            "archive": self.btn_archive,
+            "refresh": self.btn_refresh,
+            "back": self.btn_back,
+            "exit": self.btn_exit,
+        }
+        self.apply_display_settings()
 
     def _button(self, text: str, icon_name: str) -> QPushButton:
         button = QPushButton(text, self)
@@ -1519,8 +1532,55 @@ class OperBlockSector8Panel(QWidget):
         button.setStyleSheet(STYLE_SECTOR8_BUTTON)
         return button
 
-    def set_protocol_mode(self, enabled: bool):
-        self.btn_back.setVisible(bool(enabled))
+    def _clear_layout(self):
+        while self.layout.count():
+            self.layout.takeAt(0)
+
+    def apply_display_settings(self):
+        try:
+            payload = DisplaySettingsStorage().load()
+            settings = role_display_settings_from_payload(payload, "operblock")
+            section = settings["sector8_buttons"]
+            order = list(section["order"])
+            visible = dict(section["visible"])
+        except Exception:
+            order = list(getattr(self, "_button_widgets", {}).keys())
+            visible = {button_id: True for button_id in order}
+
+        self._display_order = [button_id for button_id in order if button_id in self._button_widgets]
+        for button_id in self._button_widgets:
+            if button_id not in self._display_order:
+                self._display_order.append(button_id)
+        self._display_visible = {
+            button_id: bool(visible.get(button_id, True))
+            for button_id in self._button_widgets
+        }
+
+        self._clear_layout()
+        self.layout.addWidget(self.title_label)
+        self.layout.addStretch(1)
+        for button in self._button_widgets.values():
+            button.setVisible(False)
+        for button_id in self._display_order:
+            button = self._button_widgets.get(button_id)
+            if button is None:
+                continue
+            if self._display_visible.get(button_id, True):
+                self.layout.addWidget(button)
+                button.setVisible(True)
+        self.btn_settings.setVisible(False)
+        self._apply_back_visibility()
+        self.updateGeometry()
+
+    def _apply_back_visibility(self):
+        visible_by_settings = bool(self._display_visible.get("back", True))
+        should_show = visible_by_settings and (self._protocol_mode or self._launcher_back)
+        self.btn_back.setVisible(should_show)
+
+    def set_protocol_mode(self, enabled: bool, *, launcher_back: bool = False):
+        self._protocol_mode = bool(enabled)
+        self._launcher_back = bool(launcher_back)
+        self._apply_back_visibility()
 
 
 class ElidedTooltipLabel(QLabel):
@@ -4184,12 +4244,13 @@ GAS_MAC_HINT_TOOLTIP = (
 
 
 def _create_gas_dialog_image_icon(
-    icon_file: str,
+    icon_ref,
     *,
     frame_size: int,
     icon_size: int,
     background: str,
     parent=None,
+    fallback_file: str = "",
 ) -> QFrame:
     frame = QFrame(parent)
     frame.setFixedSize(frame_size, frame_size)
@@ -4200,18 +4261,24 @@ def _create_gas_dialog_image_icon(
     layout.setContentsMargins(0, 0, 0, 0)
     icon_label = QLabel(frame)
     icon_label.setAlignment(Qt.AlignCenter)
-    pixmap = QPixmap(os.path.join(get_icon_dir(), icon_file))
+    fallback = str(fallback_file or "").strip()
+    if not fallback and isinstance(icon_ref, str) and os.path.splitext(icon_ref)[1]:
+        fallback = icon_ref
+    pixmap = load_operblock_icon_pixmap(icon_ref, fallback_file=fallback)
     if not pixmap.isNull():
         icon_label.setPixmap(pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
     layout.addWidget(icon_label, 1)
     return frame
 
 
-def _create_gas_dialog_plain_icon(icon_file: str, *, icon_size: int, parent=None) -> QLabel:
+def _create_gas_dialog_plain_icon(icon_ref, *, icon_size: int, parent=None, fallback_file: str = "") -> QLabel:
     icon_label = QLabel(parent)
     icon_label.setFixedSize(icon_size, icon_size)
     icon_label.setAlignment(Qt.AlignCenter)
-    pixmap = QPixmap(os.path.join(get_icon_dir(), icon_file))
+    fallback = str(fallback_file or "").strip()
+    if not fallback and isinstance(icon_ref, str) and os.path.splitext(icon_ref)[1]:
+        fallback = icon_ref
+    pixmap = load_operblock_icon_pixmap(icon_ref, fallback_file=fallback)
     if not pixmap.isNull():
         icon_label.setPixmap(pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
     return icon_label
@@ -4238,7 +4305,7 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         placeholder: str = "",
         left_icon_file: str,
         left_icon_background: str,
-        right_icon_file: str,
+        right_icon_file,
         geometry_key: str,
         parent=None,
         start_datetime: datetime | None = None,
@@ -4251,6 +4318,7 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         route_code: str = OPERBLOCK_ORDER_ROUTE_DEFAULT,
         action_text: str = "Сохранить",
         minimum_width: int | None = None,
+        right_icon_fallback_file: str = "",
     ):
         super().__init__(parent)
         self._dialog_title = str(title or "Изменить назначение").strip() or "Изменить назначение"
@@ -4261,7 +4329,8 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         self._placeholder = str(placeholder or "").strip()
         self._left_icon_file = str(left_icon_file or "").strip()
         self._left_icon_background = str(left_icon_background or "#EEF2FF").strip()
-        self._right_icon_file = str(right_icon_file or "").strip()
+        self._right_icon_file = right_icon_file
+        self._right_icon_fallback_file = str(right_icon_fallback_file or "").strip()
         self._start_datetime = _minute_floor_dt(start_datetime)
         self._time_min_datetime = _minute_floor_dt(min_datetime)
         self._time_max_datetime = _minute_floor_dt(max_datetime)
@@ -4536,7 +4605,12 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         drug_layout.addLayout(drug_text_col, 1)
         if self._right_icon_file:
             drug_layout.addWidget(
-                _create_gas_dialog_plain_icon(self._right_icon_file, icon_size=92, parent=drug_row),
+                _create_gas_dialog_plain_icon(
+                    self._right_icon_file,
+                    icon_size=92,
+                    parent=drug_row,
+                    fallback_file=self._right_icon_fallback_file,
+                ),
                 0,
                 Qt.AlignRight | Qt.AlignVCenter,
             )
@@ -4840,9 +4914,9 @@ class BolusEditDialog(MedicationEditDialogBase):
             value_label="Доза. (г; мг; мкг)",
             value_text=_normalize_bolus_dose_text(dose_text),
             placeholder="200 мг",
-            left_icon_file="bolus.png",
+            left_icon_file=type_icon_key("bolus"),
             left_icon_background="#EAFBF5",
-            right_icon_file="bolus-izm.png",
+            right_icon_file=edit_icon_key("bolus"),
             geometry_key="operblock/bolus_edit_dialog_geometry_v2",
             parent=parent,
             start_datetime=base_datetime,
@@ -4890,9 +4964,9 @@ class InfusionRateDialog(MedicationEditDialogBase):
             value_label="Скорость: мл/ч",
             value_text=_compact_infusion_rate_display_text(rate_text),
             placeholder="1 мл/ч",
-            left_icon_file="perfuzor.png",
+            left_icon_file=type_icon_key("continuous_infusion"),
             left_icon_background="#FFF7ED",
-            right_icon_file="dozator_izm.png",
+            right_icon_file=edit_icon_key("continuous_infusion"),
             geometry_key="operblock/infusion_rate_dialog_geometry_v2",
             parent=parent,
             start_datetime=start_datetime,
@@ -4933,9 +5007,9 @@ class InfusionVolumeDialog(MedicationEditDialogBase):
             value_label=field_label,
             value_text=_normalize_volume_ml_text(volume_text),
             placeholder=placeholder,
-            left_icon_file="kapelnitsa.png",
+            left_icon_file=type_icon_key("timed_infusion"),
             left_icon_background="#EAF3FF",
-            right_icon_file="kapeln_izm.png",
+            right_icon_file=edit_icon_key("timed_infusion"),
             geometry_key="operblock/infusion_volume_dialog_geometry_v2",
             parent=parent,
             start_datetime=start_datetime,
@@ -4961,24 +5035,31 @@ class InfusionStopDialog(MedicationEditDialogBase):
         min_datetime: datetime | None = None,
         max_datetime: datetime | None = None,
         infusion_kind: str = "rate",
+        payload: dict | None = None,
     ):
         clean_name = re.sub(r"\s+", " ", str(drug_name or "Назначение").strip()) or "Назначение"
         kind = str(infusion_kind or "").strip().casefold()
         if kind == "gas":
             subtitle = "Ингаляционный анестетик"
-            left_icon_file = "gas.png"
+            left_icon_file = type_icon_key("gas")
             left_icon_background = "#EEF2FF"
-            right_icon_file = "sevodrag.png"
+            payload_data = payload if isinstance(payload, dict) else {}
+            right_icon_file = drug_icon_candidate_keys_from_payload(payload_data, clean_name)
+            if not right_icon_file:
+                right_icon_file = [edit_icon_key("gas")]
+            right_icon_fallback = default_drug_icon_file("gas")
         elif kind == "volume":
             subtitle = "Капельная инфузия"
-            left_icon_file = "kapelnitsa.png"
+            left_icon_file = type_icon_key("timed_infusion")
             left_icon_background = "#EAF3FF"
-            right_icon_file = "kapeln_izm.png"
+            right_icon_file = edit_icon_key("timed_infusion")
+            right_icon_fallback = default_drug_icon_file("timed_infusion")
         else:
             subtitle = "Длительная инфузия"
-            left_icon_file = "perfuzor.png"
+            left_icon_file = type_icon_key("continuous_infusion")
             left_icon_background = "#FFF7ED"
-            right_icon_file = "dozator_izm.png"
+            right_icon_file = edit_icon_key("continuous_infusion")
+            right_icon_fallback = default_drug_icon_file("continuous_infusion")
         super().__init__(
             title=f"Остановить назначение: {clean_name}",
             drug_name=clean_name,
@@ -4989,6 +5070,7 @@ class InfusionStopDialog(MedicationEditDialogBase):
             left_icon_file=left_icon_file,
             left_icon_background=left_icon_background,
             right_icon_file=right_icon_file,
+            right_icon_fallback_file=right_icon_fallback,
             geometry_key="operblock/infusion_stop_dialog_geometry_v1",
             parent=parent,
             start_datetime=start_datetime,
@@ -5020,6 +5102,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         max_datetime: datetime | None = None,
         show_time: bool = True,
         action_text: str = "Сохранить",
+        payload: dict | None = None,
     ):
         super().__init__(parent)
         self._gas_name = re.sub(r"\s+", " ", str(gas_name or "Газ").strip()) or "Газ"
@@ -5031,6 +5114,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
             self._time_max_datetime = None
         self._show_time = bool(show_time)
         self._action_text = str(action_text or "Сохранить")
+        self._payload = dict(payload or {}) if isinstance(payload, dict) else {}
         self._time_text_updating = False
         self.setWindowTitle(f"Изменить газ: {self._gas_name}")
         _apply_operblock_window_icon(self)
@@ -5257,7 +5341,13 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         drug_layout.setContentsMargins(0, 0, 0, 0)
         drug_layout.setSpacing(16)
         drug_layout.addWidget(
-            _create_gas_dialog_image_icon("gas.png", frame_size=52, icon_size=32, background="#EEF2FF", parent=drug_row),
+            _create_gas_dialog_image_icon(
+                type_icon_key("gas"),
+                frame_size=52,
+                icon_size=32,
+                background="#EEF2FF",
+                parent=drug_row,
+            ),
             0,
             Qt.AlignVCenter,
         )
@@ -5274,7 +5364,12 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         drug_text_col.addStretch(1)
         drug_layout.addLayout(drug_text_col, 1)
         drug_layout.addWidget(
-            _create_gas_dialog_plain_icon("sevodrag.png", icon_size=92, parent=drug_row),
+            _create_gas_dialog_plain_icon(
+                drug_icon_candidate_keys_from_payload(self._payload, self._gas_name),
+                icon_size=92,
+                parent=drug_row,
+                fallback_file=default_drug_icon_file("gas"),
+            ),
             0,
             Qt.AlignRight | Qt.AlignVCenter,
         )
@@ -8864,6 +8959,7 @@ class OperBlockMainWidget(QWidget):
         self._orders_empty_widget: QWidget | None = None
         self._last_infusion_elapsed_refresh_minute = ""
         self._archive_cases: list[dict] = []
+        self._role_launcher_mode = False
         self._init_ui()
         self._protocol_clock_timer = QTimer(self)
         self._protocol_clock_timer.timeout.connect(self._update_protocol_current_time_label)
@@ -8998,6 +9094,7 @@ class OperBlockMainWidget(QWidget):
         self.content_stack.addWidget(self._build_vitals_tab())
         self.content_stack.addWidget(self._build_orders_tab())
         right_layout.addWidget(self.content_stack, 1)
+        self._apply_protocol_tab_display_settings()
 
         layout.addWidget(right_column, 1)
         return page
@@ -9227,10 +9324,21 @@ class OperBlockMainWidget(QWidget):
         layout = QHBoxLayout(frame)
         layout.setContentsMargins(5, 0, 5, 0)
         layout.setSpacing(10)
+        self.protocol_tabs_layout = layout
         self.tab_group = QButtonGroup(self)
         self.tab_group.setExclusive(True)
         self.vitals_tab_button = self._tab_button("Витальные функции", checked=True)
         self.orders_tab_button = self._tab_button("Назначения")
+        self._protocol_tab_widgets = {
+            "vitals": self.vitals_tab_button,
+            "orders": self.orders_tab_button,
+        }
+        self._protocol_tab_indexes = {
+            "vitals": 0,
+            "orders": 1,
+        }
+        self._protocol_tab_order = ["vitals", "orders"]
+        self._protocol_tab_visible = {"vitals": True, "orders": True}
         self.tab_group.addButton(self.vitals_tab_button, 0)
         self.tab_group.addButton(self.orders_tab_button, 1)
         self.tab_group.idClicked.connect(self._set_protocol_tab)
@@ -9248,6 +9356,84 @@ class OperBlockMainWidget(QWidget):
         button.setStyleSheet(build_remcard_tab_button_style(get_theme_manager().current_tokens()))
         return button
 
+    def _clear_protocol_tabs_layout(self):
+        layout = getattr(self, "protocol_tabs_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            layout.takeAt(0)
+
+    def _apply_protocol_tab_display_settings(self):
+        layout = getattr(self, "protocol_tabs_layout", None)
+        widgets = dict(getattr(self, "_protocol_tab_widgets", {}) or {})
+        if layout is None or not widgets:
+            return
+        try:
+            payload = DisplaySettingsStorage().load()
+            settings = role_display_settings_from_payload(payload, "operblock")
+            section = settings["remcard_tabs"]
+            order = [str(item_id) for item_id in section.get("order", [])]
+            visible = {
+                str(item_id): bool(value)
+                for item_id, value in (section.get("visible") or {}).items()
+            }
+        except Exception:
+            order = ["vitals", "orders"]
+            visible = {"vitals": True, "orders": True}
+
+        ordered_tabs = [tab_id for tab_id in order if tab_id in widgets]
+        for tab_id in ("vitals", "orders"):
+            if tab_id not in ordered_tabs:
+                ordered_tabs.append(tab_id)
+        visible_tabs = [tab_id for tab_id in ordered_tabs if visible.get(tab_id, True)]
+        if not visible_tabs:
+            visible_tabs = [ordered_tabs[0] if ordered_tabs else "vitals"]
+
+        self._protocol_tab_order = ordered_tabs
+        self._protocol_tab_visible = {tab_id: tab_id in visible_tabs for tab_id in widgets}
+        self._clear_protocol_tabs_layout()
+        for button in widgets.values():
+            button.setVisible(False)
+        for tab_id in ordered_tabs:
+            button = widgets.get(tab_id)
+            if button is None or not self._protocol_tab_visible.get(tab_id, False):
+                continue
+            layout.addWidget(button)
+            button.setVisible(True)
+        layout.addStretch(1)
+        self._ensure_visible_protocol_tab()
+
+    def _first_visible_protocol_tab_id(self) -> str:
+        order = list(getattr(self, "_protocol_tab_order", ["vitals", "orders"]) or ["vitals", "orders"])
+        visible = dict(getattr(self, "_protocol_tab_visible", {}) or {})
+        for tab_id in order:
+            if visible.get(tab_id, True):
+                return tab_id
+        return "vitals"
+
+    def _set_protocol_tab_by_id(self, tab_id: str):
+        target_id = "orders" if tab_id == "orders" else "vitals"
+        if target_id == "orders" and not self._orders_tab_enabled():
+            target_id = "vitals"
+        target_index = int((getattr(self, "_protocol_tab_indexes", {}) or {}).get(target_id, 0))
+        self.content_stack.setCurrentIndex(target_index)
+        for current_id, button in (getattr(self, "_protocol_tab_widgets", {}) or {}).items():
+            button.setChecked(current_id == target_id)
+        if target_id == "vitals":
+            QTimer.singleShot(0, self._update_vitals_chart)
+
+    def _ensure_visible_protocol_tab(self):
+        stack = getattr(self, "content_stack", None)
+        if stack is None:
+            return
+        current_id = "orders" if stack.currentIndex() == 1 else "vitals"
+        visible = dict(getattr(self, "_protocol_tab_visible", {}) or {})
+        if current_id == "orders" and not self._orders_tab_enabled():
+            self._set_protocol_tab_by_id("vitals")
+            return
+        if not visible.get(current_id, True):
+            self._set_protocol_tab_by_id(self._first_visible_protocol_tab_id())
+
     def _stage_action_button(self, text: str, *, danger: bool = False) -> QPushButton:
         button = QPushButton(text)
         button.setMinimumHeight(32)
@@ -9261,13 +9447,10 @@ class OperBlockMainWidget(QWidget):
 
     def _set_protocol_tab(self, index: int):
         target = max(0, min(1, int(index)))
-        if target == 1 and not self._orders_tab_enabled():
-            self.vitals_tab_button.setChecked(True)
-            self.orders_tab_button.setChecked(False)
-            return
-        self.content_stack.setCurrentIndex(target)
-        if target == 0:
-            QTimer.singleShot(0, self._update_vitals_chart)
+        target_id = "orders" if target == 1 else "vitals"
+        if not getattr(self, "_protocol_tab_visible", {}).get(target_id, True):
+            target_id = self._first_visible_protocol_tab_id()
+        self._set_protocol_tab_by_id(target_id)
 
     def _orders_tab_enabled(self) -> bool:
         return bool(getattr(self, "_current_case_active", False) and getattr(self, "_current_anesthesia_active", False))
@@ -9893,9 +10076,9 @@ class OperBlockMainWidget(QWidget):
         self.preset_filter_group.idClicked.connect(self._on_preset_filter_changed)
         quick_controls_layout.addLayout(filter_row)
 
-        preset_settings_button = QPushButton("Настроить препараты")
-        preset_settings_button.setFixedHeight(32)
-        preset_settings_button.setStyleSheet(
+        self.preset_settings_button = QPushButton("Настроить препараты")
+        self.preset_settings_button.setFixedHeight(32)
+        self.preset_settings_button.setStyleSheet(
             f"""
             QPushButton {{
                 background-color: #F8FAFC;
@@ -9908,8 +10091,9 @@ class OperBlockMainWidget(QWidget):
             QPushButton:hover {{ background-color: #EEF3FF; }}
             """
         )
-        preset_settings_button.clicked.connect(self._open_quick_orders_settings)
-        quick_controls_layout.addWidget(preset_settings_button)
+        self.preset_settings_button.clicked.connect(self._open_quick_orders_settings)
+        self.preset_settings_button.setVisible(False)
+        quick_controls_layout.addWidget(self.preset_settings_button)
         quick_body.addWidget(self.quick_orders_controls_panel, 0)
 
         quick_scroll = QScrollArea()
@@ -10075,6 +10259,16 @@ class OperBlockMainWidget(QWidget):
             self.refresh_operblock_archive(force=force)
         else:
             self.refresh_board(force=force)
+
+    def apply_operblock_icon_settings(self):
+        self._orders_render_signature = ""
+        self._active_infusions_render_signature = ""
+        self._rendered_medication_group_signatures.clear()
+        self._rendered_active_infusion_signatures.clear()
+        if self.stack.currentWidget() == self.protocol_page and self._current_operation_case_id:
+            self.refresh_protocol(force=True)
+        else:
+            self._refresh_quick_orders()
 
     def refresh_board(self, *, force: bool = False):
         if self._is_closing:
@@ -10685,11 +10879,11 @@ class OperBlockMainWidget(QWidget):
         orders_tab_available = case_active and aid_active
         orders_controls_enabled = write_enabled and aid_active
         if hasattr(self, "orders_tab_button"):
-            self.orders_tab_button.setEnabled(orders_tab_available)
-            if not orders_tab_available and self.content_stack.currentIndex() == 1:
-                self.vitals_tab_button.setChecked(True)
-                self.orders_tab_button.setChecked(False)
-                self.content_stack.setCurrentIndex(0)
+            orders_visible = bool(getattr(self, "_protocol_tab_visible", {}).get("orders", True))
+            self.orders_tab_button.setEnabled(orders_visible and orders_tab_available)
+            if (not orders_visible or not orders_tab_available) and self.content_stack.currentIndex() == 1:
+                self._set_protocol_tab_by_id("vitals")
+            self._ensure_visible_protocol_tab()
         self._set_orders_entry_controls_enabled(orders_controls_enabled)
 
     def _set_orders_entry_controls_enabled(self, enabled: bool):
@@ -12209,7 +12403,7 @@ class OperBlockMainWidget(QWidget):
             return {
                 "color": "#E0F2FE",
                 "icon": "drop_white",
-                "icon_file": "gas.png",
+                "icon_file": type_icon_key("gas"),
                 "icon_size": 30,
                 "time_bg": "#E0F2FE",
                 "time_fg": "#0369A1",
@@ -12220,7 +12414,7 @@ class OperBlockMainWidget(QWidget):
             return {
                 "color": "#FFF7ED",
                 "icon": "infusion_white",
-                "icon_file": "perfuzor.png",
+                "icon_file": type_icon_key("continuous_infusion"),
                 "icon_size": 30,
                 "time_bg": "#DBEAFE",
                 "time_fg": "#1D4ED8",
@@ -12229,7 +12423,7 @@ class OperBlockMainWidget(QWidget):
             return {
                 "color": "#EAF3FF",
                 "icon": "drop_white",
-                "icon_file": "kapelnitsa.png",
+                "icon_file": type_icon_key("timed_infusion"),
                 "icon_size": 30,
                 "time_bg": "#CCFBF1",
                 "time_fg": "#0F766E",
@@ -12237,7 +12431,7 @@ class OperBlockMainWidget(QWidget):
         return {
             "color": "#EAFBF5",
             "icon": "syringe_white",
-            "icon_file": "bolus.png",
+            "icon_file": type_icon_key("bolus"),
             "icon_size": 30,
             "time_bg": "#DCFCE7",
             "time_fg": "#15803D",
@@ -12254,8 +12448,8 @@ class OperBlockMainWidget(QWidget):
         icon = QLabel()
         icon.setAlignment(Qt.AlignCenter)
         icon_size = int(visual.get("icon_size") or 22)
-        icon_file = str(visual.get("icon_file") or "").strip()
-        pixmap = QPixmap(os.path.join(get_icon_dir(), icon_file)) if icon_file else QPixmap()
+        icon_file = visual.get("icon_file")
+        pixmap = load_operblock_icon_pixmap(icon_file) if icon_file else QPixmap()
         if not pixmap.isNull():
             pixmap = pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
@@ -12268,8 +12462,8 @@ class OperBlockMainWidget(QWidget):
     @staticmethod
     def _active_infusion_icon_file(interval: dict) -> str:
         if _is_gas_infusion(interval or {}):
-            return "gas.png"
-        return "perfuzor.png" if _infusion_has_rate(interval or {}) else "kapelnitsa.png"
+            return type_icon_key("gas")
+        return type_icon_key("continuous_infusion") if _infusion_has_rate(interval or {}) else type_icon_key("timed_infusion")
 
     @staticmethod
     def _active_infusion_title_text(interval: dict) -> str:
@@ -12819,8 +13013,7 @@ class OperBlockMainWidget(QWidget):
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon = QLabel()
         icon.setAlignment(Qt.AlignCenter)
-        active_icon_path = os.path.join(get_icon_dir(), self._active_infusion_icon_file(interval))
-        pixmap = QPixmap(active_icon_path)
+        pixmap = load_operblock_icon_pixmap(self._active_infusion_icon_file(interval))
         if not pixmap.isNull():
             pixmap = pixmap.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
@@ -13327,6 +13520,7 @@ class OperBlockMainWidget(QWidget):
             max_datetime=self._current_anesthesia_end,
             show_time=include_time,
             action_text="Сохранить",
+            payload=interval.get("payload") if isinstance(interval.get("payload"), dict) else None,
         )
         if dialog.exec() != QDialog.Accepted:
             return
@@ -13557,6 +13751,7 @@ class OperBlockMainWidget(QWidget):
             min_datetime=self._latest_infusion_event_datetime(interval) or start_dt,
             max_datetime=self._current_anesthesia_end if not self._current_anesthesia_active else None,
             infusion_kind=infusion_kind,
+            payload=interval.get("payload") if isinstance(interval.get("payload"), dict) else None,
         )
         if dialog.exec() != QDialog.Accepted:
             return
@@ -15643,7 +15838,20 @@ class OperBlockMainWidget(QWidget):
         self.refresh_board(force=True)
 
     def _set_protocol_chrome(self, enabled: bool):
-        self.sector_8_panel.set_protocol_mode(enabled)
+        self.sector_8_panel.set_protocol_mode(
+            enabled,
+            launcher_back=bool(getattr(self, "_role_launcher_mode", False) and not enabled),
+        )
+
+    def set_role_launcher_mode(self, enabled: bool):
+        self._role_launcher_mode = bool(enabled)
+        self._set_protocol_chrome(self.stack.currentWidget() == self.protocol_page)
+
+    def apply_display_settings(self):
+        if hasattr(self, "sector_8_panel"):
+            self.sector_8_panel.apply_display_settings()
+            self._set_protocol_chrome(self.stack.currentWidget() == self.protocol_page)
+        self._apply_protocol_tab_display_settings()
 
     def _update_protocol_current_time_label(self):
         now_dt = datetime.now()

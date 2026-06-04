@@ -20,6 +20,11 @@ from rem_card.data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabMaterial
 from rem_card.data.dto.remcard_dto import DietTemplateDTO
 from rem_card.data.settings.settings_db import SettingsDatabase, get_settings_database, reset_settings_database
 from rem_card.data.settings.settings_schema import SEED_IMPORT_VERSION, now_text
+from rem_card.services.operblock_icon_defaults import (
+    MAX_OPERBLOCK_ICON_BLOB_BYTES,
+    SEEDED_CUSTOM_ICON_DEFINITIONS,
+    SUPPORTED_OPERBLOCK_ICON_EXTENSIONS,
+)
 from rem_card.services.shift_service import ShiftService
 
 
@@ -34,6 +39,7 @@ BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
 EMERGENCY_PASSWORD_KEY = "emergency_password"
 EMERGENCY_PASSWORD_CATALOG_KEY = "emergency_password"
+OPERBLOCK_ICONS_KEY = "operblock_icons"
 DEFAULT_EMERGENCY_PASSWORD = "2u1x8dxgeD"
 MIN_EMERGENCY_PASSWORD_LENGTH = 6
 MAX_BACKGROUND_IMAGE_BLOB_BYTES = 32 * 1024 * 1024
@@ -106,6 +112,7 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     BACKGROUND_SETTINGS_KEY: (("ui_backgrounds", "background_key"), ("app_settings", "key")),
     STYLE_SETTINGS_KEY: (("app_settings", "key"),),
     EMERGENCY_PASSWORD_CATALOG_KEY: (("app_settings", "key"),),
+    OPERBLOCK_ICONS_KEY: (("operblock_icons", "icon_key"),),
 }
 
 APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
@@ -334,6 +341,7 @@ class SettingsService:
             release_report = self._apply_bundled_release_snapshot_if_needed()
             if release_report:
                 info = {**info, "settings_release_snapshot": release_report}
+            self._ensure_default_operblock_icons()
             self._ready = True
             self._ready_info = dict(info)
             return dict(info)
@@ -408,6 +416,7 @@ class SettingsService:
                 PRINT_SETTINGS_KEY,
                 DISPLAY_SETTINGS_KEY,
                 BACKGROUND_SETTINGS_KEY,
+                OPERBLOCK_ICONS_KEY,
                 STYLE_SETTINGS_KEY,
                 EMERGENCY_PASSWORD_CATALOG_KEY,
             ):
@@ -1440,6 +1449,10 @@ class SettingsService:
                 rows = cursor.execute(
                     "SELECT * FROM print_templates ORDER BY active DESC, template_key ASC"
                 ).fetchall()
+            elif table == "operblock_icons":
+                rows = cursor.execute(
+                    "SELECT * FROM operblock_icons ORDER BY enabled DESC, sort_order ASC, icon_key ASC"
+                ).fetchall()
             else:
                 rows = cursor.execute(
                     f"SELECT * FROM {table} ORDER BY enabled DESC, sort_order ASC, {key_column} ASC"
@@ -2437,6 +2450,200 @@ class SettingsService:
             fh.write(row["image_blob"])
         os.replace(tmp_path, target_path)
         return True
+
+    @staticmethod
+    def _read_operblock_icon_image(image_path: str) -> tuple[bytes, str, str]:
+        path = os.path.abspath(os.path.normpath(str(image_path or "").strip().strip('"')))
+        if not os.path.isfile(path):
+            raise FileNotFoundError("Файл иконки не найден.")
+        extension = os.path.splitext(path)[1].lower()
+        if extension not in SUPPORTED_OPERBLOCK_ICON_EXTENSIONS:
+            raise ValueError("Поддерживаются только изображения PNG, JPG, JPEG, BMP, GIF, WEBP или SVG.")
+        size = os.path.getsize(path)
+        if size > MAX_OPERBLOCK_ICON_BLOB_BYTES:
+            raise ValueError(
+                "Файл иконки слишком большой: "
+                f"{size} байт, максимум {MAX_OPERBLOCK_ICON_BLOB_BYTES} байт."
+            )
+        with open(path, "rb") as fh:
+            image_blob = fh.read()
+        image_mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        image_hash = hashlib.sha256(image_blob).hexdigest()
+        return image_blob, image_mime, image_hash
+
+    def _ensure_default_operblock_icons(self) -> None:
+        inserted: list[str] = []
+        if getattr(self.db, "settings_readonly", False):
+            return
+        try:
+            from rem_card.app.paths import get_icon_dir
+
+            icon_dir = get_icon_dir()
+            with self.db.transaction("settings_operblock_icons_seed") as cursor:
+                for definition in SEEDED_CUSTOM_ICON_DEFINITIONS:
+                    existing = cursor.execute(
+                        "SELECT 1 FROM operblock_icons WHERE icon_key = ?",
+                        (definition.icon_key,),
+                    ).fetchone()
+                    if existing:
+                        continue
+                    source_file = definition.source_file or definition.default_file
+                    source_path = os.path.join(icon_dir, source_file)
+                    if not os.path.isfile(source_path):
+                        logger.warning("Operblock default icon seed file missing: %s", source_path)
+                        continue
+                    image_blob, image_mime, image_hash = self._read_operblock_icon_image(source_path)
+                    value = {
+                        "source": "default_seed",
+                        "source_file": source_file,
+                        "default_file": definition.default_file,
+                    }
+                    now = now_text()
+                    cursor.execute(
+                        """
+                        INSERT INTO operblock_icons (
+                            icon_key, category, target_key, name, default_file, value_json,
+                            image_blob, image_mime, image_hash, enabled, sort_order,
+                            revision, source, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, 'seed', ?, ?)
+                        """,
+                        (
+                            definition.icon_key,
+                            definition.category,
+                            definition.target_key,
+                            definition.name,
+                            definition.default_file,
+                            _stable_json(value),
+                            image_blob,
+                            image_mime,
+                            image_hash,
+                            int(definition.sort_order or 0),
+                            now,
+                            now,
+                        ),
+                    )
+                    inserted.append(definition.icon_key)
+                if inserted:
+                    self._bump_catalog_version(
+                        cursor,
+                        OPERBLOCK_ICONS_KEY,
+                        "operblock_icons",
+                        None,
+                        "seed_defaults",
+                        changed_by_role="system",
+                        after={"inserted": inserted},
+                    )
+        except Exception as exc:
+            logger.warning("Не удалось подготовить стандартные иконки оперблока: %s", exc)
+
+    def list_operblock_icons(self) -> dict[str, dict[str, Any]]:
+        self.ensure_ready()
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM operblock_icons
+                WHERE enabled = 1
+                ORDER BY sort_order ASC, icon_key ASC
+                """
+            ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = dict(row)
+            value_json = item.get("value_json")
+            value = {}
+            if value_json:
+                try:
+                    decoded = json.loads(value_json)
+                    if isinstance(decoded, dict):
+                        value = decoded
+                except Exception:
+                    value = {}
+            item["value"] = value
+            result[str(item.get("icon_key") or "")] = item
+        return result
+
+    def save_operblock_icon(
+        self,
+        *,
+        icon_key: str,
+        category: str,
+        target_key: str,
+        name: str,
+        default_file: str,
+        image_path: str,
+        sort_order: int = 0,
+        changed_by_role: str | None = "doctor",
+    ) -> None:
+        self.ensure_ready()
+        clean_key = str(icon_key or "").strip()
+        if not clean_key:
+            raise ValueError("Ключ иконки не указан.")
+        image_blob, image_mime, image_hash = self._read_operblock_icon_image(image_path)
+        value = {
+            "source": "user_upload",
+            "source_file": os.path.basename(str(image_path or "")),
+            "default_file": str(default_file or ""),
+        }
+        with self.db.transaction("settings_operblock_icon_save") as cursor:
+            before = self._select_by_key(cursor, "operblock_icons", "icon_key", clean_key)
+            now = now_text()
+            cursor.execute(
+                """
+                INSERT INTO operblock_icons (
+                    icon_key, category, target_key, name, default_file, value_json,
+                    image_blob, image_mime, image_hash, enabled, sort_order,
+                    revision, source, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, 'manual', ?, ?)
+                ON CONFLICT(icon_key) DO UPDATE SET
+                    category = excluded.category,
+                    target_key = excluded.target_key,
+                    name = excluded.name,
+                    default_file = excluded.default_file,
+                    value_json = excluded.value_json,
+                    image_blob = excluded.image_blob,
+                    image_mime = excluded.image_mime,
+                    image_hash = excluded.image_hash,
+                    enabled = 1,
+                    sort_order = excluded.sort_order,
+                    revision = operblock_icons.revision + 1,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    clean_key,
+                    str(category or "custom"),
+                    str(target_key or clean_key),
+                    str(name or clean_key),
+                    str(default_file or ""),
+                    _stable_json(value),
+                    image_blob,
+                    image_mime,
+                    image_hash,
+                    int(sort_order or 0),
+                    now,
+                    now,
+                ),
+            )
+            self._bump_catalog_version(
+                cursor,
+                OPERBLOCK_ICONS_KEY,
+                "operblock_icons",
+                clean_key,
+                "update",
+                changed_by_role=changed_by_role,
+                before=before,
+                after={
+                    "icon_key": clean_key,
+                    "category": str(category or "custom"),
+                    "target_key": str(target_key or clean_key),
+                    "name": str(name or clean_key),
+                    "default_file": str(default_file or ""),
+                    "image_hash": image_hash,
+                },
+            )
 
     def _compute_app_settings_hash(self, scope: str, key: str) -> str:
         value = self.get_app_setting(scope, key, default=None)

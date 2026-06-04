@@ -14,10 +14,9 @@ import time
 
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
-from rem_card.app.paths import BAZA_DIR, get_icon_dir, get_role_lock_path
+from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.app.roles import ROLE_KEYS, ROLE_OPERBLOCK, role_display_name
-from rem_card.app.runtime_paths import get_operblock_test_baza_dir, validate_operblock_baza_dir
 from rem_card.app.version import APP_DISPLAY_TITLE
 
 def _get_desktop_path():
@@ -108,6 +107,8 @@ class MainWindow(QMainWindow):
     def __init__(self, container, role=None, role_session_lock=None, role_key=None):
         super().__init__()
         self.container = container
+        self._default_container = container
+        self._operblock_container = None
         self._initial_role = role
         self._role_lock = role_session_lock
         self._role_lock_key = role_key if role_session_lock else None
@@ -120,7 +121,7 @@ class MainWindow(QMainWindow):
         self._restore_probe_notice_deferred_until = 0.0
         self._pending_emergency_discard = None
         self._exit_role_key = None
-        self._last_active_role_key = role if role in ("doctor", "nurse") else None
+        self._last_active_role_key = role if role in ROLE_KEYS else None
         
         self.setup_base_ui()
         self._connect_runtime_outage_signal()
@@ -709,9 +710,17 @@ class MainWindow(QMainWindow):
     def _role_display_name(role_key: str) -> str:
         return role_display_name(role_key)
 
+    def _current_role_lock_path(self, role_key: str) -> str:
+        runtime_context = getattr(getattr(self.container, "db_manager", None), "runtime_context", None)
+        session_locks_dir = str(getattr(runtime_context, "session_locks_dir", "") or "").strip()
+        if session_locks_dir:
+            safe_role = str(role_key or "unknown").lower()
+            return os.path.join(session_locks_dir, f"{safe_role}.lock")
+        return get_role_lock_path(role_key)
+
     def _build_role_lock(self, role_key: str) -> RoleSessionLock:
         return RoleSessionLock(
-            lock_path=get_role_lock_path(role_key),
+            lock_path=self._current_role_lock_path(role_key),
             role=role_key,
             owner_id=self._role_lock_owner_id,
             stale_timeout_sec=60.0,
@@ -752,30 +761,6 @@ class MainWindow(QMainWindow):
                 logger.warning("Failed to release previous role lock: %s", exc)
         return True
 
-    def _ensure_operblock_runtime_path(self, *, close_on_error: bool = False) -> bool:
-        ok, message = validate_operblock_baza_dir(BAZA_DIR)
-        if ok:
-            return True
-
-        logger.error(
-            "Operblock role blocked on forbidden data root: current=%s expected=%s reason=%s",
-            BAZA_DIR,
-            get_operblock_test_baza_dir(),
-            message,
-        )
-        QMessageBox.warning(
-            self,
-            "Оперблок",
-            (
-                f"{message}\n\n"
-                "Оперблок нельзя открыть из уже запущенной РемКарты на базе РАО.\n"
-                "Запустите роль отдельно через run_operblock.py или выберите «Оперблок» в launcher.py до запуска базы."
-            ),
-        )
-        if close_on_error:
-            QTimer.singleShot(0, self.close)
-        return False
-
     def release_role_lock(self):
         if self._role_lock:
             try:
@@ -784,6 +769,70 @@ class MainWindow(QMainWindow):
                 logger.warning("Failed to release role lock: %s", exc)
         self._role_lock = None
         self._role_lock_key = None
+
+    def set_default_container(self, container, *, activate: bool = True) -> None:
+        self._default_container = container
+        if activate:
+            self._activate_container(container)
+        else:
+            self.container = container
+
+    def _activate_container(self, container) -> None:
+        self.container = container
+        runtime_context = getattr(getattr(container, "db_manager", None), "runtime_context", None)
+        if runtime_context is not None:
+            from rem_card.services.settings.settings_service import configure_settings_service
+
+            configure_settings_service(
+                runtime_context=runtime_context,
+                readonly=bool(getattr(runtime_context, "settings_readonly", False)),
+            ).ensure_ready()
+        self._connect_runtime_outage_signal()
+        self._connect_restore_probe_signal()
+
+    def _ensure_default_container(self):
+        if self._default_container is None:
+            from rem_card.app.bootstrap import bootstrap
+
+            self._default_container = bootstrap(role=None)
+        self._activate_container(self._default_container)
+        return self._default_container
+
+    def _ensure_operblock_container(self):
+        container = self._ensure_default_container()
+        if container is None:
+            return None
+        try:
+            from rem_card.app.operblock_schema import ensure_operblock_schema
+
+            ensure_operblock_schema(container.db_manager)
+        except Exception as exc:
+            logger.exception("Failed to prepare operblock schema in current database: %s", exc)
+            QMessageBox.critical(
+                self,
+                "Оперблок",
+                f"Не удалось подготовить схему оперблока в текущей базе.\n\n{exc}",
+            )
+            return None
+        return container
+
+    def _ensure_role_container(self, role_key: str):
+        if role_key == ROLE_OPERBLOCK:
+            return self._ensure_operblock_container()
+        return self._ensure_default_container()
+
+    def iter_runtime_containers(self):
+        containers = []
+        seen = set()
+        for container in (self._default_container, self._operblock_container, self.container):
+            if container is None:
+                continue
+            marker = id(container)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            containers.append(container)
+        return containers
 
     def init_with_role(self, role):
         from PySide6.QtCore import QTimer
@@ -821,6 +870,8 @@ class MainWindow(QMainWindow):
         if not self.container:
             QTimer.singleShot(50, self._activate_initial_doctor_role)
             return
+        if self._ensure_role_container("doctor") is None:
+            return
         if not self._acquire_role_lock("doctor"):
             self.close()
             return
@@ -850,7 +901,9 @@ class MainWindow(QMainWindow):
         if not self.container:
             QTimer.singleShot(50, self._activate_initial_operblock_role)
             return
-        if not self._ensure_operblock_runtime_path(close_on_error=True):
+        if self._ensure_role_container(ROLE_OPERBLOCK) is None:
+            if self._initial_role == ROLE_OPERBLOCK:
+                QTimer.singleShot(0, self.close)
             return
         if not self._acquire_role_lock(ROLE_OPERBLOCK):
             self.close()
@@ -881,6 +934,8 @@ class MainWindow(QMainWindow):
 
         if not self.container:
             QTimer.singleShot(50, self._activate_initial_nurse_role)
+            return
+        if self._ensure_role_container("nurse") is None:
             return
         if not self._acquire_role_lock("nurse"):
             self.close()
@@ -949,6 +1004,8 @@ class MainWindow(QMainWindow):
             if not self.container:
                 QTimer.singleShot(100, lambda: self.on_role_selected(role))
                 return
+            if self._ensure_role_container("doctor") is None:
+                return
             if not self._acquire_role_lock("doctor"):
                 return
 
@@ -971,6 +1028,8 @@ class MainWindow(QMainWindow):
         elif role == "Медсестра":
             if not self.container:
                 QTimer.singleShot(100, lambda: self.on_role_selected(role))
+                return
+            if self._ensure_role_container("nurse") is None:
                 return
             if not self._acquire_role_lock("nurse"):
                 return
@@ -996,7 +1055,7 @@ class MainWindow(QMainWindow):
             if not self.container:
                 QTimer.singleShot(100, lambda: self.on_role_selected(role))
                 return
-            if not self._ensure_operblock_runtime_path():
+            if self._ensure_role_container(ROLE_OPERBLOCK) is None:
                 return
             if not self._acquire_role_lock(ROLE_OPERBLOCK):
                 return
@@ -1011,6 +1070,8 @@ class MainWindow(QMainWindow):
                     parent=self.stack,
                 )
                 self.stack.addWidget(self.operblock_main)
+            if hasattr(self.operblock_main, "set_role_launcher_mode"):
+                self.operblock_main.set_role_launcher_mode(self.welcome is not None)
 
             self.stack.setCurrentWidget(self.operblock_main)
             self._schedule_maintenance()
@@ -1054,6 +1115,8 @@ class MainWindow(QMainWindow):
 
     def show_roles(self):
         self.release_role_lock()
+        if self._default_container is not None:
+            self._activate_container(self._default_container)
         if self.admin_main:
             self.stack.setCurrentWidget(self.welcome)
         else:
@@ -1236,13 +1299,14 @@ class MainWindow(QMainWindow):
         self._exit_role_key = exit_role
         try:
             logger.info("MainWindow closeEvent started")
-            if (
-                self.container
-                and hasattr(self.container, "data_service")
-                and self.container.data_service
-                and hasattr(self.container.data_service, "set_shutting_down")
-            ):
-                self.container.data_service.set_shutting_down()
+            for container in self.iter_runtime_containers():
+                if (
+                    container
+                    and hasattr(container, "data_service")
+                    and container.data_service
+                    and hasattr(container.data_service, "set_shutting_down")
+                ):
+                    container.data_service.set_shutting_down()
             self.release_role_lock()
 
             if hasattr(self, 'doctor_main'):

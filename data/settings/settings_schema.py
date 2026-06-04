@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 SCHEMA_VERSION_KEY = "schema_version"
 SEED_IMPORT_VERSION = "central_settings_v1"
 
@@ -28,6 +28,7 @@ CATALOG_TABLES = (
     "lab_analysis_templates",
     "ui_backgrounds",
     "print_templates",
+    "operblock_icons",
     "app_settings",
 )
 
@@ -42,6 +43,7 @@ REQUIRED_INDEXES = (
     "idx_app_settings_scope_key",
     "idx_settings_change_log_id",
     "idx_settings_change_log_entity_changed_at",
+    "idx_operblock_icons_category_target",
 )
 
 REQUIRED_UNIQUE_CONSTRAINTS = (
@@ -58,6 +60,7 @@ REQUIRED_UNIQUE_CONSTRAINTS = (
     ("lab_analysis_templates", ("analysis_code",)),
     ("ui_backgrounds", ("background_key",)),
     ("print_templates", ("template_key",)),
+    ("operblock_icons", ("icon_key",)),
     ("app_settings", ("scope", "key")),
 )
 
@@ -70,6 +73,7 @@ REQUIRED_CATALOG_KEYS = (
     "print_settings",
     "display_settings",
     "background_settings",
+    "operblock_icons",
     "style_settings",
 )
 
@@ -144,6 +148,14 @@ def _table_names(conn: sqlite3.Connection) -> set[str]:
     }
 
 
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    table_sql = _quote_identifier(table)
+    return {
+        str(_row_value(row, "name", 1) or "")
+        for row in conn.execute(f"PRAGMA table_info({table_sql})").fetchall()
+    }
+
+
 def _index_names(conn: sqlite3.Connection) -> set[str]:
     return {
         str(row[0])
@@ -174,6 +186,14 @@ def _unique_constraint_exists(conn: sqlite3.Connection, table: str, columns: tup
 def _active_marker_value(value: object) -> bool:
     normalized = str(value or "").strip().lower()
     return normalized not in {"", "0", "false", "ok", "done", "complete", "completed"}
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition_sql: str) -> None:
+    if column in _table_columns(conn, table):
+        return
+    table_sql = _quote_identifier(table)
+    column_sql = _quote_identifier(column)
+    conn.execute(f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {definition_sql}")
 
 
 def inspect_schema_status(conn: sqlite3.Connection) -> SettingsSchemaStatus:
@@ -498,6 +518,25 @@ def apply_schema(conn: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS operblock_icons (
+            id INTEGER PRIMARY KEY,
+            icon_key TEXT UNIQUE NOT NULL,
+            category TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            default_file TEXT NOT NULL,
+            value_json TEXT,
+            image_blob BLOB,
+            image_mime TEXT,
+            image_hash TEXT,
+            enabled INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0,
+            revision INTEGER DEFAULT 1,
+            source TEXT DEFAULT 'seed',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS app_settings (
             id INTEGER PRIMARY KEY,
             scope TEXT NOT NULL,
@@ -520,11 +559,13 @@ def apply_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_app_settings_scope_key ON app_settings(scope, key);
         CREATE INDEX IF NOT EXISTS idx_settings_change_log_id ON settings_change_log(id);
         CREATE INDEX IF NOT EXISTS idx_settings_change_log_entity_changed_at ON settings_change_log(entity_type, changed_at);
+        CREATE INDEX IF NOT EXISTS idx_operblock_icons_category_target ON operblock_icons(category, target_key);
         """
     for statement in schema_sql.split(";"):
         sql = statement.strip()
         if sql:
             conn.execute(sql)
+    _ensure_column(conn, "operblock_icons", "source", "TEXT DEFAULT 'seed'")
     now = now_text()
     conn.execute(
         """
@@ -535,3 +576,13 @@ def apply_schema(conn: sqlite3.Connection) -> None:
     )
     _set_meta(conn, SCHEMA_VERSION_KEY, str(SCHEMA_VERSION))
     _set_meta(conn, "last_migration_at", now)
+    for catalog_key in REQUIRED_CATALOG_KEYS:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO settings_catalog_versions (
+                catalog_key, version, content_hash, updated_at, updated_by_role, updated_by_user
+            )
+            VALUES (?, 0, '', ?, 'system', NULL)
+            """,
+            (catalog_key, now),
+        )

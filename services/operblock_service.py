@@ -17,8 +17,6 @@ from rem_card.app.patient_age import (
     parse_date_value,
     storage_age_from_birth_date,
 )
-from rem_card.app.runtime_paths import validate_operblock_baza_dir
-from rem_card.app.paths import BAZA_DIR
 from rem_card.data.dto.remcard_dto import VitalDTO
 from rem_card.services.concurrency import DATA_CONFLICT_MESSAGE, DataConflictError, assert_revision_matches
 from rem_card.services.operblock_medication_presets import (
@@ -160,10 +158,12 @@ def is_complete_operblock_mkb_code(value: str) -> bool:
     return bool(OPERBLOCK_MKB_CODE_RE.fullmatch(str(value or "").strip().upper()))
 
 
-def validate_operblock_runtime_path() -> None:
-    ok, message = validate_operblock_baza_dir(BAZA_DIR)
-    if not ok:
-        raise RuntimeError(message)
+def validate_operblock_runtime_path(db_manager: Any | None = None) -> None:
+    if db_manager is None:
+        return
+    db_path = str(getattr(db_manager, "db_path", "") or getattr(db_manager, "remcard_db_path", "") or "")
+    if db_path and not os.path.isfile(db_path):
+        raise RuntimeError(f"БД оперблока недоступна: {db_path}")
 
 
 def _now_text() -> str:
@@ -502,7 +502,7 @@ class OperBlockService:
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
 
     def build_operblock_board_snapshot(self) -> dict[str, Any]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         rows = self.db.fetch_all_remcard(
             """
             SELECT
@@ -604,7 +604,7 @@ class OperBlockService:
         return payload
 
     def list_archived_operation_cases(self) -> list[dict[str, Any]]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         rows = self.db.fetch_all_remcard(
             """
             SELECT
@@ -659,7 +659,7 @@ class OperBlockService:
         return result
 
     def restore_archived_operation_case(self, operation_case_id: int) -> dict[str, int]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         now = _now_text()
 
         def operation(cursor: sqlite3.Cursor):
@@ -736,7 +736,7 @@ class OperBlockService:
         return dict(self.db.run_write_operation(operation, source="operblock_restore_archived_case"))
 
     def delete_archived_operation_case(self, operation_case_id: int) -> dict[str, int]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             case = cursor.execute(
@@ -771,7 +771,7 @@ class OperBlockService:
         return dict(self.db.run_write_operation(operation, source="operblock_delete_archived_case"))
 
     def delete_all_archived_operation_cases(self) -> dict[str, int]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             rows = cursor.execute(
@@ -1089,7 +1089,7 @@ class OperBlockService:
         return result
 
     def create_operation_case(self, data: OperBlockPatientInput | dict[str, Any]) -> dict[str, int]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if not isinstance(data, OperBlockPatientInput):
             data = OperBlockPatientInput(
                 table_code=str(data.get("table_code") or ""),
@@ -1209,7 +1209,7 @@ class OperBlockService:
         return self.release_operation_table(operation_case_id)
 
     def release_operation_table(self, operation_case_id: int) -> dict[str, int]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         now = _now_text()
 
         def operation(cursor: sqlite3.Cursor):
@@ -1327,7 +1327,7 @@ class OperBlockService:
         anesthesiologist: str | None = None,
         anesthetist: str | None = None,
     ) -> dict[str, Any]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         clean_surgeons = _normalize_stage_text_list(surgeons)
         clean_operating_nurse = re.sub(r"\s+", " ", str(operating_nurse or "").strip())
         clean_anesthesiologist = re.sub(r"\s+", " ", str(anesthesiologist or "").strip())
@@ -1440,7 +1440,7 @@ class OperBlockService:
         surgeon: str | None = None,
         operating_nurse: str | None = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         clean_kind = str(stage_kind or "").strip()
         if clean_kind not in OPERBLOCK_STAGE_KIND_LABELS:
             raise ValueError("Неизвестный этап операции.")
@@ -1729,7 +1729,7 @@ class OperBlockService:
         pulse: Optional[int],
         spo2: Optional[int],
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if sys is None and dia is None and pulse is None and spo2 is None:
             raise ValueError("Введите хотя бы один показатель.")
         now = _now_text()
@@ -1750,7 +1750,7 @@ class OperBlockService:
         return int(self.db.run_write_operation(operation, source="operblock_add_vitals"))
 
     def add_vital_record(self, dto: VitalDTO, *, expected_revision: Optional[int] = None) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         timestamp = getattr(dto, "timestamp", None)
         if not isinstance(timestamp, datetime):
             raise ValueError("Укажите корректное время витальных функций.")
@@ -1855,7 +1855,7 @@ class OperBlockService:
         *,
         expected_revision: Optional[int] = None,
     ) -> Optional[int]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_for_admission(cursor, admission_id)
@@ -1904,7 +1904,7 @@ class OperBlockService:
         return int(result) if result is not None else None
 
     def add_order(self, admission_id: int, text: str, *, preset_payload: Optional[dict[str, Any]] = None) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         clean_text = str(text or "").strip()
         if not clean_text:
             raise ValueError("Текст назначения не заполнен.")
@@ -1950,7 +1950,7 @@ class OperBlockService:
         expected_revision: Optional[int] = None,
         route: str | None = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         clean_text = str(text or "").strip()
         if not clean_text:
             raise ValueError("Текст назначения не заполнен.")
@@ -2018,7 +2018,7 @@ class OperBlockService:
         return int(self.db.run_write_operation(operation, source="operblock_update_order_text"))
 
     def delete_order(self, admission_id: int, order_id: int, *, expected_revision: Optional[int] = None) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_for_admission(cursor, admission_id)
@@ -2075,7 +2075,7 @@ class OperBlockService:
         route: str | None = None,
         payload: Optional[dict[str, Any]] = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         clean_drug = str(drug_label or "").strip()
         if not clean_drug:
             raise ValueError("Укажите препарат для инфузии.")
@@ -2153,7 +2153,7 @@ class OperBlockService:
         start_event_time: Any = None,
         payload: Optional[dict[str, Any]] = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность инфузии. Обновите протокол.")
         clean_rate_value = str(new_rate_value or "").strip()
@@ -2275,7 +2275,7 @@ class OperBlockService:
         start_event_time: Any = None,
         payload: Optional[dict[str, Any]] = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность газа. Обновите протокол.")
         clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
@@ -2399,7 +2399,7 @@ class OperBlockService:
         expected_revision: Optional[int],
         event_time: Any,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность инфузии. Обновите протокол.")
         event_dt = self._normalize_timeline_event_datetime(event_time)
@@ -2469,7 +2469,7 @@ class OperBlockService:
         event_time: Any = None,
         payload: Optional[dict[str, Any]] = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность инфузии. Обновите протокол.")
         clean_volume_ml = re.sub(r"\s*мл\s*$", "", str(volume_ml or "").strip(), flags=re.IGNORECASE).strip()
@@ -2567,7 +2567,7 @@ class OperBlockService:
         event_time: Any = None,
         payload: Optional[dict[str, Any]] = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность инфузии. Обновите протокол.")
         clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
@@ -2678,7 +2678,7 @@ class OperBlockService:
         event_time: Any,
         payload: Optional[dict[str, Any]] = None,
     ) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность инфузии. Обновите протокол.")
         event_dt = self._normalize_timeline_event_datetime(event_time)
@@ -2752,7 +2752,7 @@ class OperBlockService:
         return int(self.db.run_write_operation(operation, source="operblock_stop_infusion"))
 
     def delete_infusion(self, start_event_id: int, *, expected_revision: Optional[int]) -> int:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         if expected_revision is None:
             raise ValueError("Не удалось проверить актуальность инфузии. Обновите протокол.")
 
@@ -2802,7 +2802,7 @@ class OperBlockService:
         return int(self.db.run_write_operation(operation, source="operblock_delete_infusion"))
 
     def undo_last_action(self, operation_case_id: int) -> dict[str, Any]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
@@ -2988,7 +2988,7 @@ class OperBlockService:
         return {"kind": "timeline_event", "message": f"Последнее событие «{label}» отменено."}
 
     def assert_vital_write_allowed(self, admission_id: int, timestamp: datetime) -> None:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_for_admission(cursor, admission_id)
@@ -3302,7 +3302,7 @@ class OperBlockService:
             raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
     def _get_case_row(self, operation_case_id: int) -> dict[str, Any]:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         row = self.db.fetch_one_remcard(
             """
             SELECT
@@ -3356,7 +3356,7 @@ class OperBlockService:
         }
 
     def _get_latest_case_row_for_admission(self, admission_id: int) -> dict[str, Any] | None:
-        validate_operblock_runtime_path()
+        validate_operblock_runtime_path(self.db)
         row = self.db.fetch_one_remcard(
             """
             SELECT

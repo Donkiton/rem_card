@@ -1286,6 +1286,9 @@ class NurseMainWidget(QWidget):
         )
 
     def start_auto_refresh(self, *, wake_monitor: bool = True):
+        data_service = self._get_data_service()
+        if data_service and hasattr(data_service, "set_change_monitor_enabled"):
+            data_service.set_change_monitor_enabled(True)
         self._ensure_monitor_subscription()
         if (
             not self._initial_beds_refresh_requested
@@ -1295,7 +1298,6 @@ class NurseMainWidget(QWidget):
             self._initial_beds_refresh_requested = True
             self.layout_manager.beds_selection_widget.refresh(queue_if_running=False)
         self._schedule_initial_w1a_refresh()
-        data_service = self._get_data_service()
         if data_service and wake_monitor:
             data_service.request_immediate_refresh(force_emit=False)
 

@@ -9,11 +9,7 @@ from typing import Optional
 
 
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
-OPERBLOCK_TEST_BAZA_DIR = r"\\fs.acrb-amursk.ru\common\РАО\Пациенты\remcard\operblok_baza"
-OPERBLOCK_DB_NOT_FOUND_MESSAGE = "Тестовая БД оперблока не найдена по ожидаемому пути"
-OPERBLOCK_FORBIDDEN_DB_MESSAGE = (
-    "Оперблок должен использовать тестовую сетевую БД operblok_baza. Текущий путь не разрешён."
-)
+OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в текущей папке базы"
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
@@ -136,39 +132,29 @@ def _normalize_baza_dir(path: str) -> str:
     return os.path.abspath(os.path.normpath(str(path or "").strip().strip('"')))
 
 
-def _same_path(left: str, right: str) -> bool:
-    return os.path.normcase(_normalize_baza_dir(left)) == os.path.normcase(_normalize_baza_dir(right))
-
-
 def get_operblock_test_baza_dir() -> str:
-    return _normalize_baza_dir(OPERBLOCK_TEST_BAZA_DIR)
+    return resolve_baza_dir()
 
 
 def resolve_operblock_baza_dir(path: str | None = None) -> str:
-    normalized = _normalize_baza_dir(path or get_operblock_test_baza_dir())
-    expected = get_operblock_test_baza_dir()
-    expected_archiv = os.path.join(expected, "archiv")
-    expected_db = get_journal_db_path(expected)
-    if (
-        _same_path(normalized, expected)
-        or _same_path(normalized, expected_archiv)
-        or _same_path(normalized, expected_db)
-    ):
-        return expected
-    return normalized
+    if path:
+        normalized = _normalize_baza_dir(path)
+        if os.path.basename(os.path.dirname(normalized)).lower() == "archiv":
+            return os.path.dirname(os.path.dirname(normalized))
+        if os.path.basename(normalized).lower() == "archiv":
+            return os.path.dirname(normalized)
+        return normalized
+    return resolve_baza_dir()
 
 
 def is_operblock_baza_dir(path: str) -> bool:
-    return _same_path(resolve_operblock_baza_dir(path), get_operblock_test_baza_dir())
+    return os.path.isfile(get_journal_db_path(resolve_operblock_baza_dir(path)))
 
 
 def validate_operblock_baza_dir(baza_dir: str) -> tuple[bool, str]:
     normalized = resolve_operblock_baza_dir(baza_dir)
-    expected = get_operblock_test_baza_dir()
-    if not _same_path(normalized, expected):
-        return False, OPERBLOCK_FORBIDDEN_DB_MESSAGE
     if not os.path.isdir(normalized):
-        return False, f"{OPERBLOCK_DB_NOT_FOUND_MESSAGE}: {get_journal_db_path(normalized)}"
+        return False, f"Папка базы недоступна: {normalized}"
     db_path = get_journal_db_path(normalized)
     if not os.path.isfile(db_path):
         return False, f"{OPERBLOCK_DB_NOT_FOUND_MESSAGE}: {db_path}"
@@ -179,15 +165,10 @@ def configure_operblock_runtime_path(role: str | None) -> Optional[dict[str, str
     if str(role or "").strip().lower() != "operblock":
         return None
 
-    baza_dir = resolve_operblock_baza_dir(get_operblock_test_baza_dir())
-    os.environ["REMCARD_BAZA_DIR"] = baza_dir
     os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
     os.environ["REMCARD_UI_ROLE"] = "operblock"
-
-    ok, message = validate_operblock_baza_dir(baza_dir)
-    if not ok:
-        raise DataPathConfigurationError(message)
+    baza_dir = resolve_baza_dir()
 
     return {
         "role": "operblock",
@@ -237,12 +218,7 @@ def write_configured_baza_dir(baza_dir: str) -> str:
 def resolve_baza_dir() -> str:
     override = os.environ.get("REMCARD_BAZA_DIR")
     if override:
-        if is_operblock_executable():
-            return resolve_operblock_baza_dir(override)
         return _normalize_baza_dir(override)
-
-    if is_compiled() and is_operblock_executable():
-        return get_operblock_test_baza_dir()
 
     if is_compiled():
         configured = read_configured_baza_dir()

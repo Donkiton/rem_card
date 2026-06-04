@@ -5,8 +5,6 @@ import sqlite3
 from typing import Any
 
 from rem_card.app.logger import logger
-from rem_card.app.paths import BAZA_DIR
-from rem_card.app.runtime_paths import validate_operblock_baza_dir
 from rem_card.app.sqlite_shared import run_integrity_check, run_quick_check
 from rem_card.app.unified_db_schema import (
     _create_change_triggers,
@@ -339,10 +337,6 @@ def _run_checks(db_manager: Any) -> tuple[str, str]:
 
 
 def ensure_operblock_schema(db_manager: Any) -> OperBlockSchemaResult:
-    ok, message = validate_operblock_baza_dir(BAZA_DIR)
-    if not ok:
-        raise RuntimeError(message)
-
     conn = getattr(db_manager, "_remcard_conn", None)
     controller = getattr(db_manager, "write_controller", None)
     if conn is None or controller is None:

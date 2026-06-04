@@ -21,6 +21,7 @@ from rem_card.ui.shared.components.vital_settings_dialog import ToggleSwitch
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.display_settings_storage import (
+    DISPLAY_ROLES,
     DisplaySettingsStorage,
     normalize_display_role,
     normalize_role_display_settings,
@@ -327,9 +328,11 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.payload = self.storage.load()
         self.role_drafts = {
             role: role_display_settings_from_payload(self.payload, role)
-            for role in ("doctor", "nurse")
+            for role in DISPLAY_ROLES
         }
         self.current_role = "doctor"
+        self._remcard_tabs_index = -1
+        self._w1a_tab_index = -1
         self.sector8_list: OrderedVisibilityList | None = None
         self.tabs_list: OrderedVisibilityList | None = None
         self.w1a_switch: ToggleSwitch | None = None
@@ -338,7 +341,8 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.resize(720, 560)
         self._setup_ui()
         initial_role_key = normalize_display_role(initial_role)
-        self.role_combo.setCurrentIndex(0 if initial_role_key == "doctor" else 1)
+        initial_index = self.role_combo.findData(initial_role_key)
+        self.role_combo.setCurrentIndex(initial_index if initial_index >= 0 else 0)
         self._load_role(initial_role_key)
 
     def _setup_ui(self):
@@ -351,6 +355,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.role_combo = QComboBox()
         self.role_combo.addItem("Врач", "doctor")
         self.role_combo.addItem("Медсестра", "nurse")
+        self.role_combo.addItem("Оперблок", "operblock")
         self.role_combo.currentIndexChanged.connect(self._on_role_changed)
         role_layout.addWidget(role_label)
         role_layout.addWidget(self.role_combo)
@@ -386,9 +391,9 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.remcard_tabs_page = QWidget()
         remcard_tabs_layout = QVBoxLayout(self.remcard_tabs_page)
         remcard_tabs_layout.setContentsMargins(12, 12, 12, 12)
-        remcard_tabs_title = QLabel("Вкладки РЕМ карты")
-        remcard_tabs_title.setObjectName("DisplaySettingsSectionTitle")
-        remcard_tabs_layout.addWidget(remcard_tabs_title)
+        self.remcard_tabs_title = QLabel("Вкладки РЕМ карты")
+        self.remcard_tabs_title.setObjectName("DisplaySettingsSectionTitle")
+        remcard_tabs_layout.addWidget(self.remcard_tabs_title)
         tabs_actions = QHBoxLayout()
         tabs_actions.addStretch()
         self.tabs_show_all_btn = QPushButton("Включить все")
@@ -404,7 +409,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.tabs_container_layout = QVBoxLayout(self.tabs_container)
         self.tabs_container_layout.setContentsMargins(0, 0, 0, 0)
         remcard_tabs_layout.addWidget(self.tabs_container, 1)
-        self.tabs.addTab(self.remcard_tabs_page, "Вкладки РЕМ карты")
+        self._remcard_tabs_index = self.tabs.addTab(self.remcard_tabs_page, "Вкладки РЕМ карты")
 
         self.w1a_page = QWidget()
         w1a_layout = QVBoxLayout(self.w1a_page)
@@ -444,7 +449,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         w1b_row_layout.addWidget(self.w1b_switch)
         w1a_layout.addWidget(w1b_row)
         w1a_layout.addStretch()
-        self.tabs.addTab(self.w1a_page, "W1a+W1b")
+        self._w1a_tab_index = self.tabs.addTab(self.w1a_page, "W1a+W1b")
 
         footer = QHBoxLayout()
         footer.addStretch()
@@ -503,8 +508,19 @@ class DisplaySettingsDialog(BaseStyledDialog):
         )
 
     def _load_role(self, role: str):
+        role = normalize_display_role(role)
         self.current_role = role
         draft = deepcopy(self.role_drafts[role])
+        is_operblock = role == "operblock"
+        tabs_title = "Вкладки оперблока" if is_operblock else "Вкладки РЕМ карты"
+        if hasattr(self, "remcard_tabs_title"):
+            self.remcard_tabs_title.setText(tabs_title)
+        if self._remcard_tabs_index >= 0:
+            self.tabs.setTabText(self._remcard_tabs_index, tabs_title)
+        if self._w1a_tab_index >= 0:
+            self.tabs.setTabVisible(self._w1a_tab_index, not is_operblock)
+            if is_operblock and self.tabs.currentIndex() == self._w1a_tab_index:
+                self.tabs.setCurrentIndex(0)
 
         self._clear_container(self.buttons_container_layout)
         self._clear_container(self.tabs_container_layout)
@@ -550,7 +566,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
 
         payload = self.storage.load()
         payload.setdefault("active", {})
-        for role in ("doctor", "nurse"):
+        for role in DISPLAY_ROLES:
             payload["active"][role] = normalize_role_display_settings(role, self.role_drafts[role])
 
         try:

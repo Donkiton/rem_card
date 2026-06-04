@@ -6,7 +6,7 @@ from typing import Any
 
 
 APP_NAME = "РЕМКАРТА"
-DEFAULT_APP_VERSION = "1.0.1"
+DEFAULT_APP_VERSION = "3.0.0"
 
 
 def _clean_text(value: str | None) -> str | None:

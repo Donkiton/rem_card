@@ -950,6 +950,13 @@ def _acquire_initial_role_lock(role: Optional[str]):
 
 
 def _configure_operblock_startup_path(role: Optional[str], path_setup: bool) -> bool:
+    if str(role or "").strip().lower() == ROLE_OPERBLOCK:
+        os.environ["REMCARD_UI_ROLE"] = ROLE_OPERBLOCK
+        os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
+        os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
+        if path_setup:
+            return path_setup
+
     try:
         operblock_path_info = configure_operblock_runtime_path(role)
     except DataPathConfigurationError as exc:
@@ -968,11 +975,7 @@ def _configure_operblock_startup_path(role: Optional[str], path_setup: bool) -> 
         f"local_db_used={operblock_path_info['local_db_used']}"
     )
     if path_setup:
-        _show_native_warning(
-            "Путь Оперблока зафиксирован",
-            "Оперблок работает только с сетевой БД operblok_baza. Выбор другого пути отключён.",
-        )
-        return False
+        return path_setup
     return path_setup
 
 
@@ -1015,35 +1018,52 @@ def _acquire_role_lock_for_startup(
 def _shutdown_window_resources(window, logger):
     if not window:
         return True
-    container = getattr(window, "container", None)
-    if not container:
+    iter_containers = getattr(window, "iter_runtime_containers", None)
+    if callable(iter_containers):
+        containers = list(iter_containers())
+    else:
+        container = getattr(window, "container", None)
+        containers = [container] if container else []
+    if not containers:
         return True
 
     logger.info("Application resource shutdown started")
     data_service_shutdown_ok = True
     db_shutdown_ok = True
-    data_service = getattr(container, "data_service", None)
-    if data_service:
-        try:
-            logger.info("DataService shutdown started")
-            data_service_shutdown_ok = bool(data_service.shutdown())
-            logger.info("DataService shutdown finished result=%s", "ok" if data_service_shutdown_ok else "incomplete")
-        except Exception as exc:
-            data_service_shutdown_ok = False
-            logger.warning("DataService shutdown failed: %s", exc)
+    for container in containers:
+        container_label = str(getattr(getattr(container, "runtime_context", None), "source_label", "") or "network")
+        container_data_ok = True
+        data_service = getattr(container, "data_service", None)
+        if data_service:
+            try:
+                logger.info("DataService shutdown started (%s)", container_label)
+                container_data_ok = bool(data_service.shutdown())
+                logger.info(
+                    "DataService shutdown finished (%s) result=%s",
+                    container_label,
+                    "ok" if container_data_ok else "incomplete",
+                )
+            except Exception as exc:
+                container_data_ok = False
+                logger.warning("DataService shutdown failed (%s): %s", container_label, exc)
+        data_service_shutdown_ok = bool(data_service_shutdown_ok and container_data_ok)
 
-    db_manager = getattr(container, "db_manager", None)
-    if db_manager and data_service_shutdown_ok:
-        try:
-            db_shutdown_ok = bool(db_manager.close())
-            if not db_shutdown_ok:
-                logger.warning("DB manager close did not complete cleanly")
-        except Exception as exc:
+        db_manager = getattr(container, "db_manager", None)
+        if db_manager and container_data_ok:
+            try:
+                container_db_ok = bool(db_manager.close())
+                db_shutdown_ok = bool(db_shutdown_ok and container_db_ok)
+                if not container_db_ok:
+                    logger.warning("DB manager close did not complete cleanly (%s)", container_label)
+            except Exception as exc:
+                db_shutdown_ok = False
+                logger.warning("DB manager close failed (%s): %s", container_label, exc)
+        elif db_manager:
             db_shutdown_ok = False
-            logger.warning("DB manager close failed: %s", exc)
-    elif db_manager:
-        db_shutdown_ok = False
-        logger.warning("DB manager close skipped because DataService shutdown did not complete cleanly")
+            logger.warning(
+                "DB manager close skipped because DataService shutdown did not complete cleanly (%s)",
+                container_label,
+            )
     if hasattr(window, "finalize_pending_emergency_discard"):
         if db_shutdown_ok:
             try:
@@ -1293,7 +1313,11 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 emergency_startup_request=args.emergency_startup_request,
             )
             bootstrap_elapsed_ms = (time.perf_counter() - bootstrap_started) * 1000.0
-            window.container = container
+            set_default_container = getattr(window, "set_default_container", None)
+            if callable(set_default_container):
+                set_default_container(container)
+            else:
+                window.container = container
             _startup_trace(
                 logger,
                 startup_started_at,

@@ -176,8 +176,8 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
     if str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() == "operblock":
         logger.info(
             "[OPERBLOCK DB] role=operblock data_root=%s db_path=%s db_profile=network local_db_used=false",
-            BAZA_DIR,
-            medical_db_path,
+            getattr(db_manager, "baza_dir", BAZA_DIR),
+            getattr(db_manager, "db_path", medical_db_path),
         )
         from rem_card.app.operblock_schema import ensure_operblock_schema
 

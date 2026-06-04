@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 
 class AdminMainWidget(QWidget):
@@ -28,6 +28,10 @@ class AdminMainWidget(QWidget):
         self.theme_dialog = None
         self.display_settings_dialog = None
         self.background_settings_dialog = None
+        self.operblock_icon_settings_dialog = None
+        self.operblock_medications_dialog = None
+        self.operblock_anesthesia_types_dialog = None
+        self.operblock_team_dialog = None
         self.emergency_password_dialog = None
         self.db_rotation_dialog = None
 
@@ -63,6 +67,10 @@ class AdminMainWidget(QWidget):
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
         self.btn_background_settings = QPushButton("Изменение фона")
+        self.btn_operblock_icon_settings = QPushButton("Настройка иконок оперблока")
+        self.btn_operblock_medications = QPushButton("Настройки препаратов")
+        self.btn_operblock_anesthesia_types = QPushButton("Виды пособия")
+        self.btn_operblock_team = QPushButton("Опер. бригада")
         self.btn_emergency_password = QPushButton("Аварийный пароль")
         self.btn_db_rotation = QPushButton("Ручная ротация БД")
 
@@ -92,6 +100,12 @@ class AdminMainWidget(QWidget):
         if self.role == "doctor":
             program_buttons.append(self.btn_emergency_password)
             program_buttons.append(self.btn_db_rotation)
+        operblock_buttons = [
+            self.btn_operblock_icon_settings,
+            self.btn_operblock_medications,
+            self.btn_operblock_anesthesia_types,
+            self.btn_operblock_team,
+        ]
 
         columns_layout = QHBoxLayout()
         columns_layout.setSpacing(22)
@@ -112,6 +126,8 @@ class AdminMainWidget(QWidget):
         add_column("Препараты", drug_buttons)
         add_column("Шаблоны", template_buttons)
         add_column("Настройка программы", program_buttons)
+        if self.role != "nurse":
+            add_column("Оперблок", operblock_buttons)
         columns_layout.addStretch()
 
         menu_layout.addLayout(columns_layout, 1)
@@ -140,6 +156,10 @@ class AdminMainWidget(QWidget):
         self.btn_print.clicked.connect(self.open_print)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
+        self.btn_operblock_icon_settings.clicked.connect(self.open_operblock_icon_settings)
+        self.btn_operblock_medications.clicked.connect(self.open_operblock_medications_settings)
+        self.btn_operblock_anesthesia_types.clicked.connect(self.open_operblock_anesthesia_types_settings)
+        self.btn_operblock_team.clicked.connect(self.open_operblock_team_settings)
         self.btn_emergency_password.clicked.connect(self.open_emergency_password)
         self.btn_db_rotation.clicked.connect(self.open_db_rotation)
 
@@ -300,6 +320,72 @@ class AdminMainWidget(QWidget):
 
         dialog = BackgroundSettingsDialog(parent=self)
         dialog.exec()
+
+    def open_operblock_icon_settings(self):
+        from .operblock_icon_settings_dialog import OperBlockIconSettingsDialog
+
+        self.operblock_icon_settings_dialog = OperBlockIconSettingsDialog(parent=self)
+        self.operblock_icon_settings_dialog.exec()
+
+    def open_operblock_medications_settings(self):
+        from rem_card.services.operblock_medication_presets import (
+            load_operblock_medication_presets,
+            save_operblock_medication_presets,
+        )
+        from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMedicationPresetsDialog
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            presets = load_operblock_medication_presets(include_disabled=True)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Настройки препаратов", f"Не удалось загрузить препараты оперблока: {exc}")
+            return
+        self.operblock_medications_dialog = OperBlockMedicationPresetsDialog(presets, parent=self)
+        if self.operblock_medications_dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            save_operblock_medication_presets(self.operblock_medications_dialog.templates())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Настройки препаратов", f"Не удалось сохранить препараты оперблока: {exc}")
+
+    def open_operblock_anesthesia_types_settings(self):
+        from rem_card.services.operblock_anesthesia_types import (
+            load_operblock_anesthesia_types,
+            save_operblock_anesthesia_types,
+        )
+        from rem_card.ui.operblock_view.operblock_main_widget import OperBlockAnesthesiaTypesDialog
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            items = load_operblock_anesthesia_types()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Виды пособия", f"Не удалось загрузить виды пособия: {exc}")
+            return
+        self.operblock_anesthesia_types_dialog = OperBlockAnesthesiaTypesDialog(items, parent=self)
+        if self.operblock_anesthesia_types_dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            save_operblock_anesthesia_types(self.operblock_anesthesia_types_dialog.items())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Виды пособия", f"Не удалось сохранить виды пособия: {exc}")
+
+    def open_operblock_team_settings(self):
+        from rem_card.services.operblock_team import load_operblock_team, save_operblock_team
+        from rem_card.ui.operblock_view.operblock_main_widget import OperBlockTeamDialog
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            items = load_operblock_team()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось загрузить опер. бригаду: {exc}")
+            return
+        self.operblock_team_dialog = OperBlockTeamDialog(items, parent=self)
+        if self.operblock_team_dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            save_operblock_team(self.operblock_team_dialog.items())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось сохранить опер. бригаду: {exc}")
 
     def open_emergency_password(self):
         from .emergency_password_dialog import EmergencyPasswordSettingsDialog

@@ -42,6 +42,7 @@ RELEASE_TABLES: tuple[ReleaseTable, ...] = (
     ReleaseTable("lab_analysis_templates", ("analysis_code",), "sort_order ASC, analysis_code ASC"),
     ReleaseTable("ui_backgrounds", ("background_key",), "active DESC, background_key ASC"),
     ReleaseTable("print_templates", ("template_key",), "active DESC, template_key ASC"),
+    ReleaseTable("operblock_icons", ("icon_key",), "sort_order ASC, icon_key ASC"),
     ReleaseTable("app_settings", ("scope", "key"), "scope ASC, key ASC"),
 )
 
@@ -58,6 +59,7 @@ TABLE_CATALOG_KEYS: dict[str, str] = {
     "lab_analysis_templates": "lab_analysis",
     "ui_backgrounds": "background_settings",
     "print_templates": "print_settings",
+    "operblock_icons": "operblock_icons",
 }
 
 

@@ -79,6 +79,8 @@ class DoctorMainWidget(QWidget):
         if self._is_closing or _app_is_closing():
             return
         data_service = self._get_data_service()
+        if data_service and hasattr(data_service, "set_change_monitor_enabled"):
+            data_service.set_change_monitor_enabled(True)
         if data_service and not self._monitor_connected:
             data_service.changes_detected.connect(self._on_data_changes, Qt.QueuedConnection)
             self._monitor_connected = True

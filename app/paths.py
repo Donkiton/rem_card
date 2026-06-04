@@ -8,7 +8,6 @@ from rem_card.app.runtime_paths import (
     get_local_logs_dir,
     get_project_root,
     is_compiled as _runtime_is_compiled,
-    resolve_operblock_baza_dir,
     resolve_baza_dir,
 )
 
@@ -121,10 +120,7 @@ def get_user_dict_dir() -> str:
 NETWORK_ROOT = get_base_dir()
 _BAZA_DIR_OVERRIDE = os.environ.get("REMCARD_BAZA_DIR")
 if _BAZA_DIR_OVERRIDE:
-    if str(os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() == "operblock":
-        BAZA_DIR = resolve_operblock_baza_dir(_BAZA_DIR_OVERRIDE)
-    else:
-        BAZA_DIR = os.path.abspath(os.path.normpath(_BAZA_DIR_OVERRIDE.strip().strip('"')))
+    BAZA_DIR = os.path.abspath(os.path.normpath(_BAZA_DIR_OVERRIDE.strip().strip('"')))
 elif is_compiled():
     BAZA_DIR = resolve_baza_dir()
 elif not is_compiled():

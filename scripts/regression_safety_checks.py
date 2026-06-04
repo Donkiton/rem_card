@@ -18453,6 +18453,179 @@ def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.paths import get_icon_dir
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_release import (
+        apply_settings_release_snapshot,
+        export_settings_release_snapshot,
+    )
+    from rem_card.services.operblock_icon_defaults import (
+        OPERBLOCK_ICONS_KEY,
+        default_drug_icon_file,
+        drug_icon_candidate_keys,
+        drug_icon_candidate_keys_from_payload,
+    )
+    from rem_card.services.settings.settings_service import (
+        SettingsService,
+        configure_settings_service,
+        reset_settings_service,
+    )
+    from rem_card.ui.shared.operblock_icon_settings import (
+        current_operblock_icon_source,
+        invalidate_operblock_icon_cache,
+    )
+
+    icon_dir = get_icon_dir()
+    sevo_source_path = os.path.join(icon_dir, "sevodrag.png")
+    des_source_path = os.path.join(icon_dir, "gas.png")
+    sevo_source_blob = Path(sevo_source_path).read_bytes()
+    des_source_blob = Path(des_source_path).read_bytes()
+
+    source_baza_dir = os.path.join(temp_root, "Baza")
+    service = SettingsService(SettingsDatabase(baza_dir=source_baza_dir))
+    service.ensure_ready()
+
+    with service.db.read_connection() as conn:
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'operblock_icons'"
+        ).fetchone()
+        catalog_row = conn.execute(
+            "SELECT version FROM settings_catalog_versions WHERE catalog_key = ?",
+            (OPERBLOCK_ICONS_KEY,),
+        ).fetchone()
+    if not table_exists:
+        return False, "settings schema did not create operblock_icons table"
+    if catalog_row is None:
+        return False, "settings schema did not create operblock_icons catalog version"
+
+    records = service.list_operblock_icons()
+    sevo_record = records.get("drug:manual:gas:sevoflurane")
+    if not sevo_record:
+        return False, "севофлюран не получил стартовую пользовательскую иконку"
+    if sevo_record.get("default_file") != "gas_izm.png":
+        return False, "севофлюран должен иметь стандартную иконку gas_izm.png"
+    if sevo_record.get("image_blob") != sevo_source_blob:
+        return False, "стартовая иконка севофлюрана должна быть sevodrag.png из БД"
+    if sevo_record.get("source") != "seed":
+        return False, "стартовая иконка севофлюрана должна быть seed-строкой"
+    if records.get("drug:manual:gas:desflurane") is not None:
+        return False, "десфлюран не должен наследовать пользовательскую иконку севофлюрана"
+    if default_drug_icon_file("gas") != "gas_izm.png":
+        return False, "стандартная иконка препарата-газа должна быть gas_izm.png"
+
+    sevo_candidates = drug_icon_candidate_keys_from_payload({"kind": "gas"}, "Севофлюран")
+    if "drug:manual:gas:sevoflurane" not in sevo_candidates:
+        return False, "севофлюран без preset_id не ищет сохраненную иконку севофлюрана"
+    des_candidates = drug_icon_candidate_keys(preset_id="manual:gas:desflurane", label="Desflurane")
+    if "drug:manual:gas:sevoflurane" in des_candidates:
+        return False, "десфлюран не должен искать иконку севофлюрана"
+    noisy_des_candidates = drug_icon_candidate_keys_from_payload(
+        {"kind": "gas", "label": "Десфлюран", "display_name": "Десфлюран"},
+        "Десфлюран 0,7 МАК",
+    )
+    if "drug-label:десфлюран" not in noisy_des_candidates:
+        return False, "окно изменения газа должно искать иконку по чистому названию из payload"
+
+    before_version, before_hash = service.get_catalog_version(OPERBLOCK_ICONS_KEY)
+    service.save_operblock_icon(
+        icon_key="drug:manual:gas:desflurane",
+        category="drug",
+        target_key="manual:gas:desflurane",
+        name="Иконка препарата: Десфлюран",
+        default_file="gas_izm.png",
+        image_path=des_source_path,
+        sort_order=10020,
+        changed_by_role="regression",
+    )
+    after_version, after_hash = service.get_catalog_version(OPERBLOCK_ICONS_KEY)
+    if after_version <= before_version or after_hash == before_hash:
+        return False, "сохранение иконки препарата не обновило каталог operblock_icons"
+    des_record = service.list_operblock_icons().get("drug:manual:gas:desflurane")
+    if not des_record or des_record.get("image_blob") != des_source_blob:
+        return False, "иконка десфлюрана не сохранилась BLOB-ом в settings DB"
+    if des_record.get("source") != "manual":
+        return False, "пользовательская иконка десфлюрана должна быть manual-строкой"
+    if des_record.get("default_file") != "gas_izm.png":
+        return False, "десфлюран должен оставаться на стандартном fallback gas_izm.png"
+    try:
+        configure_settings_service(settings_db_path=service.db.db_path)
+        invalidate_operblock_icon_cache()
+        label_source = current_operblock_icon_source(["drug-label:десфлюран"], fallback_file="gas_izm.png")
+        if "gas.png" not in label_source:
+            return False, "назначение десфлюрана без preset_id не нашло сохраненную иконку по названию"
+        noisy_label_source = current_operblock_icon_source(noisy_des_candidates, fallback_file="gas_izm.png")
+        if "gas.png" not in noisy_label_source:
+            return False, "окно изменения десфлюрана с дозой в названии не нашло сохраненную иконку"
+    finally:
+        reset_settings_service()
+
+    snapshot_path = os.path.join(temp_root, "settings_release_snapshot.json")
+    export_report = export_settings_release_snapshot(
+        source_baza_dir,
+        snapshot_path,
+        release_version="operblock-icons-regression",
+        release_commit="regression",
+    )
+    if export_report.get("row_counts", {}).get("operblock_icons", 0) < 2:
+        return False, "release snapshot не экспортировал иконки оперблока"
+
+    target_baza_dir = os.path.join(temp_root, "TargetBaza")
+    target_service = SettingsService(SettingsDatabase(baza_dir=target_baza_dir))
+    target_service.ensure_ready()
+    apply_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    if not apply_report.get("applied"):
+        return False, f"release snapshot с иконками не применился: {apply_report}"
+    if OPERBLOCK_ICONS_KEY not in apply_report.get("changed_catalogs", []):
+        return False, "release snapshot не обновил каталог operblock_icons"
+    with target_service.db.read_connection() as conn:
+        target_row = conn.execute(
+            "SELECT default_file, image_blob FROM operblock_icons WHERE icon_key = ?",
+            ("drug:manual:gas:desflurane",),
+        ).fetchone()
+    if not target_row or target_row["image_blob"] != des_source_blob:
+        return False, "иконка десфлюрана не перенеслась в целевую settings DB"
+    if target_row["default_file"] != "gas_izm.png":
+        return False, "fallback десфлюрана изменился после переноса release snapshot"
+
+    preserved_baza_dir = os.path.join(temp_root, "PreservedBaza")
+    preserved_service = SettingsService(SettingsDatabase(baza_dir=preserved_baza_dir))
+    preserved_service.ensure_ready()
+    preserved_source_path = os.path.join(icon_dir, "bolus.png")
+    preserved_blob = Path(preserved_source_path).read_bytes()
+    time.sleep(1.1)
+    preserved_service.save_operblock_icon(
+        icon_key="drug:manual:gas:desflurane",
+        category="drug",
+        target_key="manual:gas:desflurane",
+        name="Иконка препарата: Десфлюран",
+        default_file="gas_izm.png",
+        image_path=preserved_source_path,
+        sort_order=10020,
+        changed_by_role="regression",
+    )
+    preserved_report = apply_settings_release_snapshot(
+        preserved_service.db,
+        snapshot_path,
+        bump_catalog_version=preserved_service._bump_catalog_version,
+    )
+    preserved_table = preserved_report.get("tables", {}).get("operblock_icons", {})
+    if int(preserved_table.get("preserved") or 0) < 1:
+        return False, "release snapshot не сохранил более свежую ручную иконку"
+    with preserved_service.db.read_connection() as conn:
+        preserved_row = conn.execute(
+            "SELECT source, image_blob FROM operblock_icons WHERE icon_key = ?",
+            ("drug:manual:gas:desflurane",),
+        ).fetchone()
+    if not preserved_row or preserved_row["source"] != "manual" or preserved_row["image_blob"] != preserved_blob:
+        return False, "release snapshot перезаписал ручную иконку десфлюрана"
+    return True, "ok"
+
+
 def _check_background_files_use_shared_settings_folder(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_backgrounds_dir
     from rem_card.data.settings.settings_release import (
@@ -19551,6 +19724,7 @@ def main():
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
+        ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
