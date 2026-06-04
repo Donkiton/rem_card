@@ -23,11 +23,12 @@ class DataService(QObject):
     _success_callback_requested = Signal(object, object)
     _error_callback_requested = Signal(object, object)
 
-    def __init__(self, db_manager):
+    def __init__(self, db_manager, *, monitor_enabled: bool = True):
         super().__init__()
         self.db = db_manager
         self._queue = LocalWriteQueue(logger=logger)
-        self._monitor = DataUpdateMonitor(self)
+        self._monitor_enabled = bool(monitor_enabled)
+        self._monitor = DataUpdateMonitor(self, enabled=self._monitor_enabled)
         self._sync_coordinator = SyncCoordinator()
         self._poll_maintenance_tasks: list[Callable[[], Any]] = []
         self._emergency_standby_scheduler = None
@@ -61,6 +62,16 @@ class DataService(QObject):
         if not self._monitor:
             return None
         return self._monitor.get_change_state()
+
+    def set_change_monitor_enabled(self, enabled: bool):
+        self._monitor_enabled = bool(enabled)
+        if self._monitor:
+            self._monitor.set_enabled(self._monitor_enabled)
+
+    def is_change_monitor_enabled(self) -> bool:
+        if self._monitor:
+            return bool(self._monitor.is_enabled())
+        return bool(self._monitor_enabled)
 
     def is_network_outage_detected(self) -> bool:
         return bool(self._network_outage_detected)
@@ -313,7 +324,7 @@ class DataService(QObject):
         return bool(schedulers_stopped and monitor_stopped and drained)
 
     def request_immediate_refresh(self, *, force_emit: bool = False, source: str = ""):
-        if self._monitor and not self._shutting_down and not self._network_outage_detected:
+        if self._monitor and self._monitor_enabled and not self._shutting_down and not self._network_outage_detected:
             self._monitor.request_refresh(force_emit=force_emit, source=source)
 
     @Slot(dict)

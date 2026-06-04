@@ -27,15 +27,15 @@ class ChartDataProcessor:
         return True
 
     @staticmethod
-    def _clip_to_visible_window(sorted_vitals, start_time: datetime):
+    def _clip_to_visible_window(sorted_vitals, start_time: datetime, visible_hours: float = CHART_VISIBLE_HOURS):
         """
-        Ограничивает массив виталов видимым окном графика (24ч)
+        Ограничивает массив виталов видимым окном графика
         + небольшим контекстом до/после окна для непрерывности линий.
         """
         if not sorted_vitals:
             return []
 
-        end_time = start_time + timedelta(hours=CHART_VISIBLE_HOURS)
+        end_time = start_time + timedelta(hours=max(1.0, float(visible_hours or CHART_VISIBLE_HOURS)))
 
         before = []
         inside = []
@@ -221,7 +221,13 @@ class ChartDataProcessor:
         return np.array(new_x), np.array(new_y)
 
     @staticmethod
-    def process_vitals(vitals, start_time: datetime, active_intervals: List[Tuple[datetime, datetime]] = None):
+    def process_vitals(
+        vitals,
+        start_time: datetime,
+        active_intervals: List[Tuple[datetime, datetime]] = None,
+        *,
+        visible_hours: float = CHART_VISIBLE_HOURS,
+    ):
         """
         Преобразует виталы в X/Y для графика, добавляя разрывы на неактивных интервалах.
         """
@@ -250,7 +256,7 @@ class ChartDataProcessor:
         sorted_all_vitals = list(vitals)
         if len(sorted_all_vitals) > 1 and not ChartDataProcessor._is_sorted_by_timestamp(sorted_all_vitals):
             sorted_all_vitals.sort(key=lambda v: v.timestamp)
-        scoped_vitals = ChartDataProcessor._clip_to_visible_window(sorted_all_vitals, start_time)
+        scoped_vitals = ChartDataProcessor._clip_to_visible_window(sorted_all_vitals, start_time, visible_hours)
 
         vitals_with_intervals = ChartDataProcessor._attach_interval_indexes(scoped_vitals, merged_intervals)
         sorted_vitals = [vital for vital, _ in vitals_with_intervals]

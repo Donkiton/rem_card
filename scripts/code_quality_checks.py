@@ -39,11 +39,14 @@ SKIP_DIR_NAMES = {
 ALLOWED_F_BLOCKS = {
     ("services/bars_auth_service.py", "BarsAuthService.list_department_patients"),
     ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
+    ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"),
     ("scripts/regression_safety_checks.py", "_check_orders_pending_states_before_commit"),
     ("scripts/regression_safety_checks.py", "_check_orders_fast_click_path_stays_local"),
     ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"),
     ("scripts/regression_safety_checks.py", "_check_sync_coordinator_classifies_targeted_refresh"),
     ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"),
+    ("ui/operblock_view/operblock_main_widget.py", "OperBlockChartWidget._current_order_marker_signature"),
+    ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"),
 }
 
 

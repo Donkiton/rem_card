@@ -32,6 +32,7 @@ class DataUpdateMonitor(QThread):
         *,
         poll_interval_sec: float | None = None,
         settings_poll_interval_sec: float | None = None,
+        enabled: bool = True,
     ):
         super().__init__()
         self._data_service = data_service
@@ -67,9 +68,25 @@ class DataUpdateMonitor(QThread):
         self._refresh_request_seq: int = 0
         self._last_observed_refresh_seq: int = 0
         self._state_epoch: int = 0
+        self._paused = not bool(enabled)
+
+    def set_enabled(self, enabled: bool) -> None:
+        with self._state_lock:
+            self._paused = not bool(enabled)
+            if self._paused:
+                self._force_emit = False
+                self._force_sources = []
+            self._state_epoch += 1
+        self._wake_evt.set()
+
+    def is_enabled(self) -> bool:
+        with self._state_lock:
+            return not bool(self._paused)
 
     def request_refresh(self, *, force_emit: bool = False, source: str = ""):
         with self._state_lock:
+            if self._paused:
+                return
             self._refresh_request_seq += 1
             if force_emit:
                 self._force_emit = True
@@ -138,10 +155,21 @@ class DataUpdateMonitor(QThread):
             force_emit = False
             force_sources: list[str] = []
             with self._state_lock:
+                if self._paused:
+                    self._force_emit = False
+                    self._force_sources = []
+                    paused = True
+                else:
+                    paused = False
                 force_emit = self._force_emit
                 force_sources = list(self._force_sources)
                 self._force_emit = False
                 self._force_sources = []
+
+            if paused:
+                self._wake_evt.wait()
+                self._wake_evt.clear()
+                continue
 
             try:
                 self._poll_once(force_emit=force_emit, force_sources=force_sources)

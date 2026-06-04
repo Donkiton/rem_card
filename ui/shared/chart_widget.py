@@ -2,7 +2,7 @@ import os
 import pyqtgraph as pg
 import warnings
 from PySide6.QtWidgets import QWidget, QVBoxLayout
-from PySide6.QtCore import Qt, Signal, QEvent, QRect, QTimeLine
+from PySide6.QtCore import Qt, Signal, QEvent, QPointF, QRect, QTimeLine
 from PySide6.QtGui import QPainter, QFont, QColor, QBrush, QPainterPath
 from datetime import datetime, timedelta
 from .chart_data_processor import ChartDataProcessor
@@ -62,7 +62,7 @@ class TimeHeader(QWidget):
             view_pos = vb.mapSceneToView(scene_pos)
             
             hour_idx = int(view_pos.x())
-            if 0 <= hour_idx < 24:
+            if 0 <= hour_idx < max(1, int(getattr(self.chart, "visible_hours", 24))):
                 if self.highlighted_hour == hour_idx:
                     self.hour_selected.emit(-1)
                 else:
@@ -99,28 +99,53 @@ class TimeHeader(QWidget):
         vb = self.chart.plot_widget.getViewBox()
         view = self.chart.plot_widget
 
-        for i in range(24):
+        step_minutes = max(1, int(getattr(self.chart, "time_grid_step_minutes", 60)))
+        step_hours = step_minutes / 60.0
+        visible_hours = max(step_hours, float(getattr(self.chart, "visible_hours", 24)))
+        column_count = max(1, int((visible_hours / step_hours) + 0.999999))
+        compact_grid = step_minutes < 60
+        previous_hour = None
+
+        if compact_grid:
+            compact_font = QFont("Segoe UI", 8)
+            compact_font.setBold(False)
+            bold_compact_font = QFont("Segoe UI", 8, QFont.Bold)
+
+        for i in range(column_count):
             # РСЃРїРѕР»СЊР·СѓРµРј С‚Рµ Р¶Рµ РєРѕРѕСЂРґРёРЅР°С‚С‹ РіСЂР°РЅРёС† С‡Р°СЃР°, С‡С‚Рѕ Рё РґР»СЏ РїРѕРґСЃРІРµС‚РєРё (p1, p2)
-            p_start = view.mapFromScene(vb.mapViewToScene(pg.Point(i, 0)))
-            p_end = view.mapFromScene(vb.mapViewToScene(pg.Point(i + 1, 0)))
+            x_start = i * step_hours
+            x_end = min((i + 1) * step_hours, visible_hours)
+            p_start = view.mapFromScene(vb.mapViewToScene(pg.Point(x_start, 0)))
+            p_end = view.mapFromScene(vb.mapViewToScene(pg.Point(x_end, 0)))
             
             # Р’С‹С‡РёСЃР»СЏРµРј С†РµРЅС‚СЂ С‡Р°СЃР° СЃ СѓС‡РµС‚РѕРј СЃРјРµС‰РµРЅРёСЏ РіСЂР°С„РёРєР° 7px
             x_center = (p_start.x() + p_end.x()) / 2 + 7
 
-            text = (self.chart.start_time + timedelta(hours=i)).strftime('%H:%M')
-            
-            if i == self.highlighted_hour:
-                painter.setFont(self.chart.value_font)
+            header_mapper = getattr(self.chart, "header_datetime_for_x", None)
+            tick_time = header_mapper(x_start) if callable(header_mapper) else None
+            if not isinstance(tick_time, datetime):
+                tick_time = self.chart.start_time + timedelta(minutes=i * step_minutes)
+            if compact_grid:
+                hour_changed = previous_hour is None or tick_time.hour != previous_hour
+                text = tick_time.strftime("%H:%M") if hour_changed else tick_time.strftime("%M")
+                painter.setFont(bold_compact_font if hour_changed else compact_font)
+                text_width = 36 if hour_changed else 18
+                previous_hour = tick_time.hour
             else:
-                f = painter.font()
-                f.setBold(False)
-                painter.setFont(f)
+                text = tick_time.strftime('%H:%M')
+                text_width = 50
+                if i == self.highlighted_hour:
+                    painter.setFont(self.chart.value_font)
+                else:
+                    f = painter.font()
+                    f.setBold(False)
+                    painter.setFont(f)
 
             # РћС‚СЂРёСЃРѕРІС‹РІР°РµРј С‚РµРєСЃС‚ РІ Р±Р»РѕРєРµ С€РёСЂРёРЅРѕР№ 50px, С†РµРЅС‚СЂРёСЂСѓСЏ РµРіРѕ РїРѕ x_center
             painter.drawText(
-                int(x_center - 25),
+                int(x_center - (text_width / 2)),
                 5,
-                50,
+                text_width,
                 20,
                 Qt.AlignCenter,
                 text
@@ -211,6 +236,8 @@ class ChartWidget(QWidget):
 
         self.vitals_data = []
         self.start_time = None
+        self.visible_hours = 24
+        self.time_grid_step_minutes = 60
         self.status_service = None
         self.admission_id = None
         
@@ -265,11 +292,7 @@ class ChartWidget(QWidget):
         self.plot_widget.scene().setClickRadius(10)
         self.plot_widget.scene().sigMouseClicked.connect(self.on_scene_clicked)
 
-        for i in range(25):
-            line = pg.InfiniteLine(pos=i, angle=90, pen=pg.mkPen(color=(0, 0, 0, 50)))
-            line.setAcceptHoverEvents(False)
-            self._grid_lines.append(line)
-            self.plot_widget.addItem(line)
+        self._ensure_vertical_grid_lines(self.visible_hours)
 
         self.chart_layout.addWidget(self.plot_widget)
         self.layout.addWidget(self.chart_container)
@@ -325,6 +348,45 @@ class ChartWidget(QWidget):
         # и в аварийных логах падал внутри GraphicsScene.sendHoverEvents().
         self._original_send_hover_events = getattr(scene, "sendHoverEvents", None)
         scene.sendHoverEvents = _ignore_pyqtgraph_hover_events
+
+    def _grid_step_hours(self) -> float:
+        return max(1, int(getattr(self, "time_grid_step_minutes", 60))) / 60.0
+
+    def _ensure_vertical_grid_lines(self, visible_hours: int | float):
+        step_hours = self._grid_step_hours()
+        target_count = max(2, int((float(visible_hours) / step_hours) + 0.999999) + 1)
+        while len(self._grid_lines) < target_count:
+            line = pg.InfiniteLine(
+                pos=len(self._grid_lines) * step_hours,
+                angle=90,
+                pen=pg.mkPen(color=(0, 0, 0, 50)),
+            )
+            line.setAcceptHoverEvents(False)
+            self._grid_lines.append(line)
+            self.plot_widget.addItem(line)
+        for index, line in enumerate(self._grid_lines):
+            line.setPos(index * step_hours)
+            line.setVisible(index < target_count)
+
+    def set_visible_hours(self, visible_hours: int | float):
+        hours = max(1, int(visible_hours or 24))
+        if self.visible_hours == hours:
+            return
+        self.visible_hours = hours
+        self._ensure_vertical_grid_lines(hours)
+        self.plot_widget.getViewBox().setLimits(xMin=0, xMax=hours, yMin=0, yMax=260)
+        self.plot_widget.setXRange(0, hours, padding=0)
+        self._last_render_key = None
+        self.header_spacer.update()
+
+    def set_time_grid_step_minutes(self, step_minutes: int):
+        step = max(1, int(step_minutes or 60))
+        if self.time_grid_step_minutes == step:
+            return
+        self.time_grid_step_minutes = step
+        self._ensure_vertical_grid_lines(self.visible_hours)
+        self._last_render_key = None
+        self.header_spacer.update()
 
     def _init_reusable_plot_items(self):
         curve_specs = (
@@ -459,6 +521,33 @@ class ChartWidget(QWidget):
             self._fade_action = "in"
             self.fade_timeline.start()
 
+    def _slice_tooltip_position(self, plot_item_p, html):
+        self.tooltip.setHtml(html)
+        tooltip_rect = self.tooltip.boundingRect()
+        tooltip_width = max(1.0, float(tooltip_rect.width()))
+        tooltip_height = max(1.0, float(tooltip_rect.height()))
+        margin = 6.0
+        plot_item = self.plot_widget.getPlotItem()
+        scene_point = plot_item.mapToScene(plot_item_p)
+        scene_x = scene_point.x()
+        scene_y = scene_point.y()
+        view_rect = self.plot_widget.getViewBox().sceneBoundingRect()
+        view_left = view_rect.left()
+
+        anchor_y = 0.5
+        adjusted_scene_y = scene_y
+        if scene_y + tooltip_height / 2.0 > view_rect.bottom() - margin:
+            anchor_y = 1.0
+            adjusted_scene_y = min(scene_y, view_rect.bottom() - margin)
+        elif scene_y - tooltip_height / 2.0 < view_rect.top() + margin:
+            anchor_y = 0.0
+            adjusted_scene_y = max(scene_y, view_rect.top() + margin)
+        adjusted_p = plot_item.mapFromScene(QPointF(scene_x, adjusted_scene_y))
+
+        if scene_x - margin - tooltip_width >= view_left:
+            return QPointF(adjusted_p.x() - margin, adjusted_p.y()), (1.0, anchor_y)
+        return QPointF(adjusted_p.x() + margin, adjusted_p.y()), (0.0, anchor_y)
+
     def on_scene_clicked(self, event):
         if self._tearing_down or not self.is_plot_alive():
             return
@@ -478,8 +567,8 @@ class ChartWidget(QWidget):
             mouse_point = vb.mapSceneToView(pos)
             x_click = mouse_point.x()
             
-            # 2. РџРѕР»РЅРѕСЃС‚СЊСЋ РёРіРЅРѕСЂРёСЂСѓРµРј РІСЃС‘, С‡С‚Рѕ Р»РµРІРµРµ 8:00 (X < 0) РёР»Рё РїСЂР°РІРµРµ РєРѕРЅС†Р° (X > 24)
-            if x_click < -0.001 or x_click > 24.001:
+            visible_hours = max(1, float(getattr(self, "visible_hours", 24)))
+            if x_click < -0.001 or x_click > visible_hours + 0.001:
                 self._fade_out()
                 return
             
@@ -555,11 +644,7 @@ class ChartWidget(QWidget):
                 scene_p = self.plot_widget.getViewBox().mapViewToScene(pg.Point(closest_exact_hour, mouse_point.y()))
                 plot_item_p = self.plot_widget.getPlotItem().mapFromScene(scene_p)
                 
-                view_rect = self.plot_widget.getViewBox().viewRect()
-                if closest_exact_hour > view_rect.right() - 4.0:
-                    anchor = (1.1, 0.5)
-                else:
-                    anchor = (-0.1, 0.5)
+                plot_item_p, anchor = self._slice_tooltip_position(plot_item_p, html)
                     
                 is_update = self.slice_line.isVisible() and self.tooltip.isVisible()
                 self._fade_in_to(closest_exact_hour, plot_item_p, anchor, html, is_update)
@@ -669,7 +754,7 @@ class ChartWidget(QWidget):
         if active_intervals is None:
             resolved_active_intervals = []
             if self.status_service and self.admission_id:
-                end_time = start_time + timedelta(hours=24)
+                end_time = start_time + timedelta(hours=max(1, float(getattr(self, "visible_hours", 24))))
                 resolved_active_intervals = self.status_service.get_active_intervals(
                     self.admission_id,
                     start_time - timedelta(days=CHART_ACTIVE_INTERVAL_LOOKBACK_DAYS),
@@ -680,6 +765,7 @@ class ChartWidget(QWidget):
 
         render_key = (
             self._normalize_key_dt(start_time),
+            int(getattr(self, "visible_hours", 24)),
             self._build_vitals_key(vitals),
             self._build_intervals_key(resolved_active_intervals),
         )
@@ -688,7 +774,12 @@ class ChartWidget(QWidget):
         self._last_render_key = render_key
 
         # РћР±СЂР°Р±РѕС‚РєР° РґР°РЅРЅС‹С… С‡РµСЂРµР· РїСЂРѕС†РµСЃСЃРѕСЂ СЃ СѓС‡РµС‚РѕРј Р°РєС‚РёРІРЅС‹С… РёРЅС‚РµСЂРІР°Р»РѕРІ (СЂР°Р·СЂС‹РІС‹ Рё С„РёР»СЊС‚СЂР°С†РёСЏ)
-        processed = ChartDataProcessor.process_vitals(vitals, start_time, resolved_active_intervals)
+        processed = ChartDataProcessor.process_vitals(
+            vitals,
+            start_time,
+            resolved_active_intervals,
+            visible_hours=getattr(self, "visible_hours", 24),
+        )
         
         if 'densified_data' in processed:
             d = processed['densified_data']

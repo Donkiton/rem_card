@@ -2959,5 +2959,692 @@
     "ketoacidoz",
     "K92.2",
     "heart attack"
-  ]
+  ],
+  "operblock_quick_orders": {
+    "version": 1,
+    "items": []
+  },
+  "operblock_medication_presets": {
+    "version": 1,
+    "items": [
+      {
+        "preset_id": "drug:atropine",
+        "source_drug_id": "atropine",
+        "label": "Atropini",
+        "display_name": "S. Atropini 0.1%",
+        "latin": "Atropini",
+        "aliases": [
+          "атропин"
+        ],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "1 мг",
+        "doses": [
+          "0,1 мг",
+          "0,3 мг",
+          "0,5 мг",
+          "1 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "1 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": true,
+        "sort_order": 40,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "holinolitiks"
+        }
+      },
+      {
+        "preset_id": "drug:fentanyl",
+        "source_drug_id": "fentanyl",
+        "label": "Fentanyli",
+        "display_name": "S. Phentanyli 0,005%",
+        "latin": "Fentanyli",
+        "aliases": [
+          "фент",
+          "фентанил"
+        ],
+        "kind": "bolus",
+        "group": "Анальгезия",
+        "route": null,
+        "unit": "mcg",
+        "default_dose": "50 мкг",
+        "doses": [
+          "50 мкг",
+          "100 мкг",
+          "150 мкг",
+          "200 мкг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "50 мкг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": true,
+        "sort_order": 60,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "narcotic_analgesics"
+        }
+      },
+      {
+        "preset_id": "drug:propofol",
+        "source_drug_id": "propofol",
+        "label": "Propofoli",
+        "display_name": "S. Propofoli 2%",
+        "latin": "Propofoli",
+        "aliases": [
+          "пропофол"
+        ],
+        "kind": "bolus",
+        "group": "Седация",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "200 мг",
+        "doses": [
+          "50 мг",
+          "100 мг",
+          "150 мг",
+          "200 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "10 мг/мл",
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "uses_line": true,
+        "enabled": true,
+        "favorite": true,
+        "sort_order": 70,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "sedatives"
+        }
+      },
+      {
+        "preset_id": "drug:rocuronium",
+        "source_drug_id": "rocuronium",
+        "label": "Rocuronii",
+        "display_name": "S. Rocuronii 1%",
+        "latin": "Rocuronii",
+        "aliases": [
+          "рокуроний"
+        ],
+        "kind": "bolus",
+        "group": "Миорелаксанты",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "50 мг",
+        "doses": [
+          "10 мг",
+          "30 мг",
+          "40 мг",
+          "50 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "10 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": true,
+        "sort_order": 80,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "relaxants"
+        }
+      },
+      {
+        "preset_id": "drug:ketamine",
+        "source_drug_id": "ketamine",
+        "label": "Ketamini",
+        "display_name": "S. Ketamini 5%",
+        "latin": "Ketamini",
+        "aliases": [
+          "кетамин"
+        ],
+        "kind": "bolus",
+        "group": "Седация",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "50 мг",
+        "doses": [
+          "12,5 мг",
+          "25 мг",
+          "50 мг",
+          "100 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "50 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": null,
+        "uses_line": true,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 100,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "sedatives"
+        }
+      },
+      {
+        "preset_id": "drug:Prozerin",
+        "source_drug_id": "Prozerin",
+        "label": "Prozerini",
+        "display_name": "S. Prozerini 0.05%",
+        "latin": "Prozerini",
+        "aliases": [
+          "прозерин",
+          "неостигмин",
+          "покакать"
+        ],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "0,5 мг",
+        "doses": [
+          "1 мг",
+          "2 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "0,5 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 110,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "holinomimetiks"
+        }
+      },
+      {
+        "preset_id": "drug:dexamethasone",
+        "source_drug_id": "dexamethasone",
+        "label": "Dexamethasoni",
+        "display_name": "S. Dexamethasoni 0.4%",
+        "latin": "Dexamethasoni",
+        "aliases": [
+          "декс",
+          "дексаметазон"
+        ],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "4 мг",
+        "doses": [
+          "4 мг",
+          "8 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "4 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 120,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "glucocorticoids"
+        }
+      },
+      {
+        "preset_id": "drug:prednisolone",
+        "source_drug_id": "prednisolone",
+        "label": "Prednisoloni",
+        "display_name": "S. Prednisoloni 3%",
+        "latin": "Prednisoloni",
+        "aliases": [
+          "преднизолон"
+        ],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "30 мг",
+        "doses": [
+          "30 мг",
+          "60 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "30 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 130,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "glucocorticoids"
+        }
+      },
+      {
+        "preset_id": "drug:promedol",
+        "source_drug_id": "promedol",
+        "label": "Promedoli",
+        "display_name": "S. Promedoli 1%",
+        "latin": "Promedoli",
+        "aliases": [
+          "промедол"
+        ],
+        "kind": "bolus",
+        "group": "Анальгезия",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "20 мг",
+        "doses": [
+          "10 мг",
+          "20 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "10 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 140,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "narcotic_analgesics"
+        }
+      },
+      {
+        "preset_id": "drug:diazepam",
+        "source_drug_id": "diazepam",
+        "label": "Diazepami",
+        "display_name": "S. Diazepami 0,5%",
+        "latin": "Diazepami",
+        "aliases": [
+          "диазепам",
+          "реланиум",
+          "сибазон"
+        ],
+        "kind": "bolus",
+        "group": "Седация",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "10 мг",
+        "doses": [
+          "5 мг",
+          "10 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "5 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 150,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "sedatives"
+        }
+      },
+      {
+        "preset_id": "manual:bolus:tranexam_bolus",
+        "source_drug_id": null,
+        "label": "Tranexam_bolus",
+        "display_name": "S. Acidi tranexamici 5%",
+        "latin": null,
+        "aliases": [],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "750 мг",
+          "1000 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "50 мг/мл",
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 160,
+        "payload": {}
+      },
+      {
+        "preset_id": "manual:gas:sevoflurane",
+        "source_drug_id": null,
+        "label": "Sevoflurane",
+        "display_name": "Севофлюран",
+        "latin": null,
+        "aliases": [],
+        "kind": "gas",
+        "group": "Газы",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "0,7 МАК",
+          "0,8 МАК"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": null,
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": null,
+        "payload": {}
+      },
+      {
+        "preset_id": "drug:dopamine",
+        "source_drug_id": "dopamine",
+        "label": "Dopamini",
+        "display_name": "S. Dopamini 4%",
+        "latin": "Dopamini",
+        "aliases": [
+          "допамин",
+          "дофамин"
+        ],
+        "kind": "continuous_infusion",
+        "group": "Вазопрессоры",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "200 мг",
+        "doses": [
+          "200 мг",
+          "400 мг"
+        ],
+        "rates": [
+          "1 мл/час",
+          "5 мл/час"
+        ],
+        "rate_unit": null,
+        "concentration": "40 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": null,
+        "uses_line": true,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 30,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "vasopressors"
+        }
+      },
+      {
+        "preset_id": "drug:norepinephrine",
+        "source_drug_id": "norepinephrine",
+        "label": "Noradrenalini",
+        "display_name": "S. Noradrenalini 0,2%",
+        "latin": "Noradrenalini",
+        "aliases": [
+          "норадр",
+          "норадреналин"
+        ],
+        "kind": "continuous_infusion",
+        "group": "Вазопрессоры",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "2 мг",
+        "doses": [
+          "8 мг",
+          "16 мг"
+        ],
+        "rates": [
+          "1 мл/час",
+          "5 мл/час"
+        ],
+        "rate_unit": null,
+        "concentration": "2 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "50",
+        "duration_min": null,
+        "uses_line": true,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 50,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "vasopressors"
+        }
+      },
+      {
+        "preset_id": "drug:Acidiaminocaproici",
+        "source_drug_id": "Acidiaminocaproici",
+        "label": "Acidi aminocaproici",
+        "display_name": "S. Acidi aminocapronici 5%",
+        "latin": "Acidi aminocaproici",
+        "aliases": [
+          "аминокапронка"
+        ],
+        "kind": "timed_infusion",
+        "group": "Капельницы",
+        "route": null,
+        "unit": "ml",
+        "default_dose": "100 мл",
+        "doses": [
+          "5 гр"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "50 мг/мл",
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": "100",
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 10,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "Gemostasis"
+        }
+      },
+      {
+        "preset_id": "manual:timed_infusion:mezaton",
+        "source_drug_id": null,
+        "label": "Mezaton",
+        "display_name": "S. Phenylephrini 1%",
+        "latin": null,
+        "aliases": [],
+        "kind": "timed_infusion",
+        "group": "Капельницы",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "1 мг",
+          "2 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "10 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "200",
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 20,
+        "payload": {}
+      },
+      {
+        "preset_id": "drug:Tranexam",
+        "source_drug_id": "Tranexam",
+        "label": "Acidi tranexamici",
+        "display_name": "S. Acidi tranexamici 5%",
+        "latin": "Acidi tranexamici",
+        "aliases": [
+          "транексам"
+        ],
+        "kind": "timed_infusion",
+        "group": "Капельницы",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "1000 мг",
+        "doses": [
+          "750 мг",
+          "1000 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "50 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "200",
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 90,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "Gemostasis"
+        }
+      },
+      {
+        "preset_id": "drug:fizrastvor",
+        "source_drug_id": "fizrastvor",
+        "label": "NaCl 0.9%",
+        "display_name": "S. NaCl 0.9%",
+        "latin": "NaCl 0.9%",
+        "aliases": [
+          "физ",
+          "раствор",
+          "соль",
+          "жижа"
+        ],
+        "kind": "timed_infusion",
+        "group": "Растворы / прочее",
+        "route": null,
+        "unit": "ml",
+        "default_dose": "200 мл",
+        "doses": [
+          "200 мл",
+          "500 мл"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": null,
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": true,
+        "sort_order": 170,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "fluids"
+        }
+      }
+    ],
+    "include_opblock_seed": false,
+    "include_quick_orders_compat": false
+  },
+  "operblock_team": {
+    "version": 1,
+    "items": [
+      {
+        "id": "member_1780381457149",
+        "name": "Морозов Р.В.",
+        "position": "Хирург",
+        "sort_order": 10
+      },
+      {
+        "id": "member_1780381587045",
+        "name": "Пак Е.В,",
+        "position": "Операционная медсестра",
+        "sort_order": 20
+      },
+      {
+        "id": "member_1780381594498",
+        "name": "Чок А.В.",
+        "position": "Анестезистка",
+        "sort_order": 30
+      }
+    ]
+  },
+  "operblock_anesthesia_types": {
+    "version": 1,
+    "items": [
+      {
+        "id": "manual_1780381738677",
+        "label": "ТВВА",
+        "sort_order": 10
+      },
+      {
+        "id": "manual_1780381778846",
+        "label": "ТВВА + ИВЛ",
+        "sort_order": 20
+      },
+      {
+        "id": "manual_1780381788988",
+        "label": "Комбинированная анестезия",
+        "sort_order": 30
+      },
+      {
+        "id": "manual_1780381792324",
+        "label": "СМА",
+        "sort_order": 40
+      },
+      {
+        "id": "manual_1780381797709",
+        "label": "Проводниковая анестезия",
+        "sort_order": 50
+      }
+    ]
+  }
 }

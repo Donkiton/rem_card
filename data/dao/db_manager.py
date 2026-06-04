@@ -1887,6 +1887,9 @@ class DatabaseManager:
             logger.warning("Failed to create %s backup (%s): %s", prefix, source, exc)
             return None
 
+    def create_validated_backup(self, prefix: str, source: str):
+        return self._create_named_backup(prefix=prefix, source=source)
+
     def _create_shutdown_backup(self):
         if SHUTDOWN_BACKUP_MIN_INTERVAL_SEC > 0:
             latest_shutdown_backup = self._find_latest_runtime_backup_by_prefix("shutdown_")

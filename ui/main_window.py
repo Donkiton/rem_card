@@ -14,8 +14,10 @@ import time
 
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
-from rem_card.app.paths import get_icon_dir, get_role_lock_path
+from rem_card.app.paths import BAZA_DIR, get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
+from rem_card.app.roles import ROLE_KEYS, ROLE_OPERBLOCK, role_display_name
+from rem_card.app.runtime_paths import get_operblock_test_baza_dir, validate_operblock_baza_dir
 from rem_card.app.version import APP_DISPLAY_TITLE
 
 def _get_desktop_path():
@@ -222,6 +224,7 @@ class MainWindow(QMainWindow):
 
         self.doctor_main = None
         self.nurse_main = None
+        self.operblock_main = None
         self.admin_main = None
         self.welcome = None
         self._maintenance_scheduled = False
@@ -244,6 +247,8 @@ class MainWindow(QMainWindow):
             return "doctor"
         if self.stack.currentWidget() == self.nurse_main:
             return "nurse"
+        if self.stack.currentWidget() == self.operblock_main:
+            return ROLE_OPERBLOCK
         if self.stack.currentWidget() == self.admin_main:
             return "admin"
         return str(self._role_lock_key or self._initial_role or "unknown")
@@ -702,11 +707,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _role_display_name(role_key: str) -> str:
-        if role_key == "doctor":
-            return "Врач"
-        if role_key == "nurse":
-            return "Медсестра"
-        return str(role_key)
+        return role_display_name(role_key)
 
     def _build_role_lock(self, role_key: str) -> RoleSessionLock:
         return RoleSessionLock(
@@ -719,7 +720,7 @@ class MainWindow(QMainWindow):
         )
 
     def _acquire_role_lock(self, role_key: str) -> bool:
-        if role_key not in ("doctor", "nurse"):
+        if role_key not in ROLE_KEYS:
             return True
         if self._is_emergency_runtime():
             self._last_active_role_key = role_key
@@ -751,6 +752,30 @@ class MainWindow(QMainWindow):
                 logger.warning("Failed to release previous role lock: %s", exc)
         return True
 
+    def _ensure_operblock_runtime_path(self, *, close_on_error: bool = False) -> bool:
+        ok, message = validate_operblock_baza_dir(BAZA_DIR)
+        if ok:
+            return True
+
+        logger.error(
+            "Operblock role blocked on forbidden data root: current=%s expected=%s reason=%s",
+            BAZA_DIR,
+            get_operblock_test_baza_dir(),
+            message,
+        )
+        QMessageBox.warning(
+            self,
+            "Оперблок",
+            (
+                f"{message}\n\n"
+                "Оперблок нельзя открыть из уже запущенной РемКарты на базе РАО.\n"
+                "Запустите роль отдельно через run_operblock.py или выберите «Оперблок» в launcher.py до запуска базы."
+            ),
+        )
+        if close_on_error:
+            QTimer.singleShot(0, self.close)
+        return False
+
     def release_role_lock(self):
         if self._role_lock:
             try:
@@ -781,6 +806,9 @@ class MainWindow(QMainWindow):
         elif self._initial_role == 'nurse':
             QTimer.singleShot(10, self._activate_initial_nurse_role)
 
+        elif self._initial_role == ROLE_OPERBLOCK:
+            QTimer.singleShot(10, self._activate_initial_operblock_role)
+
     def _activate_initial_doctor_role(self, *, start_refresh: bool = True):
         from PySide6.QtCore import QTimer
         from .doctor_view.doctor_main_widget import DoctorMainWidget
@@ -806,6 +834,38 @@ class MainWindow(QMainWindow):
 
         self._initial_role_ui_ready = True
         QTimer.singleShot(1500, lambda: _apply_role_icon("doctor"))
+        self._schedule_maintenance()
+        if start_refresh:
+            QTimer.singleShot(0, self.start_initial_role_refresh)
+
+    def _activate_initial_operblock_role(self, *, start_refresh: bool = True):
+        from PySide6.QtCore import QTimer
+        from .operblock_view.operblock_main_widget import OperBlockMainWidget
+
+        if self._initial_role_ui_ready and self.operblock_main is not None:
+            if start_refresh:
+                QTimer.singleShot(0, self.start_initial_role_refresh)
+            return
+
+        if not self.container:
+            QTimer.singleShot(50, self._activate_initial_operblock_role)
+            return
+        if not self._ensure_operblock_runtime_path(close_on_error=True):
+            return
+        if not self._acquire_role_lock(ROLE_OPERBLOCK):
+            self.close()
+            return
+
+        self.operblock_main = OperBlockMainWidget(
+            self.container.patient_service,
+            self.container.remcard_service,
+            self.container.operblock_service,
+            parent=self.stack,
+        )
+        self.stack.addWidget(self.operblock_main)
+        self.stack.setCurrentWidget(self.operblock_main)
+
+        self._initial_role_ui_ready = True
         self._schedule_maintenance()
         if start_refresh:
             QTimer.singleShot(0, self.start_initial_role_refresh)
@@ -844,12 +904,14 @@ class MainWindow(QMainWindow):
         """Синхронно строит стартовую роль до первого показа окна."""
         if self._initial_role_ui_ready:
             return True
-        if not self.container or self._initial_role not in ("doctor", "nurse"):
+        if not self.container or self._initial_role not in ROLE_KEYS:
             return False
         if self._initial_role == "doctor":
             self._activate_initial_doctor_role(start_refresh=False)
         elif self._initial_role == "nurse":
             self._activate_initial_nurse_role(start_refresh=False)
+        elif self._initial_role == ROLE_OPERBLOCK:
+            self._activate_initial_operblock_role(start_refresh=False)
         return bool(self._initial_role_ui_ready)
 
     def start_initial_role_refresh(self):
@@ -860,6 +922,8 @@ class MainWindow(QMainWindow):
             role_widget = self.doctor_main
         elif self._initial_role == "nurse":
             role_widget = self.nurse_main
+        elif self._initial_role == ROLE_OPERBLOCK:
+            role_widget = self.operblock_main
         if role_widget is None or not hasattr(role_widget, "start_auto_refresh"):
             return
         self._initial_role_auto_refresh_started = True
@@ -871,6 +935,8 @@ class MainWindow(QMainWindow):
             role_widget = self.doctor_main
         elif self._initial_role == "nurse":
             role_widget = self.nurse_main
+        elif self._initial_role == ROLE_OPERBLOCK:
+            role_widget = self.operblock_main
         service = getattr(role_widget, "remcard_service", None)
         data_service = getattr(service, "data_service", None)
         if data_service:
@@ -925,6 +991,31 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self.nurse_main.start_auto_refresh)
             else:
                 QTimer.singleShot(0, self.nurse_main.auto_refresh)
+
+        elif role == "Оперблок":
+            if not self.container:
+                QTimer.singleShot(100, lambda: self.on_role_selected(role))
+                return
+            if not self._ensure_operblock_runtime_path():
+                return
+            if not self._acquire_role_lock(ROLE_OPERBLOCK):
+                return
+
+            if self.operblock_main is None:
+                from .operblock_view.operblock_main_widget import OperBlockMainWidget
+
+                self.operblock_main = OperBlockMainWidget(
+                    self.container.patient_service,
+                    self.container.remcard_service,
+                    self.container.operblock_service,
+                    parent=self.stack,
+                )
+                self.stack.addWidget(self.operblock_main)
+
+            self.stack.setCurrentWidget(self.operblock_main)
+            self._schedule_maintenance()
+            if hasattr(self.operblock_main, 'start_auto_refresh'):
+                QTimer.singleShot(0, self.operblock_main.start_auto_refresh)
 
     def _schedule_maintenance(self):
         from PySide6.QtCore import QTimer
@@ -1002,6 +1093,9 @@ class MainWindow(QMainWindow):
             elif current_widget == self.nurse_main:
                 if hasattr(self.nurse_main, 'on_back_clicked'):
                     self.nurse_main.on_back_clicked()
+            elif current_widget == self.operblock_main:
+                if hasattr(self.operblock_main, 'on_back_clicked'):
+                    self.operblock_main.on_back_clicked()
             elif current_widget == self.admin_main:
                 self.show_roles()
         
@@ -1161,6 +1255,11 @@ class MainWindow(QMainWindow):
                     self.nurse_main.shutdown()
                 elif hasattr(self.nurse_main, 'stop_auto_refresh'):
                     self.nurse_main.stop_auto_refresh()
+            if hasattr(self, 'operblock_main'):
+                if hasattr(self.operblock_main, 'shutdown'):
+                    self.operblock_main.shutdown()
+                elif hasattr(self.operblock_main, 'stop_auto_refresh'):
+                    self.operblock_main.stop_auto_refresh()
 
             is_max = getattr(self, '_is_custom_maximized', False) or self.isMaximized()
             self.settings.setValue("is_maximized", is_max)

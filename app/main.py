@@ -8,14 +8,24 @@ import time
 from functools import partial
 from typing import Callable, Optional
 
+if __package__ in (None, ""):
+    _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _repo_root not in sys.path:
+        sys.path.insert(0, _repo_root)
+    from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+    bootstrap_local_rem_card()
+
 from rem_card.app.runtime_paths import (
     DataPathConfigurationError,
     cleanup_old_local_logs,
+    configure_operblock_runtime_path,
     create_baza_structure_and_db,
     get_local_logs_dir,
     is_compiled,
     write_configured_baza_dir,
 )
+from rem_card.app.roles import ROLE_KEYS, ROLE_OPERBLOCK, role_display_name
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 
 
@@ -126,6 +136,8 @@ def _initial_role_layout(window):
         role_widget = getattr(window, "doctor_main", None)
     elif role == "nurse":
         role_widget = getattr(window, "nurse_main", None)
+    elif role == ROLE_OPERBLOCK:
+        role_widget = getattr(window, "operblock_main", None)
     if role_widget is None:
         return None
     layout = getattr(role_widget, "layout_manager", None)
@@ -136,6 +148,9 @@ def _initial_role_layout(window):
 
 
 def _initial_w1_state(window) -> dict:
+    if getattr(window, "_initial_role", None) == ROLE_OPERBLOCK:
+        return {"ready": True, "role_ui": True, "operblock": True}
+
     layout = _initial_role_layout(window)
     if layout is None:
         return {"ready": False, "role_ui": False}
@@ -642,6 +657,9 @@ def _try_emergency_startup_after_network_failure(
     before_user_message: Optional[Callable[[], None]] = None,
     emergency_startup_request: str | None = None,
 ):
+    if role not in ("doctor", "nurse"):
+        return None
+
     try:
         from rem_card.app.emergency_startup import (
             DOCTOR_NETWORK_UNAVAILABLE_MESSAGE,
@@ -793,7 +811,7 @@ def _validate_compiled_role_startup(
     on_success: Optional[Callable[[object], None]] = None,
     on_failure: Optional[Callable[[object], object]] = None,
 ) -> bool:
-    if not is_compiled() or role not in ("doctor", "nurse"):
+    if not is_compiled() or role not in ROLE_KEYS:
         return True
 
     try:
@@ -802,7 +820,7 @@ def _validate_compiled_role_startup(
         result = run_startup_db_guard(role=role)
     except Exception as exc:
         _write_startup_local_log(f"startup db guard crashed for role={role}: {exc}")
-        handled = _call_startup_failure_callback(on_failure, exc)
+        handled = _call_startup_failure_callback(on_failure, exc) if role in ("doctor", "nurse") else None
         if handled is not None:
             return handled
         _call_startup_message_callback(before_user_message)
@@ -830,7 +848,7 @@ def _validate_compiled_role_startup(
     _write_startup_local_log(
         f"startup blocked for role={role}: {result.user_message}; technical={result.technical_reason}"
     )
-    handled = _call_startup_failure_callback(on_failure, result)
+    handled = _call_startup_failure_callback(on_failure, result) if role in ("doctor", "nurse") else None
     if handled is not None:
         return handled
     update_candidate = None
@@ -905,7 +923,7 @@ def _notify_existing_instance(QLocalSocket, server_name: str, role_suffix: str) 
 
 
 def _acquire_initial_role_lock(role: Optional[str]):
-    if role not in ("doctor", "nurse"):
+    if role not in ROLE_KEYS:
         return None
 
     from rem_card.app.paths import get_role_lock_path
@@ -922,7 +940,7 @@ def _acquire_initial_role_lock(role: Optional[str]):
     if lock.acquire():
         return lock
 
-    role_name = "Врач" if role == "doctor" else "Медсестра"
+    role_name = role_display_name(role)
     holder = lock.describe_holder()
     _show_native_warning(
         "Роль занята",
@@ -931,12 +949,61 @@ def _acquire_initial_role_lock(role: Optional[str]):
     return None
 
 
+def _configure_operblock_startup_path(role: Optional[str], path_setup: bool) -> bool:
+    try:
+        operblock_path_info = configure_operblock_runtime_path(role)
+    except DataPathConfigurationError as exc:
+        _show_native_warning("База данных недоступна", str(exc))
+        sys.exit(1)
+
+    if not operblock_path_info:
+        return path_setup
+
+    _write_startup_local_log(
+        "operblock path configured: "
+        f"role={operblock_path_info['role']} "
+        f"data_root={operblock_path_info['data_root']} "
+        f"db_path={operblock_path_info['db_path']} "
+        f"db_profile={operblock_path_info['db_profile']} "
+        f"local_db_used={operblock_path_info['local_db_used']}"
+    )
+    if path_setup:
+        _show_native_warning(
+            "Путь Оперблока зафиксирован",
+            "Оперблок работает только с сетевой БД operblok_baza. Выбор другого пути отключён.",
+        )
+        return False
+    return path_setup
+
+
+def _infer_compiled_role_from_executable() -> Optional[str]:
+    exe_name = os.path.basename(str(sys.executable or "")).lower()
+    argv0_name = os.path.basename(str(sys.argv[0] if sys.argv else "")).lower()
+    source_name = f"{exe_name} {argv0_name}"
+    if "remcarddoctor" in source_name:
+        return "doctor"
+    if "remcardnurse" in source_name:
+        return "nurse"
+    if "remcardoperblock" in source_name:
+        return ROLE_OPERBLOCK
+    return None
+
+
+def _resolve_startup_role(parsed_role: Optional[str], forced_role: Optional[str]) -> Optional[str]:
+    compiled_role = _infer_compiled_role_from_executable()
+    if compiled_role:
+        return compiled_role
+    if forced_role:
+        return forced_role
+    return parsed_role or None
+
+
 def _acquire_role_lock_for_startup(
     role: Optional[str],
     emergency_runtime_context,
     close_startup_splash: Callable[[], None],
 ):
-    if role not in ("doctor", "nurse") or emergency_runtime_context is not None:
+    if role not in ROLE_KEYS or emergency_runtime_context is not None:
         return None
     role_lock = _acquire_initial_role_lock(role)
     if role_lock is None:
@@ -1086,6 +1153,9 @@ def _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, 
 
 def main(forced_role: Optional[str] = None, path_setup: bool = False):
     try:
+        compiled_role = _infer_compiled_role_from_executable()
+        if compiled_role:
+            forced_role = compiled_role
         _main_impl(forced_role=forced_role, path_setup=path_setup)
     except Exception:
         import traceback
@@ -1102,14 +1172,14 @@ def main(forced_role: Optional[str] = None, path_setup: bool = False):
 def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     startup_started_at = time.perf_counter()
     parser = argparse.ArgumentParser(description=APP_DISPLAY_TITLE)
-    parser.add_argument("--role", choices=["doctor", "nurse"], help="Начальная роль пользователя")
+    parser.add_argument("--role", choices=list(ROLE_KEYS), help="Начальная роль пользователя")
     parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
     parser.add_argument("--emergency-startup-request", default="", help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args()
-    if forced_role:
-        args.role = forced_role
+    args.role = _resolve_startup_role(args.role, forced_role)
     path_setup = bool(path_setup or args.path_setup)
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
+    path_setup = _configure_operblock_startup_path(args.role, path_setup)
 
     if _show_update_in_progress_if_needed():
         sys.exit(0)
@@ -1178,7 +1248,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         pending_single_instance_clients = []
 
         container = None
-        if args.role in ("doctor", "nurse"):
+        if args.role in ROLE_KEYS:
             bootstrap_started = time.perf_counter()
             container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
                 bootstrap,
@@ -1243,7 +1313,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         logger.info("Bootstrap completed")
 
         initial_role_prepared = False
-        if args.role in ("doctor", "nurse") and hasattr(window, "prepare_initial_role_ui_for_startup"):
+        if args.role in ROLE_KEYS and hasattr(window, "prepare_initial_role_ui_for_startup"):
             role_ui_started = time.perf_counter()
             prepared = bool(window.prepare_initial_role_ui_for_startup())
             initial_role_prepared = prepared

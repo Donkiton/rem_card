@@ -17,9 +17,10 @@ class WelcomeWidget(QWidget):
 
         self.btn_doctor = QPushButton("Врач")
         self.btn_nurse = QPushButton("Медсестра")
+        self.btn_operblock = QPushButton("Оперблок")
 
         # Настройка стилей и активности
-        for btn in [self.btn_doctor, self.btn_nurse]:
+        for btn in [self.btn_doctor, self.btn_nurse, self.btn_operblock]:
             btn.setFixedSize(250, 60)
             self.layout.addWidget(btn)
 
@@ -27,6 +28,7 @@ class WelcomeWidget(QWidget):
 
         self.btn_doctor.clicked.connect(lambda: self.role_selected.emit("Врач"))
         self.btn_nurse.clicked.connect(lambda: self.role_selected.emit("Медсестра"))
+        self.btn_operblock.clicked.connect(lambda: self.role_selected.emit("Оперблок"))
 
 class BedWidget(QFrame):
     clicked = Signal(object) # Передает PatientDTO

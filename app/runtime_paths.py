@@ -9,6 +9,11 @@ from typing import Optional
 
 
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
+OPERBLOCK_TEST_BAZA_DIR = r"\\fs.acrb-amursk.ru\common\РАО\Пациенты\remcard\operblok_baza"
+OPERBLOCK_DB_NOT_FOUND_MESSAGE = "Тестовая БД оперблока не найдена по ожидаемому пути"
+OPERBLOCK_FORBIDDEN_DB_MESSAGE = (
+    "Оперблок должен использовать тестовую сетевую БД operblok_baza. Текущий путь не разрешён."
+)
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
@@ -49,6 +54,20 @@ def is_compiled() -> bool:
         return True
     exe_name = os.path.basename(sys.executable).lower()
     return exe_name not in ("python.exe", "pythonw.exe", "python", "pythonw")
+
+
+def is_operblock_executable() -> bool:
+    exe_name = os.path.basename(str(sys.executable or "")).lower()
+    argv0_name = os.path.basename(str(sys.argv[0] if sys.argv else "")).lower()
+    argv_text = " ".join(str(arg).lower() for arg in sys.argv)
+    return (
+        "remcardoperblock" in exe_name
+        or "remcardoperblock" in argv0_name
+        or "run_operblock" in argv_text
+        or "--role operblock" in argv_text
+        or "--role=operblock" in argv_text
+        or str(os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() == "operblock"
+    )
 
 
 def get_project_root() -> str:
@@ -117,6 +136,68 @@ def _normalize_baza_dir(path: str) -> str:
     return os.path.abspath(os.path.normpath(str(path or "").strip().strip('"')))
 
 
+def _same_path(left: str, right: str) -> bool:
+    return os.path.normcase(_normalize_baza_dir(left)) == os.path.normcase(_normalize_baza_dir(right))
+
+
+def get_operblock_test_baza_dir() -> str:
+    return _normalize_baza_dir(OPERBLOCK_TEST_BAZA_DIR)
+
+
+def resolve_operblock_baza_dir(path: str | None = None) -> str:
+    normalized = _normalize_baza_dir(path or get_operblock_test_baza_dir())
+    expected = get_operblock_test_baza_dir()
+    expected_archiv = os.path.join(expected, "archiv")
+    expected_db = get_journal_db_path(expected)
+    if (
+        _same_path(normalized, expected)
+        or _same_path(normalized, expected_archiv)
+        or _same_path(normalized, expected_db)
+    ):
+        return expected
+    return normalized
+
+
+def is_operblock_baza_dir(path: str) -> bool:
+    return _same_path(resolve_operblock_baza_dir(path), get_operblock_test_baza_dir())
+
+
+def validate_operblock_baza_dir(baza_dir: str) -> tuple[bool, str]:
+    normalized = resolve_operblock_baza_dir(baza_dir)
+    expected = get_operblock_test_baza_dir()
+    if not _same_path(normalized, expected):
+        return False, OPERBLOCK_FORBIDDEN_DB_MESSAGE
+    if not os.path.isdir(normalized):
+        return False, f"{OPERBLOCK_DB_NOT_FOUND_MESSAGE}: {get_journal_db_path(normalized)}"
+    db_path = get_journal_db_path(normalized)
+    if not os.path.isfile(db_path):
+        return False, f"{OPERBLOCK_DB_NOT_FOUND_MESSAGE}: {db_path}"
+    return True, "ok"
+
+
+def configure_operblock_runtime_path(role: str | None) -> Optional[dict[str, str]]:
+    if str(role or "").strip().lower() != "operblock":
+        return None
+
+    baza_dir = resolve_operblock_baza_dir(get_operblock_test_baza_dir())
+    os.environ["REMCARD_BAZA_DIR"] = baza_dir
+    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
+    os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
+    os.environ["REMCARD_UI_ROLE"] = "operblock"
+
+    ok, message = validate_operblock_baza_dir(baza_dir)
+    if not ok:
+        raise DataPathConfigurationError(message)
+
+    return {
+        "role": "operblock",
+        "data_root": baza_dir,
+        "db_path": get_journal_db_path(baza_dir),
+        "db_profile": "network",
+        "local_db_used": "false",
+    }
+
+
 def is_baza_dir_name(path: str) -> bool:
     return os.path.basename(_normalize_baza_dir(path)) == BAZA_DIR_NAME
 
@@ -156,7 +237,12 @@ def write_configured_baza_dir(baza_dir: str) -> str:
 def resolve_baza_dir() -> str:
     override = os.environ.get("REMCARD_BAZA_DIR")
     if override:
+        if is_operblock_executable():
+            return resolve_operblock_baza_dir(override)
         return _normalize_baza_dir(override)
+
+    if is_compiled() and is_operblock_executable():
+        return get_operblock_test_baza_dir()
 
     if is_compiled():
         configured = read_configured_baza_dir()
@@ -193,6 +279,8 @@ def get_log_file_prefix() -> str:
         return "doctor"
     if "remcardnurse" in exe_name or "run_nurse" in argv_text or "--role nurse" in argv_text:
         return "nurse"
+    if "remcardoperblock" in exe_name or "run_operblock" in argv_text or "--role operblock" in argv_text:
+        return "operblock"
     if "remcardpathsetup" in exe_name or "run_path_setup" in argv_text or "--path-setup" in argv_text:
         return "path_setup"
     return "rem_card"

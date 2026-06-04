@@ -26,12 +26,18 @@ class HybridShiftTimePicker(QWidget):
     HOURS = list(range(8, 24)) + list(range(0, 8))
     MINUTES = list(range(0, 60, 5))
 
-    def __init__(self, time_service=None, shift_date=None, parent=None):
+    def __init__(self, time_service=None, shift_date=None, parent=None, *, quick_actions=None):
         super().__init__(parent)
         self._time_service = time_service
         self._shift_date = shift_date
         self._time = "08:00"
         self._last_valid_time = "08:00"
+        self._quick_actions = list(quick_actions or [
+            ("Сейчас", None),
+            ("-5 мин", -5),
+            ("-30 мин", -30),
+            ("-1 час", -60),
+        ])
         self._hour_buttons = {}
         self._minute_buttons = {}
 
@@ -66,13 +72,7 @@ class HybridShiftTimePicker(QWidget):
         quick_grid.setContentsMargins(0, 0, 0, 0)
         quick_grid.setHorizontalSpacing(3)
         quick_grid.setVerticalSpacing(3)
-        quick_actions = [
-            ("Сейчас", None),
-            ("-5 мин", -5),
-            ("-30 мин", -30),
-            ("-1 час", -60),
-        ]
-        for col, (label, delta) in enumerate(quick_actions):
+        for col, (label, delta) in enumerate(self._quick_actions):
             btn = QPushButton(label)
             btn.setObjectName("hybrid_quick_button")
             btn.setFixedHeight(24)

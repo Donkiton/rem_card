@@ -25,6 +25,7 @@ class Container:
             VitalsDAO,
         )
         from rem_card.services.data_service import DataService
+        from rem_card.services.operblock_service import OperBlockService
         from rem_card.services.patient_status_service import PatientStatusService
         from rem_card.services.read_coordinator import ReadCoordinator
         from rem_card.services.remcard_service import PatientService, RemCardService
@@ -32,8 +33,12 @@ class Container:
         self.db_manager = db_manager
         self.runtime_context = getattr(db_manager, "runtime_context", None)
         self.runtime_mode = getattr(self.runtime_context, "mode", "network")
-        self.data_service = DataService(db_manager)
+        role_key = str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()
+        monitor_enabled = role_key != "operblock"
+        self.data_service = DataService(db_manager, monitor_enabled=monitor_enabled)
         self.data_service.set_runtime_role(role)
+        if not monitor_enabled:
+            logger.info("[OPERBLOCK DB] background change monitor disabled for writer role")
         if hasattr(self.db_manager, "set_write_queue_idle_probe"):
             self.db_manager.set_write_queue_idle_probe(self.data_service.is_write_queue_idle)
         self.emergency_standby_scheduler = self._create_emergency_standby_scheduler(role)
@@ -70,6 +75,7 @@ class Container:
         self.remcard_service.read_coordinator = self.read_coordinator
         self.remcard_service.read_mode = "live"
         self.remcard_service.source_db_path = "live"
+        self.operblock_service = OperBlockService(db_manager)
 
     def _create_emergency_standby_scheduler(self, role: str | None):
         from rem_card.app.emergency_standby_scheduler import create_emergency_standby_scheduler_for_runtime
@@ -166,5 +172,22 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
     )
     if os.environ.get("REMCARD_BOOTSTRAP_DEBUG") == "1":
         print(f"[SETTINGS DB] remcard_settings.db -> {settings_info.get('settings_db_path')}")
+
+    if str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() == "operblock":
+        logger.info(
+            "[OPERBLOCK DB] role=operblock data_root=%s db_path=%s db_profile=network local_db_used=false",
+            BAZA_DIR,
+            medical_db_path,
+        )
+        from rem_card.app.operblock_schema import ensure_operblock_schema
+
+        result = ensure_operblock_schema(db_manager)
+        logger.info(
+            "[OPERBLOCK SCHEMA] migrated=%s backup_path=%s quick_check=%s integrity_check=%s",
+            result.migrated,
+            result.backup_path or "",
+            result.quick_check or "",
+            result.integrity_check or "",
+        )
 
     return Container(db_manager, role=role)

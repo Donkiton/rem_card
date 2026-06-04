@@ -24,11 +24,28 @@ class CommaDotDoubleValidator(QDoubleValidator):
 class VitalsWidget(QWidget):
     data_changed = Signal()
 
-    def __init__(self, remcard_service, admission_id, shift_date: datetime = None, parent=None):
+    def __init__(
+        self,
+        remcard_service,
+        admission_id,
+        shift_date: datetime = None,
+        parent=None,
+        *,
+        forced_settings: dict | None = None,
+        allow_inactive_status_input: bool = False,
+        force_vital_status: bool = False,
+        allow_future_input: bool = False,
+        time_quick_actions=None,
+    ):
         super().__init__(parent)
         self.service = remcard_service
         self.admission_id = admission_id
         self.shift_date = shift_date or datetime.now()
+        self._forced_settings = dict(forced_settings or {}) if forced_settings else None
+        self._allow_inactive_status_input = bool(allow_inactive_status_input)
+        self._force_vital_status = bool(force_vital_status)
+        self._allow_future_input = bool(allow_future_input)
+        self._time_quick_actions = list(time_quick_actions or [])
         self._time_manually_edited = False
         self._programmatic_time_change = False
         self._last_settings = None
@@ -38,6 +55,7 @@ class VitalsWidget(QWidget):
         self._eff_end = None
         self._has_vitals = False
         self._forced_read_only = False
+        self._extra_action_widgets = []
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(5, 5, 5, 5)
         self.init_ui()
@@ -49,7 +67,11 @@ class VitalsWidget(QWidget):
             QPushButton { font-size: 12.5px; }
         """)
         
-        self.time_edit = HybridShiftTimePicker(self.service, self.shift_date)
+        self.time_edit = HybridShiftTimePicker(
+            self.service,
+            self.shift_date,
+            quick_actions=self._time_quick_actions or None,
+        )
         
         self.sys = QLineEdit(); self.sys.setPlaceholderText("Сист"); self.sys.setValidator(QIntValidator(0, 300))
         self.dia = QLineEdit(); self.dia.setPlaceholderText("Диаст"); self.dia.setValidator(QIntValidator(0, 300))
@@ -116,6 +138,15 @@ class VitalsWidget(QWidget):
         # Первичная проверка состояния кнопки отмены
         self.update_undo_button_state()
 
+    def _current_settings(self) -> dict:
+        if self._forced_settings is not None:
+            return dict(self._forced_settings)
+        if not self.service or not self.admission_id:
+            return {'ad': 1, 'pulse': 1, 'temp': 1, 'spo2': 1, 'rr': 0, 'cvp': 0}
+        if self._cached_settings is not None:
+            return dict(self._cached_settings)
+        return self.service.get_vital_settings_cached(self.admission_id, self.shift_date)
+
     def eventFilter(self, obj, event):
         if obj is self.sys and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Slash or event.text() == "/":
@@ -137,6 +168,11 @@ class VitalsWidget(QWidget):
         else:
             self.update_undo_button_state()
 
+    def set_extra_action_widgets(self, widgets):
+        self._extra_action_widgets = [widget for widget in (widgets or []) if widget is not None]
+        self._last_settings = None
+        self.build_grid()
+
     def on_time_changed(self, _new_time):
         if not getattr(self, '_programmatic_time_change', False):
             self._time_manually_edited = True
@@ -150,6 +186,12 @@ class VitalsWidget(QWidget):
         if not event_start:
             return False
         return self._minute_floor(event_start) == self._minute_floor(current_dt)
+
+    def _should_block_inactive_status_input(self, status_service, status_event, current_dt: datetime) -> bool:
+        if self._allow_inactive_status_input:
+            return False
+        is_active = status_service.is_active_at(self.admission_id, current_dt) if status_service else True
+        return not is_active and not self._is_status_transition_minute(status_event, current_dt)
 
     def _set_time_from_service(self, time_value: str):
         self._programmatic_time_change = True
@@ -200,12 +242,7 @@ class VitalsWidget(QWidget):
 
     def build_grid(self):
         """Перестраивает сетку полей ввода в зависимости от настроек показателей."""
-        if not self.service or not self.admission_id:
-            settings = {'ad': 1, 'pulse': 1, 'temp': 1, 'spo2': 1, 'rr': 0, 'cvp': 0}
-        elif self._cached_settings is not None:
-            settings = dict(self._cached_settings)
-        else:
-            settings = self.service.get_vital_settings_cached(self.admission_id, self.shift_date)
+        settings = self._current_settings()
 
         if self._last_settings == settings:
             return
@@ -220,7 +257,7 @@ class VitalsWidget(QWidget):
                 self.time_edit, self.sys, self.dia, self.pulse, 
                 self.temp, self.rr, self.spo2, self.cvp, 
                 self.save_btn, self.undo_btn
-            ]
+            ] + list(self._extra_action_widgets)
             
             for i in reversed(range(self.grid_layout.count())):
                 item = self.grid_layout.takeAt(0)
@@ -276,6 +313,11 @@ class VitalsWidget(QWidget):
             # Кнопки
             self.grid_layout.addWidget(self.save_btn, row, 0, 1, 2); self.save_btn.show()
             self.grid_layout.addWidget(self.undo_btn, row+1, 0, 1, 2); self.undo_btn.show()
+            next_action_row = row + 2
+            for extra_widget in self._extra_action_widgets:
+                self.grid_layout.addWidget(extra_widget, next_action_row, 0, 1, 2)
+                extra_widget.show()
+                next_action_row += 1
 
             # 3. Устанавливаем порядок табуляции (Tab order) для всех видимых полей
             tab_chain = [self.time_edit]
@@ -287,6 +329,7 @@ class VitalsWidget(QWidget):
             if settings.get('cvp'): tab_chain.append(self.cvp)
             tab_chain.append(self.save_btn)
             tab_chain.append(self.undo_btn)
+            tab_chain.extend(self._extra_action_widgets)
             
             for i in range(len(tab_chain) - 1):
                 self.setTabOrder(tab_chain[i], tab_chain[i+1])
@@ -297,7 +340,7 @@ class VitalsWidget(QWidget):
             # Высота
             visible_fields = sum(1 for k in ['temp', 'ad', 'pulse', 'rr', 'spo2', 'cvp'] if settings.get(k))
             picker_height = max(190, self.time_edit.sizeHint().height())
-            calculated_height = 100 + picker_height + (visible_fields * 34)
+            calculated_height = 100 + picker_height + (visible_fields * 34) + (len(self._extra_action_widgets) * 38)
             
             # Уведомляем систему о смене размеров
             self.setFixedHeight(calculated_height)
@@ -384,9 +427,9 @@ class VitalsWidget(QWidget):
         self.undo_btn.setEnabled(False)
 
         def on_success(_):
+            self.mark_dirty()
             self.update_undo_button_state()
             self.data_changed.emit()
-            self.undo_btn.setEnabled(True)
 
         def on_error(exc):
             from ...app.logger import logger
@@ -430,8 +473,7 @@ class VitalsWidget(QWidget):
                 CustomMessageBox.warning(self, "Внимание", f"Пациент {outcome_name} в {status_event.start_time.strftime('%H:%M')}. Ввод данных позже этого времени невозможен.")
                 return
 
-        is_active = status_service.is_active_at(self.admission_id, current_dt) if status_service else True
-        if not is_active and not self._is_status_transition_minute(status_event, current_dt):
+        if self._should_block_inactive_status_input(status_service, status_event, current_dt):
             CustomMessageBox.warning(self, "Внимание", "Пациент в операционной или вне отделения. Ввод витальных функций невозможен.")
             next_start = status_service.get_next_active_event_start(self.admission_id, current_dt) if status_service else None
             if next_start:
@@ -441,7 +483,7 @@ class VitalsWidget(QWidget):
             return
 
         now_limit = datetime.now() + timedelta(minutes=15)
-        if current_dt > now_limit:
+        if not self._allow_future_input and current_dt > now_limit:
             CustomMessageBox.warning(self, "Внимание", f"Нельзя вносить показатели более чем на 15 минут в будущее.\nЛимит: {now_limit.strftime('%H:%M')}")
             return
 
@@ -455,7 +497,7 @@ class VitalsWidget(QWidget):
                     return val
                 except ValueError: raise ValueError(f"Некорректное значение в поле {label}")
 
-            settings = self.service.get_vital_settings_cached(self.admission_id, self.shift_date)
+            settings = self._current_settings()
             v_sys = check_range(self.sys, "АД Сист.", 0, 300) if settings.get('ad') else None
             v_dia = check_range(self.dia, "АД Диаст.", 0, 300) if settings.get('ad') else None
             if v_sys is not None and v_dia is not None and v_dia > v_sys: raise ValueError("АД диаст. не может быть выше систолического")
@@ -488,6 +530,7 @@ class VitalsWidget(QWidget):
                     next_hour = self.service.next_full_hour(current_time, self.shift_date)
                     self._set_time_from_service(next_hour)
 
+                self.mark_dirty()
                 self.update_undo_button_state()
                 self.data_changed.emit()
                 self.save_btn.setEnabled(True)
@@ -503,6 +546,7 @@ class VitalsWidget(QWidget):
                 operation=lambda: self.service.add_vital(
                     dto,
                     self.shift_date,
+                    force=self._force_vital_status,
                     expected_revision=expected_revision,
                 ),
                 on_success=on_success,
