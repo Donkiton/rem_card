@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "custom_presets": {},
+  "active": {
+    "doctor": {
+      "preset_id": "remcard_light",
+      "mode": "light",
+      "density": "normal",
+      "overrides": {}
+    },
+    "nurse": {
+      "preset_id": "remcard_light",
+      "mode": "light",
+      "density": "normal",
+      "overrides": {}
+    }
+  }
+}

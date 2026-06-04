@@ -15,11 +15,79 @@ PROJECT_ROOT = os.path.dirname(APP_ROOT)
 DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
 SETTINGS_TARGET = os.path.join("rem_card", "settings")
 SETTINGS_RELEASE_TARGET = os.path.join("rem_card", "settings_release")
+PACKAGE_DIRS = ("app", "data", "services", "standalone", "ui")
+ALIAS_ROOT = os.path.join(APP_ROOT, "build", "pyinstaller_package_alias")
+ALIAS_PACKAGE_ROOT = os.path.join(ALIAS_ROOT, "rem_card")
 
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
 
-HIDDEN_IMPORTS = collect_submodules("rem_card") + collect_submodules("reportlab")
+def _ignore_non_python_package_files(current_dir, names):
+    ignored = []
+    for name in names:
+        path = os.path.join(current_dir, name)
+        if os.path.isdir(path):
+            if name == "__pycache__" or name.startswith("."):
+                ignored.append(name)
+        elif not name.endswith(".py"):
+            ignored.append(name)
+    return ignored
+
+
+def _prepare_package_alias():
+    if os.path.isdir(ALIAS_ROOT):
+        shutil.rmtree(ALIAS_ROOT, ignore_errors=True)
+    os.makedirs(ALIAS_PACKAGE_ROOT, exist_ok=True)
+    with open(os.path.join(ALIAS_PACKAGE_ROOT, "__init__.py"), "w", encoding="utf-8") as fh:
+        fh.write("# Generated for PyInstaller analysis.\n")
+    for package_dir in PACKAGE_DIRS:
+        source_dir = os.path.join(APP_ROOT, package_dir)
+        if os.path.isdir(source_dir):
+            shutil.copytree(
+                source_dir,
+                os.path.join(ALIAS_PACKAGE_ROOT, package_dir),
+                ignore=_ignore_non_python_package_files,
+            )
+    for current_dir, _dir_names, _file_names in os.walk(ALIAS_PACKAGE_ROOT):
+        init_path = os.path.join(current_dir, "__init__.py")
+        if not os.path.exists(init_path):
+            with open(init_path, "w", encoding="utf-8") as fh:
+                fh.write("# Generated for PyInstaller analysis.\n")
+
+
+_prepare_package_alias()
+
+for path in (PROJECT_ROOT, APP_ROOT, ALIAS_ROOT):
+    if path in sys.path:
+        sys.path.remove(path)
+for path in (PROJECT_ROOT, APP_ROOT, ALIAS_ROOT):
+    sys.path.insert(0, path)
+
+def _collect_local_submodules():
+    modules = set()
+    for package_dir in PACKAGE_DIRS:
+        root_dir = os.path.join(APP_ROOT, package_dir)
+        if not os.path.isdir(root_dir):
+            continue
+        for current_dir, dir_names, file_names in os.walk(root_dir):
+            dir_names[:] = [
+                name for name in dir_names
+                if name != "__pycache__" and not name.startswith(".")
+            ]
+            for file_name in file_names:
+                if not file_name.endswith(".py"):
+                    continue
+                source_path = os.path.join(current_dir, file_name)
+                relative_path = os.path.relpath(source_path, APP_ROOT)
+                module_path = os.path.splitext(relative_path)[0]
+                module_parts = module_path.split(os.sep)
+                if module_parts[-1] == "__init__":
+                    module_parts = module_parts[:-1]
+                if module_parts:
+                    modules.add("rem_card." + ".".join(module_parts))
+    return sorted(modules)
+
+
+HIDDEN_IMPORTS = _collect_local_submodules()
+HIDDEN_IMPORTS.extend(collect_submodules("reportlab"))
 
 
 def _data_dir(relative_path):
@@ -57,20 +125,40 @@ def _settings_datas():
     result = []
     for current_dir, _dir_names, file_names in os.walk(source_dir):
         relative_dir = os.path.relpath(current_dir, source_dir)
+        if relative_dir == "defaults" or relative_dir.startswith("defaults" + os.sep):
+            continue
         target_dir = SETTINGS_TARGET if relative_dir == "." else os.path.join(SETTINGS_TARGET, relative_dir)
         for name in sorted(file_names):
             source_path = os.path.join(current_dir, name)
+            relative_file = os.path.normpath(os.path.join(relative_dir, name)) if relative_dir != "." else name
+            if os.path.normcase(relative_file) == os.path.normcase(
+                os.path.join("color_scheme", "style_settings.json")
+            ):
+                continue
             if os.path.isfile(source_path) and name.lower().endswith(".json"):
                 result.append((source_path, target_dir))
 
     required_files = (
-        os.path.join(source_dir, "display_settings", "display_settings.json"),
-        os.path.join(source_dir, "display_settings", "background_settings.json"),
-        os.path.join(source_dir, "color_scheme", "style_settings.json"),
+        ("display_settings", "display_settings.json"),
+        ("display_settings", "background_settings.json"),
+        ("color_scheme", "style_settings.json"),
     )
-    for required_file in required_files:
-        if not any(os.path.normcase(source) == os.path.normcase(required_file) for source, _target in result):
-            raise RuntimeError(f"Settings file not found: {required_file}")
+    for parts in required_files:
+        relative_file = os.path.join(*parts)
+        target_dir = os.path.join(SETTINGS_TARGET, os.path.dirname(relative_file))
+        if any(
+            os.path.normcase(target) == os.path.normcase(target_dir)
+            and os.path.basename(source) == os.path.basename(relative_file)
+            for source, target in result
+        ):
+            continue
+
+        regular_path = os.path.join(source_dir, relative_file)
+        default_path = os.path.join(source_dir, "defaults", relative_file)
+        source_path = default_path if os.path.isfile(default_path) else regular_path
+        if not os.path.isfile(source_path):
+            raise RuntimeError(f"Settings file not found: {regular_path}")
+        result.append((source_path, target_dir))
     return result
 
 
@@ -136,7 +224,7 @@ a = Analysis(
         os.path.join(APP_ROOT, 'run_path_setup.py'),
         os.path.join(APP_ROOT, 'run_updater.py'),
     ],
-    pathex=[PROJECT_ROOT, APP_ROOT],
+    pathex=[ALIAS_ROOT, APP_ROOT, PROJECT_ROOT],
     binaries=[],
 	datas=[
 		# версия приложения и журнал изменений

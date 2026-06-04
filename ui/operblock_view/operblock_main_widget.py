@@ -8979,7 +8979,7 @@ class OperBlockMainWidget(QWidget):
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
         self.sector_8_panel.btn_settings.clicked.connect(self._open_operblock_settings)
-        self.sector_8_panel.btn_back.clicked.connect(self._show_board)
+        self.sector_8_panel.btn_back.clicked.connect(self.on_back_clicked)
         self.sector_8_panel.btn_exit.clicked.connect(lambda: self.window().close())
         self.sector_8.set_content(self.sector_8_panel)
         root.addWidget(self.sector_8)
@@ -15873,8 +15873,14 @@ class OperBlockMainWidget(QWidget):
         self._apply_active_infusions(force_elapsed=True)
 
     def on_back_clicked(self):
-        if self.stack.currentWidget() == self.protocol_page:
+        current_widget = self.stack.currentWidget()
+        if current_widget in (self.protocol_page, self.archive_page):
             self._show_board()
+            return
+        if current_widget == self.board_page and getattr(self, "_role_launcher_mode", False):
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "setCurrentIndex"):
+                parent.setCurrentIndex(0)
 
     def shutdown(self):
         self._is_closing = True
