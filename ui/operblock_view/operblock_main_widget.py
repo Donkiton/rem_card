@@ -1769,10 +1769,10 @@ class OperBlockSector8Panel(QWidget):
         self.btn_settings = self._button(" Настройки", "settings.png")
         self.btn_back = self._button(" Назад", "back.png")
         self.btn_exit = self._button(" Выход", "exit.png")
-        self.btn_settings.setVisible(False)
         self._button_widgets = {
             "archive": self.btn_archive,
             "refresh": self.btn_refresh,
+            "settings": self.btn_settings,
             "back": self.btn_back,
             "exit": self.btn_exit,
         }
@@ -1828,7 +1828,6 @@ class OperBlockSector8Panel(QWidget):
             if self._display_visible.get(button_id, True):
                 self.layout.addWidget(button)
                 button.setVisible(True)
-        self.btn_settings.setVisible(False)
         self._apply_back_visibility()
         self.updateGeometry()
 
@@ -3553,7 +3552,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         "Избр.",
     )
 
-    def __init__(self, presets: list[dict], parent=None):
+    def __init__(self, presets: list[dict], parent=None, *, save_handler=None):
         self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v3"
         self._restoring_table_header = False
         self._fitting_table_header = False
@@ -3561,6 +3560,8 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self._visible_template_indexes: list[int] = []
         self._templates: list[dict] = []
         self._table_rendering = True
+        self._save_handler = save_handler or save_operblock_medication_presets
+        self._save_in_progress = False
         self._favorite_icon_cache: dict[bool, QIcon] = {}
         self._diluent_options = self._load_diluent_options()
         self._group_options = self._build_group_options([item for item in self._working_templates if item is not None])
@@ -3773,7 +3774,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self.save_button = QPushButton("Сохранить")
         self.save_button.setMinimumHeight(34)
         self.save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
-        self.save_button.clicked.connect(self.accept)
+        self.save_button.clicked.connect(self.save)
         actions.addWidget(self.add_row_button)
         actions.addWidget(self.toggle_visible_button)
         actions.addWidget(self.delete_selected_button)
@@ -3901,6 +3902,15 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         settings.setValue(self._table_header_settings_key, self.table.horizontalHeader().saveState())
         settings.sync()
 
+    def _set_save_button_saved(self, saved: bool) -> None:
+        if hasattr(self, "save_button"):
+            self.save_button.setText("Сохранено" if saved else "Сохранить")
+
+    def _mark_dirty(self) -> None:
+        if getattr(self, "_table_rendering", False):
+            return
+        self._set_save_button_saved(False)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         QTimer.singleShot(0, self._fit_table_columns_to_viewport)
@@ -3921,6 +3931,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self._working_templates.append(item)
             target_index = len(self._working_templates) - 1
         self._render_table()
+        self._mark_dirty()
         if target_index in self._visible_template_indexes:
             row = self._visible_template_indexes.index(target_index)
             self.table.selectRow(row)
@@ -3940,6 +3951,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         if not any(item is not None for item in self._working_templates):
             self._working_templates.append({"enabled": True, "kind": "bolus"})
         self._render_table()
+        self._mark_dirty()
 
     def _kind_combo_options(self) -> list[str]:
         return list(OPERBLOCK_PRESET_KIND_TITLES.values())
@@ -4027,6 +4039,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             return
         template["favorite"] = not bool(template.get("favorite"))
         self._render_table()
+        self._mark_dirty()
 
     def _open_combo_cell_editor(self, row: int, column: int):
         if column not in {self.COL_KIND, self.COL_GROUP, self.COL_SOLVENT}:
@@ -4054,6 +4067,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             if template is not None:
                 template["enabled"] = target_checked
         self._render_table()
+        self._mark_dirty()
 
     def _apply_filter(self, *_args):
         if getattr(self, "_table_rendering", False):
@@ -4185,6 +4199,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             template["enabled"] = enabled
             if not enabled:
                 template["favorite"] = False
+            self._mark_dirty()
             QTimer.singleShot(0, self._render_table)
             return
         if column == self.COL_LABEL and not self._is_seed_preset(template):
@@ -4230,6 +4245,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             QTimer.singleShot(0, self._render_table)
         elif column == self.COL_FAVORITE:
             return
+        self._mark_dirty()
 
     @staticmethod
     def _kind_from_value(value, *, allow_invalid: bool = False) -> str:
@@ -4376,7 +4392,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         )
         return item
 
-    def accept(self):
+    def _collect_templates(self) -> bool:
         current_item = self.table.currentItem()
         if current_item is not None:
             self.table.closePersistentEditor(current_item)
@@ -4408,6 +4424,37 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 "Есть повторяющиеся названия препаратов. Они будут сохранены, но лучше уточнить отображаемое название.",
             )
         self._templates = templates
+        return True
+
+    def save(self):
+        if self._save_in_progress:
+            return
+        if not self._collect_templates():
+            return
+        self._save_in_progress = True
+        self.save_button.setEnabled(False)
+        self.save_button.setText("Сохранение...")
+        try:
+            saved_items = self._save_handler(list(self._templates))
+            if saved_items is None:
+                saved_items = list(self._templates)
+            self._templates = [dict(item or {}) for item in saved_items]
+            self._working_templates = [dict(item or {}) for item in self._templates]
+            self._group_options = self._build_group_options(
+                [item for item in self._working_templates if item is not None]
+            )
+            self._render_table()
+            self._set_save_button_saved(True)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ошибка сохранения", f"Не удалось сохранить препараты оперблока: {exc}")
+            self._set_save_button_saved(False)
+        finally:
+            self._save_in_progress = False
+            self.save_button.setEnabled(True)
+
+    def accept(self):
+        if not self._collect_templates():
+            return
         super().accept()
 
 
@@ -6501,6 +6548,13 @@ class OperBlockMainWidget(QWidget):
         self._orders_filter_kind = "all"
         self._orders_hide_deleted = True
         self._quick_order_buttons: list[QPushButton] = []
+        self._quick_order_card_widgets: dict[str, QWidget] = {}
+        self._quick_order_card_signatures: dict[str, str] = {}
+        self._quick_order_visible_preset_ids: list[str] = []
+        self._quick_order_drag_source_id: str | None = None
+        self._quick_order_drag_placeholder: QWidget | None = None
+        self._quick_order_drag_order: list[str] = []
+        self._quick_order_drag_committed = False
         self._pending_quick_orders_scroll_state: dict | None = None
         self._order_action_buttons: list[QPushButton] = []
         self._infusion_action_buttons: list[QPushButton] = []
@@ -6528,6 +6582,9 @@ class OperBlockMainWidget(QWidget):
         self._role_launcher_mode = False
         self.protocol_page: QWidget | None = None
         self.archive_page: QWidget | None = None
+        self.settings_page: QWidget | None = None
+        self._settings_return_page = "board"
+        self._settings_return_operation_case_id: int | None = None
         self.content_stack: QStackedWidget | None = None
         self.vitals_chart: OperBlockChartWidget | None = None
         self.vitals_input: VitalsWidget | None = None
@@ -6560,7 +6617,7 @@ class OperBlockMainWidget(QWidget):
             self.sector_8_panel.set_title(self._table_filter_name)
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
-        self.sector_8_panel.btn_settings.clicked.connect(self._open_operblock_settings)
+        self.sector_8_panel.btn_settings.clicked.connect(self._open_unified_settings)
         self.sector_8_panel.btn_back.clicked.connect(self.on_back_clicked)
         self.sector_8_panel.btn_exit.clicked.connect(lambda: self.window().close())
         self.sector_8.set_content(self.sector_8_panel)
@@ -6634,6 +6691,21 @@ class OperBlockMainWidget(QWidget):
                 metric_started,
                 source="operblock_widget",
             )
+
+    def _ensure_settings_page_created(self) -> bool:
+        if self.settings_page is not None:
+            return True
+        try:
+            from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
+
+            self.settings_page = AdminMainWidget(service=self.remcard_service, role="doctor", parent=self.stack)
+            self.settings_page.btn_back_to_roles.clicked.connect(self._on_settings_back_clicked)
+            self.stack.addWidget(self.settings_page)
+            return True
+        except Exception as exc:
+            self.settings_page = None
+            CustomMessageBox.warning(self, "Настройки", f"Не удалось открыть настройки: {exc}")
+            return False
 
     def _build_board_page(self) -> QWidget:
         metric_started = operblock_startup_metrics.timer_start()
@@ -9215,36 +9287,108 @@ class OperBlockMainWidget(QWidget):
 
     def _on_preset_filter_changed(self, button_id: int):
         try:
-            self._preset_kind_filter = OPERBLOCK_TEMPLATE_FILTERS[int(button_id)][0]
+            next_filter = OPERBLOCK_TEMPLATE_FILTERS[int(button_id)][0]
         except Exception:
-            self._preset_kind_filter = "bolus"
+            next_filter = "bolus"
+        if str(next_filter or "bolus") == str(getattr(self, "_preset_kind_filter", "bolus") or "bolus"):
+            return
+        self._preset_kind_filter = next_filter
         self._render_quick_orders()
 
     def _render_quick_orders(self):
         layout = getattr(self, "quick_orders_list", None)
         if layout is None:
             return
+        if getattr(self, "_quick_order_drag_source_id", None):
+            self._cancel_quick_order_drag()
         self._quick_order_drag_source_id = None
         self._quick_order_drag_placeholder = None
         self._quick_order_drag_order = []
-        self._quick_order_card_widgets = {}
-        self._quick_order_visible_preset_ids = []
-        self._clear_layout(layout)
-        self._quick_order_buttons = []
+        self._quick_order_drag_committed = False
         presets = self._filtered_medication_presets()
-        if not presets:
-            layout.addWidget(_label("Быстрые назначения не настроены", size=12, color=OPERBLOCK_ORDERS_MUTED))
-            layout.addStretch(1)
-            return
-
+        old_widgets = dict(getattr(self, "_quick_order_card_widgets", {}) or {})
+        old_signatures = dict(getattr(self, "_quick_order_card_signatures", {}) or {})
+        next_widgets: dict[str, QWidget] = {}
+        next_signatures: dict[str, str] = {}
+        next_ids: list[str] = []
+        replaced_widgets: list[QWidget] = []
         add_icon = os.path.join(get_icon_dir(), "add_nazn.png")
         for preset in presets:
             preset_id = self._quick_order_preset_id(preset)
-            row = self._make_medication_preset_row(preset, add_icon)
-            self._quick_order_card_widgets[preset_id] = row
-            self._quick_order_visible_preset_ids.append(preset_id)
-            layout.addWidget(row)
-        layout.addStretch(1)
+            signature = self._quick_order_preset_render_signature(preset)
+            row = old_widgets.get(preset_id)
+            if row is None or old_signatures.get(preset_id) != signature:
+                if row is not None:
+                    replaced_widgets.append(row)
+                row = self._make_medication_preset_row(preset, add_icon)
+            next_widgets[preset_id] = row
+            next_signatures[preset_id] = signature
+            next_ids.append(preset_id)
+
+        render_widget = getattr(self, "quick_orders_scroll", None) or layout.parentWidget()
+        if render_widget is not None:
+            render_widget.setUpdatesEnabled(False)
+        try:
+            deleted_widget_ids = self._clear_quick_orders_layout_for_render(layout, next_widgets.values())
+            for widget in replaced_widgets:
+                if id(widget) not in deleted_widget_ids:
+                    widget.deleteLater()
+            for preset_id, widget in old_widgets.items():
+                if preset_id not in next_widgets and id(widget) not in deleted_widget_ids:
+                    widget.deleteLater()
+            self._quick_order_card_widgets = next_widgets
+            self._quick_order_card_signatures = next_signatures
+            self._quick_order_visible_preset_ids = next_ids
+            self._quick_order_buttons = []
+
+            if not presets:
+                layout.addWidget(_label("Быстрые назначения не настроены", size=12, color=OPERBLOCK_ORDERS_MUTED))
+                layout.addStretch(1)
+                return
+
+            for preset_id in next_ids:
+                row = next_widgets.get(preset_id)
+                if row is None:
+                    continue
+                row.show()
+                layout.addWidget(row)
+            layout.addStretch(1)
+            self._quick_order_buttons = self._visible_quick_order_buttons()
+            self._set_quick_order_buttons_enabled(bool(not self._write_pending) and self._orders_tab_enabled())
+        finally:
+            if render_widget is not None:
+                render_widget.setUpdatesEnabled(True)
+                render_widget.update()
+
+    @staticmethod
+    def _quick_order_preset_render_signature(preset: dict) -> str:
+        return _stable_ui_hash(preset or {})
+
+    def _clear_quick_orders_layout_for_render(self, layout, keep_widgets) -> set[int]:
+        keep_ids = {id(widget) for widget in keep_widgets if widget is not None}
+        deleted_ids: set[int] = set()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                if id(widget) not in keep_ids:
+                    widget.deleteLater()
+                    deleted_ids.add(id(widget))
+                continue
+            if child_layout is not None:
+                self._clear_layout(child_layout)
+        return deleted_ids
+
+    def _visible_quick_order_buttons(self) -> list[QPushButton]:
+        buttons: list[QPushButton] = []
+        widgets = getattr(self, "_quick_order_card_widgets", {}) or {}
+        for preset_id in getattr(self, "_quick_order_visible_preset_ids", []) or []:
+            widget = widgets.get(preset_id)
+            if widget is None:
+                continue
+            buttons.extend(widget.findChildren(QPushButton))
+        return buttons
 
     def _filtered_medication_presets(self) -> list[dict]:
         query = str(getattr(self, "_preset_search_text", "") or "").casefold()
@@ -9869,6 +10013,63 @@ class OperBlockMainWidget(QWidget):
         self._pending_quick_orders_scroll_state = dict(state)
         return state
 
+    def _open_unified_settings(self):
+        if self._is_closing:
+            return
+        self._remember_settings_return_page()
+        if not self._ensure_settings_page_created():
+            return
+        page = self.settings_page
+        if page is None:
+            return
+        if hasattr(page, "set_print_context"):
+            page.set_print_context(self.remcard_service, self._current_admission_id, datetime.now())
+        if hasattr(page, "show_menu"):
+            page.show_menu()
+        self._set_protocol_chrome(True)
+        self.stack.setCurrentWidget(page)
+
+    def _remember_settings_return_page(self):
+        current_widget = self.stack.currentWidget()
+        if current_widget == self.settings_page:
+            return
+        self._settings_return_page = "board"
+        self._settings_return_operation_case_id = None
+        if current_widget == self.protocol_page and self._current_operation_case_id:
+            self._settings_return_page = "protocol"
+            self._settings_return_operation_case_id = int(self._current_operation_case_id)
+        elif current_widget == self.archive_page:
+            self._settings_return_page = "archive"
+            return_case_id = int(getattr(self, "_archive_return_operation_case_id", 0) or 0)
+            self._settings_return_operation_case_id = return_case_id or None
+
+    def _on_settings_back_clicked(self):
+        page = self.settings_page
+        if page is not None and hasattr(page, "go_back") and page.go_back():
+            return
+        self._return_from_settings()
+
+    def _return_from_settings(self):
+        return_page = str(getattr(self, "_settings_return_page", "") or "board")
+        return_case_id = int(getattr(self, "_settings_return_operation_case_id", 0) or 0)
+        self._settings_return_page = "board"
+        self._settings_return_operation_case_id = None
+        if return_page == "protocol" and return_case_id:
+            if self.protocol_page is not None and self._current_operation_case_id == return_case_id:
+                self._set_protocol_chrome(True)
+                self.stack.setCurrentWidget(self.protocol_page)
+                self.refresh_protocol(force=True)
+                return
+            self._open_protocol(return_case_id)
+            return
+        if return_page == "archive" and self.archive_page is not None:
+            self._archive_return_operation_case_id = return_case_id or None
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(self.archive_page)
+            self.refresh_operblock_archive(force=True)
+            return
+        self._show_board()
+
     def _open_operblock_settings(self):
         if self._is_closing:
             return
@@ -9917,21 +10118,17 @@ class OperBlockMainWidget(QWidget):
             return
         self._load_quick_orders_data()
         parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
-        dialog = OperBlockMedicationPresetsDialog(self._medication_presets, parent)
-        if dialog.exec() != QDialog.Accepted:
-            return
-        self._write_pending = True
-        self.sector_8_panel.btn_settings.setEnabled(False)
-
-        def operation():
-            return save_operblock_medication_presets(dialog.templates())
-
-        self._enqueue_write(
-            "operblock_medication_presets_save",
-            operation,
-            on_success=lambda result: self._on_quick_orders_saved(result),
-            on_error=lambda exc: self._on_quick_orders_save_error(exc),
+        dialog = OperBlockMedicationPresetsDialog(
+            self._medication_presets,
+            parent,
+            save_handler=self._save_medication_presets_from_dialog,
         )
+        dialog.exec()
+
+    def _save_medication_presets_from_dialog(self, templates: list[dict]) -> list[dict]:
+        result = save_operblock_medication_presets(templates)
+        self._on_quick_orders_saved(result)
+        return list(result or [])
 
     def _on_quick_orders_saved(self, result):
         self._write_pending = False
@@ -14219,14 +14416,25 @@ class OperBlockMainWidget(QWidget):
             launcher_back=bool(getattr(self, "_role_launcher_mode", False) and not enabled),
         )
 
+    def _current_page_requires_back_chrome(self) -> bool:
+        current_widget = self.stack.currentWidget()
+        return any(
+            page is not None and current_widget == page
+            for page in (
+                self.protocol_page,
+                self.archive_page,
+                self.settings_page,
+            )
+        )
+
     def set_role_launcher_mode(self, enabled: bool):
         self._role_launcher_mode = bool(enabled)
-        self._set_protocol_chrome(self.stack.currentWidget() == self.protocol_page)
+        self._set_protocol_chrome(self._current_page_requires_back_chrome())
 
     def apply_display_settings(self):
         if hasattr(self, "sector_8_panel"):
             self.sector_8_panel.apply_display_settings()
-            self._set_protocol_chrome(self.stack.currentWidget() == self.protocol_page)
+            self._set_protocol_chrome(self._current_page_requires_back_chrome())
         self._apply_protocol_tab_display_settings()
 
     def _update_protocol_current_time_label(self):
@@ -14250,6 +14458,9 @@ class OperBlockMainWidget(QWidget):
 
     def on_back_clicked(self):
         current_widget = self.stack.currentWidget()
+        if current_widget == self.settings_page:
+            self._on_settings_back_clicked()
+            return
         if current_widget == self.archive_page:
             return_case_id = int(getattr(self, "_archive_return_operation_case_id", 0) or 0)
             self._archive_return_operation_case_id = None

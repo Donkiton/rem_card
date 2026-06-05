@@ -104,6 +104,7 @@ class DoctorRemCardWidget(QWidget):
         self._journal_prewarm_started = False
         self._journal_prewarm_done = False
         self._selection_mode = "beds"
+        self._settings_return_mode = None
         self._card_return_mode = None
         self._card_opened_from_global_archive = False
         self._archive_read_only_mode = False
@@ -2753,6 +2754,8 @@ class DoctorRemCardWidget(QWidget):
             admin_widget = getattr(self.layout_manager, "admin_widget", None)
             if admin_widget is not None and hasattr(admin_widget, "go_back") and admin_widget.go_back():
                 return
+            if self._return_from_settings():
+                return
 
         if current_idx == 0 and self._card_return_mode == "archive":
             if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
@@ -2795,6 +2798,7 @@ class DoctorRemCardWidget(QWidget):
             self.back_to_roles_requested.emit()
 
     def on_settings_clicked(self):
+        self._remember_settings_return_mode()
         self._exit_archive_read_only_mode()
         self.layout_manager.set_patient_selection_mode("admin")
         self._wire_dynamic_views()
@@ -2802,6 +2806,35 @@ class DoctorRemCardWidget(QWidget):
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
         if admin_widget:
             admin_widget.set_print_context(self.service, self.admission_id, self._current_date)
+
+    def _remember_settings_return_mode(self):
+        mode = self._resolve_selection_mode()
+        if mode and mode != "admin":
+            self._settings_return_mode = mode
+
+    def _return_from_settings(self) -> bool:
+        mode = str(self._settings_return_mode or "").strip()
+        self._settings_return_mode = None
+        if not mode or mode == "admin":
+            return False
+
+        self._release_add_patient_lock()
+        if mode == "archive":
+            self.layout_manager.set_patient_selection_mode("archive")
+            self._wire_dynamic_views()
+            self.layout_manager.bottom_row.hide()
+            return True
+        if mode in (PATIENT_BED_MANAGEMENT_MODE, "journal"):
+            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
+            self.layout_manager.bottom_row.hide()
+            return True
+        if mode == "card" and self.admission_id is not None:
+            self.layout_manager.set_patient_selection_mode("card")
+            return True
+
+        self.layout_manager.set_patient_selection_mode("beds")
+        self.layout_manager.bottom_row.show()
+        return True
 
     def on_add_patient_clicked(self):
         if self._archive_read_only_mode:

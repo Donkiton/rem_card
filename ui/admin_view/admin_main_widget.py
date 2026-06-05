@@ -340,13 +340,12 @@ class AdminMainWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Настройки препаратов", f"Не удалось загрузить препараты оперблока: {exc}")
             return
-        self.operblock_medications_dialog = OperBlockMedicationPresetsDialog(presets, parent=self)
-        if self.operblock_medications_dialog.exec() != QDialog.Accepted:
-            return
-        try:
-            save_operblock_medication_presets(self.operblock_medications_dialog.templates())
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Настройки препаратов", f"Не удалось сохранить препараты оперблока: {exc}")
+        self.operblock_medications_dialog = OperBlockMedicationPresetsDialog(
+            presets,
+            parent=self,
+            save_handler=save_operblock_medication_presets,
+        )
+        self.operblock_medications_dialog.exec()
 
     def open_operblock_anesthesia_types_settings(self):
         from rem_card.services.operblock_anesthesia_types import (

@@ -44,6 +44,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "operblock": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
+        {"id": "settings", "label": "Настройки", "default_visible": False, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
     ),

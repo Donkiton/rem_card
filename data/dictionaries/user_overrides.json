@@ -3364,6 +3364,36 @@
         "payload": {}
       },
       {
+        "preset_id": "manual:bolus:bupivacaini",
+        "source_drug_id": null,
+        "label": "Bupivacaini",
+        "display_name": "S. Bupivacaini 0.5%",
+        "latin": null,
+        "aliases": [],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "15 мг",
+          "20 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "5 мг/мл",
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "card_color": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": null,
+        "payload": {}
+      },
+      {
         "preset_id": "manual:gas:desflurane",
         "source_drug_id": null,
         "label": "Desflurane",

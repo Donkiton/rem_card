@@ -116,6 +116,7 @@ class NurseMainWidget(QWidget):
         self._initial_beds_refresh_requested = False
         self._initial_w1a_refresh_requested = False
         self._selection_mode = "beds"
+        self._settings_return_mode = None
         self._add_patient_lock = self._build_add_patient_lock()
         self._add_patient_lock_held = False
         self._add_patient_locked_by_other = False
@@ -2125,6 +2126,7 @@ class NurseMainWidget(QWidget):
             CustomMessageBox.warning(self, "Бонус", f"Не удалось открыть бонус:\n{exc}")
 
     def on_settings_clicked(self):
+        self._remember_settings_return_mode()
         self.layout_manager.set_patient_selection_mode("admin")
         self._wire_dynamic_views()
         admin_widget = getattr(self.layout_manager, 'admin_widget', None)
@@ -2134,6 +2136,11 @@ class NurseMainWidget(QWidget):
                 self.layout_manager.current_admission_id,
                 self._current_date,
             )
+
+    def _remember_settings_return_mode(self):
+        mode = self._resolve_selection_mode()
+        if mode and mode != "admin":
+            self._settings_return_mode = mode
 
     def on_add_patient_clicked(self):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -2169,6 +2176,16 @@ class NurseMainWidget(QWidget):
         if hasattr(self.layout_manager, "journal_view"):
             journal_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.journal_view)
         was_journal_mode = (current_idx == journal_idx and journal_idx != -1)
+        admin_idx = -1
+        if hasattr(self.layout_manager, "admin_view"):
+            admin_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.admin_view)
+
+        if current_idx == admin_idx and admin_idx != -1:
+            admin_widget = getattr(self.layout_manager, "admin_widget", None)
+            if admin_widget is not None and hasattr(admin_widget, "go_back") and admin_widget.go_back():
+                return
+            if self._return_from_settings():
+                return
 
         if current_idx in (0, 2, 3, 4):
             # Явно снимаем lock перед выходом из журнала/режимов выбора.
@@ -2179,6 +2196,27 @@ class NurseMainWidget(QWidget):
         else: 
             self._release_add_patient_lock()
             self.back_to_roles()
+
+    def _return_from_settings(self) -> bool:
+        mode = str(self._settings_return_mode or "").strip()
+        self._settings_return_mode = None
+        if not mode or mode == "admin":
+            return False
+
+        self._release_add_patient_lock()
+        if mode == "archive":
+            self.layout_manager.set_patient_selection_mode("archive")
+            self._wire_dynamic_views()
+            return True
+        if mode in (PATIENT_BED_MANAGEMENT_MODE, "journal"):
+            self.layout_manager.set_patient_selection_mode(PATIENT_BED_MANAGEMENT_MODE)
+            return True
+        if mode == "card" and getattr(self.layout_manager, "current_admission_id", None) is not None:
+            self.layout_manager.set_patient_selection_mode("card")
+            return True
+
+        self.layout_manager.set_patient_selection_mode("beds")
+        return True
 
     def shutdown(self):
         self._is_closing = True
