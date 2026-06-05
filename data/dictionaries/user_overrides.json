@@ -3390,7 +3390,7 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": null,
+        "sort_order": 560,
         "payload": {}
       },
       {
@@ -3420,7 +3420,37 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": null,
+        "sort_order": 570,
+        "payload": {}
+      },
+      {
+        "preset_id": "manual:gas:o2",
+        "source_drug_id": null,
+        "label": "O2",
+        "display_name": "Inh. O2",
+        "latin": null,
+        "aliases": [],
+        "kind": "gas",
+        "group": "Газы",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "5 л/мин",
+          "10 л/мин"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": null,
+        "solvent_id": null,
+        "solvent_label": null,
+        "solvent_volume_ml": null,
+        "duration_min": null,
+        "card_color": null,
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 580,
         "payload": {}
       },
       {

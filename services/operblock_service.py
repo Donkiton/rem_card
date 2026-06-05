@@ -868,16 +868,38 @@ class OperBlockService:
         state["case_ended_at"] = case.get("ended_at")
         return state
 
-    def build_operblock_vitals_snapshot(self, admission_id: int) -> dict[str, Any]:
+    def build_operblock_vitals_snapshot(
+        self,
+        admission_id: int,
+        *,
+        operation_case_id: int | None = None,
+    ) -> dict[str, Any]:
+        params: list[Any] = [int(admission_id)]
+        bounds_clause = ""
+        case = self._get_case_row(operation_case_id) if operation_case_id else None
+        if case:
+            if int(case.get("admission_id") or 0) != int(admission_id):
+                raise OperBlockConflictError("Операция не принадлежит выбранной госпитализации.")
+            started_at = _parse_dt(case.get("started_at"))
+            if started_at is None:
+                bounds_clause = "AND 1 = 0"
+            else:
+                bounds_clause = 'AND datetime("datetime") >= datetime(?)'
+                params.append(_minute_floor(started_at).isoformat())
+                ended_at = _parse_dt(case.get("ended_at"))
+                if ended_at is not None:
+                    bounds_clause += ' AND datetime("datetime") <= datetime(?)'
+                    params.append(_minute_floor(ended_at).isoformat())
         rows = self.db.fetch_all_remcard(
-            """
+            f"""
             SELECT id, admission_id, datetime, sys, dia, pulse, spo2, COALESCE(revision, 0) AS revision
             FROM vitals
             WHERE admission_id = ?
+              {bounds_clause}
             ORDER BY datetime DESC, id DESC
             LIMIT 50
             """,
-            (int(admission_id),),
+            tuple(params),
         )
         vitals = []
         for row in rows:
@@ -1043,7 +1065,7 @@ class OperBlockService:
     def build_operblock_protocol_snapshot(self, operation_case_id: int) -> dict[str, Any]:
         header = self.build_operblock_patient_header_snapshot(operation_case_id)
         admission_id = int(header["admission_id"])
-        vitals = self.build_operblock_vitals_snapshot(admission_id)
+        vitals = self.build_operblock_vitals_snapshot(admission_id, operation_case_id=operation_case_id)
         orders = self.build_operblock_orders_snapshot(admission_id, operation_case_id=operation_case_id)
         timeline = self.build_operblock_timeline_snapshot(admission_id, operation_case_id=operation_case_id)
         timeline_payload = timeline.to_dict()
@@ -1103,6 +1125,43 @@ class OperBlockService:
                 )
             )
         return result
+
+    def _operation_has_vitals_between(
+        self,
+        admission_id: int,
+        started_at: datetime,
+        ended_at: datetime | None = None,
+        *,
+        cursor: sqlite3.Cursor | None = None,
+    ) -> bool:
+        params: list[Any] = [int(admission_id), _minute_floor(started_at).isoformat()]
+        end_clause = ""
+        if ended_at is not None:
+            end_clause = 'AND datetime("datetime") <= datetime(?)'
+            params.append(_minute_floor(ended_at).isoformat())
+        query = f"""
+            SELECT 1
+            FROM vitals
+            WHERE admission_id = ?
+              AND datetime("datetime") >= datetime(?)
+              {end_clause}
+            LIMIT 1
+        """
+        if cursor is not None:
+            return bool(cursor.execute(query, tuple(params)).fetchone())
+        return bool(self.db.fetch_one_remcard(query, tuple(params)))
+
+    def operation_has_initial_vitals(self, operation_case_id: int) -> bool:
+        case = self._get_case_row(operation_case_id)
+        started_at = _parse_dt(case.get("started_at"))
+        if started_at is None:
+            return False
+        ended_at = _parse_dt(case.get("ended_at")) if case.get("ended_at") else None
+        return self._operation_has_vitals_between(
+            int(case["admission_id"]),
+            _minute_floor(started_at),
+            _minute_floor(ended_at) if ended_at is not None else None,
+        )
 
     def create_operation_case(self, data: OperBlockPatientInput | dict[str, Any]) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
@@ -1482,6 +1541,15 @@ class OperBlockService:
             if clean_kind == "anesthesia_start":
                 if anesthesia_active:
                     raise ValueError("Анестезиологическое пособие уже начато.")
+                started_at = _parse_dt(case.get("started_at"))
+                if started_at is None:
+                    raise OperBlockConflictError("У операции не задано время начала. Обновите протокол.")
+                if not self._operation_has_vitals_between(
+                    int(case["admission_id"]),
+                    _minute_floor(started_at),
+                    cursor=cursor,
+                ):
+                    raise ValueError("Перед началом пособия введите исходные витальные показатели.")
             elif clean_kind == "anesthesia_end":
                 if not anesthesia_active:
                     raise ValueError("Анестезиологическое пособие ещё не начато.")
@@ -2119,8 +2187,21 @@ class OperBlockService:
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_for_case_admission(cursor, admission_id, operation_case_id)
             self._assert_datetime_in_active_anesthesia_bounds(cursor, event_dt, case, entity_label="Время инфузии")
-            if is_gas_infusion and self._active_gas_start_for_case(cursor, admission_id, operation_case_id):
-                raise OperBlockConflictError("Газ уже идет. Измените дозу активного газа, второй газ запустить нельзя.")
+            if is_gas_infusion:
+                is_oxygen = self._payload_is_oxygen(payload_data, clean_drug)
+                if self._active_gas_start_for_case(
+                    cursor,
+                    admission_id,
+                    operation_case_id,
+                    oxygen=is_oxygen,
+                ):
+                    if is_oxygen:
+                        raise OperBlockConflictError(
+                            "Кислород уже идет. Измените поток активного кислорода, второй кислород запустить нельзя."
+                        )
+                    raise OperBlockConflictError(
+                        "Газ уже идет. Измените дозу активного газа, второй ингаляционный газ запустить нельзя."
+                    )
             rate_tail = f"{clean_rate_value} {clean_rate_unit}".strip()
             volume_tail = f"{clean_volume_ml} мл".strip() if clean_volume_ml else ""
             tail = rate_tail or volume_tail or payload_dose_text
@@ -2184,7 +2265,7 @@ class OperBlockService:
             start = self._get_active_infusion_start_for_update(cursor, start_event_id)
             assert_revision_matches(start["revision"], expected_revision)
             if self._payload_is_gas(_parse_json_dict(start["payload_json"])):
-                raise ValueError("Для газа укажите дозу в MAC. Скорость в мл/час для газа не применяется.")
+                raise ValueError("Для газа измените дозу или поток. Скорость в мл/час для газа не применяется.")
             case = self._assert_active_operation_for_case_admission(
                 cursor,
                 int(start["admission_id"]),
@@ -2296,7 +2377,7 @@ class OperBlockService:
             raise ValueError("Не удалось проверить актуальность газа. Обновите протокол.")
         clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
         if not clean_dose:
-            raise ValueError("Укажите дозу газа.")
+            raise ValueError("Укажите дозу газа или поток кислорода.")
         event_dt = self._normalize_timeline_event_datetime(event_time)
         start_event_dt = self._normalize_timeline_event_datetime(start_event_time) if start_event_time is not None else None
 
@@ -2310,7 +2391,7 @@ class OperBlockService:
             start = self._get_active_infusion_start_for_update(cursor, start_event_id)
             assert_revision_matches(start["revision"], expected_revision)
             if not self._payload_is_gas(_parse_json_dict(start["payload_json"])):
-                raise ValueError("Для дозатора изменяется скорость, для газа - доза в MAC.")
+                raise ValueError("Для дозатора изменяется скорость, для газа - доза или поток.")
             case = self._assert_active_operation_for_case_admission(
                 cursor,
                 int(start["admission_id"]),
@@ -3148,17 +3229,50 @@ class OperBlockService:
             return False
         return str(payload.get("kind") or "").strip().casefold() == "gas"
 
+    @staticmethod
+    def _text_is_oxygen(value: Any) -> bool:
+        text = str(value or "").strip().casefold().replace("ё", "е")
+        if not text:
+            return False
+        if "кислород" in text or re.search(r"(?<![0-9a-zа-я])oxygen(?![0-9a-zа-я])", text):
+            return True
+        return bool(re.search(r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])", text))
+
+    @classmethod
+    def _payload_is_oxygen(cls, payload: Mapping[str, Any] | dict[str, Any] | None, *texts: Any) -> bool:
+        data = payload if isinstance(payload, Mapping) else {}
+        subtype = str(data.get("gas_subtype") or data.get("gas_kind") or data.get("subtype") or "").strip()
+        if subtype and cls._text_is_oxygen(subtype):
+            return True
+        if isinstance(data.get("is_oxygen"), bool) and data.get("is_oxygen"):
+            return True
+        for key in (
+            "preset_id",
+            "source_drug_id",
+            "label",
+            "display_name",
+            "latin",
+            "drug_label",
+            "display_label",
+            "raw_text",
+        ):
+            if cls._text_is_oxygen(data.get(key)):
+                return True
+        return any(cls._text_is_oxygen(text) for text in texts)
+
     def _active_gas_start_for_case(
         self,
         cursor: sqlite3.Cursor,
         admission_id: int,
         operation_case_id: int,
+        *,
+        oxygen: bool | None = None,
     ):
         rows = cursor.execute(
             """
             SELECT
                 id, operation_case_id, admission_id, table_code, event_time, drug_label,
-                volume_ml, concentration_text, rate_value, rate_unit, route, status,
+                display_label, volume_ml, concentration_text, rate_value, rate_unit, route, status,
                 payload_json, COALESCE(revision, 0) AS revision
             FROM operblock_timeline_events
             WHERE admission_id = ?
@@ -3170,8 +3284,12 @@ class OperBlockService:
             (int(admission_id), int(operation_case_id)),
         ).fetchall()
         for row in rows:
-            if self._payload_is_gas(_parse_json_dict(row["payload_json"])):
-                return row
+            payload = _parse_json_dict(row["payload_json"])
+            if not self._payload_is_gas(payload):
+                continue
+            if oxygen is not None and self._payload_is_oxygen(payload, row["drug_label"], row["display_label"]) != bool(oxygen):
+                continue
+            return row
         return None
 
     def _assert_active_operation_for_case_admission(

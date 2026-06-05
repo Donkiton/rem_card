@@ -1000,6 +1000,106 @@ def _is_gas_infusion(interval: dict) -> bool:
     return kind == "gas"
 
 
+OXYGEN_ICON_FILE = "oxygen.png"
+OXYGEN_FLOW_UNIT = "л/мин"
+OXYGEN_FLOW_MIN_LPM = Decimal("0.1")
+OXYGEN_FLOW_STEP_LPM = Decimal("0.1")
+
+
+def _text_is_oxygen(value) -> bool:
+    text = str(value or "").strip().casefold().replace("ё", "е")
+    if not text:
+        return False
+    if "кислород" in text or re.search(r"(?<![0-9a-zа-я])oxygen(?![0-9a-zа-я])", text):
+        return True
+    return bool(re.search(r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])", text))
+
+
+def _payload_is_oxygen(payload: dict | None) -> bool:
+    data = payload if isinstance(payload, dict) else {}
+    subtype = str(data.get("gas_subtype") or data.get("gas_kind") or data.get("subtype") or "").strip()
+    if subtype and _text_is_oxygen(subtype):
+        return True
+    explicit = data.get("is_oxygen")
+    if isinstance(explicit, bool) and explicit:
+        return True
+    for key in (
+        "preset_id",
+        "source_drug_id",
+        "label",
+        "display_name",
+        "latin",
+        "drug_label",
+        "display_label",
+        "raw_text",
+    ):
+        if _text_is_oxygen(data.get(key)):
+            return True
+    return False
+
+
+def _payload_or_text_is_oxygen(payload: dict | None, *texts) -> bool:
+    if _payload_is_oxygen(payload):
+        return True
+    return any(_text_is_oxygen(text) for text in texts)
+
+
+def _strip_oxygen_token_for_number(value: str) -> str:
+    return re.sub(
+        r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])",
+        " ",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+
+
+def _oxygen_flow_value_lpm(value) -> Decimal | None:
+    text = _strip_oxygen_token_for_number(str(value or ""))
+    match = re.search(r"(?P<value>\d+(?:[,.]\d+)?|[,.]\d+)", text)
+    if not match:
+        return None
+    raw_value = match.group("value").replace(",", ".")
+    if raw_value.startswith("."):
+        raw_value = f"0{raw_value}"
+    try:
+        flow = Decimal(raw_value)
+    except (InvalidOperation, ValueError):
+        return None
+    if flow < OXYGEN_FLOW_MIN_LPM:
+        return None
+    return flow.quantize(OXYGEN_FLOW_STEP_LPM, rounding=ROUND_HALF_UP)
+
+
+def _normalize_oxygen_flow_text(value) -> str:
+    flow = _oxygen_flow_value_lpm(value)
+    if flow is None:
+        return ""
+    return f"{_format_decimal_ru(flow)} {OXYGEN_FLOW_UNIT}"
+
+
+def _oxygen_payload_fields(payload: dict, flow_text: str) -> dict:
+    data = dict(payload or {})
+    flow = _oxygen_flow_value_lpm(flow_text)
+    data["kind"] = "gas"
+    data["gas_subtype"] = "oxygen"
+    data["is_oxygen"] = True
+    data["oxygen_flow_unit"] = OXYGEN_FLOW_UNIT
+    if flow is not None:
+        data["oxygen_flow_lpm"] = _format_decimal_ru(flow)
+    return data
+
+
+def _format_oxygen_liters(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    rounded = max(Decimal("0"), value).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    if rounded == rounded.to_integral_value():
+        text = str(int(rounded))
+    else:
+        text = format(rounded.normalize(), "f").rstrip("0").rstrip(".").replace(".", ",")
+    return f"{text} л"
+
+
 def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор") -> str:
     data = interval or {}
     payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
@@ -1013,7 +1113,10 @@ def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор"
     )
     name = re.sub(r"\s+", " ", raw_name).strip() or clean_fallback
     name = re.sub(
-        r"\s+\d+(?:[,.]\d+)?\s*(?:мл/час|мл/ч|ml/h|ml/hr|мл|ml|MAC|мак)\s*$",
+        (
+            r"\s+\d+(?:[,.]\d+)?\s*"
+            r"(?:мл/час|мл/ч|ml/h|ml/hr|мл|ml|MAC|мак|л/мин|л/м|l/min|lpm|лит/мин|литр(?:ов)?(?:/мин)?)\s*$"
+        ),
         "",
         name,
         flags=re.IGNORECASE,
@@ -1027,6 +1130,81 @@ def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор"
     if concentration and not has_percentage_in_name and concentration.casefold() not in name.casefold():
         name = f"{name} {concentration}".strip()
     return name
+
+
+def _is_oxygen_infusion(interval: dict) -> bool:
+    if not _is_gas_infusion(interval or {}):
+        return False
+    data = interval or {}
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    return _payload_or_text_is_oxygen(
+        payload,
+        data.get("drug_label"),
+        data.get("display_label"),
+        _infusion_display_drug_name(data, ""),
+    )
+
+
+def _oxygen_consumed_liters(interval: dict, *, now: datetime | None = None) -> Decimal | None:
+    if not _is_oxygen_infusion(interval or {}):
+        return None
+    start_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("start_time")))
+    if start_dt is None:
+        return None
+    end_dt = _minute_floor_dt(_parse_datetime_value((interval or {}).get("end_time")))
+    if end_dt is None:
+        end_dt = _minute_floor_dt(now or datetime.now())
+    if end_dt is None:
+        return None
+    current_dose = _gas_dose_text(interval or {})
+    if end_dt <= start_dt:
+        return Decimal("0") if _oxygen_flow_value_lpm(current_dose) is not None else None
+
+    events = [
+        event
+        for event in _gas_dose_events(interval or {})
+        if _minute_floor_dt(_parse_datetime_value((event or {}).get("event_time"))) is not None
+    ]
+    events.sort(key=lambda item: _minute_floor_dt(_parse_datetime_value(item.get("event_time"))) or datetime.min)
+    for event in events:
+        event_dt = _minute_floor_dt(_parse_datetime_value(event.get("event_time")))
+        if event_dt is not None and event_dt <= start_dt:
+            current_dose = str(event.get("dose_text") or "").strip()
+        elif event_dt is not None:
+            break
+    if not current_dose and events:
+        current_dose = str(events[0].get("dose_text") or "").strip()
+
+    total = Decimal("0")
+    has_flow = False
+    cursor_dt = start_dt
+
+    def add_segment(flow_text: str, from_dt: datetime, to_dt: datetime) -> None:
+        nonlocal total, has_flow
+        if to_dt <= from_dt:
+            return
+        flow = _oxygen_flow_value_lpm(flow_text)
+        if flow is None:
+            return
+        minutes = Decimal(str((to_dt - from_dt).total_seconds())) / Decimal("60")
+        total += flow * minutes
+        has_flow = True
+
+    for event in events:
+        event_dt = _minute_floor_dt(_parse_datetime_value(event.get("event_time")))
+        if event_dt is None or event_dt <= start_dt:
+            continue
+        if event_dt >= end_dt:
+            break
+        add_segment(current_dose, cursor_dt, event_dt)
+        current_dose = str(event.get("dose_text") or "").strip()
+        cursor_dt = event_dt
+    add_segment(current_dose, cursor_dt, end_dt)
+    return total if has_flow else None
+
+
+def _format_oxygen_consumed_liters(interval: dict, *, now: datetime | None = None) -> str:
+    return _format_oxygen_liters(_oxygen_consumed_liters(interval or {}, now=now))
 
 
 def _normalize_gas_identity_text(value: str) -> str:
@@ -1045,6 +1223,8 @@ def _gas_display_name_for_payload(drug_name: str, payload: dict | None) -> str:
 def _gas_identity_matches(active_interval: dict, drug_name: str, payload: dict | None) -> bool:
     active_payload = active_interval.get("payload") if isinstance(active_interval.get("payload"), dict) else {}
     requested_payload = payload if isinstance(payload, dict) else {}
+    if _is_oxygen_infusion(active_interval) and _payload_or_text_is_oxygen(requested_payload, drug_name):
+        return True
     for key in ("preset_id", "source_drug_id"):
         active_value = str((active_payload or {}).get(key) or "").strip()
         requested_value = str((requested_payload or {}).get(key) or "").strip()
@@ -1086,14 +1266,18 @@ def _normalize_gas_dose_text(value: str) -> str:
 
 def _gas_dose_text(interval: dict) -> str:
     payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
-    return _normalize_gas_dose_text(str((payload or {}).get("display_dose_text") or (payload or {}).get("dose_text") or ""))
+    dose_text = str((payload or {}).get("display_dose_text") or (payload or {}).get("dose_text") or "")
+    if _is_oxygen_infusion(interval or {}):
+        return _normalize_oxygen_flow_text(dose_text)
+    return _normalize_gas_dose_text(dose_text)
 
 
 def _gas_dose_events(interval: dict) -> list[dict]:
     events: list[dict] = []
+    normalize_dose = _normalize_oxygen_flow_text if _is_oxygen_infusion(interval or {}) else _normalize_gas_dose_text
     for item in list((interval or {}).get("dose_history") or []):
         event_dt = _minute_floor_dt(_parse_datetime_value((item or {}).get("event_time")))
-        dose_text = _normalize_gas_dose_text(str((item or {}).get("dose_text") or ""))
+        dose_text = normalize_dose(str((item or {}).get("dose_text") or ""))
         if event_dt is None or not dose_text:
             continue
         events.append(
@@ -1485,6 +1669,14 @@ def _quick_order_dose_display_text(dose_text: str, concentration_text: str) -> s
     return f"{clean_dose} ({volume_text})" if volume_text else clean_dose
 
 
+def _dose_text_with_computed_volume(dose_text: str, concentration_text: str) -> str:
+    clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
+    if not clean_dose or _quick_order_explicit_volume_ml(clean_dose) is not None:
+        return clean_dose
+    volume_text = _format_infusion_volume_ml(_quick_order_mass_dose_volume_ml(clean_dose, concentration_text))
+    return f"{clean_dose} ({volume_text})" if volume_text else clean_dose
+
+
 def _summarize_dose_texts(dose_texts: list[str], *, include_unparsed: bool = True) -> str:
     totals: dict[tuple[bool, str], dict] = {}
     order: list[tuple[bool, str]] = []
@@ -1531,9 +1723,19 @@ def _summarize_dose_texts(dose_texts: list[str], *, include_unparsed: bool = Tru
     return summary
 
 
-def _summarize_order_total(rows: list[dict]) -> str:
+def _summarize_order_total(rows: list[dict], *, concentration_for_row=None) -> str:
+    dose_texts: list[str] = []
+    for row in rows:
+        dose_text = str((row or {}).get("dose_text") or "")
+        concentration_text = ""
+        if callable(concentration_for_row):
+            try:
+                concentration_text = str(concentration_for_row(row or {}) or "")
+            except Exception:
+                concentration_text = ""
+        dose_texts.append(_dose_text_with_computed_volume(dose_text, concentration_text))
     summary = _summarize_dose_texts(
-        [str(row.get("dose_text") or "") for row in rows],
+        dose_texts,
         include_unparsed=False,
     )
     if not summary:
@@ -5147,14 +5349,15 @@ class InfusionStopDialog(MedicationEditDialogBase):
         clean_name = re.sub(r"\s+", " ", str(drug_name or "Назначение").strip()) or "Назначение"
         kind = str(infusion_kind or "").strip().casefold()
         if kind == "gas":
-            subtitle = "Ингаляционный анестетик"
-            left_icon_file = type_icon_key("gas")
-            left_icon_background = "#EEF2FF"
             payload_data = payload if isinstance(payload, dict) else {}
+            is_oxygen = _payload_or_text_is_oxygen(payload_data, clean_name)
+            subtitle = "Кислород" if is_oxygen else "Ингаляционный анестетик"
+            left_icon_file = OXYGEN_ICON_FILE if is_oxygen else type_icon_key("gas")
+            left_icon_background = "#E0F2FE" if is_oxygen else "#EEF2FF"
             right_icon_file = drug_icon_candidate_keys_from_payload(payload_data, clean_name)
             if not right_icon_file:
-                right_icon_file = [edit_icon_key("gas")]
-            right_icon_fallback = default_drug_icon_file("gas")
+                right_icon_file = [] if is_oxygen else [edit_icon_key("gas")]
+            right_icon_fallback = OXYGEN_ICON_FILE if is_oxygen else default_drug_icon_file("gas")
         elif kind == "volume":
             subtitle = "Капельная инфузия"
             left_icon_file = type_icon_key("timed_infusion")
@@ -5210,10 +5413,16 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         show_time: bool = True,
         action_text: str = "Сохранить",
         payload: dict | None = None,
+        is_oxygen: bool = False,
     ):
         super().__init__(parent)
         self._gas_name = re.sub(r"\s+", " ", str(gas_name or "Газ").strip()) or "Газ"
-        self._concentration_text = str(concentration_text or "").strip()
+        self._is_oxygen = bool(is_oxygen or _payload_or_text_is_oxygen(payload if isinstance(payload, dict) else {}, self._gas_name))
+        self._concentration_text = (
+            _normalize_oxygen_flow_text(concentration_text)
+            if self._is_oxygen
+            else str(concentration_text or "").strip()
+        )
         self._start_datetime = _minute_floor_dt(start_datetime)
         self._time_min_datetime = _minute_floor_dt(min_datetime)
         self._time_max_datetime = _minute_floor_dt(max_datetime)
@@ -5223,7 +5432,8 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         self._action_text = str(action_text or "Сохранить")
         self._payload = dict(payload or {}) if isinstance(payload, dict) else {}
         self._time_text_updating = False
-        self.setWindowTitle(f"Изменить газ: {self._gas_name}")
+        self._dialog_title = f"Изменить кислород: {self._gas_name}" if self._is_oxygen else f"Изменить газ: {self._gas_name}"
+        self.setWindowTitle(self._dialog_title)
         _apply_operblock_window_icon(self)
         self.setMinimumSize(610, 342 if self._show_time else 292)
         self.resize(610, 342 if self._show_time else 292)
@@ -5424,7 +5634,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         header_icon = _create_operblock_title_icon(20)
         if header_icon is not None:
             header_layout.addWidget(header_icon, 0, Qt.AlignVCenter)
-        title = QLabel(f"Изменить газ: {self._gas_name}")
+        title = QLabel(self._dialog_title)
         title.setObjectName("GasDialogTitle")
         title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header_layout.addWidget(title, 1)
@@ -5449,11 +5659,12 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         drug_layout.setSpacing(16)
         drug_layout.addWidget(
             _create_gas_dialog_image_icon(
-                type_icon_key("gas"),
+                OXYGEN_ICON_FILE if self._is_oxygen else type_icon_key("gas"),
                 frame_size=52,
                 icon_size=32,
-                background="#EEF2FF",
+                background="#E0F2FE" if self._is_oxygen else "#EEF2FF",
                 parent=drug_row,
+                fallback_file=OXYGEN_ICON_FILE if self._is_oxygen else "",
             ),
             0,
             Qt.AlignVCenter,
@@ -5463,7 +5674,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         drug_text_col.setSpacing(3)
         drug_name = QLabel(self._gas_name)
         drug_name.setObjectName("GasDrugName")
-        drug_subtitle = QLabel("Ингаляционный анестетик")
+        drug_subtitle = QLabel("Кислород" if self._is_oxygen else "Ингаляционный анестетик")
         drug_subtitle.setObjectName("GasDrugSubtitle")
         drug_text_col.addStretch(1)
         drug_text_col.addWidget(drug_name)
@@ -5475,7 +5686,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
                 drug_icon_candidate_keys_from_payload(self._payload, self._gas_name),
                 icon_size=92,
                 parent=drug_row,
-                fallback_file=default_drug_icon_file("gas"),
+                fallback_file=OXYGEN_ICON_FILE if self._is_oxygen else default_drug_icon_file("gas"),
             ),
             0,
             Qt.AlignRight | Qt.AlignVCenter,
@@ -5534,16 +5745,17 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
         title_row.setSpacing(8)
-        title = QLabel("Концентрация / MAC")
+        title = QLabel("Поток: л/мин" if self._is_oxygen else "Концентрация / MAC")
         title.setObjectName("GasFieldTitle")
         title_row.addWidget(title)
-        info = QPushButton("!")
-        info.setObjectName("GasInfoButton")
-        info.setToolTip(GAS_MAC_HINT_TOOLTIP)
-        info.setFixedSize(18, 18)
-        info.setCursor(Qt.PointingHandCursor)
-        info.clicked.connect(lambda _=False, button=info: self._show_mac_hint(button))
-        title_row.addWidget(info, 0, Qt.AlignVCenter)
+        if not self._is_oxygen:
+            info = QPushButton("!")
+            info.setObjectName("GasInfoButton")
+            info.setToolTip(GAS_MAC_HINT_TOOLTIP)
+            info.setFixedSize(18, 18)
+            info.setCursor(Qt.PointingHandCursor)
+            info.clicked.connect(lambda _=False, button=info: self._show_mac_hint(button))
+            title_row.addWidget(info, 0, Qt.AlignVCenter)
         title_row.addStretch(1)
         layout.addLayout(title_row)
 
@@ -5551,7 +5763,7 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         self.volume_input.setObjectName("GasDoseInput")
         self.volume_input.setFixedHeight(52)
         self.volume_input.setText(self._concentration_text)
-        self.volume_input.setPlaceholderText("0,8 MAC")
+        self.volume_input.setPlaceholderText("10 л/мин" if self._is_oxygen else "0,8 MAC")
         self.volume_input.selectAll()
         layout.addWidget(self.volume_input)
         return card
@@ -5612,6 +5824,8 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
         return card
 
     def volume_text(self) -> str:
+        if getattr(self, "_is_oxygen", False):
+            return _normalize_oxygen_flow_text(self.volume_input.text())
         return self.volume_input.text().strip()
 
     def start_time_text(self) -> str:
@@ -5622,6 +5836,10 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
     def accept(self) -> None:
         if getattr(self, "_show_time", True):
             self._commit_time_text()
+        if getattr(self, "_is_oxygen", False):
+            normalized_flow = _normalize_oxygen_flow_text(self.volume_input.text())
+            if normalized_flow:
+                self.volume_input.setText(normalized_flow)
         super().accept()
 
     def eventFilter(self, obj, event):
@@ -6257,6 +6475,8 @@ class OperBlockMainWidget(QWidget):
         self._current_operation_start: datetime | None = None
         self._current_operation_end: datetime | None = None
         self._current_case_active = False
+        self._current_operation_has_vitals = False
+        self._archive_return_operation_case_id: int | None = None
         self._current_stage_state: dict = {}
         self._current_anesthesia_start: datetime | None = None
         self._current_anesthesia_end: datetime | None = None
@@ -8173,6 +8393,11 @@ class OperBlockMainWidget(QWidget):
     def _show_operblock_archive(self):
         if self._is_closing or self._write_pending:
             return
+        current_widget = self.stack.currentWidget()
+        if current_widget == self.protocol_page and self._current_operation_case_id:
+            self._archive_return_operation_case_id = int(self._current_operation_case_id)
+        elif current_widget != self.archive_page:
+            self._archive_return_operation_case_id = None
         first_open = self.archive_page is None
         first_open_started = operblock_startup_metrics.timer_start() if first_open else None
         if not self._ensure_archive_page_created():
@@ -8184,6 +8409,7 @@ class OperBlockMainWidget(QWidget):
         self._current_operation_start = None
         self._current_operation_end = None
         self._current_case_active = False
+        self._current_operation_has_vitals = False
         self._current_stage_state = {}
         self._current_anesthesia_active = False
         self._current_surgery_active = False
@@ -8642,6 +8868,7 @@ class OperBlockMainWidget(QWidget):
         self._current_operation_start = None
         self._current_operation_end = None
         self._current_case_active = False
+        self._current_operation_has_vitals = False
         self._current_stage_state = {}
         self._current_anesthesia_start = None
         self._current_anesthesia_end = None
@@ -8696,6 +8923,7 @@ class OperBlockMainWidget(QWidget):
         self.protocol_diagnosis_label.set_full_text(f"Диагноз: {diagnosis_line}")
         self._update_protocol_status_label(started_at, active=header.get("status") == "active")
         self._current_case_active = header.get("status") == "active"
+        self._current_operation_has_vitals = bool((snapshot.get("vitals") or {}).get("vitals"))
         self._apply_stage_state(header.get("stage_state") or {})
         latest = header.get("latest") or {}
         self._update_latest_badges(latest)
@@ -8761,9 +8989,14 @@ class OperBlockMainWidget(QWidget):
         case_active = bool(getattr(self, "_current_case_active", False))
         aid_active = bool(getattr(self, "_current_anesthesia_active", False))
         surgery_active = bool(getattr(self, "_current_surgery_active", False))
+        has_initial_vitals = bool(getattr(self, "_current_operation_has_vitals", False))
         write_enabled = case_active and not self._write_pending
         if hasattr(self, "start_anesthesia_button"):
-            self.start_anesthesia_button.setEnabled(write_enabled and not aid_active)
+            self.start_anesthesia_button.setEnabled(write_enabled and not aid_active and has_initial_vitals)
+            if write_enabled and not aid_active and not has_initial_vitals:
+                self.start_anesthesia_button.setToolTip("Введите исходные витальные показатели, чтобы начать пособие.")
+            else:
+                self.start_anesthesia_button.setToolTip("")
             self.end_anesthesia_button.setEnabled(write_enabled and aid_active)
             self.start_surgery_button.setEnabled(write_enabled and aid_active and not surgery_active)
             self.close_case_button.setEnabled(write_enabled and aid_active and surgery_active)
@@ -8931,8 +9164,22 @@ class OperBlockMainWidget(QWidget):
         return visible_hours
 
     def _on_standard_vitals_changed(self):
+        self._refresh_current_operation_vitals_presence()
+        self._apply_protocol_controls_state()
         self.refresh_protocol(force=True)
         self.refresh_board(force=True)
+
+    def _refresh_current_operation_vitals_presence(self) -> bool:
+        case_id = int(self._current_operation_case_id or 0)
+        if not case_id:
+            self._current_operation_has_vitals = False
+            return False
+        try:
+            self._current_operation_has_vitals = bool(self.operblock_service.operation_has_initial_vitals(case_id))
+        except Exception as exc:
+            logger.error("operblock initial vitals presence refresh failed: %s", exc, exc_info=True)
+            self._current_operation_has_vitals = False
+        return bool(self._current_operation_has_vitals)
 
     def _load_quick_orders_data(self):
         metric_started = operblock_startup_metrics.timer_start()
@@ -9355,6 +9602,7 @@ class OperBlockMainWidget(QWidget):
             else:
                 row_layout.addWidget(_label("Дозировки не указаны", size=12, color=card_muted))
         elif kind == "gas":
+            is_oxygen_gas = _payload_or_text_is_oxygen(preset, display_name, label, title_line)
             if doses:
                 visible_doses = doses[:4]
                 dose_columns = 2 if len(visible_doses) > 1 else 1
@@ -9365,16 +9613,22 @@ class OperBlockMainWidget(QWidget):
                 for column in range(dose_columns):
                     dose_grid.setColumnStretch(column, 1)
                 for index, dose in enumerate(visible_doses):
+                    dose_button_text = (
+                        _normalize_oxygen_flow_text(dose) or str(dose or "").strip()
+                        if is_oxygen_gas
+                        else _normalize_gas_dose_text(dose)
+                    )
                     add_button(
                         dose_grid,
-                        _normalize_gas_dose_text(dose),
+                        dose_button_text,
                         index // dose_columns,
                         index % dose_columns,
                         lambda _=False, current=preset, value=dose: self._add_preset_gas(current, value),
                     )
                 row_layout.addLayout(dose_grid)
             else:
-                row_layout.addWidget(_label("Дозы MAC не указаны", size=12, color=card_muted))
+                empty_text = "Потоки не указаны" if is_oxygen_gas else "Дозы MAC не указаны"
+                row_layout.addWidget(_label(empty_text, size=12, color=card_muted))
         elif kind == "continuous_infusion":
             if rates:
                 visible_rates = rates[:4]
@@ -9540,6 +9794,7 @@ class OperBlockMainWidget(QWidget):
             else:
                 row_layout.addWidget(_label("Скорости не указаны", size=12, color=TEXT_SECONDARY))
         elif doses:
+            is_oxygen_quick_gas = kind == "gas" and _payload_or_text_is_oxygen(None, drug_name, title_line)
             for dose in doses[:4]:
                 dose_layout = QHBoxLayout()
                 dose_layout.setContentsMargins(0, 0, 0, 0)
@@ -9561,7 +9816,12 @@ class OperBlockMainWidget(QWidget):
                 )
                 self._quick_order_buttons.append(add_button)
 
-                dose_label = QLabel(_quick_order_dose_display_text(dose, concentration_text))
+                dose_label_text = (
+                    _normalize_oxygen_flow_text(dose) or str(dose or "").strip()
+                    if is_oxygen_quick_gas
+                    else _quick_order_dose_display_text(dose, concentration_text)
+                )
+                dose_label = QLabel(dose_label_text)
                 dose_label.setStyleSheet(
                     f"font-size: 12px; color: {TEXT_PRIMARY}; background: transparent; border: none;"
                 )
@@ -9569,7 +9829,8 @@ class OperBlockMainWidget(QWidget):
                 dose_layout.addWidget(dose_label, 1)
                 row_layout.addLayout(dose_layout)
         else:
-            row_layout.addWidget(_label("Дозировки не указаны", size=12, color=TEXT_SECONDARY))
+            empty_text = "Потоки не указаны" if kind == "gas" and _payload_or_text_is_oxygen(None, drug_name, title_line) else "Дозировки не указаны"
+            row_layout.addWidget(_label(empty_text, size=12, color=TEXT_SECONDARY))
         return frame
 
     def _set_quick_order_buttons_enabled(self, enabled: bool):
@@ -10028,9 +10289,18 @@ class OperBlockMainWidget(QWidget):
             rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
             declared_volume = _format_infusion_declared_volume(interval)
             gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
+            is_oxygen = _is_oxygen_infusion(interval)
             is_rate_infusion = _infusion_has_rate(interval)
-            badge = "Газ" if gas_dose else "Дозатор" if is_rate_infusion else "Капельница"
-            detail = f"старт {rate}" if rate else f"старт {gas_dose}" if gas_dose else declared_volume or "старт"
+            badge = "Кислород" if is_oxygen else "Газ" if gas_dose else "Дозатор" if is_rate_infusion else "Капельница"
+            detail = (
+                f"старт {rate}"
+                if rate
+                else f"старт поток {gas_dose}"
+                if is_oxygen and gas_dose
+                else f"старт {gas_dose}"
+                if gas_dose
+                else declared_volume or "старт"
+            )
             start_event_id, _revision = self._infusion_identity(interval)
             events.append(
                 {
@@ -10053,15 +10323,23 @@ class OperBlockMainWidget(QWidget):
                         continue
                     if index == 0 and change_dt == start_dt:
                         continue
-                    change_dose = _normalize_gas_dose_text(str((change or {}).get("dose_text") or ""))
+                    change_dose = str((change or {}).get("dose_text") or "").strip()
                     events.append(
                         {
                             "kind": "infusion",
                             "role": "change",
                             "time": change_dt,
                             "drug": drug_name,
-                            "detail": f"доза {change_dose}" if change_dose else "изменение дозы",
-                            "badge": "Изм. доза",
+                            "detail": (
+                                f"поток {change_dose}"
+                                if is_oxygen and change_dose
+                                else f"доза {change_dose}"
+                                if change_dose
+                                else "изменение потока"
+                                if is_oxygen
+                                else "изменение дозы"
+                            ),
+                            "badge": "Изм. поток" if is_oxygen else "Изм. доза",
                             "interval": interval,
                             "sort_id": self._timeline_event_numeric_id((change or {}).get("event_id")),
                         }
@@ -10224,8 +10502,7 @@ class OperBlockMainWidget(QWidget):
         )
         return result
 
-    @staticmethod
-    def _medication_group_source_signature(group: dict) -> str:
+    def _medication_group_source_signature(self, group: dict) -> str:
         order_rows = []
         for row in group.get("order_rows") or []:
             order_rows.append(
@@ -10236,6 +10513,7 @@ class OperBlockMainWidget(QWidget):
                     "drug_key": row.get("drug_key"),
                     "drug_display_name": row.get("drug_display_name"),
                     "order_kind": row.get("order_kind"),
+                    "concentration": self._order_row_concentration_text(row),
                     "comment": row.get("comment"),
                     "route": _order_route_code(row),
                     "status": row.get("status"),
@@ -10283,7 +10561,11 @@ class OperBlockMainWidget(QWidget):
         parts: list[str] = []
         order_rows = list(group.get("order_rows") or [])
         infusion_rows = list(group.get("infusion_rows") or [])
-        order_total = _summarize_order_total(order_rows) if order_rows else ""
+        order_total = (
+            _summarize_order_total(order_rows, concentration_for_row=self._order_row_concentration_text)
+            if order_rows
+            else ""
+        )
         if order_total.startswith("Итого: "):
             parts.append(order_total.removeprefix("Итого: "))
         elif order_total:
@@ -10291,10 +10573,18 @@ class OperBlockMainWidget(QWidget):
 
         total_volume = Decimal("0")
         has_volume = False
+        total_oxygen_liters = Decimal("0")
+        has_oxygen_liters = False
         active_count = 0
         for interval in infusion_rows:
             if str((interval or {}).get("status") or "") == "active":
                 active_count += 1
+            if _is_oxygen_infusion(interval or {}):
+                oxygen_liters = _oxygen_consumed_liters(interval or {})
+                if oxygen_liters is not None:
+                    total_oxygen_liters += oxygen_liters
+                    has_oxygen_liters = True
+                continue
             volume_text = _format_infusion_executed_volume(interval) if _infusion_has_rate(interval) else ""
             volume = _counted_infusion_volume_ml(interval or {})
             if volume is None and volume_text:
@@ -10311,6 +10601,8 @@ class OperBlockMainWidget(QWidget):
             has_volume = True
         if has_volume:
             parts.append(_format_infusion_volume_ml(total_volume))
+        if has_oxygen_liters:
+            parts.append(_format_oxygen_liters(total_oxygen_liters))
         elif active_count:
             parts.append(f"активно: {active_count}")
 
@@ -10318,6 +10610,16 @@ class OperBlockMainWidget(QWidget):
 
     def _medication_visual(self, group: dict) -> dict:
         name = str(group.get("drug_name") or "").casefold()
+        if _text_is_oxygen(name):
+            return {
+                "color": "#E0F2FE",
+                "icon": "drop_white",
+                "icon_file": OXYGEN_ICON_FILE,
+                "icon_fallback_file": OXYGEN_ICON_FILE,
+                "icon_size": 30,
+                "time_bg": "#E0F2FE",
+                "time_fg": "#0369A1",
+            }
         if (
             group.get("has_gas_order")
             or group.get("has_gas_infusion")
@@ -10387,7 +10689,11 @@ class OperBlockMainWidget(QWidget):
         icon.setAlignment(Qt.AlignCenter)
         icon_size = int(visual.get("icon_size") or 22)
         icon_file = visual.get("icon_file")
-        pixmap = load_operblock_icon_pixmap(icon_file) if icon_file else QPixmap()
+        pixmap = (
+            load_operblock_icon_pixmap(icon_file, fallback_file=str(visual.get("icon_fallback_file") or ""))
+            if icon_file
+            else QPixmap()
+        )
         if not pixmap.isNull():
             pixmap = pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
@@ -10399,6 +10705,8 @@ class OperBlockMainWidget(QWidget):
 
     @staticmethod
     def _active_infusion_icon_file(interval: dict) -> str:
+        if _is_oxygen_infusion(interval or {}):
+            return OXYGEN_ICON_FILE
         if _is_gas_infusion(interval or {}):
             return type_icon_key("gas")
         return type_icon_key("continuous_infusion") if _infusion_has_rate(interval or {}) else type_icon_key("timed_infusion")
@@ -10951,7 +11259,10 @@ class OperBlockMainWidget(QWidget):
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon = QLabel()
         icon.setAlignment(Qt.AlignCenter)
-        pixmap = load_operblock_icon_pixmap(self._active_infusion_icon_file(interval))
+        pixmap = load_operblock_icon_pixmap(
+            self._active_infusion_icon_file(interval),
+            fallback_file=OXYGEN_ICON_FILE if _is_oxygen_infusion(interval) else "",
+        )
         if not pixmap.isNull():
             pixmap = pixmap.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
@@ -10968,6 +11279,7 @@ class OperBlockMainWidget(QWidget):
             f"font-size: 15px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
             f"{TOOLTIP_WHITE_STYLE}"
         )
+        is_oxygen = _is_oxygen_infusion(interval)
         rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
         gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
         duration = _format_infusion_duration(interval.get("start_time"))
@@ -10977,7 +11289,7 @@ class OperBlockMainWidget(QWidget):
         if rate:
             detail_parts.append(rate)
         if gas_dose:
-            detail_parts.append(f"доза {gas_dose}")
+            detail_parts.append(f"{'поток' if is_oxygen else 'доза'} {gas_dose}")
         declared_volume = _format_infusion_declared_volume(interval)
         if not rate and not gas_dose and declared_volume:
             detail_parts.append(f"объем {declared_volume}")
@@ -11089,6 +11401,11 @@ class OperBlockMainWidget(QWidget):
     @staticmethod
     def _active_infusion_volume_text(interval: dict) -> str:
         if _is_gas_infusion(interval or {}):
+            if _is_oxygen_infusion(interval or {}):
+                consumed_text = _format_oxygen_consumed_liters(interval or {})
+                if consumed_text:
+                    return f"Всего расход: {consumed_text}"
+                return "Всего расход: --"
             dose_text = _gas_dose_text(interval or {})
             if dose_text:
                 return f"Доза газа: {dose_text}"
@@ -11157,7 +11474,7 @@ class OperBlockMainWidget(QWidget):
             elif kind == "timed_infusion":
                 self.order_dose_input.setPlaceholderText("Объем/доза (мл, мг)")
             elif kind == "gas":
-                self.order_dose_input.setPlaceholderText("Доза (MAC)")
+                self.order_dose_input.setPlaceholderText("MAC или поток л/мин")
             else:
                 self.order_dose_input.setPlaceholderText("Доза (мг, мл, %)")
 
@@ -11236,6 +11553,10 @@ class OperBlockMainWidget(QWidget):
                 "volume_ml",
                 "dose_text",
                 "display_dose_text",
+                "gas_subtype",
+                "is_oxygen",
+                "oxygen_flow_lpm",
+                "oxygen_flow_unit",
                 "calculated_volume_ml",
                 "declared_total_volume_ml",
                 "duration_min",
@@ -11255,13 +11576,15 @@ class OperBlockMainWidget(QWidget):
                     latest_dt = event_dt
         return latest_dt
 
-    def _active_gas_interval(self) -> dict | None:
+    def _active_gas_interval(self, *, oxygen: bool | None = None) -> dict | None:
         snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
         intervals = [
             dict(interval or {})
             for interval in snapshot.get("infusion_intervals") or []
             if str((interval or {}).get("status") or "") == "active" and _is_gas_infusion(interval or {})
         ]
+        if oxygen is not None:
+            intervals = [interval for interval in intervals if _is_oxygen_infusion(interval) == bool(oxygen)]
         if not intervals:
             return None
         intervals.sort(key=lambda item: _parse_datetime_value(item.get("start_time")) or datetime.max)
@@ -11284,9 +11607,13 @@ class OperBlockMainWidget(QWidget):
             CustomMessageBox.warning(self, "Газ", "Не удалось проверить актуальность газа. Обновите протокол.")
             self.refresh_protocol(force=True)
             return
-        clean_dose = _normalize_gas_dose_text(dose_text)
+        is_oxygen = _is_oxygen_infusion(interval)
+        clean_dose = _normalize_oxygen_flow_text(dose_text) if is_oxygen else _normalize_gas_dose_text(dose_text)
         if not clean_dose:
-            CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
+            if is_oxygen:
+                CustomMessageBox.warning(self, "Кислород", "Укажите поток кислорода, например: 10 л/мин.")
+            else:
+                CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
             return
         change_event_time = event_time or self._current_operation_event_time_text()
         if not self._validate_infusion_event_datetime_or_warn(change_event_time):
@@ -11302,6 +11629,7 @@ class OperBlockMainWidget(QWidget):
         if clean_dose == current_dose and event_time is None and start_event_time is None and not has_rate_artifacts:
             return
         payload = self._infusion_preset_payload(interval) or {}
+        payload = _oxygen_payload_fields(payload, clean_dose) if is_oxygen else payload
         payload["kind"] = "gas"
         payload["dose_text"] = clean_dose
         payload["display_dose_text"] = clean_dose
@@ -11330,12 +11658,13 @@ class OperBlockMainWidget(QWidget):
                 (lambda _result: on_saved())
                 if on_saved is not None
                 else (
-                    lambda result, sid=start_event_id, dose=clean_dose, change_dt=change_event_time, start_dt=start_event_time: self._on_gas_dose_saved_locally(
+                    lambda result, sid=start_event_id, dose=clean_dose, change_dt=change_event_time, start_dt=start_event_time, oxygen=is_oxygen: self._on_gas_dose_saved_locally(
                         result,
                         sid,
                         dose_text=dose,
                         change_event_time=change_dt,
                         start_event_time=start_dt,
+                        is_oxygen=oxygen,
                     )
                 )
             ),
@@ -11445,6 +11774,7 @@ class OperBlockMainWidget(QWidget):
             CustomMessageBox.warning(self, "Газ", "Не удалось проверить актуальность газа. Обновите протокол.")
             self.refresh_protocol(force=True)
             return
+        is_oxygen = _is_oxygen_infusion(interval)
         current_dose = _gas_dose_text(interval)
         old_start_dt = _minute_floor_dt(_parse_datetime_value(interval.get("start_time")))
         if include_time and old_start_dt is None:
@@ -11462,12 +11792,16 @@ class OperBlockMainWidget(QWidget):
             show_time=include_time,
             action_text="Сохранить",
             payload=interval.get("payload") if isinstance(interval.get("payload"), dict) else None,
+            is_oxygen=is_oxygen,
         )
         if dialog.exec() != QDialog.Accepted:
             return
-        dose_text = _normalize_gas_dose_text(dialog.volume_text())
+        dose_text = _normalize_oxygen_flow_text(dialog.volume_text()) if is_oxygen else _normalize_gas_dose_text(dialog.volume_text())
         if not dose_text:
-            CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
+            if is_oxygen:
+                CustomMessageBox.warning(self, "Кислород", "Укажите поток кислорода, например: 10 л/мин.")
+            else:
+                CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
             return
         start_event_time = None
         new_start_dt = old_start_dt
@@ -11880,6 +12214,56 @@ class OperBlockMainWidget(QWidget):
                 return operblock_medication_preset_display_name(preset or {})
         return ""
 
+    def _preset_for_order_row(self, row: dict) -> dict | None:
+        preset_id = str((row or {}).get("drug_key") or "").strip()
+        if not preset_id:
+            return None
+        presets = list(getattr(self, "_medication_presets", []) or [])
+        if not presets:
+            try:
+                presets = load_operblock_medication_presets(include_disabled=True)
+                self._medication_presets = presets
+            except Exception as exc:
+                logger.error("operblock medication presets load for order total failed: %s", exc, exc_info=True)
+                presets = []
+        for preset in presets:
+            if str((preset or {}).get("preset_id") or "").strip() == preset_id:
+                return dict(preset or {})
+        return None
+
+    def _quick_order_template_concentration_for_row(self, row: dict) -> str:
+        drug_name = str((row or {}).get("drug_name") or (row or {}).get("raw_drug_name") or "").strip()
+        if not drug_name:
+            return ""
+        templates = list(getattr(self, "_quick_order_templates", []) or [])
+        if not templates:
+            try:
+                templates = load_operblock_quick_orders()
+                self._quick_order_templates = templates
+            except Exception as exc:
+                logger.error("operblock quick order templates load for order total failed: %s", exc, exc_info=True)
+                templates = []
+        folded_name = drug_name.casefold()
+        for template in templates:
+            raw_name = str((template or {}).get("drug_name") or "").strip()
+            concentration = str((template or {}).get("concentration") or (template or {}).get("concentration_text") or "").strip()
+            title, concentration = _quick_order_title_and_concentration(raw_name, concentration)
+            if concentration and {raw_name.casefold(), title.casefold()}.intersection({folded_name}):
+                return concentration
+        return ""
+
+    def _order_row_concentration_text(self, row: dict) -> str:
+        for key in ("concentration", "concentration_text"):
+            value = str((row or {}).get(key) or "").strip()
+            if value:
+                return value
+        preset = self._preset_for_order_row(row)
+        if preset:
+            value = str((preset or {}).get("concentration") or (preset or {}).get("concentration_text") or "").strip()
+            if value:
+                return value
+        return self._quick_order_template_concentration_for_row(row)
+
     def _order_display_drug_name(self, row: dict, fallback: str) -> str:
         display_name = str(row.get("drug_display_name") or "").strip()
         if display_name:
@@ -12016,7 +12400,9 @@ class OperBlockMainWidget(QWidget):
         latest_label.setStyleSheet(f"font-size: 12px; color: {TEXT_SECONDARY};")
         title_row.addWidget(name_label, 1)
         title_row.addWidget(latest_label, 0)
-        total_label = ElidedTooltipLabel(_summarize_order_total(rows))
+        total_label = ElidedTooltipLabel(
+            _summarize_order_total(rows, concentration_for_row=self._order_row_concentration_text)
+        )
         total_label.setMinimumWidth(120)
         total_label.setStyleSheet(
             f"font-size: 12px; font-weight: 700; color: {TEXT_PRIMARY}; background-color: #ffffff; "
@@ -12120,7 +12506,15 @@ class OperBlockMainWidget(QWidget):
         stopped_count = len(rows) - active_count
         total_volume = Decimal("0")
         has_volume = False
+        total_oxygen_liters = Decimal("0")
+        has_oxygen_liters = False
         for row in rows:
+            if _is_oxygen_infusion(row or {}):
+                oxygen_liters = _oxygen_consumed_liters(row or {})
+                if oxygen_liters is not None:
+                    total_oxygen_liters += oxygen_liters
+                    has_oxygen_liters = True
+                continue
             volume = _counted_infusion_volume_ml(row or {})
             if volume is None:
                 continue
@@ -12132,8 +12526,13 @@ class OperBlockMainWidget(QWidget):
             status_text = f"активно: {active_count}"
         else:
             status_text = f"Остановлено: {stopped_count}"
+        totals: list[str] = []
         if has_volume:
-            return f"{status_text} · итого: {_format_infusion_volume_ml(total_volume)}"
+            totals.append(_format_infusion_volume_ml(total_volume))
+        if has_oxygen_liters:
+            totals.append(_format_oxygen_liters(total_oxygen_liters))
+        if totals:
+            return f"{status_text} · итого: {', '.join(totals)}"
         return status_text
 
     def _make_infusion_history_entry_row(self, interval: dict) -> QHBoxLayout:
@@ -12170,6 +12569,7 @@ class OperBlockMainWidget(QWidget):
     def _infusion_history_entry_text(interval: dict) -> str:
         status = str(interval.get("status") or "")
         end_time = interval.get("end_time")
+        is_oxygen = _is_oxygen_infusion(interval)
         rate = "" if _is_gas_infusion(interval) else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
         gas_dose = _gas_dose_text(interval) if _is_gas_infusion(interval) else ""
         if status == "active":
@@ -12182,7 +12582,11 @@ class OperBlockMainWidget(QWidget):
         if duration:
             parts.append(duration)
         if gas_dose:
-            parts.append(f"доза: {gas_dose}")
+            parts.append(f"{'поток' if is_oxygen else 'доза'}: {gas_dose}")
+            if is_oxygen:
+                consumed_text = _format_oxygen_consumed_liters(interval)
+                if consumed_text:
+                    parts.append(f"расход: {consumed_text}")
         elif rate:
             parts.append(rate)
         if not gas_dose and rate:
@@ -12425,21 +12829,27 @@ class OperBlockMainWidget(QWidget):
         if not self._ensure_infusion_write_context_or_warn():
             return
         drug_name = re.sub(r"\s+", " ", str(drug_text or "").strip())
-        clean_dose = _normalize_gas_dose_text(dose_text)
         if not drug_name:
             CustomMessageBox.warning(self, "Газ", "Укажите газ.")
             return
+        effective_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        is_oxygen = _payload_or_text_is_oxygen(effective_payload, drug_name)
+        clean_dose = _normalize_oxygen_flow_text(dose_text) if is_oxygen else _normalize_gas_dose_text(dose_text)
         if not clean_dose:
-            CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
+            if is_oxygen:
+                CustomMessageBox.warning(self, "Кислород", "Укажите поток кислорода, например: 10 л/мин.")
+            else:
+                CustomMessageBox.warning(self, "Газ", "Укажите дозу газа, например: 0,7 MAC.")
             return
         success_callback = on_saved or self._on_infusion_mutation_saved
-        effective_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        if is_oxygen:
+            effective_payload = _oxygen_payload_fields(effective_payload, clean_dose)
         effective_payload["kind"] = "gas"
         effective_payload["dose_text"] = clean_dose
         effective_payload["display_dose_text"] = clean_dose
         effective_payload.setdefault("label", drug_name)
         effective_payload.setdefault("display_name", drug_name)
-        active_gas = self._active_gas_interval()
+        active_gas = self._active_gas_interval(oxygen=is_oxygen)
         if active_gas is not None:
             if not _gas_identity_matches(active_gas, drug_name, effective_payload):
                 active_name = _infusion_display_drug_name(active_gas, "Газ")
@@ -12901,10 +13311,11 @@ class OperBlockMainWidget(QWidget):
         dose_text: str,
         change_event_time: str,
         start_event_time: str | None,
+        is_oxygen: bool = False,
     ) -> None:
         change_event_id = _safe_int(result)
         change_event_key = self._timeline_event_key(change_event_id) or f"local_gas:{int(start_event_id)}:{change_event_time}"
-        clean_dose = _normalize_gas_dose_text(dose_text)
+        clean_dose = _normalize_oxygen_flow_text(dose_text) if is_oxygen else _normalize_gas_dose_text(dose_text)
 
         def updater(interval: dict) -> dict:
             interval = self._set_infusion_interval_start_time(interval, start_event_id, start_event_time)
@@ -12912,6 +13323,8 @@ class OperBlockMainWidget(QWidget):
             interval["current_rate_unit"] = None
             interval["rate_history"] = []
             payload = dict(interval.get("payload") or {})
+            if is_oxygen:
+                payload = _oxygen_payload_fields(payload, clean_dose)
             payload["kind"] = "gas"
             payload["dose_text"] = clean_dose
             payload["display_dose_text"] = clean_dose
@@ -13443,6 +13856,26 @@ class OperBlockMainWidget(QWidget):
             return
         case_id = int(self._current_operation_case_id)
         try:
+            self._current_operation_has_vitals = bool(self.operblock_service.operation_has_initial_vitals(case_id))
+        except Exception as exc:
+            logger.error("operblock initial vitals check before anesthesia start failed: %s", exc, exc_info=True)
+            self._current_operation_has_vitals = False
+            self._apply_protocol_controls_state()
+            CustomMessageBox.warning(
+                self,
+                "Начать пособие",
+                f"Не удалось проверить исходные витальные показатели:\n{exc}",
+            )
+            return
+        if not self._current_operation_has_vitals:
+            self._apply_protocol_controls_state()
+            CustomMessageBox.warning(
+                self,
+                "Начать пособие",
+                "Перед началом пособия введите исходные витальные показатели.",
+            )
+            return
+        try:
             anesthesia_types = load_operblock_anesthesia_types()
         except Exception as exc:
             CustomMessageBox.warning(self, "Начать пособие", f"Не удалось загрузить виды пособия: {exc}")
@@ -13744,11 +14177,13 @@ class OperBlockMainWidget(QWidget):
     def _show_board(self):
         self._set_protocol_chrome(False)
         self.stack.setCurrentWidget(self.board_page)
+        self._archive_return_operation_case_id = None
         self._current_operation_case_id = None
         self._current_admission_id = None
         self._current_operation_start = None
         self._current_operation_end = None
         self._current_case_active = False
+        self._current_operation_has_vitals = False
         self._current_stage_state = {}
         self._current_anesthesia_start = None
         self._current_anesthesia_end = None
@@ -13815,7 +14250,15 @@ class OperBlockMainWidget(QWidget):
 
     def on_back_clicked(self):
         current_widget = self.stack.currentWidget()
-        if current_widget in (self.protocol_page, self.archive_page):
+        if current_widget == self.archive_page:
+            return_case_id = int(getattr(self, "_archive_return_operation_case_id", 0) or 0)
+            self._archive_return_operation_case_id = None
+            if return_case_id:
+                self._open_protocol(return_case_id)
+                return
+            self._show_board()
+            return
+        if current_widget == self.protocol_page:
             self._show_board()
             return
         if current_widget == self.board_page and getattr(self, "_role_launcher_mode", False):

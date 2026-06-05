@@ -101,6 +101,12 @@ DEFAULT_DRUG_ICON_FILES = {
     "gas": "gas_izm.png",
 }
 
+OXYGEN_DRUG_ICON_KEYS = (
+    "drug:manual:gas:o2",
+    "drug:gas:o2",
+    "drug-source:o2",
+)
+
 
 SEEDED_CUSTOM_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
     OperBlockIconDefinition(
@@ -130,6 +136,33 @@ SEEDED_CUSTOM_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
         10012,
         source_file="sevodrag.png",
     ),
+    OperBlockIconDefinition(
+        "drug:manual:gas:o2",
+        "drug",
+        "manual:gas:o2",
+        "Иконка препарата: Кислород",
+        "oxygen.png",
+        10020,
+        source_file="oxygen.png",
+    ),
+    OperBlockIconDefinition(
+        "drug:gas:o2",
+        "drug",
+        "gas:o2",
+        "Иконка препарата: Кислород",
+        "oxygen.png",
+        10021,
+        source_file="oxygen.png",
+    ),
+    OperBlockIconDefinition(
+        "drug-source:o2",
+        "drug",
+        "o2",
+        "Иконка препарата: Кислород",
+        "oxygen.png",
+        10022,
+        source_file="oxygen.png",
+    ),
 )
 
 
@@ -138,6 +171,16 @@ DRUG_ICON_LABEL_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
     "севофлюран": ("drug:manual:gas:sevoflurane", "drug:gas:sevoflurane", "drug-source:sevoflurane"),
     "sevoran": ("drug:manual:gas:sevoflurane", "drug:gas:sevoflurane", "drug-source:sevoflurane"),
     "севоран": ("drug:manual:gas:sevoflurane", "drug:gas:sevoflurane", "drug-source:sevoflurane"),
+    "o2": OXYGEN_DRUG_ICON_KEYS,
+    "о2": OXYGEN_DRUG_ICON_KEYS,
+    "o_2": OXYGEN_DRUG_ICON_KEYS,
+    "о_2": OXYGEN_DRUG_ICON_KEYS,
+    "oxygen": OXYGEN_DRUG_ICON_KEYS,
+    "кислород": OXYGEN_DRUG_ICON_KEYS,
+    "o2_кислород": OXYGEN_DRUG_ICON_KEYS,
+    "о2_кислород": OXYGEN_DRUG_ICON_KEYS,
+    "кислород_o2": OXYGEN_DRUG_ICON_KEYS,
+    "кислород_о2": OXYGEN_DRUG_ICON_KEYS,
 }
 
 

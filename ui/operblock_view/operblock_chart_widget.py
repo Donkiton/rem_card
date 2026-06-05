@@ -298,6 +298,75 @@ def _is_gas_infusion(interval: dict) -> bool:
     kind = str((payload or {}).get("kind") or "").strip().casefold()
     return kind == "gas"
 
+OXYGEN_CHART_FLOW_UNIT = "л/м"
+OXYGEN_FLOW_MIN_LPM = Decimal("0.1")
+OXYGEN_FLOW_STEP_LPM = Decimal("0.1")
+
+def _text_is_oxygen(value) -> bool:
+    text = str(value or "").strip().casefold().replace("ё", "е")
+    if not text:
+        return False
+    if "кислород" in text or re.search(r"(?<![0-9a-zа-я])oxygen(?![0-9a-zа-я])", text):
+        return True
+    return bool(re.search(r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])", text))
+
+def _payload_is_oxygen(payload: dict | None) -> bool:
+    data = payload if isinstance(payload, dict) else {}
+    subtype = str(data.get("gas_subtype") or data.get("gas_kind") or data.get("subtype") or "").strip()
+    if subtype and _text_is_oxygen(subtype):
+        return True
+    explicit = data.get("is_oxygen")
+    if isinstance(explicit, bool) and explicit:
+        return True
+    for key in (
+        "preset_id",
+        "source_drug_id",
+        "label",
+        "display_name",
+        "latin",
+        "drug_label",
+        "display_label",
+        "raw_text",
+    ):
+        if _text_is_oxygen(data.get(key)):
+            return True
+    return False
+
+def _payload_or_text_is_oxygen(payload: dict | None, *texts) -> bool:
+    if _payload_is_oxygen(payload):
+        return True
+    return any(_text_is_oxygen(text) for text in texts)
+
+def _strip_oxygen_token_for_number(value: str) -> str:
+    return re.sub(
+        r"(?<![0-9a-zа-я])(?:o|о)\s*2(?![0-9a-zа-я])",
+        " ",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+
+def _oxygen_flow_value_lpm(value) -> Decimal | None:
+    text = _strip_oxygen_token_for_number(str(value or ""))
+    match = re.search(r"(?P<value>\d+(?:[,.]\d+)?|[,.]\d+)", text)
+    if not match:
+        return None
+    raw_value = match.group("value").replace(",", ".")
+    if raw_value.startswith("."):
+        raw_value = f"0{raw_value}"
+    try:
+        flow = Decimal(raw_value)
+    except (InvalidOperation, ValueError):
+        return None
+    if flow < OXYGEN_FLOW_MIN_LPM:
+        return None
+    return flow.quantize(OXYGEN_FLOW_STEP_LPM, rounding=ROUND_HALF_UP)
+
+def _normalize_oxygen_flow_text(value) -> str:
+    flow = _oxygen_flow_value_lpm(value)
+    if flow is None:
+        return ""
+    return f"{_format_decimal_ru(flow)} {OXYGEN_CHART_FLOW_UNIT}"
+
 def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор") -> str:
     data = interval or {}
     payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
@@ -311,7 +380,10 @@ def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор"
     )
     name = re.sub(r"\s+", " ", raw_name).strip() or clean_fallback
     name = re.sub(
-        r"\s+\d+(?:[,.]\d+)?\s*(?:мл/час|мл/ч|ml/h|ml/hr|мл|ml|MAC|мак)\s*$",
+        (
+            r"\s+\d+(?:[,.]\d+)?\s*"
+            r"(?:мл/час|мл/ч|ml/h|ml/hr|мл|ml|MAC|мак|л/мин|л/м|l/min|lpm|лит/мин|литр(?:ов)?(?:/мин)?)\s*$"
+        ),
         "",
         name,
         flags=re.IGNORECASE,
@@ -325,6 +397,18 @@ def _infusion_display_drug_name(interval: dict, fallback: str = "Дозатор"
     if concentration and not has_percentage_in_name and concentration.casefold() not in name.casefold():
         name = f"{name} {concentration}".strip()
     return name
+
+def _is_oxygen_infusion(interval: dict) -> bool:
+    if not _is_gas_infusion(interval or {}):
+        return False
+    data = interval or {}
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    return _payload_or_text_is_oxygen(
+        payload,
+        data.get("drug_label"),
+        data.get("display_label"),
+        _infusion_display_drug_name(data, ""),
+    )
 
 def _normalize_gas_dose_text(value: str) -> str:
     clean = re.sub(r"\s+", " ", str(value or "").strip())
@@ -356,13 +440,17 @@ def _normalize_gas_dose_text(value: str) -> str:
 
 def _gas_dose_text(interval: dict) -> str:
     payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
-    return _normalize_gas_dose_text(str((payload or {}).get("display_dose_text") or (payload or {}).get("dose_text") or ""))
+    dose_text = str((payload or {}).get("display_dose_text") or (payload or {}).get("dose_text") or "")
+    if _is_oxygen_infusion(interval or {}):
+        return _normalize_oxygen_flow_text(dose_text)
+    return _normalize_gas_dose_text(dose_text)
 
 def _gas_dose_events(interval: dict) -> list[dict]:
     events: list[dict] = []
+    normalize_dose = _normalize_oxygen_flow_text if _is_oxygen_infusion(interval or {}) else _normalize_gas_dose_text
     for item in list((interval or {}).get("dose_history") or []):
         event_dt = _minute_floor_dt(_parse_datetime_value((item or {}).get("event_time")))
-        dose_text = _normalize_gas_dose_text(str((item or {}).get("dose_text") or ""))
+        dose_text = normalize_dose(str((item or {}).get("dose_text") or ""))
         if event_dt is None or not dose_text:
             continue
         events.append(
@@ -3117,8 +3205,15 @@ class OperBlockChartWidget(ChartWidget):
         start_dt = _parse_datetime_value(interval.get("start_time"))
         end_dt = _parse_datetime_value(interval.get("end_time"))
         is_gas = _is_gas_infusion(interval)
+        is_oxygen = _is_oxygen_infusion(interval)
         rate = "" if is_gas else _format_infusion_rate(interval.get("current_rate_value"), interval.get("current_rate_unit"))
-        segment_gas_dose = _normalize_gas_dose_text(str(group.get("rate_text") or "")) if is_gas else ""
+        segment_gas_dose = ""
+        if is_gas:
+            segment_gas_dose = (
+                _normalize_oxygen_flow_text(str(group.get("rate_text") or ""))
+                if is_oxygen
+                else _normalize_gas_dose_text(str(group.get("rate_text") or ""))
+            )
         gas_dose = segment_gas_dose or (_gas_dose_text(interval) if is_gas else "")
         status_text = "активна" if str(interval.get("status") or "") == "active" else "остановлена"
         color = html.escape(str(group.get("color") or "#16a085"))
@@ -3128,7 +3223,8 @@ class OperBlockChartWidget(ChartWidget):
             f"Конец: {html.escape(end_dt.strftime('%H:%M') if end_dt else status_text)}",
         ]
         if gas_dose:
-            lines.append(f"Доза газа: {html.escape(gas_dose)}")
+            label = "Поток" if is_oxygen else "Доза газа"
+            lines.append(f"{label}: {html.escape(gas_dose)}")
         if rate:
             lines.append(f"Текущая скорость: {html.escape(rate)}")
         if rate:
@@ -3142,10 +3238,14 @@ class OperBlockChartWidget(ChartWidget):
         if is_gas:
             history = _gas_dose_events(interval)
             if history:
-                lines.extend(["", "<b>Изменения дозы</b>"])
+                lines.extend(["", "<b>Изменения потока</b>" if is_oxygen else "<b>Изменения дозы</b>"])
             for item in history[:8]:
                 item_dt = _parse_datetime_value((item or {}).get("event_time"))
-                item_dose = _normalize_gas_dose_text(str((item or {}).get("dose_text") or ""))
+                item_dose = (
+                    _normalize_oxygen_flow_text(str((item or {}).get("dose_text") or ""))
+                    if is_oxygen
+                    else _normalize_gas_dose_text(str((item or {}).get("dose_text") or ""))
+                )
                 lines.append(f"{html.escape(item_dt.strftime('%H:%M') if item_dt else '--:--')} · {html.escape(item_dose)}")
         else:
             history = list(interval.get("rate_history") or [])
