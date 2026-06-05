@@ -1295,6 +1295,8 @@ def _normalize_dose_unit(unit: str) -> tuple[str, str]:
         "ед": "ед",
         "me": "МЕ",
         "ме": "МЕ",
+        "mac": "MAC",
+        "мак": "MAC",
         "%": "%",
     }
     label = aliases.get(raw, raw or unit)
@@ -1452,16 +1454,20 @@ def _summarize_dose_texts(dose_texts: list[str], *, include_unparsed: bool = Tru
         for component in components:
             key = (bool(component["parenthesized"]), str(component["unit_key"]))
             if key not in totals:
-                totals[key] = {"value": Decimal("0"), "unit_label": component["unit_label"]}
+                totals[key] = {"value": Decimal("0"), "unit_label": component["unit_label"], "count": 0}
                 order.append(key)
             totals[key]["value"] += component["value"]
+            totals[key]["count"] += 1
 
     main_parts: list[str] = []
     parenthetical_parts: list[str] = []
     for key in order:
         total = totals[key]
-        value_text = _format_decimal_ru(total["value"])
-        part = f"{value_text} {total['unit_label']}"
+        if key[1] == "mac":
+            value = total["value"] / max(1, int(total.get("count") or 0))
+            part = f"среднее {_format_decimal_ru(value)} {total['unit_label']}"
+        else:
+            part = f"{_format_decimal_ru(total['value'])} {total['unit_label']}"
         if key[0]:
             parenthetical_parts.append(part)
         else:
