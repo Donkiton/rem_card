@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import weakref
 
 from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer
-from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QPainterPath, QPixmap, QTransform
+from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QImageReader, QPainterPath, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -6157,6 +6157,9 @@ class OperBlockMainWidget(QWidget):
         self._refresh_generation = 0
         self._write_pending = False
         self._table_cards: dict[str, QFrame] = {}
+        self._board_card_hashes: dict[str, str] = {}
+        self._board_card_states: dict[str, dict] = {}
+        self._board_photo_thumbnail_cache: dict[tuple, QPixmap] = {}
         self._quick_order_templates: list[dict] = []
         self._medication_presets: list[dict] = []
         self._preset_search_text = ""
@@ -6196,6 +6199,9 @@ class OperBlockMainWidget(QWidget):
         self.vitals_input: VitalsWidget | None = None
         self._creating_lazy_protocol_page = False
         self._creating_lazy_archive_page = False
+        self._board_refresh_seq = 0
+        self._board_refresh_count_before_ready = 0
+        self._current_board_apply_metrics: dict | None = None
         init_ui_started = operblock_startup_metrics.timer_start()
         try:
             self._init_ui()
@@ -6277,8 +6283,16 @@ class OperBlockMainWidget(QWidget):
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards_layout.setSpacing(8)
         for table in OPERBLOCK_TABLES:
-            card = self._make_empty_table_card(table["code"], table["display_name"])
-            self._table_cards[table["code"]] = card
+            table_code = str(table["code"])
+            card = self._make_empty_table_card(table_code, table["display_name"])
+            self._table_cards[table_code] = card
+            table_payload = self._empty_board_table_payload(table)
+            self._board_card_hashes[table_code] = self._board_table_content_hash(table_payload)
+            self._board_card_states[table_code] = {
+                "kind": "empty",
+                "content_hash": self._board_card_hashes[table_code],
+                "has_photo": True,
+            }
             self.cards_layout.addWidget(card, 1)
         layout.addLayout(self.cards_layout, 1)
         operblock_startup_metrics.record_since("build_board_page_ms", metric_started, source="operblock_widget")
@@ -7580,14 +7594,25 @@ class OperBlockMainWidget(QWidget):
         if self._is_closing:
             return
         metric_started = operblock_startup_metrics.timer_start()
+        operblock_startup_metrics.record_value(
+            "start_auto_refresh_nested_phase",
+            "wrapper:refresh_board",
+            source="operblock_widget",
+        )
         try:
             if self.data_service and hasattr(self.data_service, "set_change_monitor_enabled"):
                 self.data_service.set_change_monitor_enabled(False)
-            self.refresh_board(force=True)
+            self.refresh_board(force=True, refresh_reason="start_auto_refresh")
             if self.data_service and wake_monitor:
                 self.data_service.request_immediate_refresh(force_emit=False, source="operblock_start")
         finally:
-            operblock_startup_metrics.record_since("start_auto_refresh_ms", metric_started, source="operblock_widget")
+            operblock_startup_metrics.record_since(
+                "start_auto_refresh_ms",
+                metric_started,
+                source="operblock_widget",
+                nested_role="wrapper",
+                child_phase="first_refresh_board_ms",
+            )
 
     def auto_refresh(self, force: bool = False):
         if self._is_closing:
@@ -7598,7 +7623,7 @@ class OperBlockMainWidget(QWidget):
         elif self.archive_page is not None and current_widget == self.archive_page:
             self.refresh_operblock_archive(force=force)
         else:
-            self.refresh_board(force=force)
+            self.refresh_board(force=force, refresh_reason="auto_refresh")
 
     def apply_operblock_icon_settings(self):
         self._orders_render_signature = ""
@@ -7610,29 +7635,90 @@ class OperBlockMainWidget(QWidget):
         elif getattr(self, "quick_orders_list", None) is not None:
             self._refresh_quick_orders()
 
-    def refresh_board(self, *, force: bool = False):
+    def refresh_board(self, *, force: bool = False, refresh_reason: str = "refresh_board"):
         if self._is_closing:
             return
+        enter_started = operblock_startup_metrics.timer_start()
+        self._board_refresh_seq += 1
+        refresh_seq = self._board_refresh_seq
+        self._board_refresh_count_before_ready += 1
+        is_first_refresh = not getattr(self, "_operblock_startup_first_refresh_recorded", False)
+        refresh_fields = {
+            "refresh_seq": refresh_seq,
+            "refresh_reason": str(refresh_reason or "refresh_board"),
+            "force": bool(force),
+            "is_first": bool(is_first_refresh),
+            "is_first_refresh": bool(is_first_refresh),
+        }
+        operblock_startup_metrics.record_value("refresh_seq", refresh_seq, source="operblock_widget", **refresh_fields)
+        operblock_startup_metrics.record_value(
+            "refresh_count_before_ready",
+            self._board_refresh_count_before_ready,
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value(
+            "refresh_reason",
+            refresh_fields["refresh_reason"],
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value("refresh_force", bool(force), source="operblock_widget", **refresh_fields)
+        operblock_startup_metrics.record_value(
+            "refresh_is_first_refresh",
+            bool(is_first_refresh),
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value(
+            "refresh_is_first",
+            bool(is_first_refresh),
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_since("refresh_board_enter_ms", enter_started, source="operblock_widget", **refresh_fields)
         first_refresh_started = None
         if not getattr(self, "_operblock_startup_first_refresh_recorded", False):
             first_refresh_started = operblock_startup_metrics.timer_start()
             self._operblock_startup_first_refresh_recorded = True
         try:
             try:
+                snapshot_started = operblock_startup_metrics.timer_start()
                 snapshot = self.operblock_service.build_operblock_board_snapshot()
             except Exception as exc:
                 logger.error("operblock board refresh failed: %s", exc, exc_info=True)
                 CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
                 return
+            finally:
+                operblock_startup_metrics.record_since(
+                    "refresh_board_snapshot_ms",
+                    snapshot_started if "snapshot_started" in locals() else 0.0,
+                    source="operblock_widget",
+                    nested_role="child",
+                    parent_phase="first_refresh_board_ms",
+                    **refresh_fields,
+                )
             if not force and snapshot.get("content_hash") == self._board_hash:
                 return
             self._board_hash = snapshot.get("content_hash") or ""
-            self._apply_board_snapshot(snapshot)
+            apply_started = operblock_startup_metrics.timer_start()
+            self._apply_board_snapshot(snapshot, refresh_context=refresh_fields)
+            operblock_startup_metrics.record_since(
+                "refresh_board_apply_total_ms",
+                apply_started,
+                source="operblock_widget",
+                nested_role="child",
+                parent_phase="first_refresh_board_ms",
+                **refresh_fields,
+            )
         finally:
             operblock_startup_metrics.record_since(
                 "first_refresh_board_ms",
                 first_refresh_started,
                 source="operblock_widget",
+                nested_role="child",
+                parent_phase="start_auto_refresh_ms",
+                **refresh_fields,
             )
 
     def refresh_operblock_archive(self, *, force: bool = False):
@@ -7672,22 +7758,268 @@ class OperBlockMainWidget(QWidget):
         self._protocol_hash = snapshot.get("content_hash") or ""
         self._apply_protocol_snapshot(snapshot)
 
-    def _apply_board_snapshot(self, snapshot: dict):
+    @staticmethod
+    def _empty_board_table_payload(table: dict) -> dict:
+        return {
+            "code": str(table.get("code") or ""),
+            "display_name": table.get("display_name") or "",
+            "sort_order": table.get("sort_order"),
+            "occupied": False,
+            "patient": None,
+        }
+
+    @staticmethod
+    def _board_table_content_hash(table: dict) -> str:
+        return _stable_ui_hash(
+            {
+                "code": str(table.get("code") or ""),
+                "display_name": table.get("display_name") or "",
+                "sort_order": table.get("sort_order"),
+                "occupied": bool(table.get("occupied")),
+                "patient": table.get("patient") or None,
+            }
+        )
+
+    def _board_card_layout_index(self, widget: QWidget | None) -> int:
+        if widget is None:
+            return -1
+        layout = getattr(self, "cards_layout", None)
+        if layout is None:
+            return -1
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            if item is not None and item.widget() is widget:
+                return index
+        return -1
+
+    def _remove_board_card_widget(self, widget: QWidget | None) -> bool:
+        if widget is None:
+            return False
+        if getattr(self, "cards_layout", None) is not None:
+            self.cards_layout.removeWidget(widget)
+        widget.setParent(None)
+        return True
+
+    def _apply_board_snapshot(self, snapshot: dict, *, refresh_context: dict | None = None):
         metric_started = operblock_startup_metrics.timer_start()
-        for index in reversed(range(self.cards_layout.count())):
-            item = self.cards_layout.itemAt(index)
-            widget = item.widget() if item else None
-            if widget:
-                widget.setParent(None)
-        self._table_cards.clear()
-        for table in snapshot.get("tables", []):
-            card = self._make_occupied_table_card(table) if table.get("occupied") else self._make_empty_table_card(
-                table["code"],
-                table["display_name"],
+        refresh_fields = dict(refresh_context or {})
+        tables = list(snapshot.get("tables", []) or [])
+        occupied_count = sum(1 for table in tables if table.get("occupied"))
+        empty_count = max(0, len(tables) - occupied_count)
+        apply_fields = {
+            **refresh_fields,
+            "nested_role": "child",
+            "parent_phase": "apply_board_snapshot_ms",
+        }
+        apply_metrics = {
+            "photo_count": 0,
+            "missing_photo_count": 0,
+            "current_card_fields": {},
+            "photo_cache_hit_count": 0,
+            "photo_cache_miss_count": 0,
+        }
+        previous_apply_metrics = self._current_board_apply_metrics
+        self._current_board_apply_metrics = apply_metrics
+        try:
+            operblock_startup_metrics.record_value("board_apply_table_count", len(tables), source="operblock_widget", **apply_fields)
+            operblock_startup_metrics.record_value("board_apply_occupied_count", occupied_count, source="operblock_widget", **apply_fields)
+            operblock_startup_metrics.record_value("board_apply_empty_count", empty_count, source="operblock_widget", **apply_fields)
+            snapshot_codes = {str(table.get("code") or "") for table in tables}
+            clear_started = operblock_startup_metrics.timer_start()
+            remove_started = operblock_startup_metrics.timer_start()
+            removed_count = 0
+            for table_code, widget in list(self._table_cards.items()):
+                if table_code in snapshot_codes:
+                    continue
+                if self._remove_board_card_widget(widget):
+                    removed_count += 1
+                self._table_cards.pop(table_code, None)
+                self._board_card_hashes.pop(table_code, None)
+                self._board_card_states.pop(table_code, None)
+            operblock_startup_metrics.record_since(
+                "board_apply_clear_remove_widgets_ms",
+                remove_started,
+                source="operblock_widget",
+                removed_count=removed_count,
+                **apply_fields,
             )
-            self._table_cards[table["code"]] = card
-            self.cards_layout.addWidget(card, 1)
-        operblock_startup_metrics.record_since("apply_board_snapshot_ms", metric_started, source="operblock_widget")
+            operblock_startup_metrics.record_duration(
+                "board_apply_clear_delete_later_ms",
+                0.0,
+                source="operblock_widget",
+                reason="delete_later_not_used",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_since("board_apply_clear_total_ms", clear_started, source="operblock_widget", **apply_fields)
+
+            loop_started = operblock_startup_metrics.timer_start()
+            recreated_count = 0
+            reused_count = 0
+            skipped_unchanged_count = 0
+            replaced_count = 0
+            updated_count = 0
+            relayout_count = 0
+            relayout_elapsed_recorded = False
+            for target_index, table in enumerate(tables):
+                table_code = str(table.get("code") or "")
+                table_hash = self._board_table_content_hash(table)
+                card_kind = "occupied" if table.get("occupied") else "empty"
+                previous_card = self._table_cards.get(table_code)
+                previous_hash = self._board_card_hashes.get(table_code, "")
+                previous_state = self._board_card_states.get(table_code) or {}
+                card_fields = {
+                    **refresh_fields,
+                    "table_code": table_code,
+                    "card_kind": card_kind,
+                    "nested_role": "child",
+                    "parent_phase": "board_apply_card_loop_total_ms",
+                }
+                card_inner_fields = {
+                    **refresh_fields,
+                    "table_code": table_code,
+                    "card_kind": card_kind,
+                    "nested_role": "child",
+                    "parent_phase": (
+                        "board_apply_make_occupied_card_ms" if table.get("occupied") else "board_apply_make_empty_card_ms"
+                    ),
+                }
+                if previous_card is not None and previous_hash == table_hash:
+                    reused_count += 1
+                    skipped_unchanged_count += 1
+                    if previous_state.get("has_photo"):
+                        apply_metrics["photo_cache_hit_count"] = int(apply_metrics.get("photo_cache_hit_count") or 0) + 1
+                    current_index = self._board_card_layout_index(previous_card)
+                    if current_index != target_index:
+                        move_started = operblock_startup_metrics.timer_start()
+                        if current_index >= 0:
+                            self.cards_layout.removeWidget(previous_card)
+                        self.cards_layout.insertWidget(target_index, previous_card, 1)
+                        operblock_startup_metrics.record_since(
+                            "board_apply_order_relayout_ms",
+                            move_started,
+                            source="operblock_widget",
+                            **card_fields,
+                        )
+                        relayout_elapsed_recorded = True
+                        relayout_count += 1
+                    continue
+
+                apply_metrics["current_card_fields"] = card_inner_fields
+                if previous_card is not None:
+                    self._remove_board_card_widget(previous_card)
+                    replaced_count += 1
+                    updated_count += 1
+                if table.get("occupied"):
+                    card_started = operblock_startup_metrics.timer_start()
+                    card = self._make_occupied_table_card(table)
+                    operblock_startup_metrics.record_since(
+                        "board_apply_make_occupied_card_ms",
+                        card_started,
+                        source="operblock_widget",
+                        **card_fields,
+                    )
+                else:
+                    card_started = operblock_startup_metrics.timer_start()
+                    card = self._make_empty_table_card(table["code"], table["display_name"])
+                    operblock_startup_metrics.record_since(
+                        "board_apply_make_empty_card_ms",
+                        card_started,
+                        source="operblock_widget",
+                        **card_fields,
+                    )
+                self._table_cards[table_code] = card
+                self._board_card_hashes[table_code] = table_hash
+                self._board_card_states[table_code] = {
+                    "kind": card_kind,
+                    "content_hash": table_hash,
+                    "has_photo": True,
+                }
+                layout_add_started = operblock_startup_metrics.timer_start()
+                self.cards_layout.insertWidget(target_index, card, 1)
+                operblock_startup_metrics.record_since("board_apply_layout_add_ms", layout_add_started, source="operblock_widget", **card_fields)
+                recreated_count += 1
+            apply_metrics["current_card_fields"] = {}
+            if not relayout_elapsed_recorded:
+                operblock_startup_metrics.record_duration(
+                    "board_apply_order_relayout_ms",
+                    0.0,
+                    source="operblock_widget",
+                    **apply_fields,
+                )
+            operblock_startup_metrics.record_since("board_apply_card_loop_total_ms", loop_started, source="operblock_widget", **apply_fields)
+
+            after_loop_started = operblock_startup_metrics.timer_start()
+            operblock_startup_metrics.record_value(
+                "board_apply_card_recreated_count",
+                recreated_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_reused_count",
+                reused_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_skipped_unchanged_count",
+                skipped_unchanged_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_replaced_count",
+                replaced_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_card_updated_count",
+                updated_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_order_relayout_count",
+                relayout_count,
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_photo_count",
+                int(apply_metrics.get("photo_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_missing_photo_count",
+                int(apply_metrics.get("missing_photo_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_photo_cache_hit_count",
+                int(apply_metrics.get("photo_cache_hit_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "board_apply_photo_cache_miss_count",
+                int(apply_metrics.get("photo_cache_miss_count") or 0),
+                source="operblock_widget",
+                **apply_fields,
+            )
+            operblock_startup_metrics.record_since("board_apply_after_loop_ms", after_loop_started, source="operblock_widget", **apply_fields)
+        finally:
+            self._current_board_apply_metrics = previous_apply_metrics
+            operblock_startup_metrics.record_since(
+                "apply_board_snapshot_ms",
+                metric_started,
+                source="operblock_widget",
+                nested_role="child",
+                parent_phase="first_refresh_board_ms",
+                **refresh_fields,
+            )
 
     def _show_operblock_archive(self):
         if self._is_closing or self._write_pending:
@@ -7906,6 +8238,8 @@ class OperBlockMainWidget(QWidget):
         self.refresh_operblock_archive(force=True)
 
     def _make_empty_table_card(self, table_code: str, display_name: str) -> QFrame:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
         frame = self._base_card()
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -7913,6 +8247,7 @@ class OperBlockMainWidget(QWidget):
         header = self._card_header(display_name)
         layout.addWidget(header)
 
+        body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(34, 34, 34, 34)
@@ -7952,9 +8287,17 @@ class OperBlockMainWidget(QWidget):
         body_layout.addWidget(button)
         body_layout.addStretch(1)
         layout.addWidget(body, 1)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_body_ms",
+            body_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
         return frame
 
     def _make_occupied_table_card(self, table: dict) -> QFrame:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
         patient = table.get("patient") or {}
         frame = self._base_card()
         layout = QVBoxLayout(frame)
@@ -7962,6 +8305,7 @@ class OperBlockMainWidget(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self._card_header(table.get("display_name") or ""))
 
+        body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(30, 28, 30, 28)
@@ -8019,9 +8363,18 @@ class OperBlockMainWidget(QWidget):
         buttons.addWidget(close_btn, 2)
         body_layout.addLayout(buttons)
         layout.addWidget(body, 1)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_body_ms",
+            body_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
         return frame
 
     def _card_header(self, display_name: str) -> QLabel:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        metric_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         label = QLabel(display_name)
         label.setFixedHeight(54)
         label.setAlignment(Qt.AlignCenter)
@@ -8038,18 +8391,47 @@ class OperBlockMainWidget(QWidget):
             }}
             """
         )
+        operblock_startup_metrics.record_since(
+            "board_apply_card_header_ms",
+            metric_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
         return label
 
     def _base_card(self) -> QFrame:
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        metric_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         frame = QFrame()
         frame.setObjectName("operblockTableCard")
         frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        stylesheet_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         frame.setStyleSheet(PATIENT_CARD_STYLE)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_stylesheet_ms",
+            stylesheet_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        shadow_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         shadow = QGraphicsDropShadowEffect(frame)
         shadow.setBlurRadius(18)
         shadow.setColor(QColor(0, 0, 0, 22))
         shadow.setOffset(3, 4)
         frame.setGraphicsEffect(shadow)
+        operblock_startup_metrics.record_since(
+            "board_apply_card_shadow_effect_ms",
+            shadow_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
+        operblock_startup_metrics.record_since(
+            "board_apply_card_widget_create_ms",
+            metric_started,
+            source="operblock_widget",
+            **metric_fields,
+        )
         return frame
 
     def _open_occupy_dialog(self, table_code: str, table_name: str):
@@ -9396,6 +9778,7 @@ class OperBlockMainWidget(QWidget):
             infusion_rows = [dict(entry.get("interval") or {}) for entry in entries if entry.get("kind") == "infusion"]
             filtered_group["order_rows"] = order_rows
             filtered_group["infusion_rows"] = infusion_rows
+            filtered_group["has_bolus_order"] = any(str(row.get("order_kind") or "") == "bolus" for row in order_rows)
             filtered_group["has_gas_order"] = any(str(row.get("order_kind") or "") == "gas" for row in order_rows)
             filtered_group["has_gas_infusion"] = any(_is_gas_infusion(interval) for interval in infusion_rows)
             filtered_group["has_rate_infusion"] = any(_infusion_has_rate(interval) for interval in infusion_rows)
@@ -9593,6 +9976,7 @@ class OperBlockMainWidget(QWidget):
                     "infusion_rows": [],
                     "latest_dt": datetime.min,
                     "first_id": None,
+                    "has_bolus_order": False,
                     "has_gas_order": False,
                     "has_gas_infusion": False,
                     "has_rate_infusion": False,
@@ -9615,6 +9999,7 @@ class OperBlockMainWidget(QWidget):
             row["order_kind"] = order_kind
             group = ensure_group(drug_name)
             group["order_rows"].append(row)
+            group["has_bolus_order"] = bool(group["has_bolus_order"] or order_kind == "bolus")
             group["has_gas_order"] = bool(group["has_gas_order"] or order_kind == "gas")
             row_id = _safe_int(row.get("id")) or 0
             group["entries"].append(
@@ -9801,8 +10186,6 @@ class OperBlockMainWidget(QWidget):
                 "time_bg": "#E0F2FE",
                 "time_fg": "#0369A1",
             }
-        if "propof" in name or "пропоф" in name:
-            return {"color": "#8B5CF6", "icon": "vial_white", "time_bg": "#EEF2FF", "time_fg": "#5B21B6"}
         if group.get("has_rate_infusion") or "noradren" in name or "норадрен" in name:
             return {
                 "color": "#FFF7ED",
@@ -9820,6 +10203,15 @@ class OperBlockMainWidget(QWidget):
                 "icon_size": 30,
                 "time_bg": "#CCFBF1",
                 "time_fg": "#0F766E",
+            }
+        if group.get("has_bolus_order"):
+            return {
+                "color": "#EAFBF5",
+                "icon": "syringe_white",
+                "icon_file": type_icon_key("bolus"),
+                "icon_size": 30,
+                "time_bg": "#DCFCE7",
+                "time_fg": "#15803D",
             }
         return {
             "color": "#EAFBF5",
@@ -13288,21 +13680,107 @@ class OperBlockMainWidget(QWidget):
         super().closeEvent(event)
 
     def _set_patient_photo(self, label: QLabel, gender: str | None):
-        gender_text = str(gender or "").lower()
-        if gender_text.startswith("жен"):
-            name = "woman.png"
-        elif gender_text.startswith("муж") or gender_text.startswith("м"):
-            name = "man.png"
-        else:
-            name = "noman.png"
-        path = os.path.join(get_patient_assets_dir(), "Patients", name)
-        if not os.path.isfile(path):
-            path = os.path.join(get_patient_assets_dir(), "Patients", "noman.png")
-        if os.path.isfile(path):
-            pixmap = QPixmap(path).scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            label.setPixmap(pixmap)
-            return
-        label.setText("Фото")
+        apply_metrics = self._current_board_apply_metrics
+        metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
+        metric_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+        if apply_metrics is not None:
+            apply_metrics["photo_count"] = int(apply_metrics.get("photo_count") or 0) + 1
+        try:
+            path_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+            gender_text = str(gender or "").lower()
+            if gender_text.startswith("жен"):
+                name = "woman.png"
+            elif gender_text.startswith("муж") or gender_text.startswith("м"):
+                name = "man.png"
+            else:
+                name = "noman.png"
+            path = os.path.join(get_patient_assets_dir(), "Patients", name)
+            if not os.path.isfile(path):
+                path = os.path.join(get_patient_assets_dir(), "Patients", "noman.png")
+            operblock_startup_metrics.record_since(
+                "board_apply_card_photo_path_ms",
+                path_started,
+                source="operblock_widget",
+                **metric_fields,
+            )
+            if os.path.isfile(path):
+                load_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+                target_size = label.size()
+                try:
+                    stat = os.stat(path)
+                    cache_key = (
+                        path,
+                        int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
+                        int(stat.st_size),
+                        int(target_size.width()),
+                        int(target_size.height()),
+                    )
+                except Exception:
+                    cache_key = None
+                cached = self._board_photo_thumbnail_cache.get(cache_key) if cache_key is not None else None
+                if cached is not None and not cached.isNull():
+                    if apply_metrics is not None:
+                        apply_metrics["photo_cache_hit_count"] = int(apply_metrics.get("photo_cache_hit_count") or 0) + 1
+                        operblock_startup_metrics.record_since(
+                            "board_apply_card_photo_pixmap_load_ms",
+                            load_started,
+                            source="operblock_widget",
+                            cache_hit=True,
+                            **metric_fields,
+                        )
+                        operblock_startup_metrics.record_duration(
+                            "board_apply_card_photo_scaled_ms",
+                            0.0,
+                            source="operblock_widget",
+                            cache_hit=True,
+                            **metric_fields,
+                        )
+                    label.setPixmap(cached)
+                    return
+                if apply_metrics is not None:
+                    apply_metrics["photo_cache_miss_count"] = int(apply_metrics.get("photo_cache_miss_count") or 0) + 1
+                reader = QImageReader(path)
+                reader.setAutoTransform(True)
+                source_size = reader.size()
+                if source_size.isValid() and target_size.isValid() and not target_size.isEmpty():
+                    scaled_size = source_size.scaled(target_size, Qt.KeepAspectRatio)
+                    if scaled_size.isValid() and not scaled_size.isEmpty():
+                        reader.setScaledSize(scaled_size)
+                image = reader.read()
+                if image.isNull():
+                    source_pixmap = QPixmap(path)
+                else:
+                    source_pixmap = QPixmap.fromImage(image)
+                operblock_startup_metrics.record_since(
+                    "board_apply_card_photo_pixmap_load_ms",
+                    load_started,
+                    source="operblock_widget",
+                    cache_hit=False,
+                    **metric_fields,
+                )
+                scale_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+                pixmap = source_pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                operblock_startup_metrics.record_since(
+                    "board_apply_card_photo_scaled_ms",
+                    scale_started,
+                    source="operblock_widget",
+                    **metric_fields,
+                )
+                if not pixmap.isNull():
+                    if cache_key is not None:
+                        self._board_photo_thumbnail_cache[cache_key] = pixmap
+                    label.setPixmap(pixmap)
+                    return
+            if apply_metrics is not None:
+                apply_metrics["missing_photo_count"] = int(apply_metrics.get("missing_photo_count") or 0) + 1
+            label.setText("Фото")
+        finally:
+            operblock_startup_metrics.record_since(
+                "board_apply_card_photo_total_ms",
+                metric_started,
+                source="operblock_widget",
+                **metric_fields,
+            )
 
     @staticmethod
     def _clear_layout(layout):

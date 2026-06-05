@@ -45,29 +45,37 @@ class StepResult:
 
 
 BENCHMARK_COLUMNS = [
-    "time_to_window_visible_ms",
-    "time_to_operblock_board_ready_ms",
-    "role_activation_ms",
-    "opblock_import_ms",
-    "operblock_widget_import_ms",
-    "operblock_widget_create_ms",
-    "operblock_init_ui_ms",
-    "build_board_page_ms",
-    "build_protocol_page_ms",
-    "build_vitals_tab_ms",
-    "build_orders_tab_ms",
-    "build_archive_page_ms",
-    "operblock_chart_module_import_ms",
-    "operblock_chart_lazy_import_ms",
-    "operblock_chart_create_ms",
-    "quick_orders_load_ms",
-    "settings_ensure_ready_ms",
-    "settings_operblock_icons_seed_ms",
-    "settings_operblock_icons_seed_skipped",
-    "first_refresh_board_ms",
-    "build_operblock_board_snapshot_ms",
-    "apply_board_snapshot_ms",
-    "max_event_loop_pause_ms",
+    ("window_ms", "time_to_window_visible_ms"),
+    ("board_ready_ms", "time_to_operblock_board_ready_ms"),
+    ("bootstrap_ms", "bootstrap_ms"),
+    ("opblock_import_ms", "opblock_import_ms"),
+    ("role_activation_ms", "role_activation_ms"),
+    ("widget_import_ms", "operblock_widget_import_ms"),
+    ("widget_create_ms", "operblock_widget_create_ms"),
+    ("init_ui_ms", "operblock_init_ui_ms"),
+    ("auto_refresh_ms", "start_auto_refresh_ms"),
+    ("first_refresh_ms", "first_refresh_board_ms"),
+    ("snapshot_ms", "refresh_board_snapshot_ms"),
+    ("apply_total_ms", "refresh_board_apply_total_ms"),
+    ("clear_ms", "board_apply_clear_total_ms"),
+    ("card_loop_ms", "board_apply_card_loop_total_ms"),
+    ("empty_card_ms", "board_apply_make_empty_card_ms"),
+    ("occupied_card_ms", "board_apply_make_occupied_card_ms"),
+    ("photo_total_ms", "board_apply_card_photo_total_ms"),
+    ("photo_load_ms", "board_apply_card_photo_pixmap_load_ms"),
+    ("photo_scaled_ms", "board_apply_card_photo_scaled_ms"),
+    ("layout_ms", "board_apply_layout_add_ms"),
+    ("table_count", "board_apply_table_count"),
+    ("occupied_count", "board_apply_occupied_count"),
+    ("empty_count", "board_apply_empty_count"),
+    ("recreated_count", "board_apply_card_recreated_count"),
+    ("reused_count", "board_apply_card_reused_count"),
+    ("skipped_unchanged_count", "board_apply_card_skipped_unchanged_count"),
+    ("photo_cache_hit", "board_apply_photo_cache_hit_count"),
+    ("photo_cache_miss", "board_apply_photo_cache_miss_count"),
+    ("refresh_count_before_ready", "refresh_count_before_ready"),
+    ("chart_import_before_ready", "chart_import_before_ready"),
+    ("max_pause", "max_event_loop_pause_ms"),
 ]
 
 TOP_PHASE_EXCLUDE = {
@@ -76,6 +84,22 @@ TOP_PHASE_EXCLUDE = {
     "time_to_operblock_board_ready_ms",
     "board_ready_after_paint_ms",
     "max_event_loop_pause_ms",
+}
+
+NESTED_PHASES = {
+    "start_auto_refresh_ms": "wrapper -> first_refresh_board_ms",
+    "first_refresh_board_ms": "child of start_auto_refresh_ms; includes snapshot/apply",
+    "refresh_board_snapshot_ms": "child of first_refresh_board_ms",
+    "build_operblock_board_snapshot_ms": "child of refresh_board_snapshot_ms",
+    "refresh_board_apply_total_ms": "child of first_refresh_board_ms",
+    "apply_board_snapshot_ms": "child of first_refresh_board_ms",
+    "board_apply_clear_total_ms": "child of apply_board_snapshot_ms",
+    "board_apply_card_loop_total_ms": "child of apply_board_snapshot_ms",
+    "board_apply_make_empty_card_ms": "child of board_apply_card_loop_total_ms",
+    "board_apply_make_occupied_card_ms": "child of board_apply_card_loop_total_ms",
+    "board_apply_card_photo_total_ms": "child of card creation",
+    "board_apply_layout_add_ms": "child of board_apply_card_loop_total_ms",
+    "board_apply_order_relayout_ms": "child of board_apply_card_loop_total_ms",
 }
 
 
@@ -301,6 +325,29 @@ def _benchmark_operblock() -> dict:
     app.processEvents()
     operblock_startup_metrics.record_elapsed("board_ready_after_paint_ms", source="startup_benchmark")
     operblock_startup_metrics.record_elapsed("time_to_operblock_board_ready_ms", source="startup_benchmark")
+    pyqtgraph_before_ready = "pyqtgraph" in sys.modules
+    chart_widget_before_ready = "rem_card.ui.shared.chart_widget" in sys.modules
+    operblock_chart_before_ready = "rem_card.ui.operblock_view.operblock_chart_widget" in sys.modules
+    operblock_startup_metrics.record_value(
+        "pyqtgraph_import_before_ready",
+        pyqtgraph_before_ready,
+        source="startup_benchmark",
+    )
+    operblock_startup_metrics.record_value(
+        "chart_widget_import_before_ready",
+        chart_widget_before_ready,
+        source="startup_benchmark",
+    )
+    operblock_startup_metrics.record_value(
+        "operblock_chart_widget_import_before_ready",
+        operblock_chart_before_ready,
+        source="startup_benchmark",
+    )
+    operblock_startup_metrics.record_value(
+        "chart_import_before_ready",
+        bool(pyqtgraph_before_ready or chart_widget_before_ready or operblock_chart_before_ready),
+        source="startup_benchmark",
+    )
 
     metrics_snapshot = operblock_startup_metrics.snapshot()
     metrics = dict(metrics_snapshot.get("metrics") or {})
@@ -426,12 +473,19 @@ def _phase_counts(result: dict) -> dict[str, int]:
 def _fmt_value(value: Any) -> str:
     if value is None:
         return "-"
+    if isinstance(value, bool):
+        return "true" if value else "false"
     if isinstance(value, float):
         return f"{value:.1f}"
     try:
         return f"{float(value):.1f}"
     except Exception:
         return str(value)
+
+
+def _phase_label(name: str) -> str:
+    detail = NESTED_PHASES.get(name)
+    return f"{name} ({detail})" if detail else name
 
 
 def _table(headers: list[str], rows: Iterable[Iterable[Any]]) -> str:
@@ -476,7 +530,7 @@ def _print_single_summary(result: dict) -> None:
     print(f"max_event_loop_pause_ms: {_fmt_value(metrics.get('max_event_loop_pause_ms'))}")
     print()
     print("Top-5 phases")
-    print(_table(["phase", "ms"], [(name, _fmt_value(value)) for name, value in _top_phases(result)]))
+    print(_table(["phase", "ms"], [(_phase_label(name), _fmt_value(value)) for name, value in _top_phases(result)]))
     print()
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 
@@ -559,9 +613,9 @@ def _print_multi_summary(results: list[dict]) -> None:
         return
     rows = []
     for index, result in enumerate(results, start=1):
-        rows.append([index, *[_fmt_value(_metric(result, column)) for column in BENCHMARK_COLUMNS]])
+        rows.append([index, *[_fmt_value(_metric(result, metric_name)) for _header, metric_name in BENCHMARK_COLUMNS]])
     print("Operblock startup benchmark")
-    print(_table(["run", *BENCHMARK_COLUMNS], rows))
+    print(_table(["run", *[header for header, _metric_name in BENCHMARK_COLUMNS]], rows))
     print()
     summary = _summarize_runs(results)
     print("Board ready summary")
@@ -592,7 +646,12 @@ def _print_multi_summary(results: list[dict]) -> None:
         top_rows.append((name, statistics.mean(phase_values), max(phase_values)))
     top_rows.sort(key=lambda item: item[1], reverse=True)
     print("Top-5 phases by mean")
-    print(_table(["phase", "mean_ms", "max_ms"], [(name, _fmt_value(mean), _fmt_value(maximum)) for name, mean, maximum in top_rows[:5]]))
+    print(
+        _table(
+            ["phase", "mean_ms", "max_ms"],
+            [(_phase_label(name), _fmt_value(mean), _fmt_value(maximum)) for name, mean, maximum in top_rows[:5]],
+        )
+    )
     print()
     print(json.dumps({"summary": summary, "runs": results}, ensure_ascii=False, indent=2, default=str))
 
