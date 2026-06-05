@@ -34,6 +34,17 @@ STARTUP_W1_WAIT_MS_ENV = "REMCARD_STARTUP_W1_WAIT_MS"
 STARTUP_W1_WAIT_DEFAULT_MS = 300
 FULL_RUNTIME_THEME_ENV = "REMCARD_FULL_RUNTIME_THEME"
 STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
+EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT = "Войти в программу"
+EMERGENCY_STARTUP_PASSWORD_TEXT = "Ввести аварийный пароль"
+EMERGENCY_STARTUP_SWITCH_TO_NETWORK_TEXT = "Перейти на основную БД"
+EMERGENCY_STARTUP_CANCEL_TEXT = "Отмена"
+
+ACTIVE_EMERGENCY_SESSION_NETWORK_AVAILABLE_MESSAGE = (
+    "На этом ПК есть активная аварийная сессия RemCard.\n\n"
+    "Сетевая база доступна, но обычный запуск заблокирован до решения по аварийной сессии.\n\n"
+    "Можно войти в программу на локальной аварийной базе или после ввода аварийного пароля "
+    "перейти на основную БД с объединением аварийных изменений."
+)
 
 
 def _show_native_warning(title: str, message: str):
@@ -627,7 +638,11 @@ def _call_startup_failure_callback(callback: Optional[Callable[[object], object]
     return bool(outcome)
 
 
-def _show_emergency_startup_offer(message: str) -> bool:
+def _show_emergency_startup_offer(
+    message: str,
+    *,
+    open_text: str = EMERGENCY_STARTUP_PASSWORD_TEXT,
+) -> bool:
     if os.environ.get("REMCARD_EMERGENCY_STARTUP_AUTO_ACCEPT") == "1":
         return True
     open_code = 1
@@ -643,8 +658,8 @@ def _show_emergency_startup_offer(message: str) -> bool:
             "Аварийный режим",
             message,
             [
-                ("Ввести аварийный пароль", open_code),
-                ("Отмена", close_code),
+                (str(open_text or EMERGENCY_STARTUP_PASSWORD_TEXT), open_code),
+                (EMERGENCY_STARTUP_CANCEL_TEXT, close_code),
             ],
             default_code=close_code,
         )
@@ -653,12 +668,85 @@ def _show_emergency_startup_offer(message: str) -> bool:
             "Аварийный режим",
             message,
             [
-                ("Ввести аварийный пароль", open_code),
-                ("Отмена", close_code),
+                (str(open_text or EMERGENCY_STARTUP_PASSWORD_TEXT), open_code),
+                (EMERGENCY_STARTUP_CANCEL_TEXT, close_code),
             ],
             default_code=close_code,
         )
     return int(result) == open_code
+
+
+def _call_emergency_startup_offer(message: str, *, open_text: str) -> bool:
+    try:
+        return _show_emergency_startup_offer(message, open_text=open_text)
+    except TypeError as exc:
+        if "open_text" not in str(exc):
+            raise
+        return _show_emergency_startup_offer(message)
+
+
+def _active_emergency_startup_auto_choice(network_available: bool) -> int | None:
+    raw = str(os.environ.get("REMCARD_EMERGENCY_ACTIVE_SESSION_AUTO_CHOICE") or "").strip().lower()
+    if raw:
+        mapping = {
+            "enter": 1,
+            "resume": 1,
+            "program": 1,
+            "войти": 1,
+            "network": 2,
+            "main": 2,
+            "switch": 2,
+            "основная": 2,
+            "cancel": 0,
+            "отмена": 0,
+        }
+        value = mapping.get(raw)
+        if value == 2 and not network_available:
+            return 1
+        if value is not None:
+            return value
+    if os.environ.get("REMCARD_EMERGENCY_STARTUP_AUTO_ACCEPT") == "1":
+        return 1
+    return None
+
+
+def _active_emergency_startup_actions(network_available: bool) -> list[tuple[str, int]]:
+    actions = [(EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT, 1)]
+    if network_available:
+        actions.append((EMERGENCY_STARTUP_SWITCH_TO_NETWORK_TEXT, 2))
+    actions.append((EMERGENCY_STARTUP_CANCEL_TEXT, 0))
+    return actions
+
+
+def _show_active_emergency_startup_choice(message: str, *, network_available: bool) -> int:
+    auto_choice = _active_emergency_startup_auto_choice(network_available)
+    if auto_choice is not None:
+        return int(auto_choice)
+    close_code = 0
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.instance() or QApplication(sys.argv)
+        from rem_card.ui.shared.emergency_dialogs import EmergencyActionDialog
+
+        return int(
+            EmergencyActionDialog.ask(
+                None,
+                "Аварийный режим",
+                message,
+                _active_emergency_startup_actions(network_available),
+                default_code=close_code,
+            )
+        )
+    except Exception:
+        return int(
+            _show_startup_action_without_settings(
+                "Аварийный режим",
+                message,
+                _active_emergency_startup_actions(network_available),
+                default_code=close_code,
+            )
+        )
 
 
 def _show_emergency_startup_password(settings_db_path: str | None) -> bool:
@@ -679,8 +767,35 @@ def _show_emergency_startup_password(settings_db_path: str | None) -> bool:
             "Для перехода в аварийный режим медсестра должна ввести аварийный пароль.",
             lambda value: verify_emergency_password_for_offline_startup(value, settings_db_path=settings_db_path),
             confirm_text="Перейти в аварийный режим",
-            cancel_text="Отмена",
+            cancel_text=EMERGENCY_STARTUP_CANCEL_TEXT,
             error_text="Пароль неверный. Аварийный режим не будет открыт без подтверждения.",
+        )
+    except Exception:
+        return False
+
+
+def _show_emergency_network_transition_password(settings_db_path: str | None) -> bool:
+    if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
+        return True
+    try:
+        from PySide6.QtWidgets import QApplication
+
+        QApplication.instance() or QApplication(sys.argv)
+        from rem_card.app.emergency_password import verify_emergency_password
+        from rem_card.ui.shared.emergency_dialogs import EmergencyPasswordDialog
+
+        return EmergencyPasswordDialog.verify(
+            None,
+            "Аварийный пароль",
+            "Для перехода на основную БД и объединения аварийной сессии введите аварийный пароль.",
+            lambda value: verify_emergency_password(
+                value,
+                settings_db_path=str(settings_db_path or ""),
+                readonly=True,
+            ),
+            confirm_text=EMERGENCY_STARTUP_SWITCH_TO_NETWORK_TEXT,
+            cancel_text=EMERGENCY_STARTUP_CANCEL_TEXT,
+            error_text="Пароль неверный. Переход на основную БД не будет выполнен без подтверждения.",
         )
     except Exception:
         return False
@@ -756,7 +871,12 @@ def _try_emergency_startup_after_network_failure(
     stale_warning = startup_request_stale_warning(startup_request_payload)
     if stale_warning and stale_warning not in offer_message:
         offer_message = f"{offer_message}\n\n{stale_warning}"
-    if not _show_emergency_startup_offer(offer_message):
+    open_text = (
+        EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT
+        if decision.active_session_metadata is not None
+        else EMERGENCY_STARTUP_PASSWORD_TEXT
+    )
+    if not _call_emergency_startup_offer(offer_message, open_text=open_text):
         record_emergency_startup_metric("emergency_startup_user_cancelled", status=decision.status)
         return False
 
@@ -778,6 +898,97 @@ def _try_emergency_startup_after_network_failure(
             "Не удалось открыть аварийный режим на этом ПК. RemCard будет закрыт.",
         )
         return False
+
+
+def _active_emergency_session_network_start_message() -> str:
+    return ACTIVE_EMERGENCY_SESSION_NETWORK_AVAILABLE_MESSAGE
+
+
+def _mark_active_emergency_session_merge_pending_for_network_start(
+    decision,
+    *,
+    source_medical_db_path: str | None = None,
+    source_settings_db_path: str | None = None,
+    network_baza_dir: str | None = None,
+) -> tuple[bool, str]:
+    try:
+        from rem_card.app.emergency_startup import (
+            mark_active_emergency_session_merge_pending_for_network_start,
+        )
+
+        return mark_active_emergency_session_merge_pending_for_network_start(
+            decision,
+            source_medical_db_path=source_medical_db_path,
+            source_settings_db_path=source_settings_db_path,
+            network_baza_dir=network_baza_dir,
+        )
+    except Exception as exc:
+        return False, f"Переход на основную БД сейчас невозможен.\n\nТехническая причина: {exc}"
+
+
+def _start_active_emergency_session_for_startup(decision):
+    from rem_card.app.emergency_startup import start_or_resume_emergency_session
+
+    session = start_or_resume_emergency_session(decision)
+    _configure_emergency_settings_for_startup(session.runtime_context)
+    return session.runtime_context
+
+
+def _resolve_active_emergency_session_before_network_start(
+    role: Optional[str],
+    *,
+    before_user_message: Optional[Callable[[], None]] = None,
+):
+    if role != "nurse":
+        return None
+
+    try:
+        from rem_card.app.emergency_startup import prepare_emergency_startup, record_emergency_startup_metric
+    except Exception:
+        return None
+
+    try:
+        decision = prepare_emergency_startup(role)
+    except Exception:
+        return None
+    if getattr(decision, "active_session_metadata", None) is None:
+        return None
+    if not getattr(decision, "allowed", False):
+        return None
+
+    record_emergency_startup_metric("emergency_startup_active_session_network_available", status=decision.status)
+    _call_startup_message_callback(before_user_message)
+    choice = _show_active_emergency_startup_choice(
+        _active_emergency_session_network_start_message(),
+        network_available=True,
+    )
+    if int(choice or 0) == 0:
+        record_emergency_startup_metric("emergency_startup_user_cancelled", status=decision.status)
+        return False
+    if int(choice or 0) == 1:
+        record_emergency_startup_metric("emergency_startup_user_accepted", status=decision.status, action="resume")
+        return _start_active_emergency_session_for_startup(decision)
+    if int(choice or 0) != 2:
+        return False
+
+    settings_db_path = str(getattr(decision, "password_settings_db_path", "") or "")
+    if not _show_emergency_network_transition_password(settings_db_path):
+        record_emergency_startup_metric("emergency_startup_password_rejected", status=decision.status, action="network")
+        return False
+
+    ok, details = _mark_active_emergency_session_merge_pending_for_network_start(decision)
+    if not ok:
+        _show_custom_warning("Аварийное объединение недоступно", details)
+        record_emergency_startup_metric(
+            "emergency_startup_network_switch_blocked",
+            status=decision.status,
+            reason=details,
+        )
+        return _start_active_emergency_session_for_startup(decision)
+
+    record_emergency_startup_metric("emergency_startup_network_switch_requested", status=decision.status)
+    _run_pending_emergency_merge_before_startup(before_user_message or (lambda: None))
+    return None
 
 
 def _handle_emergency_startup_guard_failure(
@@ -1219,6 +1430,28 @@ def _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, 
     _run_pending_emergency_merge_before_startup(close_startup_splash)
 
 
+def _resolve_startup_runtime_context_after_guard(
+    role: Optional[str],
+    emergency_startup_state: dict,
+    close_startup_splash: Callable[[], None],
+):
+    emergency_runtime_context = emergency_startup_state.get("runtime_context")
+    if emergency_runtime_context is not None:
+        return emergency_runtime_context
+
+    active_session_start = _resolve_active_emergency_session_before_network_start(
+        role,
+        before_user_message=close_startup_splash,
+    )
+    if active_session_start is False:
+        close_startup_splash()
+        sys.exit(0)
+    if active_session_start is not None:
+        emergency_startup_state["runtime_context"] = active_session_start
+        return active_session_start
+    return None
+
+
 def main(forced_role: Optional[str] = None, path_setup: bool = False):
     try:
         compiled_role = _infer_compiled_role_from_executable()
@@ -1281,7 +1514,11 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         close_startup_splash()
         sys.exit(1)
 
-    emergency_runtime_context = emergency_startup_state.get("runtime_context")
+    emergency_runtime_context = _resolve_startup_runtime_context_after_guard(
+        args.role,
+        emergency_startup_state,
+        close_startup_splash,
+    )
     _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, close_startup_splash)
 
     role_suffix = args.role if args.role else "default"

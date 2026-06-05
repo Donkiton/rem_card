@@ -539,6 +539,87 @@ def scenario_remote_changed_authoritative(temp_root: Path) -> ScenarioResult:
     )
 
 
+def scenario_active_session_network_startup_switch(temp_root: Path) -> ScenarioResult:
+    from rem_card.app.emergency_pending_merge import run_pending_emergency_merge
+    from rem_card.app.emergency_startup import find_resumable_active_session, prepare_emergency_startup
+    from rem_card.app.main import (
+        EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT,
+        EMERGENCY_STARTUP_PASSWORD_TEXT,
+        EMERGENCY_STARTUP_SWITCH_TO_NETWORK_TEXT,
+        _active_emergency_startup_actions,
+        _mark_active_emergency_session_merge_pending_for_network_start,
+    )
+
+    paths = _build_network_fixture(temp_root, "active_session_network_startup_switch")
+    settings_hash_before = _file_hash(paths["settings_path"])
+    store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
+    local_writes = _apply_controlled_local_emergency_writes(startup_session.metadata.local_db_path)
+
+    online_actions = _active_emergency_startup_actions(True)
+    offline_actions = _active_emergency_startup_actions(False)
+    _require(
+        online_actions == [
+            (EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT, 1),
+            (EMERGENCY_STARTUP_SWITCH_TO_NETWORK_TEXT, 2),
+            ("Отмена", 0),
+        ],
+        f"active session online actions are wrong: {online_actions}",
+    )
+    _require(
+        offline_actions == [
+            (EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT, 1),
+            ("Отмена", 0),
+        ],
+        f"active session offline actions are wrong: {offline_actions}",
+    )
+    _require(
+        EMERGENCY_STARTUP_PASSWORD_TEXT not in [label for label, _code in offline_actions],
+        "offline active-session dialog still asks for emergency password",
+    )
+
+    decision = prepare_emergency_startup("nurse", root=paths["emergency_root"])
+    _require(
+        decision.allowed and decision.status == "active_session_available",
+        f"active session was not detected before network startup: {decision}",
+    )
+    ok, marker_path = _mark_active_emergency_session_merge_pending_for_network_start(
+        decision,
+        source_medical_db_path=paths["medical_path"],
+        source_settings_db_path=paths["settings_path"],
+        network_baza_dir=paths["network_baza"],
+    )
+    _require(ok and os.path.isfile(marker_path), f"startup switch did not create merge-ready marker: {marker_path}")
+    loaded = store.read_active_session(startup_session.metadata.emergency_session_id)
+    _require(loaded.status == "merge_pending", f"startup switch did not mark merge_pending: {loaded.status}")
+
+    merge_result = run_pending_emergency_merge(
+        root=paths["emergency_root"],
+        source_medical_db_path=paths["medical_path"],
+        source_settings_db_path=paths["settings_path"],
+        network_baza_dir=paths["network_baza"],
+    )
+    _require(
+        merge_result.ok and merge_result.attempted,
+        f"pending merge after startup switch failed: {merge_result}",
+    )
+    remote_validation = _validate_medical(paths["medical_path"])
+    _require(remote_validation.ok, f"final remote validation failed: {remote_validation}")
+    _require(
+        int(remote_validation.last_change_id or 0) == int(local_writes["local_last_change_id"]),
+        f"startup switch merge last_change_id mismatch: {remote_validation.last_change_id} != {local_writes['local_last_change_id']}",
+    )
+    _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) >= 4, "startup switch did not migrate emergency rows")
+    _assert_settings_untouched(paths["settings_path"], settings_hash_before)
+    active_session, reason = find_resumable_active_session(store)
+    _require(active_session is None, f"merged startup-switch session is still resumable: {active_session} reason={reason}")
+    return ScenarioResult(
+        name="active_session_network_startup_switch",
+        ok=True,
+        details=f"startup switch merged active emergency session last_change_id={remote_validation.last_change_id}",
+        artifacts={"merge_report": merge_result.merge_report_path, "marker_path": marker_path},
+    )
+
+
 def scenario_failure_rollback(temp_root: Path) -> ScenarioResult:
     paths = _build_network_fixture(temp_root, "failure_rollback")
     store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
@@ -702,6 +783,7 @@ def scenario_unconfirmed_write(temp_root: Path) -> ScenarioResult:
 SCENARIOS: tuple[tuple[str, Callable[[Path], ScenarioResult]], ...] = (
     ("full_mode_a_path", scenario_full_mode_a_path),
     ("remote_changed_authoritative", scenario_remote_changed_authoritative),
+    ("active_session_network_startup_switch", scenario_active_session_network_startup_switch),
     ("failure_rollback", scenario_failure_rollback),
     ("no_standby_empty_fallback_and_missing_settings_block", scenario_no_standby_empty_fallback_and_missing_settings_block),
     ("doctor_blocked", scenario_doctor_blocked),

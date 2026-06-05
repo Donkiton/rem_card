@@ -244,21 +244,48 @@ def startup_request_stale_warning(payload: dict[str, Any] | None) -> str:
     return ""
 
 
+def _runtime_restart_args(marker_path: str, *, role: str = "nurse") -> list[str]:
+    marker_abs = os.path.abspath(marker_path)
+    normalized_role = str(role or "nurse")
+    if getattr(sys, "frozen", False):
+        return [
+            os.path.abspath(sys.executable),
+            "--role",
+            normalized_role,
+            "--emergency-startup-request",
+            marker_abs,
+        ]
+
+    argv0 = str(sys.argv[0] if sys.argv else "").strip()
+    script_path = os.path.abspath(argv0) if argv0 and os.path.isfile(argv0) else ""
+    if not script_path:
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        role_script = {
+            "doctor": "run_doctor.py",
+            "nurse": "run_nurse.py",
+            "operblock": "run_operblock.py",
+        }.get(normalized_role, "launcher.py")
+        script_path = os.path.join(project_root, role_script)
+    return [
+        os.path.abspath(sys.executable),
+        script_path,
+        "--role",
+        normalized_role,
+        "--emergency-startup-request",
+        marker_abs,
+    ]
+
+
 def launch_emergency_restart(
     marker_path: str,
     *,
     role: str = "nurse",
     launcher: Callable[[list[str]], Any] | None = None,
 ) -> bool:
-    exe_path = os.path.abspath(sys.executable)
-    args = [exe_path, "--role", str(role or "nurse"), "--emergency-startup-request", os.path.abspath(marker_path)]
+    args = _runtime_restart_args(marker_path, role=role)
     if launcher is not None:
         launcher(args)
         return True
-
-    if not getattr(sys, "frozen", False):
-        record_metric("runtime_outage_emergency_relaunch_skipped", 1, reason="not_compiled")
-        return False
 
     parent_pid = os.getpid()
     ps_command = (
@@ -277,7 +304,10 @@ def launch_emergency_restart(
         *args,
     ]
     try:
-        subprocess.Popen(command, cwd=os.path.dirname(exe_path) or None)
+        cwd = os.path.dirname(args[0]) or None
+        if len(args) > 1 and os.path.isfile(args[1]):
+            cwd = os.path.dirname(args[1]) or cwd
+        subprocess.Popen(command, cwd=cwd)
     except Exception as exc:
         record_metric("runtime_outage_emergency_relaunch_failed", 1, error=str(exc))
         return False

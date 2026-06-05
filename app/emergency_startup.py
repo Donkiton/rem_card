@@ -440,3 +440,75 @@ def start_or_resume_emergency_session(
         settings_readonly=runtime_context.settings_readonly,
     )
     return EmergencyStartupSession(metadata=metadata, runtime_context=runtime_context, resumed=resumed)
+
+
+def _network_transition_probe_block_message(status: dict[str, Any]) -> str:
+    status_name = str((status or {}).get("status") or "")
+    reason = str((status or {}).get("reason") or (status or {}).get("error") or "").strip()
+    if status_name == "session_lock_active":
+        details = "на сетевой базе открыто другое окно RemCard"
+    elif status_name in {"db_lock_active", "emergency_merge_lock_active"}:
+        details = "сетевая база сейчас занята служебной операцией"
+    elif status_name.startswith("network_"):
+        details = "сетевая база пока недоступна"
+    else:
+        details = "проверка сетевой базы не разрешила объединение"
+    if reason:
+        details = f"{details}\n\nТехническая причина: {reason}"
+    return (
+        "Переход на основную БД сейчас невозможен.\n\n"
+        f"{details}\n\n"
+        "RemCard откроет активную аварийную сессию, чтобы аварийные данные не потерялись."
+    )
+
+
+def mark_active_emergency_session_merge_pending_for_network_start(
+    decision: EmergencyStartupDecision,
+    *,
+    source_medical_db_path: str | None = None,
+    source_settings_db_path: str | None = None,
+    network_baza_dir: str | None = None,
+) -> tuple[bool, str]:
+    metadata = decision.active_session_metadata
+    if metadata is None:
+        return False, "Активная аварийная сессия не найдена."
+
+    from rem_card.app.emergency_restore_probe import EmergencyRestoreProbe
+
+    store = EmergencyLocalStore(root=decision.root or None, source_role="nurse")
+    runtime_context = store.build_active_runtime_context(metadata.emergency_session_id)
+    probe = EmergencyRestoreProbe(
+        role="nurse",
+        runtime_context=runtime_context,
+        store=store,
+        session_metadata=metadata,
+        success_rounds_required=1,
+        stability_window_sec=1.0,
+        source_medical_db_path=source_medical_db_path,
+        source_settings_db_path=source_settings_db_path,
+        network_baza_dir=network_baza_dir,
+        is_shutdown=lambda: False,
+        is_local_write_idle=lambda: True,
+        is_local_maintenance_idle=lambda: True,
+    )
+    try:
+        status = probe.run_probe_once()
+        status_name = str(status.get("status") or "")
+        ready = (
+            status_name == "merge_ready_mode_a" and bool(status.get("merge_ready"))
+        ) or (
+            status_name == "remote_changed_conflict_pending" and bool(status.get("network_stable"))
+        )
+        if not ready:
+            return False, _network_transition_probe_block_message(status)
+        marker_path = probe.mark_merge_ready()
+        record_metric(
+            "emergency_startup_network_switch_merge_ready",
+            1,
+            session_id=metadata.emergency_session_id,
+            marker_path=marker_path,
+            status=status_name,
+        )
+        return True, marker_path
+    finally:
+        probe.release_network_emergency_role_marker()

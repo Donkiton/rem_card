@@ -454,11 +454,20 @@ class MainWindow(QMainWindow):
             return
         mapping = {
             "running": "Сетевая база проверяется",
+            "network_baza_unavailable": "Ожидание восстановления сетевой базы",
+            "network_medical_db_missing": "Ожидание восстановления сетевой базы",
+            "network_settings_db_missing": "Ожидание восстановления сетевой базы",
+            "network_medical_db_unavailable": "Ожидание восстановления сетевой базы",
+            "network_settings_db_unavailable": "Ожидание восстановления сетевой базы",
+            "session_lock_active": "Сеть доступна, ожидается закрытие других окон RemCard",
+            "db_lock_active": "Сеть доступна, база занята проверкой",
+            "emergency_merge_lock_active": "Сеть доступна, выполняется аварийное объединение",
+            "probe_file_unavailable": "Сеть доступна, проверяется надежность доступа",
             "merge_ready_mode_a": "Сеть восстановлена, требуется закрытие для объединения",
             "remote_changed_conflict_pending": "Сеть восстановлена, требуется решение по аварийному режиму",
         }
         if status.startswith("round_success_"):
-            text = "Сетевая база проверяется"
+            text = "Сеть восстановлена, проверяется надежность доступа"
         elif status in {"disabled", "shutdown", "stopped"}:
             text = "Ожидание восстановления сетевой базы"
         else:
