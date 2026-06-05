@@ -3191,6 +3191,43 @@
         }
       },
       {
+        "preset_id": "drug:diazepam",
+        "source_drug_id": "diazepam",
+        "label": "Diazepami",
+        "display_name": "S. Diazepami 0,5%",
+        "latin": "Diazepami",
+        "aliases": [
+          "диазепам",
+          "реланиум",
+          "сибазон"
+        ],
+        "kind": "bolus",
+        "group": "Седация",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "10 мг",
+        "doses": [
+          "5 мг",
+          "10 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "5 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": 0,
+        "card_color": "#c9c8f7",
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 120,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "sedatives"
+        }
+      },
+      {
         "preset_id": "drug:dexamethasone",
         "source_drug_id": "dexamethasone",
         "label": "Dexamethasoni",
@@ -3220,7 +3257,7 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 120,
+        "sort_order": 130,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "glucocorticoids"
@@ -3255,7 +3292,7 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 130,
+        "sort_order": 140,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "glucocorticoids"
@@ -3290,47 +3327,10 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 140,
-        "payload": {
-          "source": "drugs.seed.json",
-          "source_group": "narcotic_analgesics"
-        }
-      },
-      {
-        "preset_id": "drug:diazepam",
-        "source_drug_id": "diazepam",
-        "label": "Diazepami",
-        "display_name": "S. Diazepami 0,5%",
-        "latin": "Diazepami",
-        "aliases": [
-          "диазепам",
-          "реланиум",
-          "сибазон"
-        ],
-        "kind": "bolus",
-        "group": "Седация",
-        "route": null,
-        "unit": "mg",
-        "default_dose": "10 мг",
-        "doses": [
-          "5 мг",
-          "10 мг"
-        ],
-        "rates": [],
-        "rate_unit": null,
-        "concentration": "5 мг/мл",
-        "solvent_id": "nacl_09",
-        "solvent_label": "NaCl 0.9%",
-        "solvent_volume_ml": "10",
-        "duration_min": 0,
-        "card_color": "#c9c8f7",
-        "uses_line": false,
-        "enabled": true,
-        "favorite": false,
         "sort_order": 150,
         "payload": {
           "source": "drugs.seed.json",
-          "source_group": "sedatives"
+          "source_group": "narcotic_analgesics"
         }
       },
       {
@@ -3390,7 +3390,7 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 560,
+        "sort_order": 180,
         "payload": {}
       },
       {
@@ -3420,7 +3420,7 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 570,
+        "sort_order": 190,
         "payload": {}
       },
       {
@@ -3450,7 +3450,7 @@
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 580,
+        "sort_order": 200,
         "payload": {}
       },
       {
