@@ -23,6 +23,8 @@ UPDATE_STARTING_LOCK_FILE_NAME = "remcard_update_starting.lock"
 REQUIRED_RELEASE_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
+    "RemCardOperBlockEmergency.exe",
+    "RemCardOperBlockPlanned.exe",
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )

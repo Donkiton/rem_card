@@ -644,6 +644,24 @@ def _stable_ui_hash(payload) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _normalize_operblock_table_filter(table_code: str | None) -> str | None:
+    code = str(table_code or "").strip().lower()
+    if not code:
+        return None
+    allowed = {str(table["code"]) for table in OPERBLOCK_TABLES}
+    if code not in allowed:
+        raise ValueError("Неизвестная операционная.")
+    return code
+
+
+def _operblock_table_display_name(table_code: str | None) -> str:
+    code = str(table_code or "").strip().lower()
+    for table in OPERBLOCK_TABLES:
+        if str(table.get("code") or "") == code:
+            return str(table.get("display_name") or "")
+    return ""
+
+
 _IMPLICIT_DOSE_UNIT_PATTERN = (
     r"(?:мкгр|мкг|мг|мл|гр|г|ед|ме|ME|IU|mcg|mkg|mg|ml|ug|g|ed)"
 )
@@ -1557,6 +1575,9 @@ class OperBlockSector8Panel(QWidget):
             "exit": self.btn_exit,
         }
         self.apply_display_settings()
+
+    def set_title(self, title: str):
+        self.title_label.setText(str(title or "Оперблок"))
 
     def _button(self, text: str, icon_name: str) -> QPushButton:
         button = QPushButton(text, self)
@@ -6209,7 +6230,15 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
 
 
 class OperBlockMainWidget(QWidget):
-    def __init__(self, patient_service, remcard_service, operblock_service: OperBlockService | None = None, parent=None):
+    def __init__(
+        self,
+        patient_service,
+        remcard_service,
+        operblock_service: OperBlockService | None = None,
+        parent=None,
+        *,
+        table_code: str | None = None,
+    ):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
@@ -6218,6 +6247,8 @@ class OperBlockMainWidget(QWidget):
             raise RuntimeError("OperBlockService не передан в OperBlockMainWidget.")
         self.operblock_service = operblock_service
         self.operblock_vitals_service = OperBlockVitalsServiceAdapter(remcard_service, operblock_service)
+        self._table_filter_code = _normalize_operblock_table_filter(table_code)
+        self._table_filter_name = _operblock_table_display_name(self._table_filter_code)
         self._is_closing = False
         self._board_hash = ""
         self._protocol_hash = ""
@@ -6305,6 +6336,8 @@ class OperBlockMainWidget(QWidget):
         self.sector_8 = Sector8()
         self.sector_8.setFixedHeight(38)
         self.sector_8_panel = OperBlockSector8Panel()
+        if self._table_filter_name:
+            self.sector_8_panel.set_title(self._table_filter_name)
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
         self.sector_8_panel.btn_settings.clicked.connect(self._open_operblock_settings)
@@ -6318,6 +6351,33 @@ class OperBlockMainWidget(QWidget):
         self.stack.addWidget(self.board_page)
         root.addWidget(self.stack, 1)
         self._set_protocol_chrome(False)
+
+    def _visible_operblock_tables(self) -> list[dict]:
+        if not self._table_filter_code:
+            return [dict(table) for table in OPERBLOCK_TABLES]
+        return [dict(table) for table in OPERBLOCK_TABLES if str(table.get("code") or "") == self._table_filter_code]
+
+    def _filter_board_snapshot(self, snapshot: dict) -> dict:
+        if not self._table_filter_code:
+            return snapshot
+        filtered = dict(snapshot or {})
+        filtered["tables"] = [
+            dict(table or {})
+            for table in list((snapshot or {}).get("tables") or [])
+            if str((table or {}).get("code") or "") == self._table_filter_code
+        ]
+        filtered["table_filter_code"] = self._table_filter_code
+        filtered["content_hash"] = _stable_ui_hash(filtered)
+        return filtered
+
+    def _filter_archive_cases_by_table(self, cases: list[dict]) -> list[dict]:
+        if not self._table_filter_code:
+            return [dict(item or {}) for item in cases]
+        return [
+            dict(item or {})
+            for item in cases
+            if str((item or {}).get("table_code") or "").strip().lower() == self._table_filter_code
+        ]
 
     def _ensure_protocol_page_created(self) -> bool:
         if self.protocol_page is not None:
@@ -6365,7 +6425,7 @@ class OperBlockMainWidget(QWidget):
         self.cards_layout = QHBoxLayout()
         self.cards_layout.setContentsMargins(0, 0, 0, 0)
         self.cards_layout.setSpacing(8)
-        for table in OPERBLOCK_TABLES:
+        for table in self._visible_operblock_tables():
             table_code = str(table["code"])
             card = self._make_empty_table_card(table_code, table["display_name"])
             self._table_cards[table_code] = card
@@ -6390,7 +6450,12 @@ class OperBlockMainWidget(QWidget):
         layout.setSpacing(8)
 
         header = QHBoxLayout()
-        title = QLabel("Архив пациентов операционной")
+        archive_title = (
+            f"Архив пациентов: {self._table_filter_name}"
+            if self._table_filter_name
+            else "Архив пациентов операционной"
+        )
+        title = QLabel(archive_title)
         title.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
         self.archive_search_input = QLineEdit()
         self.archive_search_input.setPlaceholderText("ФИО, ИБ, диагноз")
@@ -7768,6 +7833,7 @@ class OperBlockMainWidget(QWidget):
             try:
                 snapshot_started = operblock_startup_metrics.timer_start()
                 snapshot = self.operblock_service.build_operblock_board_snapshot()
+                snapshot = self._filter_board_snapshot(snapshot)
             except Exception as exc:
                 logger.error("operblock board refresh failed: %s", exc, exc_info=True)
                 CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
@@ -7808,7 +7874,7 @@ class OperBlockMainWidget(QWidget):
         if self._is_closing:
             return
         try:
-            cases = self.operblock_service.list_archived_operation_cases()
+            cases = self._filter_archive_cases_by_table(self.operblock_service.list_archived_operation_cases())
         except Exception as exc:
             logger.error("operblock archive refresh failed: %s", exc, exc_info=True)
             CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось обновить архив:\n{exc}")
@@ -8290,10 +8356,11 @@ class OperBlockMainWidget(QWidget):
         count = len(getattr(self, "_archive_cases", []) or [])
         if count <= 0:
             return
+        archive_scope = f"«{self._table_filter_name}»" if self._table_filter_name else "операционной"
         reply = CustomMessageBox.question(
             self,
             "Удаление архива",
-            f"Действительно удалить всех пациентов из архива операционной? Количество: {count}.",
+            f"Действительно удалить всех пациентов из архива {archive_scope}? Количество: {count}.",
             CustomMessageBox.Yes | CustomMessageBox.No,
             CustomMessageBox.No,
         )
@@ -8304,7 +8371,7 @@ class OperBlockMainWidget(QWidget):
 
         self._enqueue_write(
             "operblock_delete_all_archive_cases",
-            lambda: self.operblock_service.delete_all_archived_operation_cases(),
+            lambda: self.operblock_service.delete_all_archived_operation_cases(table_code=self._table_filter_code),
             on_success=lambda _result: self._on_delete_archive_case_success(),
             on_error=lambda exc: self._on_delete_archive_case_error(exc),
         )
@@ -8555,9 +8622,6 @@ class OperBlockMainWidget(QWidget):
             dialog.set_saving(False)
             dialog.accept()
         self.refresh_board(force=True)
-        case_id = int((result or {}).get("operation_case_id") or 0)
-        if case_id:
-            QTimer.singleShot(0, lambda: self._open_protocol(case_id))
 
     def _on_occupy_error(self, dialog_ref, exc: Exception):
         self._write_pending = False

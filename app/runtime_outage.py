@@ -264,6 +264,8 @@ def _runtime_restart_args(marker_path: str, *, role: str = "nurse") -> list[str]
             "doctor": "run_doctor.py",
             "nurse": "run_nurse.py",
             "operblock": "run_operblock.py",
+            "operblock_emergency": "run_operblock_emergency.py",
+            "operblock_planned": "run_operblock_planned.py",
         }.get(normalized_role, "launcher.py")
         script_path = os.path.join(project_root, role_script)
     return [

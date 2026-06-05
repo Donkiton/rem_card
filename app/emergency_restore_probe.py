@@ -477,7 +477,13 @@ class EmergencyRestoreProbe:
             return "emergency_merge_lock_active", merge_lock
         active_lock = _first_existing_lock(
             context.session_locks_dir,
-            ("doctor.lock", "nurse.lock", "operblock.lock"),
+            (
+                "doctor.lock",
+                "nurse.lock",
+                "operblock.lock",
+                "operblock_emergency.lock",
+                "operblock_planned.lock",
+            ),
         )
         if active_lock:
             return "session_lock_active", active_lock

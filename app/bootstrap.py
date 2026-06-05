@@ -2,6 +2,7 @@ import os
 from typing import TYPE_CHECKING
 
 from rem_card.app.logger import logger
+from rem_card.app.roles import is_operblock_role
 from rem_card.app.paths import (
     BAZA_DIR,
     JOURNAL_DB_PATH,
@@ -34,7 +35,7 @@ class Container:
         self.runtime_context = getattr(db_manager, "runtime_context", None)
         self.runtime_mode = getattr(self.runtime_context, "mode", "network")
         role_key = str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()
-        monitor_enabled = role_key != "operblock"
+        monitor_enabled = not is_operblock_role(role_key)
         self.data_service = DataService(db_manager, monitor_enabled=monitor_enabled)
         self.data_service.set_runtime_role(role)
         if not monitor_enabled:
@@ -176,9 +177,10 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
     if os.environ.get("REMCARD_BOOTSTRAP_DEBUG") == "1":
         print(f"[SETTINGS DB] remcard_settings.db -> {settings_info.get('settings_db_path')}")
 
-    if str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() == "operblock":
+    if is_operblock_role(str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()):
         logger.info(
-            "[OPERBLOCK DB] role=operblock data_root=%s db_path=%s db_profile=network local_db_used=false",
+            "[OPERBLOCK DB] role=%s data_root=%s db_path=%s db_profile=network local_db_used=false",
+            str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() or "operblock",
             getattr(db_manager, "baza_dir", BAZA_DIR),
             getattr(db_manager, "db_path", medical_db_path),
         )

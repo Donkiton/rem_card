@@ -220,7 +220,8 @@ a = Analysis(
     [
         os.path.join(APP_ROOT, 'run_doctor.py'),
         os.path.join(APP_ROOT, 'run_nurse.py'),
-        os.path.join(APP_ROOT, 'run_operblock.py'),
+        os.path.join(APP_ROOT, 'run_operblock_emergency.py'),
+        os.path.join(APP_ROOT, 'run_operblock_planned.py'),
         os.path.join(APP_ROOT, 'run_path_setup.py'),
         os.path.join(APP_ROOT, 'run_updater.py'),
     ],
@@ -301,18 +302,32 @@ nurse_exe = EXE(
     icon=[os.path.join(APP_ROOT, 'icon', 'nurse.ico')],
 )
 
-operblock_exe = EXE(
+operblock_emergency_exe = EXE(
     pyz,
-    _script_toc('run_operblock.py'),
+    _script_toc('run_operblock_emergency.py'),
     [],
     exclude_binaries=True,
-    name='RemCardOperBlock',
+    name='RemCardOperBlockEmergency',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     console=False,
-    icon=[os.path.join(APP_ROOT, 'icon', 'remcardicon.ico')],
+    icon=[os.path.join(APP_ROOT, 'icon', 'operbloc.ico')],
+)
+
+operblock_planned_exe = EXE(
+    pyz,
+    _script_toc('run_operblock_planned.py'),
+    [],
+    exclude_binaries=True,
+    name='RemCardOperBlockPlanned',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    icon=[os.path.join(APP_ROOT, 'icon', 'operbloc.ico')],
 )
 
 path_setup_exe = EXE(
@@ -346,7 +361,8 @@ updater_exe = EXE(
 coll = COLLECT(
     doctor_exe,
     nurse_exe,
-    operblock_exe,
+    operblock_emergency_exe,
+    operblock_planned_exe,
     path_setup_exe,
     updater_exe,
     a.binaries,

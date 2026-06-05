@@ -750,7 +750,13 @@ def _existing_session_locks(directory: str) -> list[str]:
     if not os.path.isdir(directory):
         return []
     locks = []
-    for name in ("doctor.lock", "nurse.lock", "operblock.lock"):
+    for name in (
+        "doctor.lock",
+        "nurse.lock",
+        "operblock.lock",
+        "operblock_emergency.lock",
+        "operblock_planned.lock",
+    ):
         path = os.path.join(directory, name)
         if os.path.exists(path):
             locks.append(path)

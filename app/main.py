@@ -25,7 +25,14 @@ from rem_card.app.runtime_paths import (
     is_compiled,
     write_configured_baza_dir,
 )
-from rem_card.app.roles import ROLE_KEYS, ROLE_OPERBLOCK, role_display_name
+from rem_card.app.roles import (
+    ROLE_KEYS,
+    ROLE_OPERBLOCK,
+    ROLE_OPERBLOCK_EMERGENCY,
+    ROLE_OPERBLOCK_PLANNED,
+    is_operblock_role,
+    role_display_name,
+)
 from rem_card.app.version import APP_DISPLAY_TITLE, APP_VERSION
 
 
@@ -77,7 +84,7 @@ def _startup_trace(logger, started_at: float, phase: str, **fields):
 
 
 def _opblock_startup_metrics_reset(role: Optional[str], started_at: float) -> None:
-    if role != ROLE_OPERBLOCK:
+    if not is_operblock_role(role):
         return
     from rem_card.app import operblock_startup_metrics
 
@@ -85,7 +92,7 @@ def _opblock_startup_metrics_reset(role: Optional[str], started_at: float) -> No
 
 
 def _opblock_startup_timer_start(role: Optional[str]) -> float | None:
-    if role != ROLE_OPERBLOCK:
+    if not is_operblock_role(role):
         return None
     from rem_card.app import operblock_startup_metrics
 
@@ -93,7 +100,7 @@ def _opblock_startup_timer_start(role: Optional[str]) -> float | None:
 
 
 def _opblock_startup_record_duration(role: Optional[str], name: str, elapsed_ms: float, *, source: str) -> None:
-    if role != ROLE_OPERBLOCK:
+    if not is_operblock_role(role):
         return
     from rem_card.app import operblock_startup_metrics
 
@@ -101,7 +108,7 @@ def _opblock_startup_record_duration(role: Optional[str], name: str, elapsed_ms:
 
 
 def _opblock_startup_record_since(role: Optional[str], name: str, started_at: float | None, *, source: str) -> None:
-    if role != ROLE_OPERBLOCK:
+    if not is_operblock_role(role):
         return
     from rem_card.app import operblock_startup_metrics
 
@@ -109,7 +116,7 @@ def _opblock_startup_record_since(role: Optional[str], name: str, started_at: fl
 
 
 def _opblock_startup_record_window_shown(role: Optional[str], initial_role_prepared: bool, QTimer) -> None:
-    if role != ROLE_OPERBLOCK:
+    if not is_operblock_role(role):
         return
     from rem_card.app import operblock_startup_metrics
 
@@ -195,7 +202,7 @@ def _initial_role_layout(window):
         role_widget = getattr(window, "doctor_main", None)
     elif role == "nurse":
         role_widget = getattr(window, "nurse_main", None)
-    elif role == ROLE_OPERBLOCK:
+    elif is_operblock_role(role):
         role_widget = getattr(window, "operblock_main", None)
     if role_widget is None:
         return None
@@ -207,7 +214,7 @@ def _initial_role_layout(window):
 
 
 def _initial_w1_state(window) -> dict:
-    if getattr(window, "_initial_role", None) == ROLE_OPERBLOCK:
+    if is_operblock_role(getattr(window, "_initial_role", None)):
         return {"ready": True, "role_ui": True, "operblock": True}
 
     layout = _initial_role_layout(window)
@@ -1209,7 +1216,7 @@ def _acquire_initial_role_lock(role: Optional[str]):
 
 
 def _configure_operblock_startup_path(role: Optional[str], path_setup: bool) -> bool:
-    if str(role or "").strip().lower() == ROLE_OPERBLOCK:
+    if is_operblock_role(role):
         os.environ["REMCARD_UI_ROLE"] = ROLE_OPERBLOCK
         os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
         os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
@@ -1246,6 +1253,10 @@ def _infer_compiled_role_from_executable() -> Optional[str]:
         return "doctor"
     if "remcardnurse" in source_name:
         return "nurse"
+    if "remcardoperblockemergency" in source_name:
+        return ROLE_OPERBLOCK_EMERGENCY
+    if "remcardoperblockplanned" in source_name:
+        return ROLE_OPERBLOCK_PLANNED
     if "remcardoperblock" in source_name:
         return ROLE_OPERBLOCK
     return None

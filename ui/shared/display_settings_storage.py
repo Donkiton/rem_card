@@ -84,8 +84,12 @@ ROLE_ALIASES = {
     "медсестра": "nurse",
     "медицинская сестра": "nurse",
     "operblock": "operblock",
+    "operblock_emergency": "operblock",
+    "operblock_planned": "operblock",
     "операционный блок": "operblock",
     "оперблок": "operblock",
+    "экстренная операционная": "operblock",
+    "плановая операционная": "operblock",
 }
 
 

@@ -778,18 +778,26 @@ class OperBlockService:
 
         return dict(self.db.run_write_operation(operation, source="operblock_delete_archived_case"))
 
-    def delete_all_archived_operation_cases(self) -> dict[str, int]:
+    def delete_all_archived_operation_cases(self, table_code: str | None = None) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
+        clean_table_code = self._validate_table_code(table_code) if table_code else None
 
         def operation(cursor: sqlite3.Cursor):
+            table_clause = ""
+            params: list[Any] = []
+            if clean_table_code:
+                table_clause = "AND oc.table_code = ?"
+                params.append(clean_table_code)
             rows = cursor.execute(
-                """
+                f"""
                 SELECT oc.id
                 FROM operation_cases oc
                 JOIN admissions a ON a.id = oc.admission_id
                 WHERE oc.status = 'closed'
                   AND COALESCE(a.unit_scope, '') = 'operblock'
-                """
+                  {table_clause}
+                """,
+                tuple(params),
             ).fetchall()
             case_ids = [int(row["id"]) for row in rows]
             if not case_ids:

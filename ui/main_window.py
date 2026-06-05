@@ -17,7 +17,18 @@ from rem_card.app.local_metrics import record_metric
 from rem_card.app import operblock_startup_metrics
 from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
-from rem_card.app.roles import ROLE_KEYS, ROLE_OPERBLOCK, role_display_name
+from rem_card.app.roles import (
+    ROLE_DOCTOR,
+    ROLE_KEYS,
+    ROLE_NURSE,
+    ROLE_OPERBLOCK,
+    ROLE_OPERBLOCK_EMERGENCY,
+    ROLE_OPERBLOCK_PLANNED,
+    is_operblock_role,
+    normalize_role_key,
+    operblock_table_code_for_role,
+    role_display_name,
+)
 from rem_card.app.version import APP_DISPLAY_TITLE
 
 def _get_desktop_path():
@@ -227,6 +238,8 @@ class MainWindow(QMainWindow):
         self.doctor_main = None
         self.nurse_main = None
         self.operblock_main = None
+        self._operblock_widgets = {}
+        self._active_operblock_role_key = None
         self.admin_main = None
         self.welcome = None
         self._maintenance_scheduled = False
@@ -245,12 +258,13 @@ class MainWindow(QMainWindow):
         self._start_event_loop_watchdog()
 
     def _current_role_key(self) -> str:
-        if self.stack.currentWidget() == self.doctor_main:
-            return "doctor"
-        if self.stack.currentWidget() == self.nurse_main:
-            return "nurse"
-        if self.stack.currentWidget() == self.operblock_main:
-            return ROLE_OPERBLOCK
+        current_widget = self.stack.currentWidget()
+        if current_widget == self.doctor_main:
+            return ROLE_DOCTOR
+        if current_widget == self.nurse_main:
+            return ROLE_NURSE
+        if current_widget == self.operblock_main or current_widget in (self._operblock_widgets or {}).values():
+            return self._active_operblock_role_key or ROLE_OPERBLOCK
         if self.stack.currentWidget() == self.admin_main:
             return "admin"
         return str(self._role_lock_key or self._initial_role or "unknown")
@@ -726,6 +740,22 @@ class MainWindow(QMainWindow):
     def _role_display_name(role_key: str) -> str:
         return role_display_name(role_key)
 
+    @staticmethod
+    def _role_key_from_selection(role) -> str:
+        role_key = normalize_role_key(role)
+        if role_key in ROLE_KEYS:
+            return role_key
+        text_map = {
+            "врач": ROLE_DOCTOR,
+            "медсестра": ROLE_NURSE,
+            "медицинская сестра": ROLE_NURSE,
+            "оперблок": ROLE_OPERBLOCK,
+            "операционный блок": ROLE_OPERBLOCK,
+            "экстренная операционная": ROLE_OPERBLOCK_EMERGENCY,
+            "плановая операционная": ROLE_OPERBLOCK_PLANNED,
+        }
+        return text_map.get(role_key, role_key)
+
     def _current_role_lock_path(self, role_key: str) -> str:
         runtime_context = getattr(getattr(self.container, "db_manager", None), "runtime_context", None)
         session_locks_dir = str(getattr(runtime_context, "session_locks_dir", "") or "").strip()
@@ -834,7 +864,7 @@ class MainWindow(QMainWindow):
         return container
 
     def _ensure_role_container(self, role_key: str):
-        if role_key == ROLE_OPERBLOCK:
+        if is_operblock_role(role_key):
             return self._ensure_operblock_container()
         return self._ensure_default_container()
 
@@ -872,7 +902,7 @@ class MainWindow(QMainWindow):
         elif self._initial_role == 'nurse':
             QTimer.singleShot(10, self._activate_initial_nurse_role)
 
-        elif self._initial_role == ROLE_OPERBLOCK:
+        elif is_operblock_role(self._initial_role):
             QTimer.singleShot(10, self._activate_initial_operblock_role)
 
     def _activate_initial_doctor_role(self, *, start_refresh: bool = True):
@@ -918,6 +948,7 @@ class MainWindow(QMainWindow):
                 widget_import_started,
                 source="main_window",
             )
+            role_key = self._initial_role if is_operblock_role(self._initial_role) else ROLE_OPERBLOCK
 
             if self._initial_role_ui_ready and self.operblock_main is not None:
                 if start_refresh:
@@ -927,11 +958,11 @@ class MainWindow(QMainWindow):
             if not self.container:
                 QTimer.singleShot(50, self._activate_initial_operblock_role)
                 return
-            if self._ensure_role_container(ROLE_OPERBLOCK) is None:
-                if self._initial_role == ROLE_OPERBLOCK:
+            if self._ensure_role_container(role_key) is None:
+                if is_operblock_role(self._initial_role):
                     QTimer.singleShot(0, self.close)
                 return
-            if not self._acquire_role_lock(ROLE_OPERBLOCK):
+            if not self._acquire_role_lock(role_key):
                 self.close()
                 return
 
@@ -940,8 +971,11 @@ class MainWindow(QMainWindow):
                 self.container.patient_service,
                 self.container.remcard_service,
                 self.container.operblock_service,
+                table_code=operblock_table_code_for_role(role_key),
                 parent=self.stack,
             )
+            self._operblock_widgets[role_key] = self.operblock_main
+            self._active_operblock_role_key = role_key
             operblock_startup_metrics.record_since(
                 "operblock_widget_create_ms",
                 widget_create_started,
@@ -999,7 +1033,7 @@ class MainWindow(QMainWindow):
             self._activate_initial_doctor_role(start_refresh=False)
         elif self._initial_role == "nurse":
             self._activate_initial_nurse_role(start_refresh=False)
-        elif self._initial_role == ROLE_OPERBLOCK:
+        elif is_operblock_role(self._initial_role):
             self._activate_initial_operblock_role(start_refresh=False)
         return bool(self._initial_role_ui_ready)
 
@@ -1011,7 +1045,7 @@ class MainWindow(QMainWindow):
             role_widget = self.doctor_main
         elif self._initial_role == "nurse":
             role_widget = self.nurse_main
-        elif self._initial_role == ROLE_OPERBLOCK:
+        elif is_operblock_role(self._initial_role):
             role_widget = self.operblock_main
         if role_widget is None or not hasattr(role_widget, "start_auto_refresh"):
             return
@@ -1024,7 +1058,7 @@ class MainWindow(QMainWindow):
             role_widget = self.doctor_main
         elif self._initial_role == "nurse":
             role_widget = self.nurse_main
-        elif self._initial_role == ROLE_OPERBLOCK:
+        elif is_operblock_role(self._initial_role):
             role_widget = self.operblock_main
         service = getattr(role_widget, "remcard_service", None)
         data_service = getattr(service, "data_service", None)
@@ -1033,14 +1067,16 @@ class MainWindow(QMainWindow):
 
     def on_role_selected(self, role):
         from PySide6.QtCore import QTimer
-        
-        if role == "Врач":
+
+        role_key = self._role_key_from_selection(role)
+
+        if role_key == ROLE_DOCTOR:
             if not self.container:
                 QTimer.singleShot(100, lambda: self.on_role_selected(role))
                 return
-            if self._ensure_role_container("doctor") is None:
+            if self._ensure_role_container(ROLE_DOCTOR) is None:
                 return
-            if not self._acquire_role_lock("doctor"):
+            if not self._acquire_role_lock(ROLE_DOCTOR):
                 return
 
             if self.doctor_main is None:
@@ -1059,13 +1095,13 @@ class MainWindow(QMainWindow):
             else:
                 QTimer.singleShot(0, self.doctor_main.auto_refresh)
 
-        elif role == "Медсестра":
+        elif role_key == ROLE_NURSE:
             if not self.container:
                 QTimer.singleShot(100, lambda: self.on_role_selected(role))
                 return
-            if self._ensure_role_container("nurse") is None:
+            if self._ensure_role_container(ROLE_NURSE) is None:
                 return
-            if not self._acquire_role_lock("nurse"):
+            if not self._acquire_role_lock(ROLE_NURSE):
                 return
 
             if self.nurse_main is None:
@@ -1085,15 +1121,16 @@ class MainWindow(QMainWindow):
             else:
                 QTimer.singleShot(0, self.nurse_main.auto_refresh)
 
-        elif role == "Оперблок":
+        elif is_operblock_role(role_key):
             if not self.container:
                 QTimer.singleShot(100, lambda: self.on_role_selected(role))
                 return
-            if self._ensure_role_container(ROLE_OPERBLOCK) is None:
+            if self._ensure_role_container(role_key) is None:
                 return
-            if not self._acquire_role_lock(ROLE_OPERBLOCK):
+            if not self._acquire_role_lock(role_key):
                 return
 
+            self.operblock_main = self._operblock_widgets.get(role_key)
             if self.operblock_main is None:
                 from .operblock_view.operblock_main_widget import OperBlockMainWidget
 
@@ -1101,9 +1138,12 @@ class MainWindow(QMainWindow):
                     self.container.patient_service,
                     self.container.remcard_service,
                     self.container.operblock_service,
+                    table_code=operblock_table_code_for_role(role_key),
                     parent=self.stack,
                 )
+                self._operblock_widgets[role_key] = self.operblock_main
                 self.stack.addWidget(self.operblock_main)
+            self._active_operblock_role_key = role_key
             if hasattr(self.operblock_main, "set_role_launcher_mode"):
                 self.operblock_main.set_role_launcher_mode(self.welcome is not None)
 
@@ -1190,9 +1230,9 @@ class MainWindow(QMainWindow):
             elif current_widget == self.nurse_main:
                 if hasattr(self.nurse_main, 'on_back_clicked'):
                     self.nurse_main.on_back_clicked()
-            elif current_widget == self.operblock_main:
-                if hasattr(self.operblock_main, 'on_back_clicked'):
-                    self.operblock_main.on_back_clicked()
+            elif current_widget == self.operblock_main or current_widget in (self._operblock_widgets or {}).values():
+                if hasattr(current_widget, 'on_back_clicked'):
+                    current_widget.on_back_clicked()
             elif current_widget == self.admin_main:
                 self.show_roles()
         
@@ -1353,11 +1393,14 @@ class MainWindow(QMainWindow):
                     self.nurse_main.shutdown()
                 elif hasattr(self.nurse_main, 'stop_auto_refresh'):
                     self.nurse_main.stop_auto_refresh()
-            if hasattr(self, 'operblock_main'):
-                if hasattr(self.operblock_main, 'shutdown'):
-                    self.operblock_main.shutdown()
-                elif hasattr(self.operblock_main, 'stop_auto_refresh'):
-                    self.operblock_main.stop_auto_refresh()
+            operblock_widgets = list(dict.fromkeys((self._operblock_widgets or {}).values()))
+            if self.operblock_main is not None and self.operblock_main not in operblock_widgets:
+                operblock_widgets.append(self.operblock_main)
+            for operblock_widget in operblock_widgets:
+                if hasattr(operblock_widget, 'shutdown'):
+                    operblock_widget.shutdown()
+                elif hasattr(operblock_widget, 'stop_auto_refresh'):
+                    operblock_widget.stop_auto_refresh()
 
             is_max = getattr(self, '_is_custom_maximized', False) or self.isMaximized()
             self.settings.setValue("is_maximized", is_max)

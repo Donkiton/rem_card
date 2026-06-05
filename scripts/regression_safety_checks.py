@@ -194,6 +194,8 @@ def _write_fake_update_package(path: str, version: str = "9.9.9") -> None:
     for exe_name in (
         "RemCardDoctor.exe",
         "RemCardNurse.exe",
+        "RemCardOperBlockEmergency.exe",
+        "RemCardOperBlockPlanned.exe",
         "RemCardPathSetup.exe",
         "RemCardUpdater.exe",
     ):

@@ -1,5 +1,11 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QFrame
 from PySide6.QtCore import Qt, Signal
+from rem_card.app.roles import (
+    ROLE_DOCTOR,
+    ROLE_NURSE,
+    ROLE_OPERBLOCK_EMERGENCY,
+    ROLE_OPERBLOCK_PLANNED,
+)
 from ..styles.theme import get_bed_style
 
 class WelcomeWidget(QWidget):
@@ -11,24 +17,26 @@ class WelcomeWidget(QWidget):
         self.layout.setAlignment(Qt.AlignCenter)
         self.layout.setSpacing(20)
 
-        title = QLabel("Кто ты, воин?")
+        title = QLabel("Выберите роль")
         title.setProperty("heading", "true")
         self.layout.addWidget(title)
 
         self.btn_doctor = QPushButton("Врач")
         self.btn_nurse = QPushButton("Медсестра")
-        self.btn_operblock = QPushButton("Оперблок")
+        self.btn_operblock_emergency = QPushButton("Экстренная операционная")
+        self.btn_operblock_planned = QPushButton("Плановая операционная")
 
         # Настройка стилей и активности
-        for btn in [self.btn_doctor, self.btn_nurse, self.btn_operblock]:
-            btn.setFixedSize(250, 60)
+        for btn in [self.btn_doctor, self.btn_nurse, self.btn_operblock_emergency, self.btn_operblock_planned]:
+            btn.setFixedSize(300, 60)
             self.layout.addWidget(btn)
 
         self.btn_nurse.setEnabled(True)
 
-        self.btn_doctor.clicked.connect(lambda: self.role_selected.emit("Врач"))
-        self.btn_nurse.clicked.connect(lambda: self.role_selected.emit("Медсестра"))
-        self.btn_operblock.clicked.connect(lambda: self.role_selected.emit("Оперблок"))
+        self.btn_doctor.clicked.connect(lambda: self.role_selected.emit(ROLE_DOCTOR))
+        self.btn_nurse.clicked.connect(lambda: self.role_selected.emit(ROLE_NURSE))
+        self.btn_operblock_emergency.clicked.connect(lambda: self.role_selected.emit(ROLE_OPERBLOCK_EMERGENCY))
+        self.btn_operblock_planned.clicked.connect(lambda: self.role_selected.emit(ROLE_OPERBLOCK_PLANNED))
 
 class BedWidget(QFrame):
     clicked = Signal(object) # Передает PatientDTO

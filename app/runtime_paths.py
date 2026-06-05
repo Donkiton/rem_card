@@ -7,6 +7,14 @@ import tempfile
 import time
 from typing import Optional
 
+from rem_card.app.roles import (
+    OPERBLOCK_ROLE_KEYS,
+    ROLE_OPERBLOCK,
+    ROLE_OPERBLOCK_EMERGENCY,
+    ROLE_OPERBLOCK_PLANNED,
+    is_operblock_role,
+)
+
 
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
 OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в текущей папке базы"
@@ -56,13 +64,13 @@ def is_operblock_executable() -> bool:
     exe_name = os.path.basename(str(sys.executable or "")).lower()
     argv0_name = os.path.basename(str(sys.argv[0] if sys.argv else "")).lower()
     argv_text = " ".join(str(arg).lower() for arg in sys.argv)
+    ui_role = str(os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()
     return (
         "remcardoperblock" in exe_name
         or "remcardoperblock" in argv0_name
         or "run_operblock" in argv_text
-        or "--role operblock" in argv_text
-        or "--role=operblock" in argv_text
-        or str(os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() == "operblock"
+        or any(f"--role {role}" in argv_text or f"--role={role}" in argv_text for role in OPERBLOCK_ROLE_KEYS)
+        or is_operblock_role(ui_role)
     )
 
 
@@ -162,16 +170,17 @@ def validate_operblock_baza_dir(baza_dir: str) -> tuple[bool, str]:
 
 
 def configure_operblock_runtime_path(role: str | None) -> Optional[dict[str, str]]:
-    if str(role or "").strip().lower() != "operblock":
+    role_key = str(role or "").strip().lower()
+    if not is_operblock_role(role_key):
         return None
 
     os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
-    os.environ["REMCARD_UI_ROLE"] = "operblock"
+    os.environ["REMCARD_UI_ROLE"] = ROLE_OPERBLOCK
     baza_dir = resolve_baza_dir()
 
     return {
-        "role": "operblock",
+        "role": role_key or ROLE_OPERBLOCK,
         "data_root": baza_dir,
         "db_path": get_journal_db_path(baza_dir),
         "db_profile": "network",
@@ -255,8 +264,22 @@ def get_log_file_prefix() -> str:
         return "doctor"
     if "remcardnurse" in exe_name or "run_nurse" in argv_text or "--role nurse" in argv_text:
         return "nurse"
+    if (
+        "remcardoperblockemergency" in exe_name
+        or "run_operblock_emergency" in argv_text
+        or f"--role {ROLE_OPERBLOCK_EMERGENCY}" in argv_text
+        or f"--role={ROLE_OPERBLOCK_EMERGENCY}" in argv_text
+    ):
+        return ROLE_OPERBLOCK_EMERGENCY
+    if (
+        "remcardoperblockplanned" in exe_name
+        or "run_operblock_planned" in argv_text
+        or f"--role {ROLE_OPERBLOCK_PLANNED}" in argv_text
+        or f"--role={ROLE_OPERBLOCK_PLANNED}" in argv_text
+    ):
+        return ROLE_OPERBLOCK_PLANNED
     if "remcardoperblock" in exe_name or "run_operblock" in argv_text or "--role operblock" in argv_text:
-        return "operblock"
+        return ROLE_OPERBLOCK
     if "remcardpathsetup" in exe_name or "run_path_setup" in argv_text or "--path-setup" in argv_text:
         return "path_setup"
     return "rem_card"

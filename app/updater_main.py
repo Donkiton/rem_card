@@ -89,6 +89,8 @@ WAIT_ACTIVE_SESSIONS_TIMEOUT_SEC = 30 * 60
 REQUIRED_EXES = (
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
+    "RemCardOperBlockEmergency.exe",
+    "RemCardOperBlockPlanned.exe",
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
@@ -96,6 +98,9 @@ MANAGED_ROOT_FILES = (
     "RemCard.exe",
     "RemCardDoctor.exe",
     "RemCardNurse.exe",
+    "RemCardOperBlock.exe",
+    "RemCardOperBlockEmergency.exe",
+    "RemCardOperBlockPlanned.exe",
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
     "VERSION",
@@ -325,6 +330,9 @@ def _wait_for_active_sessions(baza_dir: str, status: Callable[[str, int], None])
     lock_names = {
         "doctor.lock": "врача",
         "nurse.lock": "медсестры",
+        "operblock.lock": "оперблока",
+        "operblock_emergency.lock": "экстренной операционной",
+        "operblock_planned.lock": "плановой операционной",
     }
     deadline = time.time() + WAIT_ACTIVE_SESSIONS_TIMEOUT_SEC
     while True:
