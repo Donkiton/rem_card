@@ -9350,8 +9350,8 @@ class OperBlockMainWidget(QWidget):
                 row = next_widgets.get(preset_id)
                 if row is None:
                     continue
-                row.show()
                 layout.addWidget(row)
+                row.show()
             layout.addStretch(1)
             self._quick_order_buttons = self._visible_quick_order_buttons()
             self._set_quick_order_buttons_enabled(bool(not self._write_pending) and self._orders_tab_enabled())
