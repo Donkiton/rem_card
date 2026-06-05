@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
+from rem_card.app import operblock_startup_metrics
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import run_integrity_check, run_quick_check
@@ -45,6 +46,9 @@ MIN_EMERGENCY_PASSWORD_LENGTH = 6
 MAX_BACKGROUND_IMAGE_BLOB_BYTES = 32 * 1024 * 1024
 PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
+OPERBLOCK_ICONS_SEED_META_VERSION_KEY = "operblock_icons_seed_version"
+OPERBLOCK_ICONS_SEED_META_HASH_KEY = "operblock_icons_seed_hash"
+OPERBLOCK_ICONS_SEED_VERSION = "seeded_custom_icons_v1"
 
 
 @dataclass(frozen=True)
@@ -2471,14 +2475,134 @@ class SettingsService:
         image_hash = hashlib.sha256(image_blob).hexdigest()
         return image_blob, image_mime, image_hash
 
+    @staticmethod
+    def _operblock_icons_seed_hash() -> str:
+        return _hash_value(
+            [
+                {
+                    "icon_key": definition.icon_key,
+                    "category": definition.category,
+                    "target_key": definition.target_key,
+                    "name": definition.name,
+                    "default_file": definition.default_file,
+                    "sort_order": int(definition.sort_order or 0),
+                    "source_file": definition.source_file or definition.default_file,
+                }
+                for definition in SEEDED_CUSTOM_ICON_DEFINITIONS
+            ]
+        )
+
+    def _operblock_icons_seed_fastpath_state(self) -> dict[str, Any]:
+        expected_keys = tuple(definition.icon_key for definition in SEEDED_CUSTOM_ICON_DEFINITIONS)
+        expected_hash = self._operblock_icons_seed_hash()
+        if not expected_keys:
+            return {
+                "ready": True,
+                "reason": "no_seed_definitions",
+                "expected_hash": expected_hash,
+                "missing_keys": [],
+            }
+
+        with self.db.read_connection() as conn:
+            meta_rows = conn.execute(
+                """
+                SELECT key, value
+                FROM settings_meta
+                WHERE key IN (?, ?)
+                """,
+                (OPERBLOCK_ICONS_SEED_META_VERSION_KEY, OPERBLOCK_ICONS_SEED_META_HASH_KEY),
+            ).fetchall()
+            meta = {str(row["key"]): str(row["value"] or "") for row in meta_rows}
+            placeholders = ",".join("?" for _ in expected_keys)
+            icon_rows = conn.execute(
+                f"SELECT icon_key FROM operblock_icons WHERE icon_key IN ({placeholders})",
+                expected_keys,
+            ).fetchall()
+
+        existing_keys = {str(row["icon_key"] or "") for row in icon_rows}
+        missing_keys = [key for key in expected_keys if key not in existing_keys]
+        version_ok = meta.get(OPERBLOCK_ICONS_SEED_META_VERSION_KEY) == OPERBLOCK_ICONS_SEED_VERSION
+        hash_ok = meta.get(OPERBLOCK_ICONS_SEED_META_HASH_KEY) == expected_hash
+        if missing_keys:
+            reason = "missing_icons"
+        elif not version_ok:
+            reason = "marker_version_mismatch"
+        elif not hash_ok:
+            reason = "marker_hash_mismatch"
+        else:
+            reason = "fast_path"
+        return {
+            "ready": not missing_keys and version_ok and hash_ok,
+            "reason": reason,
+            "expected_hash": expected_hash,
+            "missing_keys": missing_keys,
+        }
+
+    @staticmethod
+    def _missing_operblock_seed_icon_keys(cursor) -> list[str]:
+        expected_keys = tuple(definition.icon_key for definition in SEEDED_CUSTOM_ICON_DEFINITIONS)
+        if not expected_keys:
+            return []
+        placeholders = ",".join("?" for _ in expected_keys)
+        rows = cursor.execute(
+            f"SELECT icon_key FROM operblock_icons WHERE icon_key IN ({placeholders})",
+            expected_keys,
+        ).fetchall()
+        existing_keys = {str(row["icon_key"] or "") for row in rows}
+        return [key for key in expected_keys if key not in existing_keys]
+
     def _ensure_default_operblock_icons(self) -> None:
         inserted: list[str] = []
         if getattr(self.db, "settings_readonly", False):
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_skipped",
+                "readonly",
+                source="settings_service",
+            )
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_reason",
+                "readonly",
+                source="settings_service",
+            )
             return
+
+        fastpath_started = operblock_startup_metrics.timer_start()
+        fastpath_state: dict[str, Any]
+        try:
+            fastpath_state = self._operblock_icons_seed_fastpath_state()
+        except Exception as exc:
+            fastpath_state = {
+                "ready": False,
+                "reason": f"fastpath_read_error:{type(exc).__name__}",
+                "expected_hash": self._operblock_icons_seed_hash(),
+                "missing_keys": [],
+            }
+        operblock_startup_metrics.record_since(
+            "settings_operblock_icons_seed_fastpath_ms",
+            fastpath_started,
+            source="settings_service",
+            reason=fastpath_state.get("reason"),
+        )
+        if fastpath_state.get("ready"):
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_skipped",
+                "fast_path",
+                source="settings_service",
+            )
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_reason",
+                str(fastpath_state.get("reason") or "fast_path"),
+                source="settings_service",
+            )
+            return
+
+        metric_started = operblock_startup_metrics.timer_start()
+        seed_status = "error"
         try:
             from rem_card.app.paths import get_icon_dir
 
             icon_dir = get_icon_dir()
+            expected_hash = str(fastpath_state.get("expected_hash") or self._operblock_icons_seed_hash())
             with self.db.transaction("settings_operblock_icons_seed") as cursor:
                 for definition in SEEDED_CUSTOM_ICON_DEFINITIONS:
                     existing = cursor.execute(
@@ -2524,6 +2648,7 @@ class SettingsService:
                         ),
                     )
                     inserted.append(definition.icon_key)
+                missing_after_seed = self._missing_operblock_seed_icon_keys(cursor)
                 if inserted:
                     self._bump_catalog_version(
                         cursor,
@@ -2534,8 +2659,41 @@ class SettingsService:
                         changed_by_role="system",
                         after={"inserted": inserted},
                     )
+                if not missing_after_seed:
+                    self._set_meta(cursor, OPERBLOCK_ICONS_SEED_META_VERSION_KEY, OPERBLOCK_ICONS_SEED_VERSION)
+                    self._set_meta(cursor, OPERBLOCK_ICONS_SEED_META_HASH_KEY, expected_hash)
+                seed_status = "ok"
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_skipped",
+                "no",
+                source="settings_service",
+            )
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_reason",
+                str(fastpath_state.get("reason") or "seed_required"),
+                source="settings_service",
+            )
         except Exception as exc:
             logger.warning("Не удалось подготовить стандартные иконки оперблока: %s", exc)
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_skipped",
+                "error",
+                source="settings_service",
+            )
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_reason",
+                f"error:{type(exc).__name__}",
+                source="settings_service",
+            )
+        finally:
+            operblock_startup_metrics.record_since(
+                "settings_operblock_icons_seed_ms",
+                metric_started,
+                source="settings_service",
+                inserted_count=len(inserted),
+                status=seed_status,
+                reason=fastpath_state.get("reason"),
+            )
 
     def list_operblock_icons(self) -> dict[str, dict[str, Any]]:
         self.ensure_ready()

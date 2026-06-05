@@ -14,6 +14,7 @@ import time
 
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
+from rem_card.app import operblock_startup_metrics
 from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.app.roles import ROLE_KEYS, ROLE_OPERBLOCK, role_display_name
@@ -699,6 +700,12 @@ class MainWindow(QMainWindow):
             role=role,
             source="refresh",
         )
+        operblock_startup_metrics.record_event_loop_pause(
+            pause_ms,
+            threshold_ms=round(float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)), 3),
+            interval_ms=int(expected_interval_ms or 0),
+            source="ui_watchdog",
+        )
 
     def init_ui(self):
         self.welcome = WelcomeWidget()
@@ -805,7 +812,8 @@ class MainWindow(QMainWindow):
         try:
             from rem_card.app.operblock_schema import ensure_operblock_schema
 
-            ensure_operblock_schema(container.db_manager)
+            with operblock_startup_metrics.measure("ensure_operblock_schema_ms", source="main_window"):
+                ensure_operblock_schema(container.db_manager)
         except Exception as exc:
             logger.exception("Failed to prepare operblock schema in current database: %s", exc)
             QMessageBox.critical(
@@ -890,38 +898,55 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.start_initial_role_refresh)
 
     def _activate_initial_operblock_role(self, *, start_refresh: bool = True):
-        from PySide6.QtCore import QTimer
-        from .operblock_view.operblock_main_widget import OperBlockMainWidget
+        role_activation_started = operblock_startup_metrics.timer_start()
+        try:
+            from PySide6.QtCore import QTimer
 
-        if self._initial_role_ui_ready and self.operblock_main is not None:
+            widget_import_started = operblock_startup_metrics.timer_start()
+            from .operblock_view.operblock_main_widget import OperBlockMainWidget
+            operblock_startup_metrics.record_since(
+                "operblock_widget_import_ms",
+                widget_import_started,
+                source="main_window",
+            )
+
+            if self._initial_role_ui_ready and self.operblock_main is not None:
+                if start_refresh:
+                    QTimer.singleShot(0, self.start_initial_role_refresh)
+                return
+
+            if not self.container:
+                QTimer.singleShot(50, self._activate_initial_operblock_role)
+                return
+            if self._ensure_role_container(ROLE_OPERBLOCK) is None:
+                if self._initial_role == ROLE_OPERBLOCK:
+                    QTimer.singleShot(0, self.close)
+                return
+            if not self._acquire_role_lock(ROLE_OPERBLOCK):
+                self.close()
+                return
+
+            widget_create_started = operblock_startup_metrics.timer_start()
+            self.operblock_main = OperBlockMainWidget(
+                self.container.patient_service,
+                self.container.remcard_service,
+                self.container.operblock_service,
+                parent=self.stack,
+            )
+            operblock_startup_metrics.record_since(
+                "operblock_widget_create_ms",
+                widget_create_started,
+                source="main_window",
+            )
+            self.stack.addWidget(self.operblock_main)
+            self.stack.setCurrentWidget(self.operblock_main)
+
+            self._initial_role_ui_ready = True
+            self._schedule_maintenance()
             if start_refresh:
                 QTimer.singleShot(0, self.start_initial_role_refresh)
-            return
-
-        if not self.container:
-            QTimer.singleShot(50, self._activate_initial_operblock_role)
-            return
-        if self._ensure_role_container(ROLE_OPERBLOCK) is None:
-            if self._initial_role == ROLE_OPERBLOCK:
-                QTimer.singleShot(0, self.close)
-            return
-        if not self._acquire_role_lock(ROLE_OPERBLOCK):
-            self.close()
-            return
-
-        self.operblock_main = OperBlockMainWidget(
-            self.container.patient_service,
-            self.container.remcard_service,
-            self.container.operblock_service,
-            parent=self.stack,
-        )
-        self.stack.addWidget(self.operblock_main)
-        self.stack.setCurrentWidget(self.operblock_main)
-
-        self._initial_role_ui_ready = True
-        self._schedule_maintenance()
-        if start_refresh:
-            QTimer.singleShot(0, self.start_initial_role_refresh)
+        finally:
+            operblock_startup_metrics.record_since("role_activation_ms", role_activation_started, source="main_window")
 
     def _activate_initial_nurse_role(self, *, start_refresh: bool = True):
         from PySide6.QtCore import QTimer

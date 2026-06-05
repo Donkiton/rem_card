@@ -165,7 +165,10 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
         )
     else:
         settings_service = get_settings_service()
-    settings_info = settings_service.ensure_ready()
+    from rem_card.app import operblock_startup_metrics
+
+    with operblock_startup_metrics.measure("settings_ensure_ready_ms", source="bootstrap"):
+        settings_info = settings_service.ensure_ready()
     logger.info(
         "[SETTINGS DB] remcard_settings.db -> %s",
         settings_info.get("settings_db_path"),
@@ -181,7 +184,8 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
         )
         from rem_card.app.operblock_schema import ensure_operblock_schema
 
-        result = ensure_operblock_schema(db_manager)
+        with operblock_startup_metrics.measure("ensure_operblock_schema_ms", source="bootstrap"):
+            result = ensure_operblock_schema(db_manager)
         logger.info(
             "[OPERBLOCK SCHEMA] migrated=%s backup_path=%s quick_check=%s integrity_check=%s",
             result.migrated,

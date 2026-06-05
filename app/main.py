@@ -65,6 +65,54 @@ def _startup_trace(logger, started_at: float, phase: str, **fields):
     logger.info("[StartupTrace] phase=%s t_ms=%.1f%s", phase, elapsed_ms, suffix)
 
 
+def _opblock_startup_metrics_reset(role: Optional[str], started_at: float) -> None:
+    if role != ROLE_OPERBLOCK:
+        return
+    from rem_card.app import operblock_startup_metrics
+
+    operblock_startup_metrics.reset(started_at=started_at)
+
+
+def _opblock_startup_timer_start(role: Optional[str]) -> float | None:
+    if role != ROLE_OPERBLOCK:
+        return None
+    from rem_card.app import operblock_startup_metrics
+
+    return operblock_startup_metrics.timer_start()
+
+
+def _opblock_startup_record_duration(role: Optional[str], name: str, elapsed_ms: float, *, source: str) -> None:
+    if role != ROLE_OPERBLOCK:
+        return
+    from rem_card.app import operblock_startup_metrics
+
+    operblock_startup_metrics.record_duration(name, elapsed_ms, source=source)
+
+
+def _opblock_startup_record_since(role: Optional[str], name: str, started_at: float | None, *, source: str) -> None:
+    if role != ROLE_OPERBLOCK:
+        return
+    from rem_card.app import operblock_startup_metrics
+
+    operblock_startup_metrics.record_since(name, started_at or 0.0, source=source)
+
+
+def _opblock_startup_record_window_shown(role: Optional[str], initial_role_prepared: bool, QTimer) -> None:
+    if role != ROLE_OPERBLOCK:
+        return
+    from rem_card.app import operblock_startup_metrics
+
+    operblock_startup_metrics.record_elapsed("time_to_window_visible_ms", source="app_main")
+    if not initial_role_prepared:
+        return
+
+    def _record_operblock_board_ready_after_paint():
+        operblock_startup_metrics.record_elapsed("board_ready_after_paint_ms", source="app_main")
+        operblock_startup_metrics.record_elapsed("time_to_operblock_board_ready_ms", source="app_main")
+
+    QTimer.singleShot(0, _record_operblock_board_ready_after_paint)
+
+
 def _install_startup_trace_hooks(container, logger, started_at: float):
     if not _env_flag_enabled(STARTUP_TRACE_ENV):
         return
@@ -1197,6 +1245,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     parser.add_argument("--emergency-startup-request", default="", help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args()
     args.role = _resolve_startup_role(args.role, forced_role)
+    _opblock_startup_metrics_reset(args.role, startup_started_at)
     path_setup = bool(path_setup or args.path_setup)
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
     path_setup = _configure_operblock_startup_path(args.role, path_setup)
@@ -1292,14 +1341,17 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 theme_ui_init_ms=theme_ui_init_ms,
                 total_bootstrap_ms=bootstrap_elapsed_ms,
             )
+            _opblock_startup_record_duration(args.role, "bootstrap_ms", bootstrap_elapsed_ms, source="app_main")
             _install_startup_trace_hooks(container, logger, startup_started_at)
 
+        main_window_started = _opblock_startup_timer_start(args.role)
         window = MainWindow(
             container=container,
             role=args.role,
             role_session_lock=role_lock,
             role_key=args.role if role_lock else None,
         )
+        _opblock_startup_record_since(args.role, "main_window_create_ms", main_window_started, source="app_main")
         _startup_trace(logger, startup_started_at, "main_window_constructed", role=args.role or "default")
 
         if container is None:
@@ -1331,6 +1383,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 theme_ui_init_ms=theme_ui_init_ms,
                 total_bootstrap_ms=bootstrap_elapsed_ms,
             )
+            _opblock_startup_record_duration(args.role, "bootstrap_ms", bootstrap_elapsed_ms, source="app_main")
             _install_startup_trace_hooks(container, logger, startup_started_at)
         else:
             window.container = container
@@ -1363,6 +1416,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         if splash is not None:
             splash.finish(window)
         window.show()
+        _opblock_startup_record_window_shown(args.role, initial_role_prepared, QTimer)
         if initial_role_prepared and hasattr(window, "wake_initial_role_monitor"):
             QTimer.singleShot(250, window.wake_initial_role_monitor)
         _startup_trace(logger, startup_started_at, "window_shown", role=args.role or "default")

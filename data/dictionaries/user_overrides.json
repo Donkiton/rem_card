@@ -3356,7 +3356,7 @@
         "preset_id": "manual:gas:desflurane",
         "source_drug_id": null,
         "label": "Desflurane",
-        "display_name": "Десфлюран",
+        "display_name": "Inh. Desflurani",
         "latin": null,
         "aliases": [],
         "kind": "gas",
@@ -3385,7 +3385,7 @@
         "preset_id": "manual:gas:sevoflurane",
         "source_drug_id": null,
         "label": "Sevoflurane",
-        "display_name": "Севофлюран",
+        "display_name": "Inh. Sevoflurani",
         "latin": null,
         "aliases": [],
         "kind": "gas",
@@ -3640,7 +3640,7 @@
       },
       {
         "id": "member_1780381594498",
-        "name": "Чок А.В.",
+        "name": "Тищенко Л.В.",
         "position": "Анестезистка",
         "sort_order": 30
       }

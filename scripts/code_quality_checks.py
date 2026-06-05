@@ -45,7 +45,7 @@ ALLOWED_F_BLOCKS = {
     ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"),
     ("scripts/regression_safety_checks.py", "_check_sync_coordinator_classifies_targeted_refresh"),
     ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"),
-    ("ui/operblock_view/operblock_main_widget.py", "OperBlockChartWidget._current_order_marker_signature"),
+    ("ui/operblock_view/operblock_chart_widget.py", "OperBlockChartWidget._current_order_marker_signature"),
     ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"),
 }
 

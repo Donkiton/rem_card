@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any, Mapping, Optional
 import uuid
 
+from rem_card.app import operblock_startup_metrics
 from rem_card.app.patient_age import (
     format_patient_age,
     format_patient_age_from_birth_date,
@@ -502,6 +503,7 @@ class OperBlockService:
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
 
     def build_operblock_board_snapshot(self) -> dict[str, Any]:
+        metric_started = operblock_startup_metrics.timer_start()
         validate_operblock_runtime_path(self.db)
         rows = self.db.fetch_all_remcard(
             """
@@ -601,6 +603,12 @@ class OperBlockService:
             "tables": tables,
         }
         payload["content_hash"] = _hash_payload(payload)
+        operblock_startup_metrics.record_since(
+            "build_operblock_board_snapshot_ms",
+            metric_started,
+            source="operblock_service",
+            table_count=len(tables),
+        )
         return payload
 
     def list_archived_operation_cases(self) -> list[dict[str, Any]]:
