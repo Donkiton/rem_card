@@ -121,6 +121,9 @@ KNOWN_PRESET_FIELDS = {
     "solvent_label",
     "solvent_volume_ml",
     "duration_min",
+    "card_color",
+    "card_color_hex",
+    "color",
     "uses_line",
     "enabled",
     "favorite",
@@ -152,6 +155,7 @@ class OperBlockMedicationPreset:
     solvent_label: str | None = None
     solvent_volume_ml: str | None = None
     duration_min: int | None = None
+    card_color: str | None = None
     uses_line: bool = False
     enabled: bool = False
     favorite: bool = False
@@ -240,6 +244,22 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_hex_color(value: Any) -> str | None:
+    text = _as_text(value)
+    if not text:
+        return None
+    if re.fullmatch(r"#[0-9A-Fa-f]{6}", text):
+        return text.lower()
+    return None
+
+
+def _preset_color_value(data: Mapping[str, Any]) -> Any:
+    for key in ("card_color", "card_color_hex", "color"):
+        if key in data:
+            return data.get(key)
+    return None
 
 
 def _as_list(value: Any) -> list[str]:
@@ -403,6 +423,7 @@ def _normalize_preset(raw: Mapping[str, Any], *, base: Mapping[str, Any] | None 
         solvent_label=_as_optional_text(data.get("solvent_label")),
         solvent_volume_ml=_as_optional_text(data.get("solvent_volume_ml")),
         duration_min=_as_int(data.get("duration_min")),
+        card_color=_as_hex_color(_preset_color_value(data)),
         uses_line=_as_bool(data.get("uses_line")),
         enabled=_as_bool(data.get("enabled"), default=False),
         favorite=_as_bool(data.get("favorite") or data.get("is_favorite") or data.get("pinned"), default=False),
@@ -532,6 +553,7 @@ def quick_order_to_medication_preset(raw: Mapping[str, Any], *, sort_order: int 
             "enabled": True,
             "favorite": _as_bool(raw.get("favorite") or raw.get("is_favorite") or raw.get("pinned"), default=False),
             "sort_order": sort_order,
+            "card_color": raw.get("card_color") or raw.get("card_color_hex") or raw.get("color"),
             "payload": {"compat_source": "operblock_quick_orders", "legacy_group": raw.get("group")},
         }
     )
@@ -726,6 +748,7 @@ def build_operblock_preset_payload(preset: Mapping[str, Any]) -> dict[str, Any]:
         "solvent_label",
         "solvent_volume_ml",
         "duration_min",
+        "card_color",
     ):
         value = preset.get(key)
         if value not in (None, "", []):

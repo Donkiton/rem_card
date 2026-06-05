@@ -611,6 +611,34 @@ def _safe_int(value) -> int | None:
         return None
 
 
+OPERBLOCK_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+
+def _normalize_operblock_card_color(value) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if OPERBLOCK_HEX_COLOR_RE.fullmatch(text):
+        return text.lower()
+    return None
+
+
+def _contrast_text_color(hex_color: str | None, *, default: str = OPERBLOCK_ORDERS_TEXT) -> str:
+    color = _normalize_operblock_card_color(hex_color)
+    if not color:
+        return default
+    qcolor = QColor(color)
+    return "#000000" if qcolor.lightness() > 150 else "#FFFFFF"
+
+
+def _operblock_preset_card_color(preset: dict) -> str | None:
+    source = preset or {}
+    for key in ("card_color", "card_color_hex", "color"):
+        if key in source:
+            return _normalize_operblock_card_color(source.get(key))
+    return None
+
+
 def _stable_ui_hash(payload) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -3285,7 +3313,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     COL_CONCENTRATION = 7
     COL_SOLVENT = 8
     COL_VOLUME = 9
-    COL_DURATION = 10
+    COL_COLOR = 10
     COL_FAVORITE = 11
     TABLE_HEADERS = (
         "Вкл",
@@ -3298,12 +3326,12 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         "Конц.",
         "Растворитель",
         "мл",
-        "мин",
+        "Цвет",
         "Избр.",
     )
 
     def __init__(self, presets: list[dict], parent=None):
-        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v2"
+        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v3"
         self._restoring_table_header = False
         self._fitting_table_header = False
         self._working_templates: list[dict | None] = [dict(preset or {}) for preset in (presets or [])]
@@ -3543,7 +3571,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self.COL_CONCENTRATION: 82,
             self.COL_SOLVENT: 130,
             self.COL_VOLUME: 62,
-            self.COL_DURATION: 62,
+            self.COL_COLOR: 84,
             self.COL_FAVORITE: 58,
         }
         header = self.table.horizontalHeader()
@@ -3867,7 +3895,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self.table.setItem(row, self.COL_CONCENTRATION, self._text_item(str(preset.get("concentration") or ""), template_index))
         self.table.setItem(row, self.COL_SOLVENT, self._text_item(self._solvent_display_text(preset), template_index))
         self.table.setItem(row, self.COL_VOLUME, self._text_item(str(preset.get("solvent_volume_ml") or ""), template_index))
-        self.table.setItem(row, self.COL_DURATION, self._text_item(str(preset.get("duration_min") or ""), template_index))
+        self.table.setItem(row, self.COL_COLOR, self._color_item(preset, template_index))
         self.table.setItem(row, self.COL_FAVORITE, self._favorite_item(template_index))
         self.table.setCellWidget(row, self.COL_FAVORITE, self._favorite_button(template_index, preset))
 
@@ -3892,6 +3920,22 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         if editable:
             flags |= Qt.ItemFlag.ItemIsEditable
         item.setFlags(flags)
+        return item
+
+    @staticmethod
+    def _preset_card_color(preset: dict) -> str | None:
+        return _operblock_preset_card_color(preset)
+
+    @classmethod
+    def _color_item(cls, preset: dict, template_index: int) -> QTableWidgetItem:
+        color = cls._preset_card_color(preset)
+        item = cls._text_item(color or "", template_index)
+        if color:
+            item.setBackground(QColor(color))
+            item.setForeground(QColor(_contrast_text_color(color)))
+            item.setToolTip(color)
+        else:
+            item.setToolTip("Пусто = цвета нет")
         return item
 
     @staticmethod
@@ -3941,8 +3985,26 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             template["solvent_label"] = solvent_label
         elif column == self.COL_VOLUME:
             template["solvent_volume_ml"] = item.text().strip() or None
-        elif column == self.COL_DURATION:
-            template["duration_min"] = _safe_int(item.text())
+        elif column == self.COL_COLOR:
+            raw_color = item.text().strip()
+            color = _normalize_operblock_card_color(raw_color)
+            if raw_color and color is None:
+                previous_color = self._preset_card_color(template) or ""
+                CustomMessageBox.warning(
+                    self,
+                    "Неверный формат",
+                    "Цвет должен быть в HEX-формате #000000. Оставьте ячейку пустой, если цвет не нужен.",
+                )
+                previous_block = self.table.blockSignals(True)
+                try:
+                    item.setText(previous_color)
+                finally:
+                    self.table.blockSignals(previous_block)
+                return
+            template["card_color"] = color
+            template.pop("card_color_hex", None)
+            template.pop("color", None)
+            QTimer.singleShot(0, self._render_table)
         elif column == self.COL_FAVORITE:
             return
 
@@ -4055,6 +4117,20 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         item = dict(preset or {})
         preset_id = str(item.get("preset_id") or "").strip() or self._manual_preset_id(kind, label)
         solvent_id, solvent_label = self._resolve_solvent_text(self._solvent_display_text(item), item)
+        raw_color_value = None
+        for color_key in ("card_color", "card_color_hex", "color"):
+            if color_key in item:
+                raw_color_value = item.get(color_key)
+                break
+        raw_color = str(raw_color_value or "").strip()
+        card_color = _normalize_operblock_card_color(raw_color)
+        if raw_color and card_color is None:
+            CustomMessageBox.warning(
+                self,
+                "Неверный формат",
+                f"Для препарата «{label}» укажите цвет в HEX-формате #000000 или оставьте ячейку пустой.",
+            )
+            return None
         item.update(
             {
                 "preset_id": preset_id,
@@ -4070,6 +4146,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 "solvent_label": solvent_label,
                 "solvent_volume_ml": str(item.get("solvent_volume_ml") or "").strip() or None,
                 "duration_min": _safe_int(item.get("duration_min")),
+                "card_color": card_color,
                 "enabled": bool(item.get("enabled")),
                 "favorite": bool(item.get("favorite")) and bool(item.get("enabled")),
             }
@@ -9130,18 +9207,24 @@ class OperBlockMainWidget(QWidget):
         title_text, concentration_text = _quick_order_title_and_concentration(display_name or label, concentration_text)
         solvent_text = _quick_order_solvent_text(preset)
         title_line = f"{title_text} + {solvent_text}" if solvent_text else title_text
+        card_color = _operblock_preset_card_color(preset)
+        card_bg = card_color or OPERBLOCK_ORDERS_CARD_BG
+        card_text = _contrast_text_color(card_color, default=OPERBLOCK_ORDERS_TEXT)
+        card_muted = card_text if card_color else OPERBLOCK_ORDERS_MUTED
+        button_bg = "#FFFFFF" if card_color else "#F8FAFC"
+        button_hover_bg = "#F1F5F9" if card_color else "#EEF3FF"
 
         frame = _QuickOrderPresetCard(self._quick_order_preset_id(preset), self)
         frame.setObjectName("medicationPresetRow")
         frame.setStyleSheet(
             f"""
             QFrame#medicationPresetRow {{
-                background-color: {OPERBLOCK_ORDERS_CARD_BG};
+                background-color: {card_bg};
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
                 border-radius: 6px;
             }}
             QPushButton {{
-                background-color: #F8FAFC;
+                background-color: {button_bg};
                 border: 1px solid {OPERBLOCK_ORDERS_BORDER};
                 border-radius: 4px;
                 color: {OPERBLOCK_ORDERS_TEXT};
@@ -9150,7 +9233,7 @@ class OperBlockMainWidget(QWidget):
                 font-weight: 500;
             }}
             QPushButton:hover {{
-                background-color: #EEF3FF;
+                background-color: {button_hover_bg};
                 color: {OPERBLOCK_ORDERS_ACCENT};
                 border-color: {OPERBLOCK_ORDERS_BORDER};
             }}
@@ -9166,14 +9249,14 @@ class OperBlockMainWidget(QWidget):
 
         name_label = ElidedTooltipLabel(title_line)
         name_label.setStyleSheet(
-            f"font-size: 13px; font-weight: 500; color: {OPERBLOCK_ORDERS_TEXT}; background: transparent; border: none;"
+            f"font-size: 13px; font-weight: 500; color: {card_text}; background: transparent; border: none;"
             f"{TOOLTIP_WHITE_STYLE}"
         )
         row_layout.addWidget(name_label)
         if concentration_text:
             detail_label = ElidedTooltipLabel(concentration_text)
             detail_label.setStyleSheet(
-                f"font-size: 11px; color: {OPERBLOCK_ORDERS_MUTED}; background: transparent; border: none;"
+                f"font-size: 11px; color: {card_muted}; background: transparent; border: none;"
                 f"{TOOLTIP_WHITE_STYLE}"
             )
             row_layout.addWidget(detail_label)
@@ -9206,7 +9289,7 @@ class OperBlockMainWidget(QWidget):
                     )
                 row_layout.addLayout(dose_grid)
             else:
-                row_layout.addWidget(_label("Дозировки не указаны", size=12, color=OPERBLOCK_ORDERS_MUTED))
+                row_layout.addWidget(_label("Дозировки не указаны", size=12, color=card_muted))
         elif kind == "gas":
             if doses:
                 visible_doses = doses[:4]
@@ -9227,7 +9310,7 @@ class OperBlockMainWidget(QWidget):
                     )
                 row_layout.addLayout(dose_grid)
             else:
-                row_layout.addWidget(_label("Дозы MAC не указаны", size=12, color=OPERBLOCK_ORDERS_MUTED))
+                row_layout.addWidget(_label("Дозы MAC не указаны", size=12, color=card_muted))
         elif kind == "continuous_infusion":
             if rates:
                 visible_rates = rates[:4]
@@ -9248,7 +9331,7 @@ class OperBlockMainWidget(QWidget):
                     )
                 row_layout.addLayout(rate_grid)
             else:
-                row_layout.addWidget(_label("Скорости не указаны", size=12, color=OPERBLOCK_ORDERS_MUTED))
+                row_layout.addWidget(_label("Скорости не указаны", size=12, color=card_muted))
         elif kind in {"timed_infusion", "solvent"}:
             dose_options = _timed_infusion_dose_options(preset)
             if dose_options:
@@ -9270,9 +9353,9 @@ class OperBlockMainWidget(QWidget):
                     )
                 row_layout.addLayout(dose_grid)
             else:
-                row_layout.addWidget(_label("Объем не указан", size=12, color=OPERBLOCK_ORDERS_MUTED))
+                row_layout.addWidget(_label("Объем не указан", size=12, color=card_muted))
         else:
-            row_layout.addWidget(_label("Доступно в справочнике", size=12, color=OPERBLOCK_ORDERS_MUTED))
+            row_layout.addWidget(_label("Доступно в справочнике", size=12, color=card_muted))
         frame.bind_drag_sources()
         return frame
 
@@ -11092,6 +11175,7 @@ class OperBlockMainWidget(QWidget):
                 "calculated_volume_ml",
                 "declared_total_volume_ml",
                 "duration_min",
+                "card_color",
             )
             if payload.get(key) not in (None, "", [])
         }
