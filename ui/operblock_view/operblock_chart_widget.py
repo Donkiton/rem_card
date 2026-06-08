@@ -803,6 +803,7 @@ class OperBlockChartWidget(ChartWidget):
         "anesthesia_end": "#7A3E3E",
         "surgery_start": "#2563EB",
         "surgery_end": "#C2410C",
+        "custom": "#0F766E",
     }
     # MVP: protocol snapshot limits orders to 100 rows, so a full overlay rebuild is bounded.
     ORDER_MARKER_RECREATE_LIMIT = 150
@@ -825,6 +826,7 @@ class OperBlockChartWidget(ChartWidget):
         super().__init__(parent)
         self._apply_operblock_y_axis()
         self._order_marker_items: list = []
+        self._operation_stage_marker_items_by_key: dict[str, list] = {}
         self._order_marker_groups: list[dict] = []
         self._order_marker_rows: list[dict] = []
         self._infusion_interval_rows: list[dict] = []
@@ -847,6 +849,7 @@ class OperBlockChartWidget(ChartWidget):
         self._order_label_total_lanes = 0
         self._order_label_scroll_top_lane = 0
         self._order_label_scrollbar_syncing = False
+        self._last_operation_stage_gaps_by_x: dict[float, list[tuple[float, float]]] = {}
         self._timeline_scrollbar = self._create_timeline_scrollbar()
         self._order_label_scrollbar = self._create_order_label_scrollbar()
         self._timeline_scroll_refresh_timer = QTimer(self)
@@ -1193,6 +1196,113 @@ class OperBlockChartWidget(ChartWidget):
         self._order_marker_start = start_time if isinstance(start_time, datetime) else None
         self._rebuild_order_marker_style_map()
         self._render_order_markers(force=force)
+
+    @staticmethod
+    def _operation_stage_marker_key(row: dict) -> str:
+        source_id = str((row or {}).get("source_id") or "").strip()
+        if source_id:
+            return f"timeline_event:{source_id}"
+        event_id = str((row or {}).get("id") or "").strip()
+        if event_id:
+            return event_id
+        return "|".join(
+            (
+                str((row or {}).get("stage_kind") or ""),
+                str((row or {}).get("event_time") or ""),
+                str((row or {}).get("display_label") or ""),
+            )
+        )
+
+    @staticmethod
+    def _operation_stage_display_label(row: dict) -> str:
+        stage_kind = str((row or {}).get("stage_kind") or "").strip()
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if stage_kind == "custom":
+            return str(
+                (payload or {}).get("label")
+                or (row or {}).get("display_label")
+                or (row or {}).get("raw_text")
+                or "Этап операции"
+            )
+        return str(OperBlockChartWidget.OPERATION_STAGE_LABELS.get(stage_kind) or (row or {}).get("display_label") or "Этап")
+
+    def _remove_operation_stage_marker_items(self, marker_key: str) -> None:
+        if not marker_key:
+            return
+        marker_items = list((getattr(self, "_operation_stage_marker_items_by_key", {}) or {}).pop(marker_key, []))
+        if not marker_items:
+            return
+        marker_item_ids = {id(item) for item in marker_items}
+        for item in marker_items:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self._order_marker_items = [
+            item for item in list(getattr(self, "_order_marker_items", []) or []) if id(item) not in marker_item_ids
+        ]
+
+    def _append_operation_stage_marker_item(self, marker_key: str, item) -> None:
+        self._order_marker_items.append(item)
+        if marker_key:
+            self._operation_stage_marker_items_by_key.setdefault(marker_key, []).append(item)
+
+    def patch_operation_stage_marker(
+        self,
+        stage_event: dict,
+        *,
+        snapshot: dict | None = None,
+        start_time: datetime | None = None,
+    ) -> bool:
+        rows = self.operation_stage_rows_from_timeline_snapshot({"operation_events": [dict(stage_event or {})]})
+        if not rows:
+            return False
+        row = rows[0]
+        marker_key = self._operation_stage_marker_key(row)
+        if not marker_key:
+            return False
+        if snapshot is not None:
+            self._timeline_snapshot = dict(snapshot or {})
+        if isinstance(start_time, datetime):
+            self._order_marker_start = start_time
+
+        patched_rows: list[dict] = []
+        replaced = False
+        for existing in list(getattr(self, "_operation_stage_rows", []) or []):
+            if self._operation_stage_marker_key(existing) == marker_key:
+                if not replaced:
+                    patched_rows.append(row)
+                    replaced = True
+                continue
+            patched_rows.append(existing)
+        if not replaced:
+            patched_rows.append(row)
+        patched_rows.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("event_time")) or datetime.min,
+                int((item or {}).get("source_id") or 0),
+            )
+        )
+        self._operation_stage_rows = patched_rows
+        self._remove_operation_stage_marker_items(marker_key)
+        start = self._order_marker_start if isinstance(self._order_marker_start, datetime) else None
+        if start is None or not getattr(self, "plot_widget", None):
+            self._order_marker_render_signature = self._current_order_marker_signature()
+            return True
+        event_dt = _minute_floor_dt(_parse_datetime_value(row.get("event_time")))
+        if event_dt is not None:
+            visible_hours = max(1.0, float(getattr(self, "visible_hours", OPERBLOCK_INITIAL_CHART_HOURS)))
+            self._render_single_operation_stage_marker(
+                start.replace(second=0, microsecond=0),
+                visible_hours,
+                event_dt,
+                self._operation_stage_display_label(row),
+                str(self.OPERATION_STAGE_COLORS.get(str(row.get("stage_kind") or "").strip()) or "#506174"),
+                gaps_by_x=getattr(self, "_last_operation_stage_gaps_by_x", {}) or {},
+                marker_key=marker_key,
+            )
+        self._order_marker_render_signature = self._current_order_marker_signature()
+        return True
 
     @classmethod
     def build_operation_timeline_transform(
@@ -2064,6 +2174,7 @@ class OperBlockChartWidget(ChartWidget):
             except Exception:
                 pass
         self._order_marker_items = []
+        self._operation_stage_marker_items_by_key = {}
         self._order_marker_groups = []
         self._infusion_interval_groups = []
 
@@ -2162,6 +2273,7 @@ class OperBlockChartWidget(ChartWidget):
             groups_with_lanes=groups_with_lanes,
         )
         all_guideline_gaps = self._merge_guideline_gap_maps(guideline_gaps, visual_gaps)
+        self._last_operation_stage_gaps_by_x = dict(all_guideline_gaps or {})
         self._render_operation_stage_markers(start, visible_hours, gaps_by_x=all_guideline_gaps)
         self._render_order_guidelines(guideline_specs, all_guideline_gaps)
 
@@ -2572,7 +2684,7 @@ class OperBlockChartWidget(ChartWidget):
             event_dt = _minute_floor_dt(_parse_datetime_value((row or {}).get("event_time")))
             if event_dt is None:
                 continue
-            label_text = str(self.OPERATION_STAGE_LABELS.get(stage_kind) or (row or {}).get("display_label") or "Этап")
+            label_text = self._operation_stage_display_label(row)
             color = str(self.OPERATION_STAGE_COLORS.get(stage_kind) or "#506174")
             if self._render_single_operation_stage_marker(
                 start,
@@ -2581,6 +2693,7 @@ class OperBlockChartWidget(ChartWidget):
                 label_text,
                 color,
                 gaps_by_x=gaps_by_x,
+                marker_key=self._operation_stage_marker_key(row),
             ):
                 rendered = True
         if rendered:
@@ -2596,6 +2709,7 @@ class OperBlockChartWidget(ChartWidget):
         color: str,
         *,
         gaps_by_x: dict[float, list[tuple[float, float]]] | None = None,
+        marker_key: str = "",
     ) -> bool:
         x = self._display_x_for_time(event_dt, start)
         if x is None or x < -0.001 or x > visible_hours + 0.001:
@@ -2617,7 +2731,7 @@ class OperBlockChartWidget(ChartWidget):
             line.setZValue(32)
             setattr(line, "_operblock_operation_stage_segment", True)
             self.plot_widget.addItem(line)
-            self._order_marker_items.append(line)
+            self._append_operation_stage_marker_item(marker_key, line)
 
         label_x, anchor = self._operation_start_label_position(x, label_text)
         label = pg.TextItem(
@@ -2633,7 +2747,7 @@ class OperBlockChartWidget(ChartWidget):
         label.setZValue(73)
         label.setPos(label_x, self._operation_start_label_y())
         self.plot_widget.addItem(label)
-        self._order_marker_items.append(label)
+        self._append_operation_stage_marker_item(marker_key, label)
         return True
 
     def _render_operation_start_marker(
@@ -2710,6 +2824,7 @@ class OperBlockChartWidget(ChartWidget):
                 str(row.get("id") or ""),
                 str(row.get("stage_kind") or ""),
                 str(row.get("event_time") or ""),
+                str(row.get("display_label") or row.get("raw_text") or ""),
                 int(row.get("revision") or 0),
             )
             for row in getattr(self, "_operation_stage_rows", []) or []

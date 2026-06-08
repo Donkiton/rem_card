@@ -18633,6 +18633,137 @@ def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bo
     return True, "ok"
 
 
+def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import date, timedelta
+
+    from rem_card.app.operblock_schema import _apply_operblock_schema
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.services.operblock_service import OperBlockService
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+
+    db_path = os.path.join(temp_root, "operblock_operation_stages.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        manager.run_write_operation(_apply_operblock_schema, source="regression_operblock_schema")
+        service = OperBlockService(manager)
+        case = service.create_operation_case(
+            {
+                "table_code": "emergency",
+                "history_number": "REGSTAGE1",
+                "full_name": "Тестов Пациент",
+                "gender": "м",
+                "birth_date": date(1980, 1, 1),
+                "diagnosis_code": "K35",
+                "diagnosis_text": "Острый аппендицит",
+            }
+        )
+        admission_id = int(case["admission_id"])
+        case_id = int(case["operation_case_id"])
+        service.add_vitals(admission_id, sys=120, dia=80, pulse=70, spo2=98)
+        service.start_anesthesia(case_id, "ОА")
+        service.start_surgery(case_id, operation_name="Операция", surgeons=["Хирург"])
+
+        added = service.add_operation_stage(case_id, "Аппендэктомия")
+        if added.get("display_label") != "Аппендэктомия" or (added.get("payload") or {}).get("stage_kind") != "custom":
+            return False, f"custom stage insert returned unexpected payload: {added!r}"
+        snapshot_after_add = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
+        added_events = list(snapshot_after_add.get("operation_events") or [])
+        if [event.get("display_label") for event in added_events] != ["Начало пособия", "Начало операции", "Аппендэктомия"]:
+            return False, f"operation stage order after add is wrong: {added_events!r}"
+
+        auto_event_id = int(added_events[0].get("source_id") or 0)
+        try:
+            service.update_operation_stage(auto_event_id, "Другое начало", expected_revision=int(added_events[0].get("revision") or 0))
+        except ValueError as exc:
+            if "Автоматические этапы" not in str(exc):
+                return False, f"unexpected auto-stage edit error: {exc}"
+        else:
+            return False, "automatic operation stage was editable"
+
+        surgery_start_dt = datetime.fromisoformat(str(added_events[1].get("event_time")).replace(" ", "T"))
+        first_stage_time = surgery_start_dt + timedelta(minutes=60)
+        second_stage_time = surgery_start_dt + timedelta(minutes=90)
+
+        edited = service.update_operation_stage(
+            int(added["source_id"]),
+            "Лапароскопическая аппендэктомия",
+            expected_revision=int(added["revision"]),
+            event_time=first_stage_time,
+        )
+        if int(edited.get("revision") or 0) != int(added.get("revision") or 0) + 1:
+            return False, f"custom stage revision did not increase: added={added!r}, edited={edited!r}"
+        second_added = service.add_operation_stage(case_id, "Ревизия брюшной полости")
+        second_moved_later = service.update_operation_stage(
+            int(second_added["source_id"]),
+            "Ревизия брюшной полости",
+            expected_revision=int(second_added["revision"]),
+            event_time=second_stage_time,
+        )
+        snapshot_after_edit = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
+        edited_events = list(snapshot_after_edit.get("operation_events") or [])
+        labels_after_edit = [event.get("display_label") for event in edited_events]
+        if labels_after_edit != [
+            "Начало пособия",
+            "Начало операции",
+            "Лапароскопическая аппендэктомия",
+            "Ревизия брюшной полости",
+        ]:
+            return False, f"operation stage label was not updated in snapshot: {labels_after_edit!r}"
+
+        second_moved_earlier = service.update_operation_stage(
+            int(second_moved_later["source_id"]),
+            "Ревизия брюшной полости",
+            expected_revision=int(second_moved_later["revision"]),
+            event_time=surgery_start_dt + timedelta(minutes=59),
+        )
+        snapshot_after_reorder = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
+        reordered_labels = [event.get("display_label") for event in snapshot_after_reorder.get("operation_events") or []]
+        if reordered_labels != [
+            "Начало пособия",
+            "Начало операции",
+            "Ревизия брюшной полости",
+            "Лапароскопическая аппендэктомия",
+        ]:
+            return False, f"operation stage time edit did not reorder stages: {reordered_labels!r}"
+        try:
+            service.update_operation_stage(
+                int(second_moved_earlier["source_id"]),
+                "Ревизия брюшной полости",
+                expected_revision=int(second_moved_earlier["revision"]),
+                event_time=surgery_start_dt - timedelta(minutes=1),
+            )
+        except ValueError as exc:
+            if "раньше начала операции" not in str(exc):
+                return False, f"unexpected before-surgery stage time error: {exc}"
+        else:
+            return False, "custom stage time was moved before surgery start"
+
+        widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+        widget._current_timeline_snapshot = dict(snapshot_after_edit)
+        if not OperBlockMainWidget._patch_operation_stage_event_locally(widget, second_moved_earlier):
+            return False, "local UI stage patch returned false"
+        patched_events = list((widget._current_timeline_snapshot or {}).get("operation_events") or [])
+        patched_labels = [event.get("display_label") for event in patched_events]
+        if patched_labels != reordered_labels:
+            return False, f"local UI patch did not replace only target stage: {patched_labels!r}"
+        if len(patched_events) != len(edited_events):
+            return False, "local UI patch changed operation_events count"
+
+        service.end_surgery(case_id)
+        try:
+            service.add_operation_stage(case_id, "Поздний этап")
+        except ValueError as exc:
+            if "после начала операции" not in str(exc):
+                return False, f"unexpected closed-surgery stage error: {exc}"
+        else:
+            return False, "custom stage was added after surgery end"
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -19923,6 +20054,7 @@ def main():
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
         ("operblock_route_settings_order_and_default", _check_operblock_route_settings_order_and_default),
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
+        ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),

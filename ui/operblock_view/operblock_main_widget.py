@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 import weakref
 
-from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer
+from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QImageReader, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
@@ -2785,6 +2785,380 @@ class StartSurgeryDialog(OperBlockStyledDialog):
             self.operation_name_edit.setFocus(Qt.OtherFocusReason)
             return
         super().accept()
+
+
+class OperationStagesDialog(OperBlockStyledDialog):
+    saveRequested = Signal(object)
+    timeEditRequested = Signal(object)
+
+    AUTO_STAGE_KINDS = {"anesthesia_start", "surgery_start"}
+    CUSTOM_STAGE_KIND = "custom"
+
+    def __init__(self, stages: list[dict], parent=None):
+        super().__init__(
+            "Этапы операции",
+            "operation_stages_dialog_geometry",
+            parent,
+            minimum_size=(620, 380),
+            initial_size=(760, 540),
+        )
+        self._rows: list[dict] = []
+        self._row_widgets: dict[str, dict] = {}
+        self._init_ui(stages)
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self, stages: list[dict]):
+        layout = self.content_layout
+        layout.setSpacing(10)
+
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("OperBlockOperationStagesScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scrollbar = self.scroll.verticalScrollBar()
+        scrollbar.setObjectName("OperBlockOperationStagesScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(38)
+        scrollbar.setPageStep(152)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockOperationStagesScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+
+        self.rows_widget = QWidget()
+        self.rows_widget.setObjectName("OperBlockOperationStagesContent")
+        self.rows_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOperationStagesContent {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        self.rows_layout = QVBoxLayout(self.rows_widget)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(7)
+        self.scroll.setWidget(self.rows_widget)
+        self.scroll.setStyleSheet(
+            """
+            QScrollArea#OperBlockOperationStagesScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#OperBlockOperationStagesScroll > QWidget > QWidget {
+                background: transparent;
+            }
+            """
+        )
+        layout.addWidget(self.scroll, 1)
+
+        note_label = QLabel("Конец операции и конец пособия будут установлены автоматически.")
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet(
+            f"font-size: 12px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
+        )
+        layout.addWidget(note_label, 0)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        close_button = QPushButton("Закрыть")
+        close_button.setMinimumHeight(34)
+        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        close_button.clicked.connect(self.accept)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+
+        self.set_stages(stages)
+
+    @staticmethod
+    def _row_key(row: dict) -> str:
+        event_id = _safe_int((row or {}).get("event_id") or (row or {}).get("source_id"))
+        if event_id:
+            return f"event:{event_id}"
+        return "new"
+
+    @staticmethod
+    def _clean_label(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _stage_label(cls, row: dict) -> str:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        return cls._clean_label(
+            row.get("label")
+            or row.get("display_label")
+            or row.get("raw_text")
+            or (payload or {}).get("label")
+        )
+
+    @staticmethod
+    def _stage_sort_key(row: dict) -> tuple[datetime, int]:
+        return (
+            _minute_floor_dt(_parse_datetime_value((row or {}).get("event_time"))) or datetime.max,
+            _safe_int((row or {}).get("event_id") or (row or {}).get("source_id")) or 0,
+        )
+
+    def set_stages(self, stages: list[dict]) -> None:
+        auto_rows = []
+        custom_rows = []
+        seen_auto: set[str] = set()
+        for item in stages or []:
+            row = dict(item or {})
+            kind = str(row.get("kind") or row.get("stage_kind") or "").strip()
+            row["kind"] = kind
+            row["label"] = self._stage_label(row)
+            row["event_id"] = _safe_int(row.get("event_id") or row.get("source_id"))
+            row["revision"] = int(row.get("revision") or 0)
+            if kind in self.AUTO_STAGE_KINDS:
+                if kind in seen_auto:
+                    continue
+                row["readonly"] = True
+                seen_auto.add(kind)
+                auto_rows.append(row)
+            elif kind == self.CUSTOM_STAGE_KIND:
+                row["readonly"] = False
+                custom_rows.append(row)
+        auto_rows.sort(key=lambda row: 0 if row.get("kind") == "anesthesia_start" else 1)
+        custom_rows.sort(key=self._stage_sort_key)
+        self._rows = auto_rows + custom_rows
+        self._ensure_blank_row()
+        self._render_rows()
+
+    def _ensure_blank_row(self) -> None:
+        self._rows = [row for row in self._rows if self._row_key(row) != "new"]
+        self._rows.append(
+            {
+                "kind": self.CUSTOM_STAGE_KIND,
+                "label": "",
+                "event_id": None,
+                "revision": 0,
+                "readonly": False,
+                "new": True,
+            }
+        )
+
+    def _clear_rows_layout(self) -> None:
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._row_widgets = {}
+
+    def _render_rows(self) -> None:
+        self._clear_rows_layout()
+        for index, row in enumerate(self._rows, start=1):
+            frame = self._create_row_widget(index, row)
+            self.rows_layout.addWidget(frame)
+        self.rows_layout.addStretch(1)
+
+    def _create_row_widget(self, index: int, row: dict) -> QWidget:
+        row_key = self._row_key(row)
+        frame = QFrame()
+        frame.setObjectName("OperBlockOperationStageRow")
+        frame.setStyleSheet(
+            f"""
+            QFrame#OperBlockOperationStageRow {{
+                background: #ffffff;
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: 6px;
+            }}
+            """
+        )
+        frame.setMinimumHeight(46)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(10, 7, 10, 7)
+        layout.setSpacing(8)
+
+        number_label = QLabel(str(index))
+        number_label.setFixedWidth(28)
+        number_label.setAlignment(Qt.AlignCenter)
+        number_label.setStyleSheet(f"font-size: 13px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
+        layout.addWidget(number_label)
+
+        can_edit_time = bool(row.get("event_id")) and not bool(row.get("readonly")) and not bool(row.get("new"))
+        time_text = _format_order_time(row.get("event_time")) if row.get("event_time") else ""
+        if can_edit_time:
+            time_label = OperBlockClickableLabel(time_text, click_callback=lambda key=row_key: self._request_time_edit(key))
+            time_label.setToolTip("Изменить время этапа")
+        else:
+            time_label = QLabel(time_text)
+        time_label.setFixedWidth(46)
+        time_label.setAlignment(Qt.AlignCenter)
+        time_style = (
+            f"font-size: 12px; color: {COLOR_PRIMARY_DARK}; font-weight: 700; text-decoration: underline;"
+            if can_edit_time
+            else f"font-size: 12px; color: {TEXT_SECONDARY};"
+        )
+        time_label.setStyleSheet(time_style)
+        layout.addWidget(time_label)
+
+        edit = QLineEdit()
+        edit.setText(str(row.get("label") or ""))
+        edit.setPlaceholderText("Название этапа")
+        edit.setMinimumHeight(32)
+        edit.setReadOnly(bool(row.get("readonly")))
+        edit.setProperty("row_key", row_key)
+        edit.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background: {'#f8fafc' if row.get('readonly') else '#ffffff'};
+                border: 1px solid {BORDER_COLOR};
+                border-radius: 5px;
+                padding: 5px 8px;
+                color: {TEXT_PRIMARY};
+            }}
+            QLineEdit:read-only {{
+                color: {TEXT_SECONDARY};
+            }}
+            """
+        )
+        layout.addWidget(edit, 1)
+
+        save_button = QPushButton("Сохранить")
+        save_button.setFixedWidth(104)
+        save_button.setMinimumHeight(30)
+        save_button.setCursor(Qt.PointingHandCursor)
+        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE + "QPushButton { padding: 4px 8px; }")
+        save_button.setProperty("row_key", row_key)
+        save_button.clicked.connect(lambda _=False, key=row_key: self._request_save(key))
+        layout.addWidget(save_button, 0)
+
+        self._row_widgets[row_key] = {
+            "frame": frame,
+            "edit": edit,
+            "button": save_button,
+            "time_label": time_label,
+            "row": row,
+        }
+        edit.textChanged.connect(lambda _text="", key=row_key: self._sync_row_button(key))
+        self._sync_row_button(row_key, initial=True)
+        return frame
+
+    def _sync_row_button(self, row_key: str, *, initial: bool = False) -> None:
+        widgets = self._row_widgets.get(row_key) or {}
+        row = widgets.get("row") or {}
+        button = widgets.get("button")
+        edit = widgets.get("edit")
+        if button is None or edit is None:
+            return
+        if row.get("readonly"):
+            button.setText("Авто")
+            button.setEnabled(False)
+            return
+        current = self._clean_label(edit.text())
+        original = self._clean_label(row.get("label") or "")
+        if row.get("new"):
+            button.setText("Сохранить")
+            button.setEnabled(bool(current))
+            return
+        if initial:
+            button.setText("Сохранено")
+            button.setEnabled(False)
+            return
+        button.setText("Сохранить")
+        button.setEnabled(bool(current) and current != original)
+
+    def _request_save(self, row_key: str) -> None:
+        widgets = self._row_widgets.get(row_key) or {}
+        row = dict(widgets.get("row") or {})
+        edit = widgets.get("edit")
+        button = widgets.get("button")
+        if edit is None or button is None:
+            return
+        label = self._clean_label(edit.text())
+        if not label:
+            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            edit.setFocus(Qt.OtherFocusReason)
+            return
+        button.setText("Сохранение...")
+        button.setEnabled(False)
+        edit.setEnabled(False)
+        self.saveRequested.emit(
+            {
+                "row_key": row_key,
+                "event_id": _safe_int(row.get("event_id")),
+                "expected_revision": int(row.get("revision") or 0),
+                "label": label,
+                "is_new": bool(row.get("new")),
+            }
+        )
+
+    def _request_time_edit(self, row_key: str) -> None:
+        widgets = self._row_widgets.get(row_key) or {}
+        row = dict(widgets.get("row") or {})
+        if row.get("readonly") or row.get("new"):
+            return
+        event_id = _safe_int(row.get("event_id"))
+        if not event_id:
+            return
+        edit = widgets.get("edit")
+        label = self._clean_label(edit.text()) if edit is not None else self._stage_label(row)
+        if not label:
+            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            if edit is not None:
+                edit.setFocus(Qt.OtherFocusReason)
+            return
+        self.timeEditRequested.emit(
+            {
+                "row_key": row_key,
+                "event_id": event_id,
+                "expected_revision": int(row.get("revision") or 0),
+                "label": label,
+                "event_time": row.get("event_time"),
+            }
+        )
+
+    def apply_save_error(self, row_key: str) -> None:
+        widgets = self._row_widgets.get(str(row_key or "")) or {}
+        edit = widgets.get("edit")
+        if edit is not None:
+            edit.setEnabled(True)
+        time_label = widgets.get("time_label")
+        if time_label is not None:
+            time_label.setEnabled(True)
+        self._sync_row_button(str(row_key or ""))
+
+    def apply_saved_stage(self, row_key: str, stage: dict) -> None:
+        event_id = _safe_int((stage or {}).get("source_id") or (stage or {}).get("event_id"))
+        if not event_id:
+            self.apply_save_error(row_key)
+            return
+        updated = {
+            "kind": self.CUSTOM_STAGE_KIND,
+            "label": self._stage_label(stage),
+            "event_id": event_id,
+            "event_time": (stage or {}).get("event_time"),
+            "revision": int((stage or {}).get("revision") or 0),
+            "readonly": False,
+            "new": False,
+            "payload": dict((stage or {}).get("payload") or {}),
+        }
+        replaced = False
+        rows = []
+        for row in self._rows:
+            if self._row_key(row) == str(row_key or "") or _safe_int(row.get("event_id")) == event_id:
+                if not replaced:
+                    rows.append(updated)
+                    replaced = True
+                continue
+            if self._row_key(row) != "new":
+                rows.append(row)
+        if not replaced:
+            rows.append(updated)
+        self.set_stages(rows)
+        target_key = self._row_key(updated)
+        widgets = self._row_widgets.get(target_key) or {}
+        button = widgets.get("button")
+        if button is not None:
+            button.setText("Сохранено")
+            button.setEnabled(False)
 
 
 class EditOperBlockStaffDialog(OperBlockStyledDialog):
@@ -7078,6 +7452,7 @@ class OperBlockMainWidget(QWidget):
         self.start_anesthesia_button = self._stage_action_button(" Начать пособие")
         self.end_anesthesia_button = self._stage_action_button(" Завершить пособие", danger=True)
         self.start_surgery_button = self._stage_action_button(" Начать операцию")
+        self.operation_stages_button = self._stage_action_button(" Этапы операции")
         self.close_case_button = self._stage_action_button(" Завершить операцию", danger=True)
         self.release_table_button = self._stage_action_button(" Освободить стол", danger=True)
         self.report_button = QPushButton(" Отчет за операцию")
@@ -7091,6 +7466,7 @@ class OperBlockMainWidget(QWidget):
         self.start_anesthesia_button.clicked.connect(self._start_anesthesia)
         self.end_anesthesia_button.clicked.connect(self._end_anesthesia)
         self.start_surgery_button.clicked.connect(self._start_surgery)
+        self.operation_stages_button.clicked.connect(self._open_operation_stages_dialog)
         self.close_case_button.clicked.connect(self._end_surgery)
         self.release_table_button.clicked.connect(self._confirm_release_current_case)
         self.report_button.clicked.connect(self._show_report_placeholder)
@@ -7099,6 +7475,7 @@ class OperBlockMainWidget(QWidget):
             self.start_anesthesia_button,
             self.end_anesthesia_button,
             self.start_surgery_button,
+            self.operation_stages_button,
             self.close_case_button,
             self.release_table_button,
             self.report_button,
@@ -9318,6 +9695,7 @@ class OperBlockMainWidget(QWidget):
                 self.start_anesthesia_button.setToolTip("")
             self.end_anesthesia_button.setEnabled(write_enabled and aid_active)
             self.start_surgery_button.setEnabled(write_enabled and aid_active and not surgery_active)
+            self.operation_stages_button.setEnabled(write_enabled and aid_active and surgery_active)
             self.close_case_button.setEnabled(write_enabled and aid_active and surgery_active)
             self.release_table_button.setEnabled(write_enabled and not aid_active)
         if getattr(self, "vitals_input", None) is not None:
@@ -14583,6 +14961,285 @@ class OperBlockMainWidget(QWidget):
             f"operblock_end_surgery:{case_id}",
             lambda: self.operblock_service.end_surgery(case_id),
         )
+
+    def _operation_stage_dialog_rows(self) -> list[dict]:
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        rows: list[dict] = []
+        for event in snapshot.get("operation_events") or []:
+            data = dict(event or {})
+            payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            kind = str((payload or {}).get("stage_kind") or (payload or {}).get("operation_stage") or "").strip()
+            if kind not in {"anesthesia_start", "surgery_start", "custom"}:
+                continue
+            label = str(
+                (payload or {}).get("label")
+                or data.get("display_label")
+                or data.get("raw_text")
+                or ""
+            ).strip()
+            rows.append(
+                {
+                    "kind": kind,
+                    "label": label,
+                    "event_id": _safe_int(data.get("source_id")),
+                    "source_id": _safe_int(data.get("source_id")),
+                    "event_time": data.get("event_time"),
+                    "revision": int(data.get("revision") or 0),
+                    "payload": payload,
+                    "display_label": data.get("display_label"),
+                    "raw_text": data.get("raw_text"),
+                }
+            )
+
+        existing_auto = {str(row.get("kind") or "") for row in rows}
+        for event in (getattr(self, "_current_stage_state", {}) or {}).get("events") or []:
+            kind = str((event or {}).get("kind") or "").strip()
+            if kind not in {"anesthesia_start", "surgery_start"} or kind in existing_auto:
+                continue
+            rows.append(
+                {
+                    "kind": kind,
+                    "label": str((event or {}).get("label") or ""),
+                    "event_id": _safe_int((event or {}).get("id")),
+                    "source_id": _safe_int((event or {}).get("id")),
+                    "event_time": (event or {}).get("event_time"),
+                    "revision": int((event or {}).get("revision") or 0),
+                    "payload": {"stage_kind": kind, "label": str((event or {}).get("label") or "")},
+                }
+            )
+        return rows
+
+    def _open_operation_stages_dialog(self):
+        if self._write_pending:
+            return
+        if not self._current_operation_case_id:
+            return
+        if not getattr(self, "_current_surgery_active", False):
+            CustomMessageBox.warning(self, "Этапы операции", "Этапы доступны после начала операции и до её завершения.")
+            return
+        dialog = OperationStagesDialog(self._operation_stage_dialog_rows(), self)
+        dialog_ref = weakref.ref(dialog)
+        dialog.saveRequested.connect(lambda payload, ref=dialog_ref: self._save_operation_stage_from_dialog(ref, payload))
+        dialog.timeEditRequested.connect(lambda payload, ref=dialog_ref: self._edit_operation_stage_time_from_dialog(ref, payload))
+        dialog.exec()
+
+    def _validate_operation_stage_datetime_or_warn(self, value: str | None) -> bool:
+        event_dt = _minute_floor_dt(_parse_datetime_value(value))
+        if event_dt is None:
+            CustomMessageBox.warning(self, "Время этапа", "Укажите корректное время этапа.")
+            return False
+        surgery_start = _minute_floor_dt(self._current_surgery_start)
+        if surgery_start is None:
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить начало операции. Обновите протокол.")
+            return False
+        if event_dt < surgery_start:
+            CustomMessageBox.warning(
+                self,
+                "Время этапа",
+                f"Этап операции не может быть раньше начала операции: {surgery_start.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        anesthesia_end = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
+        if anesthesia_end is not None and event_dt > anesthesia_end:
+            CustomMessageBox.warning(
+                self,
+                "Время этапа",
+                f"Этап операции не может быть позже окончания пособия: {anesthesia_end.strftime('%d.%m.%Y %H:%M')}.",
+            )
+            return False
+        return True
+
+    def _edit_operation_stage_time_from_dialog(self, dialog_ref, payload: dict):
+        dialog = dialog_ref()
+        row_key = str((payload or {}).get("row_key") or "")
+        if dialog is None or self._write_pending:
+            if dialog is not None:
+                dialog.apply_save_error(row_key)
+            return
+        event_id = _safe_int((payload or {}).get("event_id"))
+        old_event_dt = _minute_floor_dt(_parse_datetime_value((payload or {}).get("event_time")))
+        label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
+        if not event_id or old_event_dt is None or not label:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить этап. Обновите протокол.")
+            return
+        time_dialog = TimeEditDialog("Время этапа операции", old_event_dt, self, field_label="Время этапа")
+        if time_dialog.exec() != QDialog.Accepted:
+            return
+        event_time = time_dialog.datetime_text()
+        new_event_dt = _minute_floor_dt(_parse_datetime_value(event_time))
+        if new_event_dt == old_event_dt:
+            return
+        if not self._validate_operation_stage_datetime_or_warn(event_time):
+            return
+        self._save_operation_stage_from_dialog(
+            dialog_ref,
+            {
+                "row_key": row_key,
+                "event_id": event_id,
+                "expected_revision": int((payload or {}).get("expected_revision") or 0),
+                "label": label,
+                "event_time": event_time,
+                "is_new": False,
+            },
+        )
+
+    def _save_operation_stage_from_dialog(self, dialog_ref, payload: dict):
+        dialog = dialog_ref()
+        row_key = str((payload or {}).get("row_key") or "")
+        if dialog is None:
+            return
+        if self._write_pending:
+            dialog.apply_save_error(row_key)
+            return
+        if not self._current_operation_case_id:
+            dialog.apply_save_error(row_key)
+            return
+        label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
+        if not label:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            return
+        case_id = int(self._current_operation_case_id)
+        is_new = bool((payload or {}).get("is_new"))
+        event_id = _safe_int((payload or {}).get("event_id"))
+        expected_revision = int((payload or {}).get("expected_revision") or 0)
+        event_time = str((payload or {}).get("event_time") or "").strip() or None
+        if not is_new and not event_id:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Этапы операции", "Не удалось определить этап. Обновите протокол.")
+            return
+        if event_time is not None and not self._validate_operation_stage_datetime_or_warn(event_time):
+            dialog.apply_save_error(row_key)
+            return
+
+        write_description = (
+            f"operblock_add_operation_stage:{case_id}"
+            if is_new
+            else f"operblock_update_operation_stage:{int(event_id)}"
+        )
+        self._write_pending = True
+        self._apply_protocol_controls_state()
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
+
+        def operation():
+            if is_new:
+                return self.operblock_service.add_operation_stage(case_id, label)
+            return self.operblock_service.update_operation_stage(
+                int(event_id),
+                label,
+                expected_revision=expected_revision,
+                event_time=event_time,
+            )
+
+        self._enqueue_write(
+            write_description,
+            operation,
+            on_success=lambda result, ref=dialog_ref, key=row_key: self._on_operation_stage_saved(ref, key, result),
+            on_error=lambda exc, ref=dialog_ref, key=row_key: self._on_operation_stage_save_error(ref, key, exc),
+        )
+
+    @staticmethod
+    def _normalized_operation_stage_event(stage: dict) -> dict:
+        data = dict(stage or {})
+        source_id = _safe_int(data.get("source_id") or data.get("event_id"))
+        if source_id:
+            data["id"] = f"timeline_event:{int(source_id)}"
+            data["source"] = "timeline_event"
+            data["source_id"] = int(source_id)
+        payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+        payload = dict(payload or {})
+        payload["stage_kind"] = str(payload.get("stage_kind") or "custom").strip() or "custom"
+        label = re.sub(
+            r"\s+",
+            " ",
+            str(payload.get("label") or data.get("display_label") or data.get("raw_text") or "").strip(),
+        )
+        if label:
+            payload["label"] = label
+            data["drug_label"] = label
+            data["display_label"] = label
+            data["raw_text"] = label
+        data["payload"] = payload
+        data["event_type"] = "clinical_event"
+        data["status"] = str(data.get("status") or "active")
+        data["revision"] = int(data.get("revision") or 0)
+        return data
+
+    def _patch_operation_stage_event_locally(self, stage: dict) -> bool:
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        if not snapshot:
+            return False
+        stage_event = self._normalized_operation_stage_event(stage)
+        source_id = _safe_int(stage_event.get("source_id"))
+        if not source_id:
+            return False
+        events = []
+        replaced = False
+        for event in list(snapshot.get("operation_events") or []):
+            data = dict(event or {})
+            if _safe_int(data.get("source_id")) == int(source_id):
+                if not replaced:
+                    events.append(stage_event)
+                    replaced = True
+                continue
+            events.append(data)
+        if not replaced:
+            events.append(stage_event)
+        events.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("event_time")) or datetime.min,
+                _safe_int((item or {}).get("source_id")) or 0,
+            )
+        )
+        snapshot["operation_events"] = events
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    def _update_single_operation_stage_marker(self, stage: dict) -> bool:
+        chart = getattr(self, "vitals_chart", None)
+        if chart is None or not hasattr(chart, "patch_operation_stage_marker"):
+            return False
+        start_dt = getattr(chart, "start_time", None)
+        if not isinstance(start_dt, datetime):
+            transform = getattr(chart, "_timeline_transform", None)
+            start_dt = getattr(transform, "display_origin_at", None)
+        if not isinstance(start_dt, datetime):
+            start_dt = self._current_operation_start or self._current_protocol_date
+        return bool(
+            chart.patch_operation_stage_marker(
+                self._normalized_operation_stage_event(stage),
+                snapshot=getattr(self, "_current_timeline_snapshot", None),
+                start_time=start_dt,
+            )
+        )
+
+    def _on_operation_stage_saved(self, dialog_ref, row_key: str, result):
+        self._write_pending = False
+        self._apply_protocol_controls_state()
+        stage = self._normalized_operation_stage_event(dict(result or {}))
+        patched = self._patch_operation_stage_event_locally(stage)
+        dialog = dialog_ref()
+        if patched:
+            if dialog is not None:
+                dialog.apply_saved_stage(row_key, stage)
+            if not self._update_single_operation_stage_marker(stage):
+                self._update_vitals_chart_order_markers()
+            return
+        if dialog is not None:
+            dialog.apply_save_error(row_key)
+        self.refresh_protocol(force=True)
+
+    def _on_operation_stage_save_error(self, dialog_ref, row_key: str, exc: Exception):
+        self._write_pending = False
+        self._apply_protocol_controls_state()
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.apply_save_error(row_key)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Этапы операции"
+        CustomMessageBox.warning(self, title, str(exc))
+        if isinstance(exc, (DataConflictError, OperBlockConflictError)) and self._current_operation_case_id:
+            self.refresh_protocol(force=True)
 
     def _undo_last_action(self):
         if not self._current_operation_case_id or self._write_pending:

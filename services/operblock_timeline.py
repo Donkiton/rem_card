@@ -25,6 +25,7 @@ OPERBLOCK_STAGE_KIND_LABELS = {
     "anesthesia_end": "Конец пособия",
     "surgery_start": "Начало операции",
     "surgery_end": "Конец операции",
+    "custom": "Этап операции",
 }
 
 

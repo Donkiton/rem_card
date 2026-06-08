@@ -215,6 +215,10 @@ def _stage_label(kind: str) -> str:
     return OPERBLOCK_STAGE_KIND_LABELS.get(str(kind or "").strip(), str(kind or "").strip() or "Этап операции")
 
 
+def _normalize_operation_stage_label(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
 def _row_stage_kind(row: Mapping[str, Any] | dict[str, Any]) -> str:
     payload = _parse_json_dict((row or {}).get("payload_json"))
     return operation_stage_kind_from_payload(payload)
@@ -1390,6 +1394,183 @@ class OperBlockService:
     def end_surgery(self, operation_case_id: int) -> int:
         return self._add_stage_event(operation_case_id, "surgery_end")
 
+    def add_operation_stage(self, operation_case_id: int, label: str) -> dict[str, Any]:
+        validate_operblock_runtime_path(self.db)
+        clean_label = _normalize_operation_stage_label(label)
+        if not clean_label:
+            raise ValueError("Укажите название этапа операции.")
+        event_dt = _minute_floor(datetime.now())
+
+        def operation(cursor: sqlite3.Cursor):
+            case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
+            stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
+            state = self._stage_state_from_cursor_rows(stage_rows)
+            if not bool(state.get("surgery_active")):
+                raise ValueError("Этапы операции доступны только после начала операции и до её завершения.")
+            surgery_start = _parse_dt(state.get("current_surgery_start"))
+            if surgery_start is not None and event_dt < _minute_floor(surgery_start):
+                raise ValueError(
+                    f"Этап операции не может быть раньше начала операции: "
+                    f"{_format_bound_time(_minute_floor(surgery_start))}."
+                )
+            self._assert_datetime_in_active_anesthesia_bounds(
+                cursor,
+                event_dt,
+                case,
+                entity_label="Этап операции",
+            )
+            payload = {"stage_kind": "custom", "label": clean_label}
+            payload_json = self._timeline_payload_json(payload)
+            cursor.execute(
+                """
+                INSERT INTO operblock_timeline_events (
+                    operation_case_id, admission_id, table_code, event_type, event_time,
+                    drug_label, display_label, raw_text, status, revision, payload_json,
+                    created_by_role, created_by_client_id, last_modified_by
+                ) VALUES (?, ?, ?, 'clinical_event', ?, ?, ?, ?, 'active', 1, ?,
+                          'operblock', ?, 'operblock')
+                """,
+                (
+                    int(case["operation_case_id"]),
+                    int(case["admission_id"]),
+                    case.get("table_code"),
+                    event_dt.isoformat(timespec="seconds"),
+                    clean_label,
+                    clean_label,
+                    clean_label,
+                    payload_json,
+                    self.client_id,
+                ),
+            )
+            return self._operation_stage_event_result(
+                event_id=int(cursor.lastrowid),
+                case=case,
+                label=clean_label,
+                event_dt=event_dt,
+                revision=1,
+                payload=payload,
+            )
+
+        return dict(self.db.run_write_operation(operation, source="operblock_add_operation_stage"))
+
+    def update_operation_stage(
+        self,
+        event_id: int,
+        label: str,
+        *,
+        expected_revision: Optional[int] = None,
+        event_time: Any = None,
+    ) -> dict[str, Any]:
+        validate_operblock_runtime_path(self.db)
+        clean_label = _normalize_operation_stage_label(label)
+        if not clean_label:
+            raise ValueError("Укажите название этапа операции.")
+        new_event_dt = self._normalize_timeline_event_datetime(event_time) if event_time is not None else None
+
+        def operation(cursor: sqlite3.Cursor):
+            row = cursor.execute(
+                """
+                SELECT
+                    id, operation_case_id, admission_id, table_code, event_type, event_time,
+                    display_label, raw_text, payload_json, COALESCE(revision, 0) AS revision
+                FROM operblock_timeline_events
+                WHERE id = ?
+                  AND event_type = 'clinical_event'
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                """,
+                (int(event_id),),
+            ).fetchone()
+            if not row:
+                raise OperBlockConflictError("Этап операции не найден или уже удалён. Обновите протокол.")
+            payload = _parse_json_dict(row["payload_json"])
+            if operation_stage_kind_from_payload(payload) != "custom":
+                raise ValueError("Автоматические этапы операции нельзя редактировать.")
+            assert_revision_matches(row["revision"], expected_revision)
+            case = self._assert_active_operation_case_for_update(cursor, int(row["operation_case_id"]))
+            if int(case["admission_id"]) != int(row["admission_id"]):
+                raise OperBlockConflictError("Этап операции не принадлежит текущему случаю. Обновите протокол.")
+            stage_rows = self._fetch_stage_rows_for_case(cursor, int(case["operation_case_id"]))
+            state = self._stage_state_from_cursor_rows(stage_rows)
+            if not bool(state.get("surgery_active")):
+                raise ValueError("Этапы операции доступны только после начала операции и до её завершения.")
+            event_dt = _parse_dt(row["event_time"])
+            if event_dt is None:
+                raise OperBlockConflictError("Не удалось определить время этапа. Обновите протокол.")
+            effective_event_dt = _minute_floor(new_event_dt or event_dt)
+            surgery_start = _parse_dt(state.get("current_surgery_start"))
+            if surgery_start is None:
+                raise OperBlockConflictError("Не удалось определить начало операции. Обновите протокол.")
+            if effective_event_dt < _minute_floor(surgery_start):
+                raise ValueError(
+                    f"Этап операции не может быть раньше начала операции: "
+                    f"{_format_bound_time(_minute_floor(surgery_start))}."
+                )
+            self._assert_datetime_in_active_anesthesia_bounds(
+                cursor,
+                effective_event_dt,
+                case,
+                entity_label="Время этапа операции",
+            )
+            payload["label"] = clean_label
+            payload_json = self._timeline_payload_json(payload)
+            if (
+                str(row["display_label"] or "").strip() == clean_label
+                and str(row["raw_text"] or "").strip() == clean_label
+                and str(row["payload_json"] or "") == str(payload_json or "")
+                and _minute_floor(event_dt) == effective_event_dt
+            ):
+                return self._operation_stage_event_result(
+                    event_id=int(row["id"]),
+                    case=case,
+                    label=clean_label,
+                    event_dt=effective_event_dt,
+                    revision=int(row["revision"] or 0),
+                    payload=payload,
+                )
+            revision_clause = ""
+            params: list[Any] = [
+                clean_label,
+                clean_label,
+                clean_label,
+                effective_event_dt.isoformat(timespec="seconds"),
+                payload_json,
+                int(row["id"]),
+            ]
+            if expected_revision is not None:
+                revision_clause = "AND COALESCE(revision, 0) = ?"
+                params.append(int(expected_revision))
+            cursor.execute(
+                f"""
+                UPDATE operblock_timeline_events
+                SET drug_label = ?,
+                    display_label = ?,
+                    raw_text = ?,
+                    event_time = ?,
+                    payload_json = ?,
+                    revision = COALESCE(revision, 0) + 1,
+                    last_modified_by = 'operblock',
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE id = ?
+                  AND event_type = 'clinical_event'
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                  {revision_clause}
+                """,
+                tuple(params),
+            )
+            if cursor.rowcount != 1:
+                assert_revision_matches(None, expected_revision)
+                raise OperBlockConflictError("Этап операции уже изменён другим пользователем. Обновите протокол.")
+            return self._operation_stage_event_result(
+                event_id=int(row["id"]),
+                case=case,
+                label=clean_label,
+                event_dt=effective_event_dt,
+                revision=int(row["revision"] or 0) + 1,
+                payload=payload,
+            )
+
+        return dict(self.db.run_write_operation(operation, source="operblock_update_operation_stage"))
+
     def update_operation_staff(
         self,
         operation_case_id: int,
@@ -1603,6 +1784,45 @@ class OperBlockService:
             )
 
         return int(self.db.run_write_operation(operation, source=f"operblock_stage_{clean_kind}"))
+
+    @staticmethod
+    def _operation_stage_event_result(
+        *,
+        event_id: int,
+        case: dict[str, Any],
+        label: str,
+        event_dt: datetime,
+        revision: int,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        clean_label = _normalize_operation_stage_label(label) or _stage_label(str(payload.get("stage_kind") or ""))
+        event_time = _minute_floor(event_dt).isoformat(timespec="seconds")
+        return {
+            "id": f"timeline_event:{int(event_id)}",
+            "source": "timeline_event",
+            "source_id": int(event_id),
+            "admission_id": int(case["admission_id"]),
+            "operation_case_id": int(case["operation_case_id"]),
+            "table_code": str(case.get("table_code") or "") or None,
+            "event_time": event_time,
+            "end_time": None,
+            "event_type": "clinical_event",
+            "drug_label": clean_label,
+            "display_label": clean_label,
+            "raw_text": clean_label,
+            "dose_value": None,
+            "dose_unit": None,
+            "volume_ml": None,
+            "concentration_text": None,
+            "rate_value": None,
+            "rate_unit": None,
+            "route": None,
+            "status": "active",
+            "revision": int(revision or 0),
+            "created_at": None,
+            "updated_at": None,
+            "payload": dict(payload or {}),
+        }
 
     def _insert_stage_event(
         self,
