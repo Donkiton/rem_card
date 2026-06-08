@@ -18971,6 +18971,81 @@ def _check_operblock_operation_stage_chart_grouping(temp_root: str) -> tuple[boo
         app.processEvents()
 
 
+def _check_operblock_board_preview_full_card_layout(
+    app,
+    widget,
+    base_dt: datetime,
+    operation_events: list[dict],
+    medication_history: list[dict],
+) -> tuple[bool, str]:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QLabel, QFrame, QScrollArea
+
+    widget._current_board_apply_metrics = None
+    widget._board_photo_thumbnail_cache = {}
+    full_card = widget._make_occupied_table_card(
+        {
+            "display_name": "Экстренная операционная",
+            "patient": {
+                "operation_case_id": 1,
+                "history_number": "REGBOARD1",
+                "full_name": "Тестов Пациент",
+                "age": "46 лет",
+                "gender": "м",
+                "diagnosis_code": "K35.8",
+                "diagnosis_text": "Острый аппендицит. Перитонит.",
+                "operation_name": "Лапароскопическая холецистэктомия",
+                "started_at": base_dt.isoformat(timespec="seconds"),
+                "operation_events": operation_events,
+                "medication_history": medication_history,
+                "latest": {"ad": "120/80", "pulse": 70, "spo2": 98, "source": "current"},
+            },
+        },
+    )
+    try:
+        full_card.resize(1380, 780)
+        full_card.show()
+        app.processEvents()
+        app.processEvents()
+
+        def first_label(text: str) -> QLabel | None:
+            exact = [label for label in full_card.findChildren(QLabel) if label.text() == text]
+            return exact[0] if exact else None
+
+        vitals_title = first_label("Текущие показатели")
+        meds_title = first_label("Назначения и препараты")
+        if vitals_title is None or meds_title is None:
+            return False, "board preview did not render vitals or medication title"
+        vitals_y = vitals_title.mapTo(full_card, QPoint(0, 0)).y()
+        meds_y = meds_title.mapTo(full_card, QPoint(0, 0)).y()
+        if abs(vitals_y - meds_y) > 1:
+            return False, f"board medication title is not aligned with vitals title: {meds_y} != {vitals_y}"
+        full_scroll = full_card.findChild(QScrollArea, "OperBlockBoardMedicationsScroll")
+        if full_scroll is None:
+            return False, "full board preview medication scroll was not rendered"
+        scroll_y = full_scroll.mapTo(full_card, QPoint(0, 0)).y()
+        title_bottom = meds_title.mapTo(full_card, QPoint(0, 0)).y() + meds_title.height()
+        scroll_gap = scroll_y - title_bottom
+        if scroll_gap < 8 or scroll_gap > 24:
+            return False, f"board medication list gap is unstable: {scroll_gap}"
+        if full_scroll.verticalScrollBar().value() != full_scroll.verticalScrollBar().maximum():
+            return False, "full board preview medication scroll is not positioned at latest rows"
+        full_stage_title = first_label("Этапы операции")
+        if full_stage_title is None:
+            return False, "full board preview operation stages block was not rendered"
+        stage_block = full_stage_title.parentWidget()
+        while stage_block is not None and not (
+            isinstance(stage_block, QFrame) and stage_block.objectName() == "OperBlockStartBlock"
+        ):
+            stage_block = stage_block.parentWidget()
+        if stage_block is None or "#F8FBFF" not in stage_block.styleSheet() or "#CFE3FF" not in stage_block.styleSheet():
+            return False, "full board operation stages block does not use blue framed styling"
+        return True, "ok"
+    finally:
+        full_card.deleteLater()
+        app.processEvents()
+
+
 def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19111,6 +19186,16 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
 
     if not all(has_red_pixel_near(x, y) for x, y in ((8, 8), (14, 14), (14, 8), (8, 14))):
         return False, "board allergy danger icon cross is not drawn on both diagonals"
+
+    ok, details = _check_operblock_board_preview_full_card_layout(
+        app,
+        widget,
+        base_dt,
+        operation_events,
+        medication_history,
+    )
+    if not ok:
+        return False, details
 
     meds_block.deleteLater()
     progress_block.deleteLater()

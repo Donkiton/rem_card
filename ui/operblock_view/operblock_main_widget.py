@@ -9930,20 +9930,19 @@ class OperBlockMainWidget(QWidget):
         body_layout.setSpacing(16)
         body.setStyleSheet("QWidget#OperBlockStartBody { background: #F7F9FC; }")
 
-        content = QHBoxLayout()
+        content = QGridLayout()
         content.setContentsMargins(0, 0, 0, 0)
-        content.setSpacing(12)
+        content.setHorizontalSpacing(12)
+        content.setVerticalSpacing(12)
 
-        left_column = QVBoxLayout()
-        left_column.setSpacing(12)
-        left_column.addWidget(self._board_patient_block(patient), 3)
-        left_column.addWidget(self._board_vitals_block(patient), 2)
-
-        center_column = QVBoxLayout()
-        center_column.setSpacing(12)
-        center_column.addWidget(self._board_admission_block(table, patient), 0)
-        center_column.addWidget(self._board_progress_block(patient), 0)
-        center_column.addWidget(self._board_medications_block(patient), 1)
+        center_top = QWidget()
+        center_top.setStyleSheet("background: transparent; border: none;")
+        center_top_layout = QVBoxLayout(center_top)
+        center_top_layout.setContentsMargins(0, 0, 0, 0)
+        center_top_layout.setSpacing(12)
+        center_top_layout.addWidget(self._board_admission_block(table, patient), 0)
+        center_top_layout.addWidget(self._board_progress_block(patient), 0)
+        center_top_layout.addStretch(1)
 
         right_column = QVBoxLayout()
         right_column.setSpacing(12)
@@ -9952,9 +9951,16 @@ class OperBlockMainWidget(QWidget):
         right_column.addWidget(self._board_operation_stages_block(patient), 1)
         right_column.addStretch(1)
 
-        content.addLayout(left_column, 3)
-        content.addLayout(center_column, 5)
-        content.addLayout(right_column, 3)
+        content.addWidget(self._board_patient_block(patient), 0, 0)
+        content.addWidget(center_top, 0, 1)
+        content.addLayout(right_column, 0, 2, 2, 1)
+        content.addWidget(self._board_vitals_block(patient), 1, 0)
+        content.addWidget(self._board_medications_block(patient), 1, 1)
+        content.setColumnStretch(0, 3)
+        content.setColumnStretch(1, 5)
+        content.setColumnStretch(2, 3)
+        content.setRowStretch(0, 0)
+        content.setRowStretch(1, 1)
         body_layout.addLayout(content, 1)
 
         buttons = QHBoxLayout()
@@ -10040,20 +10046,22 @@ class OperBlockMainWidget(QWidget):
         icon_color: str = "#2563EB",
         icon_kind: str = "",
         shadow: bool = True,
+        background_color: str = "#FFFFFF",
+        border_color: str = "#E0E6EE",
     ) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("OperBlockStartBlock")
         frame.setStyleSheet(
-            """
-            QFrame#OperBlockStartBlock {
-                background-color: #FFFFFF;
-                border: 1px solid #E0E6EE;
+            f"""
+            QFrame#OperBlockStartBlock {{
+                background-color: {background_color};
+                border: 1px solid {border_color};
                 border-radius: 8px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 background: transparent;
                 border: none;
-            }
+            }}
             """
         )
         if shadow:
@@ -10079,8 +10087,10 @@ class OperBlockMainWidget(QWidget):
                 header.addWidget(marker, 0)
             title_label = QLabel(title)
             title_label.setWordWrap(True)
+            title_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
             title_label.setStyleSheet(f"color: {title_color}; font-size: 15px; font-weight: 800;")
-            header.addWidget(title_label, 1)
+            header.addWidget(title_label, 1, Qt.AlignTop)
             layout.addLayout(header)
         return frame, layout
 
@@ -10661,7 +10671,12 @@ class OperBlockMainWidget(QWidget):
         return block
 
     def _board_operation_stages_block(self, patient: dict) -> QFrame:
-        block, layout = self._board_block("Этапы операции", title_color="#2563EB")
+        block, layout = self._board_block(
+            "Этапы операции",
+            title_color="#2563EB",
+            background_color="#F8FBFF",
+            border_color="#CFE3FF",
+        )
         events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
         _active_index, _fill_fraction, active_kind = self._board_progress_state(events)
         history = self._board_stage_history(patient)
@@ -10731,7 +10746,7 @@ class OperBlockMainWidget(QWidget):
             content_layout.addLayout(row)
         content_layout.addStretch(1)
         scroll.setWidget(content)
-        layout.addWidget(scroll)
+        layout.addWidget(scroll, 0, Qt.AlignTop)
         self._scroll_board_area_to_bottom_when_ready(scroll)
         return block
 
