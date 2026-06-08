@@ -10039,6 +10039,7 @@ class OperBlockMainWidget(QWidget):
         title_color: str = "#1F2D3D",
         icon_color: str = "#2563EB",
         icon_kind: str = "",
+        shadow: bool = True,
     ) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("OperBlockStartBlock")
@@ -10055,11 +10056,12 @@ class OperBlockMainWidget(QWidget):
             }
             """
         )
-        shadow = QGraphicsDropShadowEffect(frame)
-        shadow.setBlurRadius(24)
-        shadow.setOffset(0, 5)
-        shadow.setColor(QColor(15, 23, 42, 10))
-        frame.setGraphicsEffect(shadow)
+        if shadow:
+            effect = QGraphicsDropShadowEffect(frame)
+            effect.setBlurRadius(24)
+            effect.setOffset(0, 5)
+            effect.setColor(QColor(15, 23, 42, 10))
+            frame.setGraphicsEffect(effect)
         layout = QVBoxLayout(frame)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
@@ -10521,7 +10523,7 @@ class OperBlockMainWidget(QWidget):
         return block
 
     def _board_admission_block(self, table: dict, patient: dict) -> QFrame:
-        block, layout = self._board_block("Диагноз при поступлении")
+        block, layout = self._board_block("Диагноз при поступлении", shadow=False)
         diagnosis = self._board_value_label(self._board_diagnosis_text(patient), size=15, weight=700)
         diagnosis.setMaximumHeight(76)
         layout.addWidget(diagnosis)

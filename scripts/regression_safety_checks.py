@@ -19055,8 +19055,34 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     if "Подготовка пациента" in stage_texts:
         return False, "board operation history mixed case started_at into timeline stages"
 
+    admission_block = OperBlockMainWidget._board_admission_block(
+        widget,
+        {"display_name": "Экстренная операционная"},
+        {
+            "diagnosis_code": "K35.8",
+            "diagnosis_text": "Острый аппендицит. Перитонит.",
+            "started_at": base_dt.isoformat(timespec="seconds"),
+        },
+    )
+    diagnosis_labels = [
+        label
+        for label in admission_block.findChildren(QLabel)
+        if "Острый аппендицит" in label.text()
+    ]
+    if not diagnosis_labels:
+        return False, "board admission preview did not render diagnosis text"
+    if admission_block.graphicsEffect() is not None:
+        return False, "board admission preview keeps a graphics effect around selectable diagnosis text"
+    if not (diagnosis_labels[0].textInteractionFlags() & Qt.TextSelectableByMouse):
+        return False, "board admission diagnosis text is not selectable"
+    default_block, _default_layout = OperBlockMainWidget._board_block("Проверка тени")
+    if default_block.graphicsEffect() is None:
+        return False, "default board block shadow was disabled globally"
+
     meds_block.deleteLater()
     progress_block.deleteLater()
+    admission_block.deleteLater()
+    default_block.deleteLater()
     app.processEvents()
     return True, "ok"
 
