@@ -19043,9 +19043,23 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     ]
     progress_block = OperBlockMainWidget._board_progress_block(
         widget,
+        {
+            "operation_name": "Лапароскопическая холецистэктомия",
+            "started_at": base_dt.isoformat(timespec="seconds"),
+            "operation_events": operation_events,
+        },
+    )
+    progress_texts = [label.text() for label in progress_block.findChildren(QLabel)]
+    if "Ход операции: Лапароскопическая холецистэктомия" not in progress_texts:
+        return False, f"board progress title does not include operation name: {progress_texts!r}"
+    if any(f"Этап {index:02d}" in progress_texts for index in range(1, 9)):
+        return False, f"board progress preview still contains detailed operation stages: {progress_texts!r}"
+
+    stages_block = OperBlockMainWidget._board_operation_stages_block(
+        widget,
         {"started_at": base_dt.isoformat(timespec="seconds"), "operation_events": operation_events},
     )
-    stage_texts = [label.text() for label in progress_block.findChildren(QLabel)]
+    stage_texts = [label.text() for label in stages_block.findChildren(QLabel)]
     for index in range(1, 4):
         if f"Этап {index:02d}" in stage_texts:
             return False, f"board operation history includes an old stage: {stage_texts!r}"
@@ -19100,6 +19114,7 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
 
     meds_block.deleteLater()
     progress_block.deleteLater()
+    stages_block.deleteLater()
     admission_block.deleteLater()
     default_block.deleteLater()
     allergy_icon.deleteLater()

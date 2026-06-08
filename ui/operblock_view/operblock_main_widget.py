@@ -198,7 +198,7 @@ if TYPE_CHECKING:
 OPERBLOCK_VITAL_SETTINGS = {"ad": 1, "pulse": 1, "temp": 0, "spo2": 1, "rr": 0, "cvp": 0}
 OPERBLOCK_INITIAL_CHART_HOURS = 3
 OPERBLOCK_CHART_EXPAND_THRESHOLD_MINUTES = 20
-OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT = 178
+OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT = 262
 OPERBLOCK_MAX_CHART_HOURS = 72
 OPERBLOCK_VITAL_TIME_STEP_MINUTES = 5
 OPERBLOCK_CHART_GRID_STEP_MINUTES = 15
@@ -9942,14 +9942,14 @@ class OperBlockMainWidget(QWidget):
         center_column = QVBoxLayout()
         center_column.setSpacing(12)
         center_column.addWidget(self._board_admission_block(table, patient), 0)
-        center_column.addWidget(self._board_progress_block(patient), 1)
+        center_column.addWidget(self._board_progress_block(patient), 0)
         center_column.addWidget(self._board_medications_block(patient), 1)
 
         right_column = QVBoxLayout()
         right_column.setSpacing(12)
         right_column.addWidget(self._board_allergies_block(patient), 0)
         right_column.addWidget(self._board_special_notes_block(patient), 0)
-        right_column.addWidget(self._board_operation_block(table, patient), 1)
+        right_column.addWidget(self._board_operation_stages_block(patient), 1)
         right_column.addStretch(1)
 
         content.addLayout(left_column, 3)
@@ -10078,6 +10078,7 @@ class OperBlockMainWidget(QWidget):
                 marker.setStyleSheet(f"color: {icon_color}; font-size: 12px; font-weight: 900;")
                 header.addWidget(marker, 0)
             title_label = QLabel(title)
+            title_label.setWordWrap(True)
             title_label.setStyleSheet(f"color: {title_color}; font-size: 15px; font-weight: 800;")
             header.addWidget(title_label, 1)
             layout.addLayout(header)
@@ -10598,10 +10599,26 @@ class OperBlockMainWidget(QWidget):
         }
         return labels.get(kind, fallback or "Этап операции")
 
-    def _board_progress_block(self, patient: dict) -> QFrame:
-        block, layout = self._board_block("Ход операции")
+    @staticmethod
+    def _board_stage_history(patient: dict) -> list[dict]:
         events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
-        active_index, fill_fraction, active_kind = self._board_progress_state(events)
+        history = [
+            {
+                "event_time": event.get("event_time"),
+                "label": OperBlockMainWidget._board_stage_label(str(event.get("kind") or ""), str(event.get("label") or "")),
+                "kind": str(event.get("kind") or ""),
+            }
+            for event in events
+        ]
+        history.sort(key=lambda item: _parse_datetime_value(item.get("event_time")) or datetime.min)
+        return history
+
+    def _board_progress_block(self, patient: dict) -> QFrame:
+        operation_name = normalize_operblock_team_text(patient.get("operation_name"))
+        title = f"Ход операции: {operation_name}" if operation_name else "Ход операции"
+        block, layout = self._board_block(title)
+        events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
+        active_index, fill_fraction, _active_kind = self._board_progress_state(events)
         stages = ["Подготовка", "Анестезия", "Операция", "Завершение"]
 
         layout.addWidget(_OperBlockBoardProgressStepper(stages, active_index, fill_fraction))
@@ -10641,37 +10658,18 @@ class OperBlockMainWidget(QWidget):
             layout.addWidget(notice)
             return block
 
-        layout.addSpacing(16)
-        history_box = QFrame()
-        history_box.setObjectName("OperBlockProgressHistory")
-        history_box.setStyleSheet(
-            """
-            QFrame#OperBlockProgressHistory {
-                background-color: #F8FBFF;
-                border: 1px solid #CFE3FF;
-                border-radius: 6px;
-            }
-            QLabel {
-                background: transparent;
-                border: none;
-            }
-            """
-        )
-        history_layout = QVBoxLayout(history_box)
-        history_layout.setContentsMargins(14, 12, 14, 12)
-        history_layout.setSpacing(8)
-        title = self._board_value_label("Этапы операции", size=13, weight=800, color="#2563EB")
-        history_layout.addWidget(title)
+        return block
 
-        history = [
-            {
-                "event_time": event.get("event_time"),
-                "label": self._board_stage_label(str(event.get("kind") or ""), str(event.get("label") or "")),
-                "kind": str(event.get("kind") or ""),
-            }
-            for event in events
-        ]
-        history.sort(key=lambda item: _parse_datetime_value(item.get("event_time")) or datetime.min)
+    def _board_operation_stages_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Этапы операции", title_color="#2563EB")
+        events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
+        _active_index, _fill_fraction, active_kind = self._board_progress_state(events)
+        history = self._board_stage_history(patient)
+        if not history:
+            empty = self._board_muted_label("Этапы операции не начаты", size=14)
+            empty.setStyleSheet("font-size: 14px; color: #1F2D3D; font-weight: 500;")
+            layout.addWidget(empty)
+            return block
         for item in history[-5:]:
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
@@ -10693,8 +10691,7 @@ class OperBlockMainWidget(QWidget):
             row.addWidget(dot, 0)
             row.addWidget(time_label, 0)
             row.addWidget(text_label, 1)
-            history_layout.addLayout(row)
-        layout.addWidget(history_box)
+            layout.addLayout(row)
         return block
 
     def _board_medications_block(self, patient: dict) -> QFrame:
@@ -10757,28 +10754,6 @@ class OperBlockMainWidget(QWidget):
     def _board_special_notes_block(self, patient: dict) -> QFrame:
         block, layout = self._board_block("Особые отметки")
         layout.addWidget(self._board_muted_label("—", size=15))
-        return block
-
-    def _board_operation_block(self, table: dict, patient: dict) -> QFrame:
-        block, layout = self._board_block("Операция")
-        operation_name = normalize_operblock_team_text(patient.get("operation_name"))
-        layout.addWidget(self._board_value_label(operation_name or "—", size=15, weight=800))
-        surgeons = [
-            normalize_operblock_team_text(item)
-            for item in (patient.get("surgeons") or [])
-            if normalize_operblock_team_text(item)
-        ]
-        info_rows = [
-            ("Хирурги", ", ".join(surgeons) if surgeons else "—"),
-            ("Анестезиолог", normalize_operblock_team_text(patient.get("anesthesiologist")) or "—"),
-            ("Анестезистка", normalize_operblock_team_text(patient.get("anesthetist")) or "—"),
-            ("Операционная", self._board_operating_room_text(table.get("display_name"))),
-        ]
-        for label_text, value_text in info_rows:
-            layout.addWidget(self._board_muted_label(f"{label_text}:", size=12))
-            value_label = self._board_value_label(value_text, size=13, weight=650)
-            value_label.setMaximumHeight(42)
-            layout.addWidget(value_label)
         return block
 
     def _card_header(self, display_name: str) -> QLabel:
