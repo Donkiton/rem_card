@@ -18641,7 +18641,9 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
     from rem_card.app.operblock_schema import _apply_operblock_schema
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.services.operblock_service import OperBlockService
-    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget, OperationStagesDialog
+    from PySide6.QtWidgets import QApplication
+    import weakref
 
     db_path = os.path.join(temp_root, "operblock_operation_stages.db")
     manager = DatabaseManager(db_path, db_path)
@@ -18750,6 +18752,137 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
             return False, f"local UI patch did not replace only target stage: {patched_labels!r}"
         if len(patched_events) != len(edited_events):
             return False, "local UI patch changed operation_events count"
+
+        class _StageDialogSpy:
+            def __init__(self):
+                self.saved: list[tuple[str, dict]] = []
+
+            def apply_saved_stage(self, row_key: str, stage: dict) -> None:
+                self.saved.append((row_key, dict(stage or {})))
+
+            def apply_save_error(self, row_key: str) -> None:
+                raise AssertionError(f"unexpected stage save error for {row_key}")
+
+        class _PatchOnlyChart:
+            def __init__(self):
+                self.start_time = surgery_start_dt
+                self.calls: list[dict] = []
+
+            def patch_operation_stage_marker(self, stage_event: dict, *, snapshot=None, start_time=None) -> bool:
+                self.calls.append({"stage_event": dict(stage_event or {}), "snapshot": snapshot, "start_time": start_time})
+                return True
+
+        def _unexpected_refresh(*args, **kwargs):
+            raise AssertionError("operation stage save caused full protocol/chart refresh")
+
+        save_widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+        save_widget._write_pending = True
+        save_widget._current_timeline_snapshot = dict(snapshot_after_edit)
+        save_widget._current_operation_start = surgery_start_dt
+        save_widget._current_protocol_date = surgery_start_dt
+        save_widget.vitals_chart = _PatchOnlyChart()
+        save_widget._apply_protocol_controls_state = lambda: None
+        save_widget.refresh_protocol = _unexpected_refresh
+        save_widget._update_vitals_chart_order_markers = _unexpected_refresh
+        dialog_spy = _StageDialogSpy()
+        try:
+            OperBlockMainWidget._on_operation_stage_saved(
+                save_widget,
+                weakref.ref(dialog_spy),
+                f"event:{int(second_moved_later['source_id'])}",
+                second_moved_earlier,
+            )
+        except AssertionError as exc:
+            return False, str(exc)
+        if not dialog_spy.saved:
+            return False, "operation stage save did not update dialog locally"
+        if len(save_widget.vitals_chart.calls) != 1:
+            return False, f"single chart marker patch expected, got {len(save_widget.vitals_chart.calls)}"
+
+        app = QApplication.instance() or QApplication([])
+        dialog = OperationStagesDialog(
+            [
+                {
+                    "kind": "anesthesia_start",
+                    "label": "Начало пособия",
+                    "event_id": int(added_events[0].get("source_id") or 0),
+                    "event_time": added_events[0].get("event_time"),
+                    "revision": int(added_events[0].get("revision") or 0),
+                    "readonly": True,
+                },
+                {
+                    "kind": "surgery_start",
+                    "label": "Начало операции",
+                    "event_id": int(added_events[1].get("source_id") or 0),
+                    "event_time": added_events[1].get("event_time"),
+                    "revision": int(added_events[1].get("revision") or 0),
+                    "readonly": True,
+                },
+                {
+                    "kind": "custom",
+                    "label": "Лапароскопическая аппендэктомия",
+                    "event_id": int(edited["source_id"]),
+                    "event_time": edited.get("event_time"),
+                    "revision": int(edited["revision"]),
+                    "readonly": False,
+                    "payload": {"stage_kind": "custom", "label": "Лапароскопическая аппендэктомия"},
+                },
+                {
+                    "kind": "custom",
+                    "label": "Ревизия брюшной полости",
+                    "event_id": int(second_moved_later["source_id"]),
+                    "event_time": second_moved_later.get("event_time"),
+                    "revision": int(second_moved_later["revision"]),
+                    "readonly": False,
+                    "payload": {"stage_kind": "custom", "label": "Ревизия брюшной полости"},
+                },
+            ]
+        )
+        render_calls = 0
+        original_render_rows = dialog._render_rows
+
+        def _count_render_rows():
+            nonlocal render_calls
+            render_calls += 1
+            return original_render_rows()
+
+        dialog._render_rows = _count_render_rows
+        target_key = f"event:{int(edited['source_id'])}"
+        second_key = f"event:{int(second_moved_later['source_id'])}"
+        before_widget_ids = {
+            key: id(widgets.get("frame"))
+            for key, widgets in (dialog._row_widgets or {}).items()
+            if key in {target_key, second_key}
+        }
+        dialog.apply_saved_stage(
+            target_key,
+            {
+                "source_id": int(edited["source_id"]),
+                "display_label": "Переименованный этап",
+                "raw_text": "Переименованный этап",
+                "event_time": edited.get("event_time"),
+                "revision": int(edited["revision"]) + 1,
+                "payload": {"stage_kind": "custom", "label": "Переименованный этап"},
+            },
+        )
+        after_widget_ids = {
+            key: id(widgets.get("frame"))
+            for key, widgets in (dialog._row_widgets or {}).items()
+            if key in {target_key, second_key}
+        }
+        if render_calls:
+            return False, "operation stage rename rerendered all stage rows"
+        if before_widget_ids != after_widget_ids:
+            return False, "operation stage rename recreated unchanged row widgets"
+        target_edit = (dialog._row_widgets.get(target_key) or {}).get("edit")
+        second_edit = (dialog._row_widgets.get(second_key) or {}).get("edit")
+        if target_edit is None or target_edit.text() != "Переименованный этап":
+            return False, "operation stage rename did not update target row in place"
+        if second_edit is None or second_edit.text() != "Ревизия брюшной полости":
+            return False, "operation stage rename changed a different stage row"
+        dialog.close()
+        dialog.deleteLater()
+        app.processEvents()
 
         service.end_surgery(case_id)
         try:

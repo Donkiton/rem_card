@@ -2905,7 +2905,8 @@ class OperationStagesDialog(OperBlockStyledDialog):
             _safe_int((row or {}).get("event_id") or (row or {}).get("source_id")) or 0,
         )
 
-    def set_stages(self, stages: list[dict]) -> None:
+    @classmethod
+    def _normalized_stage_rows(cls, stages: list[dict]) -> list[dict]:
         auto_rows = []
         custom_rows = []
         seen_auto: set[str] = set()
@@ -2913,21 +2914,24 @@ class OperationStagesDialog(OperBlockStyledDialog):
             row = dict(item or {})
             kind = str(row.get("kind") or row.get("stage_kind") or "").strip()
             row["kind"] = kind
-            row["label"] = self._stage_label(row)
+            row["label"] = cls._stage_label(row)
             row["event_id"] = _safe_int(row.get("event_id") or row.get("source_id"))
             row["revision"] = int(row.get("revision") or 0)
-            if kind in self.AUTO_STAGE_KINDS:
+            if kind in cls.AUTO_STAGE_KINDS:
                 if kind in seen_auto:
                     continue
                 row["readonly"] = True
                 seen_auto.add(kind)
                 auto_rows.append(row)
-            elif kind == self.CUSTOM_STAGE_KIND:
+            elif kind == cls.CUSTOM_STAGE_KIND:
                 row["readonly"] = False
                 custom_rows.append(row)
         auto_rows.sort(key=lambda row: 0 if row.get("kind") == "anesthesia_start" else 1)
-        custom_rows.sort(key=self._stage_sort_key)
-        self._rows = auto_rows + custom_rows
+        custom_rows.sort(key=cls._stage_sort_key)
+        return auto_rows + custom_rows
+
+    def set_stages(self, stages: list[dict]) -> None:
+        self._rows = self._normalized_stage_rows(stages)
         self._ensure_blank_row()
         self._render_rows()
 
@@ -3141,6 +3145,8 @@ class OperationStagesDialog(OperBlockStyledDialog):
             "new": False,
             "payload": dict((stage or {}).get("payload") or {}),
         }
+        if self._apply_saved_stage_in_place(row_key, updated):
+            return
         replaced = False
         rows = []
         for row in self._rows:
@@ -3160,6 +3166,67 @@ class OperationStagesDialog(OperBlockStyledDialog):
         if button is not None:
             button.setText("Сохранено")
             button.setEnabled(False)
+
+    def _apply_saved_stage_in_place(self, row_key: str, updated: dict) -> bool:
+        if self._row_key(updated) == "new":
+            return False
+        old_key = str(row_key or "")
+        target_key = self._row_key(updated)
+        target_event_id = _safe_int(updated.get("event_id"))
+        if old_key == "new" or not target_event_id:
+            return False
+
+        rows_without_blank = [dict(row or {}) for row in self._rows if self._row_key(row) != "new"]
+        candidate_rows: list[dict] = []
+        replaced = False
+        for row in rows_without_blank:
+            current_key = self._row_key(row)
+            if current_key == old_key or _safe_int(row.get("event_id")) == target_event_id:
+                if not replaced:
+                    candidate_rows.append(dict(updated))
+                    replaced = True
+                continue
+            candidate_rows.append(row)
+        if not replaced:
+            return False
+
+        current_order = [self._row_key(row) for row in rows_without_blank]
+        next_order = [self._row_key(row) for row in self._normalized_stage_rows(candidate_rows)]
+        if current_order != next_order:
+            return False
+
+        widgets = self._row_widgets.get(old_key) or self._row_widgets.get(target_key) or {}
+        if not widgets:
+            return False
+        for index, row in enumerate(self._rows):
+            if self._row_key(row) == old_key or _safe_int(row.get("event_id")) == target_event_id:
+                self._rows[index] = dict(updated)
+                break
+
+        if old_key != target_key:
+            self._row_widgets[target_key] = widgets
+            self._row_widgets.pop(old_key, None)
+        widgets["row"] = dict(updated)
+        edit = widgets.get("edit")
+        if edit is not None:
+            was_blocked = edit.blockSignals(True)
+            try:
+                edit.setProperty("row_key", target_key)
+                edit.setText(str(updated.get("label") or ""))
+                edit.setEnabled(True)
+            finally:
+                edit.blockSignals(was_blocked)
+        time_label = widgets.get("time_label")
+        if time_label is not None:
+            time_label.setProperty("row_key", target_key)
+            time_label.setText(_format_order_time(updated.get("event_time")) if updated.get("event_time") else "")
+            time_label.setEnabled(True)
+        button = widgets.get("button")
+        if button is not None:
+            button.setProperty("row_key", target_key)
+            button.setText("Сохранено")
+            button.setEnabled(False)
+        return True
 
 
 class EditOperBlockStaffDialog(OperBlockStyledDialog):
