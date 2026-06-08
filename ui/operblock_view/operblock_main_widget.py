@@ -58,7 +58,12 @@ from rem_card.services.operblock_service import (
     normalize_operblock_mkb_code,
 )
 from rem_card.services.concurrency import DataConflictError
-from rem_card.services.operblock_timeline import format_operblock_medication_display_label
+from rem_card.services.operblock_timeline import (
+    build_infusion_intervals_from_timeline_events,
+    format_operblock_medication_display_label,
+    legacy_order_row_to_medication_event,
+    timeline_event_row_to_medication_event,
+)
 from rem_card.services.operblock_quick_orders import (
     build_operblock_quick_order_text,
     load_operblock_quick_orders,
@@ -12758,12 +12763,15 @@ class OperBlockMainWidget(QWidget):
                 event_time,
                 concentration_text=concentration_text,
                 payload=preset_payload,
+                return_event=True,
             )
 
+        write_description = f"operblock_start_infusion:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
         self._enqueue_write(
-            f"operblock_start_infusion:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_infusion_mutation_saved(),
+            on_success=lambda result: self._on_infusion_mutation_saved(result),
             on_error=lambda exc: self._on_infusion_mutation_error(exc),
         )
 
@@ -13147,12 +13155,13 @@ class OperBlockMainWidget(QWidget):
             on_error=lambda exc: self._on_infusion_mutation_error(exc),
         )
 
-    def _on_infusion_mutation_saved(self):
+    def _on_infusion_mutation_saved(self, result=None):
         quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
         self._pending_quick_orders_scroll_state = None
         self._write_pending = False
         self._set_protocol_write_controls_enabled(True)
-        self.refresh_protocol(force=True)
+        if not self._apply_started_infusion_locally(dict(result or {}) if isinstance(result, dict) else {}):
+            self.refresh_protocol(force=True)
         self._restore_quick_orders_scroll_state_later(quick_scroll_state)
 
     def _on_infusion_mutation_error(self, exc: Exception):
@@ -13792,20 +13801,28 @@ class OperBlockMainWidget(QWidget):
         preset_payload = self._manual_single_order_payload(kind, drug_text) if kind == "gas" else None
 
         def operation():
-            return self.operblock_service.add_order(self._current_admission_id, text, preset_payload=preset_payload)
+            return self.operblock_service.add_order(
+                self._current_admission_id,
+                text,
+                preset_payload=preset_payload,
+                return_row=True,
+            )
 
+        write_description = f"operblock_add_{kind}_order:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
         self._enqueue_write(
-            f"operblock_add_{kind}_order:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_order_saved(),
+            on_success=lambda result: self._on_order_saved(result),
             on_error=lambda exc: self._on_protocol_write_error(exc, self.save_order_button, OPERBLOCK_ADD_ORDER_BUTTON_TEXT),
         )
 
-    def _on_order_saved(self):
+    def _on_order_saved(self, result=None):
         self._write_pending = False
         self._set_protocol_write_controls_enabled(True)
         self._clear_manual_order_inputs()
-        self.refresh_protocol(force=True)
+        if not self._apply_added_order_locally(dict(result or {}) if isinstance(result, dict) else {}):
+            self.refresh_protocol(force=True)
 
     def _clear_manual_order_inputs(self):
         if hasattr(self, "order_input"):
@@ -13815,9 +13832,9 @@ class OperBlockMainWidget(QWidget):
         if hasattr(self, "order_rate_input"):
             self.order_rate_input.clear()
 
-    def _on_manual_infusion_saved(self):
+    def _on_manual_infusion_saved(self, result=None):
         self._clear_manual_order_inputs()
-        self._on_infusion_mutation_saved()
+        self._on_infusion_mutation_saved(result)
 
     def _manual_infusion_payload(self, kind: str, dose_text: str, volume: str = "") -> dict[str, str | bool]:
         payload: dict[str, str | bool] = {"kind": kind, "manual_order": True}
@@ -13860,12 +13877,15 @@ class OperBlockMainWidget(QWidget):
                 rate_unit,
                 event_time,
                 payload=payload,
+                return_event=True,
             )
 
+        write_description = f"operblock_manual_dozator:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
         self._enqueue_write(
-            f"operblock_manual_dozator:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_manual_infusion_saved(),
+            on_success=lambda result: self._on_manual_infusion_saved(result),
             on_error=lambda exc: self._on_infusion_mutation_error(exc),
         )
 
@@ -13899,12 +13919,15 @@ class OperBlockMainWidget(QWidget):
                 event_time,
                 volume_ml=volume,
                 payload=payload,
+                return_event=True,
             )
 
+        write_description = f"operblock_manual_timed_infusion:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
         self._enqueue_write(
-            f"operblock_manual_timed_infusion:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_manual_infusion_saved(),
+            on_success=lambda result: self._on_manual_infusion_saved(result),
             on_error=lambda exc: self._on_infusion_mutation_error(exc),
         )
 
@@ -13961,7 +13984,7 @@ class OperBlockMainWidget(QWidget):
                 active_gas,
                 clean_dose,
                 source_key=f"{source_key}_active",
-                on_saved=success_callback,
+                on_saved=success_callback if on_saved is not None else None,
             )
             return
         event_time = self._current_operation_event_time_text()
@@ -13981,12 +14004,15 @@ class OperBlockMainWidget(QWidget):
                 "",
                 event_time,
                 payload=effective_payload,
+                return_event=True,
             )
 
+        write_description = f"{source_key}:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
         self._enqueue_write(
-            f"{source_key}:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: success_callback(),
+            on_success=lambda result: success_callback(result),
             on_error=lambda exc: self._on_infusion_mutation_error(exc),
         )
 
@@ -14196,6 +14222,154 @@ class OperBlockMainWidget(QWidget):
             return False
         snapshot["bolus_events"] = patched_events
         self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    @staticmethod
+    def _timeline_snapshot_source_versions_with(
+        snapshot: dict,
+        source_key: str,
+        source_id: int | None,
+        revision: int | None,
+    ) -> dict:
+        versions = dict((snapshot or {}).get("source_versions") or {})
+        current = dict(versions.get(source_key) or {})
+        ids = [
+            int(value)
+            for value in list(current.get("ids") or [])
+            if _safe_int(value) is not None
+        ]
+        if source_id is not None and int(source_id) not in ids:
+            ids.append(int(source_id))
+        current["ids"] = ids
+        current["count"] = len(ids)
+        if revision is not None:
+            current["max_revision"] = max(int(current.get("max_revision") or 0), int(revision or 0))
+        versions[source_key] = current
+        return versions
+
+    def _timeline_table_code_for_local_event(self) -> str | None:
+        snapshot = getattr(self, "_current_timeline_snapshot", None) or {}
+        for section in ("operation_events", "bolus_events"):
+            for event in list(snapshot.get(section) or []):
+                table_code = str((event or {}).get("table_code") or "").strip()
+                if table_code:
+                    return table_code
+        for interval in list(snapshot.get("infusion_intervals") or []):
+            table_code = str((interval or {}).get("table_code") or "").strip()
+            if table_code:
+                return table_code
+        return None
+
+    def _patch_timeline_snapshot_added_order(self, order_row: dict) -> bool:
+        order_id = _safe_int((order_row or {}).get("id"))
+        if not order_id or not self._current_admission_id:
+            return False
+        event = legacy_order_row_to_medication_event(
+            dict(order_row or {}),
+            admission_id=int(self._current_admission_id),
+            operation_case_id=int(self._current_operation_case_id or 0) or None,
+            table_code=self._timeline_table_code_for_local_event(),
+        )
+        if event is None:
+            return False
+        event_data = event.to_dict()
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        if not snapshot:
+            snapshot = {
+                "admission_id": int(self._current_admission_id),
+                "operation_case_id": int(self._current_operation_case_id or 0) or None,
+            }
+        events = [
+            dict(item or {})
+            for item in list(snapshot.get("bolus_events") or [])
+            if not (str((item or {}).get("source") or "") == "legacy_order" and _safe_int((item or {}).get("source_id")) == int(order_id))
+        ]
+        events.append(event_data)
+        events.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("event_time")) or datetime.min,
+                _safe_int((item or {}).get("source_id")) or 0,
+            )
+        )
+        snapshot["bolus_events"] = events
+        snapshot["source_versions"] = self._timeline_snapshot_source_versions_with(
+            snapshot,
+            "legacy_orders",
+            int(order_id),
+            int((order_row or {}).get("revision") or 0),
+        )
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    def _apply_added_order_locally(self, order_row: dict) -> bool:
+        row = dict(order_row or {})
+        order_id = _safe_int(row.get("id"))
+        order_dt = _minute_floor_dt(_parse_datetime_value(row.get("datetime")))
+        if not order_id or order_dt is None:
+            return False
+        row["route"] = _order_route_code(row)
+        rows = [
+            dict(existing or {})
+            for existing in list(getattr(self, "_current_orders_rows", []) or [])
+            if _safe_int((existing or {}).get("id")) != int(order_id)
+        ]
+        rows.append(row)
+        rows.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("datetime")) or datetime.min,
+                _safe_int((item or {}).get("id")) or 0,
+            ),
+            reverse=True,
+        )
+        rows = rows[:100]
+        if not self._patch_timeline_snapshot_added_order(row):
+            return False
+        self._current_orders_rows = rows
+        self._apply_orders({"orders": rows})
+        return True
+
+    def _patch_timeline_snapshot_started_infusion(self, event_row: dict) -> bool:
+        event = timeline_event_row_to_medication_event(dict(event_row or {}))
+        if event is None or event.event_type != "infusion_start":
+            return False
+        intervals = build_infusion_intervals_from_timeline_events([event])
+        if not intervals:
+            return False
+        interval = intervals[0].to_dict()
+        snapshot = dict(getattr(self, "_current_timeline_snapshot", None) or {})
+        if not snapshot:
+            snapshot = {
+                "admission_id": int(self._current_admission_id or event.admission_id or 0),
+                "operation_case_id": int(self._current_operation_case_id or event.operation_case_id or 0) or None,
+            }
+        interval_id = str(interval.get("interval_id") or "")
+        current_intervals = [
+            dict(item or {})
+            for item in list(snapshot.get("infusion_intervals") or [])
+            if str((item or {}).get("interval_id") or "") != interval_id
+        ]
+        current_intervals.append(interval)
+        current_intervals.sort(
+            key=lambda item: (
+                _parse_datetime_value((item or {}).get("start_time")) or datetime.min,
+                str((item or {}).get("interval_id") or ""),
+            )
+        )
+        snapshot["infusion_intervals"] = current_intervals
+        snapshot["source_versions"] = self._timeline_snapshot_source_versions_with(
+            snapshot,
+            "timeline_events",
+            int(event.source_id),
+            int(event.revision or 0),
+        )
+        self._current_timeline_snapshot = self._refresh_timeline_snapshot_hash(snapshot)
+        return True
+
+    def _apply_started_infusion_locally(self, event_row: dict) -> bool:
+        if not self._patch_timeline_snapshot_started_infusion(event_row):
+            return False
+        self._apply_active_infusions()
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])})
         return True
 
     def _apply_order_route_change_locally(self, order_id: int, route_code: str) -> bool:
@@ -14781,12 +14955,18 @@ class OperBlockMainWidget(QWidget):
         self._restore_quick_orders_scroll_state_later(quick_scroll_state)
 
         def operation():
-            return self.operblock_service.add_order(self._current_admission_id, text)
+            return self.operblock_service.add_order(
+                self._current_admission_id,
+                text,
+                return_row=True,
+            )
 
+        write_description = f"operblock_quick_{normalized_kind}_order:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
         self._enqueue_write(
-            f"operblock_quick_{normalized_kind}_order:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_quick_order_saved(),
+            on_success=lambda result: self._on_quick_order_saved(result),
             on_error=lambda exc: self._on_quick_order_error(exc),
         )
 
@@ -14813,12 +14993,15 @@ class OperBlockMainWidget(QWidget):
                 text,
                 preset_payload=preset_payload,
                 route=route_code,
+                return_row=True,
             )
 
+        write_description = f"operblock_preset_bolus:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"orders"})
         self._enqueue_write(
-            f"operblock_preset_bolus:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_quick_order_saved(),
+            on_success=lambda result: self._on_quick_order_saved(result),
             on_error=lambda exc: self._on_quick_order_error(exc),
         )
 
@@ -14895,24 +15078,28 @@ class OperBlockMainWidget(QWidget):
                 concentration_text=concentration_text,
                 volume_ml=volume,
                 payload=preset_payload,
+                return_event=True,
             )
 
+        write_description = f"operblock_timed_infusion:{self._current_admission_id}"
+        self._remember_local_write_refresh_suppression(write_description, {"operblock_timeline_events"})
         self._enqueue_write(
-            f"operblock_timed_infusion:{self._current_admission_id}",
+            write_description,
             operation,
-            on_success=lambda _result: self._on_infusion_mutation_saved(),
+            on_success=lambda result: self._on_infusion_mutation_saved(result),
             on_error=lambda exc: self._on_infusion_mutation_error(exc),
         )
 
     def _add_timed_infusion_preset(self, preset: dict):
         self._start_timed_infusion_preset(preset, "")
 
-    def _on_quick_order_saved(self):
+    def _on_quick_order_saved(self, result=None):
         quick_scroll_state = getattr(self, "_pending_quick_orders_scroll_state", None)
         self._pending_quick_orders_scroll_state = None
         self._write_pending = False
         self._set_protocol_write_controls_enabled(True)
-        self.refresh_protocol(force=True)
+        if not self._apply_added_order_locally(dict(result or {}) if isinstance(result, dict) else {}):
+            self.refresh_protocol(force=True)
         self._restore_quick_orders_scroll_state_later(quick_scroll_state)
 
     def _on_quick_order_error(self, exc: Exception):

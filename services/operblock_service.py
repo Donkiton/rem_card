@@ -2211,7 +2211,8 @@ class OperBlockService:
         *,
         preset_payload: Optional[dict[str, Any]] = None,
         route: str | None = None,
-    ) -> int:
+        return_row: bool = False,
+    ) -> int | dict[str, Any]:
         validate_operblock_runtime_path(self.db)
         clean_text = str(text or "").strip()
         if not clean_text:
@@ -2255,9 +2256,42 @@ class OperBlockService:
                     comment_text,
                 ),
             )
-            return int(cursor.lastrowid)
+            order_id = int(cursor.lastrowid)
+            if not return_row:
+                return order_id
+            row = cursor.execute(
+                """
+                SELECT
+                    id,
+                    datetime,
+                    text,
+                    drug_key,
+                    status,
+                    is_committed,
+                    comment,
+                    created_at,
+                    updated_at,
+                    COALESCE(revision, 0) AS revision
+                FROM orders
+                WHERE id = ?
+                """,
+                (order_id,),
+            ).fetchone()
+            data = _row_to_dict(row)
+            display_name = ""
+            if isinstance(preset_payload, Mapping):
+                display_name = str(
+                    preset_payload.get("display_name")
+                    or preset_payload.get("label")
+                    or preset_payload.get("latin")
+                    or ""
+                ).strip()
+            if display_name:
+                data["drug_display_name"] = display_name
+            return data
 
-        return int(self.db.run_write_operation(operation, source="operblock_add_order"))
+        result = self.db.run_write_operation(operation, source="operblock_add_order")
+        return dict(result or {}) if return_row else int(result)
 
     def update_order_text(
         self,
@@ -2393,7 +2427,8 @@ class OperBlockService:
         volume_ml: Any = None,
         route: str | None = None,
         payload: Optional[dict[str, Any]] = None,
-    ) -> int:
+        return_event: bool = False,
+    ) -> int | dict[str, Any]:
         validate_operblock_runtime_path(self.db)
         clean_drug = str(drug_label or "").strip()
         if not clean_drug:
@@ -2470,9 +2505,44 @@ class OperBlockService:
                     self.client_id,
                 ),
             )
-            return int(cursor.lastrowid)
+            event_id = int(cursor.lastrowid)
+            if not return_event:
+                return event_id
+            row = cursor.execute(
+                """
+                SELECT
+                    id,
+                    operation_case_id,
+                    admission_id,
+                    table_code,
+                    event_type,
+                    event_time,
+                    end_time,
+                    drug_label,
+                    display_label,
+                    raw_text,
+                    dose_value,
+                    dose_unit,
+                    volume_ml,
+                    concentration_text,
+                    rate_value,
+                    rate_unit,
+                    route,
+                    status,
+                    COALESCE(revision, 0) AS revision,
+                    created_at,
+                    updated_at,
+                    payload_json,
+                    parent_event_id
+                FROM operblock_timeline_events
+                WHERE id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+            return _row_to_dict(row)
 
-        return int(self.db.run_write_operation(operation, source="operblock_start_infusion"))
+        result = self.db.run_write_operation(operation, source="operblock_start_infusion")
+        return dict(result or {}) if return_event else int(result)
 
     def change_infusion_rate(
         self,

@@ -18971,6 +18971,144 @@ def _check_operblock_operation_stage_chart_grouping(temp_root: str) -> tuple[boo
         app.processEvents()
 
 
+def _check_operblock_quick_order_local_updates(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import date
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.app.operblock_schema import _apply_operblock_schema
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.services.operblock_service import OperBlockService
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+
+    class _ChartSpy:
+        def __init__(self, start_time):
+            self.start_time = start_time
+            self.calls: list[dict] = []
+
+        def set_timeline_snapshot(self, snapshot, start_time, *, force: bool = False):
+            self.calls.append({"snapshot": dict(snapshot or {}), "start_time": start_time, "force": bool(force)})
+
+        def update_data(self, *args, **kwargs):
+            raise AssertionError("quick order save updated vitals data")
+
+    def _unexpected_refresh(*args, **kwargs):
+        raise AssertionError("quick order save caused full protocol/vitals refresh")
+
+    db_path = os.path.join(temp_root, "operblock_quick_order_local_updates.db")
+    manager = DatabaseManager(db_path, db_path)
+    app = QApplication.instance() or QApplication([])
+    try:
+        manager.run_write_operation(_apply_operblock_schema, source="regression_operblock_schema")
+        service = OperBlockService(manager)
+        case = service.create_operation_case(
+            {
+                "table_code": "emergency",
+                "history_number": "REGQORDER1",
+                "full_name": "Тестов Пациент",
+                "gender": "м",
+                "birth_date": date(1980, 1, 1),
+                "diagnosis_code": "K35",
+                "diagnosis_text": "Острый аппендицит",
+            }
+        )
+        admission_id = int(case["admission_id"])
+        case_id = int(case["operation_case_id"])
+        service.add_vitals(admission_id, sys=120, dia=80, pulse=70, spo2=98)
+        service.start_anesthesia(case_id, "ОА")
+        snapshot = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
+        orders_snapshot = service.build_operblock_orders_snapshot(admission_id, operation_case_id=case_id)
+        anesthesia_start = datetime.fromisoformat(str((snapshot.get("operation_events") or [])[0].get("event_time")).replace(" ", "T"))
+
+        widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+        widget._current_admission_id = admission_id
+        widget._current_operation_case_id = case_id
+        widget._current_operation_start = anesthesia_start
+        widget._current_protocol_date = anesthesia_start
+        widget._current_orders_rows = [dict(row or {}) for row in orders_snapshot.get("orders") or []]
+        widget._current_timeline_snapshot = dict(snapshot)
+        widget._pending_quick_orders_scroll_state = None
+        widget._write_pending = True
+        widget._orders_force_top_on_next_apply = False
+        widget._orders_render_signature = ""
+        widget._orders_source_signature = ""
+        widget._orders_filter_kind = "all"
+        widget._orders_hide_deleted = True
+        widget._local_write_refresh_suppressions = {}
+        widget.vitals_chart = _ChartSpy(anesthesia_start)
+        widget._set_protocol_write_controls_enabled = lambda *_args, **_kwargs: None
+        widget._restore_quick_orders_scroll_state_later = lambda *_args, **_kwargs: None
+        widget.refresh_protocol = _unexpected_refresh
+        widget._update_vitals_chart = _unexpected_refresh
+
+        order_row = service.add_order(admission_id, "Фентанил 0,1 мг", return_row=True)
+        if not isinstance(order_row, dict) or not int(order_row.get("id") or 0):
+            return False, f"add_order(return_row=True) returned unexpected result: {order_row!r}"
+        try:
+            OperBlockMainWidget._on_quick_order_saved(widget, order_row)
+        except AssertionError as exc:
+            return False, str(exc)
+        order_id = int(order_row["id"])
+        if order_id not in {int((row or {}).get("id") or 0) for row in widget._current_orders_rows}:
+            return False, "quick bolus was not added to local orders rows"
+        bolus_ids = {
+            int((event or {}).get("source_id") or 0)
+            for event in (widget._current_timeline_snapshot or {}).get("bolus_events") or []
+        }
+        if order_id not in bolus_ids:
+            return False, "quick bolus was not added to local timeline snapshot"
+        if len(widget.vitals_chart.calls) != 1:
+            return False, f"quick bolus should patch chart markers once, got {len(widget.vitals_chart.calls)}"
+
+        write_source = f"operblock_quick_bolus_order:{admission_id}"
+        OperBlockMainWidget._remember_local_write_refresh_suppression(widget, write_source, {"orders"})
+        if not OperBlockMainWidget._should_skip_local_write_refresh(
+            widget,
+            {"force_sources": [write_source], "changes": [{"entity_name": "orders"}]},
+        ):
+            return False, "quick bolus local write did not suppress own orders refresh"
+
+        event_row = service.start_infusion(
+            admission_id,
+            case_id,
+            "Пропофол",
+            "5",
+            "мл/час",
+            anesthesia_start.isoformat(timespec="seconds"),
+            return_event=True,
+        )
+        if not isinstance(event_row, dict) or not int(event_row.get("id") or 0):
+            return False, f"start_infusion(return_event=True) returned unexpected result: {event_row!r}"
+        widget._write_pending = True
+        before_chart_calls = len(widget.vitals_chart.calls)
+        try:
+            OperBlockMainWidget._on_infusion_mutation_saved(widget, event_row)
+        except AssertionError as exc:
+            return False, str(exc)
+        interval_ids = {
+            str((interval or {}).get("interval_id") or "")
+            for interval in (widget._current_timeline_snapshot or {}).get("infusion_intervals") or []
+        }
+        if f"infusion:{int(event_row['id'])}" not in interval_ids:
+            return False, "quick infusion was not added to local timeline snapshot"
+        if len(widget.vitals_chart.calls) != before_chart_calls + 1:
+            return False, "quick infusion should patch chart markers once"
+
+        infusion_source = f"operblock_start_infusion:{admission_id}"
+        OperBlockMainWidget._remember_local_write_refresh_suppression(widget, infusion_source, {"operblock_timeline_events"})
+        if not OperBlockMainWidget._should_skip_local_write_refresh(
+            widget,
+            {"force_sources": [infusion_source], "changes": [{"entity_name": "operblock_timeline_events"}]},
+        ):
+            return False, "quick infusion local write did not suppress own timeline refresh"
+        return True, "ok"
+    finally:
+        manager.close()
+        app.processEvents()
+
+
 def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -20285,6 +20423,7 @@ def main():
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
         ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
+        ("operblock_quick_order_local_updates", _check_operblock_quick_order_local_updates),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),
