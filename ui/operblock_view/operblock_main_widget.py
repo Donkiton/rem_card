@@ -10178,6 +10178,18 @@ class OperBlockMainWidget(QWidget):
         return label
 
     @staticmethod
+    def _board_allergy_status_icon(*, has_allergies: bool) -> QLabel:
+        icon = QLabel("✕" if has_allergies else "✓")
+        icon.setFixedSize(22, 22)
+        icon.setAlignment(Qt.AlignCenter)
+        color = "#EF4444" if has_allergies else "#16A34A"
+        icon.setStyleSheet(
+            f"font-size: 16px; color: {color}; font-weight: 900; "
+            f"border: 2px solid {color}; border-radius: 11px;"
+        )
+        return icon
+
+    @staticmethod
     def _board_format_weight(value) -> str:
         if value in (None, ""):
             return "—"
@@ -10616,23 +10628,17 @@ class OperBlockMainWidget(QWidget):
     def _board_allergies_block(self, patient: dict) -> QFrame:
         allergies = normalize_operblock_team_text(patient.get("allergies"))
         block, layout = self._board_block("Аллергии", title_color="#EF4444")
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
         if allergies:
             label = self._board_value_label(allergies, size=14, weight=800, color="#EF4444")
-            layout.addWidget(label)
+            row.addWidget(label, 1)
+            row.addWidget(self._board_allergy_status_icon(has_allergies=True), 0, Qt.AlignRight | Qt.AlignTop)
         else:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
             text = self._board_value_label("Не известны", size=14, weight=500)
-            ok = QLabel("✓")
-            ok.setFixedSize(22, 22)
-            ok.setAlignment(Qt.AlignCenter)
-            ok.setStyleSheet(
-                "font-size: 16px; color: #16A34A; font-weight: 900; "
-                "border: 2px solid #16A34A; border-radius: 11px;"
-            )
             row.addWidget(text, 1)
-            row.addWidget(ok, 0, Qt.AlignRight | Qt.AlignTop)
-            layout.addLayout(row)
+            row.addWidget(self._board_allergy_status_icon(has_allergies=False), 0, Qt.AlignRight | Qt.AlignTop)
+        layout.addLayout(row)
         return block
 
     def _board_special_notes_block(self, patient: dict) -> QFrame:
