@@ -18437,6 +18437,85 @@ def _check_settings_change_log_invalidates_cache(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _check_operblock_route_settings_order_and_default(temp_root: str) -> tuple[bool, str]:
+    from rem_card.services.operblock_route_settings import (
+        OPERBLOCK_DEFAULT_ROUTE_CODE,
+        load_operblock_drug_groups,
+        operblock_default_route_for_drug_group,
+        operblock_routes_for_drug_group,
+        save_operblock_group_route_settings,
+    )
+    from rem_card.services.settings.settings_service import configure_settings_service, reset_settings_service
+
+    settings_db_path = os.path.join(temp_root, "Baza", "settings", "remcard_settings.db")
+    try:
+        service = configure_settings_service(settings_db_path=settings_db_path)
+        service.ensure_ready()
+        service.save_prescription_item(
+            "groups",
+            "regression_anesthetics",
+            {"name_ru": "Анестетики", "priority_level": 1, "offset_min": 0, "color": "#6b7280"},
+        )
+        for code, label in (
+            ("epidural", "Э/дурально"),
+            ("intrathecal", "Интратекально"),
+            ("perineural", "Периневрально"),
+        ):
+            service.save_prescription_item("admin_types", code, {"name_ru": label})
+
+        save_operblock_group_route_settings(
+            {"regression_anesthetics": ["epidural", "intrathecal", "perineural"]}
+        )
+        codes = [item["code"] for item in operblock_routes_for_drug_group("regression_anesthetics")]
+        if codes[:3] != ["epidural", "intrathecal", "perineural"]:
+            return False, f"route order without IV was not preserved: {codes}"
+        if operblock_default_route_for_drug_group("regression_anesthetics") != "epidural":
+            return False, "default route without IV should be the first configured route"
+
+        save_operblock_group_route_settings(
+            {"regression_anesthetics": ["intrathecal", "epidural", "perineural"]}
+        )
+        if operblock_default_route_for_drug_group("regression_anesthetics") != "intrathecal":
+            return False, "default route did not follow reordered first route"
+
+        save_operblock_group_route_settings(
+            {"regression_anesthetics": ["epidural", OPERBLOCK_DEFAULT_ROUTE_CODE, "intrathecal"]}
+        )
+        if operblock_default_route_for_drug_group("regression_anesthetics") != OPERBLOCK_DEFAULT_ROUTE_CODE:
+            return False, "IV route should remain the preferred default when it is available"
+
+        service.save_prescription_item(
+            "admin_types",
+            "regression_unknown_preset_route",
+            {"name_ru": "Регрессионный путь"},
+        )
+        service.set_app_setting(
+            "operblock",
+            "group_routes",
+            {
+                "version": 1,
+                "routes_by_group": {"manual_only_group": ["regression_unknown_preset_route"]},
+            },
+            entity_type="operblock_group_routes",
+            operation="regression",
+            changed_by_role="regression",
+        )
+        import rem_card.services.operblock_route_settings as route_settings
+
+        original_loader = route_settings._load_operblock_preset_group_codes
+        try:
+            route_settings._load_operblock_preset_group_codes = lambda: ["manual_only_group"]
+            if "manual_only_group" not in {item["code"] for item in load_operblock_drug_groups()}:
+                return False, "manual preset-only group was not exposed in operblock route settings"
+            if operblock_default_route_for_drug_group("manual_only_group") != "regression_unknown_preset_route":
+                return False, "manual preset-only group routes were not loaded from app setting"
+        finally:
+            route_settings._load_operblock_preset_group_codes = original_loader
+        return True, "ok"
+    finally:
+        reset_settings_service()
+
+
 def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -19725,6 +19804,7 @@ def main():
         ("unchanged_catalog_hash_is_stable", _check_unchanged_catalog_hash_is_stable),
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
+        ("operblock_route_settings_order_and_default", _check_operblock_route_settings_order_and_default),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),

@@ -30,6 +30,7 @@ class AdminMainWidget(QWidget):
         self.background_settings_dialog = None
         self.operblock_icon_settings_dialog = None
         self.operblock_medications_dialog = None
+        self.operblock_quick_buttons_settings_widget = None
         self.operblock_route_settings_widget = None
         self.operblock_anesthesia_types_dialog = None
         self.operblock_team_dialog = None
@@ -70,6 +71,7 @@ class AdminMainWidget(QWidget):
         self.btn_background_settings = QPushButton("Изменение фона")
         self.btn_operblock_icon_settings = QPushButton("Настройка иконок оперблока")
         self.btn_operblock_medications = QPushButton("Настройки препаратов")
+        self.btn_operblock_quick_buttons = QPushButton("Кнопки быстрых назначений")
         self.btn_operblock_routes = QPushButton("Оперблок - путь введения")
         self.btn_operblock_anesthesia_types = QPushButton("Виды пособия")
         self.btn_operblock_team = QPushButton("Опер. бригада")
@@ -105,6 +107,7 @@ class AdminMainWidget(QWidget):
         operblock_buttons = [
             self.btn_operblock_icon_settings,
             self.btn_operblock_medications,
+            self.btn_operblock_quick_buttons,
             self.btn_operblock_routes,
             self.btn_operblock_anesthesia_types,
             self.btn_operblock_team,
@@ -161,6 +164,7 @@ class AdminMainWidget(QWidget):
         self.btn_background_settings.clicked.connect(self.open_background_settings)
         self.btn_operblock_icon_settings.clicked.connect(self.open_operblock_icon_settings)
         self.btn_operblock_medications.clicked.connect(self.open_operblock_medications_settings)
+        self.btn_operblock_quick_buttons.clicked.connect(self.open_operblock_quick_buttons_settings)
         self.btn_operblock_routes.clicked.connect(self.open_operblock_route_settings)
         self.btn_operblock_anesthesia_types.clicked.connect(self.open_operblock_anesthesia_types_settings)
         self.btn_operblock_team.clicked.connect(self.open_operblock_team_settings)
@@ -263,6 +267,14 @@ class AdminMainWidget(QWidget):
             self.stack.addWidget(self.operblock_route_settings_widget)
         return self.operblock_route_settings_widget
 
+    def _ensure_operblock_quick_buttons_settings_widget(self):
+        if self.operblock_quick_buttons_settings_widget is None:
+            from .operblock_quick_buttons_settings_widget import OperBlockQuickButtonsSettingsWidget
+
+            self.operblock_quick_buttons_settings_widget = self._connect_back(OperBlockQuickButtonsSettingsWidget())
+            self.stack.addWidget(self.operblock_quick_buttons_settings_widget)
+        return self.operblock_quick_buttons_settings_widget
+
     def _ensure_print_dialog(self):
         if self.print_dialog is None:
             from .print_settings_widget import PrintSettingsDialog
@@ -361,6 +373,9 @@ class AdminMainWidget(QWidget):
 
     def open_operblock_route_settings(self):
         self._show_page(self._ensure_operblock_route_settings_widget())
+
+    def open_operblock_quick_buttons_settings(self):
+        self._show_page(self._ensure_operblock_quick_buttons_settings_widget())
 
     def open_operblock_anesthesia_types_settings(self):
         from rem_card.services.operblock_anesthesia_types import (

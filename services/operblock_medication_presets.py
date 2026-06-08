@@ -15,6 +15,7 @@ from rem_card.services.operblock_quick_orders import (
     load_operblock_quick_orders,
     normalize_operblock_quick_order_kind,
 )
+from rem_card.services.operblock_quick_order_buttons import normalize_operblock_extra_quick_type_keys
 
 
 OPERBLOCK_MEDICATION_PRESETS_FILE = "operblock_medication_presets.seed.json"
@@ -126,6 +127,9 @@ KNOWN_PRESET_FIELDS = {
     "card_color",
     "card_color_hex",
     "color",
+    "extra_quick_types",
+    "additional_quick_types",
+    "additional_types",
     "uses_line",
     "enabled",
     "favorite",
@@ -159,6 +163,7 @@ class OperBlockMedicationPreset:
     solvent_volume_ml: str | None = None
     duration_min: int | None = None
     card_color: str | None = None
+    extra_quick_types: list[str] = field(default_factory=list)
     uses_line: bool = False
     enabled: bool = False
     favorite: bool = False
@@ -380,6 +385,7 @@ def project_drug_to_operblock_preset(
         solvent_label=solvent_label,
         solvent_volume_ml=_as_optional_text(default_dilution.get("volume")),
         duration_min=_as_int(raw.get("duration_min")),
+        extra_quick_types=[],
         uses_line=_as_bool(raw.get("uses_line")),
         enabled=enabled,
         payload={"source": "drugs.seed.json", "source_group": raw.get("group")},
@@ -429,6 +435,10 @@ def _normalize_preset(raw: Mapping[str, Any], *, base: Mapping[str, Any] | None 
         solvent_volume_ml=_as_optional_text(data.get("solvent_volume_ml")),
         duration_min=_as_int(data.get("duration_min")),
         card_color=_as_hex_color(_preset_color_value(data)),
+        extra_quick_types=normalize_operblock_extra_quick_type_keys(
+            data.get("extra_quick_types") or data.get("additional_quick_types") or data.get("additional_types"),
+            include_unknown=True,
+        ),
         uses_line=_as_bool(data.get("uses_line")),
         enabled=_as_bool(data.get("enabled"), default=False),
         favorite=_as_bool(data.get("favorite") or data.get("is_favorite") or data.get("pinned"), default=False),

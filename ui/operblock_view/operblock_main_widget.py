@@ -66,6 +66,12 @@ from rem_card.services.operblock_quick_orders import (
     normalize_operblock_quick_order_group,
     save_operblock_quick_orders,
 )
+from rem_card.services.operblock_quick_order_buttons import (
+    load_operblock_quick_order_buttons,
+    normalize_operblock_extra_quick_type_keys,
+    operblock_extra_quick_type_buttons,
+    operblock_quick_order_button_label_map,
+)
 from rem_card.services.operblock_medication_presets import (
     OPERBLOCK_MEDICATION_PRESET_KINDS,
     build_operblock_preset_bolus_text,
@@ -81,6 +87,7 @@ from rem_card.services.operblock_route_settings import (
     load_operblock_drug_groups,
     normalize_operblock_route_code,
     operblock_comment_with_route,
+    operblock_default_route_for_drug_group,
     operblock_route_from_comment,
     operblock_route_label,
     operblock_routes_for_drug_group,
@@ -3498,25 +3505,100 @@ class _QuickOrderPresetListWidget(QWidget):
         event.ignore()
 
 
+class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
+    def __init__(self, options: list[dict], selected_keys: list[str], parent=None):
+        self._options = [dict(option or {}) for option in options or []]
+        self._selected_keys = set(str(key or "").strip() for key in selected_keys or [] if str(key or "").strip())
+        self._checkboxes: dict[str, QCheckBox] = {}
+        self._result_keys: list[str] = []
+        super().__init__(
+            "Доп типы",
+            "extra_quick_types_dialog_geometry",
+            parent,
+            minimum_size=(360, 260),
+            initial_size=(420, 340),
+        )
+        self._init_ui()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self):
+        layout = self.content_layout
+        layout.setSpacing(10)
+
+        if not self._options:
+            empty_label = QLabel("Дополнительные типы не настроены.")
+            empty_label.setWordWrap(True)
+            empty_label.setStyleSheet(f"font-size: 13px; color: {TEXT_SECONDARY};")
+            layout.addWidget(empty_label)
+            layout.addStretch(1)
+        else:
+            for option in self._options:
+                key = str((option or {}).get("key") or "").strip()
+                label = str((option or {}).get("label") or key).strip()
+                if not key or not label:
+                    continue
+                checkbox = QCheckBox(label)
+                checkbox.setChecked(key in self._selected_keys)
+                checkbox.setStyleSheet(
+                    f"""
+                    QCheckBox {{
+                        color: {TEXT_PRIMARY};
+                        font-size: 13px;
+                        padding: 4px 2px;
+                    }}
+                    QCheckBox::indicator {{
+                        width: 16px;
+                        height: 16px;
+                    }}
+                    """
+                )
+                self._checkboxes[key] = checkbox
+                layout.addWidget(checkbox)
+            layout.addStretch(1)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton("Сохранить")
+        save_button.setMinimumHeight(34)
+        save_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        save_button.clicked.connect(self.accept)
+        actions.addWidget(cancel_button)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+
+    def selected_keys(self) -> list[str]:
+        return list(self._result_keys)
+
+    def accept(self):
+        self._result_keys = [key for key, checkbox in self._checkboxes.items() if checkbox.isChecked()]
+        super().accept()
+
+
 class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     COL_ENABLED = 0
     COL_LABEL = 1
     COL_DISPLAY = 2
     COL_KIND = 3
-    COL_GROUP = 4
-    COL_DRUG_GROUP = 5
-    COL_DOSES = 6
-    COL_RATES = 7
-    COL_CONCENTRATION = 8
-    COL_SOLVENT = 9
-    COL_VOLUME = 10
-    COL_COLOR = 11
-    COL_FAVORITE = 12
+    COL_EXTRA_TYPES = 4
+    COL_GROUP = 5
+    COL_DRUG_GROUP = 6
+    COL_DOSES = 7
+    COL_RATES = 8
+    COL_CONCENTRATION = 9
+    COL_SOLVENT = 10
+    COL_VOLUME = 11
+    COL_COLOR = 12
+    COL_FAVORITE = 13
     TABLE_HEADERS = (
         "Вкл",
         "Истинное название",
         "Отображаемое",
         "Тип",
+        "Доп тип",
         "Группа",
         "Группа препарата",
         "Дозы",
@@ -3529,7 +3611,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     )
 
     def __init__(self, presets: list[dict], parent=None, *, save_handler=None):
-        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v4"
+        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v5"
         self._restoring_table_header = False
         self._fitting_table_header = False
         self._working_templates: list[dict | None] = [dict(preset or {}) for preset in (presets or [])]
@@ -3539,6 +3621,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self._save_handler = save_handler or save_operblock_medication_presets
         self._save_in_progress = False
         self._favorite_icon_cache: dict[bool, QIcon] = {}
+        self._extra_quick_type_options = self._load_extra_quick_type_options()
         self._diluent_options = self._load_diluent_options()
         self._group_options = self._build_group_options([item for item in self._working_templates if item is not None])
         self._drug_group_options = self._load_drug_group_options()
@@ -3578,6 +3661,13 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             return load_operblock_diluent_options()
         except Exception:
             logger.exception("Не удалось загрузить растворители для настроек препаратов оперблока")
+            return []
+
+    def _load_extra_quick_type_options(self) -> list[dict]:
+        try:
+            return operblock_extra_quick_type_buttons(load_operblock_quick_order_buttons())
+        except Exception:
+            logger.exception("Не удалось загрузить дополнительные типы быстрых назначений")
             return []
 
     def _load_drug_group_options(self) -> list[dict[str, str]]:
@@ -3777,6 +3867,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self.COL_LABEL: 210,
             self.COL_DISPLAY: 180,
             self.COL_KIND: 138,
+            self.COL_EXTRA_TYPES: 130,
             self.COL_GROUP: 1,
             self.COL_DRUG_GROUP: 150,
             self.COL_DOSES: 170,
@@ -3966,6 +4057,41 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 labels.append(option_label)
         return labels
 
+    def _extra_quick_types_display_text(self, preset: dict) -> str:
+        keys = normalize_operblock_extra_quick_type_keys(
+            (preset or {}).get("extra_quick_types"),
+            buttons=self._extra_quick_type_options,
+            include_unknown=True,
+        )
+        labels = operblock_quick_order_button_label_map(self._extra_quick_type_options)
+        return _join_semicolon_list([labels.get(key, key) for key in keys])
+
+    def _open_extra_quick_types_editor(self, row: int):
+        if row < 0 or row >= len(self._visible_template_indexes):
+            return
+        template_index = self._visible_template_indexes[row]
+        template = self._working_templates[template_index]
+        if template is None:
+            return
+        if not self._extra_quick_type_options:
+            CustomMessageBox.information(
+                self,
+                "Доп тип",
+                "Дополнительные кнопки быстрых назначений не настроены.",
+            )
+            return
+        current_keys = normalize_operblock_extra_quick_type_keys(
+            template.get("extra_quick_types"),
+            buttons=self._extra_quick_type_options,
+            include_unknown=True,
+        )
+        dialog = OperBlockExtraQuickTypesDialog(self._extra_quick_type_options, current_keys, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        template["extra_quick_types"] = dialog.selected_keys()
+        self._render_table()
+        self._mark_dirty()
+
     @staticmethod
     def _grayscale_pixmap(pixmap: QPixmap) -> QPixmap:
         image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32)
@@ -4040,6 +4166,9 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self._mark_dirty()
 
     def _open_combo_cell_editor(self, row: int, column: int):
+        if column == self.COL_EXTRA_TYPES:
+            self._open_extra_quick_types_editor(row)
+            return
         if column not in {self.COL_KIND, self.COL_GROUP, self.COL_DRUG_GROUP, self.COL_SOLVENT}:
             return
         item = self.table.item(row, column)
@@ -4119,6 +4248,9 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self.COL_KIND,
             self._text_item(kind_title, template_index),
         )
+        extra_types_item = self._text_item(self._extra_quick_types_display_text(preset), template_index, editable=False)
+        extra_types_item.setToolTip("Нажмите для выбора")
+        self.table.setItem(row, self.COL_EXTRA_TYPES, extra_types_item)
         default_group = OPERBLOCK_PRESET_KIND_GROUP_TITLES.get(kind, "Болюсы")
         self.table.setItem(
             row,
@@ -4355,6 +4487,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                     str((preset or {}).get("label") or ""),
                     str((preset or {}).get("display_name") or ""),
                     str((preset or {}).get("group") or ""),
+                    self._extra_quick_types_display_text(preset or {}),
                     self._drug_group_display_text((preset or {}).get("drug_group")),
                     self._solvent_display_text(preset or {}),
                     str((preset or {}).get("solvent_id") or ""),
@@ -4406,6 +4539,11 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 "kind": kind,
                 "group": self._group_display_text(item.get("group"))
                 or OPERBLOCK_PRESET_KIND_GROUP_TITLES.get(kind, "Болюсы"),
+                "extra_quick_types": normalize_operblock_extra_quick_type_keys(
+                    item.get("extra_quick_types"),
+                    buttons=self._extra_quick_type_options,
+                    include_unknown=True,
+                ),
                 "drug_group": self._resolve_drug_group_text(self._drug_group_display_text(item.get("drug_group"))),
                 "doses": _split_semicolon_list(_join_semicolon_list(item.get("doses") or [])),
                 "rates": _split_semicolon_list(_join_semicolon_list(item.get("rates") or [])),
@@ -6601,6 +6739,8 @@ class OperBlockMainWidget(QWidget):
         self._medication_presets: list[dict] = []
         self._preset_search_text = ""
         self._preset_kind_filter = "bolus"
+        self._quick_order_filter_buttons: list[dict] = []
+        self._quick_order_filter_keys: list[str] = []
         self._orders_filter_kind = "all"
         self._orders_hide_deleted = True
         self._quick_order_buttons: list[QPushButton] = []
@@ -7888,11 +8028,24 @@ class OperBlockMainWidget(QWidget):
         filter_row.setColumnStretch(1, 1)
         self.preset_filter_group = QButtonGroup(self)
         self.preset_filter_group.setExclusive(True)
-        for index, (filter_key, label) in enumerate(OPERBLOCK_TEMPLATE_FILTERS):
+        self._quick_order_filter_buttons = self._load_quick_order_filter_buttons()
+        self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+        if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+            self._preset_kind_filter = self._quick_order_filter_keys[0]
+        grid_row = 0
+        grid_column = 0
+        for index, button_info in enumerate(self._quick_order_filter_buttons):
+            filter_key = str((button_info or {}).get("key") or "").strip()
+            label = str((button_info or {}).get("label") or filter_key).strip()
+            if not filter_key or not label:
+                continue
             button = QPushButton(label)
             button.setCheckable(True)
             button.setChecked(filter_key == self._preset_kind_filter)
             button.setFixedHeight(28)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setToolTip(label)
             button.setCursor(Qt.PointingHandCursor)
             button.setStyleSheet(
                 f"""
@@ -7914,9 +8067,15 @@ class OperBlockMainWidget(QWidget):
             )
             self.preset_filter_group.addButton(button, index)
             if filter_key == "favorite":
-                filter_row.addWidget(button, index // 2, 0, 1, 2)
+                filter_row.addWidget(button, grid_row, 0, 1, 2)
+                grid_row += 1
+                grid_column = 0
             else:
-                filter_row.addWidget(button, index // 2, index % 2)
+                filter_row.addWidget(button, grid_row, grid_column)
+                grid_column += 1
+                if grid_column > 1:
+                    grid_column = 0
+                    grid_row += 1
         self.preset_filter_group.idClicked.connect(self._on_preset_filter_changed)
         quick_controls_layout.addLayout(filter_row)
 
@@ -9333,10 +9492,18 @@ class OperBlockMainWidget(QWidget):
             try:
                 self._quick_order_templates = load_operblock_quick_orders()
                 self._medication_presets = load_operblock_medication_presets(include_disabled=True)
+                self._quick_order_filter_buttons = self._load_quick_order_filter_buttons()
+                self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+                if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+                    self._preset_kind_filter = self._quick_order_filter_keys[0]
             except Exception as exc:
                 logger.error("operblock medication presets load failed: %s", exc, exc_info=True)
                 self._quick_order_templates = []
                 self._medication_presets = []
+                self._quick_order_filter_buttons = self._fallback_quick_order_filter_buttons()
+                self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+                if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+                    self._preset_kind_filter = self._quick_order_filter_keys[0]
         finally:
             elapsed_ms = (time.perf_counter() - metric_started) * 1000.0 if metric_started else 0.0
             operblock_startup_metrics.record_duration(
@@ -9351,6 +9518,31 @@ class OperBlockMainWidget(QWidget):
                     source="operblock_widget",
                 )
 
+    @staticmethod
+    def _fallback_quick_order_filter_buttons() -> list[dict]:
+        return [
+            {"key": key, "label": label, "built_in": True, "sort_order": (index + 1) * 10}
+            for index, (key, label) in enumerate(OPERBLOCK_TEMPLATE_FILTERS)
+        ]
+
+    @staticmethod
+    def _quick_order_filter_keys_from_buttons(buttons: list[dict]) -> list[str]:
+        return [
+            str((button or {}).get("key") or "").strip()
+            for button in buttons or []
+            if str((button or {}).get("key") or "").strip()
+        ]
+
+    def _load_quick_order_filter_buttons(self) -> list[dict]:
+        try:
+            buttons = load_operblock_quick_order_buttons()
+        except Exception:
+            logger.exception("Не удалось загрузить кнопки быстрых назначений")
+            buttons = []
+        if not buttons:
+            buttons = self._fallback_quick_order_filter_buttons()
+        return [dict(button or {}) for button in buttons]
+
     def _refresh_quick_orders(self):
         self._load_quick_orders_data()
         self._render_quick_orders()
@@ -9361,7 +9553,7 @@ class OperBlockMainWidget(QWidget):
 
     def _on_preset_filter_changed(self, button_id: int):
         try:
-            next_filter = OPERBLOCK_TEMPLATE_FILTERS[int(button_id)][0]
+            next_filter = self._quick_order_filter_keys[int(button_id)]
         except Exception:
             next_filter = "bolus"
         if str(next_filter or "bolus") == str(getattr(self, "_preset_kind_filter", "bolus") or "bolus"):
@@ -9483,12 +9675,25 @@ class OperBlockMainWidget(QWidget):
     def _filtered_medication_presets(self) -> list[dict]:
         query = str(getattr(self, "_preset_search_text", "") or "").casefold()
         filter_kind = str(getattr(self, "_preset_kind_filter", "bolus") or "bolus")
+        extra_filter_keys = {
+            str((button or {}).get("key") or "").strip()
+            for button in getattr(self, "_quick_order_filter_buttons", []) or []
+            if str((button or {}).get("key") or "").strip() and not bool((button or {}).get("built_in"))
+        }
         result: list[dict] = []
         for preset in getattr(self, "_medication_presets", []) or []:
             if not preset.get("enabled"):
                 continue
             kind = normalize_operblock_medication_preset_kind(preset.get("kind"))
-            if filter_kind == "favorite":
+            if filter_kind in extra_filter_keys:
+                extra_types = normalize_operblock_extra_quick_type_keys(
+                    preset.get("extra_quick_types"),
+                    buttons=getattr(self, "_quick_order_filter_buttons", []) or [],
+                    include_unknown=False,
+                )
+                if filter_kind not in extra_types:
+                    continue
+            elif filter_kind == "favorite":
                 if not any(bool(preset.get(key)) for key in ("favorite", "is_favorite", "pinned")):
                     continue
             elif filter_kind == "timed_infusion":
@@ -9497,6 +9702,17 @@ class OperBlockMainWidget(QWidget):
             elif kind != filter_kind:
                 continue
             if query:
+                label_by_extra_key = operblock_quick_order_button_label_map(
+                    getattr(self, "_quick_order_filter_buttons", []) or []
+                )
+                extra_type_labels = [
+                    label_by_extra_key.get(key, key)
+                    for key in normalize_operblock_extra_quick_type_keys(
+                        preset.get("extra_quick_types"),
+                        buttons=getattr(self, "_quick_order_filter_buttons", []) or [],
+                        include_unknown=True,
+                    )
+                ]
                 haystack = " ".join(
                     [
                         str(preset.get("label") or ""),
@@ -9504,6 +9720,7 @@ class OperBlockMainWidget(QWidget):
                         str(preset.get("latin") or ""),
                         str(preset.get("group") or ""),
                         self._drug_group_label_for_preset(preset),
+                        " ".join(extra_type_labels),
                         " ".join(str(alias) for alias in preset.get("aliases") or []),
                     ]
                 ).casefold()
@@ -12555,9 +12772,7 @@ class OperBlockMainWidget(QWidget):
                 return dict(preset or {})
         return None
 
-    def _route_options_for_order_row(self, row: dict) -> list[dict[str, str]]:
-        preset = self._preset_for_order_row(row)
-        group_code = str((preset or {}).get("drug_group") or "").strip() if preset else ""
+    def _route_options_for_group(self, group_code: str, *, current_code: str = "") -> list[dict[str, str]]:
         try:
             routes = operblock_routes_for_drug_group(group_code)
         except Exception as exc:
@@ -12576,10 +12791,24 @@ class OperBlockMainWidget(QWidget):
             label = str(operblock_route_label(code, short=True, routes=label_routes) or raw_label or code).strip()
             result.append({"code": code, "label": label})
             seen.add(code)
-        current_code = _normalize_order_route_code(_order_route_code(row))
+        current_code = _normalize_order_route_code(current_code)
         if current_code and current_code not in seen:
             result.append({"code": current_code, "label": operblock_route_label(current_code, short=True)})
         return result or [{"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)}]
+
+    def _route_options_for_order_row(self, row: dict) -> list[dict[str, str]]:
+        preset = self._preset_for_order_row(row)
+        group_code = str((preset or {}).get("drug_group") or "").strip() if preset else ""
+        return self._route_options_for_group(group_code, current_code=_order_route_code(row))
+
+    def _default_route_for_preset(self, preset: dict) -> str:
+        group_code = str((preset or {}).get("drug_group") or "").strip()
+        try:
+            route_code = operblock_default_route_for_drug_group(group_code)
+        except Exception as exc:
+            logger.error("operblock default route load for preset failed: %s", exc, exc_info=True)
+            route_code = OPERBLOCK_ORDER_ROUTE_DEFAULT
+        return _normalize_order_route_code(route_code)
 
     def _quick_order_template_concentration_for_row(self, row: dict) -> str:
         drug_name = str((row or {}).get("drug_name") or (row or {}).get("raw_drug_name") or "").strip()
@@ -14062,9 +14291,15 @@ class OperBlockMainWidget(QWidget):
         self._set_protocol_write_controls_enabled(False)
         self._restore_quick_orders_scroll_state_later(quick_scroll_state)
         preset_payload = build_operblock_preset_payload(preset)
+        route_code = self._default_route_for_preset(preset)
 
         def operation():
-            return self.operblock_service.add_order(self._current_admission_id, text, preset_payload=preset_payload)
+            return self.operblock_service.add_order(
+                self._current_admission_id,
+                text,
+                preset_payload=preset_payload,
+                route=route_code,
+            )
 
         self._enqueue_write(
             f"operblock_preset_bolus:{self._current_admission_id}",

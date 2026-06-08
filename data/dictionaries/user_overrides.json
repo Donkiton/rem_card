@@ -2996,10 +2996,13 @@
         "solvent_volume_ml": "10",
         "duration_min": 0,
         "card_color": "#e1f7c8",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": true,
-        "sort_order": 40,
+        "sort_order": 20,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "holinolitiks"
@@ -3035,10 +3038,13 @@
         "solvent_volume_ml": "10",
         "duration_min": 0,
         "card_color": "#f7c8c8",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": true,
-        "sort_order": 60,
+        "sort_order": 40,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "narcotic_analgesics"
@@ -3073,10 +3079,13 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": true,
         "enabled": true,
         "favorite": true,
-        "sort_order": 70,
+        "sort_order": 60,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "sedatives"
@@ -3111,10 +3120,13 @@
         "solvent_volume_ml": "10",
         "duration_min": 0,
         "card_color": "#c8f7f7",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": true,
-        "sort_order": 80,
+        "sort_order": 70,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "relaxants"
@@ -3149,10 +3161,13 @@
         "solvent_volume_ml": "10",
         "duration_min": null,
         "card_color": "#f7dfc8",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": true,
         "enabled": true,
         "favorite": false,
-        "sort_order": 100,
+        "sort_order": 80,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "sedatives"
@@ -3187,10 +3202,13 @@
         "solvent_volume_ml": "10",
         "duration_min": null,
         "card_color": "#e1f7c8",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 110,
+        "sort_order": 100,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "holinomimetiks"
@@ -3225,10 +3243,13 @@
         "solvent_volume_ml": "10",
         "duration_min": 0,
         "card_color": "#c9c8f7",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 120,
+        "sort_order": 110,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "sedatives"
@@ -3262,10 +3283,11 @@
         "solvent_volume_ml": "10",
         "duration_min": 0,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 130,
+        "sort_order": 120,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "glucocorticoids"
@@ -3298,10 +3320,11 @@
         "solvent_volume_ml": "10",
         "duration_min": 0,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 140,
+        "sort_order": 130,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "glucocorticoids"
@@ -3334,10 +3357,11 @@
         "solvent_volume_ml": "10",
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 150,
+        "sort_order": 140,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "narcotic_analgesics"
@@ -3368,10 +3392,11 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 160,
+        "sort_order": 150,
         "payload": {}
       },
       {
@@ -3399,6 +3424,40 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [
+          "extra:новая_кнопка"
+        ],
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 160,
+        "payload": {}
+      },
+      {
+        "preset_id": "manual:bolus:mgso4",
+        "source_drug_id": null,
+        "label": "MgSO4",
+        "display_name": "S. MgSO4 25%",
+        "latin": null,
+        "aliases": [],
+        "kind": "bolus",
+        "group": "Болюсы",
+        "drug_group": "microelements",
+        "route": null,
+        "unit": null,
+        "default_dose": null,
+        "doses": [
+          "2500 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "250 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "10",
+        "duration_min": null,
+        "card_color": null,
+        "extra_quick_types": [],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
@@ -3430,6 +3489,9 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": "#a1b8ff",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
@@ -3461,6 +3523,9 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": "#fffda1",
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
@@ -3492,6 +3557,9 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
@@ -3529,6 +3597,7 @@
         "solvent_volume_ml": "10",
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": true,
         "enabled": true,
         "favorite": false,
@@ -3569,6 +3638,7 @@
         "solvent_volume_ml": "50",
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": true,
         "enabled": true,
         "favorite": false,
@@ -3604,10 +3674,48 @@
         "solvent_volume_ml": "100",
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
         "sort_order": 10,
+        "payload": {
+          "source": "drugs.seed.json",
+          "source_group": "Gemostasis"
+        }
+      },
+      {
+        "preset_id": "drug:Tranexam",
+        "source_drug_id": "Tranexam",
+        "label": "Acidi tranexamici",
+        "display_name": "S. Acidi tranexamici 5%",
+        "latin": "Acidi tranexamici",
+        "aliases": [
+          "транексам"
+        ],
+        "kind": "timed_infusion",
+        "group": "Капельницы",
+        "drug_group": "Gemostasis",
+        "route": null,
+        "unit": "mg",
+        "default_dose": "1000 мг",
+        "doses": [
+          "750 мг",
+          "1000 мг"
+        ],
+        "rates": [],
+        "rate_unit": null,
+        "concentration": "50 мг/мл",
+        "solvent_id": "nacl_09",
+        "solvent_label": "NaCl 0.9%",
+        "solvent_volume_ml": "200",
+        "duration_min": null,
+        "card_color": null,
+        "extra_quick_types": [],
+        "uses_line": false,
+        "enabled": true,
+        "favorite": false,
+        "sort_order": 90,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "Gemostasis"
@@ -3638,47 +3746,14 @@
         "solvent_volume_ml": "200",
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [
+          "extra:новая_кнопка"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": false,
-        "sort_order": 20,
+        "sort_order": 170,
         "payload": {}
-      },
-      {
-        "preset_id": "drug:Tranexam",
-        "source_drug_id": "Tranexam",
-        "label": "Acidi tranexamici",
-        "display_name": "S. Acidi tranexamici 5%",
-        "latin": "Acidi tranexamici",
-        "aliases": [
-          "транексам"
-        ],
-        "kind": "timed_infusion",
-        "group": "Капельницы",
-        "drug_group": "Gemostasis",
-        "route": null,
-        "unit": "mg",
-        "default_dose": "1000 мг",
-        "doses": [
-          "750 мг",
-          "1000 мг"
-        ],
-        "rates": [],
-        "rate_unit": null,
-        "concentration": "50 мг/мл",
-        "solvent_id": "nacl_09",
-        "solvent_label": "NaCl 0.9%",
-        "solvent_volume_ml": "200",
-        "duration_min": null,
-        "card_color": null,
-        "uses_line": false,
-        "enabled": true,
-        "favorite": false,
-        "sort_order": 90,
-        "payload": {
-          "source": "drugs.seed.json",
-          "source_group": "Gemostasis"
-        }
       },
       {
         "preset_id": "drug:fizrastvor",
@@ -3710,10 +3785,14 @@
         "solvent_volume_ml": null,
         "duration_min": null,
         "card_color": null,
+        "extra_quick_types": [
+          "extra:новая_кнопка",
+          "extra:новая_кнопка_2"
+        ],
         "uses_line": false,
         "enabled": true,
         "favorite": true,
-        "sort_order": 170,
+        "sort_order": 210,
         "payload": {
           "source": "drugs.seed.json",
           "source_group": "fluids"
@@ -3773,6 +3852,53 @@
         "id": "manual_1780381797709",
         "label": "Проводниковая анестезия",
         "sort_order": 50
+      }
+    ]
+  },
+  "operblock_quick_order_buttons": {
+    "version": 1,
+    "items": [
+      {
+        "key": "bolus",
+        "label": "Болюсы",
+        "built_in": true,
+        "sort_order": 10
+      },
+      {
+        "key": "continuous_infusion",
+        "label": "Дозатор",
+        "built_in": true,
+        "sort_order": 20
+      },
+      {
+        "key": "timed_infusion",
+        "label": "Капельницы",
+        "built_in": true,
+        "sort_order": 30
+      },
+      {
+        "key": "gas",
+        "label": "Газ",
+        "built_in": true,
+        "sort_order": 40
+      },
+      {
+        "key": "favorite",
+        "label": "Избранное",
+        "built_in": true,
+        "sort_order": 50
+      },
+      {
+        "key": "extra:новая_кнопка",
+        "label": "СМА",
+        "built_in": false,
+        "sort_order": 60
+      },
+      {
+        "key": "extra:новая_кнопка_2",
+        "label": "ТВВА",
+        "built_in": false,
+        "sort_order": 70
       }
     ]
   }

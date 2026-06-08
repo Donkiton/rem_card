@@ -1984,7 +1984,14 @@ class OperBlockService:
         result = self.db.run_write_operation(operation, source="operblock_delete_last_vital_record")
         return int(result) if result is not None else None
 
-    def add_order(self, admission_id: int, text: str, *, preset_payload: Optional[dict[str, Any]] = None) -> int:
+    def add_order(
+        self,
+        admission_id: int,
+        text: str,
+        *,
+        preset_payload: Optional[dict[str, Any]] = None,
+        route: str | None = None,
+    ) -> int:
         validate_operblock_runtime_path(self.db)
         clean_text = str(text or "").strip()
         if not clean_text:
@@ -1992,6 +1999,7 @@ class OperBlockService:
         preset_id = ""
         if isinstance(preset_payload, dict):
             preset_id = str(preset_payload.get("preset_id") or "").strip()
+        comment_text = _operblock_order_comment_with_route("", route) if route is not None else ""
         now = _now_text()
 
         def operation(cursor: sqlite3.Cursor):
@@ -2012,10 +2020,20 @@ class OperBlockService:
                     admission_id, datetime, text, drug_key, latin, type, status, dose_value, dose_unit,
                     frequency, specific_times, sort_order, draft_sort_order, is_finalized,
                     is_committed, created_at, comment, last_modified_by, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'observation', 'active', 0, '', 1, '[]', ?, ?, 1, 1, ?, '', 'operblock',
+                ) VALUES (?, ?, ?, ?, ?, 'observation', 'active', 0, '', 1, '[]', ?, ?, 1, 1, ?, ?, 'operblock',
                           STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
                 """,
-                (int(admission_id), now, clean_text, preset_id or None, clean_text, sort_order, sort_order, now),
+                (
+                    int(admission_id),
+                    now,
+                    clean_text,
+                    preset_id or None,
+                    clean_text,
+                    sort_order,
+                    sort_order,
+                    now,
+                    comment_text,
+                ),
             )
             return int(cursor.lastrowid)
 

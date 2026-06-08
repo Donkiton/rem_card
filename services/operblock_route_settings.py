@@ -102,15 +102,37 @@ def _payload_label(payload: Mapping[str, Any], fallback: str) -> str:
     )
 
 
+def _load_operblock_preset_group_codes() -> list[str]:
+    try:
+        from rem_card.services.operblock_medication_presets import load_operblock_medication_presets
+
+        presets = load_operblock_medication_presets(include_disabled=True)
+    except Exception:
+        return []
+    result: list[str] = []
+    for preset in presets:
+        clean_code = _clean_text((preset or {}).get("drug_group"))
+        if clean_code and clean_code not in result:
+            result.append(clean_code)
+    return result
+
+
 def load_operblock_drug_groups() -> list[dict[str, str]]:
     snapshot = get_settings_service().drug_catalog_snapshot()
     result: list[dict[str, str]] = []
+    seen_codes: set[str] = set()
     for code, payload in (snapshot.groups or {}).items():
         clean_code = _clean_text(code)
         if not clean_code:
             continue
         data = payload if isinstance(payload, Mapping) else {}
+        seen_codes.add(clean_code)
         result.append({"code": clean_code, "label": _payload_label(data, clean_code)})
+    for clean_code in _load_operblock_preset_group_codes():
+        if clean_code in seen_codes:
+            continue
+        seen_codes.add(clean_code)
+        result.append({"code": clean_code, "label": f"Группа оперблока: {clean_code}"})
     result.sort(key=lambda item: (item["label"].casefold(), item["code"].casefold()))
     return result
 
@@ -261,3 +283,7 @@ def operblock_routes_for_drug_group(group_code: Any) -> list[dict[str, str]]:
         default_code = _effective_default_route(routes)
         result.append({"code": default_code, "label": operblock_route_label(default_code, short=False, routes=routes)})
     return result
+
+
+def operblock_default_route_for_drug_group(group_code: Any) -> str:
+    return _effective_default_route(operblock_routes_for_drug_group(group_code))
