@@ -9848,84 +9848,48 @@ class OperBlockMainWidget(QWidget):
         body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(30, 28, 30, 28)
-        body_layout.setSpacing(18)
+        body_layout.setContentsMargins(18, 16, 18, 16)
+        body_layout.setSpacing(14)
+        body.setStyleSheet("QWidget { background: #F5F7FA; }")
 
-        preview = QHBoxLayout()
-        preview.setSpacing(26)
-        photo = QLabel()
-        photo.setFixedSize(260, 260)
-        photo.setAlignment(Qt.AlignCenter)
-        self._set_patient_photo(photo, patient.get("gender"))
-        preview.addWidget(photo, 0, Qt.AlignTop)
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(14)
 
-        info = QVBoxLayout()
-        info.setSpacing(12)
-        status = QLabel("В ОПЕРАЦИОННОЙ")
-        status.setStyleSheet(
-            "color: white; font-weight: 800; font-size: 14px; "
-            "background-color: #e74c3c; border-radius: 4px; padding: 4px 10px;"
-        )
-        status.setFixedWidth(180)
-        status.setAlignment(Qt.AlignCenter)
-        info.addWidget(status, 0, Qt.AlignLeft)
-        info.addWidget(_label(f"ИБ № {patient.get('history_number') or '—'}", size=18, weight=800, color=COLOR_PRIMARY_DARK))
-        info.addWidget(_label(patient.get("full_name") or "Неизвестно", size=27, weight=800))
-        info.addWidget(_label(f"Возраст: {patient.get('age') or '—'}", size=20))
-        info.addWidget(_label(f"Пол: {patient.get('gender') or '—'}", size=18))
-        diagnosis_line = patient.get("diagnosis_text") or "—"
-        code = patient.get("diagnosis_code")
-        if code:
-            diagnosis_line = f"{code}: {diagnosis_line}"
-        diagnosis = _label(f"Диагноз: {diagnosis_line}", size=18)
-        diagnosis.setMinimumHeight(54)
-        info.addWidget(diagnosis)
-        detail_lines: list[str] = []
-        operation_name = normalize_operblock_team_text(patient.get("operation_name"))
-        if operation_name:
-            detail_lines.append(f"Операция: {operation_name}")
-        surgeons = [
-            normalize_operblock_team_text(item)
-            for item in (patient.get("surgeons") or [])
-            if normalize_operblock_team_text(item)
-        ]
-        if surgeons:
-            detail_lines.append(f"Хирурги: {', '.join(surgeons)}")
-        anesthesiologist = normalize_operblock_team_text(patient.get("anesthesiologist"))
-        if anesthesiologist:
-            detail_lines.append(f"Анестезиолог: {anesthesiologist}")
-        height = patient.get("height_cm")
-        weight = patient.get("weight_kg")
-        height_weight = []
-        if height not in (None, ""):
-            height_weight.append(f"рост {height} см")
-        if weight not in (None, ""):
-            weight_text = str(weight).rstrip("0").rstrip(".") if isinstance(weight, float) else str(weight)
-            height_weight.append(f"вес {weight_text} кг")
-        if height_weight:
-            detail_lines.append("Пациент: " + ", ".join(height_weight))
-        allergies = normalize_operblock_team_text(patient.get("allergies"))
-        if allergies:
-            detail_lines.append(f"Аллергии: {allergies}")
-        for line in detail_lines[:5]:
-            item = _label(line, size=15, weight=600 if line.startswith("Аллергии:") else 500, color=TEXT_PRIMARY)
-            item.setMaximumHeight(42)
-            info.addWidget(item)
-        info.addStretch(1)
-        preview.addLayout(info, 1)
-        body_layout.addLayout(preview, 1)
+        left_column = QVBoxLayout()
+        left_column.setSpacing(12)
+        left_column.addWidget(self._board_patient_block(patient), 3)
+        left_column.addWidget(self._board_vitals_block(patient), 2)
+
+        center_column = QVBoxLayout()
+        center_column.setSpacing(12)
+        center_column.addWidget(self._board_admission_block(table, patient), 0)
+        center_column.addWidget(self._board_progress_block(patient), 1)
+        center_column.addWidget(self._board_medications_block(patient), 1)
+
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+        right_column.addWidget(self._board_allergies_block(patient), 0)
+        right_column.addWidget(self._board_special_notes_block(patient), 0)
+        right_column.addWidget(self._board_operation_block(table, patient), 1)
+        right_column.addStretch(1)
+
+        content.addLayout(left_column, 3)
+        content.addLayout(center_column, 5)
+        content.addLayout(right_column, 3)
+        body_layout.addLayout(content, 1)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
         open_btn = QPushButton("ОТКРЫТЬ КАРТОЧКУ")
-        edit_btn = QPushButton("РЕДАКТИРОВАТЬ")
+        edit_btn = QPushButton("✎  РЕДАКТИРОВАТЬ")
         close_btn = QPushButton("ОСВОБОДИТЬ СТОЛ")
         for button in (open_btn, edit_btn, close_btn):
-            button.setFixedHeight(56)
+            button.setFixedHeight(52)
             button.setCursor(Qt.PointingHandCursor)
-        open_btn.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        edit_btn.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        close_btn.setStyleSheet(DANGER_BUTTON_STYLE)
+        open_btn.setStyleSheet(self._board_action_button_style("open"))
+        edit_btn.setStyleSheet(self._board_action_button_style("edit"))
+        close_btn.setStyleSheet(self._board_action_button_style("danger"))
         open_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._open_protocol(int(case_id))
         )
@@ -9948,6 +9912,419 @@ class OperBlockMainWidget(QWidget):
         )
         return frame
 
+    @staticmethod
+    def _board_action_button_style(kind: str) -> str:
+        if kind == "edit":
+            return """
+                QPushButton {
+                    background-color: #EFF6FF;
+                    color: #2563EB;
+                    border: 1px solid #93C5FD;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #DBEAFE; border-color: #2563EB; }
+            """
+        if kind == "danger":
+            return """
+                QPushButton {
+                    background-color: #FFF7F7;
+                    color: #EF4444;
+                    border: 1.5px solid #EF4444;
+                    border-radius: 8px;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #FEE2E2; }
+            """
+        return """
+            QPushButton {
+                background-color: #FFFFFF;
+                color: #1E3A8A;
+                border: 1px solid #CBD5E1;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 800;
+                padding: 4px 12px;
+            }
+            QPushButton:hover { background-color: #F8FAFC; border-color: #94A3B8; }
+        """
+
+    @staticmethod
+    def _board_block(title: str, icon_text: str = "") -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("OperBlockStartBlock")
+        frame.setStyleSheet(
+            """
+            QFrame#OperBlockStartBlock {
+                background-color: #FFFFFF;
+                border: 1px solid #DDE3EA;
+                border-radius: 9px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(7)
+        marker = QLabel(icon_text or "")
+        marker.setFixedSize(20, 16)
+        marker.setAlignment(Qt.AlignCenter)
+        marker.setStyleSheet("color: #1E5AA8; font-size: 12px; font-weight: 900;")
+        title_label = QLabel(title)
+        title_label.setStyleSheet("color: #1E5AA8; font-size: 15px; font-weight: 800;")
+        header.addWidget(marker, 0)
+        header.addWidget(title_label, 1)
+        layout.addLayout(header)
+        return frame, layout
+
+    @staticmethod
+    def _board_muted_label(text: str, *, size: int = 13) -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"font-size: {size}px; color: #64748B; font-weight: 500;")
+        return label
+
+    @staticmethod
+    def _board_value_label(text: str, *, size: int = 14, weight: int = 700, color: str = "#1F2D3D") -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        label.setStyleSheet(f"font-size: {size}px; color: {color}; font-weight: {weight};")
+        return label
+
+    @staticmethod
+    def _board_format_weight(value) -> str:
+        if value in (None, ""):
+            return "—"
+        text = str(value).strip()
+        if isinstance(value, float):
+            text = text.rstrip("0").rstrip(".")
+        return f"{text} кг"
+
+    @staticmethod
+    def _board_elapsed_text(started_at) -> str:
+        start = _minute_floor_dt(_parse_datetime_value(started_at))
+        if start is None:
+            return "—"
+        delta = max(timedelta(0), datetime.now().replace(second=0, microsecond=0) - start)
+        total_minutes = int(delta.total_seconds() // 60)
+        hours, minutes = divmod(total_minutes, 60)
+        if hours <= 0:
+            return f"{minutes} мин"
+        return f"{hours} ч {minutes:02d} мин"
+
+    @staticmethod
+    def _board_diagnosis_text(patient: dict) -> str:
+        diagnosis = str(patient.get("diagnosis_text") or "—").strip()
+        code = str(patient.get("diagnosis_code") or "").strip()
+        return f"{code}: {diagnosis}" if code else diagnosis
+
+    def _board_patient_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Пациент", "●")
+        photo = QLabel()
+        photo.setFixedSize(132, 132)
+        photo.setAlignment(Qt.AlignCenter)
+        self._set_patient_photo(photo, patient.get("gender"))
+        layout.addWidget(photo, 0, Qt.AlignHCenter)
+
+        status = QLabel("В ОПЕРАЦИОННОЙ")
+        status.setAlignment(Qt.AlignCenter)
+        status.setFixedHeight(26)
+        status.setStyleSheet(
+            "color: #FFFFFF; background-color: #EF4444; border-radius: 5px; "
+            "font-size: 12px; font-weight: 800; padding: 3px 8px;"
+        )
+        layout.addWidget(status, 0, Qt.AlignLeft)
+        layout.addWidget(self._board_value_label(f"ИБ № {patient.get('history_number') or '—'}", size=15, color="#1E5AA8"))
+        layout.addWidget(self._board_value_label(patient.get("full_name") or "Неизвестно", size=21, weight=800))
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(5)
+        rows = [
+            ("Возраст", patient.get("age") or "—"),
+            ("Пол", patient.get("gender") or "—"),
+            ("Рост", f"{patient.get('height_cm')} см" if patient.get("height_cm") not in (None, "") else "—"),
+            ("Вес", self._board_format_weight(patient.get("weight_kg"))),
+        ]
+        for row, (label_text, value_text) in enumerate(rows):
+            grid.addWidget(self._board_muted_label(label_text, size=12), row, 0)
+            grid.addWidget(self._board_value_label(str(value_text), size=13, weight=700), row, 1)
+        layout.addLayout(grid)
+
+        layout.addWidget(self._board_muted_label("Диагноз:", size=12))
+        diagnosis = self._board_value_label(self._board_diagnosis_text(patient), size=14, weight=650)
+        diagnosis.setMaximumHeight(68)
+        layout.addWidget(diagnosis)
+        allergies = normalize_operblock_team_text(patient.get("allergies")) or "Не известны"
+        allergy_label = self._board_value_label(f"Аллергии: {allergies}", size=13, weight=700, color="#EF4444" if allergies != "Не известны" else "#16A34A")
+        allergy_label.setMaximumHeight(42)
+        layout.addWidget(allergy_label)
+        layout.addStretch(1)
+        return block
+
+    def _board_vitals_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Показатели", "⌁")
+        latest = patient.get("latest") or {}
+        ad = str(latest.get("ad") or "").strip("/")
+        pulse = latest.get("pulse")
+        spo2 = latest.get("spo2")
+        has_data = bool(ad) or pulse not in (None, "") or spo2 not in (None, "")
+        source = str(latest.get("source") or "")
+        subtitle = "Исходные показатели" if source == "initial" else ""
+        if source == "current" and latest.get("datetime"):
+            subtitle = f"Обновлено: {_format_order_time(latest.get('datetime'))}"
+        if subtitle:
+            layout.addWidget(self._board_muted_label(subtitle, size=12))
+        if not has_data:
+            layout.addWidget(self._board_muted_label("Нет данных", size=14))
+            return block
+        values = [
+            ("АД", f"{ad} мм рт. ст." if ad else "—"),
+            ("ЧСС", f"{pulse} уд/мин" if pulse not in (None, "") else "—"),
+            ("SpO₂", f"{spo2} %" if spo2 not in (None, "") else "—"),
+        ]
+        for index, (name, value) in enumerate(values):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(self._board_muted_label(name, size=13), 0)
+            value_label = self._board_value_label(value, size=16, weight=800, color="#1F2D3D")
+            value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(value_label, 1)
+            layout.addLayout(row)
+            if index < len(values) - 1:
+                line = QFrame()
+                line.setFixedHeight(1)
+                line.setStyleSheet("background: #E5EAF0; border: none;")
+                layout.addWidget(line)
+        return block
+
+    def _board_admission_block(self, table: dict, patient: dict) -> QFrame:
+        block, layout = self._board_block("Диагноз при поступлении", "i")
+        diagnosis = self._board_value_label(self._board_diagnosis_text(patient), size=15, weight=700)
+        diagnosis.setMaximumHeight(76)
+        layout.addWidget(diagnosis)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(7)
+        surgeons = ", ".join(
+            item
+            for item in [normalize_operblock_team_text(value) for value in (patient.get("surgeons") or [])]
+            if item
+        )
+        team_parts = []
+        if surgeons:
+            team_parts.append(surgeons)
+        anesthesiologist = normalize_operblock_team_text(patient.get("anesthesiologist"))
+        if anesthesiologist:
+            team_parts.append(f"Анестезиолог: {anesthesiologist}")
+        team = "; ".join(team_parts) if team_parts else "—"
+        values = [
+            ("Поступление", _format_dt(patient.get("started_at"))),
+            ("Время в операционной", self._board_elapsed_text(patient.get("started_at"))),
+            ("Операционная", table.get("display_name") or "—"),
+            ("Бригада / анестезиолог", team),
+        ]
+        for index, (name, value) in enumerate(values):
+            row = index // 2
+            col = (index % 2) * 2
+            grid.addWidget(self._board_muted_label(name, size=12), row, col)
+            grid.addWidget(self._board_value_label(str(value or "—"), size=13, weight=700), row, col + 1)
+        layout.addLayout(grid)
+        return block
+
+    @staticmethod
+    def _board_progress_state(operation_events: list[dict]) -> tuple[int, float, str]:
+        kinds = [str((event or {}).get("kind") or "") for event in operation_events]
+        if "surgery_end" in kinds:
+            return 3, 1.0, "surgery_end"
+        if "surgery_start" in kinds:
+            return 2, 5.0 / 6.0, "surgery_start"
+        if "anesthesia_start" in kinds:
+            return 1, 0.5, "anesthesia_start"
+        return 0, 1.0 / 6.0, "preparation"
+
+    @staticmethod
+    def _board_stage_label(kind: str, fallback: str = "") -> str:
+        labels = {
+            "anesthesia_start": "Начало анестезии",
+            "anesthesia_end": "Завершение анестезии",
+            "surgery_start": "Начало операции",
+            "surgery_end": "Завершение операции",
+            "custom": fallback or "Этап операции",
+        }
+        return labels.get(kind, fallback or "Этап операции")
+
+    def _board_progress_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Ход операции", "—")
+        events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
+        active_index, fill_fraction, active_kind = self._board_progress_state(events)
+        stages = ["Подготовка", "Анестезия", "Операция", "Завершение"]
+
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(0, 2, 0, 0)
+        progress_row.setSpacing(0)
+        for index, stage in enumerate(stages):
+            completed = index < active_index or active_index == 3
+            current = index == active_index and active_index != 3
+            circle = QLabel(str(index + 1))
+            circle.setFixedSize(28, 28)
+            circle.setAlignment(Qt.AlignCenter)
+            if completed:
+                circle.setStyleSheet("background: #2563EB; color: #FFFFFF; border: 2px solid #2563EB; border-radius: 14px; font-weight: 800;")
+            elif current:
+                circle.setStyleSheet("background: #FFFFFF; color: #2563EB; border: 2px solid #2563EB; border-radius: 14px; font-weight: 800;")
+            else:
+                circle.setStyleSheet("background: #F1F5F9; color: #94A3B8; border: 2px solid #CBD5E1; border-radius: 14px; font-weight: 800;")
+            progress_row.addWidget(circle, 0)
+            if index < len(stages) - 1:
+                segment_start = index / 3.0
+                segment_end = (index + 1) / 3.0
+                active_ratio = max(0.0, min(1.0, (fill_fraction - segment_start) / (segment_end - segment_start)))
+                segment = QWidget()
+                segment_layout = QHBoxLayout(segment)
+                segment_layout.setContentsMargins(0, 12, 0, 12)
+                segment_layout.setSpacing(0)
+                active_line = QFrame()
+                active_line.setFixedHeight(3)
+                active_line.setStyleSheet("background: #2563EB; border: none;")
+                inactive_line = QFrame()
+                inactive_line.setFixedHeight(3)
+                inactive_line.setStyleSheet("background: #CBD5E1; border: none;")
+                active_stretch = int(round(active_ratio * 100))
+                inactive_stretch = max(0, 100 - active_stretch)
+                if active_stretch:
+                    segment_layout.addWidget(active_line, active_stretch)
+                if inactive_stretch:
+                    segment_layout.addWidget(inactive_line, inactive_stretch)
+                progress_row.addWidget(segment, 1)
+        layout.addLayout(progress_row)
+
+        labels_row = QHBoxLayout()
+        labels_row.setContentsMargins(0, 0, 0, 0)
+        labels_row.setSpacing(8)
+        for index, stage in enumerate(stages):
+            label = QLabel(stage)
+            label.setAlignment(Qt.AlignCenter)
+            color = "#2563EB" if index == active_index or index < active_index or active_index == 3 else "#94A3B8"
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {color};")
+            labels_row.addWidget(label, 1)
+        layout.addLayout(labels_row)
+
+        title = self._board_value_label("Этапы операции", size=13, weight=800, color="#1E5AA8")
+        layout.addWidget(title)
+        if not events:
+            notice = QLabel("Этапы операции не начаты")
+            notice.setStyleSheet("background: #EFF6FF; color: #1E5AA8; border: 1px solid #BFDBFE; border-radius: 6px; padding: 7px 9px; font-size: 13px; font-weight: 700;")
+            layout.addWidget(notice)
+            return block
+
+        history: list[dict] = []
+        if patient.get("started_at"):
+            history.append({"event_time": patient.get("started_at"), "label": "Подготовка пациента", "kind": "preparation"})
+        for event in events:
+            history.append(
+                {
+                    "event_time": event.get("event_time"),
+                    "label": self._board_stage_label(str(event.get("kind") or ""), str(event.get("label") or "")),
+                    "kind": str(event.get("kind") or ""),
+                }
+            )
+        history.sort(key=lambda item: _parse_datetime_value(item.get("event_time")) or datetime.min)
+        for item in history[-5:]:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            dot = QLabel("•")
+            dot.setFixedWidth(12)
+            dot.setAlignment(Qt.AlignCenter)
+            is_current = str(item.get("kind") or "") == active_kind
+            color = "#2563EB" if is_current else "#94A3B8"
+            dot.setStyleSheet(f"font-size: 18px; color: {color}; font-weight: 900;")
+            time_label = QLabel(_format_order_time(item.get("event_time")))
+            time_label.setFixedWidth(44)
+            time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 700;")
+            text_label = self._board_value_label(str(item.get("label") or "Этап операции"), size=13, weight=800 if is_current else 600, color="#2563EB" if is_current else "#1F2D3D")
+            row.addWidget(dot, 0)
+            row.addWidget(time_label, 0)
+            row.addWidget(text_label, 1)
+            layout.addLayout(row)
+        return block
+
+    def _board_medications_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Назначения и препараты", "Rx")
+        items = [dict(item or {}) for item in (patient.get("medication_history") or [])]
+        if not items:
+            layout.addWidget(self._board_muted_label("Нет введённых препаратов", size=14))
+            return block
+        for item in items[-5:]:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            time_label = QLabel(_format_order_time(item.get("time")))
+            time_label.setFixedWidth(44)
+            time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 800;")
+            text_label = self._board_value_label(str(item.get("label") or "Препарат"), size=13, weight=700)
+            pill = QLabel(str(item.get("kind_label") or "Болюс"))
+            pill.setAlignment(Qt.AlignCenter)
+            pill.setStyleSheet("background: #EEF2FF; color: #2563EB; border: 1px solid #C7D2FE; border-radius: 5px; padding: 2px 6px; font-size: 11px; font-weight: 800;")
+            row.addWidget(time_label, 0)
+            row.addWidget(text_label, 1)
+            row.addWidget(pill, 0)
+            layout.addLayout(row)
+        return block
+
+    def _board_allergies_block(self, patient: dict) -> QFrame:
+        allergies = normalize_operblock_team_text(patient.get("allergies"))
+        block, layout = self._board_block("Аллергии", "!")
+        if allergies:
+            label = self._board_value_label(allergies, size=14, weight=800, color="#EF4444")
+            layout.addWidget(label)
+        else:
+            ok = QLabel("✓  Не известны")
+            ok.setStyleSheet("font-size: 14px; color: #16A34A; font-weight: 800;")
+            layout.addWidget(ok)
+        return block
+
+    def _board_special_notes_block(self, patient: dict) -> QFrame:
+        block, layout = self._board_block("Особые отметки", "!")
+        layout.addWidget(self._board_muted_label("—", size=15))
+        return block
+
+    def _board_operation_block(self, table: dict, patient: dict) -> QFrame:
+        block, layout = self._board_block("Операция", "●")
+        operation_name = normalize_operblock_team_text(patient.get("operation_name"))
+        layout.addWidget(self._board_value_label(operation_name or "—", size=15, weight=800))
+        surgeons = [
+            normalize_operblock_team_text(item)
+            for item in (patient.get("surgeons") or [])
+            if normalize_operblock_team_text(item)
+        ]
+        info_rows = [
+            ("Хирурги", ", ".join(surgeons) if surgeons else "—"),
+            ("Анестезиолог", normalize_operblock_team_text(patient.get("anesthesiologist")) or "—"),
+            ("Анестезистка", normalize_operblock_team_text(patient.get("anesthetist")) or "—"),
+            ("Операционная", table.get("display_name") or "—"),
+        ]
+        for label_text, value_text in info_rows:
+            layout.addWidget(self._board_muted_label(f"{label_text}:", size=12))
+            value_label = self._board_value_label(value_text, size=13, weight=650)
+            value_label.setMaximumHeight(42)
+            layout.addWidget(value_label)
+        return block
+
     def _card_header(self, display_name: str) -> QLabel:
         apply_metrics = self._current_board_apply_metrics
         metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
@@ -9958,11 +10335,11 @@ class OperBlockMainWidget(QWidget):
         label.setStyleSheet(
             f"""
             QLabel {{
-                background-color: {BG_LIGHT};
-                color: {TEXT_PRIMARY};
+                background-color: #F5F7FA;
+                color: #1F2D3D;
                 font-size: 24px;
                 font-weight: 800;
-                border-bottom: 1px solid {BORDER_COLOR};
+                border-bottom: 1px solid #DDE3EA;
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
             }}

@@ -693,6 +693,80 @@ class OperBlockService:
         self.db = db_manager
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
 
+    @staticmethod
+    def _board_operation_events_from_timeline(timeline: Mapping[str, Any] | dict[str, Any]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for event in list((timeline or {}).get("operation_events") or []):
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            kind = operation_stage_kind_from_payload(payload)
+            if not kind:
+                continue
+            label = _normalize_case_text(
+                (payload or {}).get("label")
+                or event.get("display_label")
+                or event.get("raw_text")
+                or OPERBLOCK_STAGE_KIND_LABELS.get(kind)
+                or ""
+            )
+            result.append(
+                {
+                    "id": event.get("id") or "",
+                    "source_id": int(event.get("source_id") or 0),
+                    "kind": kind,
+                    "label": label or OPERBLOCK_STAGE_KIND_LABELS.get(kind, "Этап операции"),
+                    "event_time": event.get("event_time"),
+                    "revision": int(event.get("revision") or 0),
+                }
+            )
+        result.sort(key=lambda item: (_parse_dt(item.get("event_time")) or datetime.min, int(item.get("source_id") or 0)))
+        return result
+
+    @staticmethod
+    def _board_medication_history_from_timeline(timeline: Mapping[str, Any] | dict[str, Any]) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for event in list((timeline or {}).get("bolus_events") or []):
+            label = _normalize_case_text(event.get("display_label") or event.get("raw_text") or event.get("drug_label"))
+            if not label:
+                continue
+            items.append(
+                {
+                    "time": event.get("event_time"),
+                    "label": label,
+                    "kind": "bolus",
+                    "kind_label": "Болюс",
+                    "source_id": int(event.get("source_id") or 0),
+                }
+            )
+        for interval in list((timeline or {}).get("infusion_intervals") or []):
+            payload = interval.get("payload") if isinstance(interval.get("payload"), Mapping) else {}
+            label = _normalize_case_text(
+                interval.get("display_label")
+                or (payload or {}).get("display_name")
+                or (payload or {}).get("label")
+                or interval.get("drug_label")
+            )
+            if not label:
+                continue
+            is_gas = str((payload or {}).get("kind") or "").strip().casefold() == "gas"
+            dose_text = _normalize_case_text((payload or {}).get("display_dose_text") or (payload or {}).get("dose_text"))
+            if is_gas and dose_text and dose_text.casefold() not in label.casefold():
+                label = f"{label} {dose_text}".strip()
+            try:
+                source_id = int(str(interval.get("interval_id") or "0").rsplit(":", 1)[-1] or 0)
+            except (TypeError, ValueError):
+                source_id = 0
+            items.append(
+                {
+                    "time": interval.get("start_time"),
+                    "label": label,
+                    "kind": "gas" if is_gas else "infusion",
+                    "kind_label": "Газ" if is_gas else "Инфузия",
+                    "source_id": source_id,
+                }
+            )
+        items.sort(key=lambda item: (_parse_dt(item.get("time")) or datetime.min, int(item.get("source_id") or 0)))
+        return items[-6:]
+
     def build_operblock_board_snapshot(self) -> dict[str, Any]:
         metric_started = operblock_startup_metrics.timer_start()
         validate_operblock_runtime_path(self.db)
@@ -718,6 +792,11 @@ class OperBlockService:
                 oc.allergies,
                 oc.blood_group,
                 oc.blood_rh,
+                oc.preop_sys,
+                oc.preop_dia,
+                oc.preop_pulse,
+                oc.preop_spo2,
+                COALESCE(oc.preop_save_initial_vitals, 1) AS preop_save_initial_vitals,
                 p.full_name,
                 p.birth_date,
                 a.history_number,
@@ -728,29 +807,61 @@ class OperBlockService:
                 a.diagnosis_code,
                 a.diagnosis_text,
                 (
+                    SELECT v.id FROM vitals v
+                    WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
+                    ORDER BY v.datetime ASC, v.id ASC
+                    LIMIT 1
+                ) AS first_vitals_id,
+                (
+                    SELECT v.id FROM vitals v
+                    WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
+                    ORDER BY v.datetime DESC, v.id DESC
+                    LIMIT 1
+                ) AS latest_vitals_id,
+                (
                     SELECT v.sys FROM vitals v
                     WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
                     ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_sys,
                 (
                     SELECT v.dia FROM vitals v
                     WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
                     ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_dia,
                 (
                     SELECT v.pulse FROM vitals v
                     WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
                     ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_pulse,
                 (
                     SELECT v.spo2 FROM vitals v
                     WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
                     ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
-                ) AS latest_spo2
+                ) AS latest_spo2,
+                (
+                    SELECT v.datetime FROM vitals v
+                    WHERE v.admission_id = oc.admission_id
+                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
+                    ORDER BY v.datetime DESC, v.id DESC
+                    LIMIT 1
+                ) AS latest_vitals_time
             FROM operating_tables t
             LEFT JOIN operation_cases oc
                 ON oc.table_code = t.code
@@ -769,6 +880,48 @@ class OperBlockService:
             occupied = row.get("operation_case_id") is not None
             patient = None
             if occupied:
+                latest_sys = row.get("latest_sys")
+                latest_dia = row.get("latest_dia")
+                latest_pulse = row.get("latest_pulse")
+                latest_spo2 = row.get("latest_spo2")
+                latest_time = row.get("latest_vitals_time")
+                latest_source = "current" if latest_time else ""
+                if (
+                    latest_time
+                    and row.get("preop_save_initial_vitals")
+                    and row.get("latest_vitals_id") is not None
+                    and row.get("latest_vitals_id") == row.get("first_vitals_id")
+                    and any(
+                        value is not None
+                        for value in (row.get("preop_sys"), row.get("preop_dia"), row.get("preop_pulse"), row.get("preop_spo2"))
+                    )
+                ):
+                    latest_source = "initial"
+                if latest_time in (None, "") and any(
+                    value is not None
+                    for value in (row.get("preop_sys"), row.get("preop_dia"), row.get("preop_pulse"), row.get("preop_spo2"))
+                ):
+                    latest_sys = row.get("preop_sys")
+                    latest_dia = row.get("preop_dia")
+                    latest_pulse = row.get("preop_pulse")
+                    latest_spo2 = row.get("preop_spo2")
+                    latest_source = "initial"
+                operation_events: list[dict[str, Any]] = []
+                medication_history: list[dict[str, Any]] = []
+                try:
+                    timeline = self.build_operblock_timeline_snapshot(
+                        int(row.get("admission_id") or 0),
+                        operation_case_id=int(row.get("operation_case_id") or 0),
+                    ).to_dict()
+                    operation_events = self._board_operation_events_from_timeline(timeline)
+                    medication_history = self._board_medication_history_from_timeline(timeline)
+                except Exception as exc:
+                    logger.warning(
+                        "operblock board timeline summary failed case_id=%s: %s",
+                        row.get("operation_case_id"),
+                        exc,
+                        exc_info=True,
+                    )
                 patient = {
                     "patient_id": row.get("patient_id"),
                     "admission_id": row.get("admission_id"),
@@ -792,10 +945,16 @@ class OperBlockService:
                     "started_at": row.get("started_at"),
                     "revision": int(row.get("case_revision") or 0),
                     "latest": {
-                        "ad": self._format_ad(row.get("latest_sys"), row.get("latest_dia")),
-                        "pulse": row.get("latest_pulse"),
-                        "spo2": row.get("latest_spo2"),
+                        "ad": self._format_ad(latest_sys, latest_dia),
+                        "sys": latest_sys,
+                        "dia": latest_dia,
+                        "pulse": latest_pulse,
+                        "spo2": latest_spo2,
+                        "datetime": latest_time,
+                        "source": latest_source,
                     },
+                    "operation_events": operation_events,
+                    "medication_history": medication_history,
                 }
             tables.append(
                 {
