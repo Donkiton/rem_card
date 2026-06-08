@@ -3373,7 +3373,9 @@
         "label": "Tranexam_bolus",
         "display_name": "S. Acidi tranexamici 5%",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "транек"
+        ],
         "kind": "bolus",
         "group": "Болюсы",
         "drug_group": "Gemostasis",
@@ -3405,7 +3407,9 @@
         "label": "Bupivacaini",
         "display_name": "S. Bupivacaini 0.5%",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "бупи"
+        ],
         "kind": "bolus",
         "group": "Болюсы",
         "drug_group": "anethtetics",
@@ -3439,7 +3443,9 @@
         "label": "MgSO4",
         "display_name": "S. MgSO4 25%",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "магн"
+        ],
         "kind": "bolus",
         "group": "Болюсы",
         "drug_group": "microelements",
@@ -3470,7 +3476,9 @@
         "label": "Desflurane",
         "display_name": "Inh. Desflurani",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "дес"
+        ],
         "kind": "gas",
         "group": "Газы",
         "drug_group": "gas",
@@ -3504,7 +3512,9 @@
         "label": "Sevoflurane",
         "display_name": "Inh. Sevoflurani",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "сево"
+        ],
         "kind": "gas",
         "group": "Газы",
         "drug_group": "gas",
@@ -3538,7 +3548,9 @@
         "label": "O2",
         "display_name": "Inh. O2",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "кислород"
+        ],
         "kind": "gas",
         "group": "Газы",
         "drug_group": "gas",
@@ -3727,7 +3739,9 @@
         "label": "Mezaton",
         "display_name": "S. Phenylephrini 1%",
         "latin": null,
-        "aliases": [],
+        "aliases": [
+          "мезатон"
+        ],
         "kind": "timed_infusion",
         "group": "Капельницы",
         "drug_group": null,

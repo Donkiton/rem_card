@@ -18516,6 +18516,123 @@ def _check_operblock_route_settings_order_and_default(temp_root: str) -> tuple[b
         reset_settings_service()
 
 
+def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from rem_card.services.operblock_medication_presets import (
+        DILUENTS_SEED_FILE,
+        DRUGS_SEED_FILE,
+        OPERBLOCK_MEDICATION_PRESETS_FILE,
+        OPERBLOCK_MEDICATION_PRESETS_OVERRIDE_KEY,
+        load_operblock_medication_presets,
+        save_operblock_medication_presets,
+    )
+    import rem_card.ui.operblock_view.operblock_main_widget as operblock_widget_module
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+
+    seed_dir = os.path.join(temp_root, "seed")
+    user_dict_dir = os.path.join(temp_root, "user")
+    os.makedirs(seed_dir, exist_ok=True)
+    os.makedirs(user_dict_dir, exist_ok=True)
+    for filename, payload in (
+        (DRUGS_SEED_FILE, {}),
+        (DILUENTS_SEED_FILE, {}),
+        (OPERBLOCK_MEDICATION_PRESETS_FILE, {"items": []}),
+    ):
+        with open(os.path.join(seed_dir, filename), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+    with open(os.path.join(user_dict_dir, "user_overrides.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                OPERBLOCK_MEDICATION_PRESETS_OVERRIDE_KEY: {
+                    "version": 1,
+                    "include_opblock_seed": False,
+                    "include_quick_orders_compat": False,
+                    "items": [],
+                }
+            },
+            fh,
+            ensure_ascii=False,
+        )
+
+    save_operblock_medication_presets(
+        [
+            {
+                "preset_id": "manual:bolus:propofol",
+                "label": "Propofol",
+                "display_name": "S. Propofoli",
+                "aliases": ["диприван", "проф"],
+                "kind": "bolus",
+                "drug_group": "regression_anesthetics",
+                "enabled": True,
+                "sort_order": 10,
+            },
+            {
+                "preset_id": "manual:timed_infusion:mezaton",
+                "label": "Mezaton",
+                "display_name": "S. Phenylephrini 1%",
+                "aliases": ["меза"],
+                "kind": "timed_infusion",
+                "drug_group": "regression_vasopressors",
+                "enabled": True,
+                "sort_order": 20,
+            }
+        ],
+        user_dict_dir=user_dict_dir,
+    )
+    presets = load_operblock_medication_presets(
+        seed_dir=seed_dir,
+        user_dict_dir=user_dict_dir,
+        include_disabled=True,
+    )
+    aliases_by_id = {str(item.get("preset_id") or ""): item.get("aliases") for item in presets}
+    if aliases_by_id.get("manual:bolus:propofol") != ["диприван", "проф"]:
+        return False, f"aliases were not preserved: {presets!r}"
+    if aliases_by_id.get("manual:timed_infusion:mezaton") != ["меза"]:
+        return False, f"timed infusion aliases were not preserved: {presets!r}"
+
+    widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+    widget._medication_presets = presets
+    widget._preset_search_text = ""
+    widget._preset_kind_filter = "bolus"
+    widget._quick_order_filter_buttons = [
+        {"key": "bolus", "label": "Болюсы", "built_in": True, "sort_order": 10},
+    ]
+    group_load_calls = 0
+    original_group_loader = operblock_widget_module.load_operblock_drug_groups
+
+    def fake_group_loader():
+        nonlocal group_load_calls
+        group_load_calls += 1
+        return [
+            {"code": "regression_anesthetics", "label": "Анестетики"},
+            {"code": "regression_vasopressors", "label": "Вазопрессоры"},
+        ]
+
+    try:
+        operblock_widget_module.load_operblock_drug_groups = fake_group_loader
+        OperBlockMainWidget._rebuild_quick_order_search_index(widget)
+        if group_load_calls != 1:
+            return False, f"search index should load drug groups once, got {group_load_calls}"
+        group_load_calls = 0
+        result = OperBlockMainWidget._filtered_medication_presets(widget)
+        if [item.get("preset_id") for item in result] != ["manual:bolus:propofol"]:
+            return False, f"empty search should keep active bolus tab filter: {result!r}"
+        widget._preset_search_text = "диприв"
+        result = OperBlockMainWidget._filtered_medication_presets(widget)
+        if [item.get("preset_id") for item in result] != ["manual:bolus:propofol"]:
+            return False, f"quick search did not find preset by alias: {result!r}"
+        widget._preset_search_text = "меза"
+        result = OperBlockMainWidget._filtered_medication_presets(widget)
+        if [item.get("preset_id") for item in result] != ["manual:timed_infusion:mezaton"]:
+            return False, f"quick search was limited by active bolus tab: {result!r}"
+        if group_load_calls != 0:
+            return False, f"quick search reloaded drug groups while typing: {group_load_calls}"
+    finally:
+        operblock_widget_module.load_operblock_drug_groups = original_group_loader
+    return True, "ok"
+
+
 def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -19805,6 +19922,7 @@ def main():
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
         ("operblock_route_settings_order_and_default", _check_operblock_route_settings_order_and_default),
+        ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),
