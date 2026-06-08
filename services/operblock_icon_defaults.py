@@ -55,6 +55,14 @@ TYPE_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
         "gas.png",
         40,
     ),
+    OperBlockIconDefinition(
+        "type:operation_stage",
+        "type",
+        "operation_stage",
+        "Иконка этапа операции в окне изменения времени",
+        "etap1.png",
+        50,
+    ),
 )
 
 
@@ -90,6 +98,14 @@ EDIT_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
         "Иконка газа в окне изменения",
         "gas_izm.png",
         140,
+    ),
+    OperBlockIconDefinition(
+        "edit:operation_stage",
+        "edit",
+        "operation_stage",
+        "Иконка изменения времени этапа операции",
+        "etap2.png",
+        150,
     ),
 )
 
@@ -206,6 +222,10 @@ def _clean_kind(kind: Any) -> str:
         "газ": "gas",
         "bolus": "bolus",
         "болюс": "bolus",
+        "operation_stage": "operation_stage",
+        "stage": "operation_stage",
+        "этап": "operation_stage",
+        "этап_операции": "operation_stage",
     }
     return aliases.get(text, text or "bolus")
 

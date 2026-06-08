@@ -18864,10 +18864,14 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         export_settings_release_snapshot,
     )
     from rem_card.services.operblock_icon_defaults import (
+        DEFAULT_ICON_DEFINITION_BY_KEY,
         OPERBLOCK_ICONS_KEY,
+        default_icon_file_for_key,
         default_drug_icon_file,
         drug_icon_candidate_keys,
         drug_icon_candidate_keys_from_payload,
+        edit_icon_key,
+        type_icon_key,
     )
     from rem_card.services.settings.settings_service import (
         SettingsService,
@@ -18916,6 +18920,24 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         return False, "десфлюран не должен наследовать пользовательскую иконку севофлюрана"
     if default_drug_icon_file("gas") != "gas_izm.png":
         return False, "стандартная иконка препарата-газа должна быть gas_izm.png"
+    operation_stage_type_key = type_icon_key("operation_stage")
+    operation_stage_edit_key = edit_icon_key("operation_stage")
+    if operation_stage_type_key != "type:operation_stage":
+        return False, f"неверный ключ иконки этапа операции: {operation_stage_type_key}"
+    if operation_stage_edit_key != "edit:operation_stage":
+        return False, f"неверный ключ иконки изменения этапа операции: {operation_stage_edit_key}"
+    if default_icon_file_for_key(operation_stage_type_key) != "etap1.png":
+        return False, "иконка этапа операции по умолчанию должна быть etap1.png"
+    if default_icon_file_for_key(operation_stage_edit_key) != "etap2.png":
+        return False, "иконка окна изменения этапа операции по умолчанию должна быть etap2.png"
+    if operation_stage_type_key not in DEFAULT_ICON_DEFINITION_BY_KEY:
+        return False, "иконка этапа операции не попала в список настраиваемых иконок"
+    if operation_stage_edit_key not in DEFAULT_ICON_DEFINITION_BY_KEY:
+        return False, "иконка изменения этапа операции не попала в список настраиваемых иконок"
+    if not os.path.isfile(os.path.join(icon_dir, "etap1.png")):
+        return False, "файл стандартной иконки этапа операции etap1.png не найден"
+    if not os.path.isfile(os.path.join(icon_dir, "etap2.png")):
+        return False, "файл стандартной иконки изменения этапа операции etap2.png не найден"
 
     sevo_candidates = drug_icon_candidate_keys_from_payload({"kind": "gas"}, "Севофлюран")
     if "drug:manual:gas:sevoflurane" not in sevo_candidates:
