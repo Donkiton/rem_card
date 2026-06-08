@@ -14,7 +14,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1002
+OPERBLOCK_SCHEMA_VERSION = 1005
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -67,6 +67,20 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "created_by_role",
         "created_by_client_id",
         "revision",
+        "planned_operation_name",
+        "planned_surgeons_json",
+        "planned_anesthesiologist",
+        "planned_anesthetist",
+        "height_cm",
+        "weight_kg",
+        "allergies",
+        "blood_group",
+        "blood_rh",
+        "preop_sys",
+        "preop_dia",
+        "preop_pulse",
+        "preop_spo2",
+        "preop_save_initial_vitals",
     }.issubset(case_columns):
         return False
     if not _index_exists(conn, "idx_operation_cases_one_active_per_table"):
@@ -137,6 +151,20 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
             last_modified_by TEXT,
             future_rao_admission_id INTEGER,
+            planned_operation_name TEXT,
+            planned_surgeons_json TEXT,
+            planned_anesthesiologist TEXT,
+            planned_anesthetist TEXT,
+            height_cm INTEGER,
+            weight_kg REAL,
+            allergies TEXT,
+            blood_group TEXT,
+            blood_rh TEXT,
+            preop_sys INTEGER,
+            preop_dia INTEGER,
+            preop_pulse INTEGER,
+            preop_spo2 INTEGER,
+            preop_save_initial_vitals INTEGER NOT NULL DEFAULT 1,
             CHECK (table_code IN ('emergency', 'planned')),
             CHECK (status IN ('active', 'closed', 'transferred_to_rao', 'cancelled')),
             CHECK (ended_at IS NULL OR ended_at >= started_at),
@@ -147,6 +175,20 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         )
         """
     )
+    _ensure_column(conn, "operation_cases", "planned_operation_name", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "planned_surgeons_json", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "planned_anesthesiologist", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "planned_anesthetist", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "height_cm", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "weight_kg", "REAL", logger)
+    _ensure_column(conn, "operation_cases", "allergies", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "blood_group", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "blood_rh", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "preop_sys", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "preop_dia", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "preop_pulse", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "preop_spo2", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "preop_save_initial_vitals", "INTEGER NOT NULL DEFAULT 1", logger)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS operation_table_assignments (
@@ -318,7 +360,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         use_updated_at_gate=False,
     )
     _mark_schema_migration(conn, 1001, "operblock operation cases and table assignments")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock timeline events")
+    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock patient metadata")
 
 
 def _run_checks(db_manager: Any) -> tuple[str, str]:

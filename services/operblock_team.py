@@ -173,8 +173,27 @@ def load_operblock_anesthetists(*, user_dict_dir: str | None = None) -> list[str
 
 
 def load_operblock_surgeons(*, user_dict_dir: str | None = None) -> list[str]:
+    surgical_markers = (
+        "хирург",
+        "травматолог",
+        "ортопед",
+        "гинеколог",
+        "акушер",
+        "лор",
+        "оториноларинголог",
+        "уролог",
+        "нейрохирург",
+        "колопроктолог",
+        "проктолог",
+        "сосудист",
+        "эндоскопист",
+        "офтальмолог",
+        "челюстно",
+        "стоматолог",
+        "онколог",
+    )
     return _load_operblock_team_names_by_position(
-        lambda position: "хирург" in position,
+        lambda position: any(marker in position for marker in surgical_markers),
         user_dict_dir=user_dict_dir,
     )
 

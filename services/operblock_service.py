@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -43,6 +44,16 @@ OPERBLOCK_ROLE = "operblock"
 OPERBLOCK_TABLES = (
     {"code": "emergency", "display_name": "Экстренная операционная", "sort_order": 1},
     {"code": "planned", "display_name": "Плановая операционная", "sort_order": 2},
+)
+OPERBLOCK_BLOOD_GROUP_OPTIONS = (
+    "O(I) первая",
+    "A(II) вторая",
+    "B(III) третья",
+    "AB(IV) четвертая",
+)
+OPERBLOCK_BLOOD_RH_OPTIONS = (
+    "Rh(+) положительный",
+    "Rh(-) отрицательный",
 )
 OPERBLOCK_MKB_CODE_RE = re.compile(r"^[A-Z]\d{2}(?:\.\d{1,2})?$")
 _RU_TO_EN_KEYBOARD = {
@@ -94,6 +105,20 @@ class OperBlockPatientInput:
     birth_date: date
     diagnosis_code: Optional[str]
     diagnosis_text: str
+    operation_name: str = ""
+    surgeons: tuple[str, ...] = ()
+    anesthesiologist: str = ""
+    anesthetist: str = ""
+    height_cm: Optional[int] = None
+    weight_kg: Optional[float] = None
+    allergies: str = ""
+    blood_group: str = ""
+    blood_rh: str = ""
+    preop_sys: Optional[int] = None
+    preop_dia: Optional[int] = None
+    preop_pulse: Optional[int] = None
+    preop_spo2: Optional[int] = None
+    save_initial_vitals: bool = True
 
 
 def normalize_operblock_history_number(value: str) -> str:
@@ -485,6 +510,171 @@ def _to_birth_date(value: Any) -> date:
     return parsed
 
 
+def _normalize_case_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _case_option_lookup(options: tuple[str, ...], aliases: Mapping[str, str] | None = None) -> dict[str, str]:
+    lookup = {option.casefold(): option for option in options}
+    for key, value in (aliases or {}).items():
+        lookup[str(key).casefold()] = value
+    return lookup
+
+
+_BLOOD_GROUP_LOOKUP = _case_option_lookup(
+    OPERBLOCK_BLOOD_GROUP_OPTIONS,
+    {
+        "O(I)": "O(I) первая",
+        "0(I)": "O(I) первая",
+        "I": "O(I) первая",
+        "1": "O(I) первая",
+        "первая": "O(I) первая",
+        "A(II)": "A(II) вторая",
+        "II": "A(II) вторая",
+        "2": "A(II) вторая",
+        "вторая": "A(II) вторая",
+        "B(III)": "B(III) третья",
+        "III": "B(III) третья",
+        "3": "B(III) третья",
+        "третья": "B(III) третья",
+        "AB(IV)": "AB(IV) четвертая",
+        "IV": "AB(IV) четвертая",
+        "4": "AB(IV) четвертая",
+        "четвертая": "AB(IV) четвертая",
+        "четвёртая": "AB(IV) четвертая",
+    },
+)
+_BLOOD_RH_LOOKUP = _case_option_lookup(
+    OPERBLOCK_BLOOD_RH_OPTIONS,
+    {
+        "Rh(+)": "Rh(+) положительный",
+        "Rh+": "Rh(+) положительный",
+        "+": "Rh(+) положительный",
+        "положительный": "Rh(+) положительный",
+        "положительная": "Rh(+) положительный",
+        "пол.": "Rh(+) положительный",
+        "Rh(-)": "Rh(-) отрицательный",
+        "Rh-": "Rh(-) отрицательный",
+        "-": "Rh(-) отрицательный",
+        "отрицательный": "Rh(-) отрицательный",
+        "отрицательная": "Rh(-) отрицательный",
+        "отр.": "Rh(-) отрицательный",
+    },
+)
+
+
+def normalize_operblock_blood_group(value: Any) -> str:
+    text = _normalize_case_text(value)
+    if not text:
+        return ""
+    result = _BLOOD_GROUP_LOOKUP.get(text.casefold())
+    if result:
+        return result
+    raise ValueError("Группа крови: выберите значение из списка.")
+
+
+def normalize_operblock_blood_rh(value: Any) -> str:
+    text = _normalize_case_text(value)
+    if not text:
+        return ""
+    result = _BLOOD_RH_LOOKUP.get(text.casefold())
+    if result:
+        return result
+    raise ValueError("Резус: выберите значение из списка.")
+
+
+def _normalize_optional_int(value: Any, label: str, minimum: int, maximum: int) -> int | None:
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"\d+", text):
+        raise ValueError(f"{label}: укажите целое число.")
+    number = int(text)
+    if number < minimum or number > maximum:
+        raise ValueError(f"{label}: допустимый диапазон {minimum}-{maximum}.")
+    return number
+
+
+def _normalize_optional_float(value: Any, label: str, minimum: float, maximum: float) -> float | None:
+    text = "" if value is None else str(value).strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        number = float(Decimal(text))
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"{label}: укажите число.") from None
+    if number < minimum or number > maximum:
+        left = int(minimum) if float(minimum).is_integer() else minimum
+        right = int(maximum) if float(maximum).is_integer() else maximum
+        raise ValueError(f"{label}: допустимый диапазон {left}-{right}.")
+    return number
+
+
+def _normalize_case_surgeons(value: Any) -> tuple[str, ...]:
+    return tuple(_normalize_stage_text_list(value, split_commas=True))
+
+
+def _surgeons_json(value: Any) -> str | None:
+    surgeons = list(_normalize_case_surgeons(value))
+    return json.dumps(surgeons, ensure_ascii=False) if surgeons else None
+
+
+def _surgeons_from_json(value: Any) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        parsed = value
+    return list(_normalize_case_surgeons(parsed))
+
+
+def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | dict[str, Any]) -> OperBlockPatientInput:
+    if isinstance(data, OperBlockPatientInput):
+        return data
+    payload = data if isinstance(data, Mapping) else {}
+    return OperBlockPatientInput(
+        table_code=str(payload.get("table_code") or ""),
+        history_number=str(payload.get("history_number") or ""),
+        full_name=str(payload.get("full_name") or ""),
+        gender=str(payload.get("gender") or ""),
+        birth_date=_to_birth_date(payload.get("birth_date")),
+        diagnosis_code=payload.get("diagnosis_code"),
+        diagnosis_text=str(payload.get("diagnosis_text") or ""),
+        operation_name=_normalize_case_text(payload.get("operation_name")),
+        surgeons=_normalize_case_surgeons(payload.get("surgeons")),
+        anesthesiologist=_normalize_case_text(payload.get("anesthesiologist")),
+        anesthetist=_normalize_case_text(payload.get("anesthetist")),
+        height_cm=_normalize_optional_int(payload.get("height_cm"), "Рост", 1, 260),
+        weight_kg=_normalize_optional_float(payload.get("weight_kg"), "Вес", 0.5, 500),
+        allergies=_normalize_case_text(payload.get("allergies")),
+        blood_group=normalize_operblock_blood_group(payload.get("blood_group")),
+        blood_rh=normalize_operblock_blood_rh(payload.get("blood_rh")),
+        preop_sys=_normalize_optional_int(payload.get("preop_sys"), "АД систолическое", 0, 300),
+        preop_dia=_normalize_optional_int(payload.get("preop_dia"), "АД диастолическое", 0, 300),
+        preop_pulse=_normalize_optional_int(payload.get("preop_pulse"), "ЧСС", 0, 300),
+        preop_spo2=_normalize_optional_int(payload.get("preop_spo2"), "SpO₂", 0, 100),
+        save_initial_vitals=bool(payload.get("save_initial_vitals", True)),
+    )
+
+
+def _validate_case_vitals(data: OperBlockPatientInput) -> None:
+    if (data.preop_sys is None) ^ (data.preop_dia is None):
+        raise ValueError("АД: заполните систолическое и диастолическое значения.")
+    if data.preop_sys is not None and data.preop_dia is not None and data.preop_dia > data.preop_sys:
+        raise ValueError("АД диастолическое не может быть выше систолического.")
+    values = (data.preop_sys, data.preop_dia, data.preop_pulse, data.preop_spo2)
+    if any(value is not None for value in values) and any(value is None for value in values):
+        raise ValueError("Исходные витальные показатели заполните полностью: АД, ЧСС и SpO₂.")
+
+
+def _has_case_vitals(data: OperBlockPatientInput) -> bool:
+    return any(
+        value is not None
+        for value in (data.preop_sys, data.preop_dia, data.preop_pulse, data.preop_spo2)
+    )
+
+
 def _age_text(row: dict[str, Any], reference: Optional[datetime] = None) -> str:
     birth_date = parse_date_value(row.get("birth_date"))
     if birth_date:
@@ -519,6 +709,15 @@ class OperBlockService:
                 oc.started_at,
                 oc.ended_at,
                 COALESCE(oc.revision, 0) AS case_revision,
+                oc.planned_operation_name,
+                oc.planned_surgeons_json,
+                oc.planned_anesthesiologist,
+                oc.planned_anesthetist,
+                oc.height_cm,
+                oc.weight_kg,
+                oc.allergies,
+                oc.blood_group,
+                oc.blood_rh,
                 p.full_name,
                 p.birth_date,
                 a.history_number,
@@ -580,6 +779,15 @@ class OperBlockService:
                     "gender": row.get("patient_gender") or "",
                     "diagnosis_code": row.get("diagnosis_code") or "",
                     "diagnosis_text": row.get("diagnosis_text") or "",
+                    "operation_name": row.get("planned_operation_name") or "",
+                    "surgeons": _surgeons_from_json(row.get("planned_surgeons_json")),
+                    "anesthesiologist": row.get("planned_anesthesiologist") or "",
+                    "anesthetist": row.get("planned_anesthetist") or "",
+                    "height_cm": row.get("height_cm"),
+                    "weight_kg": row.get("weight_kg"),
+                    "allergies": row.get("allergies") or "",
+                    "blood_group": row.get("blood_group") or "",
+                    "blood_rh": row.get("blood_rh") or "",
                     "status_text": "В операционной",
                     "started_at": row.get("started_at"),
                     "revision": int(row.get("case_revision") or 0),
@@ -1164,18 +1372,174 @@ class OperBlockService:
             _minute_floor(ended_at) if ended_at is not None else None,
         )
 
+    def _first_operation_vital_row(
+        self,
+        cursor: sqlite3.Cursor,
+        case: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        started_at = _parse_dt(case.get("started_at"))
+        if started_at is None:
+            return None
+        params: list[Any] = [int(case["admission_id"]), _minute_floor(started_at).isoformat()]
+        end_clause = ""
+        ended_at = _parse_dt(case.get("ended_at")) if case.get("ended_at") else None
+        if ended_at is not None:
+            end_clause = 'AND datetime("datetime") <= datetime(?)'
+            params.append(_minute_floor(ended_at).isoformat())
+        row = cursor.execute(
+            f"""
+            SELECT id, admission_id, datetime, sys, dia, pulse, spo2, COALESCE(revision, 0) AS revision
+            FROM vitals
+            WHERE admission_id = ?
+              AND datetime("datetime") >= datetime(?)
+              {end_clause}
+              AND (sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR spo2 IS NOT NULL)
+            ORDER BY datetime("datetime") ASC, id ASC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+    def _upsert_initial_vitals_for_case(
+        self,
+        cursor: sqlite3.Cursor,
+        case: Mapping[str, Any],
+        data: OperBlockPatientInput,
+    ) -> int | None:
+        if not _has_case_vitals(data):
+            return None
+        started_at = _parse_dt(case.get("started_at"))
+        if started_at is None:
+            raise OperBlockConflictError("У операции не задано время начала. Обновите протокол.")
+        existing = self._first_operation_vital_row(cursor, case)
+        if existing:
+            cursor.execute(
+                """
+                UPDATE vitals
+                SET sys = ?,
+                    dia = ?,
+                    pulse = ?,
+                    spo2 = ?,
+                    last_modified_by = 'operblock',
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE id = ?
+                """,
+                (data.preop_sys, data.preop_dia, data.preop_pulse, data.preop_spo2, int(existing["id"])),
+            )
+            return int(existing["id"])
+        cursor.execute(
+            """
+            INSERT INTO vitals (
+                admission_id, datetime, sys, dia, pulse, spo2, last_modified_by, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'operblock', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+            """,
+            (
+                int(case["admission_id"]),
+                _minute_floor(started_at).isoformat(timespec="seconds"),
+                data.preop_sys,
+                data.preop_dia,
+                data.preop_pulse,
+                data.preop_spo2,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _set_stage_payload_text(payload: dict[str, Any], key: str, value: str) -> None:
+        if value:
+            payload[key] = value
+        else:
+            payload.pop(key, None)
+
+    def _sync_case_metadata_to_stage_payloads(
+        self,
+        cursor: sqlite3.Cursor,
+        operation_case_id: int,
+        *,
+        operation_name: str | None = None,
+        surgeons: tuple[str, ...] | list[str] | None = None,
+        anesthesiologist: str | None = None,
+        anesthetist: str | None = None,
+    ) -> int:
+        rows = [
+            _row_to_dict(row)
+            for row in cursor.execute(
+                """
+                SELECT id, payload_json
+                FROM operblock_timeline_events
+                WHERE operation_case_id = ?
+                  AND event_type = 'clinical_event'
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                ORDER BY datetime(event_time) ASC, id ASC
+                """,
+                (int(operation_case_id),),
+            ).fetchall()
+        ]
+
+        def latest_stage_row(kind: str) -> dict[str, Any] | None:
+            for row in reversed(rows):
+                payload = _parse_json_dict(row.get("payload_json"))
+                if operation_stage_kind_from_payload(payload) == kind:
+                    return row
+            return None
+
+        def update_payload(row: dict[str, Any], payload: dict[str, Any]) -> bool:
+            payload_json = self._timeline_payload_json(payload)
+            if payload_json == row.get("payload_json"):
+                return False
+            cursor.execute(
+                """
+                UPDATE operblock_timeline_events
+                SET payload_json = ?,
+                    revision = COALESCE(revision, 0) + 1,
+                    last_modified_by = 'operblock',
+                    updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                WHERE id = ?
+                  AND event_type = 'clinical_event'
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                """,
+                (payload_json, int(row["id"])),
+            )
+            if cursor.rowcount != 1:
+                raise DataConflictError(DATA_CONFLICT_MESSAGE)
+            return True
+
+        updated = 0
+        if operation_name is not None or surgeons is not None:
+            surgery_row = latest_stage_row("surgery_start")
+            if surgery_row is not None:
+                payload = _parse_json_dict(surgery_row.get("payload_json"))
+                if operation_name is not None:
+                    self._set_stage_payload_text(payload, "operation_name", _normalize_case_text(operation_name))
+                if surgeons is not None:
+                    clean_surgeons = list(_normalize_case_surgeons(surgeons))
+                    if clean_surgeons:
+                        payload["surgeons"] = clean_surgeons
+                        payload["surgeon"] = ", ".join(clean_surgeons)
+                    else:
+                        payload.pop("surgeons", None)
+                        payload.pop("surgeon", None)
+                if update_payload(surgery_row, payload):
+                    updated += 1
+
+        if anesthesiologist is not None or anesthetist is not None:
+            anesthesia_row = latest_stage_row("anesthesia_start")
+            if anesthesia_row is not None:
+                payload = _parse_json_dict(anesthesia_row.get("payload_json"))
+                if anesthesiologist is not None:
+                    self._set_stage_payload_text(payload, "anesthesiologist", _normalize_case_text(anesthesiologist))
+                if anesthetist is not None:
+                    self._set_stage_payload_text(payload, "anesthetist", _normalize_case_text(anesthetist))
+                if update_payload(anesthesia_row, payload):
+                    updated += 1
+        return updated
+
     def create_operation_case(self, data: OperBlockPatientInput | dict[str, Any]) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
-        if not isinstance(data, OperBlockPatientInput):
-            data = OperBlockPatientInput(
-                table_code=str(data.get("table_code") or ""),
-                history_number=str(data.get("history_number") or ""),
-                full_name=str(data.get("full_name") or ""),
-                gender=str(data.get("gender") or ""),
-                birth_date=_to_birth_date(data.get("birth_date")),
-                diagnosis_code=data.get("diagnosis_code"),
-                diagnosis_text=str(data.get("diagnosis_text") or ""),
-            )
+        data = _case_input_from_payload(data)
+        _validate_case_vitals(data)
 
         table_code = self._validate_table_code(data.table_code)
         history_number = normalize_operblock_history_number(data.history_number)
@@ -1246,10 +1610,35 @@ class OperBlockService:
                 """
                 INSERT INTO operation_cases (
                     patient_id, admission_id, table_code, status, created_at, started_at,
-                    created_by_role, created_by_client_id, last_modified_by
-                ) VALUES (?, ?, ?, 'active', ?, ?, 'operblock', ?, 'operblock')
+                    created_by_role, created_by_client_id, last_modified_by,
+                    planned_operation_name, planned_surgeons_json, planned_anesthesiologist, planned_anesthetist,
+                    height_cm, weight_kg, allergies, blood_group, blood_rh,
+                    preop_sys, preop_dia, preop_pulse, preop_spo2, preop_save_initial_vitals
+                ) VALUES (?, ?, ?, 'active', ?, ?, 'operblock', ?, 'operblock',
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (patient_id, admission_id, table_code, now, now, self.client_id),
+                (
+                    patient_id,
+                    admission_id,
+                    table_code,
+                    now,
+                    now,
+                    self.client_id,
+                    data.operation_name or None,
+                    _surgeons_json(data.surgeons),
+                    data.anesthesiologist or None,
+                    data.anesthetist or None,
+                    data.height_cm,
+                    data.weight_kg,
+                    data.allergies or None,
+                    data.blood_group or None,
+                    data.blood_rh or None,
+                    data.preop_sys,
+                    data.preop_dia,
+                    data.preop_pulse,
+                    data.preop_spo2,
+                    1 if data.save_initial_vitals else 0,
+                ),
             )
             operation_case_id = int(cursor.lastrowid)
             cursor.execute(
@@ -1270,6 +1659,13 @@ class OperBlockService:
                 """,
                 (admission_id, now),
             )
+            if data.save_initial_vitals and _has_case_vitals(data):
+                self._upsert_initial_vitals_for_case(cursor, {
+                    "operation_case_id": operation_case_id,
+                    "admission_id": admission_id,
+                    "started_at": now,
+                    "ended_at": None,
+                }, data)
             return {
                 "patient_id": patient_id,
                 "admission_id": admission_id,
@@ -1280,6 +1676,253 @@ class OperBlockService:
             return dict(self.db.run_write_operation(operation, source="operblock_create_operation_case"))
         except sqlite3.IntegrityError as exc:
             raise OperBlockConflictError("Операционный стол уже занят другим пользователем.") from exc
+
+    def get_operation_case_form_data(self, operation_case_id: int) -> dict[str, Any]:
+        validate_operblock_runtime_path(self.db)
+
+        def operation(cursor: sqlite3.Cursor):
+            case = cursor.execute(
+                """
+                SELECT
+                    oc.id AS operation_case_id,
+                    oc.patient_id,
+                    oc.admission_id,
+                    oc.table_code,
+                    oc.status AS case_status,
+                    oc.started_at,
+                    oc.ended_at,
+                    t.display_name AS table_display_name,
+                    p.full_name,
+                    p.birth_date,
+                    a.history_number,
+                    a.patient_gender,
+                    a.diagnosis_code,
+                    a.diagnosis_text,
+                    oc.planned_operation_name,
+                    oc.planned_surgeons_json,
+                    oc.planned_anesthesiologist,
+                    oc.planned_anesthetist,
+                    oc.height_cm,
+                    oc.weight_kg,
+                    oc.allergies,
+                    oc.blood_group,
+                    oc.blood_rh,
+                    oc.preop_sys,
+                    oc.preop_dia,
+                    oc.preop_pulse,
+                    oc.preop_spo2,
+                    COALESCE(oc.preop_save_initial_vitals, 1) AS preop_save_initial_vitals
+                FROM operation_cases oc
+                JOIN operating_tables t ON t.code = oc.table_code
+                JOIN admissions a ON a.id = oc.admission_id
+                JOIN patients p ON p.id = oc.patient_id
+                WHERE oc.id = ?
+                """,
+                (int(operation_case_id),),
+            ).fetchone()
+            if not case:
+                raise OperBlockConflictError("Операция не найдена.")
+            data = _row_to_dict(case)
+            stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
+            stage_state = _build_stage_intervals(stage_rows)
+            operation_name = _normalize_case_text(
+                stage_state.get("current_operation_name")
+                or stage_state.get("last_operation_name")
+                or stage_state.get("first_operation_name")
+                or data.get("planned_operation_name")
+            )
+            surgeons = _normalize_stage_text_list(
+                stage_state.get("current_surgeons")
+                or stage_state.get("last_surgeons")
+                or stage_state.get("first_surgeons")
+                or _surgeons_from_json(data.get("planned_surgeons_json")),
+                split_commas=True,
+            )
+            anesthesiologist = _normalize_case_text(
+                stage_state.get("current_anesthesiologist")
+                or stage_state.get("last_anesthesiologist")
+                or stage_state.get("first_anesthesiologist")
+                or data.get("planned_anesthesiologist")
+            )
+            anesthetist = _normalize_case_text(
+                stage_state.get("current_anesthetist")
+                or stage_state.get("last_anesthetist")
+                or stage_state.get("first_anesthetist")
+                or data.get("planned_anesthetist")
+            )
+            first_vital = self._first_operation_vital_row(cursor, data)
+            if first_vital:
+                preop_sys = first_vital.get("sys")
+                preop_dia = first_vital.get("dia")
+                preop_pulse = first_vital.get("pulse")
+                preop_spo2 = first_vital.get("spo2")
+                vitals_source = "vitals"
+                save_initial_vitals = True
+            else:
+                preop_sys = data.get("preop_sys")
+                preop_dia = data.get("preop_dia")
+                preop_pulse = data.get("preop_pulse")
+                preop_spo2 = data.get("preop_spo2")
+                vitals_source = "case"
+                save_initial_vitals = bool(data.get("preop_save_initial_vitals", 1))
+            return {
+                "operation_case_id": int(data.get("operation_case_id") or 0),
+                "table_code": data.get("table_code") or "",
+                "table_name": data.get("table_display_name") or "",
+                "history_number": data.get("history_number") or "",
+                "full_name": data.get("full_name") or "",
+                "gender": data.get("patient_gender") or "",
+                "birth_date": data.get("birth_date"),
+                "diagnosis_code": data.get("diagnosis_code") or "",
+                "diagnosis_text": data.get("diagnosis_text") or "",
+                "operation_name": operation_name,
+                "surgeons": surgeons,
+                "anesthesiologist": anesthesiologist,
+                "anesthetist": anesthetist,
+                "height_cm": data.get("height_cm"),
+                "weight_kg": data.get("weight_kg"),
+                "allergies": data.get("allergies") or "",
+                "blood_group": data.get("blood_group") or "",
+                "blood_rh": data.get("blood_rh") or "",
+                "preop_sys": preop_sys,
+                "preop_dia": preop_dia,
+                "preop_pulse": preop_pulse,
+                "preop_spo2": preop_spo2,
+                "save_initial_vitals": save_initial_vitals,
+                "vitals_source": vitals_source,
+            }
+
+        return dict(self.db.run_write_operation(operation, source="operblock_get_operation_case_form_data"))
+
+    def update_operation_case_form_data(
+        self,
+        operation_case_id: int,
+        data: OperBlockPatientInput | dict[str, Any],
+    ) -> dict[str, int]:
+        validate_operblock_runtime_path(self.db)
+        data = _case_input_from_payload(data)
+        _validate_case_vitals(data)
+
+        history_number = normalize_operblock_history_number(data.history_number)
+        full_name = _normalize_case_text(data.full_name)
+        if not full_name:
+            raise ValueError("ФИО пациента не заполнено.")
+        diagnosis_code = normalize_operblock_mkb_code(data.diagnosis_code or "")
+        if diagnosis_code and not is_complete_operblock_mkb_code(diagnosis_code):
+            raise ValueError("Код МКБ-10 должен быть в формате X33, S82.0 или S82.01.")
+        diagnosis_text = _normalize_case_text(data.diagnosis_text)
+        if not diagnosis_text:
+            raise ValueError("Диагноз не заполнен.")
+        birth_date = _to_birth_date(data.birth_date)
+        age = storage_age_from_birth_date(birth_date, datetime.now())
+        last_name, first_name, middle_name = _split_name(full_name)
+        now = _now_text()
+
+        def operation(cursor: sqlite3.Cursor):
+            case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
+            patient_id = int(case["patient_id"])
+            admission_id = int(case["admission_id"])
+            cursor.execute(
+                """
+                UPDATE patients
+                SET full_name = ?,
+                    birth_date = ?,
+                    last_name = ?,
+                    first_name = ?,
+                    middle_name = ?
+                WHERE id = ?
+                """,
+                (full_name, birth_date.isoformat(), last_name, first_name, middle_name, patient_id),
+            )
+            cursor.execute(
+                """
+                UPDATE admissions
+                SET history_number = ?,
+                    patient_age = ?,
+                    patient_months = ?,
+                    patient_age_unit = ?,
+                    patient_gender = ?,
+                    diagnosis_code = ?,
+                    diagnosis_text = ?,
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (
+                    history_number,
+                    age["patient_age"],
+                    age["patient_months"],
+                    age["patient_age_unit"],
+                    data.gender,
+                    diagnosis_code or None,
+                    diagnosis_text,
+                    now,
+                    admission_id,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE operation_cases
+                SET planned_operation_name = ?,
+                    planned_surgeons_json = ?,
+                    planned_anesthesiologist = ?,
+                    planned_anesthetist = ?,
+                    height_cm = ?,
+                    weight_kg = ?,
+                    allergies = ?,
+                    blood_group = ?,
+                    blood_rh = ?,
+                    preop_sys = ?,
+                    preop_dia = ?,
+                    preop_pulse = ?,
+                    preop_spo2 = ?,
+                    preop_save_initial_vitals = ?,
+                    last_modified_by = 'operblock',
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                  AND status = 'active'
+                """,
+                (
+                    data.operation_name or None,
+                    _surgeons_json(data.surgeons),
+                    data.anesthesiologist or None,
+                    data.anesthetist or None,
+                    data.height_cm,
+                    data.weight_kg,
+                    data.allergies or None,
+                    data.blood_group or None,
+                    data.blood_rh or None,
+                    data.preop_sys,
+                    data.preop_dia,
+                    data.preop_pulse,
+                    data.preop_spo2,
+                    1 if data.save_initial_vitals else 0,
+                    int(operation_case_id),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise OperBlockConflictError("Случай уже изменён другим рабочим местом. Обновите список оперблока.")
+            case_for_vitals = dict(case)
+            case_for_vitals["started_at"] = case.get("started_at")
+            case_for_vitals["ended_at"] = case.get("ended_at")
+            if data.save_initial_vitals and _has_case_vitals(data):
+                self._upsert_initial_vitals_for_case(cursor, case_for_vitals, data)
+            synced = self._sync_case_metadata_to_stage_payloads(
+                cursor,
+                int(operation_case_id),
+                operation_name=data.operation_name,
+                surgeons=data.surgeons,
+                anesthesiologist=data.anesthesiologist,
+                anesthetist=data.anesthetist,
+            )
+            return {
+                "operation_case_id": int(operation_case_id),
+                "admission_id": admission_id,
+                "patient_id": patient_id,
+                "synced_stage_events": int(synced),
+            }
+
+        return dict(self.db.run_write_operation(operation, source="operblock_update_operation_case_form_data"))
 
     def close_operation_case(self, operation_case_id: int) -> dict[str, int]:
         return self.release_operation_table(operation_case_id)
@@ -1659,6 +2302,17 @@ class OperBlockService:
                     set_text(payload, "operating_nurse", clean_operating_nurse)
                 if update_payload(cursor, surgery_row, payload):
                     updated += 1
+                if surgeons is not None:
+                    cursor.execute(
+                        """
+                        UPDATE operation_cases
+                        SET planned_surgeons_json = ?,
+                            last_modified_by = 'operblock',
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
+                        (_surgeons_json(clean_surgeons), int(operation_case_id)),
+                    )
 
             if anesthesiologist is not None or anesthetist is not None:
                 if not stage_state.get("anesthesia_active"):
@@ -1673,6 +2327,25 @@ class OperBlockService:
                     set_text(payload, "anesthetist", clean_anesthetist)
                 if update_payload(cursor, anesthesia_row, payload):
                     updated += 1
+                case_updates: list[str] = []
+                case_params: list[Any] = []
+                if anesthesiologist is not None:
+                    case_updates.append("planned_anesthesiologist = ?")
+                    case_params.append(clean_anesthesiologist or None)
+                if anesthetist is not None:
+                    case_updates.append("planned_anesthetist = ?")
+                    case_params.append(clean_anesthetist or None)
+                if case_updates:
+                    cursor.execute(
+                        f"""
+                        UPDATE operation_cases
+                        SET {", ".join(case_updates)},
+                            last_modified_by = 'operblock',
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
+                        (*case_params, int(operation_case_id)),
+                    )
 
             if updated == 0:
                 return {"operation_case_id": int(operation_case_id), "updated": 0}
@@ -1885,7 +2558,36 @@ class OperBlockService:
                 self.client_id,
             ),
         )
-        return int(cursor.lastrowid)
+        event_id = int(cursor.lastrowid)
+        if stage_kind == "surgery_start":
+            cursor.execute(
+                """
+                UPDATE operation_cases
+                SET planned_operation_name = ?,
+                    planned_surgeons_json = ?,
+                    last_modified_by = 'operblock',
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (
+                    clean_operation_name or None,
+                    _surgeons_json(clean_surgeons),
+                    int(case["operation_case_id"]),
+                ),
+            )
+        elif stage_kind == "anesthesia_start":
+            cursor.execute(
+                """
+                UPDATE operation_cases
+                SET planned_anesthesiologist = ?,
+                    planned_anesthetist = ?,
+                    last_modified_by = 'operblock',
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (clean_anesthesiologist or None, clean_anesthetist or None, int(case["operation_case_id"])),
+            )
+        return event_id
 
     def _validate_medications_before_anesthesia_end(
         self,
@@ -3617,6 +4319,7 @@ class OperBlockService:
             """
             SELECT
                 id AS operation_case_id,
+                patient_id,
                 admission_id,
                 table_code,
                 status AS case_status,
@@ -3761,7 +4464,21 @@ class OperBlockService:
                 a.patient_months,
                 a.patient_age_unit,
                 a.diagnosis_code,
-                a.diagnosis_text
+                a.diagnosis_text,
+                oc.planned_operation_name,
+                oc.planned_surgeons_json,
+                oc.planned_anesthesiologist,
+                oc.planned_anesthetist,
+                oc.height_cm,
+                oc.weight_kg,
+                oc.allergies,
+                oc.blood_group,
+                oc.blood_rh,
+                oc.preop_sys,
+                oc.preop_dia,
+                oc.preop_pulse,
+                oc.preop_spo2,
+                COALESCE(oc.preop_save_initial_vitals, 1) AS preop_save_initial_vitals
             FROM operation_cases oc
             JOIN operating_tables t ON t.code = oc.table_code
             JOIN admissions a ON a.id = oc.admission_id

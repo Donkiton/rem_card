@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import html
@@ -11,14 +11,15 @@ import time
 from typing import TYPE_CHECKING
 import weakref
 
-from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer, Signal
-from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QImageReader, QPainterPath, QPixmap
+from PySide6.QtCore import QDate, QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QImageReader, QIntValidator, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QFormLayout,
     QFrame,
@@ -50,10 +51,14 @@ from rem_card.app.patient_age import parse_date_value
 from rem_card.app.paths import get_icon_dir, get_patient_assets_dir
 from rem_card.services.mkb import MKBService
 from rem_card.services.operblock_service import (
+    OPERBLOCK_BLOOD_GROUP_OPTIONS,
+    OPERBLOCK_BLOOD_RH_OPTIONS,
     OPERBLOCK_TABLES,
     OperBlockConflictError,
     OperBlockService,
     is_complete_operblock_mkb_code,
+    normalize_operblock_blood_group,
+    normalize_operblock_blood_rh,
     normalize_operblock_history_number,
     normalize_operblock_mkb_code,
 )
@@ -2466,6 +2471,9 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         anesthesiologists: list[str] | None = None,
         anesthetists: list[str] | None = None,
         parent=None,
+        *,
+        initial_anesthesiologist: str = "",
+        initial_anesthetist: str = "",
     ):
         super().__init__(
             "Начать пособие",
@@ -2475,6 +2483,10 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
             initial_size=(660, 310),
         )
         self._init_ui(anesthesia_types, anesthesiologists or [], anesthetists or [])
+        if initial_anesthesiologist:
+            self.anesthesiologist_combo.setEditText(normalize_operblock_team_text(initial_anesthesiologist))
+        if initial_anesthetist:
+            self.anesthetist_combo.setEditText(normalize_operblock_team_text(initial_anesthetist))
         self._finalize_dialog_chrome()
 
     def _init_ui(self, anesthesia_types: list[dict], anesthesiologists: list[str], anesthetists: list[str]):
@@ -2566,6 +2578,10 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         surgeons: list[str] | None = None,
         operating_nurses: list[str] | None = None,
         parent=None,
+        *,
+        initial_operation_name: str = "",
+        initial_surgeons: list[str] | None = None,
+        initial_operating_nurse: str = "",
     ):
         super().__init__(
             "Начать операцию",
@@ -2577,6 +2593,13 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         self._surgeon_options = list(surgeons or [])
         self._surgeon_combos: list[QComboBox] = []
         self._syncing_surgeon_fields = False
+        self._initial_operation_name = normalize_operblock_team_text(initial_operation_name)
+        self._initial_surgeons = [
+            normalize_operblock_team_text(item)
+            for item in (initial_surgeons or [])
+            if normalize_operblock_team_text(item)
+        ]
+        self._initial_operating_nurse = normalize_operblock_team_text(initial_operating_nurse)
         self._init_ui(surgeons or [], operating_nurses or [])
         self._finalize_dialog_chrome()
 
@@ -2588,6 +2611,8 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         self.operation_name_edit = QLineEdit()
         self.operation_name_edit.setMinimumWidth(430)
         self.operation_name_edit.setPlaceholderText("Название операции")
+        if self._initial_operation_name:
+            self.operation_name_edit.setText(self._initial_operation_name)
         form.addRow("Название операции:", self.operation_name_edit)
 
         self.surgeons_scroll = QScrollArea()
@@ -2622,8 +2647,14 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         self.surgeons_layout.setContentsMargins(0, 0, 0, 0)
         self.surgeons_layout.setHorizontalSpacing(10)
         self.surgeons_layout.setVerticalSpacing(6)
-        self._add_surgeon_combo()
+        if self._initial_surgeons:
+            for surgeon in self._initial_surgeons:
+                self._add_surgeon_combo(surgeon)
+        else:
+            self._add_surgeon_combo()
         self.operating_nurse_combo = StartAnesthesiaDialog._staff_combo(operating_nurses)
+        if self._initial_operating_nurse:
+            self.operating_nurse_combo.setEditText(self._initial_operating_nurse)
         self._install_surgery_team_combo_event_filter(self.operating_nurse_combo)
         self.surgeons_layout.addRow("Операционная медсестра:", self.operating_nurse_combo)
         self.surgeons_scroll.setWidget(self.surgeons_widget)
@@ -6889,21 +6920,86 @@ class OperBlockVitalsServiceAdapter:
 
 
 class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
-    def __init__(self, table_code: str, table_name: str, parent=None):
+    EMPTY_BIRTH_DATE = QDate(1900, 1, 1)
+
+    def __init__(
+        self,
+        table_code: str,
+        table_name: str,
+        parent=None,
+        *,
+        mode: str = "create",
+        initial_data: dict | None = None,
+        operation_case_id: int | None = None,
+    ):
         super().__init__(parent)
         self.table_code = table_code
-        self.table_name = table_name
+        self.table_name = table_name or _operblock_table_display_name(table_code)
+        self.operation_case_id = int(operation_case_id) if operation_case_id else None
+        self.is_edit_mode = str(mode or "").strip().lower() == "edit"
         self.mkb_service = MKBService()
-        self.setWindowTitle("Занять стол")
+        self._surgeon_rows: list[tuple[QWidget, QComboBox]] = []
+        try:
+            self._surgeon_options = load_operblock_surgeons()
+        except Exception as exc:
+            logger.error("operblock surgeons load failed: %s", exc, exc_info=True)
+            self._surgeon_options = []
+        try:
+            self._anesthesiologist_options = load_operblock_anesthesiologists()
+        except Exception as exc:
+            logger.error("operblock anesthesiologists load failed: %s", exc, exc_info=True)
+            self._anesthesiologist_options = []
+        try:
+            self._anesthetist_options = load_operblock_anesthetists()
+        except Exception as exc:
+            logger.error("operblock anesthetists load failed: %s", exc, exc_info=True)
+            self._anesthetist_options = []
+        self._save_button_text = (
+            "СОХРАНИТЬ ИЗМЕНЕНИЯ" if self.is_edit_mode else "СОЗДАТЬ КАРТОЧКУ ПАЦИЕНТА"
+        )
+        self.setWindowTitle("Редактировать пациента" if self.is_edit_mode else "Занять стол")
         _apply_operblock_window_icon(self)
-        self.setMinimumSize(760, 520)
-        self.resize(860, 600)
+        self.setMinimumSize(780, 620)
+        self.resize(900, 760)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setMouseTracking(True)
         self._init_saved_frameless_dialog("operblock/occupy_table_dialog_geometry", drag_area_height=70)
         self._init_ui()
+        if initial_data:
+            self.set_data(initial_data)
         self._restore_saved_geometry()
+
+    def _section(self, title: str) -> tuple[QFrame, QFormLayout]:
+        frame = QFrame()
+        frame.setObjectName("OperBlockPatientFormSection")
+        frame.setStyleSheet(
+            f"""
+            QFrame#OperBlockPatientFormSection {{
+                background-color: {BG_CARD};
+                border: 1px solid {BORDER_LIGHT};
+                border-radius: 8px;
+            }}
+            QFrame#OperBlockPatientFormSection QLabel {{
+                background: transparent;
+                border: none;
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(18, 14, 18, 16)
+        layout.setSpacing(10)
+        title_label = QLabel(title)
+        title_label.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
+        layout.addWidget(title_label)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(10)
+        layout.addLayout(form)
+        return frame, form
 
     def _init_ui(self):
         apply_custom_dialog_style(self)
@@ -6930,7 +7026,12 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         if icon_label is not None:
             header_layout.addWidget(icon_label)
             header_layout.addSpacing(8)
-        title = QLabel(f"ЗАНЯТЬ СТОЛ - {self.table_name.upper()}")
+        header_text = (
+            f"РЕДАКТИРОВАТЬ ПАЦИЕНТА — {self.table_name.upper()}"
+            if self.is_edit_mode
+            else f"ЗАНЯТЬ СТОЛ — {self.table_name.upper()}"
+        )
+        title = QLabel(header_text)
         title.setObjectName("DialogTitleText")
         header_layout.addWidget(title)
         header_layout.addStretch(1)
@@ -6951,27 +7052,30 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.form_scroll = QScrollArea()
         self.form_scroll.setWidgetResizable(True)
         self.form_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.form_scroll.setStyleSheet(STYLE_PATIENT_FORM_SCROLL)
+        form_scrollbar = self.form_scroll.verticalScrollBar()
+        form_scrollbar.setObjectName("OperBlockPatientFormScrollBar")
+        form_scrollbar.setFixedWidth(14)
+        form_scrollbar.setSingleStep(36)
+        form_scrollbar.setPageStep(180)
+        form_scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockPatientFormScrollBar",
+                width_px=14,
+                left_margin_px=2,
+                right_margin_px=1,
+            )
+        )
 
         self.form_page = QWidget()
         self.form_page.setStyleSheet(STYLE_PATIENT_FORM_PAGE)
         page_layout = QVBoxLayout(self.form_page)
         page_layout.setContentsMargins(0, 0, 0, 0)
-        page_layout.setSpacing(2)
+        page_layout.setSpacing(10)
 
-        general_title = QLabel("ОБЩИЕ ДАННЫЕ")
-        general_title.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
-        page_layout.addWidget(general_title)
-
-        general = QWidget()
-        general.setStyleSheet(STYLE_PATIENT_FORM_TAB)
-        general_form = QFormLayout(general)
-        general_form.setContentsMargins(24, 12, 24, 12)
-        general_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        general_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        general_form.setHorizontalSpacing(14)
-        general_form.setVerticalSpacing(10)
-
+        general, general_form = self._section("1. ОБЩИЕ ДАННЫЕ ПАЦИЕНТА")
         self.history_input = _line_edit()
         self.history_input.setPlaceholderText("12345, АБ123 или 123/456")
         self.full_name_input = _line_edit()
@@ -6979,30 +7083,22 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.gender_combo = QComboBox()
         self.gender_combo.setFixedHeight(34)
         self.gender_combo.addItems(["Мужской", "Женский"])
-        self.birth_date_input = _line_edit()
-        self.birth_date_input.setPlaceholderText("дд.мм.гггг")
-        self.birth_date_input.setMaxLength(10)
-        self.birth_date_input.textEdited.connect(self._on_birth_date_text_edited)
-        self.birth_date_input.editingFinished.connect(self._normalize_birth_date_field)
-        general_form.addRow("Номер истории болезни:", self.history_input)
-        general_form.addRow("ФИО пациента:", self.full_name_input)
-        general_form.addRow("Пол:", self.gender_combo)
-        general_form.addRow("Дата рождения:", self.birth_date_input)
+        self.gender_combo.setStyleSheet(_operblock_combo_box_style())
+        self.birth_date_input = QDateEdit()
+        self.birth_date_input.setFixedHeight(34)
+        self.birth_date_input.setCalendarPopup(True)
+        self.birth_date_input.setDisplayFormat("dd.MM.yyyy")
+        self.birth_date_input.setMinimumDate(self.EMPTY_BIRTH_DATE)
+        self.birth_date_input.setMaximumDate(QDate.currentDate())
+        self.birth_date_input.setSpecialValueText("дд.мм.гггг")
+        self.birth_date_input.setDate(self.EMPTY_BIRTH_DATE)
+        general_form.addRow("Номер истории болезни *:", self.history_input)
+        general_form.addRow("ФИО пациента *:", self.full_name_input)
+        general_form.addRow("Пол *:", self.gender_combo)
+        general_form.addRow("Дата рождения *:", self.birth_date_input)
         page_layout.addWidget(general)
 
-        diagnosis_title = QLabel("ДИАГНОЗ")
-        diagnosis_title.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
-        page_layout.addWidget(diagnosis_title)
-
-        diagnosis = QWidget()
-        diagnosis.setStyleSheet(STYLE_PATIENT_FORM_TAB)
-        diagnosis_form = QFormLayout(diagnosis)
-        diagnosis_form.setContentsMargins(24, 12, 24, 12)
-        diagnosis_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        diagnosis_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        diagnosis_form.setHorizontalSpacing(14)
-        diagnosis_form.setVerticalSpacing(10)
-
+        diagnosis, diagnosis_form = self._section("2. ДИАГНОЗ")
         self.diagnosis_code_input = _line_edit()
         self.diagnosis_code_input.setPlaceholderText("Код МКБ-10")
         self.diagnosis_code_input.setMaxLength(6)
@@ -7016,9 +7112,108 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         code_line.setSpacing(12)
         code_line.addWidget(self.diagnosis_code_input, 0)
         code_line.addWidget(self.diagnosis_name, 1)
-        diagnosis_form.addRow("Код диагноза МКБ-10:", code_line)
-        diagnosis_form.addRow("Ручной ввод диагноза:", self.diagnosis_text_input)
+        diagnosis_form.addRow("Код диагноза МКБ-10 *:", code_line)
+        diagnosis_form.addRow("Диагноз *:", self.diagnosis_text_input)
         page_layout.addWidget(diagnosis)
+
+        operation, operation_form = self._section("3. ОПЕРАЦИОННАЯ ИНФОРМАЦИЯ")
+        self.operation_name_input = _line_edit()
+        self.operation_name_input.setPlaceholderText("Название операции")
+        self.height_input = _line_edit()
+        self.height_input.setPlaceholderText("см")
+        self.height_input.setValidator(QIntValidator(1, 260, self.height_input))
+        self.weight_input = _line_edit()
+        self.weight_input.setPlaceholderText("кг")
+        self.allergies_input = _line_edit()
+        self.allergies_input.setPlaceholderText("Нет данных")
+        self.blood_group_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_GROUP_OPTIONS)
+        self.blood_rh_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_RH_OPTIONS)
+        blood_widget = QWidget()
+        blood_layout = QGridLayout(blood_widget)
+        blood_layout.setContentsMargins(0, 0, 0, 0)
+        blood_layout.setHorizontalSpacing(12)
+        blood_layout.setVerticalSpacing(4)
+        blood_group_label = QLabel("Группа крови")
+        blood_rh_label = QLabel("Резус")
+        for label in (blood_group_label, blood_rh_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        blood_layout.addWidget(blood_group_label, 0, 0)
+        blood_layout.addWidget(blood_rh_label, 0, 1)
+        blood_layout.addWidget(self.blood_group_combo, 1, 0)
+        blood_layout.addWidget(self.blood_rh_combo, 1, 1)
+        blood_layout.setColumnStretch(0, 1)
+        blood_layout.setColumnStretch(1, 1)
+        self.surgeons_widget = QWidget()
+        self.surgeons_layout = QVBoxLayout(self.surgeons_widget)
+        self.surgeons_layout.setContentsMargins(0, 0, 0, 0)
+        self.surgeons_layout.setSpacing(6)
+        self._add_surgeon_row()
+        self.add_surgeon_button = QPushButton("+ Добавить хирурга")
+        self.add_surgeon_button.setCursor(Qt.PointingHandCursor)
+        self.add_surgeon_button.setFixedHeight(32)
+        self.add_surgeon_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.add_surgeon_button.clicked.connect(lambda: self._add_surgeon_row())
+        self.surgeons_layout.addWidget(self.add_surgeon_button)
+        self.anesthesiologist_combo = StartAnesthesiaDialog._staff_combo(self._anesthesiologist_options)
+        self.anesthetist_combo = StartAnesthesiaDialog._staff_combo(self._anesthetist_options)
+        for combo in (self.anesthesiologist_combo, self.anesthetist_combo):
+            combo.setMinimumWidth(0)
+            combo.setMinimumContentsLength(18)
+            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        anesthesia_team_widget = QWidget()
+        anesthesia_team_layout = QGridLayout(anesthesia_team_widget)
+        anesthesia_team_layout.setContentsMargins(0, 0, 0, 0)
+        anesthesia_team_layout.setHorizontalSpacing(12)
+        anesthesia_team_layout.setVerticalSpacing(4)
+        anesthesiologist_label = QLabel("Анестезиолог")
+        anesthetist_label = QLabel("Анестезистка")
+        for label in (anesthesiologist_label, anesthetist_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        anesthesia_team_layout.addWidget(anesthesiologist_label, 0, 0)
+        anesthesia_team_layout.addWidget(anesthetist_label, 0, 1)
+        anesthesia_team_layout.addWidget(self.anesthesiologist_combo, 1, 0)
+        anesthesia_team_layout.addWidget(self.anesthetist_combo, 1, 1)
+        anesthesia_team_layout.setColumnStretch(0, 1)
+        anesthesia_team_layout.setColumnStretch(1, 1)
+        operation_form.addRow("Название операции:", self.operation_name_input)
+        operation_form.addRow("Рост (см):", self.height_input)
+        operation_form.addRow("Вес (кг):", self.weight_input)
+        operation_form.addRow("Аллергии:", self.allergies_input)
+        operation_form.addRow("Кровь:", blood_widget)
+        operation_form.addRow("Хирурги:", self.surgeons_widget)
+        operation_form.addRow("Анестезия:", anesthesia_team_widget)
+        page_layout.addWidget(operation)
+
+        vitals, vitals_form = self._section("4. ИСХОДНЫЕ ВИТАЛЬНЫЕ ПОКАЗАТЕЛИ")
+        self.sys_input = _line_edit()
+        self.sys_input.setPlaceholderText("Систолическое")
+        self.sys_input.setValidator(QIntValidator(0, 300, self.sys_input))
+        self.sys_input.installEventFilter(self)
+        self.dia_input = _line_edit()
+        self.dia_input.setPlaceholderText("Диастолическое")
+        self.dia_input.setValidator(QIntValidator(0, 300, self.dia_input))
+        self.pulse_input = _line_edit()
+        self.pulse_input.setPlaceholderText("ЧСС")
+        self.pulse_input.setValidator(QIntValidator(0, 300, self.pulse_input))
+        self.spo2_input = _line_edit()
+        self.spo2_input.setPlaceholderText("%")
+        self.spo2_input.setValidator(QIntValidator(0, 100, self.spo2_input))
+        ad_row = QHBoxLayout()
+        ad_row.setContentsMargins(0, 0, 0, 0)
+        ad_row.setSpacing(8)
+        slash = QLabel("/")
+        slash.setAlignment(Qt.AlignCenter)
+        slash.setStyleSheet(f"font-size: 18px; font-weight: 800; color: {TEXT_SECONDARY}; background: transparent;")
+        ad_row.addWidget(self.sys_input, 1)
+        ad_row.addWidget(slash, 0)
+        ad_row.addWidget(self.dia_input, 1)
+        vitals_form.addRow("АД:", ad_row)
+        vitals_form.addRow("ЧСС:", self.pulse_input)
+        vitals_form.addRow("SpO₂:", self.spo2_input)
+        self.save_initial_vitals_checkbox = QCheckBox("Сохранить как исходные показатели")
+        self.save_initial_vitals_checkbox.setChecked(True)
+        vitals_form.addRow("", self.save_initial_vitals_checkbox)
+        page_layout.addWidget(vitals)
         page_layout.addStretch(1)
 
         self.form_scroll.setWidget(self.form_page)
@@ -7033,7 +7228,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.cancel_button.setDefault(False)
         self.cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
         self.cancel_button.clicked.connect(self.reject)
-        self.save_button = QPushButton("СОХРАНИТЬ КАРТОЧКУ")
+        self.save_button = QPushButton(self._save_button_text)
         self.save_button.setCursor(Qt.PointingHandCursor)
         self.save_button.setFixedHeight(45)
         self.save_button.setAutoDefault(True)
@@ -7044,27 +7239,132 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         content_layout.addLayout(buttons)
         main.addWidget(content, 1)
 
-    def _on_birth_date_text_edited(self, text: str):
-        normalized = normalize_operblock_birth_date_text(text, final=False)
-        if normalized == text:
-            return
-        self.birth_date_input.blockSignals(True)
-        self.birth_date_input.setText(normalized)
-        self.birth_date_input.setCursorPosition(len(normalized))
-        self.birth_date_input.blockSignals(False)
+    def _add_surgeon_row(self, text: str = "") -> QComboBox:
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+        combo = StartAnesthesiaDialog._staff_combo(self._surgeon_options)
+        if text:
+            combo.setEditText(text)
+        remove_button = QPushButton("Удалить")
+        remove_button.setFixedHeight(32)
+        remove_button.setCursor(Qt.PointingHandCursor)
+        remove_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        remove_button.clicked.connect(lambda _=False, widget=row: self._remove_surgeon_row(widget))
+        row_layout.addWidget(combo, 1)
+        row_layout.addWidget(remove_button, 0)
+        insert_at = max(0, self.surgeons_layout.count() - 1)
+        self.surgeons_layout.insertWidget(insert_at, row)
+        self._surgeon_rows.append((row, combo))
+        self._refresh_surgeon_remove_buttons()
+        return combo
 
-    def _normalize_birth_date_field(self):
-        normalized = normalize_operblock_birth_date_text(self.birth_date_input.text())
-        birth_date = parse_date_value(normalized)
-        if birth_date is None:
-            if normalized != self.birth_date_input.text():
-                self.birth_date_input.blockSignals(True)
-                self.birth_date_input.setText(normalized)
-                self.birth_date_input.blockSignals(False)
+    def _remove_surgeon_row(self, row: QWidget) -> None:
+        for index, (widget, combo) in enumerate(list(self._surgeon_rows)):
+            if widget is not row:
+                continue
+            self._surgeon_rows.pop(index)
+            self.surgeons_layout.removeWidget(widget)
+            widget.deleteLater()
+            break
+        if not self._surgeon_rows:
+            self._add_surgeon_row()
+        self._refresh_surgeon_remove_buttons()
+
+    def _refresh_surgeon_remove_buttons(self) -> None:
+        single = len(self._surgeon_rows) <= 1
+        for widget, _combo in self._surgeon_rows:
+            button = widget.findChild(QPushButton)
+            if button is not None:
+                button.setVisible(not single)
+
+    @staticmethod
+    def _fixed_option_combo(options: tuple[str, ...]) -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(False)
+        combo.setFixedHeight(34)
+        combo.setStyleSheet(_operblock_combo_box_style())
+        combo.addItem("Не указано", "")
+        for option in options:
+            combo.addItem(option, option)
+        combo.setCurrentIndex(0)
+        return combo
+
+    @staticmethod
+    def _set_combo_text(combo: QComboBox, value: str) -> None:
+        text = normalize_operblock_team_text(value)
+        if combo.isEditable():
+            combo.setEditText(text)
             return
-        self.birth_date_input.blockSignals(True)
-        self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
-        self.birth_date_input.blockSignals(False)
+        for index in range(combo.count()):
+            if combo.itemText(index).casefold() == text.casefold():
+                combo.setCurrentIndex(index)
+                return
+
+    @staticmethod
+    def _set_fixed_combo_text(combo: QComboBox, value: str, normalizer) -> None:
+        try:
+            text = normalizer(value)
+        except ValueError:
+            text = ""
+        for index in range(combo.count()):
+            if str(combo.itemData(index) or "") == text:
+                combo.setCurrentIndex(index)
+                return
+        combo.setCurrentIndex(0)
+
+    def _replace_surgeons(self, surgeons: list[str]) -> None:
+        for widget, _combo in list(self._surgeon_rows):
+            self.surgeons_layout.removeWidget(widget)
+            widget.deleteLater()
+        self._surgeon_rows.clear()
+        for surgeon in surgeons or [""]:
+            self._add_surgeon_row(surgeon)
+
+    def set_data(self, data: dict) -> None:
+        self.history_input.setText(str((data or {}).get("history_number") or ""))
+        self.full_name_input.setText(str((data or {}).get("full_name") or ""))
+        self._set_combo_text(self.gender_combo, str((data or {}).get("gender") or ""))
+        birth_date = parse_date_value((data or {}).get("birth_date"))
+        if birth_date is not None:
+            self.birth_date_input.setDate(QDate(int(birth_date.year), int(birth_date.month), int(birth_date.day)))
+        code = normalize_operblock_mkb_code(str((data or {}).get("diagnosis_code") or ""))
+        self.diagnosis_code_input.setText(code)
+        diagnosis_text = str((data or {}).get("diagnosis_text") or "").strip()
+        if code:
+            self._validate_mkb_code()
+        if diagnosis_text and not self.diagnosis_text_input.text().strip():
+            self._set_manual_diagnosis_enabled(True, text=diagnosis_text)
+        elif diagnosis_text and not self.diagnosis_text_input.isReadOnly():
+            self.diagnosis_text_input.setText(diagnosis_text)
+        self.operation_name_input.setText(str((data or {}).get("operation_name") or ""))
+        self.height_input.setText("" if (data or {}).get("height_cm") in (None, "") else str((data or {}).get("height_cm")))
+        weight = (data or {}).get("weight_kg")
+        self.weight_input.setText("" if weight in (None, "") else str(weight).replace(".", ","))
+        self.allergies_input.setText(str((data or {}).get("allergies") or ""))
+        self._set_fixed_combo_text(
+            self.blood_group_combo,
+            str((data or {}).get("blood_group") or ""),
+            normalize_operblock_blood_group,
+        )
+        self._set_fixed_combo_text(
+            self.blood_rh_combo,
+            str((data or {}).get("blood_rh") or ""),
+            normalize_operblock_blood_rh,
+        )
+        self._replace_surgeons([normalize_operblock_team_text(item) for item in (data or {}).get("surgeons") or []])
+        self._set_combo_text(self.anesthesiologist_combo, str((data or {}).get("anesthesiologist") or ""))
+        self._set_combo_text(self.anesthetist_combo, str((data or {}).get("anesthetist") or ""))
+        for edit, key in (
+            (self.sys_input, "preop_sys"),
+            (self.dia_input, "preop_dia"),
+            (self.pulse_input, "preop_pulse"),
+            (self.spo2_input, "preop_spo2"),
+        ):
+            value = (data or {}).get(key)
+            edit.setText("" if value in (None, "") else str(value))
+        self.save_initial_vitals_checkbox.setChecked(bool((data or {}).get("save_initial_vitals", True)))
 
     def _on_mkb_code_text_edited(self, text: str):
         normalized = normalize_operblock_mkb_code(text)
@@ -7085,7 +7385,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         text: str | None = None,
         placeholder: str = "Введите диагноз вручную",
     ):
-        self.diagnosis_text_input.setEnabled(bool(enabled))
+        self.diagnosis_text_input.setEnabled(True)
+        self.diagnosis_text_input.setReadOnly(not bool(enabled))
         self.diagnosis_text_input.setStyleSheet(
             STYLE_PATIENT_FORM_MANUAL_FIELD if enabled else STYLE_PATIENT_FORM_READONLY_FIELD
         )
@@ -7119,7 +7420,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         else:
             self.diagnosis_name.setText("Код не найден")
             self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
-            self._set_manual_diagnosis_enabled(True, clear=not self.diagnosis_text_input.isEnabled())
+            self._set_manual_diagnosis_enabled(True, clear=self.diagnosis_text_input.isReadOnly())
             return True
 
     def set_saving(self, saving: bool):
@@ -7127,7 +7428,16 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.cancel_button.setEnabled(not saving)
         self.close_button.setEnabled(not saving)
         self.save_button.setEnabled(not saving)
-        self.save_button.setText("СОХРАНЕНИЕ..." if saving else "СОХРАНИТЬ КАРТОЧКУ")
+        self.save_button.setText("СОХРАНЕНИЕ..." if saving else self._save_button_text)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "sys_input", None) and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Slash:
+                self.dia_input.setFocus(Qt.TabFocusReason)
+                self.dia_input.selectAll()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -7137,15 +7447,54 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             return
         super().keyPressEvent(event)
 
+    @staticmethod
+    def _optional_int(text: str, label: str, minimum: int, maximum: int) -> int | None:
+        value = str(text or "").strip()
+        if not value:
+            return None
+        if not re.fullmatch(r"\d+", value):
+            raise ValueError(f"{label}: укажите целое число.")
+        number = int(value)
+        if number < minimum or number > maximum:
+            raise ValueError(f"{label}: допустимый диапазон {minimum}-{maximum}.")
+        return number
+
+    @staticmethod
+    def _optional_weight(text: str) -> float | None:
+        value = str(text or "").strip().replace(",", ".")
+        if not value:
+            return None
+        try:
+            number = float(Decimal(value))
+        except (InvalidOperation, ValueError):
+            raise ValueError("Вес: укажите число.") from None
+        if number < 0.5 or number > 500:
+            raise ValueError("Вес: допустимый диапазон 0.5-500.")
+        return number
+
+    def selected_surgeons(self) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for _widget, combo in self._surgeon_rows:
+            name = normalize_operblock_team_text(combo.currentText())
+            key = name.casefold()
+            if name and key not in seen:
+                seen.add(key)
+                result.append(name)
+        return result
+
+    def _birth_date_value(self) -> date:
+        qdate = self.birth_date_input.date()
+        if qdate == self.EMPTY_BIRTH_DATE:
+            raise ValueError("Укажите дату рождения.")
+        return date(int(qdate.year()), int(qdate.month()), int(qdate.day()))
+
     def get_data(self) -> dict:
         history_number = normalize_operblock_history_number(self.history_input.text())
         full_name = self.full_name_input.text().strip()
         if not full_name:
             raise ValueError("ФИО пациента не заполнено.")
-        self._normalize_birth_date_field()
-        birth_date = parse_date_value(self.birth_date_input.text().strip())
-        if birth_date is None:
-            raise ValueError("Укажите корректную дату рождения.")
+        birth_date = self._birth_date_value()
         diagnosis_code = normalize_operblock_mkb_code(self.diagnosis_code_input.text())
         if not diagnosis_code:
             raise ValueError("Введите код МКБ-10.")
@@ -7155,14 +7504,41 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         diagnosis_text = self.diagnosis_text_input.text().strip()
         if not diagnosis_text:
             raise ValueError("Диагноз не заполнен. Если код МКБ-10 не найден, заполните ручной ввод.")
+        preop_sys = self._optional_int(self.sys_input.text(), "АД систолическое", 0, 300)
+        preop_dia = self._optional_int(self.dia_input.text(), "АД диастолическое", 0, 300)
+        if (preop_sys is None) ^ (preop_dia is None):
+            raise ValueError("АД: заполните систолическое и диастолическое значения.")
+        if preop_sys is not None and preop_dia is not None and preop_dia > preop_sys:
+            raise ValueError("АД диастолическое не может быть выше систолического.")
+        preop_pulse = self._optional_int(self.pulse_input.text(), "ЧСС", 0, 300)
+        preop_spo2 = self._optional_int(self.spo2_input.text(), "SpO₂", 0, 100)
+        if any(value is not None for value in (preop_sys, preop_dia, preop_pulse, preop_spo2)) and any(
+            value is None for value in (preop_sys, preop_dia, preop_pulse, preop_spo2)
+        ):
+            raise ValueError("Исходные витальные показатели заполните полностью: АД, ЧСС и SpO₂.")
         return {
             "table_code": self.table_code,
+            "operation_case_id": self.operation_case_id,
             "history_number": history_number,
             "full_name": full_name,
             "gender": self.gender_combo.currentText(),
             "birth_date": birth_date,
             "diagnosis_code": diagnosis_code or None,
             "diagnosis_text": diagnosis_text,
+            "operation_name": normalize_operblock_team_text(self.operation_name_input.text()),
+            "height_cm": self._optional_int(self.height_input.text(), "Рост", 1, 260),
+            "weight_kg": self._optional_weight(self.weight_input.text()),
+            "allergies": normalize_operblock_team_text(self.allergies_input.text()),
+            "blood_group": normalize_operblock_blood_group(self.blood_group_combo.currentData()),
+            "blood_rh": normalize_operblock_blood_rh(self.blood_rh_combo.currentData()),
+            "surgeons": self.selected_surgeons(),
+            "anesthesiologist": normalize_operblock_team_text(self.anesthesiologist_combo.currentText()),
+            "anesthetist": normalize_operblock_team_text(self.anesthetist_combo.currentText()),
+            "preop_sys": preop_sys,
+            "preop_dia": preop_dia,
+            "preop_pulse": preop_pulse,
+            "preop_spo2": preop_spo2,
+            "save_initial_vitals": self.save_initial_vitals_checkbox.isChecked(),
         }
 
 
@@ -9504,6 +9880,37 @@ class OperBlockMainWidget(QWidget):
         diagnosis = _label(f"Диагноз: {diagnosis_line}", size=18)
         diagnosis.setMinimumHeight(54)
         info.addWidget(diagnosis)
+        detail_lines: list[str] = []
+        operation_name = normalize_operblock_team_text(patient.get("operation_name"))
+        if operation_name:
+            detail_lines.append(f"Операция: {operation_name}")
+        surgeons = [
+            normalize_operblock_team_text(item)
+            for item in (patient.get("surgeons") or [])
+            if normalize_operblock_team_text(item)
+        ]
+        if surgeons:
+            detail_lines.append(f"Хирурги: {', '.join(surgeons)}")
+        anesthesiologist = normalize_operblock_team_text(patient.get("anesthesiologist"))
+        if anesthesiologist:
+            detail_lines.append(f"Анестезиолог: {anesthesiologist}")
+        height = patient.get("height_cm")
+        weight = patient.get("weight_kg")
+        height_weight = []
+        if height not in (None, ""):
+            height_weight.append(f"рост {height} см")
+        if weight not in (None, ""):
+            weight_text = str(weight).rstrip("0").rstrip(".") if isinstance(weight, float) else str(weight)
+            height_weight.append(f"вес {weight_text} кг")
+        if height_weight:
+            detail_lines.append("Пациент: " + ", ".join(height_weight))
+        allergies = normalize_operblock_team_text(patient.get("allergies"))
+        if allergies:
+            detail_lines.append(f"Аллергии: {allergies}")
+        for line in detail_lines[:5]:
+            item = _label(line, size=15, weight=600 if line.startswith("Аллергии:") else 500, color=TEXT_PRIMARY)
+            item.setMaximumHeight(42)
+            info.addWidget(item)
         info.addStretch(1)
         preview.addLayout(info, 1)
         body_layout.addLayout(preview, 1)
@@ -9511,19 +9918,25 @@ class OperBlockMainWidget(QWidget):
         buttons = QHBoxLayout()
         buttons.setSpacing(10)
         open_btn = QPushButton("ОТКРЫТЬ КАРТОЧКУ")
+        edit_btn = QPushButton("РЕДАКТИРОВАТЬ")
         close_btn = QPushButton("ОСВОБОДИТЬ СТОЛ")
-        for button in (open_btn, close_btn):
+        for button in (open_btn, edit_btn, close_btn):
             button.setFixedHeight(56)
             button.setCursor(Qt.PointingHandCursor)
         open_btn.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        edit_btn.setStyleSheet(STYLE_SECTOR8_BUTTON)
         close_btn.setStyleSheet(DANGER_BUTTON_STYLE)
         open_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._open_protocol(int(case_id))
+        )
+        edit_btn.clicked.connect(
+            lambda _=False, case_id=patient.get("operation_case_id"): self._open_edit_patient_dialog(int(case_id))
         )
         close_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._confirm_release_case(int(case_id))
         )
         buttons.addWidget(open_btn, 1)
+        buttons.addWidget(edit_btn, 1)
         buttons.addWidget(close_btn, 2)
         body_layout.addLayout(buttons)
         layout.addWidget(body, 1)
@@ -9629,6 +10042,52 @@ class OperBlockMainWidget(QWidget):
         dialog.save_button.clicked.connect(save)
         dialog.exec()
 
+    def _open_edit_patient_dialog(self, operation_case_id: int):
+        if self._is_closing or self._write_pending:
+            return
+        try:
+            initial_data = self.operblock_service.get_operation_case_form_data(int(operation_case_id))
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Редактировать пациента", str(exc))
+            self.refresh_board(force=True)
+            return
+        table_code = str((initial_data or {}).get("table_code") or "")
+        table_name = str((initial_data or {}).get("table_name") or "") or _operblock_table_display_name(table_code)
+        dialog = OccupyTableDialog(
+            table_code,
+            table_name,
+            self,
+            mode="edit",
+            initial_data=dict(initial_data or {}),
+            operation_case_id=int(operation_case_id),
+        )
+        dialog_ref = weakref.ref(dialog)
+
+        def save():
+            form = dialog_ref()
+            if form is None:
+                return
+            try:
+                payload = form.get_data()
+            except Exception as exc:
+                CustomMessageBox.warning(form, "Ошибка", str(exc))
+                return
+            form.set_saving(True)
+            self._write_pending = True
+
+            def operation():
+                return self.operblock_service.update_operation_case_form_data(int(operation_case_id), payload)
+
+            self._enqueue_write(
+                f"operblock_update_operation_case:{int(operation_case_id)}",
+                operation,
+                on_success=lambda result: self._on_patient_edit_success(dialog_ref, result),
+                on_error=lambda exc: self._on_patient_edit_error(dialog_ref, exc),
+            )
+
+        dialog.save_button.clicked.connect(save)
+        dialog.exec()
+
     def _on_occupy_success(self, dialog_ref, result):
         self._write_pending = False
         dialog = dialog_ref()
@@ -9644,6 +10103,28 @@ class OperBlockMainWidget(QWidget):
             dialog.set_saving(False)
         CustomMessageBox.warning(self, "Ошибка сохранения", str(exc))
         self.refresh_board(force=True)
+
+    def _on_patient_edit_success(self, dialog_ref, result):
+        self._write_pending = False
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.set_saving(False)
+            dialog.accept()
+        self.refresh_board(force=True)
+        case_id = int((result or {}).get("operation_case_id") or 0)
+        if self._current_operation_case_id and int(self._current_operation_case_id) == case_id:
+            self.refresh_protocol(force=True)
+
+    def _on_patient_edit_error(self, dialog_ref, exc: Exception):
+        self._write_pending = False
+        dialog = dialog_ref()
+        if dialog is not None:
+            dialog.set_saving(False)
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Ошибка сохранения"
+        CustomMessageBox.warning(self, title, str(exc))
+        self.refresh_board(force=True)
+        if self._current_operation_case_id:
+            self.refresh_protocol(force=True)
 
     def _open_protocol(self, operation_case_id: int):
         if self._is_closing:
@@ -15139,6 +15620,13 @@ class OperBlockMainWidget(QWidget):
             self.refresh_protocol(force=True)
         self.refresh_board(force=True)
 
+    def _operation_case_defaults(self, operation_case_id: int) -> dict:
+        try:
+            return dict(self.operblock_service.get_operation_case_form_data(int(operation_case_id)) or {})
+        except Exception as exc:
+            logger.error("operblock operation case defaults load failed: %s", exc, exc_info=True)
+            return {}
+
     def _start_anesthesia(self):
         if not self._current_operation_case_id:
             return
@@ -15174,7 +15662,15 @@ class OperBlockMainWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Начать пособие", f"Не удалось загрузить сотрудников для пособия: {exc}")
             return
-        dialog = StartAnesthesiaDialog(anesthesia_types, anesthesiologists, anesthetists, self)
+        defaults = self._operation_case_defaults(case_id)
+        dialog = StartAnesthesiaDialog(
+            anesthesia_types,
+            anesthesiologists,
+            anesthetists,
+            self,
+            initial_anesthesiologist=str(defaults.get("anesthesiologist") or ""),
+            initial_anesthetist=str(defaults.get("anesthetist") or ""),
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         assistance_type = dialog.selected_assistance_type()
@@ -15211,7 +15707,14 @@ class OperBlockMainWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Начать операцию", f"Не удалось загрузить сотрудников для операции: {exc}")
             return
-        dialog = StartSurgeryDialog(surgeons, operating_nurses, self)
+        defaults = self._operation_case_defaults(case_id)
+        dialog = StartSurgeryDialog(
+            surgeons,
+            operating_nurses,
+            self,
+            initial_operation_name=str(defaults.get("operation_name") or ""),
+            initial_surgeons=list(defaults.get("surgeons") or []),
+        )
         if dialog.exec() != QDialog.Accepted:
             return
         operation_name = dialog.operation_name()
