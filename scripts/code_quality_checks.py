@@ -44,8 +44,10 @@ ALLOWED_F_BLOCKS = {
     ("scripts/regression_safety_checks.py", "_check_orders_fast_click_path_stays_local"),
     ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"),
     ("scripts/regression_safety_checks.py", "_check_sync_coordinator_classifies_targeted_refresh"),
+    ("scripts/regression_safety_checks.py", "_check_operblock_operation_stages_custom_events"),
     ("ui/doctor_view/orders_widget.py", "OrdersWidget._apply_optimistic_cell"),
     ("ui/operblock_view/operblock_chart_widget.py", "OperBlockChartWidget._current_order_marker_signature"),
+    ("ui/operblock_view/operblock_main_widget.py", "OccupyTableDialog.set_data"),
     ("ui/operblock_view/operblock_main_widget.py", "OperBlockMainWidget._build_timeline_events"),
 }
 

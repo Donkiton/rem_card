@@ -18971,6 +18971,87 @@ def _check_operblock_operation_stage_chart_grouping(temp_root: str) -> tuple[boo
         app.processEvents()
 
 
+def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import timedelta
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
+
+    from rem_card.services.operblock_service import OperBlockService
+    from rem_card.ui.operblock_view.operblock_main_widget import (
+        OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT,
+        OperBlockMainWidget,
+    )
+
+    app = QApplication.instance() or QApplication([])
+    widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+    base_dt = datetime(2026, 6, 8, 12, 0)
+
+    timeline = {
+        "bolus_events": [
+            {
+                "source_id": index,
+                "event_time": (base_dt + timedelta(minutes=index)).isoformat(timespec="seconds"),
+                "display_label": f"Болюс {index:02d}",
+            }
+            for index in range(1, 9)
+        ]
+    }
+    service_items = OperBlockService._board_medication_history_from_timeline(timeline)
+    if len(service_items) != 8:
+        return False, f"board medication history was truncated before UI scroll: {len(service_items)}"
+
+    medication_history = [
+        {
+            "time": (base_dt + timedelta(minutes=index)).isoformat(timespec="seconds"),
+            "label": f"Препарат {index:02d}",
+            "kind_label": "Болюс",
+        }
+        for index in range(1, 13)
+    ]
+    meds_block = OperBlockMainWidget._board_medications_block(widget, {"medication_history": medication_history})
+    meds_scroll = meds_block.findChild(QScrollArea, "OperBlockBoardMedicationsScroll")
+    if meds_scroll is None:
+        return False, "board medication preview did not create a scroll area"
+    if meds_scroll.maximumHeight() != OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT:
+        return False, f"unexpected medication scroll maximum height: {meds_scroll.maximumHeight()}"
+    if meds_scroll.verticalScrollBarPolicy() != Qt.ScrollBarAsNeeded:
+        return False, "board medication scroll bar is not set to appear as needed"
+    med_texts = [label.text() for label in meds_block.findChildren(QLabel)]
+    if "Препарат 01" not in med_texts or "Препарат 12" not in med_texts:
+        return False, f"medication preview scroll did not keep all rows: {med_texts!r}"
+
+    operation_events = [
+        {
+            "source_id": index,
+            "event_time": (base_dt + timedelta(minutes=index)).isoformat(timespec="seconds"),
+            "kind": "custom",
+            "label": f"Этап {index:02d}",
+        }
+        for index in range(1, 9)
+    ]
+    progress_block = OperBlockMainWidget._board_progress_block(
+        widget,
+        {"started_at": base_dt.isoformat(timespec="seconds"), "operation_events": operation_events},
+    )
+    stage_texts = [label.text() for label in progress_block.findChildren(QLabel)]
+    for index in range(1, 4):
+        if f"Этап {index:02d}" in stage_texts:
+            return False, f"board operation history includes an old stage: {stage_texts!r}"
+    for index in range(4, 9):
+        if f"Этап {index:02d}" not in stage_texts:
+            return False, f"board operation history missed recent stage {index:02d}: {stage_texts!r}"
+    if "Подготовка пациента" in stage_texts:
+        return False, "board operation history mixed case started_at into timeline stages"
+
+    meds_block.deleteLater()
+    progress_block.deleteLater()
+    app.processEvents()
+    return True, "ok"
+
+
 def _check_operblock_quick_order_local_updates(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20423,6 +20504,7 @@ def main():
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
         ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
+        ("operblock_board_preview_bounded_history", _check_operblock_board_preview_bounded_history),
         ("operblock_quick_order_local_updates", _check_operblock_quick_order_local_updates),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),

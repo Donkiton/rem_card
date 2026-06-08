@@ -13,6 +13,7 @@ from typing import Any, Mapping, Optional
 import uuid
 
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.logger import logger
 from rem_card.app.patient_age import (
     format_patient_age,
     format_patient_age_from_birth_date,
@@ -765,7 +766,7 @@ class OperBlockService:
                 }
             )
         items.sort(key=lambda item: (_parse_dt(item.get("time")) or datetime.min, int(item.get("source_id") or 0)))
-        return items[-6:]
+        return items
 
     def build_operblock_board_snapshot(self) -> dict[str, Any]:
         metric_started = operblock_startup_metrics.timer_start()

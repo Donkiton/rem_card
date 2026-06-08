@@ -198,6 +198,7 @@ if TYPE_CHECKING:
 OPERBLOCK_VITAL_SETTINGS = {"ad": 1, "pulse": 1, "temp": 0, "spo2": 1, "rr": 0, "cvp": 0}
 OPERBLOCK_INITIAL_CHART_HOURS = 3
 OPERBLOCK_CHART_EXPAND_THRESHOLD_MINUTES = 20
+OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT = 178
 OPERBLOCK_MAX_CHART_HOURS = 72
 OPERBLOCK_VITAL_TIME_STEP_MINUTES = 5
 OPERBLOCK_CHART_GRID_STEP_MINUTES = 15
@@ -10190,6 +10191,49 @@ class OperBlockMainWidget(QWidget):
         return icon
 
     @staticmethod
+    def _board_scroll_area(
+        *,
+        object_name: str,
+        scrollbar_object_name: str,
+        maximum_height: int,
+        single_step: int = 36,
+        page_step: int = 144,
+    ) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName(object_name)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setMaximumHeight(maximum_height)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        scroll.setStyleSheet(
+            f"""
+            QScrollArea#{object_name} {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea#{object_name} > QWidget > QWidget {{
+                background: transparent;
+            }}
+            """
+        )
+        scrollbar = scroll.verticalScrollBar()
+        scrollbar.setObjectName(scrollbar_object_name)
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(single_step)
+        scrollbar.setPageStep(page_step)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                scrollbar_object_name,
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
+        return scroll
+
+    @staticmethod
     def _board_format_weight(value) -> str:
         if value in (None, ""):
             return "—"
@@ -10568,17 +10612,14 @@ class OperBlockMainWidget(QWidget):
         title = self._board_value_label("Этапы операции", size=13, weight=800, color="#2563EB")
         history_layout.addWidget(title)
 
-        history: list[dict] = []
-        if patient.get("started_at"):
-            history.append({"event_time": patient.get("started_at"), "label": "Подготовка пациента", "kind": "preparation"})
-        for event in events:
-            history.append(
-                {
-                    "event_time": event.get("event_time"),
-                    "label": self._board_stage_label(str(event.get("kind") or ""), str(event.get("label") or "")),
-                    "kind": str(event.get("kind") or ""),
-                }
-            )
+        history = [
+            {
+                "event_time": event.get("event_time"),
+                "label": self._board_stage_label(str(event.get("kind") or ""), str(event.get("label") or "")),
+                "kind": str(event.get("kind") or ""),
+            }
+            for event in events
+        ]
         history.sort(key=lambda item: _parse_datetime_value(item.get("event_time")) or datetime.min)
         for item in history[-5:]:
             row = QHBoxLayout()
@@ -10592,7 +10633,12 @@ class OperBlockMainWidget(QWidget):
             time_label = QLabel(_format_order_time(item.get("event_time")))
             time_label.setFixedWidth(44)
             time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 700;")
-            text_label = self._board_value_label(str(item.get("label") or "Этап операции"), size=13, weight=800 if is_current else 600, color="#2563EB" if is_current else "#1F2D3D")
+            text_label = self._board_value_label(
+                str(item.get("label") or "Этап операции"),
+                size=13,
+                weight=800 if is_current else 600,
+                color="#2563EB" if is_current else "#1F2D3D",
+            )
             row.addWidget(dot, 0)
             row.addWidget(time_label, 0)
             row.addWidget(text_label, 1)
@@ -10608,7 +10654,19 @@ class OperBlockMainWidget(QWidget):
             empty.setStyleSheet("font-size: 14px; color: #1F2D3D; font-weight: 500;")
             layout.addWidget(empty)
             return block
-        for item in items[-5:]:
+        scroll = self._board_scroll_area(
+            object_name="OperBlockBoardMedicationsScroll",
+            scrollbar_object_name="OperBlockBoardMedicationsScrollBar",
+            maximum_height=OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT,
+            single_step=34,
+            page_step=136,
+        )
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        for item in items:
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(8)
@@ -10622,7 +10680,10 @@ class OperBlockMainWidget(QWidget):
             row.addWidget(time_label, 0)
             row.addWidget(text_label, 1)
             row.addWidget(pill, 0)
-            layout.addLayout(row)
+            content_layout.addLayout(row)
+        content_layout.addStretch(1)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
         return block
 
     def _board_allergies_block(self, patient: dict) -> QFrame:
