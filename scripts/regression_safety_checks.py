@@ -19079,10 +19079,30 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     if default_block.graphicsEffect() is None:
         return False, "default board block shadow was disabled globally"
 
+    allergy_icon = OperBlockMainWidget._board_allergy_status_icon(has_allergies=True)
+    if allergy_icon.text():
+        return False, "board allergy danger icon is still rendered as font text"
+    allergy_pixmap = allergy_icon.pixmap()
+    if allergy_pixmap is None or allergy_pixmap.isNull():
+        return False, "board allergy danger icon pixmap was not rendered"
+    allergy_image = allergy_pixmap.toImage()
+
+    def has_red_pixel_near(x: int, y: int) -> bool:
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                color = allergy_image.pixelColor(x + dx, y + dy)
+                if color.alpha() > 80 and color.red() > 180 and color.green() < 120 and color.blue() < 120:
+                    return True
+        return False
+
+    if not all(has_red_pixel_near(x, y) for x, y in ((8, 8), (14, 14), (14, 8), (8, 14))):
+        return False, "board allergy danger icon cross is not drawn on both diagonals"
+
     meds_block.deleteLater()
     progress_block.deleteLater()
     admission_block.deleteLater()
     default_block.deleteLater()
+    allergy_icon.deleteLater()
     app.processEvents()
     return True, "ok"
 

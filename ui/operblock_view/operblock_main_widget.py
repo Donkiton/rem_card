@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 import weakref
 
-from PySide6.QtCore import QDate, QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QDrag,
@@ -10182,14 +10182,30 @@ class OperBlockMainWidget(QWidget):
 
     @staticmethod
     def _board_allergy_status_icon(*, has_allergies: bool) -> QLabel:
-        icon = QLabel("✕" if has_allergies else "✓")
+        size = 22
+        color = "#EF4444" if has_allergies else "#16A34A"
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(color), 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QRectF(2.5, 2.5, 17.0, 17.0))
+        pen.setWidthF(2.1)
+        painter.setPen(pen)
+        if has_allergies:
+            painter.drawLine(QPointF(7.2, 7.2), QPointF(14.8, 14.8))
+            painter.drawLine(QPointF(14.8, 7.2), QPointF(7.2, 14.8))
+        else:
+            painter.drawLine(QPointF(6.2, 11.2), QPointF(9.4, 14.4))
+            painter.drawLine(QPointF(9.4, 14.4), QPointF(15.8, 7.8))
+        painter.end()
+        icon = QLabel()
         icon.setFixedSize(22, 22)
         icon.setAlignment(Qt.AlignCenter)
-        color = "#EF4444" if has_allergies else "#16A34A"
-        icon.setStyleSheet(
-            f"font-size: 16px; color: {color}; font-weight: 900; "
-            f"border: 2px solid {color}; border-radius: 11px;"
-        )
+        icon.setPixmap(pixmap)
+        icon.setStyleSheet("background: transparent; border: none;")
         return icon
 
     @staticmethod
