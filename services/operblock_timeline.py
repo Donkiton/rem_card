@@ -8,6 +8,8 @@ import json
 import re
 from typing import Any, Mapping, Optional
 
+from rem_card.services.operblock_route_settings import operblock_route_from_comment
+
 
 OPERBLOCK_TIMELINE_EVENT_TYPES = (
     "bolus",
@@ -27,15 +29,8 @@ OPERBLOCK_STAGE_KIND_LABELS = {
 
 
 _DOSE_COMPONENT_RE = re.compile(r"(?P<value>\d+(?:[.,]\d+)?)\s*(?P<unit>[A-Za-zА-Яа-яЁёµ%./]+)")
-_OPERBLOCK_ORDER_ROUTE_TAG_RE = re.compile(r"\[OB_ROUTE:(?P<route>iv|im)\]", flags=re.IGNORECASE)
-
-
 def _legacy_order_route(comment: Any) -> Optional[str]:
-    match = _OPERBLOCK_ORDER_ROUTE_TAG_RE.search(str(comment or ""))
-    if not match:
-        return None
-    route = str(match.group("route") or "").strip().casefold()
-    return "im" if route == "im" else None
+    return operblock_route_from_comment(comment)
 
 
 @dataclass(frozen=True)

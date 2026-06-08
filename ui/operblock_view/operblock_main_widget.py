@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import weakref
 
 from PySide6.QtCore import QEvent, QMimeData, QRectF, QSize, Qt, QTime, QTimer
-from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QImageReader, QPainterPath, QPixmap, QTransform
+from PySide6.QtGui import QColor, QDrag, QFont, QFontMetrics, QIcon, QImage, QImageReader, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -32,7 +32,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
-    QScrollBar,
     QSizePolicy,
     QStackedWidget,
     QHeaderView,
@@ -76,6 +75,15 @@ from rem_card.services.operblock_medication_presets import (
     normalize_operblock_medication_preset_kind,
     operblock_medication_preset_display_name,
     save_operblock_medication_presets,
+)
+from rem_card.services.operblock_route_settings import (
+    OPERBLOCK_DEFAULT_ROUTE_CODE,
+    load_operblock_drug_groups,
+    normalize_operblock_route_code,
+    operblock_comment_with_route,
+    operblock_route_from_comment,
+    operblock_route_label,
+    operblock_routes_for_drug_group,
 )
 from rem_card.services.operblock_icon_defaults import (
     default_drug_icon_file,
@@ -144,6 +152,12 @@ from rem_card.ui.styles.theme import (
     TEXT_SECONDARY,
 )
 from rem_card.ui.styles.theme_manager import get_theme_manager
+from rem_card.ui.operblock_view.operblock_control_styles import (
+    operblock_arrow_button_style,
+    operblock_arrow_icon,
+    operblock_combo_box_style as _operblock_combo_box_style,
+    operblock_vertical_scrollbar_style as _operblock_vertical_scrollbar_style,
+)
 
 
 if TYPE_CHECKING:
@@ -230,17 +244,14 @@ OPERBLOCK_ORDERS_FILTERS = (
     ("timed_infusion", "Капельницы"),
     ("active", "Активные"),
 )
-OPERBLOCK_ORDER_ROUTE_DEFAULT = "iv"
+OPERBLOCK_ORDERS_SORT_OPTIONS = (
+    ("time_desc", "По времени (новые сверху)"),
+    ("time_asc", "По времени (старые сверху)"),
+    ("drug", "По препарату"),
+    ("active_only", "Только активные"),
+)
+OPERBLOCK_ORDER_ROUTE_DEFAULT = OPERBLOCK_DEFAULT_ROUTE_CODE
 OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR = "im"
-OPERBLOCK_ORDER_ROUTE_TAG_RE = re.compile(r"\[OB_ROUTE:(?P<route>iv|im)\]", flags=re.IGNORECASE)
-OPERBLOCK_ORDER_ROUTE_LONG_LABELS = {
-    OPERBLOCK_ORDER_ROUTE_DEFAULT: "в/в",
-    OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR: "в/мышечно",
-}
-OPERBLOCK_ORDER_ROUTE_SHORT_LABELS = {
-    OPERBLOCK_ORDER_ROUTE_DEFAULT: "в/в",
-    OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR: "в/м",
-}
 OPERBLOCK_ROUTE_ONLY_REFRESH_SUPPRESS_SECONDS = 10.0
 OPERBLOCK_LOCAL_WRITE_REFRESH_SUPPRESS_SECONDS = 10.0
 OPERBLOCK_ACTIVE_INFUSION_COLUMNS = 3
@@ -257,95 +268,6 @@ TOOLTIP_WHITE_STYLE = """
         padding: 4px 6px;
     }
 """
-
-
-def _operblock_vertical_scrollbar_style(
-    object_name: str,
-    *,
-    width_px: int = 13,
-    left_margin_px: int = 2,
-    right_margin_px: int = 1,
-) -> str:
-    return f"""
-        QScrollBar#{object_name} {{
-            background: transparent;
-            margin: 6px {right_margin_px}px 6px {left_margin_px}px;
-            width: {width_px}px;
-        }}
-        QScrollBar#{object_name}::groove:vertical {{
-            background: #e8edf3;
-            border: 1px solid #d4dce7;
-            border-radius: 4px;
-            width: 7px;
-        }}
-        QScrollBar#{object_name}::handle:vertical {{
-            background: #8fa3ba;
-            border: 1px solid #71869d;
-            border-radius: 4px;
-            min-height: 28px;
-        }}
-        QScrollBar#{object_name}::handle:vertical:hover {{
-            background: #7890aa;
-        }}
-        QScrollBar#{object_name}::add-line:vertical,
-        QScrollBar#{object_name}::sub-line:vertical {{
-            height: 0px;
-            background: transparent;
-            border: none;
-        }}
-        QScrollBar#{object_name}::add-page:vertical,
-        QScrollBar#{object_name}::sub-page:vertical {{
-            background: transparent;
-        }}
-    """
-
-
-def _operblock_combo_box_style() -> str:
-    arrow_path = os.path.join(get_icon_dir(), "combo_arrow_down.svg")
-    arrow_image = f"url({arrow_path.replace(os.sep, '/')})" if os.path.exists(arrow_path) else "none"
-    return f"""
-        QComboBox {{
-            padding: 7px 38px 7px 8px;
-            border: 1px solid {BORDER_LIGHT};
-            border-radius: {CUSTOM_DIALOG_RADIUS};
-            background: {BG_CARD};
-            color: {TEXT_PRIMARY};
-        }}
-        QComboBox:focus {{
-            border: 1px solid {BORDER_COLOR};
-            background: {BG_CARD};
-        }}
-        QComboBox::drop-down {{
-            subcontrol-origin: border;
-            subcontrol-position: top right;
-            width: 28px;
-            margin: 3px 3px 3px 0;
-            border: 1px solid #9fb2c7;
-            border-radius: 5px;
-            background: #e6eef7;
-        }}
-        QComboBox::drop-down:hover {{
-            border-color: #7f9bb8;
-            background: #d8e5f2;
-        }}
-        QComboBox::down-arrow {{
-            image: {arrow_image};
-            width: 12px;
-            height: 12px;
-        }}
-        QComboBox QAbstractItemView {{
-            background: {BG_CARD};
-            color: {TEXT_PRIMARY};
-            border: 1px solid {BORDER_COLOR};
-            selection-background-color: #e3edf7;
-            selection-color: {TEXT_PRIMARY};
-            outline: 0;
-        }}
-        QComboBox QAbstractItemView::item {{
-            min-height: 24px;
-            padding: 4px 8px;
-        }}
-    """
 
 
 def _operblock_app_icon_path() -> str:
@@ -562,8 +484,8 @@ def _format_main_remcard_status_text(started_at, *, active: bool = True) -> tupl
     parsed = _parse_datetime_value(started_at)
     time_str = parsed.strftime("%H:%M") if parsed else "--:--"
     if active:
-        return f"🔴 Операционная ({time_str})", "#e74c3c"
-    return f"⚫ Случай закрыт ({time_str})", "#968c8c"
+        return f"🔴 Опер. {time_str}", "#e74c3c"
+    return f"⚫ Закрыт {time_str}", "#968c8c"
 
 
 def normalize_operblock_birth_date_text(value: str, *, final: bool = True) -> str:
@@ -731,26 +653,15 @@ def _normalize_bolus_dose_text(value: str) -> str:
 
 
 def _normalize_order_route_code(value) -> str:
-    code = str(value or "").strip().casefold()
-    if code in {"im", "вм", "в/м", "intramuscular", "внутримышечно", "в/мышечно"}:
-        return OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR
-    return OPERBLOCK_ORDER_ROUTE_DEFAULT
+    return normalize_operblock_route_code(value)
 
 
 def _order_route_code_from_comment(comment: str) -> str:
-    match = OPERBLOCK_ORDER_ROUTE_TAG_RE.search(str(comment or ""))
-    return _normalize_order_route_code(match.group("route")) if match else OPERBLOCK_ORDER_ROUTE_DEFAULT
-
-
-def _strip_order_route_tag(comment: str) -> str:
-    return re.sub(r"\s+", " ", OPERBLOCK_ORDER_ROUTE_TAG_RE.sub("", str(comment or ""))).strip()
+    return operblock_route_from_comment(comment) or OPERBLOCK_ORDER_ROUTE_DEFAULT
 
 
 def _order_comment_with_route(comment: str, route_code: str) -> str:
-    clean_comment = _strip_order_route_tag(comment)
-    if _normalize_order_route_code(route_code) == OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR:
-        return f"{clean_comment} [OB_ROUTE:im]".strip()
-    return clean_comment
+    return operblock_comment_with_route(comment, route_code)
 
 
 def _order_route_code(row: dict) -> str:
@@ -763,12 +674,16 @@ def _order_route_code(row: dict) -> str:
     return _order_route_code_from_comment(str((row or {}).get("comment") or ""))
 
 
+def _stored_order_route_value(route_code: str | None) -> str | None:
+    normalized = _normalize_order_route_code(route_code)
+    return None if normalized == OPERBLOCK_ORDER_ROUTE_DEFAULT else normalized
+
+
 def _order_route_suffix(row: dict, *, short: bool = False) -> str:
     route_code = _order_route_code(row)
     if route_code == OPERBLOCK_ORDER_ROUTE_DEFAULT:
         return ""
-    labels = OPERBLOCK_ORDER_ROUTE_SHORT_LABELS if short else OPERBLOCK_ORDER_ROUTE_LONG_LABELS
-    label = labels.get(route_code, "")
+    label = operblock_route_label(route_code, short=short)
     return f"({label})" if label else ""
 
 
@@ -1867,6 +1782,65 @@ class ElidedTooltipLabel(QLabel):
             text = self.fontMetrics().elidedText(self._full_text, Qt.ElideRight, width)
         if self.text() != text:
             super().setText(text)
+
+
+class FittingSingleLineLabel(QLabel):
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        max_pixel_size: int = 16,
+        min_pixel_size: int = 16,
+        weight: int = 700,
+        color: str = TEXT_PRIMARY,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self._full_text = ""
+        self._max_pixel_size = max(1, int(max_pixel_size))
+        self._min_pixel_size = max(1, min(int(min_pixel_size), self._max_pixel_size))
+        self._weight = int(weight)
+        self._current_pixel_size = 0
+        self.setWordWrap(False)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.setMinimumWidth(220)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        self.setStyleSheet(f"color: {color}; background: transparent; border: none;")
+        self.set_full_text(text)
+
+    def setText(self, text: str):
+        self.set_full_text(text)
+
+    def set_full_text(self, text: str):
+        self._full_text = str(text or "")
+        self.setToolTip(self._full_text)
+        if self.text() != self._full_text:
+            super().setText(self._full_text)
+        self._fit_font_to_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_font_to_width()
+
+    def _fit_font_to_width(self):
+        width = max(0, self.contentsRect().width())
+        target_size = self._max_pixel_size
+        if width > 0 and self._full_text:
+            target_size = self._min_pixel_size
+            for size in range(self._max_pixel_size, self._min_pixel_size - 1, -1):
+                font = QFont(self.font())
+                font.setPixelSize(size)
+                font.setBold(self._weight >= 600)
+                if QFontMetrics(font).horizontalAdvance(self._full_text) <= width:
+                    target_size = size
+                    break
+        if self._current_pixel_size == target_size:
+            return
+        font = QFont(self.font())
+        font.setPixelSize(target_size)
+        font.setBold(self._weight >= 600)
+        self.setFont(font)
+        self._current_pixel_size = target_size
 
 
 class OperBlockClickableLabel(QLabel):
@@ -3530,19 +3504,21 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     COL_DISPLAY = 2
     COL_KIND = 3
     COL_GROUP = 4
-    COL_DOSES = 5
-    COL_RATES = 6
-    COL_CONCENTRATION = 7
-    COL_SOLVENT = 8
-    COL_VOLUME = 9
-    COL_COLOR = 10
-    COL_FAVORITE = 11
+    COL_DRUG_GROUP = 5
+    COL_DOSES = 6
+    COL_RATES = 7
+    COL_CONCENTRATION = 8
+    COL_SOLVENT = 9
+    COL_VOLUME = 10
+    COL_COLOR = 11
+    COL_FAVORITE = 12
     TABLE_HEADERS = (
         "Вкл",
         "Истинное название",
         "Отображаемое",
         "Тип",
         "Группа",
+        "Группа препарата",
         "Дозы",
         "Скорости",
         "Конц.",
@@ -3553,7 +3529,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     )
 
     def __init__(self, presets: list[dict], parent=None, *, save_handler=None):
-        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v3"
+        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v4"
         self._restoring_table_header = False
         self._fitting_table_header = False
         self._working_templates: list[dict | None] = [dict(preset or {}) for preset in (presets or [])]
@@ -3565,6 +3541,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self._favorite_icon_cache: dict[bool, QIcon] = {}
         self._diluent_options = self._load_diluent_options()
         self._group_options = self._build_group_options([item for item in self._working_templates if item is not None])
+        self._drug_group_options = self._load_drug_group_options()
         minimum_width = self._bounded_dialog_width(parent, preferred=640, min_width=420)
         initial_width = self._bounded_dialog_width(parent, preferred=1180, min_width=minimum_width)
         super().__init__(
@@ -3601,6 +3578,13 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             return load_operblock_diluent_options()
         except Exception:
             logger.exception("Не удалось загрузить растворители для настроек препаратов оперблока")
+            return []
+
+    def _load_drug_group_options(self) -> list[dict[str, str]]:
+        try:
+            return load_operblock_drug_groups()
+        except Exception:
+            logger.exception("Не удалось загрузить группы препаратов для настроек оперблока")
             return []
 
     @staticmethod
@@ -3747,6 +3731,10 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             _OperBlockComboBoxDelegate(self._group_combo_options, self.table),
         )
         self.table.setItemDelegateForColumn(
+            self.COL_DRUG_GROUP,
+            _OperBlockComboBoxDelegate(self._drug_group_combo_options, self.table),
+        )
+        self.table.setItemDelegateForColumn(
             self.COL_SOLVENT,
             _OperBlockComboBoxDelegate(self._solvent_combo_options, self.table),
         )
@@ -3790,6 +3778,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self.COL_DISPLAY: 180,
             self.COL_KIND: 138,
             self.COL_GROUP: 1,
+            self.COL_DRUG_GROUP: 150,
             self.COL_DOSES: 170,
             self.COL_RATES: 170,
             self.COL_CONCENTRATION: 82,
@@ -3806,6 +3795,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         if not hasattr(self, "table"):
             return
         self.table.setColumnHidden(self.COL_GROUP, True)
+        self.table.setColumnHidden(self.COL_DRUG_GROUP, False)
         self.table.horizontalHeader().resizeSection(self.COL_FAVORITE, 58)
 
     def _restore_table_header_state(self):
@@ -3959,6 +3949,14 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     def _group_combo_options(self) -> list[str]:
         return list(self._group_options)
 
+    def _drug_group_combo_options(self) -> list[str]:
+        labels = ["Без группы"]
+        for option in self._drug_group_options:
+            label = str((option or {}).get("label") or (option or {}).get("code") or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
+
     def _solvent_combo_options(self) -> list[str]:
         labels = ["Без растворителя"]
         for option in self._diluent_options:
@@ -4042,7 +4040,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self._mark_dirty()
 
     def _open_combo_cell_editor(self, row: int, column: int):
-        if column not in {self.COL_KIND, self.COL_GROUP, self.COL_SOLVENT}:
+        if column not in {self.COL_KIND, self.COL_GROUP, self.COL_DRUG_GROUP, self.COL_SOLVENT}:
             return
         item = self.table.item(row, column)
         if item is not None and item.flags() & Qt.ItemFlag.ItemIsEditable:
@@ -4126,6 +4124,11 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             row,
             self.COL_GROUP,
             self._text_item(self._group_display_text(preset.get("group") or default_group), template_index),
+        )
+        self.table.setItem(
+            row,
+            self.COL_DRUG_GROUP,
+            self._text_item(self._drug_group_display_text(preset.get("drug_group")), template_index),
         )
         self.table.setItem(row, self.COL_DOSES, self._text_item(_join_semicolon_list(preset.get("doses") or []), template_index))
         self.table.setItem(row, self.COL_RATES, self._text_item(_join_semicolon_list(preset.get("rates") or []), template_index))
@@ -4211,6 +4214,8 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             QTimer.singleShot(0, self._render_table)
         elif column == self.COL_GROUP:
             template["group"] = item.text().strip()
+        elif column == self.COL_DRUG_GROUP:
+            template["drug_group"] = self._resolve_drug_group_text(item.text())
         elif column == self.COL_DOSES:
             template["doses"] = _split_semicolon_list(item.text())
         elif column == self.COL_RATES:
@@ -4298,6 +4303,28 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                     return option_label or solvent_label or solvent_id
         return solvent_label
 
+    def _drug_group_display_text(self, value) -> str:
+        clean = str(value or "").strip()
+        if not clean:
+            return "Без группы"
+        for option in self._drug_group_options:
+            option_code = str((option or {}).get("code") or "").strip()
+            option_label = str((option or {}).get("label") or option_code).strip()
+            if clean.casefold() in {option_code.casefold(), option_label.casefold()}:
+                return option_label or option_code
+        return clean
+
+    def _resolve_drug_group_text(self, text: str) -> str | None:
+        clean = str(text or "").strip()
+        if not clean or clean.casefold() == "без группы":
+            return None
+        for option in self._drug_group_options:
+            option_code = str((option or {}).get("code") or "").strip()
+            option_label = str((option or {}).get("label") or option_code).strip()
+            if clean.casefold() in {option_code.casefold(), option_label.casefold()}:
+                return option_code or None
+        return clean
+
     def _resolve_solvent_text(self, text: str, current: dict) -> tuple[str | None, str | None]:
         clean = str(text or "").strip()
         if not clean or clean.casefold() == "без растворителя":
@@ -4328,6 +4355,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                     str((preset or {}).get("label") or ""),
                     str((preset or {}).get("display_name") or ""),
                     str((preset or {}).get("group") or ""),
+                    self._drug_group_display_text((preset or {}).get("drug_group")),
                     self._solvent_display_text(preset or {}),
                     str((preset or {}).get("solvent_id") or ""),
                 )
@@ -4378,6 +4406,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 "kind": kind,
                 "group": self._group_display_text(item.get("group"))
                 or OPERBLOCK_PRESET_KIND_GROUP_TITLES.get(kind, "Болюсы"),
+                "drug_group": self._resolve_drug_group_text(self._drug_group_display_text(item.get("drug_group"))),
                 "doses": _split_semicolon_list(_join_semicolon_list(item.get("doses") or [])),
                 "rates": _split_semicolon_list(_join_semicolon_list(item.get("rates") or [])),
                 "concentration": str(item.get("concentration") or "").strip() or None,
@@ -4443,6 +4472,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self._group_options = self._build_group_options(
                 [item for item in self._working_templates if item is not None]
             )
+            self._drug_group_options = self._load_drug_group_options()
             self._render_table()
             self._set_save_button_saved(True)
         except Exception as exc:
@@ -4641,12 +4671,7 @@ def _create_gas_dialog_plain_icon(icon_ref, *, icon_size: int, parent=None, fall
 
 
 def _gas_time_step_icon(*, up: bool) -> QIcon:
-    pixmap = QPixmap(os.path.join(get_icon_dir(), "combo_arrow_down.svg"))
-    if pixmap.isNull():
-        return QIcon()
-    if up:
-        pixmap = pixmap.transformed(QTransform().rotate(180), Qt.SmoothTransformation)
-    return QIcon(pixmap)
+    return operblock_arrow_icon(up=up)
 
 
 class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
@@ -4672,6 +4697,7 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         show_value: bool = True,
         time_label: str = "Время начала",
         route_code: str = OPERBLOCK_ORDER_ROUTE_DEFAULT,
+        route_options: list[dict[str, str]] | None = None,
         action_text: str = "Сохранить",
         minimum_width: int | None = None,
         right_icon_fallback_file: str = "",
@@ -4693,10 +4719,13 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
             self._time_max_datetime = None
         self._show_time = bool(show_time)
-        self._show_route = bool(show_route)
         self._show_value = bool(show_value)
         self._time_label = str(time_label or "Время").strip() or "Время"
         self._route_code = _normalize_order_route_code(route_code)
+        self._route_options = self._normalize_route_options(route_options, self._route_code)
+        if self._route_code not in {option["code"] for option in self._route_options} and self._route_options:
+            self._route_code = self._route_options[0]["code"]
+        self._show_route = bool(show_route and len(self._route_options) > 1)
         self._action_text = str(action_text or "Сохранить")
         self._time_text_updating = False
 
@@ -4721,6 +4750,40 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         self._init_saved_frameless_dialog(geometry_key, drag_area_height=44)
         self._init_ui()
         self._restore_saved_geometry()
+
+    @staticmethod
+    def _normalize_route_options(route_options: list[dict[str, str]] | None, current_code: str = "") -> list[dict[str, str]]:
+        source = route_options
+        if source is None:
+            source = [
+                {"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": "в/в"},
+                {"code": OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR, "label": "в/м"},
+            ]
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        label_indexes: dict[str, int] = {}
+        current_code = _normalize_order_route_code(current_code)
+        for option in source or []:
+            code = _normalize_order_route_code((option or {}).get("code"))
+            if not code or code in seen:
+                continue
+            raw_label = str((option or {}).get("label") or "").strip()
+            label_routes = [{"code": code, "label": raw_label}] if raw_label else None
+            label = str(operblock_route_label(code, short=True, routes=label_routes) or raw_label or code).strip()
+            label_key = label.casefold()
+            if label_key in label_indexes:
+                index = label_indexes[label_key]
+                existing_code = result[index]["code"]
+                if code == current_code or (existing_code != current_code and code == OPERBLOCK_ORDER_ROUTE_DEFAULT):
+                    result[index] = {"code": code, "label": label}
+                    seen.add(code)
+                continue
+            result.append({"code": code, "label": label})
+            label_indexes[label_key] = len(result) - 1
+            seen.add(code)
+        if not result:
+            result.append({"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)})
+        return result
 
     def _init_ui(self) -> None:
         self.setStyleSheet(
@@ -4826,19 +4889,9 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
                 background-color: transparent;
                 border: none;
             }
-            QPushButton#MedTimeStepButton {
-                background-color: #EAF3FF;
-                border: 1px solid #BFD1E5;
-                border-radius: 5px;
-                padding: 0;
-            }
-            QPushButton#MedTimeStepButton:hover {
-                background-color: #DCEBFA;
-                border-color: #9FB8D2;
-            }
-            QPushButton#MedTimeStepButton:pressed {
-                background-color: #CFE3F7;
-            }
+            """
+            + operblock_arrow_button_style("QPushButton#MedTimeStepButton")
+            + """
             QPushButton#MedRouteButton {
                 background-color: #F1F5F9;
                 color: #64748B;
@@ -5092,8 +5145,11 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         return card
 
     def _route_card(self, parent=None) -> QFrame:
-        card, layout = self._field_card(parent, minimum_width=142)
-        card.setMaximumWidth(164)
+        max_label_len = max((len(str(option.get("label") or "")) for option in self._route_options), default=0)
+        button_width = max(70, min(132, 12 + max_label_len * 7))
+        card_width = max(142, min(520, 24 + (button_width + 8) * len(self._route_options)))
+        card, layout = self._field_card(parent, minimum_width=card_width)
+        card.setMaximumWidth(card_width + 10)
         title = QLabel("Место")
         title.setObjectName("MedFieldTitle")
         layout.addWidget(title)
@@ -5102,17 +5158,25 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
         row.setSpacing(8)
         self.route_button_group = QButtonGroup(self)
         self.route_button_group.setExclusive(True)
-        for label, route_code in (("в/в", OPERBLOCK_ORDER_ROUTE_DEFAULT), ("в/м", OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR)):
+        checked_any = False
+        for option in self._route_options:
+            route_code = _normalize_order_route_code((option or {}).get("code"))
+            raw_label = str((option or {}).get("label") or "").strip()
+            label_routes = [{"code": route_code, "label": raw_label}] if raw_label else None
+            label = str(operblock_route_label(route_code, short=True, routes=label_routes) or raw_label or route_code).strip()
             button = QPushButton(label)
             button.setObjectName("MedRouteButton")
             button.setCheckable(True)
-            button.setFixedSize(56, 52)
+            button.setFixedSize(button_width, 52)
             button.setCursor(Qt.PointingHandCursor)
             button.setProperty("route_code", route_code)
             self.route_button_group.addButton(button)
             row.addWidget(button)
             if route_code == self._route_code:
                 button.setChecked(True)
+                checked_any = True
+        if not checked_any and self.route_button_group.buttons():
+            self.route_button_group.buttons()[0].setChecked(True)
         layout.addLayout(row)
         return card
 
@@ -5122,10 +5186,10 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
     def route_code(self) -> str:
         group = getattr(self, "route_button_group", None)
         if group is None:
-            return OPERBLOCK_ORDER_ROUTE_DEFAULT
+            return self._route_code or OPERBLOCK_ORDER_ROUTE_DEFAULT
         checked = group.checkedButton()
         if checked is None:
-            return OPERBLOCK_ORDER_ROUTE_DEFAULT
+            return self._route_code or OPERBLOCK_ORDER_ROUTE_DEFAULT
         return _normalize_order_route_code(checked.property("route_code"))
 
     def start_time_text(self) -> str:
@@ -5260,6 +5324,7 @@ class BolusEditDialog(MedicationEditDialogBase):
         min_datetime: datetime | None = None,
         max_datetime: datetime | None = None,
         route_code: str = OPERBLOCK_ORDER_ROUTE_DEFAULT,
+        route_options: list[dict[str, str]] | None = None,
         action_text: str = "Сохранить",
     ):
         clean_name = re.sub(r"\s+", " ", str(drug_name or "Препарат").strip()) or "Препарат"
@@ -5281,6 +5346,7 @@ class BolusEditDialog(MedicationEditDialogBase):
             show_time=base_datetime is not None,
             show_route=True,
             route_code=route_code,
+            route_options=route_options,
             action_text=action_text,
             minimum_width=724 if base_datetime is not None else 610,
         )
@@ -5609,19 +5675,9 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
                 background-color: transparent;
                 border: none;
             }
-            QPushButton#GasTimeStepButton {
-                background-color: #EAF3FF;
-                border: 1px solid #BFD1E5;
-                border-radius: 5px;
-                padding: 0;
-            }
-            QPushButton#GasTimeStepButton:hover {
-                background-color: #DCEBFA;
-                border-color: #9FB8D2;
-            }
-            QPushButton#GasTimeStepButton:pressed {
-                background-color: #CFE3F7;
-            }
+            """
+            + operblock_arrow_button_style("QPushButton#GasTimeStepButton")
+            + """
             QFrame#GasDialogFooter {
                 background-color: #F8FAFC;
                 border-bottom-left-radius: 12px;
@@ -6952,23 +7008,27 @@ class OperBlockMainWidget(QWidget):
         top_body = QFrame()
         top_body.setStyleSheet(SECTOR_BODY_STYLE)
         top_layout = QHBoxLayout(top_body)
-        top_layout.setContentsMargins(10, 2, 10, 4)
-        top_layout.setSpacing(12)
-        top_layout.setAlignment(Qt.AlignVCenter)
+        top_layout.setContentsMargins(6, 2, 6, 4)
+        top_layout.setSpacing(6)
 
         self.protocol_status_label = QLabel("-")
-        self.protocol_status_label.setFixedWidth(185)
+        self.protocol_status_label.setFixedWidth(120)
         self.protocol_status_label.setAlignment(Qt.AlignCenter)
         self.protocol_status_label.setStyleSheet(
             """
-            font-weight: bold; font-size: 13px; color: white;
+            font-weight: bold; font-size: 14px; color: white;
             background-color: #7f8c8d; border-radius: 4px; padding: 2px 5px;
             """
         )
         self.protocol_history_label = _label("№ -", size=14, weight=700, color=COLOR_PRIMARY_DARK)
-        self.protocol_patient_label = _label("-", size=16, weight=700)
-        self.protocol_age_label = _label("Возраст: -", size=14)
+        self.protocol_history_label.setWordWrap(False)
+        self.protocol_patient_label = FittingSingleLineLabel("-", max_pixel_size=16, min_pixel_size=16, weight=700)
+        self.protocol_age_label = _label("—", size=14)
+        self.protocol_age_label.setWordWrap(False)
         self.protocol_diagnosis_label = ElidedTooltipLabel("Диагноз: -")
+        self.protocol_diagnosis_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.protocol_diagnosis_label.setMinimumWidth(70)
+        self.protocol_diagnosis_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.protocol_diagnosis_label.setStyleSheet(
             f"font-size: 14px; font-weight: 400; color: {TEXT_PRIMARY}; background: transparent; border: none;"
             f"{TOOLTIP_WHITE_STYLE}"
@@ -6983,7 +7043,7 @@ class OperBlockMainWidget(QWidget):
         self.badge_pulse = VitalBadge("ЧСС:", "-", "#dadaff", COLOR_VITAL_PULSE)
         self.badge_spo2 = VitalBadge("SpO₂:", "-%", "#e1f5fe", COLOR_VITAL_SPO2)
         for badge in (self.badge_ad, self.badge_pulse, self.badge_spo2):
-            badge.update_style(13, 115)
+            badge.update_style(14, 115)
             badge.setFixedHeight(28)
             badge.layout_inner.setContentsMargins(5, 0, 5, 0)
             top_layout.addWidget(badge, 0, Qt.AlignVCenter)
@@ -7718,8 +7778,10 @@ class OperBlockMainWidget(QWidget):
         self.orders_sort_combo = QComboBox()
         self.orders_sort_combo.setFixedHeight(32)
         self.orders_sort_combo.setMinimumWidth(210)
-        self.orders_sort_combo.addItems(("По времени (новые сверху)", "По времени (старые сверху)", "По препарату", "Только активные"))
+        for sort_key, title in OPERBLOCK_ORDERS_SORT_OPTIONS:
+            self.orders_sort_combo.addItem(title, sort_key)
         self.orders_sort_combo.setStyleSheet(_operblock_combo_box_style())
+        self.orders_sort_combo.currentIndexChanged.connect(self._on_orders_sort_changed)
         timeline_header.addWidget(timeline_title, 0)
         timeline_header.addWidget(self.orders_count_label, 0)
         timeline_header.addStretch(1)
@@ -7985,11 +8047,13 @@ class OperBlockMainWidget(QWidget):
         allowed = {key for key, _title in OPERBLOCK_ORDERS_FILTERS}
         self._orders_filter_kind = normalized if normalized in allowed else "all"
         self._update_orders_filter_button_text()
-        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])})
+        self._orders_force_top_on_next_apply = True
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
 
     def _toggle_orders_hide_deleted(self, checked: bool):
         self._orders_hide_deleted = bool(checked)
-        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])})
+        self._orders_force_top_on_next_apply = True
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
 
     def _update_orders_filter_button_text(self):
         filter_key = str(getattr(self, "_orders_filter_kind", "all") or "all")
@@ -7999,6 +8063,16 @@ class OperBlockMainWidget(QWidget):
             self.orders_filter_button.setText("Фильтры")
         else:
             self.orders_filter_button.setText(f"Фильтры: {title}")
+
+    def _orders_sort_mode(self) -> str:
+        combo = getattr(self, "orders_sort_combo", None)
+        sort_key = str(combo.currentData() or "") if combo is not None else ""
+        allowed = {key for key, _title in OPERBLOCK_ORDERS_SORT_OPTIONS}
+        return sort_key if sort_key in allowed else "time_desc"
+
+    def _on_orders_sort_changed(self, *_args):
+        self._orders_force_top_on_next_apply = True
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
 
     def _placeholder_frame(self, title: str, rows: list[str]) -> QWidget:
         widget, body_layout = self._sector(title)
@@ -8988,7 +9062,7 @@ class OperBlockMainWidget(QWidget):
         self._current_protocol_date = self._current_operation_start
         self.protocol_patient_label.setText(header.get("full_name") or "Неизвестно")
         self.protocol_history_label.setText(f"№ {header.get('history_number') or '—'}")
-        self.protocol_age_label.setText(f"Возраст: {header.get('age') or '—'}")
+        self.protocol_age_label.setText(str(header.get("age") or "—"))
         diagnosis_text = header.get("diagnosis_text") or "—"
         diagnosis_code = header.get("diagnosis_code")
         diagnosis_line = f"{diagnosis_code}: {diagnosis_text}" if diagnosis_code else diagnosis_text
@@ -9390,6 +9464,22 @@ class OperBlockMainWidget(QWidget):
             buttons.extend(widget.findChildren(QPushButton))
         return buttons
 
+    @staticmethod
+    def _drug_group_label_for_preset(preset: dict) -> str:
+        group_code = str((preset or {}).get("drug_group") or "").strip()
+        if not group_code:
+            return ""
+        try:
+            groups = load_operblock_drug_groups()
+        except Exception:
+            groups = []
+        for group in groups:
+            code = str((group or {}).get("code") or "").strip()
+            label = str((group or {}).get("label") or code).strip()
+            if group_code.casefold() in {code.casefold(), label.casefold()}:
+                return label or code
+        return group_code
+
     def _filtered_medication_presets(self) -> list[dict]:
         query = str(getattr(self, "_preset_search_text", "") or "").casefold()
         filter_kind = str(getattr(self, "_preset_kind_filter", "bolus") or "bolus")
@@ -9413,6 +9503,7 @@ class OperBlockMainWidget(QWidget):
                         str(preset.get("display_name") or ""),
                         str(preset.get("latin") or ""),
                         str(preset.get("group") or ""),
+                        self._drug_group_label_for_preset(preset),
                         " ".join(str(alias) for alias in preset.get("aliases") or []),
                     ]
                 ).casefold()
@@ -10149,15 +10240,15 @@ class OperBlockMainWidget(QWidget):
         CustomMessageBox.warning(self, "Ошибка сохранения", str(exc))
         self._refresh_quick_orders()
 
-    def _apply_orders(self, snapshot: dict):
+    def _apply_orders(self, snapshot: dict, *, update_chart_markers: bool = True):
         scroll_state = self._capture_orders_scroll_state()
         force_top = bool(getattr(self, "_orders_force_top_on_next_apply", False))
         self._orders_force_top_on_next_apply = False
         rows = [dict(row or {}) for row in (snapshot.get("orders") or [])]
-        groups = self._build_medication_order_groups(rows)
-        groups = self._filtered_medication_order_groups(groups)
+        source_groups = self._build_medication_order_groups(rows)
+        source_signature = self._orders_groups_source_signature(source_groups)
+        groups = self._filtered_medication_order_groups(source_groups)
         render_signature = self._orders_groups_render_signature(groups)
-        source_signature = self._orders_groups_source_signature(groups)
         previous_signature = getattr(self, "_orders_render_signature", "")
         if render_signature == previous_signature:
             self._current_orders_rows = rows
@@ -10170,7 +10261,7 @@ class OperBlockMainWidget(QWidget):
         scroll = getattr(self, "orders_scroll", None)
         try:
             self._current_orders_rows = rows
-            if source_changed:
+            if source_changed and update_chart_markers:
                 self._update_vitals_chart_order_markers()
             if hasattr(self, "orders_count_label"):
                 self.orders_count_label.setText(str(len(groups)))
@@ -10329,9 +10420,10 @@ class OperBlockMainWidget(QWidget):
 
     def _sync_orders_render_signatures_from_current_rows(self) -> None:
         rows = [dict(row or {}) for row in getattr(self, "_current_orders_rows", []) or []]
-        groups = self._filtered_medication_order_groups(self._build_medication_order_groups(rows))
+        source_groups = self._build_medication_order_groups(rows)
+        groups = self._filtered_medication_order_groups(source_groups)
         self._orders_render_signature = self._orders_groups_render_signature(groups)
-        self._orders_source_signature = self._orders_groups_source_signature(groups)
+        self._orders_source_signature = self._orders_groups_source_signature(source_groups)
         rendered_signatures = dict(getattr(self, "_rendered_medication_group_signatures", {}) or {})
         rendered_widgets = dict(getattr(self, "_rendered_medication_group_widgets", {}) or {})
         for group in groups:
@@ -10374,15 +10466,18 @@ class OperBlockMainWidget(QWidget):
     def _filtered_medication_order_groups(self, groups: list[dict]) -> list[dict]:
         filter_kind = str(getattr(self, "_orders_filter_kind", "all") or "all")
         hide_deleted = bool(getattr(self, "_orders_hide_deleted", True))
+        sort_mode = self._orders_sort_mode()
         result: list[dict] = []
         for group in groups or []:
             entries = [
                 dict(entry or {})
                 for entry in (group.get("entries") or [])
                 if self._medication_entry_matches_orders_filter(entry or {}, filter_kind, hide_deleted)
+                and (sort_mode != "active_only" or self._medication_entry_is_active(entry or {}))
             ]
             if not entries:
                 continue
+            entries = self._sorted_medication_entries(entries, sort_mode)
             filtered_group = dict(group)
             filtered_group["entries"] = entries
             order_rows = [dict(entry.get("row") or {}) for entry in entries if entry.get("kind") == "order"]
@@ -10394,26 +10489,58 @@ class OperBlockMainWidget(QWidget):
             filtered_group["has_gas_infusion"] = any(_is_gas_infusion(interval) for interval in infusion_rows)
             filtered_group["has_rate_infusion"] = any(_infusion_has_rate(interval) for interval in infusion_rows)
             filtered_group["has_volume_infusion"] = any(_is_volume_only_infusion(interval) for interval in infusion_rows)
-            latest_values = [
+            time_values = [
                 _minute_floor_dt(_parse_datetime_value(entry.get("time"))) or datetime.min
                 for entry in entries
             ]
-            filtered_group["latest_dt"] = max(latest_values) if latest_values else datetime.min
+            filtered_group["latest_dt"] = max(time_values) if time_values else datetime.min
+            filtered_group["first_dt"] = min(time_values) if time_values else datetime.min
             sort_ids = [_safe_int(entry.get("sort_id")) or 0 for entry in entries]
             sort_ids = [value for value in sort_ids if value > 0]
             filtered_group["first_id"] = min(sort_ids) if sort_ids else None
             filtered_group["total_text"] = self._medication_group_total_text(filtered_group)
             filtered_group["source_signature"] = self._medication_group_source_signature(filtered_group)
             result.append(filtered_group)
-        result.sort(
-            key=lambda group: (
-                group.get("latest_dt") if isinstance(group.get("latest_dt"), datetime) else datetime.min,
-                int(group.get("first_id") or 0),
-                str(group.get("drug_name") or "").casefold(),
-            ),
-            reverse=True,
-        )
+        self._sort_medication_order_groups(result, sort_mode)
         return result
+
+    @staticmethod
+    def _medication_entry_sort_key(entry: dict) -> tuple:
+        return (
+            _minute_floor_dt(_parse_datetime_value(entry.get("time"))) or datetime.min,
+            int(entry.get("sort_id") or 0),
+            str(entry.get("detail") or "").casefold(),
+        )
+
+    def _sorted_medication_entries(self, entries: list[dict], sort_mode: str) -> list[dict]:
+        return sorted(entries, key=self._medication_entry_sort_key, reverse=sort_mode != "time_asc")
+
+    @staticmethod
+    def _medication_group_time_sort_key(group: dict) -> tuple:
+        latest_dt = group.get("latest_dt")
+        if not isinstance(latest_dt, datetime):
+            latest_dt = datetime.min
+        return (
+            latest_dt,
+            int(group.get("first_id") or 0),
+            str(group.get("drug_name") or "").casefold(),
+        )
+
+    def _sort_medication_order_groups(self, groups: list[dict], sort_mode: str) -> None:
+        if sort_mode == "time_asc":
+            groups.sort(key=self._medication_group_time_sort_key)
+            return
+        if sort_mode == "drug":
+            groups.sort(key=lambda group: str(group.get("drug_name") or "").casefold())
+            return
+        groups.sort(key=self._medication_group_time_sort_key, reverse=True)
+
+    @staticmethod
+    def _medication_entry_is_active(entry: dict) -> bool:
+        row = entry.get("row") if isinstance(entry.get("row"), dict) else {}
+        interval = entry.get("interval") if isinstance(entry.get("interval"), dict) else {}
+        status = str((interval or row or {}).get("status") or "")
+        return status == "active"
 
     @staticmethod
     def _medication_entry_matches_orders_filter(entry: dict, filter_kind: str, hide_deleted: bool) -> bool:
@@ -11051,7 +11178,7 @@ class OperBlockMainWidget(QWidget):
             self._collapsed_order_group_keys.discard(key)
         else:
             self._collapsed_order_group_keys.add(key)
-        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])})
+        self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
 
     def _edit_infusion_from_group_row(self, interval: dict):
         if _is_gas_infusion(interval):
@@ -12428,6 +12555,32 @@ class OperBlockMainWidget(QWidget):
                 return dict(preset or {})
         return None
 
+    def _route_options_for_order_row(self, row: dict) -> list[dict[str, str]]:
+        preset = self._preset_for_order_row(row)
+        group_code = str((preset or {}).get("drug_group") or "").strip() if preset else ""
+        try:
+            routes = operblock_routes_for_drug_group(group_code)
+        except Exception as exc:
+            logger.error("operblock routes load for bolus edit failed: %s", exc, exc_info=True)
+            routes = []
+        if not routes:
+            routes = [{"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)}]
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for route in routes:
+            code = _normalize_order_route_code((route or {}).get("code"))
+            if not code or code in seen:
+                continue
+            raw_label = str((route or {}).get("label") or "").strip()
+            label_routes = [{"code": code, "label": raw_label}] if raw_label else None
+            label = str(operblock_route_label(code, short=True, routes=label_routes) or raw_label or code).strip()
+            result.append({"code": code, "label": label})
+            seen.add(code)
+        current_code = _normalize_order_route_code(_order_route_code(row))
+        if current_code and current_code not in seen:
+            result.append({"code": current_code, "label": operblock_route_label(current_code, short=True)})
+        return result or [{"code": OPERBLOCK_ORDER_ROUTE_DEFAULT, "label": operblock_route_label(OPERBLOCK_ORDER_ROUTE_DEFAULT, short=True)}]
+
     def _quick_order_template_concentration_for_row(self, row: dict) -> str:
         drug_name = str((row or {}).get("drug_name") or (row or {}).get("raw_drug_name") or "").strip()
         if not drug_name:
@@ -13221,7 +13374,7 @@ class OperBlockMainWidget(QWidget):
         events = list(snapshot.get("bolus_events") or [])
         if not events:
             return False
-        route_value = "im" if _normalize_order_route_code(route_code) == OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR else None
+        route_value = _stored_order_route_value(route_code)
         changed = False
         patched_events: list[dict] = []
         for event in events:
@@ -13272,9 +13425,7 @@ class OperBlockMainWidget(QWidget):
         patched_events: list[dict] = []
         drug_name, dose_text = _split_order_drug_and_dose(text or "") if text is not None else ("", "")
         event_time = self._local_iso_minute_text(order_datetime) if order_datetime is not None else None
-        route_value = None
-        if route_code is not None and _normalize_order_route_code(route_code) == OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR:
-            route_value = "im"
+        route_value = _stored_order_route_value(route_code) if route_code is not None else None
         for event in events:
             data = dict(event or {})
             event_order_id = _safe_int(data.get("source_id"))
@@ -13621,6 +13772,7 @@ class OperBlockMainWidget(QWidget):
             return
         old_route = _order_route_code(row)
         drug_name, dose_text = self._bolus_order_dialog_parts(row)
+        route_options = self._route_options_for_order_row(row)
         dialog = BolusEditDialog(
             drug_name,
             dose_text,
@@ -13629,6 +13781,7 @@ class OperBlockMainWidget(QWidget):
             min_datetime=self._current_anesthesia_start or self._current_operation_start,
             max_datetime=self._current_anesthesia_end,
             route_code=old_route,
+            route_options=route_options,
         )
         if dialog.exec() != QDialog.Accepted:
             return
@@ -13698,11 +13851,13 @@ class OperBlockMainWidget(QWidget):
         old_route = _order_route_code(row)
         old_text = str(row.get("text") or "").strip()
         drug_name, dose_text = self._bolus_order_dialog_parts(row)
+        route_options = self._route_options_for_order_row(row)
         dialog = BolusEditDialog(
             drug_name,
             dose_text,
             self,
             route_code=old_route,
+            route_options=route_options,
         )
         if dialog.exec() != QDialog.Accepted:
             return

@@ -10,68 +10,24 @@ from PySide6.QtCore import QEvent, QRectF, Qt, QTimer
 from PySide6.QtGui import QFont, QFontMetrics, QPainterPath
 from PySide6.QtWidgets import QGraphicsPathItem, QScrollBar
 
+from rem_card.services.operblock_route_settings import (
+    OPERBLOCK_DEFAULT_ROUTE_CODE,
+    normalize_operblock_route_code,
+    operblock_route_from_comment,
+    operblock_route_label,
+)
 from rem_card.services.operblock_timeline import format_operblock_medication_display_label
 from rem_card.ui.shared.chart_widget import ChartWidget
+from rem_card.ui.operblock_view.operblock_control_styles import (
+    operblock_horizontal_scrollbar_style,
+    operblock_vertical_scrollbar_style as _operblock_vertical_scrollbar_style,
+)
 
 OPERBLOCK_INITIAL_CHART_HOURS = 3
 
 OPERBLOCK_INFUSION_RATE_UNIT = "мл/час"
 
-OPERBLOCK_ORDER_ROUTE_DEFAULT = "iv"
-
-OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR = "im"
-
-OPERBLOCK_ORDER_ROUTE_TAG_RE = re.compile(r"\[OB_ROUTE:(?P<route>iv|im)\]", flags=re.IGNORECASE)
-
-OPERBLOCK_ORDER_ROUTE_LONG_LABELS = {
-    OPERBLOCK_ORDER_ROUTE_DEFAULT: "в/в",
-    OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR: "в/мышечно",
-}
-
-OPERBLOCK_ORDER_ROUTE_SHORT_LABELS = {
-    OPERBLOCK_ORDER_ROUTE_DEFAULT: "в/в",
-    OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR: "в/м",
-}
-
-def _operblock_vertical_scrollbar_style(
-    object_name: str,
-    *,
-    width_px: int = 13,
-    left_margin_px: int = 2,
-    right_margin_px: int = 1,
-) -> str:
-    return f"""
-        QScrollBar#{object_name} {{
-            background: transparent;
-            margin: 6px {right_margin_px}px 6px {left_margin_px}px;
-            width: {width_px}px;
-        }}
-        QScrollBar#{object_name}::groove:vertical {{
-            background: #e8edf3;
-            border: 1px solid #d4dce7;
-            border-radius: 4px;
-            width: 7px;
-        }}
-        QScrollBar#{object_name}::handle:vertical {{
-            background: #8fa3ba;
-            border: 1px solid #71869d;
-            border-radius: 4px;
-            min-height: 28px;
-        }}
-        QScrollBar#{object_name}::handle:vertical:hover {{
-            background: #7890aa;
-        }}
-        QScrollBar#{object_name}::add-line:vertical,
-        QScrollBar#{object_name}::sub-line:vertical {{
-            height: 0px;
-            background: transparent;
-            border: none;
-        }}
-        QScrollBar#{object_name}::add-page:vertical,
-        QScrollBar#{object_name}::sub-page:vertical {{
-            background: transparent;
-        }}
-    """
+OPERBLOCK_ORDER_ROUTE_DEFAULT = OPERBLOCK_DEFAULT_ROUTE_CODE
 
 def _parse_datetime_value(value) -> datetime | None:
     text = str(value or "").strip().replace("T", " ")
@@ -125,14 +81,10 @@ def _split_order_drug_and_dose(text: str) -> tuple[str, str]:
     return clean or "Без названия", ""
 
 def _normalize_order_route_code(value) -> str:
-    code = str(value or "").strip().casefold()
-    if code in {"im", "вм", "в/м", "intramuscular", "внутримышечно", "в/мышечно"}:
-        return OPERBLOCK_ORDER_ROUTE_INTRAMUSCULAR
-    return OPERBLOCK_ORDER_ROUTE_DEFAULT
+    return normalize_operblock_route_code(value)
 
 def _order_route_code_from_comment(comment: str) -> str:
-    match = OPERBLOCK_ORDER_ROUTE_TAG_RE.search(str(comment or ""))
-    return _normalize_order_route_code(match.group("route")) if match else OPERBLOCK_ORDER_ROUTE_DEFAULT
+    return operblock_route_from_comment(comment) or OPERBLOCK_ORDER_ROUTE_DEFAULT
 
 def _order_route_code(row: dict) -> str:
     route = str((row or {}).get("route") or "").strip()
@@ -147,8 +99,7 @@ def _order_route_suffix(row: dict, *, short: bool = False) -> str:
     route_code = _order_route_code(row)
     if route_code == OPERBLOCK_ORDER_ROUTE_DEFAULT:
         return ""
-    labels = OPERBLOCK_ORDER_ROUTE_SHORT_LABELS if short else OPERBLOCK_ORDER_ROUTE_LONG_LABELS
-    label = labels.get(route_code, "")
+    label = operblock_route_label(route_code, short=short)
     return f"({label})" if label else ""
 
 def _order_dose_text_with_route(dose_text: str, row: dict, *, short: bool = False) -> str:
@@ -957,40 +908,7 @@ class OperBlockChartWidget(ChartWidget):
         scrollbar.valueChanged.connect(self._on_timeline_scroll_value_changed)
         scrollbar.sliderPressed.connect(self._on_timeline_scroll_user_started)
         scrollbar.sliderReleased.connect(self._refresh_timeline_scroll_overlay)
-        scrollbar.setStyleSheet(
-            """
-            QScrollBar#OperBlockTimelineScrollBar {
-                background: transparent;
-                margin: 2px 6px 1px 6px;
-                height: 13px;
-            }
-            QScrollBar#OperBlockTimelineScrollBar::groove:horizontal {
-                background: #e8edf3;
-                border: 1px solid #d4dce7;
-                border-radius: 4px;
-                height: 7px;
-            }
-            QScrollBar#OperBlockTimelineScrollBar::handle:horizontal {
-                background: #8fa3ba;
-                border: 1px solid #71869d;
-                border-radius: 4px;
-                min-width: 34px;
-            }
-            QScrollBar#OperBlockTimelineScrollBar::handle:horizontal:hover {
-                background: #7890aa;
-            }
-            QScrollBar#OperBlockTimelineScrollBar::add-line:horizontal,
-            QScrollBar#OperBlockTimelineScrollBar::sub-line:horizontal {
-                width: 0px;
-                background: transparent;
-                border: none;
-            }
-            QScrollBar#OperBlockTimelineScrollBar::add-page:horizontal,
-            QScrollBar#OperBlockTimelineScrollBar::sub-page:horizontal {
-                background: transparent;
-            }
-            """
-        )
+        scrollbar.setStyleSheet(operblock_horizontal_scrollbar_style("OperBlockTimelineScrollBar"))
         scrollbar.hide()
         return scrollbar
 

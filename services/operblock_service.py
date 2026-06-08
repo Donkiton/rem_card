@@ -24,6 +24,11 @@ from rem_card.services.operblock_medication_presets import (
     load_operblock_medication_presets,
     operblock_medication_preset_display_name,
 )
+from rem_card.services.operblock_route_settings import (
+    normalize_operblock_route_code,
+    operblock_comment_with_route,
+    strip_operblock_route_tag,
+)
 from rem_card.services.operblock_anesthesia_types import normalize_operblock_anesthesia_type_label
 from rem_card.services.operblock_timeline import (
     OPERBLOCK_STAGE_KIND_LABELS,
@@ -40,7 +45,6 @@ OPERBLOCK_TABLES = (
     {"code": "planned", "display_name": "Плановая операционная", "sort_order": 2},
 )
 OPERBLOCK_MKB_CODE_RE = re.compile(r"^[A-Z]\d{2}(?:\.\d{1,2})?$")
-OPERBLOCK_ORDER_ROUTE_TAG_RE = re.compile(r"\[OB_ROUTE:(?P<route>iv|im)\]", flags=re.IGNORECASE)
 _RU_TO_EN_KEYBOARD = {
     "й": "q",
     "ц": "w",
@@ -108,22 +112,15 @@ def normalize_operblock_history_number(value: str) -> str:
 
 
 def normalize_operblock_order_route(value: str | None) -> str:
-    code = str(value or "").strip().casefold()
-    if code in {"im", "вм", "в/м", "intramuscular", "внутримышечно", "в/мышечно"}:
-        return "im"
-    return "iv"
+    return normalize_operblock_route_code(value)
 
 
 def _strip_operblock_order_route_tag(comment: str) -> str:
-    return re.sub(r"\s+", " ", OPERBLOCK_ORDER_ROUTE_TAG_RE.sub("", str(comment or ""))).strip()
+    return strip_operblock_route_tag(comment)
 
 
 def _operblock_order_comment_with_route(comment: str, route: str | None) -> str:
-    clean_comment = _strip_operblock_order_route_tag(comment)
-    route_code = normalize_operblock_order_route(route)
-    if route_code == "im":
-        return f"{clean_comment} [OB_ROUTE:im]".strip()
-    return clean_comment
+    return operblock_comment_with_route(comment, route)
 
 
 def normalize_operblock_mkb_code(value: str) -> str:

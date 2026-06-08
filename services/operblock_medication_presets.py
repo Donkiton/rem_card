@@ -109,6 +109,8 @@ KNOWN_PRESET_FIELDS = {
     "aliases",
     "kind",
     "group",
+    "drug_group",
+    "drug_group_code",
     "route",
     "unit",
     "default_dose",
@@ -144,6 +146,7 @@ class OperBlockMedicationPreset:
     aliases: list[str] = field(default_factory=list)
     kind: str = "bolus"
     group: str = "Болюсы"
+    drug_group: str | None = None
     route: str | None = None
     unit: str | None = None
     default_dose: str | None = None
@@ -369,6 +372,7 @@ def project_drug_to_operblock_preset(
         aliases=_as_list(raw.get("aliases")),
         kind=kind,
         group=_default_group(kind, raw.get("group")),
+        drug_group=_as_optional_text(raw.get("group")),
         unit=_as_optional_text(raw.get("unit")),
         default_dose=_dose_option(raw.get("default_dose"), raw.get("unit")) if raw.get("default_dose") is not None else None,
         doses=_dose_options_from_drug(raw),
@@ -412,6 +416,7 @@ def _normalize_preset(raw: Mapping[str, Any], *, base: Mapping[str, Any] | None 
         aliases=_as_list(data.get("aliases")),
         kind=kind,
         group=_as_text(data.get("group")) or _default_group(kind),
+        drug_group=_as_optional_text(data.get("drug_group") or data.get("drug_group_code")),
         route=_as_optional_text(data.get("route")),
         unit=_as_optional_text(data.get("unit")),
         default_dose=_as_optional_text(data.get("default_dose")),
@@ -547,6 +552,7 @@ def quick_order_to_medication_preset(raw: Mapping[str, Any], *, sort_order: int 
             "display_name": _as_text(raw.get("display_name") or label),
             "kind": kind,
             "group": KIND_GROUP_LABELS.get(kind, "Болюсы"),
+            "drug_group": _as_optional_text(raw.get("drug_group") or raw.get("drug_group_code")),
             "doses": _as_list(raw.get("doses")),
             "rates": _as_list(raw.get("rates")),
             "concentration": raw.get("concentration") or raw.get("concentration_text"),
@@ -743,6 +749,7 @@ def build_operblock_preset_payload(preset: Mapping[str, Any]) -> dict[str, Any]:
         "display_name",
         "latin",
         "kind",
+        "drug_group",
         "concentration",
         "solvent_id",
         "solvent_label",
