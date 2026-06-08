@@ -1226,10 +1226,126 @@ class OperBlockChartWidget(ChartWidget):
             )
         return str(OperBlockChartWidget.OPERATION_STAGE_LABELS.get(stage_kind) or (row or {}).get("display_label") or "Этап")
 
+    @staticmethod
+    def _operation_stage_sort_id(row: dict) -> int:
+        for value in ((row or {}).get("source_id"), (row or {}).get("id")):
+            text = str(value or "").strip()
+            if not text:
+                continue
+            try:
+                return int(text)
+            except (TypeError, ValueError):
+                match = re.search(r"(\d+)$", text)
+                if match:
+                    return int(match.group(1))
+        return 0
+
+    @classmethod
+    def _operation_stage_row_sort_key(cls, row: dict) -> tuple[datetime, int]:
+        return (
+            _parse_datetime_value((row or {}).get("event_time")) or datetime.min,
+            cls._operation_stage_sort_id(row),
+        )
+
+    @staticmethod
+    def _join_operation_stage_labels(labels: list[str]) -> str:
+        cleaned = [re.sub(r"\s+", " ", str(label or "").strip()) for label in labels]
+        return ", ".join(label for label in cleaned if label) or "Этап операции"
+
+    def _operation_stage_label_half_width_hours(self) -> float:
+        return max(0.0, self._hours_for_plot_pixels(self._operation_start_label_metrics.height() + 10.0) / 2.0)
+
+    def _visible_operation_stage_marker_specs(
+        self,
+        start: datetime,
+        visible_hours: float,
+        rows: list[dict] | None = None,
+    ) -> list[dict]:
+        specs: list[dict] = []
+        view_left, view_right = self._current_timeline_view_bounds(visible_hours)
+        half_width = self._operation_stage_label_half_width_hours()
+        for row in sorted(list(rows if rows is not None else getattr(self, "_operation_stage_rows", []) or []), key=self._operation_stage_row_sort_key):
+            stage_kind = str((row or {}).get("stage_kind") or "").strip()
+            event_dt = _minute_floor_dt(_parse_datetime_value((row or {}).get("event_time")))
+            if event_dt is None:
+                continue
+            x = self._display_x_for_time(event_dt, start)
+            if x is None or x < -0.001 or x > visible_hours + 0.001:
+                continue
+            if x < view_left - 0.001 or x > view_right + 0.001:
+                continue
+            label_text = re.sub(r"\s+", " ", self._operation_stage_display_label(row).strip())
+            if not label_text:
+                continue
+            label_x, anchor = self._operation_start_label_position(x, label_text)
+            specs.append(
+                {
+                    "row": dict(row or {}),
+                    "event_dt": event_dt,
+                    "x": float(x),
+                    "label_x": float(label_x),
+                    "label_left": float(label_x) - half_width,
+                    "label_right": float(label_x) + half_width,
+                    "anchor": anchor,
+                    "label": label_text,
+                    "color": str(self.OPERATION_STAGE_COLORS.get(stage_kind) or "#506174"),
+                    "marker_key": self._operation_stage_marker_key(row),
+                    "sort_id": self._operation_stage_sort_id(row),
+                }
+            )
+        return specs
+
+    def _operation_stage_marker_clusters(self, specs: list[dict]) -> list[list[dict]]:
+        clusters: list[list[dict]] = []
+        cluster_right_edges: list[float] = []
+        gap = self._hours_for_plot_pixels(2.0)
+        for spec in sorted(specs or [], key=lambda item: (float(item.get("label_left") or 0.0), item.get("event_dt") or datetime.min, int(item.get("sort_id") or 0))):
+            left = float(spec.get("label_left") or 0.0)
+            right = float(spec.get("label_right") or left)
+            if clusters and left <= cluster_right_edges[-1] + gap:
+                clusters[-1].append(spec)
+                cluster_right_edges[-1] = max(cluster_right_edges[-1], right)
+                continue
+            clusters.append([spec])
+            cluster_right_edges.append(right)
+        for cluster in clusters:
+            cluster.sort(key=lambda item: (item.get("event_dt") or datetime.min, int(item.get("sort_id") or 0)))
+        return clusters
+
+    @staticmethod
+    def _operation_stage_cluster_marker_keys(cluster: list[dict]) -> set[str]:
+        return {str(spec.get("marker_key") or "").strip() for spec in (cluster or []) if str(spec.get("marker_key") or "").strip()}
+
+    def _operation_stage_cluster_keys_for_marker_keys(
+        self,
+        rows: list[dict],
+        start: datetime,
+        visible_hours: float,
+        marker_keys: set[str],
+    ) -> set[str]:
+        wanted = {str(key or "").strip() for key in (marker_keys or []) if str(key or "").strip()}
+        if not wanted:
+            return set()
+        affected: set[str] = set()
+        for cluster in self._operation_stage_marker_clusters(
+            self._visible_operation_stage_marker_specs(start, visible_hours, rows)
+        ):
+            cluster_keys = self._operation_stage_cluster_marker_keys(cluster)
+            if cluster_keys & wanted:
+                affected.update(cluster_keys)
+        return affected
+
     def _remove_operation_stage_marker_items(self, marker_key: str) -> None:
-        if not marker_key:
+        self._remove_operation_stage_marker_items_for_keys({marker_key})
+
+    def _remove_operation_stage_marker_items_for_keys(self, marker_keys: set[str] | list[str] | tuple[str, ...]) -> None:
+        keys = {str(key or "").strip() for key in (marker_keys or []) if str(key or "").strip()}
+        if not keys:
             return
-        marker_items = list((getattr(self, "_operation_stage_marker_items_by_key", {}) or {}).pop(marker_key, []))
+        marker_items = []
+        marker_map = getattr(self, "_operation_stage_marker_items_by_key", {}) or {}
+        for key in keys:
+            marker_items.extend(list(marker_map.pop(key, []) or []))
         if not marker_items:
             return
         marker_item_ids = {id(item) for item in marker_items}
@@ -1238,13 +1354,22 @@ class OperBlockChartWidget(ChartWidget):
                 self.plot_widget.removeItem(item)
             except Exception:
                 pass
+        for key, items in list(marker_map.items()):
+            kept_items = [item for item in list(items or []) if id(item) not in marker_item_ids]
+            if kept_items:
+                marker_map[key] = kept_items
+            else:
+                marker_map.pop(key, None)
         self._order_marker_items = [
             item for item in list(getattr(self, "_order_marker_items", []) or []) if id(item) not in marker_item_ids
         ]
 
     def _append_operation_stage_marker_item(self, marker_key: str, item) -> None:
+        self._append_operation_stage_marker_item_for_keys({marker_key}, item)
+
+    def _append_operation_stage_marker_item_for_keys(self, marker_keys: set[str] | list[str] | tuple[str, ...], item) -> None:
         self._order_marker_items.append(item)
-        if marker_key:
+        for marker_key in {str(key or "").strip() for key in (marker_keys or []) if str(key or "").strip()}:
             self._operation_stage_marker_items_by_key.setdefault(marker_key, []).append(item)
 
     def patch_operation_stage_marker(
@@ -1266,9 +1391,10 @@ class OperBlockChartWidget(ChartWidget):
         if isinstance(start_time, datetime):
             self._order_marker_start = start_time
 
+        previous_rows = list(getattr(self, "_operation_stage_rows", []) or [])
         patched_rows: list[dict] = []
         replaced = False
-        for existing in list(getattr(self, "_operation_stage_rows", []) or []):
+        for existing in previous_rows:
             if self._operation_stage_marker_key(existing) == marker_key:
                 if not replaced:
                     patched_rows.append(row)
@@ -1277,29 +1403,40 @@ class OperBlockChartWidget(ChartWidget):
             patched_rows.append(existing)
         if not replaced:
             patched_rows.append(row)
-        patched_rows.sort(
-            key=lambda item: (
-                _parse_datetime_value((item or {}).get("event_time")) or datetime.min,
-                int((item or {}).get("source_id") or 0),
-            )
-        )
+        patched_rows.sort(key=self._operation_stage_row_sort_key)
         self._operation_stage_rows = patched_rows
-        self._remove_operation_stage_marker_items(marker_key)
         start = self._order_marker_start if isinstance(self._order_marker_start, datetime) else None
         if start is None or not getattr(self, "plot_widget", None):
+            self._remove_operation_stage_marker_items(marker_key)
             self._order_marker_render_signature = self._current_order_marker_signature()
             return True
-        event_dt = _minute_floor_dt(_parse_datetime_value(row.get("event_time")))
-        if event_dt is not None:
-            visible_hours = max(1.0, float(getattr(self, "visible_hours", OPERBLOCK_INITIAL_CHART_HOURS)))
-            self._render_single_operation_stage_marker(
-                start.replace(second=0, microsecond=0),
+        visible_hours = max(1.0, float(getattr(self, "visible_hours", OPERBLOCK_INITIAL_CHART_HOURS)))
+        normalized_start = start.replace(second=0, microsecond=0)
+        seed_keys = {marker_key}
+        affected_keys = set(seed_keys)
+        affected_keys.update(
+            self._operation_stage_cluster_keys_for_marker_keys(previous_rows, normalized_start, visible_hours, seed_keys)
+        )
+        affected_keys.update(
+            self._operation_stage_cluster_keys_for_marker_keys(patched_rows, normalized_start, visible_hours, seed_keys)
+        )
+        self._remove_operation_stage_marker_items_for_keys(affected_keys)
+        rendered_clusters: set[tuple[str, ...]] = set()
+        for cluster in self._operation_stage_marker_clusters(
+            self._visible_operation_stage_marker_specs(normalized_start, visible_hours, patched_rows)
+        ):
+            cluster_keys = self._operation_stage_cluster_marker_keys(cluster)
+            if not cluster_keys or not (cluster_keys & affected_keys):
+                continue
+            cluster_key = tuple(sorted(cluster_keys))
+            if cluster_key in rendered_clusters:
+                continue
+            rendered_clusters.add(cluster_key)
+            self._render_operation_stage_marker_group(
+                normalized_start,
                 visible_hours,
-                event_dt,
-                self._operation_stage_display_label(row),
-                str(self.OPERATION_STAGE_COLORS.get(str(row.get("stage_kind") or "").strip()) or "#506174"),
+                cluster,
                 gaps_by_x=getattr(self, "_last_operation_stage_gaps_by_x", {}) or {},
-                marker_key=marker_key,
             )
         self._order_marker_render_signature = self._current_order_marker_signature()
         return True
@@ -2674,31 +2811,76 @@ class OperBlockChartWidget(ChartWidget):
         *,
         gaps_by_x: dict[float, list[tuple[float, float]]] | None = None,
     ):
-        rows = sorted(
-            list(getattr(self, "_operation_stage_rows", []) or []),
-            key=lambda item: (_parse_datetime_value((item or {}).get("event_time")) or datetime.min, int((item or {}).get("source_id") or (item or {}).get("id") or 0)),
-        )
         rendered = False
-        for row in rows:
-            stage_kind = str((row or {}).get("stage_kind") or "").strip()
-            event_dt = _minute_floor_dt(_parse_datetime_value((row or {}).get("event_time")))
-            if event_dt is None:
-                continue
-            label_text = self._operation_stage_display_label(row)
-            color = str(self.OPERATION_STAGE_COLORS.get(stage_kind) or "#506174")
-            if self._render_single_operation_stage_marker(
+        specs = self._visible_operation_stage_marker_specs(start, visible_hours)
+        for cluster in self._operation_stage_marker_clusters(specs):
+            if self._render_operation_stage_marker_group(
                 start,
                 visible_hours,
-                event_dt,
-                label_text,
-                color,
+                cluster,
                 gaps_by_x=gaps_by_x,
-                marker_key=self._operation_stage_marker_key(row),
             ):
                 rendered = True
         if rendered:
             return
         self._render_operation_start_marker(start, visible_hours, gaps_by_x=gaps_by_x)
+
+    def _render_operation_stage_marker_group(
+        self,
+        start: datetime,
+        visible_hours: float,
+        cluster: list[dict],
+        *,
+        gaps_by_x: dict[float, list[tuple[float, float]]] | None = None,
+    ) -> bool:
+        specs = sorted(cluster or [], key=lambda item: (item.get("event_dt") or datetime.min, int(item.get("sort_id") or 0)))
+        if not specs:
+            return False
+        marker_keys = self._operation_stage_cluster_marker_keys(specs)
+        drawn_lines: dict[tuple[float, str], set[str]] = {}
+        for spec in specs:
+            x = float(spec.get("x") or 0.0)
+            color = str(spec.get("color") or "#506174")
+            spec_key = str(spec.get("marker_key") or "").strip()
+            line_key = (self._guideline_gap_key(x), color)
+            drawn_lines.setdefault(line_key, set()).add(spec_key)
+            if len(drawn_lines[line_key]) > 1:
+                continue
+            gaps = (gaps_by_x or {}).get(self._guideline_gap_key(x), [])
+            for y_start, y_end in self.vertical_guideline_segments_around_gaps(
+                self.MEDICATION_BAND_MIN,
+                self.VITAL_AXIS_MAX,
+                gaps,
+            ):
+                line = pg.PlotDataItem(
+                    [x, x],
+                    [y_start, y_end],
+                    pen=pg.mkPen(color, width=1, style=Qt.DashLine),
+                )
+                line.setZValue(32)
+                setattr(line, "_operblock_operation_stage_segment", True)
+                self.plot_widget.addItem(line)
+                self._append_operation_stage_marker_item_for_keys({spec_key}, line)
+
+        label_text = self._join_operation_stage_labels([str(spec.get("label") or "") for spec in specs])
+        label_x, anchor = self._operation_start_label_position(float(specs[0].get("x") or 0.0), label_text)
+        colors = [str(spec.get("color") or "#506174") for spec in specs]
+        label_color = colors[0] if all(color == colors[0] for color in colors) else "#334155"
+        label = pg.TextItem(
+            html=(
+                "<span style='font-family: Segoe UI; "
+                f"font-size: {int(self.OPERATION_START_LABEL_FONT_SIZE)}px; font-weight: 700; "
+                f"color: {html.escape(label_color)}; padding: 2px 4px;'>{html.escape(label_text)}</span>"
+            ),
+            anchor=anchor,
+            fill=pg.mkBrush("#ffffff"),
+            angle=-90,
+        )
+        label.setZValue(73)
+        label.setPos(label_x, self._operation_start_label_y())
+        self.plot_widget.addItem(label)
+        self._append_operation_stage_marker_item_for_keys(marker_keys, label)
+        return True
 
     def _render_single_operation_stage_marker(
         self,

@@ -18764,6 +18764,80 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         manager.close()
 
 
+def _check_operblock_operation_stage_chart_grouping(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import timedelta
+
+    import pyqtgraph as pg
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.operblock_view.operblock_chart_widget import OperBlockChartWidget
+
+    app = QApplication.instance() or QApplication([])
+    start = datetime(2026, 6, 8, 12, 0)
+    chart = OperBlockChartWidget()
+    try:
+        chart.resize(900, 520)
+        chart.show()
+        app.processEvents()
+        chart.start_time = start
+        chart.visible_hours = 3
+        chart.plot_widget.getViewBox().setRange(
+            xRange=(0, 3),
+            yRange=(chart.MEDICATION_BAND_MIN, chart.VITAL_AXIS_MAX),
+            padding=0,
+        )
+        first = {
+            "source_id": 10,
+            "event_time": start.isoformat(timespec="seconds"),
+            "display_label": "разрез",
+            "raw_text": "разрез",
+            "revision": 1,
+            "payload": {"stage_kind": "custom", "label": "разрез"},
+        }
+        second = {
+            "source_id": 11,
+            "event_time": start.isoformat(timespec="seconds"),
+            "display_label": "распил",
+            "raw_text": "распил",
+            "revision": 1,
+            "payload": {"stage_kind": "custom", "label": "распил"},
+        }
+        snapshot = {"operation_events": [first, second]}
+        chart.set_timeline_snapshot(snapshot, start, force=True)
+        app.processEvents()
+        labels = [item for item in chart._order_marker_items if isinstance(item, pg.TextItem)]
+        texts = [getattr(getattr(item, "textItem", None), "toPlainText", lambda: "")() for item in labels]
+        if texts != ["разрез, распил"]:
+            return False, f"same-time operation stages were not grouped: {texts!r}"
+        shared_ids = set(id(item) for item in chart._operation_stage_marker_items_by_key.get("timeline_event:10", []))
+        shared_ids &= set(id(item) for item in chart._operation_stage_marker_items_by_key.get("timeline_event:11", []))
+        if not shared_ids:
+            return False, "grouped operation stage label was not indexed by both stage keys"
+
+        moved_second = dict(second)
+        moved_second["event_time"] = (start + timedelta(minutes=30)).isoformat(timespec="seconds")
+        moved_second["revision"] = 2
+        chart.patch_operation_stage_marker(
+            moved_second,
+            snapshot={"operation_events": [first, moved_second]},
+            start_time=start,
+        )
+        app.processEvents()
+        texts_after_patch = [
+            getattr(getattr(item, "textItem", None), "toPlainText", lambda: "")()
+            for item in chart._order_marker_items
+            if isinstance(item, pg.TextItem)
+        ]
+        if sorted(texts_after_patch) != ["разрез", "распил"]:
+            return False, f"operation stage group was not redrawn after patch: {texts_after_patch!r}"
+        return True, "ok"
+    finally:
+        chart.deleteLater()
+        app.processEvents()
+
+
 def _check_print_and_background_settings_from_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import SettingsService
@@ -20055,6 +20129,7 @@ def main():
         ("operblock_route_settings_order_and_default", _check_operblock_route_settings_order_and_default),
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
+        ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),
