@@ -10234,6 +10234,39 @@ class OperBlockMainWidget(QWidget):
         return scroll
 
     @staticmethod
+    def _scroll_board_area_to_bottom_when_ready(scroll: QScrollArea) -> None:
+        scroll_ref = weakref.ref(scroll)
+        scrollbar = scroll.verticalScrollBar()
+        connection = {"active": True}
+
+        def scroll_to_bottom(*_args) -> None:
+            if not connection.get("active"):
+                return
+            scroll_widget = scroll_ref()
+            if scroll_widget is None:
+                connection["active"] = False
+                return
+            try:
+                maximum = int(scrollbar.maximum())
+                minimum = int(scrollbar.minimum())
+                if maximum <= minimum:
+                    return
+                scrollbar.setValue(maximum)
+                connection["active"] = False
+                try:
+                    scrollbar.rangeChanged.disconnect(scroll_to_bottom)
+                except (RuntimeError, TypeError):
+                    pass
+            except RuntimeError:
+                connection["active"] = False
+
+        try:
+            scrollbar.rangeChanged.connect(scroll_to_bottom)
+        except RuntimeError:
+            return
+        QTimer.singleShot(0, scroll_to_bottom)
+
+    @staticmethod
     def _board_format_weight(value) -> str:
         if value in (None, ""):
             return "—"
@@ -10684,6 +10717,7 @@ class OperBlockMainWidget(QWidget):
         content_layout.addStretch(1)
         scroll.setWidget(content)
         layout.addWidget(scroll)
+        self._scroll_board_area_to_bottom_when_ready(scroll)
         return block
 
     def _board_allergies_block(self, patient: dict) -> QFrame:

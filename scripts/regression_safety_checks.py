@@ -19022,6 +19022,15 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     med_texts = [label.text() for label in meds_block.findChildren(QLabel)]
     if "Препарат 01" not in med_texts or "Препарат 12" not in med_texts:
         return False, f"medication preview scroll did not keep all rows: {med_texts!r}"
+    meds_block.resize(360, 260)
+    meds_block.show()
+    app.processEvents()
+    app.processEvents()
+    meds_bar = meds_scroll.verticalScrollBar()
+    if meds_bar.maximum() <= 0:
+        return False, "board medication preview did not overflow in the scroll area"
+    if meds_bar.value() != meds_bar.maximum():
+        return False, f"board medication preview did not auto-scroll to latest row: {meds_bar.value()} != {meds_bar.maximum()}"
 
     operation_events = [
         {
