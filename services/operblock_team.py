@@ -14,6 +14,9 @@ OPERBLOCK_TEAM_OVERRIDE_KEY = "operblock_team"
 OPERBLOCK_TEAM_VERSION = 1
 OPERBLOCK_TEAM_DEFAULT_POSITIONS = (
     "Хирург",
+    "Гинеколог",
+    "Лор",
+    "Травматолог",
     "Операционная медсестра",
     "Анестезистка",
 )
