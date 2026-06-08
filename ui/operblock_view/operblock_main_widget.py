@@ -6600,23 +6600,39 @@ class GasDoseDialog(SavedFramelessDialogMixin, QDialog):
 
 
 class TimeEditDialog(OperBlockStyledDialog):
-    def __init__(self, title: str, base_datetime, parent=None, *, field_label: str = "Время"):
+    def __init__(
+        self,
+        title: str,
+        base_datetime,
+        parent=None,
+        *,
+        field_label: str = "Время",
+        medication_time_style: bool = False,
+    ):
         self._base_datetime = _minute_floor_dt(_parse_datetime_value(base_datetime)) or datetime.now().replace(
             second=0,
             microsecond=0,
         )
         self._field_label = str(field_label or "Время")
+        self._medication_time_style = bool(medication_time_style)
+        self._time_text_updating = False
+        minimum_size = (470, 205) if self._medication_time_style else (360, 140)
+        initial_size = (520, 225) if self._medication_time_style else (400, 155)
+        geometry_key = "operation_stage_time_edit_dialog_geometry" if self._medication_time_style else "time_edit_dialog_geometry"
         super().__init__(
             title,
-            "time_edit_dialog_geometry",
+            geometry_key,
             parent,
-            minimum_size=(360, 140),
-            initial_size=(400, 155),
+            minimum_size=minimum_size,
+            initial_size=initial_size,
         )
         self._init_ui()
         self._finalize_dialog_chrome()
 
     def _init_ui(self):
+        if self._medication_time_style:
+            self._init_medication_time_ui()
+            return
         layout = self.content_layout
         time_row = QHBoxLayout()
         time_row.setContentsMargins(0, 0, 0, 0)
@@ -6648,11 +6664,253 @@ class TimeEditDialog(OperBlockStyledDialog):
         actions.addWidget(save_button)
         layout.addLayout(actions)
 
+    def _init_medication_time_ui(self) -> None:
+        self.setStyleSheet(
+            self.styleSheet()
+            + """
+            QFrame#StageTimeFieldCard {
+                background-color: #FFFFFF;
+                border: 1px solid #E5E7EB;
+                border-radius: 14px;
+            }
+            QLabel#StageTimeFieldTitle {
+                color: #6B7280;
+                font-size: 12px;
+                font-weight: 500;
+                background: transparent;
+            }
+            QFrame#StageTimeInputFrame {
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }
+            QFrame#StageTimeInputFrame[focused="true"] {
+                border: 1px solid #6366F1;
+            }
+            QLineEdit#StageTimeInput {
+                background-color: transparent;
+                color: #111827;
+                border: none;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }
+            QFrame#StageTimeStepperColumn {
+                background-color: transparent;
+                border: none;
+            }
+            QPushButton#StageTimeCancelButton {
+                background-color: #FFFFFF;
+                color: #111827;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton#StageTimeCancelButton:hover {
+                background-color: #F3F4F6;
+                border-color: #B8C0CC;
+            }
+            QPushButton#StageTimeSaveButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #4F46E5);
+                color: #FFFFFF;
+                border: 1px solid #4F46E5;
+                border-radius: 8px;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            QPushButton#StageTimeSaveButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7377F7, stop:1 #5B52EA);
+                border-color: #6366F1;
+            }
+            """
+            + operblock_arrow_button_style("QPushButton#StageTimeStepButton")
+        )
+
+        layout = self.content_layout
+        layout.setSpacing(12)
+
+        card = QFrame()
+        card.setObjectName("StageTimeFieldCard")
+        card.setMinimumHeight(110)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 12, 16, 14)
+        card_layout.setSpacing(6)
+
+        time_label = QLabel(self._field_label)
+        time_label.setObjectName("StageTimeFieldTitle")
+        card_layout.addWidget(time_label)
+
+        self.time_frame = QFrame()
+        self.time_frame.setObjectName("StageTimeInputFrame")
+        self.time_frame.setFixedHeight(52)
+        self.time_frame.setProperty("focused", False)
+        time_layout = QHBoxLayout(self.time_frame)
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("StageTimeInput")
+        self.time_input.setText(self._time_text_from_datetime(self._base_datetime))
+        self.time_input.setPlaceholderText("09:10")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        time_layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName("StageTimeStepperColumn")
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        up_button = QPushButton()
+        up_button.setObjectName("StageTimeStepButton")
+        up_button.setFixedSize(30, 20)
+        up_button.setIcon(_gas_time_step_icon(up=True))
+        up_button.setIconSize(QSize(14, 14))
+        up_button.setCursor(Qt.PointingHandCursor)
+        up_button.clicked.connect(lambda _=False: self._step_time(1))
+        down_button = QPushButton()
+        down_button.setObjectName("StageTimeStepButton")
+        down_button.setFixedSize(30, 20)
+        down_button.setIcon(_gas_time_step_icon(up=False))
+        down_button.setIconSize(QSize(14, 14))
+        down_button.setCursor(Qt.PointingHandCursor)
+        down_button.clicked.connect(lambda _=False: self._step_time(-1))
+        stepper_layout.addWidget(up_button)
+        stepper_layout.addWidget(down_button)
+        time_layout.addWidget(stepper, 0)
+
+        card_layout.addWidget(self.time_frame)
+        layout.addWidget(card)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 4, 0, 0)
+        actions.setSpacing(10)
+        actions.addStretch(1)
+        cancel_button = QPushButton("Отменить")
+        cancel_button.setObjectName("StageTimeCancelButton")
+        cancel_button.setFixedSize(118, 38)
+        cancel_button.setCursor(Qt.PointingHandCursor)
+        cancel_button.clicked.connect(self.reject)
+        save_button = QPushButton("Сохранить")
+        save_button.setObjectName("StageTimeSaveButton")
+        save_button.setFixedSize(138, 38)
+        save_button.setCursor(Qt.PointingHandCursor)
+        save_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, save_button)
+        actions.addWidget(cancel_button)
+        actions.addWidget(save_button)
+        layout.addLayout(actions)
+
+    def eventFilter(self, obj, event):
+        if self._medication_time_style and obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        frame = getattr(self, "time_frame", None)
+        if frame is None:
+            return
+        frame.setProperty("focused", bool(focused))
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        digits = re.sub(r"\D", "", str(text or ""))
+        if len(digits) < 4:
+            return
+        event_dt = self._time_datetime_from_text(digits[:4])
+        if event_dt is None:
+            return
+        self._set_time_input_text(self._time_text_from_datetime(event_dt), select_all=False)
+
+    def _commit_time_text(self) -> str:
+        raw_text = self.time_input.text() if isinstance(getattr(self, "time_input", None), QLineEdit) else ""
+        event_dt = self._time_datetime_from_text(raw_text)
+        if event_dt is None:
+            event_dt = self._base_datetime
+        normalized = self._time_text_from_datetime(event_dt)
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _step_time(self, delta_minutes: int) -> None:
+        current_dt = self._time_datetime_from_text(self.time_input.text())
+        if current_dt is None:
+            current_dt = self._base_datetime
+        stepped = _minute_floor_dt(current_dt + timedelta(minutes=int(delta_minutes))) or self._base_datetime
+        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(text)
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(text))
+        finally:
+            self._time_text_updating = False
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = self._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        return self._base_datetime.replace(
+            hour=minutes // 60,
+            minute=minutes % 60,
+            second=0,
+            microsecond=0,
+        )
+
+    @staticmethod
+    def _time_text_from_datetime(value: datetime) -> str:
+        return f"{value.hour:02d}:{value.minute:02d}"
+
+    @staticmethod
+    def _time_minutes_from_text(value: str) -> int | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        colon_match = re.fullmatch(r"(\d{1,2})\s*:\s*(\d{1,2})", raw)
+        if colon_match:
+            hour = int(colon_match.group(1))
+            minute = int(colon_match.group(2))
+        else:
+            digits = re.sub(r"\D", "", raw)
+            if len(digits) == 4:
+                hour = int(digits[:2])
+                minute = int(digits[2:])
+            elif len(digits) == 3:
+                hour = int(digits[:1])
+                minute = int(digits[1:])
+            else:
+                return None
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour * 60 + minute
+        return None
+
     def start_time_text(self) -> str:
+        if self._medication_time_style:
+            return self._commit_time_text()
         selected = self.time_input.time()
         return f"{selected.hour():02d}:{selected.minute():02d}"
 
     def datetime_text(self) -> str:
+        if self._medication_time_style:
+            event_dt = self._time_datetime_from_text(self._commit_time_text()) or self._base_datetime
+            return event_dt.isoformat(timespec="seconds")
         selected = self.time_input.time()
         value = self._base_datetime.replace(
             hour=selected.hour(),
@@ -15063,7 +15321,13 @@ class OperBlockMainWidget(QWidget):
             dialog.apply_save_error(row_key)
             CustomMessageBox.warning(self, "Время этапа", "Не удалось определить этап. Обновите протокол.")
             return
-        time_dialog = TimeEditDialog("Время этапа операции", old_event_dt, self, field_label="Время этапа")
+        time_dialog = TimeEditDialog(
+            "Время этапа операции",
+            old_event_dt,
+            self,
+            field_label="Время этапа",
+            medication_time_style=True,
+        )
         if time_dialog.exec() != QDialog.Accepted:
             return
         event_time = time_dialog.datetime_text()
