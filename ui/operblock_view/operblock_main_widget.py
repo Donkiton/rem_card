@@ -163,6 +163,7 @@ from rem_card.ui.operblock_view.operblock_control_styles import (
     operblock_arrow_button_style,
     operblock_arrow_icon,
     operblock_combo_box_style as _operblock_combo_box_style,
+    operblock_med_action_button_style,
     operblock_vertical_scrollbar_style as _operblock_vertical_scrollbar_style,
 )
 
@@ -5438,31 +5439,8 @@ class MedicationEditDialogBase(SavedFramelessDialogMixin, QDialog):
                 border-bottom-right-radius: 12px;
                 border-top: 1px solid #E5E7EB;
             }
-            QPushButton#MedCancelButton {
-                background-color: #FFFFFF;
-                color: #111827;
-                border: 1px solid #D1D5DB;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton#MedCancelButton:hover {
-                background-color: #F3F4F6;
-                border-color: #B8C0CC;
-            }
-            QPushButton#MedSaveButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #4F46E5);
-                color: #FFFFFF;
-                border: 1px solid #4F46E5;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 700;
-            }
-            QPushButton#MedSaveButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7377F7, stop:1 #5B52EA);
-                border-color: #6366F1;
-            }
             """
+            + operblock_med_action_button_style("QPushButton#MedCancelButton", "QPushButton#MedSaveButton")
         )
 
         outer = QVBoxLayout(self)
@@ -6700,32 +6678,9 @@ class TimeEditDialog(OperBlockStyledDialog):
                 background-color: transparent;
                 border: none;
             }
-            QPushButton#StageTimeCancelButton {
-                background-color: #FFFFFF;
-                color: #111827;
-                border: 1px solid #D1D5DB;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton#StageTimeCancelButton:hover {
-                background-color: #F3F4F6;
-                border-color: #B8C0CC;
-            }
-            QPushButton#StageTimeSaveButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #4F46E5);
-                color: #FFFFFF;
-                border: 1px solid #4F46E5;
-                border-radius: 8px;
-                font-size: 13px;
-                font-weight: 700;
-            }
-            QPushButton#StageTimeSaveButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7377F7, stop:1 #5B52EA);
-                border-color: #6366F1;
-            }
             """
-            + operblock_arrow_button_style("QPushButton#StageTimeStepButton")
+            + operblock_arrow_button_style("QPushButton#MedTimeStepButton")
+            + operblock_med_action_button_style("QPushButton#MedCancelButton", "QPushButton#MedSaveButton")
         )
 
         layout = self.content_layout
@@ -6769,14 +6724,14 @@ class TimeEditDialog(OperBlockStyledDialog):
         stepper_layout.setSpacing(4)
 
         up_button = QPushButton()
-        up_button.setObjectName("StageTimeStepButton")
+        up_button.setObjectName("MedTimeStepButton")
         up_button.setFixedSize(30, 20)
         up_button.setIcon(_gas_time_step_icon(up=True))
         up_button.setIconSize(QSize(14, 14))
         up_button.setCursor(Qt.PointingHandCursor)
         up_button.clicked.connect(lambda _=False: self._step_time(1))
         down_button = QPushButton()
-        down_button.setObjectName("StageTimeStepButton")
+        down_button.setObjectName("MedTimeStepButton")
         down_button.setFixedSize(30, 20)
         down_button.setIcon(_gas_time_step_icon(up=False))
         down_button.setIconSize(QSize(14, 14))
@@ -6794,12 +6749,12 @@ class TimeEditDialog(OperBlockStyledDialog):
         actions.setSpacing(10)
         actions.addStretch(1)
         cancel_button = QPushButton("Отменить")
-        cancel_button.setObjectName("StageTimeCancelButton")
+        cancel_button.setObjectName("MedCancelButton")
         cancel_button.setFixedSize(118, 38)
         cancel_button.setCursor(Qt.PointingHandCursor)
         cancel_button.clicked.connect(self.reject)
         save_button = QPushButton("Сохранить")
-        save_button.setObjectName("StageTimeSaveButton")
+        save_button.setObjectName("MedSaveButton")
         save_button.setFixedSize(138, 38)
         save_button.setCursor(Qt.PointingHandCursor)
         save_button.clicked.connect(self.accept)

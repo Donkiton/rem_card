@@ -124,6 +124,35 @@ def operblock_arrow_button_style(selector: str) -> str:
     """
 
 
+def operblock_med_action_button_style(cancel_selector: str, save_selector: str) -> str:
+    return f"""
+        {cancel_selector} {{
+            background-color: #FFFFFF;
+            color: #111827;
+            border: 1px solid #D1D5DB;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+        }}
+        {cancel_selector}:hover {{
+            background-color: #F3F4F6;
+            border-color: #B8C0CC;
+        }}
+        {save_selector} {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #6366F1, stop:1 #4F46E5);
+            color: #FFFFFF;
+            border: 1px solid #4F46E5;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 700;
+        }}
+        {save_selector}:hover {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #7377F7, stop:1 #5B52EA);
+            border-color: #6366F1;
+        }}
+    """
+
+
 def operblock_arrow_icon(*, up: bool = False) -> QIcon:
     pixmap = QPixmap(os.path.join(get_icon_dir(), "combo_arrow_down.svg"))
     if pixmap.isNull():
