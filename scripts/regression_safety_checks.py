@@ -19238,6 +19238,77 @@ def _check_operblock_board_medication_empty_notice(app, widget) -> tuple[bool, s
         app.processEvents()
 
 
+def _check_operblock_empty_table_card_layout(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication, QFrame, QLabel, QPushButton, QWidget
+
+    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+    widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+    widget._current_board_apply_metrics = None
+    card = widget._make_empty_table_card("planned", "Плановая операционная")
+    try:
+        card.resize(1200, 720)
+        card.show()
+        app.processEvents()
+        app.processEvents()
+
+        header = next((label for label in card.findChildren(QLabel) if label.text() == "Плановая операционная"), None)
+        if header is None:
+            return False, "empty table card did not render the table title"
+        empty_state = card.findChild(QFrame, "OperBlockEmptyStateCard")
+        if empty_state is None:
+            return False, "empty table card did not render the central empty-state card"
+        width_ratio = empty_state.width() / max(1, card.width())
+        if width_ratio < 0.78 or width_ratio > 0.92:
+            return False, f"empty-state card width ratio is outside the requested range: {width_ratio:.3f}"
+        if "#FFFFFF" not in empty_state.styleSheet() or "#DDE5EE" not in empty_state.styleSheet():
+            return False, "empty-state card does not keep the white card and thin border styling"
+        illustration = card.findChild(QWidget, "OperBlockEmptyStateIllustration")
+        if illustration is None:
+            return False, "empty table card did not render the round operating-room illustration"
+        if isinstance(illustration, QLabel):
+            return False, "empty-state illustration must not be the old QLabel pixmap"
+        if illustration.width() < 120 or illustration.height() < 120:
+            return False, f"empty-state illustration is too small: {illustration.size()}"
+        status = next((label for label in card.findChildren(QLabel) if label.text() == "МЕСТО СВОБОДНО"), None)
+        if status is None or "#16A34A" not in status.styleSheet():
+            return False, "empty table card did not render the green free-status text"
+        description = card.findChild(QLabel, "OperBlockEmptyStateDescription")
+        if description is None or "нет активной операции" not in description.text():
+            return False, "empty table card did not render the explanatory text"
+        separator = card.findChild(QFrame, "OperBlockEmptyStateSeparator")
+        if separator is None or separator.height() != 1:
+            return False, "empty table card did not render the thin separator"
+        button = card.findChild(QPushButton, "OperBlockEmptyStateOccupyButton")
+        if button is None:
+            return False, "empty table card did not render the primary occupy button"
+        if button.text() != "ЗАНЯТЬ СТОЛ" or button.height() < 52 or button.maximumWidth() > 520:
+            return False, f"empty occupy button has unexpected geometry or text: {button.text()} {button.size()}"
+        if "#16A34A" not in button.styleSheet():
+            return False, "empty occupy button is not styled as the green primary action"
+        pixmap_labels = [
+            label
+            for label in card.findChildren(QLabel)
+            if label.pixmap() is not None and not label.pixmap().isNull()
+        ]
+        if pixmap_labels:
+            return False, "empty table card still renders a pixmap label from the old placeholder"
+        info = card.findChild(QFrame, "OperBlockEmptyStateInfo")
+        if info is None or "#EFF6FF" not in info.styleSheet() or "#BBD7FF" not in info.styleSheet():
+            return False, "empty table card did not render the blue informational block"
+        info_text = card.findChild(QLabel, "OperBlockEmptyStateInfoText")
+        if info_text is None or "После занятия стола" not in info_text.text():
+            return False, "empty table card did not render the informational text"
+        return True, "ok"
+    finally:
+        card.deleteLater()
+        app.processEvents()
+
+
 def _check_operblock_board_gender_photo_uses_operating_room_asset(
     app,
     widget,
@@ -21028,6 +21099,7 @@ def main():
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
         ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
+        ("operblock_empty_table_card_layout", _check_operblock_empty_table_card_layout),
         ("operblock_board_preview_bounded_history", _check_operblock_board_preview_bounded_history),
         ("operblock_quick_order_local_updates", _check_operblock_quick_order_local_updates),
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),

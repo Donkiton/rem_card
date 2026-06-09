@@ -471,6 +471,118 @@ def _label(text: str, *, size: int = 12, weight: int = 400, color: str = TEXT_PR
     return label
 
 
+class _OperBlockEmptyRoomIllustration(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("OperBlockEmptyStateIllustration")
+        self.setFixedSize(144, 144)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        circle_rect = QRectF(3, 3, 138, 138)
+        clip = QPainterPath()
+        clip.addEllipse(circle_rect)
+        painter.setClipPath(clip)
+        painter.fillPath(clip, QColor("#EEF7FF"))
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.drawRoundedRect(QRectF(25, 24, 44, 34), 6, 6)
+        painter.drawRoundedRect(QRectF(75, 24, 44, 34), 6, 6)
+        painter.setBrush(QColor("#D9EFFF"))
+        painter.drawRect(QRectF(68, 24, 2, 34))
+
+        painter.setBrush(QColor("#E2E8F0"))
+        painter.drawRect(QRectF(0, 102, 144, 42))
+        painter.setPen(QPen(QColor("#C7D4E2"), 1))
+        painter.drawLine(20, 115, 124, 115)
+
+        painter.setPen(QPen(QColor("#8AA3B8"), 4, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(45, 71, 72, 84)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor("#BED0DE"), 2))
+        painter.drawRoundedRect(QRectF(42, 80, 66, 20), 10, 10)
+        painter.setBrush(QColor("#BFE3EA"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(50, 84, 48, 12), 6, 6)
+        painter.setPen(QPen(QColor("#8AA3B8"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(58, 100, 50, 116)
+        painter.drawLine(93, 100, 101, 116)
+
+        painter.setPen(QPen(QColor("#7C93A7"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(98, 68, 98, 92)
+        painter.setBrush(QColor("#FFFFFF"))
+        painter.setPen(QPen(QColor("#AFC3D3"), 2))
+        painter.drawRoundedRect(QRectF(102, 64, 23, 18), 4, 4)
+        painter.setBrush(QColor("#93C5FD"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(QRectF(106, 68, 15, 10), 2, 2)
+
+        painter.setPen(QPen(QColor("#9AAFC1"), 3, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(72, 20, 72, 45)
+        painter.drawLine(72, 45, 58, 58)
+        painter.drawLine(72, 45, 86, 58)
+        painter.setBrush(QColor("#FDFDFE"))
+        painter.setPen(QPen(QColor("#BAC8D6"), 2))
+        painter.drawEllipse(QRectF(49, 54, 18, 12))
+        painter.drawEllipse(QRectF(77, 54, 18, 12))
+        painter.setBrush(QColor("#DDF4FF"))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(QRectF(54, 58, 8, 5))
+        painter.drawEllipse(QRectF(82, 58, 8, 5))
+
+        painter.setClipping(False)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#BBD7EA"), 2))
+        painter.drawEllipse(circle_rect)
+        painter.end()
+
+
+class _OperBlockCircleIcon(QWidget):
+    def __init__(
+        self,
+        kind: str,
+        *,
+        background: str,
+        border: str,
+        foreground: str,
+        size: int,
+        parent: QWidget | None = None,
+    ):
+        super().__init__(parent)
+        self._kind = str(kind or "")
+        self._background = QColor(background)
+        self._border = QColor(border)
+        self._foreground = QColor(foreground)
+        self.setFixedSize(size, size)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+    def paintEvent(self, event):  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        rect = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        painter.setBrush(self._background)
+        painter.setPen(QPen(self._border, 1.2))
+        painter.drawEllipse(rect)
+
+        painter.setPen(QPen(self._foreground, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        width = float(self.width())
+        height = float(self.height())
+        if self._kind == "check":
+            painter.drawLine(QPointF(width * 0.31, height * 0.51), QPointF(width * 0.44, height * 0.64))
+            painter.drawLine(QPointF(width * 0.44, height * 0.64), QPointF(width * 0.70, height * 0.37))
+        else:
+            painter.drawLine(QPointF(width * 0.50, height * 0.43), QPointF(width * 0.50, height * 0.68))
+            painter.drawPoint(QPointF(width * 0.50, height * 0.30))
+        painter.end()
+
+
 class _OperBlockBoardProgressStepper(QWidget):
     def __init__(self, stages: list[str], active_index: int, fill_fraction: float, parent: QWidget | None = None):
         super().__init__(parent)
@@ -9854,6 +9966,82 @@ class OperBlockMainWidget(QWidget):
         CustomMessageBox.warning(self, "Удаление из архива", str(exc))
         self.refresh_operblock_archive(force=True)
 
+    def _make_empty_table_action_button(self, table_code: str, display_name: str) -> QPushButton:
+        button = QPushButton("ЗАНЯТЬ СТОЛ")
+        button.setObjectName("OperBlockEmptyStateOccupyButton")
+        button.setFixedHeight(58)
+        button.setMinimumWidth(320)
+        button.setMaximumWidth(480)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setIcon(QIcon(os.path.join(get_icon_dir(), "operblock_plus.svg")))
+        button.setIconSize(QSize(22, 22))
+        button.setStyleSheet(
+            """
+            QPushButton#OperBlockEmptyStateOccupyButton {
+                background-color: #16A34A;
+                color: #FFFFFF;
+                border: 1px solid #15803D;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 800;
+                padding: 0 28px;
+                text-align: center;
+            }
+            QPushButton#OperBlockEmptyStateOccupyButton:hover {
+                background-color: #15803D;
+                border-color: #166534;
+            }
+            QPushButton#OperBlockEmptyStateOccupyButton:pressed {
+                background-color: #166534;
+                border-color: #14532D;
+            }
+            """
+        )
+        button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
+        return button
+
+    @staticmethod
+    def _make_empty_table_info_block() -> QFrame:
+        info = QFrame()
+        info.setObjectName("OperBlockEmptyStateInfo")
+        info.setMinimumHeight(58)
+        info.setStyleSheet(
+            """
+            QFrame#OperBlockEmptyStateInfo {
+                background-color: #EFF6FF;
+                border: 1px solid #BBD7FF;
+                border-radius: 10px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        info_layout = QHBoxLayout(info)
+        info_layout.setContentsMargins(18, 12, 18, 12)
+        info_layout.setSpacing(11)
+        info_layout.addStretch(1)
+
+        icon = _OperBlockCircleIcon(
+            "info",
+            background="#DBEAFE",
+            border="#93C5FD",
+            foreground="#1D4ED8",
+            size=26,
+        )
+        icon.setObjectName("OperBlockEmptyStateInfoIcon")
+        info_layout.addWidget(icon, 0, Qt.AlignVCenter)
+
+        text = QLabel("После занятия стола вы сможете добавить пациента и запланировать операцию.")
+        text.setObjectName("OperBlockEmptyStateInfoText")
+        text.setWordWrap(True)
+        text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        text.setStyleSheet("color: #31516F; font-size: 14px; font-weight: 600;")
+        info_layout.addWidget(text, 0, Qt.AlignVCenter)
+        info_layout.addStretch(1)
+        return info
+
     def _make_empty_table_card(self, table_code: str, display_name: str) -> QFrame:
         apply_metrics = self._current_board_apply_metrics
         metric_fields = dict((apply_metrics or {}).get("current_card_fields") or {})
@@ -9867,41 +10055,77 @@ class OperBlockMainWidget(QWidget):
         body_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
         body = QWidget()
         body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(34, 34, 34, 34)
-        body_layout.setSpacing(18)
+        body_layout.setContentsMargins(64, 32, 64, 32)
+        body_layout.setSpacing(16)
         body_layout.addStretch(1)
 
-        photo = QLabel()
-        photo.setFixedSize(240, 240)
-        photo.setAlignment(Qt.AlignCenter)
-        self._set_patient_photo(photo, None)
-        body_layout.addWidget(photo, 0, Qt.AlignCenter)
-
-        free = QLabel("МЕСТО СВОБОДНО")
-        free.setAlignment(Qt.AlignCenter)
-        free.setStyleSheet(f"color: {COLOR_SUCCESS}; font-size: 24px; font-weight: 800; background: transparent;")
-        body_layout.addWidget(free)
-
-        button = QPushButton("ЗАНЯТЬ СТОЛ")
-        button.setFixedHeight(62)
-        button.setCursor(Qt.PointingHandCursor)
-        button.setStyleSheet(
-            f"""
-            QPushButton {{
-                background-color: {BG_LIGHT};
-                color: {TEXT_PRIMARY};
-                border: 1px solid {BORDER_COLOR};
-                border-radius: 8px;
-                font-weight: 800;
-                font-size: 18px;
-            }}
-            QPushButton:hover {{
-                background-color: #d8dde2;
-            }}
+        empty_card = QFrame()
+        empty_card.setObjectName("OperBlockEmptyStateCard")
+        empty_card.setMinimumHeight(438)
+        empty_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        empty_card.setStyleSheet(
+            """
+            QFrame#OperBlockEmptyStateCard {
+                background-color: #FFFFFF;
+                border: 1px solid #DDE5EE;
+                border-radius: 14px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
             """
         )
-        button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
-        body_layout.addWidget(button)
+        empty_shadow = QGraphicsDropShadowEffect(empty_card)
+        empty_shadow.setBlurRadius(24)
+        empty_shadow.setColor(QColor(31, 45, 61, 20))
+        empty_shadow.setOffset(0, 8)
+        empty_card.setGraphicsEffect(empty_shadow)
+
+        empty_layout = QVBoxLayout(empty_card)
+        empty_layout.setContentsMargins(46, 34, 46, 36)
+        empty_layout.setSpacing(16)
+        empty_layout.addWidget(_OperBlockEmptyRoomIllustration(), 0, Qt.AlignCenter)
+
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(10)
+        status_row.addStretch(1)
+        status_icon = _OperBlockCircleIcon(
+            "check",
+            background="#DCFCE7",
+            border="#86EFAC",
+            foreground="#16A34A",
+            size=24,
+        )
+        status_icon.setObjectName("OperBlockEmptyStateStatusIcon")
+        status_row.addWidget(status_icon, 0, Qt.AlignVCenter)
+        free = QLabel("МЕСТО СВОБОДНО")
+        free.setObjectName("OperBlockEmptyStateStatus")
+        free.setAlignment(Qt.AlignCenter)
+        free.setStyleSheet("color: #16A34A; font-size: 25px; font-weight: 900; background: transparent;")
+        status_row.addWidget(free, 0, Qt.AlignVCenter)
+        status_row.addStretch(1)
+        empty_layout.addLayout(status_row)
+
+        description = QLabel("В операционной нет активной операции.\nВы можете занять стол для нового пациента.")
+        description.setObjectName("OperBlockEmptyStateDescription")
+        description.setAlignment(Qt.AlignCenter)
+        description.setWordWrap(True)
+        description.setStyleSheet("color: #5D7288; font-size: 15px; line-height: 130%;")
+        empty_layout.addWidget(description)
+
+        separator = QFrame()
+        separator.setObjectName("OperBlockEmptyStateSeparator")
+        separator.setFixedHeight(1)
+        separator.setStyleSheet("background-color: #E2E8F0; border: none;")
+        empty_layout.addSpacing(2)
+        empty_layout.addWidget(separator)
+        empty_layout.addSpacing(2)
+        empty_layout.addWidget(self._make_empty_table_action_button(table_code, display_name), 0, Qt.AlignCenter)
+
+        body_layout.addWidget(empty_card)
+        body_layout.addWidget(self._make_empty_table_info_block())
         body_layout.addStretch(1)
         layout.addWidget(body, 1)
         operblock_startup_metrics.record_since(
