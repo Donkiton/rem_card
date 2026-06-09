@@ -18983,6 +18983,9 @@ def _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups(temp_root:
             return False, "occupy dialog birth date still uses QDateEdit calendar widget"
         if not isinstance(dialog.birth_date_input, QLineEdit):
             return False, "occupy dialog birth date is not a plain text input"
+        scroll_style = dialog.form_scroll.styleSheet()
+        if "border: none" not in scroll_style or "border: 1px" in scroll_style:
+            return False, "occupy dialog form scroll area still has an outer border connecting section cards"
         birth_samples = {
             "01012000": date(2000, 1, 1),
             "01/01/00": date(2000, 1, 1),

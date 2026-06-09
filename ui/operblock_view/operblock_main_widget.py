@@ -7243,7 +7243,17 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.form_scroll.setFrameShape(QScrollArea.NoFrame)
         self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.form_scroll.setStyleSheet(STYLE_PATIENT_FORM_SCROLL)
+        self.form_scroll.setStyleSheet(
+            f"""
+            QScrollArea {{
+                border: none;
+                background: {BG_MAIN};
+            }}
+            QScrollArea > QWidget {{
+                background: {BG_MAIN};
+            }}
+            """
+        )
         form_scrollbar = self.form_scroll.verticalScrollBar()
         form_scrollbar.setObjectName("OperBlockPatientFormScrollBar")
         form_scrollbar.setFixedWidth(14)
