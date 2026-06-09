@@ -10626,21 +10626,21 @@ class OperBlockMainWidget(QWidget):
         return history
 
     @staticmethod
-    def _board_operation_stages_empty_notice() -> QFrame:
+    def _board_empty_notice(text: str, *, object_name: str) -> QFrame:
         notice = QFrame()
-        notice.setObjectName("OperBlockStagesEmptyNotice")
+        notice.setObjectName(object_name)
         notice.setMinimumHeight(66)
         notice.setStyleSheet(
-            """
-            QFrame#OperBlockStagesEmptyNotice {
+            f"""
+            QFrame#{object_name} {{
                 background-color: #EFF6FF;
                 border: 1px solid #8FBEFF;
                 border-radius: 6px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 background: transparent;
                 border: none;
-            }
+            }}
             """
         )
         notice_layout = QHBoxLayout(notice)
@@ -10653,11 +10653,18 @@ class OperBlockMainWidget(QWidget):
             "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
             "font-size: 12px; font-weight: 800;"
         )
-        notice_text = QLabel("Этапы операции не начаты")
+        notice_text = QLabel(text)
         notice_text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 800;")
         notice_layout.addWidget(icon, 0)
         notice_layout.addWidget(notice_text, 1)
         return notice
+
+    @staticmethod
+    def _board_operation_stages_empty_notice() -> QFrame:
+        return OperBlockMainWidget._board_empty_notice(
+            "Этапы операции не начаты",
+            object_name="OperBlockStagesEmptyNotice",
+        )
 
     def _board_progress_block(self, patient: dict) -> QFrame:
         operation_name = normalize_operblock_team_text(patient.get("operation_name"))
@@ -10736,9 +10743,14 @@ class OperBlockMainWidget(QWidget):
         layout.setAlignment(Qt.AlignTop)
         items = [dict(item or {}) for item in (patient.get("medication_history") or [])]
         if not items:
-            empty = self._board_muted_label("Нет введённых препаратов", size=14)
-            empty.setStyleSheet("font-size: 14px; color: #1F2D3D; font-weight: 500;")
-            layout.addWidget(empty)
+            layout.addWidget(
+                self._board_empty_notice(
+                    "Нет введённых препаратов",
+                    object_name="OperBlockMedicationsEmptyNotice",
+                ),
+                0,
+                Qt.AlignTop,
+            )
             return block
         scroll = self._board_scroll_area(
             object_name="OperBlockBoardMedicationsScroll",

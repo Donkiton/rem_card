@@ -19139,6 +19139,39 @@ def _check_operblock_board_progress_preview_content(
         app.processEvents()
 
 
+def _check_operblock_board_medication_empty_notice(app, widget) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QLabel, QFrame
+
+    meds_block = widget._board_medications_block({"medication_history": []})
+    try:
+        meds_block.resize(360, 180)
+        meds_block.show()
+        app.processEvents()
+        app.processEvents()
+        empty_notice = meds_block.findChild(QFrame, "OperBlockMedicationsEmptyNotice")
+        if empty_notice is None:
+            return False, "empty medication preview does not render styled notice"
+        if "#EFF6FF" not in empty_notice.styleSheet() or "#8FBEFF" not in empty_notice.styleSheet():
+            return False, "empty medication preview notice does not use the operation stages notice style"
+        notice_text = next(
+            (label for label in empty_notice.findChildren(QLabel) if label.text() == "Нет введённых препаратов"),
+            None,
+        )
+        if notice_text is None:
+            return False, "empty medication preview notice text was not rendered"
+        plain_empty_labels = [
+            label
+            for label in meds_block.findChildren(QLabel)
+            if label.text() == "Нет введённых препаратов" and label.parentWidget() is not empty_notice
+        ]
+        if plain_empty_labels:
+            return False, "empty medication preview still renders the old plain label"
+        return True, "ok"
+    finally:
+        meds_block.deleteLater()
+        app.processEvents()
+
+
 def _check_operblock_board_preview_full_card_layout(
     app,
     widget,
@@ -19304,6 +19337,10 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     )
     if meds_gap < 4 or meds_gap > 10:
         return False, f"board medication preview leaves a large gap before rows: {meds_gap}"
+
+    ok, details = _check_operblock_board_medication_empty_notice(app, widget)
+    if not ok:
+        return False, details
 
     operation_events = [
         {
