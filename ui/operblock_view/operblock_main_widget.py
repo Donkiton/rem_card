@@ -9941,8 +9941,7 @@ class OperBlockMainWidget(QWidget):
         center_top_layout.setContentsMargins(0, 0, 0, 0)
         center_top_layout.setSpacing(12)
         center_top_layout.addWidget(self._board_admission_block(table, patient), 0)
-        center_top_layout.addWidget(self._board_progress_block(patient), 0)
-        center_top_layout.addStretch(1)
+        center_top_layout.addWidget(self._board_progress_block(patient), 1)
 
         right_column = QVBoxLayout()
         right_column.setSpacing(12)

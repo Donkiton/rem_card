@@ -19012,6 +19012,14 @@ def _check_operblock_board_preview_full_card_layout(
             exact = [label for label in full_card.findChildren(QLabel) if label.text() == text]
             return exact[0] if exact else None
 
+        def owner_block(label: QLabel | None) -> QFrame | None:
+            block = label.parentWidget() if label is not None else None
+            while block is not None and not (
+                isinstance(block, QFrame) and block.objectName() == "OperBlockStartBlock"
+            ):
+                block = block.parentWidget()
+            return block if isinstance(block, QFrame) else None
+
         vitals_title = first_label("Текущие показатели")
         meds_title = first_label("Назначения и препараты")
         if vitals_title is None or meds_title is None:
@@ -19030,14 +19038,20 @@ def _check_operblock_board_preview_full_card_layout(
             return False, f"board medication list gap is unstable: {scroll_gap}"
         if full_scroll.verticalScrollBar().value() != full_scroll.verticalScrollBar().maximum():
             return False, "full board preview medication scroll is not positioned at latest rows"
+        progress_title = first_label("Ход операции: Лапароскопическая холецистэктомия")
+        progress_block = owner_block(progress_title)
+        meds_block = owner_block(meds_title)
+        if progress_block is None or meds_block is None:
+            return False, "board preview did not render progress or medication block frame"
+        progress_bottom = progress_block.mapTo(full_card, QPoint(0, 0)).y() + progress_block.height()
+        meds_top = meds_block.mapTo(full_card, QPoint(0, 0)).y()
+        progress_to_meds_gap = meds_top - progress_bottom
+        if progress_to_meds_gap < 8 or progress_to_meds_gap > 18:
+            return False, f"board progress block does not fill the gap above medications: {progress_to_meds_gap}"
         full_stage_title = first_label("Этапы операции")
         if full_stage_title is None:
             return False, "full board preview operation stages block was not rendered"
-        stage_block = full_stage_title.parentWidget()
-        while stage_block is not None and not (
-            isinstance(stage_block, QFrame) and stage_block.objectName() == "OperBlockStartBlock"
-        ):
-            stage_block = stage_block.parentWidget()
+        stage_block = owner_block(full_stage_title)
         if stage_block is None or "#F8FBFF" not in stage_block.styleSheet() or "#CFE3FF" not in stage_block.styleSheet():
             return False, "full board operation stages block does not use blue framed styling"
         edit_buttons = [
