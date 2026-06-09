@@ -19172,6 +19172,55 @@ def _check_operblock_board_medication_empty_notice(app, widget) -> tuple[bool, s
         app.processEvents()
 
 
+def _check_operblock_board_male_photo_uses_operating_room_asset(app, widget) -> tuple[bool, str]:
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QImageReader
+    from PySide6.QtWidgets import QLabel
+
+    from rem_card.app.paths import get_icon_dir
+
+    asset_path = os.path.join(get_icon_dir(), "man_in_oper_extr.png")
+    if not os.path.isfile(asset_path):
+        return False, "operating room male patient photo asset is missing"
+
+    label = QLabel()
+    label.setFixedSize(232, 268)
+    widget._current_board_apply_metrics = None
+    widget._board_photo_thumbnail_cache = {}
+    widget._set_patient_photo(label, "Мужской")
+    pixmap = label.pixmap()
+    if pixmap is None or pixmap.isNull():
+        return False, "male operating room patient photo was not rendered"
+
+    reader = QImageReader(asset_path)
+    reader.setAutoTransform(True)
+    source_size = reader.size()
+    if source_size.isValid():
+        reader.setScaledSize(source_size.scaled(label.size(), Qt.KeepAspectRatio))
+    expected = reader.read()
+    if expected.isNull():
+        return False, "operating room male patient photo asset could not be decoded"
+    actual = pixmap.toImage()
+    if actual.size() != expected.size():
+        return False, f"male patient photo does not use operating room asset size: {actual.size()} != {expected.size()}"
+    for x, y in (
+        (actual.width() // 2, actual.height() // 2),
+        (actual.width() // 3, actual.height() // 3),
+        (actual.width() * 2 // 3, actual.height() * 2 // 3),
+    ):
+        actual_color = actual.pixelColor(x, y)
+        expected_color = expected.pixelColor(x, y)
+        channel_delta = (
+            abs(actual_color.red() - expected_color.red())
+            + abs(actual_color.green() - expected_color.green())
+            + abs(actual_color.blue() - expected_color.blue())
+            + abs(actual_color.alpha() - expected_color.alpha())
+        )
+        if channel_delta > 12:
+            return False, "male patient photo pixels do not match operating room asset"
+    return True, "ok"
+
+
 def _check_operblock_board_preview_full_card_layout(
     app,
     widget,
@@ -19337,6 +19386,10 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     )
     if meds_gap < 4 or meds_gap > 10:
         return False, f"board medication preview leaves a large gap before rows: {meds_gap}"
+
+    ok, details = _check_operblock_board_male_photo_uses_operating_room_asset(app, widget)
+    if not ok:
+        return False, details
 
     ok, details = _check_operblock_board_medication_empty_notice(app, widget)
     if not ok:

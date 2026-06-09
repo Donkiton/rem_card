@@ -17238,7 +17238,12 @@ class OperBlockMainWidget(QWidget):
                 name = "man.png"
             else:
                 name = "noman.png"
-            path = os.path.join(get_patient_assets_dir(), "Patients", name)
+            if name == "man.png":
+                path = os.path.join(get_icon_dir(), "man_in_oper_extr.png")
+                if not os.path.isfile(path):
+                    path = os.path.join(get_patient_assets_dir(), "Patients", name)
+            else:
+                path = os.path.join(get_patient_assets_dir(), "Patients", name)
             if not os.path.isfile(path):
                 path = os.path.join(get_patient_assets_dir(), "Patients", "noman.png")
             operblock_startup_metrics.record_since(
