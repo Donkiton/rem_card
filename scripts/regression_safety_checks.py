@@ -3571,6 +3571,72 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
             form.close()
 
 
+def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.app.paths import get_icon_dir
+    from rem_card.ui.patient_bed_management.side_patient_card import SidePatientCard
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+    card = SidePatientCard()
+    checks = (
+        ("Мужской", "man_in_oper_extr.png"),
+        ("Женский", "woman_in_oper_extr.png"),
+    )
+    try:
+        for gender, asset_name in checks:
+            asset_path = os.path.join(get_icon_dir(), asset_name)
+            if not os.path.isfile(asset_path):
+                return False, f"side patient card asset is missing: {asset_name}"
+            patient = SimpleNamespace(full_name=f"Тест {gender}", birth_date=datetime(2022, 1, 1).date())
+            admission = SimpleNamespace(
+                history_number="REG-SIDE-001",
+                patient_age=4,
+                patient_months=None,
+                patient_age_unit="годы",
+                patient_gender=gender,
+                admission_datetime=datetime(2026, 1, 1, 9, 0),
+                diagnosis_text="Тестовый диагноз",
+            )
+            card.update_info(1, patient, admission)
+            app.processEvents()
+            actual = card.photo_label.pixmap()
+            if actual is None or actual.isNull():
+                return False, f"side patient card did not render photo for {gender}"
+            expected = QPixmap(asset_path).scaled(312, 312, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            if actual.size() != expected.size():
+                return False, f"side patient card photo size mismatch for {gender}: {actual.size()} != {expected.size()}"
+            actual_image = actual.toImage()
+            expected_image = expected.toImage()
+            for x, y in (
+                (actual_image.width() // 2, actual_image.height() // 2),
+                (actual_image.width() // 3, actual_image.height() // 3),
+                (actual_image.width() * 2 // 3, actual_image.height() * 2 // 3),
+            ):
+                actual_color = actual_image.pixelColor(x, y)
+                expected_color = expected_image.pixelColor(x, y)
+                channel_delta = (
+                    abs(actual_color.red() - expected_color.red())
+                    + abs(actual_color.green() - expected_color.green())
+                    + abs(actual_color.blue() - expected_color.blue())
+                    + abs(actual_color.alpha() - expected_color.alpha())
+                )
+                if channel_delta > 12:
+                    return False, f"side patient card photo pixels do not match gender asset for {gender}"
+        return True, "ok"
+    finally:
+        card.close()
+        app.processEvents()
+
+
 def _check_patient_bed_move_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
     from PySide6.QtWidgets import QApplication
 
@@ -20535,6 +20601,7 @@ def main():
         ("diet_intake_enqueue_error_refreshes", _check_diet_intake_enqueue_error_refreshes),
         ("oral_intake_batch_rolls_back", _check_oral_intake_batch_rolls_back),
         ("patient_form_enqueue_error_keeps_dialog", _check_patient_form_enqueue_error_keeps_dialog),
+        ("side_patient_card_child_photo_uses_gender_assets", _check_side_patient_card_child_photo_uses_gender_assets),
         ("patient_bed_move_enqueue_error_refreshes", _check_patient_bed_move_enqueue_error_refreshes),
         ("archive_delete_enqueue_error_refreshes", _check_archive_delete_enqueue_error_refreshes),
         ("doctor_create_card_enqueue_error_refreshes", _check_doctor_create_card_enqueue_error_refreshes),

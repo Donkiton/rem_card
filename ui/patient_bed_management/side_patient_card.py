@@ -2,7 +2,8 @@ import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap, QColor, QFontMetrics
-from rem_card.app.patient_age import calculate_age_components, format_patient_age, format_patient_age_from_birth_date
+from rem_card.app.patient_age import format_patient_age, format_patient_age_from_birth_date
+from rem_card.app.paths import PATIENT_ASSETS_DIR, get_icon_dir
 from rem_card.ui.styles.theme import (
     STYLE_SIDE_PATIENT_ACTION_BUTTON,
     STYLE_SIDE_PATIENT_CARD,
@@ -178,9 +179,20 @@ class SidePatientCard(QFrame):
         if self.current_bed_number:
             self.open_card_clicked.emit(self.current_bed_number)
 
+    @staticmethod
+    def _photo_path_for_gender(gender):
+        assets_path = os.path.join(PATIENT_ASSETS_DIR, "Patients")
+        gender_text = str(gender or "").strip().casefold()
+        if gender_text.startswith("ж"):
+            path = os.path.join(get_icon_dir(), "woman_in_oper_extr.png")
+            return path if os.path.isfile(path) else os.path.join(assets_path, "woman.png")
+        if gender_text.startswith("м"):
+            path = os.path.join(get_icon_dir(), "man_in_oper_extr.png")
+            return path if os.path.isfile(path) else os.path.join(assets_path, "man.png")
+        return os.path.join(assets_path, "noman.png")
+
     def update_info(self, bed_number, patient=None, admission=None):
         self.current_bed_number = bed_number
-        from rem_card.app.paths import PATIENT_ASSETS_DIR
         assets_path = os.path.join(PATIENT_ASSETS_DIR, "Patients")
 
         if not patient or not admission:
@@ -201,34 +213,13 @@ class SidePatientCard(QFrame):
             self.photo_label.show()
             self.history_label.show()
             self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            # Исправленная логика фото:
-            photo_name = "noman.png"
             years = admission.patient_age
             months = admission.patient_months
             unit = admission.patient_age_unit
             birth_date = getattr(patient, "birth_date", None)
             reference_date = admission.admission_datetime
 
-            is_kid = False
-            age_components = calculate_age_components(birth_date, reference_date)
-            if age_components is not None:
-                is_kid = age_components.years < 10
-            elif unit == "месяцы" and years is not None:
-                is_kid = True
-            elif unit == "годы" and years is not None and years < 10:
-                is_kid = True
-
-            # Если это не ребенок, проверяем пол для выбора man/woman
-            if is_kid:
-                photo_name = "kid.png"
-            elif years is not None and years > 0:
-                if admission.patient_gender == "Женский":
-                    photo_name = "woman.png"
-                else:
-                    photo_name = "man.png"
-            # Если ни одно условие не подошло (возраст не указан), остается noman.png
-
-            self.photo_label.setPixmap(self._get_pixmap(os.path.join(assets_path, photo_name)))
+            self.photo_label.setPixmap(self._get_pixmap(self._photo_path_for_gender(admission.patient_gender)))
 
             self.age_label.show()
             self.diagnosis_label.show()
