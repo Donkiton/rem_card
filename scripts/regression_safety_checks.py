@@ -19020,6 +19020,9 @@ def _check_operblock_board_preview_full_card_layout(
                 block = block.parentWidget()
             return block if isinstance(block, QFrame) else None
 
+        def block_bottom(block: QFrame) -> int:
+            return block.mapTo(full_card, QPoint(0, 0)).y() + block.height()
+
         vitals_title = first_label("Текущие показатели")
         meds_title = first_label("Назначения и препараты")
         if vitals_title is None or meds_title is None:
@@ -19040,10 +19043,11 @@ def _check_operblock_board_preview_full_card_layout(
             return False, "full board preview medication scroll is not positioned at latest rows"
         progress_title = first_label("Ход операции: Лапароскопическая холецистэктомия")
         progress_block = owner_block(progress_title)
+        vitals_block = owner_block(vitals_title)
         meds_block = owner_block(meds_title)
-        if progress_block is None or meds_block is None:
+        if progress_block is None or vitals_block is None or meds_block is None:
             return False, "board preview did not render progress or medication block frame"
-        progress_bottom = progress_block.mapTo(full_card, QPoint(0, 0)).y() + progress_block.height()
+        progress_bottom = block_bottom(progress_block)
         meds_top = meds_block.mapTo(full_card, QPoint(0, 0)).y()
         progress_to_meds_gap = meds_top - progress_bottom
         if progress_to_meds_gap < 8 or progress_to_meds_gap > 18:
@@ -19054,6 +19058,22 @@ def _check_operblock_board_preview_full_card_layout(
         stage_block = owner_block(full_stage_title)
         if stage_block is None or "#F8FBFF" not in stage_block.styleSheet() or "#CFE3FF" not in stage_block.styleSheet():
             return False, "full board operation stages block does not use blue framed styling"
+        target_bottom = max(block_bottom(vitals_block), block_bottom(meds_block))
+        stage_bottom = block_bottom(stage_block)
+        if abs(stage_bottom - target_bottom) > 2:
+            return False, f"board operation stages block is not stretched to lower row bottom: {stage_bottom} != {target_bottom}"
+        empty_stage_notice = next(
+            (label for label in stage_block.findChildren(QLabel) if label.text() == "Этапы операции не начаты"),
+            None,
+        )
+        if empty_stage_notice is not None:
+            stage_notice_gap = (
+                empty_stage_notice.mapTo(full_card, QPoint(0, 0)).y()
+                - full_stage_title.mapTo(full_card, QPoint(0, 0)).y()
+                - full_stage_title.height()
+            )
+            if stage_notice_gap < 6 or stage_notice_gap > 24:
+                return False, f"empty operation stages content is not kept near the title: {stage_notice_gap}"
         edit_buttons = [
             button
             for button in full_card.findChildren(QPushButton)
@@ -19219,15 +19239,16 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     if not all(has_red_pixel_near(x, y) for x, y in ((8, 8), (14, 14), (14, 8), (8, 14))):
         return False, "board allergy danger icon cross is not drawn on both diagonals"
 
-    ok, details = _check_operblock_board_preview_full_card_layout(
-        app,
-        widget,
-        base_dt,
-        operation_events,
-        medication_history,
-    )
-    if not ok:
-        return False, details
+    for preview_events in (operation_events, operation_events[:1], []):
+        ok, details = _check_operblock_board_preview_full_card_layout(
+            app,
+            widget,
+            base_dt,
+            preview_events,
+            medication_history,
+        )
+        if not ok:
+            return False, details
 
     meds_block.deleteLater()
     progress_block.deleteLater()

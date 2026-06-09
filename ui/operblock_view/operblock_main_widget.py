@@ -9948,7 +9948,6 @@ class OperBlockMainWidget(QWidget):
         right_column.addWidget(self._board_allergies_block(patient), 0)
         right_column.addWidget(self._board_special_notes_block(patient), 0)
         right_column.addWidget(self._board_operation_stages_block(patient), 1)
-        right_column.addStretch(1)
 
         content.addWidget(self._board_patient_block(patient), 0, 0)
         content.addWidget(center_top, 0, 1)
@@ -10680,6 +10679,7 @@ class OperBlockMainWidget(QWidget):
             background_color="#F8FBFF",
             border_color="#CFE3FF",
         )
+        layout.setAlignment(Qt.AlignTop)
         events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
         _active_index, _fill_fraction, active_kind = self._board_progress_state(events)
         history = self._board_stage_history(patient)
