@@ -19073,6 +19073,72 @@ def _check_operblock_board_preview_edit_button(full_card) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_operblock_board_progress_stepper_centered(app, widget, base_dt: datetime) -> tuple[bool, str]:
+    from PySide6.QtCore import QPoint
+
+    from rem_card.ui.operblock_view.operblock_main_widget import _OperBlockBoardProgressStepper
+
+    block = widget._board_progress_block(
+        {
+            "started_at": base_dt.isoformat(timespec="seconds"),
+            "operation_events": [],
+        }
+    )
+    try:
+        block.resize(840, 236)
+        block.show()
+        app.processEvents()
+        app.processEvents()
+        title = _find_operblock_board_label(block, "Ход операции")
+        stepper = block.findChild(_OperBlockBoardProgressStepper)
+        if title is None or stepper is None:
+            return False, "board progress preview did not render title or stepper"
+        space_above = (
+            stepper.mapTo(block, QPoint(0, 0)).y()
+            - title.mapTo(block, QPoint(0, 0)).y()
+            - title.height()
+        )
+        space_below = block.height() - stepper.mapTo(block, QPoint(0, 0)).y() - stepper.height() - 16
+        if space_below < 8:
+            return False, f"board progress stepper is still pressed to the bottom: {space_below}"
+        if abs((space_above - 12) - space_below) > 4:
+            return False, f"board progress stepper is not vertically centered: above={space_above}, below={space_below}"
+        return True, "ok"
+    finally:
+        block.deleteLater()
+        app.processEvents()
+
+
+def _check_operblock_board_progress_preview_content(
+    app,
+    widget,
+    base_dt: datetime,
+    operation_events: list[dict],
+) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QLabel
+
+    progress_block = widget._board_progress_block(
+        {
+            "operation_name": "Лапароскопическая холецистэктомия",
+            "started_at": base_dt.isoformat(timespec="seconds"),
+            "operation_events": operation_events,
+        }
+    )
+    try:
+        progress_texts = [label.text() for label in progress_block.findChildren(QLabel)]
+        if "Ход операции: Лапароскопическая холецистэктомия" not in progress_texts:
+            return False, f"board progress title does not include operation name: {progress_texts!r}"
+        if any(f"Этап {index:02d}" in progress_texts for index in range(1, 9)):
+            return False, f"board progress preview still contains detailed operation stages: {progress_texts!r}"
+        ok, details = _check_operblock_board_progress_stepper_centered(app, widget, base_dt)
+        if not ok:
+            return False, details
+        return True, "ok"
+    finally:
+        progress_block.deleteLater()
+        app.processEvents()
+
+
 def _check_operblock_board_preview_full_card_layout(
     app,
     widget,
@@ -19248,19 +19314,9 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
         }
         for index in range(1, 9)
     ]
-    progress_block = OperBlockMainWidget._board_progress_block(
-        widget,
-        {
-            "operation_name": "Лапароскопическая холецистэктомия",
-            "started_at": base_dt.isoformat(timespec="seconds"),
-            "operation_events": operation_events,
-        },
-    )
-    progress_texts = [label.text() for label in progress_block.findChildren(QLabel)]
-    if "Ход операции: Лапароскопическая холецистэктомия" not in progress_texts:
-        return False, f"board progress title does not include operation name: {progress_texts!r}"
-    if any(f"Этап {index:02d}" in progress_texts for index in range(1, 9)):
-        return False, f"board progress preview still contains detailed operation stages: {progress_texts!r}"
+    ok, details = _check_operblock_board_progress_preview_content(app, widget, base_dt, operation_events)
+    if not ok:
+        return False, details
 
     stages_block = OperBlockMainWidget._board_operation_stages_block(
         widget,
@@ -19328,7 +19384,6 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
             return False, details
 
     meds_block.deleteLater()
-    progress_block.deleteLater()
     stages_block.deleteLater()
     admission_block.deleteLater()
     default_block.deleteLater()

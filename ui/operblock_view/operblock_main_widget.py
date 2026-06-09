@@ -10667,7 +10667,17 @@ class OperBlockMainWidget(QWidget):
         active_index, fill_fraction, _active_kind = self._board_progress_state(events)
         stages = ["Подготовка", "Анестезия", "Операция", "Завершение"]
 
-        layout.addWidget(_OperBlockBoardProgressStepper(stages, active_index, fill_fraction))
+        stepper_area = QWidget()
+        stepper_area.setObjectName("OperBlockBoardProgressStepperArea")
+        stepper_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        stepper_area.setStyleSheet("background: transparent; border: none;")
+        stepper_layout = QVBoxLayout(stepper_area)
+        stepper_layout.setContentsMargins(0, 0, 0, 0)
+        stepper_layout.setSpacing(0)
+        stepper_layout.addStretch(1)
+        stepper_layout.addWidget(_OperBlockBoardProgressStepper(stages, active_index, fill_fraction), 0)
+        stepper_layout.addStretch(1)
+        layout.addWidget(stepper_area, 1)
         return block
 
     def _board_operation_stages_block(self, patient: dict) -> QFrame:
