@@ -19076,7 +19076,7 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
 
     from datetime import timedelta
 
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtWidgets import QApplication, QLabel, QScrollArea
 
     from rem_card.services.operblock_service import OperBlockService
@@ -19131,6 +19131,16 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
         return False, "board medication preview did not overflow in the scroll area"
     if meds_bar.value() != meds_bar.maximum():
         return False, f"board medication preview did not auto-scroll to latest row: {meds_bar.value()} != {meds_bar.maximum()}"
+    meds_title = next((label for label in meds_block.findChildren(QLabel) if label.text() == "Назначения и препараты"), None)
+    if meds_title is None:
+        return False, "board medication preview did not render title"
+    meds_gap = (
+        meds_scroll.mapTo(meds_block, QPoint(0, 0)).y()
+        - meds_title.mapTo(meds_block, QPoint(0, 0)).y()
+        - meds_title.height()
+    )
+    if meds_gap < 4 or meds_gap > 10:
+        return False, f"board medication preview leaves a large gap before rows: {meds_gap}"
 
     operation_events = [
         {
