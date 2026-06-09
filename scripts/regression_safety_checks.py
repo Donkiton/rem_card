@@ -18971,6 +18971,108 @@ def _check_operblock_operation_stage_chart_grouping(temp_root: str) -> tuple[boo
         app.processEvents()
 
 
+def _find_operblock_board_label(root, text: str):
+    from PySide6.QtWidgets import QLabel
+
+    return next((label for label in root.findChildren(QLabel) if label.text() == text), None)
+
+
+def _find_operblock_board_owner_block(label):
+    from PySide6.QtWidgets import QFrame
+
+    block = label.parentWidget() if label is not None else None
+    while block is not None and not (
+        isinstance(block, QFrame) and block.objectName() == "OperBlockStartBlock"
+    ):
+        block = block.parentWidget()
+    return block if isinstance(block, QFrame) else None
+
+
+def _operblock_board_block_bottom(full_card, block) -> int:
+    from PySide6.QtCore import QPoint
+
+    return block.mapTo(full_card, QPoint(0, 0)).y() + block.height()
+
+
+def _check_operblock_board_preview_stages_layout(
+    full_card,
+    full_stage_title,
+    vitals_block,
+    meds_block,
+    operation_events: list[dict],
+) -> tuple[bool, str]:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QLabel, QFrame
+
+    stage_block = _find_operblock_board_owner_block(full_stage_title)
+    if stage_block is None:
+        return False, "full board preview operation stages block frame was not rendered"
+    if "#F8FBFF" in stage_block.styleSheet() or "#CFE3FF" in stage_block.styleSheet():
+        return False, "operation stages title is still inside the blue framed block"
+    if "#1F2D3D" not in full_stage_title.styleSheet() or "#2563EB" in full_stage_title.styleSheet():
+        return False, "operation stages title does not use the default black style"
+    stages_panel = stage_block.findChild(QFrame, "OperBlockBoardStagesPanel")
+    if stages_panel is None or "#F8FBFF" not in stages_panel.styleSheet() or "#CFE3FF" not in stages_panel.styleSheet():
+        return False, "operation stages rows are not inside the blue framed panel"
+    target_bottom = max(
+        _operblock_board_block_bottom(full_card, vitals_block),
+        _operblock_board_block_bottom(full_card, meds_block),
+    )
+    stage_bottom = _operblock_board_block_bottom(full_card, stage_block)
+    if abs(stage_bottom - target_bottom) > 2:
+        return False, f"board operation stages block is not stretched to lower row bottom: {stage_bottom} != {target_bottom}"
+    empty_stage_notice = stages_panel.findChild(QFrame, "OperBlockStagesEmptyNotice")
+    if not operation_events and empty_stage_notice is None:
+        return False, "empty operation stages notice was not moved into the stages block"
+    if empty_stage_notice is not None:
+        if "#EFF6FF" not in empty_stage_notice.styleSheet() or "#8FBEFF" not in empty_stage_notice.styleSheet():
+            return False, "empty operation stages notice does not keep the progress notice styling"
+        empty_stage_notice_text = next(
+            (
+                label
+                for label in empty_stage_notice.findChildren(QLabel)
+                if label.text() == "Этапы операции не начаты"
+            ),
+            None,
+        )
+        if empty_stage_notice_text is None:
+            return False, "empty operation stages notice does not render its text"
+        stage_notice_gap = (
+            empty_stage_notice.mapTo(full_card, QPoint(0, 0)).y()
+            - full_stage_title.mapTo(full_card, QPoint(0, 0)).y()
+            - full_stage_title.height()
+        )
+        if stage_notice_gap < 6 or stage_notice_gap > 24:
+            return False, f"empty operation stages content is not kept near the title: {stage_notice_gap}"
+    for stage_index in range(1, len(operation_events) + 1):
+        stage_label = next(
+            (label for label in stages_panel.findChildren(QLabel) if label.text() == f"Этап {stage_index:02d}"),
+            None,
+        )
+        if stage_label is None:
+            return False, f"operation stage label missed in rows panel: {stage_index:02d}"
+        if "#1F2D3D" not in stage_label.styleSheet() or "#2563EB" in stage_label.styleSheet():
+            return False, f"operation stage label is not rendered in the unified black style: {stage_label.styleSheet()!r}"
+    return True, "ok"
+
+
+def _check_operblock_board_preview_edit_button(full_card) -> tuple[bool, str]:
+    from PySide6.QtWidgets import QPushButton
+
+    edit_buttons = [
+        button
+        for button in full_card.findChildren(QPushButton)
+        if "РЕДАКТИРОВАТЬ" in button.text()
+    ]
+    if not edit_buttons:
+        return False, "board preview edit button was not rendered"
+    if any("✎" in button.text() for button in edit_buttons):
+        return False, "board preview edit button still uses a text pencil"
+    if edit_buttons[0].icon().isNull():
+        return False, "board preview edit button did not load edit.png icon"
+    return True, "ok"
+
+
 def _check_operblock_board_preview_full_card_layout(
     app,
     widget,
@@ -18979,7 +19081,7 @@ def _check_operblock_board_preview_full_card_layout(
     medication_history: list[dict],
 ) -> tuple[bool, str]:
     from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QLabel, QFrame, QPushButton, QScrollArea
+    from PySide6.QtWidgets import QLabel, QScrollArea
 
     widget._current_board_apply_metrics = None
     widget._board_photo_thumbnail_cache = {}
@@ -19008,23 +19110,8 @@ def _check_operblock_board_preview_full_card_layout(
         app.processEvents()
         app.processEvents()
 
-        def first_label(text: str) -> QLabel | None:
-            exact = [label for label in full_card.findChildren(QLabel) if label.text() == text]
-            return exact[0] if exact else None
-
-        def owner_block(label: QLabel | None) -> QFrame | None:
-            block = label.parentWidget() if label is not None else None
-            while block is not None and not (
-                isinstance(block, QFrame) and block.objectName() == "OperBlockStartBlock"
-            ):
-                block = block.parentWidget()
-            return block if isinstance(block, QFrame) else None
-
-        def block_bottom(block: QFrame) -> int:
-            return block.mapTo(full_card, QPoint(0, 0)).y() + block.height()
-
-        vitals_title = first_label("Текущие показатели")
-        meds_title = first_label("Назначения и препараты")
+        vitals_title = _find_operblock_board_label(full_card, "Текущие показатели")
+        meds_title = _find_operblock_board_label(full_card, "Назначения и препараты")
         if vitals_title is None or meds_title is None:
             return False, "board preview did not render vitals or medication title"
         vitals_y = vitals_title.mapTo(full_card, QPoint(0, 0)).y()
@@ -19041,66 +19128,40 @@ def _check_operblock_board_preview_full_card_layout(
             return False, f"board medication list gap is unstable: {scroll_gap}"
         if full_scroll.verticalScrollBar().value() != full_scroll.verticalScrollBar().maximum():
             return False, "full board preview medication scroll is not positioned at latest rows"
-        progress_title = first_label("Ход операции: Лапароскопическая холецистэктомия")
-        progress_block = owner_block(progress_title)
-        vitals_block = owner_block(vitals_title)
-        meds_block = owner_block(meds_title)
+        progress_title = _find_operblock_board_label(full_card, "Ход операции: Лапароскопическая холецистэктомия")
+        progress_block = _find_operblock_board_owner_block(progress_title)
+        vitals_block = _find_operblock_board_owner_block(vitals_title)
+        meds_block = _find_operblock_board_owner_block(meds_title)
         if progress_block is None or vitals_block is None or meds_block is None:
             return False, "board preview did not render progress or medication block frame"
-        progress_bottom = block_bottom(progress_block)
+        if not operation_events:
+            progress_empty_labels = [
+                label.text()
+                for label in progress_block.findChildren(QLabel)
+                if label.text() == "Этапы операции не начаты"
+            ]
+            if progress_empty_labels:
+                return False, "empty operation stages notice is still rendered in the progress block"
+        progress_bottom = _operblock_board_block_bottom(full_card, progress_block)
         meds_top = meds_block.mapTo(full_card, QPoint(0, 0)).y()
         progress_to_meds_gap = meds_top - progress_bottom
         if progress_to_meds_gap < 8 or progress_to_meds_gap > 18:
             return False, f"board progress block does not fill the gap above medications: {progress_to_meds_gap}"
-        full_stage_title = first_label("Этапы операции")
+        full_stage_title = _find_operblock_board_label(full_card, "Этапы операции")
         if full_stage_title is None:
             return False, "full board preview operation stages block was not rendered"
-        stage_block = owner_block(full_stage_title)
-        if stage_block is None:
-            return False, "full board preview operation stages block frame was not rendered"
-        if "#F8FBFF" in stage_block.styleSheet() or "#CFE3FF" in stage_block.styleSheet():
-            return False, "operation stages title is still inside the blue framed block"
-        if "#1F2D3D" not in full_stage_title.styleSheet() or "#2563EB" in full_stage_title.styleSheet():
-            return False, "operation stages title does not use the default black style"
-        stages_panel = stage_block.findChild(QFrame, "OperBlockBoardStagesPanel")
-        if stages_panel is None or "#F8FBFF" not in stages_panel.styleSheet() or "#CFE3FF" not in stages_panel.styleSheet():
-            return False, "operation stages rows are not inside the blue framed panel"
-        target_bottom = max(block_bottom(vitals_block), block_bottom(meds_block))
-        stage_bottom = block_bottom(stage_block)
-        if abs(stage_bottom - target_bottom) > 2:
-            return False, f"board operation stages block is not stretched to lower row bottom: {stage_bottom} != {target_bottom}"
-        empty_stage_notice = next(
-            (label for label in stages_panel.findChildren(QLabel) if label.text() == "Этапы операции не начаты"),
-            None,
+        ok, details = _check_operblock_board_preview_stages_layout(
+            full_card,
+            full_stage_title,
+            vitals_block,
+            meds_block,
+            operation_events,
         )
-        if empty_stage_notice is not None:
-            stage_notice_gap = (
-                empty_stage_notice.mapTo(full_card, QPoint(0, 0)).y()
-                - full_stage_title.mapTo(full_card, QPoint(0, 0)).y()
-                - full_stage_title.height()
-            )
-            if stage_notice_gap < 6 or stage_notice_gap > 24:
-                return False, f"empty operation stages content is not kept near the title: {stage_notice_gap}"
-        for stage_index in range(1, len(operation_events) + 1):
-            stage_label = next(
-                (label for label in stages_panel.findChildren(QLabel) if label.text() == f"Этап {stage_index:02d}"),
-                None,
-            )
-            if stage_label is None:
-                return False, f"operation stage label missed in rows panel: {stage_index:02d}"
-            if "#1F2D3D" not in stage_label.styleSheet() or "#2563EB" in stage_label.styleSheet():
-                return False, f"operation stage label is not rendered in the unified black style: {stage_label.styleSheet()!r}"
-        edit_buttons = [
-            button
-            for button in full_card.findChildren(QPushButton)
-            if "РЕДАКТИРОВАТЬ" in button.text()
-        ]
-        if not edit_buttons:
-            return False, "board preview edit button was not rendered"
-        if any("✎" in button.text() for button in edit_buttons):
-            return False, "board preview edit button still uses a text pencil"
-        if edit_buttons[0].icon().isNull():
-            return False, "board preview edit button did not load edit.png icon"
+        if not ok:
+            return False, details
+        ok, details = _check_operblock_board_preview_edit_button(full_card)
+        if not ok:
+            return False, details
         return True, "ok"
     finally:
         full_card.deleteLater()

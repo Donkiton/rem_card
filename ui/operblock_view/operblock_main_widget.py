@@ -10625,6 +10625,40 @@ class OperBlockMainWidget(QWidget):
         history.sort(key=lambda item: _parse_datetime_value(item.get("event_time")) or datetime.min)
         return history
 
+    @staticmethod
+    def _board_operation_stages_empty_notice() -> QFrame:
+        notice = QFrame()
+        notice.setObjectName("OperBlockStagesEmptyNotice")
+        notice.setMinimumHeight(66)
+        notice.setStyleSheet(
+            """
+            QFrame#OperBlockStagesEmptyNotice {
+                background-color: #EFF6FF;
+                border: 1px solid #8FBEFF;
+                border-radius: 6px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        notice_layout = QHBoxLayout(notice)
+        notice_layout.setContentsMargins(16, 0, 16, 0)
+        notice_layout.setSpacing(10)
+        icon = QLabel("i")
+        icon.setFixedSize(18, 18)
+        icon.setAlignment(Qt.AlignCenter)
+        icon.setStyleSheet(
+            "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
+            "font-size: 12px; font-weight: 800;"
+        )
+        notice_text = QLabel("Этапы операции не начаты")
+        notice_text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 800;")
+        notice_layout.addWidget(icon, 0)
+        notice_layout.addWidget(notice_text, 1)
+        return notice
+
     def _board_progress_block(self, patient: dict) -> QFrame:
         operation_name = normalize_operblock_team_text(patient.get("operation_name"))
         title = f"Ход операции: {operation_name}" if operation_name else "Ход операции"
@@ -10634,42 +10668,6 @@ class OperBlockMainWidget(QWidget):
         stages = ["Подготовка", "Анестезия", "Операция", "Завершение"]
 
         layout.addWidget(_OperBlockBoardProgressStepper(stages, active_index, fill_fraction))
-
-        if not events:
-            layout.addSpacing(12)
-            notice = QFrame()
-            notice.setObjectName("OperBlockProgressNotice")
-            notice.setMinimumHeight(66)
-            notice.setStyleSheet(
-                """
-                QFrame#OperBlockProgressNotice {
-                    background-color: #EFF6FF;
-                    border: 1px solid #8FBEFF;
-                    border-radius: 6px;
-                }
-                QLabel {
-                    background: transparent;
-                    border: none;
-                }
-                """
-            )
-            notice_layout = QHBoxLayout(notice)
-            notice_layout.setContentsMargins(16, 0, 16, 0)
-            notice_layout.setSpacing(10)
-            icon = QLabel("i")
-            icon.setFixedSize(18, 18)
-            icon.setAlignment(Qt.AlignCenter)
-            icon.setStyleSheet(
-                "color: #2563EB; border: 1px solid #2563EB; border-radius: 9px; "
-                "font-size: 12px; font-weight: 800;"
-            )
-            notice_text = QLabel("Этапы операции не начаты")
-            notice_text.setStyleSheet("color: #2563EB; font-size: 13px; font-weight: 800;")
-            notice_layout.addWidget(icon, 0)
-            notice_layout.addWidget(notice_text, 1)
-            layout.addWidget(notice)
-            return block
-
         return block
 
     def _board_operation_stages_block(self, patient: dict) -> QFrame:
@@ -10696,9 +10694,7 @@ class OperBlockMainWidget(QWidget):
         events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
         history = self._board_stage_history(patient)
         if not history:
-            empty = self._board_muted_label("Этапы операции не начаты", size=14)
-            empty.setStyleSheet("font-size: 14px; color: #1F2D3D; font-weight: 500;")
-            stages_layout.addWidget(empty)
+            stages_layout.addWidget(self._board_operation_stages_empty_notice())
             layout.addWidget(stages_panel, 0, Qt.AlignTop)
             return block
         for item in history:
