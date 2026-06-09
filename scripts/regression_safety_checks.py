@@ -19026,7 +19026,7 @@ def _check_operblock_board_preview_full_card_layout(
         scroll_y = full_scroll.mapTo(full_card, QPoint(0, 0)).y()
         title_bottom = meds_title.mapTo(full_card, QPoint(0, 0)).y() + meds_title.height()
         scroll_gap = scroll_y - title_bottom
-        if scroll_gap < 8 or scroll_gap > 24:
+        if scroll_gap < 4 or scroll_gap > 10:
             return False, f"board medication list gap is unstable: {scroll_gap}"
         if full_scroll.verticalScrollBar().value() != full_scroll.verticalScrollBar().maximum():
             return False, "full board preview medication scroll is not positioned at latest rows"

@@ -10711,6 +10711,7 @@ class OperBlockMainWidget(QWidget):
 
     def _board_medications_block(self, patient: dict) -> QFrame:
         block, layout = self._board_block("Назначения и препараты")
+        layout.setSpacing(6)
         items = [dict(item or {}) for item in (patient.get("medication_history") or [])]
         if not items:
             empty = self._board_muted_label("Нет введённых препаратов", size=14)
