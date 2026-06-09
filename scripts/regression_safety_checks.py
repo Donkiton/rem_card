@@ -18979,7 +18979,7 @@ def _check_operblock_board_preview_full_card_layout(
     medication_history: list[dict],
 ) -> tuple[bool, str]:
     from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QLabel, QFrame, QScrollArea
+    from PySide6.QtWidgets import QLabel, QFrame, QPushButton, QScrollArea
 
     widget._current_board_apply_metrics = None
     widget._board_photo_thumbnail_cache = {}
@@ -19040,6 +19040,17 @@ def _check_operblock_board_preview_full_card_layout(
             stage_block = stage_block.parentWidget()
         if stage_block is None or "#F8FBFF" not in stage_block.styleSheet() or "#CFE3FF" not in stage_block.styleSheet():
             return False, "full board operation stages block does not use blue framed styling"
+        edit_buttons = [
+            button
+            for button in full_card.findChildren(QPushButton)
+            if "РЕДАКТИРОВАТЬ" in button.text()
+        ]
+        if not edit_buttons:
+            return False, "board preview edit button was not rendered"
+        if any("✎" in button.text() for button in edit_buttons):
+            return False, "board preview edit button still uses a text pencil"
+        if edit_buttons[0].icon().isNull():
+            return False, "board preview edit button did not load edit.png icon"
         return True, "ok"
     finally:
         full_card.deleteLater()

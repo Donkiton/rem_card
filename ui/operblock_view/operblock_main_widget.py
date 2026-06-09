@@ -9966,7 +9966,11 @@ class OperBlockMainWidget(QWidget):
         buttons = QHBoxLayout()
         buttons.setSpacing(12)
         open_btn = QPushButton("ОТКРЫТЬ КАРТОЧКУ")
-        edit_btn = QPushButton("✎  РЕДАКТИРОВАТЬ")
+        edit_btn = QPushButton("РЕДАКТИРОВАТЬ")
+        edit_icon_path = os.path.join(get_icon_dir(), "edit.png")
+        if os.path.exists(edit_icon_path):
+            edit_btn.setIcon(QIcon(edit_icon_path))
+            edit_btn.setIconSize(QSize(24, 24))
         close_btn = QPushButton("ОСВОБОДИТЬ СТОЛ")
         for button in (open_btn, edit_btn, close_btn):
             button.setFixedHeight(48)
