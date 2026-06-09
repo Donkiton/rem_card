@@ -19191,6 +19191,8 @@ def _check_operblock_board_male_photo_uses_operating_room_asset(app, widget) -> 
     pixmap = label.pixmap()
     if pixmap is None or pixmap.isNull():
         return False, "male operating room patient photo was not rendered"
+    if pixmap.width() < label.width() - 4 or pixmap.height() < label.height() - 4:
+        return False, f"male operating room patient photo is too small for the slot: {pixmap.size()}"
 
     reader = QImageReader(asset_path)
     reader.setAutoTransform(True)
