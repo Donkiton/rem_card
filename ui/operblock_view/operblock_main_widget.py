@@ -17238,8 +17238,13 @@ class OperBlockMainWidget(QWidget):
                 name = "man.png"
             else:
                 name = "noman.png"
-            if name == "man.png":
-                path = os.path.join(get_icon_dir(), "man_in_oper_extr.png")
+            operating_room_photo_by_name = {
+                "man.png": "man_in_oper_extr.png",
+                "woman.png": "woman_in_oper_extr.png",
+            }
+            operating_room_photo = operating_room_photo_by_name.get(name)
+            if operating_room_photo:
+                path = os.path.join(get_icon_dir(), operating_room_photo)
                 if not os.path.isfile(path):
                     path = os.path.join(get_patient_assets_dir(), "Patients", name)
             else:

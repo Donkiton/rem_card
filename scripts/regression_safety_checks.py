@@ -19172,27 +19172,34 @@ def _check_operblock_board_medication_empty_notice(app, widget) -> tuple[bool, s
         app.processEvents()
 
 
-def _check_operblock_board_male_photo_uses_operating_room_asset(app, widget) -> tuple[bool, str]:
+def _check_operblock_board_gender_photo_uses_operating_room_asset(
+    app,
+    widget,
+    *,
+    gender: str,
+    asset_name: str,
+    description: str,
+) -> tuple[bool, str]:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QImageReader
     from PySide6.QtWidgets import QLabel
 
     from rem_card.app.paths import get_icon_dir
 
-    asset_path = os.path.join(get_icon_dir(), "man_in_oper_extr.png")
+    asset_path = os.path.join(get_icon_dir(), asset_name)
     if not os.path.isfile(asset_path):
-        return False, "operating room male patient photo asset is missing"
+        return False, f"operating room {description} patient photo asset is missing"
 
     label = QLabel()
     label.setFixedSize(232, 268)
     widget._current_board_apply_metrics = None
     widget._board_photo_thumbnail_cache = {}
-    widget._set_patient_photo(label, "Мужской")
+    widget._set_patient_photo(label, gender)
     pixmap = label.pixmap()
     if pixmap is None or pixmap.isNull():
-        return False, "male operating room patient photo was not rendered"
+        return False, f"{description} operating room patient photo was not rendered"
     if pixmap.width() < label.width() - 4 or pixmap.height() < label.height() - 4:
-        return False, f"male operating room patient photo is too small for the slot: {pixmap.size()}"
+        return False, f"{description} operating room patient photo is too small for the slot: {pixmap.size()}"
 
     reader = QImageReader(asset_path)
     reader.setAutoTransform(True)
@@ -19201,10 +19208,10 @@ def _check_operblock_board_male_photo_uses_operating_room_asset(app, widget) -> 
         reader.setScaledSize(source_size.scaled(label.size(), Qt.KeepAspectRatio))
     expected = reader.read()
     if expected.isNull():
-        return False, "operating room male patient photo asset could not be decoded"
+        return False, f"operating room {description} patient photo asset could not be decoded"
     actual = pixmap.toImage()
     if actual.size() != expected.size():
-        return False, f"male patient photo does not use operating room asset size: {actual.size()} != {expected.size()}"
+        return False, f"{description} patient photo does not use operating room asset size: {actual.size()} != {expected.size()}"
     for x, y in (
         (actual.width() // 2, actual.height() // 2),
         (actual.width() // 3, actual.height() // 3),
@@ -19219,7 +19226,25 @@ def _check_operblock_board_male_photo_uses_operating_room_asset(app, widget) -> 
             + abs(actual_color.alpha() - expected_color.alpha())
         )
         if channel_delta > 12:
-            return False, "male patient photo pixels do not match operating room asset"
+            return False, f"{description} patient photo pixels do not match operating room asset"
+    return True, "ok"
+
+
+def _check_operblock_board_operating_room_photos(app, widget) -> tuple[bool, str]:
+    checks = (
+        ("Мужской", "man_in_oper_extr.png", "male"),
+        ("Женский", "woman_in_oper_extr.png", "female"),
+    )
+    for gender, asset_name, description in checks:
+        ok, details = _check_operblock_board_gender_photo_uses_operating_room_asset(
+            app,
+            widget,
+            gender=gender,
+            asset_name=asset_name,
+            description=description,
+        )
+        if not ok:
+            return False, details
     return True, "ok"
 
 
@@ -19389,7 +19414,7 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     if meds_gap < 4 or meds_gap > 10:
         return False, f"board medication preview leaves a large gap before rows: {meds_gap}"
 
-    ok, details = _check_operblock_board_male_photo_uses_operating_room_asset(app, widget)
+    ok, details = _check_operblock_board_operating_room_photos(app, widget)
     if not ok:
         return False, details
 
