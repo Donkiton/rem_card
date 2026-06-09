@@ -11,7 +11,7 @@ import time
 from typing import TYPE_CHECKING
 import weakref
 
-from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QRegularExpression, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QDrag,
@@ -25,6 +25,7 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QRegularExpressionValidator,
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
@@ -32,7 +33,6 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
-    QDateEdit,
     QDialog,
     QFormLayout,
     QFrame,
@@ -7273,14 +7273,14 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.gender_combo.setFixedHeight(34)
         self.gender_combo.addItems(["Мужской", "Женский"])
         self.gender_combo.setStyleSheet(_operblock_combo_box_style())
-        self.birth_date_input = QDateEdit()
+        self.birth_date_input = _line_edit()
+        self.birth_date_input.setObjectName("OperBlockOccupyBirthDateInput")
         self.birth_date_input.setFixedHeight(34)
-        self.birth_date_input.setCalendarPopup(True)
-        self.birth_date_input.setDisplayFormat("dd.MM.yyyy")
-        self.birth_date_input.setMinimumDate(self.EMPTY_BIRTH_DATE)
-        self.birth_date_input.setMaximumDate(QDate.currentDate())
-        self.birth_date_input.setSpecialValueText("дд.мм.гггг")
-        self.birth_date_input.setDate(self.EMPTY_BIRTH_DATE)
+        self.birth_date_input.setPlaceholderText("дд.мм.гггг")
+        self.birth_date_input.setMaxLength(10)
+        self.birth_date_input.setValidator(QRegularExpressionValidator(QRegularExpression(r"^[0-9.,/\\]*$")))
+        self.birth_date_input.textEdited.connect(self._on_birth_date_text_edited)
+        self.birth_date_input.editingFinished.connect(self._normalize_birth_date_field)
         general_form.addRow("Номер истории болезни *:", self.history_input)
         general_form.addRow("ФИО пациента *:", self.full_name_input)
         general_form.addRow("Пол *:", self.gender_combo)
@@ -7318,6 +7318,19 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.blood_group_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_GROUP_OPTIONS)
         self.blood_rh_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_RH_OPTIONS)
         blood_widget = QWidget()
+        blood_widget.setObjectName("OperBlockOccupyBloodFields")
+        blood_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupyBloodFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupyBloodFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
         blood_layout = QGridLayout(blood_widget)
         blood_layout.setContentsMargins(0, 0, 0, 0)
         blood_layout.setHorizontalSpacing(12)
@@ -7350,6 +7363,19 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             combo.setMinimumContentsLength(18)
             combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         anesthesia_team_widget = QWidget()
+        anesthesia_team_widget.setObjectName("OperBlockOccupyAnesthesiaFields")
+        anesthesia_team_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupyAnesthesiaFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupyAnesthesiaFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
         anesthesia_team_layout = QGridLayout(anesthesia_team_widget)
         anesthesia_team_layout.setContentsMargins(0, 0, 0, 0)
         anesthesia_team_layout.setHorizontalSpacing(12)
@@ -7400,6 +7426,17 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         vitals_form.addRow("ЧСС:", self.pulse_input)
         vitals_form.addRow("SpO₂:", self.spo2_input)
         self.save_initial_vitals_checkbox = QCheckBox("Сохранить как исходные показатели")
+        self.save_initial_vitals_checkbox.setObjectName("OperBlockSaveInitialVitalsCheckbox")
+        self.save_initial_vitals_checkbox.setStyleSheet(
+            f"""
+            QCheckBox#OperBlockSaveInitialVitalsCheckbox {{
+                background: transparent;
+                border: none;
+                color: {TEXT_PRIMARY};
+                spacing: 8px;
+            }}
+            """
+        )
         self.save_initial_vitals_checkbox.setChecked(True)
         vitals_form.addRow("", self.save_initial_vitals_checkbox)
         page_layout.addWidget(vitals)
@@ -7437,7 +7474,9 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         if text:
             combo.setEditText(text)
         remove_button = QPushButton("Удалить")
+        remove_button.setObjectName("OperBlockOccupyRemoveSurgeonButton")
         remove_button.setFixedHeight(32)
+        remove_button.setFixedWidth(remove_button.sizeHint().width() + 20)
         remove_button.setCursor(Qt.PointingHandCursor)
         remove_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
         remove_button.clicked.connect(lambda _=False, widget=row: self._remove_surgeon_row(widget))
@@ -7511,13 +7550,110 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         for surgeon in surgeons or [""]:
             self._add_surgeon_row(surgeon)
 
+    @staticmethod
+    def _expanded_birth_year(year_text: str) -> int | None:
+        text = "".join(ch for ch in str(year_text or "") if ch.isdigit())
+        if not text:
+            return None
+        if len(text) <= 2:
+            year_num = int(text)
+            pivot = datetime.now().year % 100
+            return (1900 if year_num > pivot else 2000) + year_num
+        if len(text) == 4:
+            return int(text)
+        return None
+
+    @classmethod
+    def _date_from_birth_parts(cls, day_text: str, month_text: str, year_text: str) -> date | None:
+        year = cls._expanded_birth_year(year_text)
+        if year is None:
+            return None
+        try:
+            return date(year, int(day_text), int(month_text))
+        except ValueError:
+            return None
+
+    @classmethod
+    def _parse_birth_date_text(cls, text: str) -> date | None:
+        raw_text = str(text or "").strip()
+        if not raw_text:
+            return None
+
+        direct = parse_date_value(raw_text)
+        if direct is not None:
+            return direct
+
+        normalized = normalize_operblock_birth_date_text(raw_text, final=True)
+        parsed = parse_date_value(normalized)
+        if parsed is not None:
+            return parsed
+
+        groups = re.findall(r"\d+", raw_text)
+        candidates: list[tuple[str, str, str]] = []
+        if len(groups) == 3:
+            candidates.append((groups[0], groups[1], groups[2]))
+
+        digits = "".join(ch for ch in raw_text if ch.isdigit())
+        if len(digits) == 8:
+            candidates.append((digits[:2], digits[2:4], digits[4:]))
+        elif len(digits) == 7:
+            candidates.extend(
+                (
+                    (digits[:2], digits[2:3], digits[3:]),
+                    (digits[:1], digits[1:3], digits[3:]),
+                )
+            )
+        elif len(digits) == 6:
+            candidates.append((digits[:2], digits[2:4], digits[4:]))
+        elif len(digits) == 5:
+            candidates.extend(
+                (
+                    (digits[:2], digits[2:3], digits[3:]),
+                    (digits[:1], digits[1:3], digits[3:]),
+                )
+            )
+
+        for day_text, month_text, year_text in candidates:
+            candidate = cls._date_from_birth_parts(day_text, month_text, year_text)
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _on_birth_date_text_edited(self, text: str):
+        normalized = normalize_operblock_birth_date_text(text, final=False)
+        if normalized == text:
+            return
+        old_cursor_pos = self.birth_date_input.cursorPosition()
+        if old_cursor_pos >= len(text):
+            cursor_pos = len(normalized)
+        else:
+            cursor_pos = min(old_cursor_pos + max(0, len(normalized) - len(text)), len(normalized))
+        self.birth_date_input.blockSignals(True)
+        self.birth_date_input.setText(normalized)
+        self.birth_date_input.setCursorPosition(cursor_pos)
+        self.birth_date_input.blockSignals(False)
+
+    def _normalize_birth_date_field(self):
+        text = self.birth_date_input.text().strip()
+        if not text:
+            return
+        birth_date = self._parse_birth_date_text(text)
+        if birth_date is None:
+            normalized = normalize_operblock_birth_date_text(text, final=True)
+            if normalized != text:
+                self.birth_date_input.setText(normalized)
+            return
+        self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+
     def set_data(self, data: dict) -> None:
         self.history_input.setText(str((data or {}).get("history_number") or ""))
         self.full_name_input.setText(str((data or {}).get("full_name") or ""))
         self._set_combo_text(self.gender_combo, str((data or {}).get("gender") or ""))
         birth_date = parse_date_value((data or {}).get("birth_date"))
         if birth_date is not None:
-            self.birth_date_input.setDate(QDate(int(birth_date.year), int(birth_date.month), int(birth_date.day)))
+            self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+        else:
+            self.birth_date_input.clear()
         code = normalize_operblock_mkb_code(str((data or {}).get("diagnosis_code") or ""))
         self.diagnosis_code_input.setText(code)
         diagnosis_text = str((data or {}).get("diagnosis_text") or "").strip()
@@ -7673,10 +7809,19 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         return result
 
     def _birth_date_value(self) -> date:
-        qdate = self.birth_date_input.date()
-        if qdate == self.EMPTY_BIRTH_DATE:
+        text = self.birth_date_input.text().strip()
+        if not text:
             raise ValueError("Укажите дату рождения.")
-        return date(int(qdate.year()), int(qdate.month()), int(qdate.day()))
+        birth_date = self._parse_birth_date_text(text)
+        if birth_date is None:
+            raise ValueError("Укажите корректную дату рождения.")
+        min_birth_date = date(int(self.EMPTY_BIRTH_DATE.year()), int(self.EMPTY_BIRTH_DATE.month()), int(self.EMPTY_BIRTH_DATE.day()))
+        if birth_date < min_birth_date:
+            raise ValueError("Дата рождения не может быть раньше 01.01.1900.")
+        if birth_date > date.today():
+            raise ValueError("Дата рождения не может быть позже текущей даты.")
+        self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
+        return birth_date
 
     def get_data(self) -> dict:
         history_number = normalize_operblock_history_number(self.history_input.text())

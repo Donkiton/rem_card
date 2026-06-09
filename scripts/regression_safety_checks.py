@@ -18963,6 +18963,94 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         manager.close()
 
 
+def _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import date
+
+    from PySide6.QtWidgets import QApplication, QCheckBox, QComboBox, QDateEdit, QLineEdit, QPushButton, QWidget
+
+    from rem_card.ui.operblock_view.operblock_main_widget import OccupyTableDialog
+    from rem_card.ui.styles.theme import STYLE_PATIENT_FORM_CANCEL_BUTTON
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+    dialog = OccupyTableDialog("planned", "Плановая операционная")
+    try:
+        dialog.show()
+        app.processEvents()
+        if isinstance(dialog.birth_date_input, QDateEdit):
+            return False, "occupy dialog birth date still uses QDateEdit calendar widget"
+        if not isinstance(dialog.birth_date_input, QLineEdit):
+            return False, "occupy dialog birth date is not a plain text input"
+        birth_samples = {
+            "01012000": date(2000, 1, 1),
+            "01/01/00": date(2000, 1, 1),
+            "1.1.00": date(2000, 1, 1),
+            "03051986": date(1986, 5, 3),
+        }
+        for raw_text, expected in birth_samples.items():
+            dialog.birth_date_input.setText(raw_text)
+            dialog._normalize_birth_date_field()
+            parsed = dialog._birth_date_value()
+            if parsed != expected:
+                return False, f"occupy dialog birth date parse mismatch for {raw_text!r}: {parsed} != {expected}"
+            if dialog.birth_date_input.text() != expected.strftime("%d.%m.%Y"):
+                return False, f"occupy dialog birth date was not normalized after parse: {dialog.birth_date_input.text()!r}"
+        dialog.birth_date_input.clear()
+        for char in "03051986":
+            cursor_pos = dialog.birth_date_input.cursorPosition()
+            new_text = (
+                dialog.birth_date_input.text()[:cursor_pos]
+                + char
+                + dialog.birth_date_input.text()[cursor_pos:]
+            )
+            dialog.birth_date_input.setText(new_text)
+            dialog.birth_date_input.setCursorPosition(cursor_pos + 1)
+            dialog._on_birth_date_text_edited(new_text)
+        if dialog.birth_date_input.text() != "03.05.1986" or dialog.birth_date_input.cursorPosition() != 10:
+            return False, "occupy dialog birth date progressive numeric input does not keep cursor at the end"
+
+        for object_name in ("OperBlockOccupyBloodFields", "OperBlockOccupyAnesthesiaFields"):
+            group = dialog.findChild(QWidget, object_name)
+            if group is None:
+                return False, f"occupy dialog field group missing: {object_name}"
+            stylesheet = group.styleSheet()
+            if "background: transparent" not in stylesheet or "border: none" not in stylesheet:
+                return False, f"occupy dialog field group is not transparent: {object_name}"
+
+        checkbox = dialog.findChild(QCheckBox, "OperBlockSaveInitialVitalsCheckbox")
+        if checkbox is None:
+            return False, "occupy dialog initial vitals checkbox was not named"
+        if "background: transparent" not in checkbox.styleSheet() or "border: none" not in checkbox.styleSheet():
+            return False, "occupy dialog initial vitals checkbox still has a framed background"
+
+        dialog._add_surgeon_row("Второй хирург")
+        app.processEvents()
+        remove_buttons = dialog.findChildren(QPushButton, "OperBlockOccupyRemoveSurgeonButton")
+        visible_remove_buttons = [button for button in remove_buttons if not button.isHidden()]
+        if not visible_remove_buttons:
+            return False, "occupy dialog did not show remove surgeon buttons after adding a second surgeon"
+        reference_remove_button = QPushButton("Удалить")
+        reference_remove_button.setFixedHeight(32)
+        reference_remove_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        expected_remove_width = reference_remove_button.sizeHint().width() + 20
+        for button in visible_remove_buttons:
+            if button.width() < expected_remove_width:
+                return False, f"remove surgeon button was not widened by 20px: {button.width()} < {expected_remove_width}"
+        surgeon_combos = [
+            combo
+            for _row, combo in getattr(dialog, "_surgeon_rows", [])
+            if isinstance(combo, QComboBox)
+        ]
+        if len(surgeon_combos) < 2:
+            return False, "occupy dialog did not keep surgeon combo rows"
+        return True, "ok"
+    finally:
+        dialog.close()
+        app.processEvents()
+
+
 def _check_operblock_operation_stage_chart_grouping(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21098,6 +21186,7 @@ def main():
         ("operblock_route_settings_order_and_default", _check_operblock_route_settings_order_and_default),
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
+        ("operblock_occupy_dialog_manual_birth_date_and_plain_groups", _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups),
         ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
         ("operblock_empty_table_card_layout", _check_operblock_empty_table_card_layout),
         ("operblock_board_preview_bounded_history", _check_operblock_board_preview_bounded_history),
