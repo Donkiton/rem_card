@@ -10685,7 +10685,7 @@ class OperBlockMainWidget(QWidget):
             empty.setStyleSheet("font-size: 14px; color: #1F2D3D; font-weight: 500;")
             layout.addWidget(empty)
             return block
-        for item in history[-5:]:
+        for item in history:
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             dot = QLabel("•")

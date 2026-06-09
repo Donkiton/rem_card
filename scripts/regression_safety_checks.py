@@ -19135,12 +19135,9 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
         {"started_at": base_dt.isoformat(timespec="seconds"), "operation_events": operation_events},
     )
     stage_texts = [label.text() for label in stages_block.findChildren(QLabel)]
-    for index in range(1, 4):
-        if f"Этап {index:02d}" in stage_texts:
-            return False, f"board operation history includes an old stage: {stage_texts!r}"
-    for index in range(4, 9):
+    for index in range(1, 9):
         if f"Этап {index:02d}" not in stage_texts:
-            return False, f"board operation history missed recent stage {index:02d}: {stage_texts!r}"
+            return False, f"board operation history missed stage {index:02d}: {stage_texts!r}"
     if "Подготовка пациента" in stage_texts:
         return False, "board operation history mixed case started_at into timeline stages"
 
