@@ -10673,20 +10673,33 @@ class OperBlockMainWidget(QWidget):
         return block
 
     def _board_operation_stages_block(self, patient: dict) -> QFrame:
-        block, layout = self._board_block(
-            "Этапы операции",
-            title_color="#2563EB",
-            background_color="#F8FBFF",
-            border_color="#CFE3FF",
-        )
+        block, layout = self._board_block("Этапы операции")
         layout.setAlignment(Qt.AlignTop)
+        stages_panel = QFrame()
+        stages_panel.setObjectName("OperBlockBoardStagesPanel")
+        stages_panel.setStyleSheet(
+            """
+            QFrame#OperBlockBoardStagesPanel {
+                background-color: #F8FBFF;
+                border: 1px solid #CFE3FF;
+                border-radius: 8px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        stages_layout = QVBoxLayout(stages_panel)
+        stages_layout.setContentsMargins(12, 10, 12, 10)
+        stages_layout.setSpacing(8)
         events = [dict(event or {}) for event in (patient.get("operation_events") or [])]
-        _active_index, _fill_fraction, active_kind = self._board_progress_state(events)
         history = self._board_stage_history(patient)
         if not history:
             empty = self._board_muted_label("Этапы операции не начаты", size=14)
             empty.setStyleSheet("font-size: 14px; color: #1F2D3D; font-weight: 500;")
-            layout.addWidget(empty)
+            stages_layout.addWidget(empty)
+            layout.addWidget(stages_panel, 0, Qt.AlignTop)
             return block
         for item in history:
             row = QHBoxLayout()
@@ -10694,22 +10707,21 @@ class OperBlockMainWidget(QWidget):
             dot = QLabel("•")
             dot.setFixedWidth(12)
             dot.setAlignment(Qt.AlignCenter)
-            is_current = str(item.get("kind") or "") == active_kind
-            color = "#2563EB" if is_current else "#94A3B8"
-            dot.setStyleSheet(f"font-size: 18px; color: {color}; font-weight: 900;")
+            dot.setStyleSheet("font-size: 18px; color: #1F2D3D; font-weight: 900;")
             time_label = QLabel(_format_order_time(item.get("event_time")))
             time_label.setFixedWidth(44)
             time_label.setStyleSheet("font-size: 12px; color: #64748B; font-weight: 700;")
             text_label = self._board_value_label(
                 str(item.get("label") or "Этап операции"),
                 size=13,
-                weight=800 if is_current else 600,
-                color="#2563EB" if is_current else "#1F2D3D",
+                weight=700,
+                color="#1F2D3D",
             )
             row.addWidget(dot, 0)
             row.addWidget(time_label, 0)
             row.addWidget(text_label, 1)
-            layout.addLayout(row)
+            stages_layout.addLayout(row)
+        layout.addWidget(stages_panel, 0, Qt.AlignTop)
         return block
 
     def _board_medications_block(self, patient: dict) -> QFrame:

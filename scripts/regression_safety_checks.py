@@ -19056,14 +19056,21 @@ def _check_operblock_board_preview_full_card_layout(
         if full_stage_title is None:
             return False, "full board preview operation stages block was not rendered"
         stage_block = owner_block(full_stage_title)
-        if stage_block is None or "#F8FBFF" not in stage_block.styleSheet() or "#CFE3FF" not in stage_block.styleSheet():
-            return False, "full board operation stages block does not use blue framed styling"
+        if stage_block is None:
+            return False, "full board preview operation stages block frame was not rendered"
+        if "#F8FBFF" in stage_block.styleSheet() or "#CFE3FF" in stage_block.styleSheet():
+            return False, "operation stages title is still inside the blue framed block"
+        if "#1F2D3D" not in full_stage_title.styleSheet() or "#2563EB" in full_stage_title.styleSheet():
+            return False, "operation stages title does not use the default black style"
+        stages_panel = stage_block.findChild(QFrame, "OperBlockBoardStagesPanel")
+        if stages_panel is None or "#F8FBFF" not in stages_panel.styleSheet() or "#CFE3FF" not in stages_panel.styleSheet():
+            return False, "operation stages rows are not inside the blue framed panel"
         target_bottom = max(block_bottom(vitals_block), block_bottom(meds_block))
         stage_bottom = block_bottom(stage_block)
         if abs(stage_bottom - target_bottom) > 2:
             return False, f"board operation stages block is not stretched to lower row bottom: {stage_bottom} != {target_bottom}"
         empty_stage_notice = next(
-            (label for label in stage_block.findChildren(QLabel) if label.text() == "Этапы операции не начаты"),
+            (label for label in stages_panel.findChildren(QLabel) if label.text() == "Этапы операции не начаты"),
             None,
         )
         if empty_stage_notice is not None:
@@ -19074,6 +19081,15 @@ def _check_operblock_board_preview_full_card_layout(
             )
             if stage_notice_gap < 6 or stage_notice_gap > 24:
                 return False, f"empty operation stages content is not kept near the title: {stage_notice_gap}"
+        for stage_index in range(1, len(operation_events) + 1):
+            stage_label = next(
+                (label for label in stages_panel.findChildren(QLabel) if label.text() == f"Этап {stage_index:02d}"),
+                None,
+            )
+            if stage_label is None:
+                return False, f"operation stage label missed in rows panel: {stage_index:02d}"
+            if "#1F2D3D" not in stage_label.styleSheet() or "#2563EB" in stage_label.styleSheet():
+                return False, f"operation stage label is not rendered in the unified black style: {stage_label.styleSheet()!r}"
         edit_buttons = [
             button
             for button in full_card.findChildren(QPushButton)
