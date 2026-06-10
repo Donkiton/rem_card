@@ -13,6 +13,11 @@ from rem_card.ui.rem_card_sectors.outcome_dialogs import DeathOutcomeDialog, Tra
 from rem_card.ui.styles.theme import BG_LIGHT, BORDER_COLOR, COLOR_INFO, TEXT_MUTED, TEXT_ON_DARK
 
 
+OUTCOME_REPORT_DAILY = 101
+OUTCOME_REPORT_FULL = 102
+OUTCOME_REPORT_SKIP = 103
+
+
 def _movement_comment_text(status, reason_text):
     text = str(reason_text or "").strip()
     status_value = getattr(status, "value", status)
@@ -39,6 +44,8 @@ class SectorEvents(BaseSectorWidget):
         self._current_status = None
         self._status_write_pending = False
         self._snapshot_cache = OrderedDict()
+        self._outcome_report_controller = None
+        self._outcome_report_controller_service = None
 
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
@@ -777,6 +784,7 @@ class SectorEvents(BaseSectorWidget):
             if result:
                 self.edit_reason_text.clear()
                 self._schedule_post_status_refresh()
+                self._show_outcome_report_reminder(event_time)
             else:
                 self.refresh(force=True)
                 CustomMessageBox.warning(
@@ -840,6 +848,91 @@ class SectorEvents(BaseSectorWidget):
             on_success(result)
         except Exception as exc:
             on_error(exc)
+
+    def _outcome_report_reminder_enabled(self) -> bool:
+        try:
+            from rem_card.ui.rem_card_sectors.sector_print import PrintConfig
+
+            return bool(PrintConfig().load().get("outcome_report_reminder", False))
+        except Exception:
+            from rem_card.app.logger import logger
+
+            logger.exception("Не удалось загрузить настройку напоминания о печати отчета при исходе.")
+            return False
+
+    def _show_outcome_report_reminder(self, event_time):
+        if not self._outcome_report_reminder_enabled():
+            return
+
+        result = CustomMessageBox.warning_with_actions(
+            self,
+            "Печать отчета",
+            "Пациенту сохранен финальный исход.\n\nКакой отчет о пребывании пациента в отделении распечатать?",
+            [
+                ("Отчет за сутки", OUTCOME_REPORT_DAILY),
+                ("Отчет за все время пребывания", OUTCOME_REPORT_FULL),
+                ("Не печатать отчеты", OUTCOME_REPORT_SKIP),
+            ],
+        )
+        if result == OUTCOME_REPORT_DAILY:
+            self._run_outcome_report("daily", event_time)
+        elif result == OUTCOME_REPORT_FULL:
+            self._run_outcome_report("full", event_time)
+
+    def _ancestor_widgets(self):
+        widget = self
+        seen = set()
+        while widget is not None:
+            marker = id(widget)
+            if marker in seen:
+                break
+            seen.add(marker)
+            yield widget
+            parent_getter = getattr(widget, "parent", None)
+            widget = parent_getter() if callable(parent_getter) else None
+
+    def _get_outcome_report_controller(self):
+        for widget in self._ancestor_widgets():
+            getter = getattr(widget, "_get_report_controller", None)
+            if callable(getter):
+                return getter()
+
+        for widget in self._ancestor_widgets():
+            service = getattr(widget, "remcard_service", None) or getattr(widget, "service", None)
+            if service is None:
+                continue
+            if (
+                self._outcome_report_controller is not None
+                and self._outcome_report_controller_service is service
+            ):
+                return self._outcome_report_controller
+            from rem_card.ui.shared.report_controller import RemCardReportController
+
+            self._outcome_report_controller = RemCardReportController(service, widget)
+            self._outcome_report_controller_service = service
+            return self._outcome_report_controller
+        return None
+
+    def _run_outcome_report(self, report_kind: str, event_time):
+        controller = self._get_outcome_report_controller()
+        if controller is None:
+            CustomMessageBox.warning(
+                self,
+                "Печать отчета",
+                "Не удалось найти контроллер печати отчетов для текущей карты пациента.",
+            )
+            return
+        if not self.admission_id:
+            return
+        try:
+            admission_id = int(self.admission_id)
+            if report_kind == "daily":
+                report_date = self.shift_date or event_time or datetime.now()
+                controller.run_daily_report(admission_id, report_date)
+            elif report_kind == "full":
+                controller.run_full_report(admission_id)
+        except Exception as exc:
+            CustomMessageBox.critical(self, "Ошибка", f"Не удалось запустить печать отчета: {exc}")
 
     def on_save_time_clicked(self, event_dto, start_edit, end_edit, reason_edit):
         """Обработка сохранения измененного времени и комментария."""

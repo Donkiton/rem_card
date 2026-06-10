@@ -22,6 +22,7 @@ REPORT_SECTIONS = [
     ("death_outcome", "Отчет о смерти", True),
     ("death_protocol", "Протокол смерти", True),
     ("transfusion_registration", "Лист регистрации трансфузий", True),
+    ("outcome_report_reminder", "Напоминать о печати отчета при исходе", True),
     ("procedures", "Процедуры", False),
     ("labs", "Анализы", False),
 ]
@@ -143,6 +144,7 @@ class PrintSettingsWidget(QWidget):
             cfg["death_outcome"],
             cfg["death_protocol"],
             cfg["transfusion_registration"],
+            cfg["outcome_report_reminder"],
         )
 
 

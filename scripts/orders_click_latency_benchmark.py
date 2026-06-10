@@ -109,10 +109,15 @@ def _prepare_target_order(container, clicks: int):
 
     doctor = DoctorMainWidget(container.patient_service, container.remcard_service)
     doctor.remcard_widget.load_patient_card(admission_id, datetime.now())
+    layout = doctor.remcard_widget.layout_manager
+    if hasattr(layout, "set_active_tab"):
+        layout.set_active_tab("Назначения", source="benchmark")
+    if hasattr(layout, "sector_2b") and hasattr(layout.sector_2b, "select_tab"):
+        layout.sector_2b.select_tab("Назначения", emit=False)
     doctor.remcard_widget.on_tab_changed("Назначения")
     app.processEvents()
 
-    ow = doctor.remcard_widget.layout_manager.orders_widget
+    ow = layout.orders_widget
     if ow.model is None:
         raise RuntimeError("Orders model is not initialized")
 

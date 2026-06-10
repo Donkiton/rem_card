@@ -1323,6 +1323,7 @@ class SettingsService:
             "death_outcome": True,
             "death_protocol": True,
             "transfusion_registration": True,
+            "outcome_report_reminder": False,
         }
         self._write_app_setting_in_tx(
             cursor,

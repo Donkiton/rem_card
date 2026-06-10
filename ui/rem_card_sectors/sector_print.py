@@ -36,7 +36,8 @@ class PrintConfig:
         
     def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool,
              ventilation: bool, labs: bool, procedures: bool, death_outcome: bool = None,
-             death_protocol: bool = None, transfusion_registration: bool = None):
+             death_protocol: bool = None, transfusion_registration: bool = None,
+             outcome_report_reminder: bool = None):
         current = self.load()
         if death_outcome is None:
             death_outcome = current.get("death_outcome", True)
@@ -44,6 +45,8 @@ class PrintConfig:
             death_protocol = current.get("death_protocol", death_outcome)
         if transfusion_registration is None:
             transfusion_registration = current.get("transfusion_registration", True)
+        if outcome_report_reminder is None:
+            outcome_report_reminder = current.get("outcome_report_reminder", False)
         from rem_card.services.settings.settings_service import PRINT_SETTINGS_KEY, get_settings_service
 
         payload = {
@@ -57,6 +60,7 @@ class PrintConfig:
             "death_outcome": bool(death_outcome),
             "death_protocol": bool(death_protocol),
             "transfusion_registration": bool(transfusion_registration),
+            "outcome_report_reminder": bool(outcome_report_reminder),
         }
         get_settings_service().set_app_setting(
             "doctor",
@@ -81,6 +85,7 @@ class PrintConfig:
             "death_outcome": True,
             "death_protocol": True,
             "transfusion_registration": True,
+            "outcome_report_reminder": False,
         }
         payload = get_settings_service().get_app_setting("doctor", "print_config", default=default)
         if not isinstance(payload, dict):

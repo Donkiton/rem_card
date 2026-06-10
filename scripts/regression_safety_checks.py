@@ -10,6 +10,8 @@ Usage:
 from __future__ import annotations
 
 import ast
+import argparse
+import faulthandler
 import glob
 import hashlib
 import json
@@ -22,12 +24,14 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_REGRESSION_TIMEOUT_SEC = 600.0
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 try:
@@ -40,6 +44,37 @@ except Exception:
 
 def _make_temp_root() -> str:
     return tempfile.mkdtemp(prefix="remcard_regression_checks_")
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Regression checks for RemCard safety contracts")
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=_float_env("REMCARD_REGRESSION_TIMEOUT_SEC", DEFAULT_REGRESSION_TIMEOUT_SEC),
+        help=(
+            "Hard timeout for the whole regression process. "
+            "Set 0 to disable. Can also be set with REMCARD_REGRESSION_TIMEOUT_SEC."
+        ),
+    )
+    parser.add_argument(
+        "--quiet-progress",
+        action="store_true",
+        help="Do not print per-check progress lines before the final JSON report.",
+    )
+    return parser.parse_args(argv)
+
+
+def _print_progress(message: str, *, quiet: bool) -> None:
+    if not quiet:
+        print(message, flush=True)
 
 
 def _prepare_import_environment(temp_root: str):
@@ -18396,6 +18431,134 @@ def _check_print_config_change_updates_print_settings_hash(temp_root: str) -> tu
     return True, "ok"
 
 
+def _check_print_config_outcome_report_reminder(temp_root: str) -> tuple[bool, str]:
+    from rem_card.services.settings.settings_service import configure_settings_service, reset_settings_service
+    from rem_card.ui.rem_card_sectors.sector_print import PrintConfig
+
+    settings_dir = os.path.join(temp_root, "settings")
+    os.makedirs(settings_dir, exist_ok=True)
+    configure_settings_service(settings_db_path=os.path.join(settings_dir, "remcard_settings.db"))
+    try:
+        config = PrintConfig()
+        loaded = config.load()
+        if "outcome_report_reminder" not in loaded:
+            return False, "print config does not expose outcome_report_reminder"
+        if loaded.get("outcome_report_reminder") is not False:
+            return False, f"outcome report reminder default must be disabled: {loaded!r}"
+
+        config.save(
+            loaded["vitals"],
+            loaded["balance"],
+            loaded["prescriptions"],
+            loaded["events"],
+            loaded["ventilation"],
+            loaded["labs"],
+            loaded["procedures"],
+            loaded["death_outcome"],
+            loaded["death_protocol"],
+            loaded["transfusion_registration"],
+            outcome_report_reminder=True,
+        )
+        enabled = config.load()
+        if enabled.get("outcome_report_reminder") is not True:
+            return False, f"outcome report reminder was not saved enabled: {enabled!r}"
+
+        config.save(
+            enabled["vitals"],
+            enabled["balance"],
+            enabled["prescriptions"],
+            enabled["events"],
+            enabled["ventilation"],
+            enabled["labs"],
+            enabled["procedures"],
+            enabled["death_outcome"],
+            enabled["death_protocol"],
+            enabled["transfusion_registration"],
+            outcome_report_reminder=False,
+        )
+        disabled = config.load()
+        if disabled.get("outcome_report_reminder") is not False:
+            return False, f"outcome report reminder was not saved disabled: {disabled!r}"
+        return True, "ok"
+    finally:
+        reset_settings_service()
+
+
+def _check_outcome_report_reminder_dispatch(temp_root: str) -> tuple[bool, str]:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from datetime import datetime
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors import sector_events as events_module
+    from rem_card.ui.rem_card_sectors.sector_events import (
+        OUTCOME_REPORT_DAILY,
+        OUTCOME_REPORT_FULL,
+        SectorEvents,
+    )
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakeReportController:
+        def __init__(self):
+            self.daily_calls = []
+            self.full_calls = []
+
+        def run_daily_report(self, admission_id, shift_date):
+            self.daily_calls.append((admission_id, shift_date))
+
+        def run_full_report(self, admission_id):
+            self.full_calls.append(admission_id)
+
+    shown = []
+    original_warning_with_actions = events_module.CustomMessageBox.warning_with_actions
+    widget = SectorEvents()
+    controller = FakeReportController()
+    try:
+        widget.admission_id = 42
+        widget.shift_date = datetime(2026, 6, 10, 8, 0)
+        widget._outcome_report_reminder_enabled = lambda: True
+        widget._get_outcome_report_controller = lambda: controller
+
+        def fake_warning_with_actions(parent, title, message, action_buttons):
+            shown.append(
+                {
+                    "title": title,
+                    "message": message,
+                    "buttons": [text for text, _code in action_buttons],
+                }
+            )
+            return OUTCOME_REPORT_DAILY if len(shown) == 1 else OUTCOME_REPORT_FULL
+
+        events_module.CustomMessageBox.warning_with_actions = fake_warning_with_actions
+        widget._show_outcome_report_reminder(datetime(2026, 6, 10, 12, 30))
+        widget._show_outcome_report_reminder(datetime(2026, 6, 10, 12, 30))
+        app.processEvents()
+
+        if len(shown) != 2:
+            return False, f"outcome report reminder was not shown twice for enabled setting: {shown!r}"
+        expected_buttons = ["Отчет за сутки", "Отчет за все время пребывания", "Не печатать отчеты"]
+        if shown[0]["buttons"] != expected_buttons:
+            return False, f"unexpected reminder buttons: {shown[0]['buttons']!r}"
+        if "Какой отчет о пребывании пациента" not in shown[0]["message"]:
+            return False, f"reminder message does not ask for report kind: {shown[0]['message']!r}"
+        if controller.daily_calls != [(42, widget.shift_date)]:
+            return False, f"daily report was not dispatched with current shift date: {controller.daily_calls!r}"
+        if controller.full_calls != [42]:
+            return False, f"full report was not dispatched: {controller.full_calls!r}"
+
+        widget._outcome_report_reminder_enabled = lambda: False
+        widget._show_outcome_report_reminder(datetime(2026, 6, 10, 13, 0))
+        if len(shown) != 2:
+            return False, "disabled outcome report reminder still showed dialog"
+        return True, "ok"
+    finally:
+        events_module.CustomMessageBox.warning_with_actions = original_warning_with_actions
+        widget.close()
+
+
 def _check_unchanged_catalog_hash_is_stable(temp_root: str) -> tuple[bool, str]:
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import (
@@ -20940,7 +21103,13 @@ def _check_db_cycle_period_selection(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def main():
+def main(argv: list[str] | None = None):
+    args = _parse_args(argv)
+    timeout_s = max(0.0, float(args.timeout_s or 0.0))
+    if timeout_s > 0:
+        faulthandler.enable()
+        faulthandler.dump_traceback_later(timeout_s, repeat=False, exit=True)
+
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
 
@@ -21423,6 +21592,8 @@ def main():
         ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),
         ("lab_materials_change_updates_lab_analysis_hash", _check_lab_materials_change_updates_lab_analysis_hash),
         ("print_config_change_updates_print_settings_hash", _check_print_config_change_updates_print_settings_hash),
+        ("print_config_outcome_report_reminder", _check_print_config_outcome_report_reminder),
+        ("outcome_report_reminder_dispatch", _check_outcome_report_reminder_dispatch),
         ("unchanged_catalog_hash_is_stable", _check_unchanged_catalog_hash_is_stable),
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
@@ -21445,15 +21616,44 @@ def main():
     failures = 0
     started = time.time()
     try:
-        for name, fn in checks:
+        total = len(checks)
+        _print_progress(
+            f"[regression] start total={total} timeout_s={timeout_s:g}",
+            quiet=bool(args.quiet_progress),
+        )
+        for index, (name, fn) in enumerate(checks, start=1):
             check_root = os.path.join(temp_root, name)
             Path(check_root).mkdir(parents=True, exist_ok=True)
-            ok, details = fn(check_root)
-            result_items.append({"check": name, "ok": bool(ok), "details": str(details)})
+            check_started = time.time()
+            _print_progress(
+                f"[regression] {index}/{total} {name} start",
+                quiet=bool(args.quiet_progress),
+            )
+            try:
+                ok, details = fn(check_root)
+            except Exception as exc:
+                ok = False
+                details = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=20)}"
+            duration_sec = round(time.time() - check_started, 3)
+            result_items.append(
+                {
+                    "check": name,
+                    "ok": bool(ok),
+                    "details": str(details),
+                    "duration_sec": duration_sec,
+                }
+            )
             if not ok:
                 failures += 1
+            status = "ok" if ok else "FAIL"
+            _print_progress(
+                f"[regression] {index}/{total} {name} {status} {duration_sec:.3f}s",
+                quiet=bool(args.quiet_progress),
+            )
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
+        if timeout_s > 0:
+            faulthandler.cancel_dump_traceback_later()
 
     report = {
         "total": len(checks),

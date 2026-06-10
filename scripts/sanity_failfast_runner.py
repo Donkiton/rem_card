@@ -16,8 +16,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -70,53 +72,127 @@ def _tail(text: str, max_chars: int = 1600) -> str:
     return text[-max_chars:]
 
 
+def _terminate_process(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _read_pipe(pipe, stream_name: str, output_queue: queue.Queue[tuple[str, str]]) -> None:
+    try:
+        for line in iter(pipe.readline, ""):
+            output_queue.put((stream_name, line))
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+
+
 def _run_check(
     *,
     name: str,
     command: list[str],
     timeout_sec: float,
+    idle_timeout_sec: float | None = None,
     env: dict[str, str],
     validate: Callable[[int, dict[str, Any] | None], tuple[bool, str]],
 ) -> CheckResult:
     started = time.perf_counter()
-    try:
-        proc = subprocess.run(
-            command,
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            env=env,
-        )
+    timeout_sec = float(timeout_sec or 0.0)
+    idle_timeout_sec = float(idle_timeout_sec or 0.0)
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+    proc = subprocess.Popen(
+        command,
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    readers = [
+        threading.Thread(target=_read_pipe, args=(proc.stdout, "stdout", output_queue), daemon=True),
+        threading.Thread(target=_read_pipe, args=(proc.stderr, "stderr", output_queue), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    last_output = started
+    timed_out_reason = ""
+    while True:
+        try:
+            stream_name, line = output_queue.get(timeout=0.1)
+            if stream_name == "stdout":
+                stdout_parts.append(line)
+            else:
+                stderr_parts.append(line)
+            last_output = time.perf_counter()
+        except queue.Empty:
+            pass
+
+        if proc.poll() is not None:
+            break
+
+        now = time.perf_counter()
+        if timeout_sec > 0 and now - started >= timeout_sec:
+            timed_out_reason = f"Timeout after {timeout_sec:.1f}s"
+            _terminate_process(proc)
+            break
+        if idle_timeout_sec > 0 and now - last_output >= idle_timeout_sec:
+            timed_out_reason = f"Idle timeout after {idle_timeout_sec:.1f}s without output"
+            _terminate_process(proc)
+            break
+
+    for reader in readers:
+        reader.join(timeout=2.0)
+    while True:
+        try:
+            stream_name, line = output_queue.get_nowait()
+            if stream_name == "stdout":
+                stdout_parts.append(line)
+            else:
+                stderr_parts.append(line)
+        except queue.Empty:
+            break
+
+    duration = time.perf_counter() - started
+    stdout = "".join(stdout_parts)
+    stderr = "".join(stderr_parts)
+    payload = _extract_last_json_dict(stdout) or _extract_last_json_dict(stderr)
+    if timed_out_reason:
         duration = time.perf_counter() - started
-        payload = _extract_last_json_dict(proc.stdout) or _extract_last_json_dict(proc.stderr)
-        ok, reason = validate(proc.returncode, payload)
-        return CheckResult(
-            name=name,
-            ok=ok,
-            duration_sec=duration,
-            exit_code=proc.returncode,
-            reason=reason,
-            json_payload=payload,
-            stdout_tail=_tail(proc.stdout),
-            stderr_tail=_tail(proc.stderr),
-            command=command,
-        )
-    except subprocess.TimeoutExpired as exc:
-        duration = time.perf_counter() - started
-        out = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-        err = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
         return CheckResult(
             name=name,
             ok=False,
             duration_sec=duration,
             exit_code=None,
-            reason=f"Timeout after {timeout_sec:.1f}s",
-            json_payload=None,
-            stdout_tail=_tail(out),
-            stderr_tail=_tail(err),
+            reason=timed_out_reason,
+            json_payload=payload,
+            stdout_tail=_tail(stdout),
+            stderr_tail=_tail(stderr),
             command=command,
         )
+    ok, reason = validate(proc.returncode or 0, payload)
+    return CheckResult(
+        name=name,
+        ok=ok,
+        duration_sec=duration,
+        exit_code=proc.returncode,
+        reason=reason,
+        json_payload=payload,
+        stdout_tail=_tail(stdout),
+        stderr_tail=_tail(stderr),
+        command=command,
+    )
 
 
 def _validate_regression(exit_code: int, payload: dict[str, Any] | None) -> tuple[bool, str]:
@@ -239,7 +315,13 @@ def main() -> int:
     parser.add_argument("--benchmark-clicks", type=int, default=5, help="Clicks for orders latency benchmark")
     parser.add_argument("--benchmark-timeout-s", type=float, default=120.0, help="Hard timeout for benchmark script")
     parser.add_argument("--quality-timeout-s", type=float, default=60.0, help="Timeout for static quality checks")
-    parser.add_argument("--regression-timeout-s", type=float, default=120.0, help="Timeout for regression checks")
+    parser.add_argument("--regression-timeout-s", type=float, default=600.0, help="Hard timeout for regression checks")
+    parser.add_argument(
+        "--regression-idle-timeout-s",
+        type=float,
+        default=180.0,
+        help="Timeout for regression checks when no progress output is received",
+    )
     args = parser.parse_args()
 
     report_dir = Path(args.report_dir).resolve()
@@ -264,8 +346,14 @@ def main() -> int:
         },
         {
             "name": "regression_safety_checks",
-            "command": [args.python, str(SCRIPT_DIR / "regression_safety_checks.py")],
+            "command": [
+                args.python,
+                str(SCRIPT_DIR / "regression_safety_checks.py"),
+                "--timeout-s",
+                str(max(0.0, float(args.regression_timeout_s) - 5.0)),
+            ],
             "timeout": float(args.regression_timeout_s),
+            "idle_timeout": float(args.regression_idle_timeout_s),
             "validate": _validate_regression,
         },
         {
@@ -296,6 +384,7 @@ def main() -> int:
             name=item["name"],
             command=item["command"],
             timeout_sec=item["timeout"],
+            idle_timeout_sec=item.get("idle_timeout"),
             env=env,
             validate=item["validate"],
         )
