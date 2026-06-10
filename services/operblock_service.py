@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import socket
 import sqlite3
@@ -20,6 +21,7 @@ from rem_card.app.patient_age import (
     parse_date_value,
     storage_age_from_birth_date,
 )
+from rem_card.app.paths import REPORT_DIR
 from rem_card.data.dto.remcard_dto import VitalDTO
 from rem_card.services.concurrency import DATA_CONFLICT_MESSAGE, DataConflictError, assert_revision_matches
 from rem_card.services.operblock_medication_presets import (
@@ -40,6 +42,7 @@ from rem_card.services.operblock_timeline import (
     with_timeline_content_hash,
 )
 from rem_card.services.patient_departments import normalize_profile_department
+from rem_card.services.patient_departments import PROFILE_DEPARTMENTS
 
 
 OPERBLOCK_ROLE = "operblock"
@@ -57,6 +60,8 @@ OPERBLOCK_BLOOD_RH_OPTIONS = (
     "Rh(+) положительный",
     "Rh(-) отрицательный",
 )
+OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS = ("РАО",) + PROFILE_DEPARTMENTS
+OPERBLOCK_REPORT_RETENTION_DAYS = 7
 OPERBLOCK_MKB_CODE_RE = re.compile(r"^[A-Z]\d{2}(?:\.\d{1,2})?$")
 _RU_TO_EN_KEYBOARD = {
     "й": "q",
@@ -215,6 +220,88 @@ def _format_bound_time(value: datetime) -> str:
     return value.strftime("%d.%m.%Y %H:%M")
 
 
+def _format_protocol_date(value: Any) -> str:
+    parsed: date | None = None
+    if isinstance(value, datetime):
+        parsed = value.date()
+    elif isinstance(value, date):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if text:
+            try:
+                parsed = datetime.fromisoformat(text.replace(" ", "T")).date()
+            except Exception:
+                try:
+                    parsed = date.fromisoformat(text[:10])
+                except Exception:
+                    parsed = None
+    if parsed is None:
+        return ""
+    return f"{parsed.day}.{parsed.month:02d}.{parsed.year}г."
+
+
+def format_operblock_protocol_display(protocol_number: Any, protocol_date: Any) -> str:
+    try:
+        number = int(protocol_number or 0)
+    except (TypeError, ValueError):
+        number = 0
+    date_text = _format_protocol_date(protocol_date)
+    if number <= 0 or not date_text:
+        return ""
+    return f"{number} от {date_text}"
+
+
+def normalize_operblock_transfer_department(value: Any) -> str:
+    text = normalize_profile_department(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    if text.casefold().replace("ё", "е") == "рао":
+        return "РАО"
+    return text
+
+
+def _is_upper_abbreviation(text: str) -> bool:
+    compact = re.sub(r"[\s.]+", "", str(text or ""))
+    return bool(compact) and compact.upper() == compact and any(ch.isalpha() for ch in compact)
+
+
+def transfer_department_target_text(value: Any) -> str:
+    department = normalize_operblock_transfer_department(value)
+    if not department:
+        return ""
+    if _is_upper_abbreviation(department):
+        return department
+
+    known = {
+        "терапия": "терапию",
+        "хирургия": "хирургию",
+        "травматология": "травматологию",
+        "гинекология": "гинекологию",
+        "неврология": "неврологию",
+        "кардиология": "кардиологию",
+        "инфекционно-педиатрическое": "инфекционно-педиатрическое отделение",
+    }
+    key = department.casefold().replace("ё", "е")
+    if key in known:
+        return known[key]
+
+    lower = department[:1].lower() + department[1:]
+    if re.search(r"\bотделение$", lower, flags=re.IGNORECASE):
+        return lower
+    if lower.endswith("ия"):
+        return f"{lower[:-2]}ию"
+    if lower.endswith("а"):
+        return f"{lower[:-1]}у"
+    if lower.endswith("я"):
+        return f"{lower[:-1]}ю"
+    return lower
+
+
+def operblock_transfer_stage_label(department: Any) -> str:
+    target = transfer_department_target_text(department)
+    return f"Конец пособия - переведен в {target}" if target else "Конец пособия"
+
+
 def _normalize_order_datetime_text(value: Any) -> str:
     parsed = _parse_dt(value)
     if parsed is None:
@@ -268,7 +355,12 @@ def _stage_rows_from_timeline_rows(rows: list[Mapping[str, Any]] | list[dict[str
         if event_dt is None:
             continue
         row["stage_kind"] = kind
-        row["stage_label"] = _stage_label(kind)
+        row["stage_label"] = _normalize_case_text(
+            payload.get("label")
+            or row.get("display_label")
+            or row.get("raw_text")
+            or _stage_label(kind)
+        )
         row["payload"] = payload
         row["event_dt"] = _minute_floor(event_dt)
         result.append(row)
@@ -1211,8 +1303,21 @@ class OperBlockService:
             "birth_date": case["birth_date"],
             "diagnosis_code": case["diagnosis_code"],
             "diagnosis_text": case["diagnosis_text"],
+            "department_profile": case.get("department_profile") or "",
             "started_at": case["started_at"],
             "ended_at": case["ended_at"],
+            "protocol_number": case.get("anesthesia_protocol_number"),
+            "protocol_date": case.get("anesthesia_protocol_date"),
+            "protocol_display": format_operblock_protocol_display(
+                case.get("anesthesia_protocol_number"),
+                case.get("anesthesia_protocol_date"),
+            ),
+            "operation_name": case.get("planned_operation_name") or "",
+            "surgeons": _surgeons_from_json(case.get("planned_surgeons_json")),
+            "anesthesiologist": case.get("planned_anesthesiologist") or "",
+            "anesthetist": case.get("planned_anesthetist") or "",
+            "transfer_department": case.get("transfer_department") or "",
+            "transfer_department_target": transfer_department_target_text(case.get("transfer_department") or ""),
             "latest": latest,
             "stage_state": stage_state,
         }
@@ -1450,6 +1555,268 @@ class OperBlockService:
         hash_payload["timeline"] = timeline_hash_payload
         payload["content_hash"] = _hash_payload(hash_payload)
         return payload
+
+    def build_operation_report_context(self, operation_case_id: int) -> dict[str, Any]:
+        snapshot = self.build_operblock_protocol_snapshot(operation_case_id)
+        header = dict(snapshot.get("header") or {})
+        stage_state = dict(header.get("stage_state") or {})
+        timeline = dict(snapshot.get("timeline") or {})
+        case = self._get_case_row(operation_case_id)
+        vitals = [
+            {
+                "id": vital.id,
+                "datetime": vital.timestamp.isoformat(timespec="seconds"),
+                "sys": vital.sys,
+                "dia": vital.dia,
+                "pulse": vital.pulse,
+                "spo2": vital.spo2,
+                "temp": vital.temp,
+                "rr": vital.rr,
+                "cvp": vital.cvp,
+            }
+            for vital in self.list_operation_vitals(operation_case_id)
+        ]
+        stage_events = self._operation_report_stage_events(timeline)
+        transfer_department = normalize_operblock_transfer_department(
+            case.get("transfer_department")
+            or header.get("transfer_department")
+            or self._transfer_department_from_stage_events(stage_events)
+        )
+        anesthesia_interval = self._report_first_last_interval(stage_state.get("anesthesia_intervals"))
+        surgery_interval = self._report_first_last_interval(stage_state.get("surgery_intervals"))
+        report = {
+            "generated_at": _now_text(),
+            "operation_case_id": int(operation_case_id),
+            "patient": {
+                "full_name": header.get("full_name") or "",
+                "history_number": header.get("history_number") or "",
+                "age": header.get("age") or "",
+                "birth_date": header.get("birth_date") or "",
+                "diagnosis_code": header.get("diagnosis_code") or "",
+                "diagnosis_text": header.get("diagnosis_text") or "",
+                "department_profile": header.get("department_profile") or "",
+            },
+            "case": {
+                "table_code": header.get("table_code") or "",
+                "table_display_name": header.get("table_display_name") or "",
+                "admission_started_at": header.get("started_at"),
+                "closed_at": header.get("ended_at"),
+                "protocol_number": header.get("protocol_number"),
+                "protocol_date": header.get("protocol_date"),
+                "protocol_display": header.get("protocol_display") or "",
+                "operation_name": self._report_operation_name(case, stage_state),
+                "surgeons": self._report_surgeons(case, stage_state),
+                "anesthesia_type": self._report_anesthesia_type(stage_state),
+                "anesthesiologist": self._report_anesthesiologist(case, stage_state),
+                "anesthetist": self._report_anesthetist(case, stage_state),
+                "operating_nurse": self._report_operating_nurse(stage_state),
+                "surgery_start": surgery_interval.get("start"),
+                "surgery_end": surgery_interval.get("end"),
+                "surgery_duration_minutes": self._duration_minutes(surgery_interval.get("start"), surgery_interval.get("end")),
+                "anesthesia_start": anesthesia_interval.get("start"),
+                "anesthesia_end": anesthesia_interval.get("end"),
+                "anesthesia_duration_minutes": self._duration_minutes(anesthesia_interval.get("start"), anesthesia_interval.get("end")),
+                "transfer_department": transfer_department,
+                "transfer_department_target": transfer_department_target_text(transfer_department),
+            },
+            "stages": stage_events,
+            "vitals": vitals,
+            "timeline": timeline,
+            "medications": self._operation_report_medications(timeline),
+        }
+        report["content_hash"] = _hash_payload(report)
+        return report
+
+    @staticmethod
+    def _transfer_department_from_stage_events(stage_events: list[dict[str, Any]]) -> str:
+        for event in reversed(stage_events or []):
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            department = normalize_operblock_transfer_department((payload or {}).get("transfer_department"))
+            if department:
+                return department
+        return ""
+
+    @staticmethod
+    def _report_first_last_interval(intervals: Any) -> dict[str, Any]:
+        rows = [dict(row or {}) for row in (intervals or []) if isinstance(row, Mapping)]
+        rows = [row for row in rows if row.get("start")]
+        rows.sort(key=lambda row: _parse_dt(row.get("start")) or datetime.max)
+        if not rows:
+            return {}
+        first = rows[0]
+        last_with_end = next((row for row in reversed(rows) if row.get("end")), rows[-1])
+        return {"start": first.get("start"), "end": last_with_end.get("end")}
+
+    @staticmethod
+    def _duration_minutes(start_value: Any, end_value: Any) -> int | None:
+        start_dt = _parse_dt(start_value)
+        end_dt = _parse_dt(end_value)
+        if start_dt is None or end_dt is None or end_dt < start_dt:
+            return None
+        return int(round((end_dt - start_dt).total_seconds() / 60.0))
+
+    @staticmethod
+    def _operation_report_stage_events(timeline: Mapping[str, Any] | dict[str, Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for event in list((timeline or {}).get("operation_events") or []):
+            data = dict(event or {})
+            payload = data.get("payload") if isinstance(data.get("payload"), Mapping) else {}
+            kind = operation_stage_kind_from_payload(payload)
+            if not kind:
+                continue
+            label = _normalize_case_text(
+                (payload or {}).get("label")
+                or data.get("display_label")
+                or data.get("raw_text")
+                or OPERBLOCK_STAGE_KIND_LABELS.get(kind)
+                or ""
+            )
+            rows.append(
+                {
+                    "kind": kind,
+                    "label": label or OPERBLOCK_STAGE_KIND_LABELS.get(kind, "Этап операции"),
+                    "event_time": data.get("event_time"),
+                    "payload": dict(payload or {}),
+                    "source_id": int(data.get("source_id") or 0),
+                }
+            )
+        rows.sort(key=lambda item: (_parse_dt(item.get("event_time")) or datetime.min, int(item.get("source_id") or 0)))
+        return rows
+
+    @staticmethod
+    def _report_operation_name(case: dict[str, Any], stage_state: dict[str, Any]) -> str:
+        return _normalize_case_text(
+            stage_state.get("last_operation_name")
+            or stage_state.get("first_operation_name")
+            or case.get("planned_operation_name")
+            or ""
+        )
+
+    @staticmethod
+    def _report_surgeons(case: dict[str, Any], stage_state: dict[str, Any]) -> list[str]:
+        values = _normalize_stage_text_list(stage_state.get("last_surgeons") or stage_state.get("first_surgeons"))
+        if values:
+            return values
+        return _surgeons_from_json(case.get("planned_surgeons_json"))
+
+    @staticmethod
+    def _report_anesthesia_type(stage_state: dict[str, Any]) -> str:
+        return normalize_operblock_anesthesia_type_label(
+            stage_state.get("last_anesthesia_assistance_type")
+            or stage_state.get("first_anesthesia_assistance_type")
+            or stage_state.get("current_anesthesia_assistance_type")
+            or ""
+        )
+
+    @staticmethod
+    def _report_anesthesiologist(case: dict[str, Any], stage_state: dict[str, Any]) -> str:
+        return _normalize_case_text(
+            stage_state.get("last_anesthesiologist")
+            or stage_state.get("first_anesthesiologist")
+            or case.get("planned_anesthesiologist")
+            or ""
+        )
+
+    @staticmethod
+    def _report_anesthetist(case: dict[str, Any], stage_state: dict[str, Any]) -> str:
+        return _normalize_case_text(
+            stage_state.get("last_anesthetist")
+            or stage_state.get("first_anesthetist")
+            or case.get("planned_anesthetist")
+            or ""
+        )
+
+    @staticmethod
+    def _report_operating_nurse(stage_state: dict[str, Any]) -> str:
+        return _normalize_case_text(
+            stage_state.get("last_operating_nurse")
+            or stage_state.get("first_operating_nurse")
+            or ""
+        )
+
+    @staticmethod
+    def _operation_report_medications(timeline: Mapping[str, Any] | dict[str, Any]) -> dict[str, Any]:
+        boluses = []
+        for event in list((timeline or {}).get("bolus_events") or []):
+            payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
+            boluses.append(
+                {
+                    "time": event.get("event_time"),
+                    "name": _normalize_case_text(event.get("drug_label") or event.get("display_label") or event.get("raw_text")),
+                    "display": _normalize_case_text(event.get("display_label") or event.get("raw_text") or event.get("drug_label")),
+                    "dose_value": event.get("dose_value"),
+                    "dose_unit": event.get("dose_unit"),
+                    "route": event.get("route") or (payload or {}).get("route"),
+                }
+            )
+        infusions = []
+        for interval in list((timeline or {}).get("infusion_intervals") or []):
+            payload = interval.get("payload") if isinstance(interval.get("payload"), Mapping) else {}
+            infusions.append(
+                {
+                    "start": interval.get("start_time"),
+                    "end": interval.get("end_time"),
+                    "status": interval.get("status"),
+                    "name": _normalize_case_text(
+                        (payload or {}).get("display_name")
+                        or (payload or {}).get("label")
+                        or interval.get("drug_label")
+                        or interval.get("display_label")
+                    ),
+                    "display": _normalize_case_text(interval.get("display_label") or interval.get("drug_label")),
+                    "volume_ml": interval.get("volume_ml"),
+                    "rate_value": interval.get("current_rate_value"),
+                    "rate_unit": interval.get("current_rate_unit"),
+                    "payload": dict(payload or {}),
+                    "rate_history": list(interval.get("rate_history") or []),
+                    "dose_history": list(interval.get("dose_history") or []),
+                }
+            )
+        return {"boluses": boluses, "infusions": infusions}
+
+    def build_operation_report_pdf_path(self, operation_case_id: int) -> Path:
+        self.cleanup_operation_report_dir()
+        case = self._get_case_row(operation_case_id)
+        patient_name = self._safe_report_filename(case.get("full_name") or "patient")
+        protocol_display = format_operblock_protocol_display(
+            case.get("anesthesia_protocol_number"),
+            case.get("anesthesia_protocol_date"),
+        )
+        protocol_slug = self._safe_report_filename(protocol_display or f"case_{int(operation_case_id)}")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_dir = Path(REPORT_DIR) / "operblock"
+        return report_dir / f"{patient_name}_protocol_{protocol_slug}_{stamp}.pdf"
+
+    def build_operation_report_pdf(self, operation_case_id: int, pdf_path) -> Path:
+        from rem_card.services.operblock_reportlab_builder import OperBlockReportLabBuilder
+
+        output_path = Path(pdf_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        context = self.build_operation_report_context(operation_case_id)
+        OperBlockReportLabBuilder.build_pdf(context, output_path)
+        return output_path
+
+    @staticmethod
+    def cleanup_operation_report_dir() -> None:
+        report_dir = Path(REPORT_DIR) / "operblock"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        cutoff = datetime.now() - timedelta(days=OPERBLOCK_REPORT_RETENTION_DAYS)
+        for path in report_dir.glob("*.pdf"):
+            try:
+                if not path.is_file():
+                    continue
+                modified_at = datetime.fromtimestamp(path.stat().st_mtime)
+                if modified_at < cutoff:
+                    path.unlink()
+            except Exception as exc:
+                logger.warning("Не удалось удалить старый отчет оперблока path=%s error=%s", path, exc)
+
+    @staticmethod
+    def _safe_report_filename(value: Any) -> str:
+        text = re.sub(r"\s+", "_", str(value or "").strip())
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", text)
+        text = re.sub(r"_+", "_", text).strip("._ ")
+        return text[:80] or "report"
 
     def list_operation_vitals(self, operation_case_id: int) -> list[VitalDTO]:
         case = self._get_case_row(operation_case_id)
@@ -2187,6 +2554,13 @@ class OperBlockService:
     def end_anesthesia(self, operation_case_id: int) -> int:
         return self._add_stage_event(operation_case_id, "anesthesia_end")
 
+    def end_anesthesia_with_transfer(self, operation_case_id: int, transfer_department: str) -> int:
+        return self._add_stage_event(
+            operation_case_id,
+            "anesthesia_end",
+            transfer_department=transfer_department,
+        )
+
     def start_surgery(
         self,
         operation_case_id: int,
@@ -2536,6 +2910,7 @@ class OperBlockService:
         surgeons: list[str] | None = None,
         surgeon: str | None = None,
         operating_nurse: str | None = None,
+        transfer_department: str | None = None,
     ) -> int:
         validate_operblock_runtime_path(self.db)
         clean_kind = str(stage_kind or "").strip()
@@ -2551,8 +2926,10 @@ class OperBlockService:
         if clean_surgeon and clean_surgeon.casefold() not in {item.casefold() for item in clean_surgeons}:
             clean_surgeons.append(clean_surgeon)
         clean_operating_nurse = re.sub(r"\s+", " ", str(operating_nurse or "").strip())
+        clean_transfer_department = normalize_operblock_transfer_department(transfer_department)
 
         def operation(cursor: sqlite3.Cursor):
+            nonlocal clean_transfer_department
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
             self._assert_datetime_in_operation_bounds(event_dt, case, entity_label=_stage_label(clean_kind))
             stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
@@ -2587,6 +2964,12 @@ class OperBlockService:
                     event_dt,
                 )
                 self._auto_stop_open_infusions(cursor, case, event_dt)
+                if not clean_transfer_department:
+                    clean_transfer_department = normalize_operblock_transfer_department(
+                        case.get("department_profile")
+                    )
+                if not clean_transfer_department:
+                    raise ValueError("Укажите отделение, куда переводится пациент.")
             elif clean_kind == "surgery_start":
                 if not anesthesia_active:
                     raise ValueError("Начать операцию можно только после начала пособия.")
@@ -2625,6 +3008,7 @@ class OperBlockService:
                 operation_name=clean_operation_name,
                 surgeons=clean_surgeons,
                 operating_nurse=clean_operating_nurse,
+                transfer_department=clean_transfer_department,
             )
 
         return int(self.db.run_write_operation(operation, source=f"operblock_stage_{clean_kind}"))
@@ -2682,9 +3066,16 @@ class OperBlockService:
         surgeons: list[str] | None = None,
         surgeon: str | None = None,
         operating_nurse: str | None = None,
+        transfer_department: str | None = None,
     ) -> int:
-        label = _stage_label(stage_kind)
+        clean_transfer_department = normalize_operblock_transfer_department(transfer_department)
+        label = operblock_transfer_stage_label(clean_transfer_department) if stage_kind == "anesthesia_end" else _stage_label(stage_kind)
         payload = {"stage_kind": stage_kind, "label": label}
+        if stage_kind == "anesthesia_start":
+            self._ensure_case_protocol_number(cursor, case, event_dt)
+        if stage_kind == "anesthesia_end" and clean_transfer_department:
+            payload["transfer_department"] = clean_transfer_department
+            payload["transfer_department_target"] = transfer_department_target_text(clean_transfer_department)
         clean_assistance_type = normalize_operblock_anesthesia_type_label(assistance_type)
         if stage_kind == "anesthesia_start" and clean_assistance_type:
             payload["anesthesia_assistance_type"] = clean_assistance_type
@@ -2758,7 +3149,82 @@ class OperBlockService:
                 """,
                 (clean_anesthesiologist or None, clean_anesthetist or None, int(case["operation_case_id"])),
             )
+        elif stage_kind == "anesthesia_end":
+            cursor.execute(
+                """
+                UPDATE operation_cases
+                SET transfer_department = ?,
+                    last_modified_by = 'operblock',
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (clean_transfer_department or None, int(case["operation_case_id"])),
+            )
         return event_id
+
+    @staticmethod
+    def _ensure_case_protocol_number(cursor: sqlite3.Cursor, case: dict[str, Any], event_dt: datetime) -> tuple[int, str]:
+        operation_case_id = int(case["operation_case_id"])
+        row = cursor.execute(
+            """
+            SELECT anesthesia_protocol_number, anesthesia_protocol_date, table_code
+            FROM operation_cases
+            WHERE id = ?
+            """,
+            (operation_case_id,),
+        ).fetchone()
+        if not row:
+            raise OperBlockConflictError("Операция не найдена. Обновите протокол.")
+        existing_display = format_operblock_protocol_display(
+            row["anesthesia_protocol_number"],
+            row["anesthesia_protocol_date"],
+        )
+        if existing_display:
+            return int(row["anesthesia_protocol_number"]), str(row["anesthesia_protocol_date"])
+
+        table_code = str(row["table_code"] or case.get("table_code") or "")
+        protocol_date = _minute_floor(event_dt).date().isoformat()
+        max_row = cursor.execute(
+            """
+            SELECT MAX(anesthesia_protocol_number) AS max_number
+            FROM operation_cases
+            WHERE table_code = ?
+              AND anesthesia_protocol_date = ?
+              AND id <> ?
+            """,
+            (table_code, protocol_date, operation_case_id),
+        ).fetchone()
+        protocol_number = int((max_row["max_number"] if max_row else 0) or 0) + 1
+        cursor.execute(
+            """
+            UPDATE operation_cases
+            SET anesthesia_protocol_number = ?,
+                anesthesia_protocol_date = ?,
+                last_modified_by = 'operblock',
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+              AND (anesthesia_protocol_number IS NULL OR anesthesia_protocol_date IS NULL)
+            """,
+            (protocol_number, protocol_date, operation_case_id),
+        )
+        if cursor.rowcount != 1:
+            check_row = cursor.execute(
+                """
+                SELECT anesthesia_protocol_number, anesthesia_protocol_date
+                FROM operation_cases
+                WHERE id = ?
+                """,
+                (operation_case_id,),
+            ).fetchone()
+            if check_row and format_operblock_protocol_display(
+                check_row["anesthesia_protocol_number"],
+                check_row["anesthesia_protocol_date"],
+            ):
+                return int(check_row["anesthesia_protocol_number"]), str(check_row["anesthesia_protocol_date"])
+            raise OperBlockConflictError("Не удалось присвоить номер протокола. Обновите протокол.")
+        case["anesthesia_protocol_number"] = protocol_number
+        case["anesthesia_protocol_date"] = protocol_date
+        return protocol_number, protocol_date
 
     def _validate_medications_before_anesthesia_end(
         self,
@@ -4489,17 +4955,22 @@ class OperBlockService:
         row = cursor.execute(
             """
             SELECT
-                id AS operation_case_id,
-                patient_id,
-                admission_id,
-                table_code,
-                status AS case_status,
-                started_at,
-                ended_at,
-                COALESCE(revision, 0) AS revision
-            FROM operation_cases
-            WHERE id = ?
-              AND status = 'active'
+                oc.id AS operation_case_id,
+                oc.patient_id,
+                oc.admission_id,
+                oc.table_code,
+                oc.status AS case_status,
+                oc.started_at,
+                oc.ended_at,
+                oc.anesthesia_protocol_number,
+                oc.anesthesia_protocol_date,
+                oc.transfer_department,
+                a.department_profile,
+                COALESCE(oc.revision, 0) AS revision
+            FROM operation_cases oc
+            JOIN admissions a ON a.id = oc.admission_id
+            WHERE oc.id = ?
+              AND oc.status = 'active'
             """,
             (int(operation_case_id),),
         ).fetchone()
@@ -4649,7 +5120,11 @@ class OperBlockService:
                 oc.preop_dia,
                 oc.preop_pulse,
                 oc.preop_spo2,
-                COALESCE(oc.preop_save_initial_vitals, 1) AS preop_save_initial_vitals
+                COALESCE(oc.preop_save_initial_vitals, 1) AS preop_save_initial_vitals,
+                oc.anesthesia_protocol_number,
+                oc.anesthesia_protocol_date,
+                oc.transfer_department,
+                a.department_profile
             FROM operation_cases oc
             JOIN operating_tables t ON t.code = oc.table_code
             JOIN admissions a ON a.id = oc.admission_id

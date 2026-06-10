@@ -1,9 +1,14 @@
-import os
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap, QColor, QFontMetrics
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from rem_card.app.patient_age import format_patient_age, format_patient_age_from_birth_date
-from rem_card.app.paths import PATIENT_ASSETS_DIR, get_icon_dir
+from rem_card.services.remcard_icon_defaults import (
+    REMCARD_EMPTY_BED_ICON_KEY,
+    REMCARD_FEMALE_PATIENT_ICON_KEY,
+    REMCARD_MALE_PATIENT_ICON_KEY,
+)
+from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label
+from rem_card.ui.shared.remcard_icon_settings import load_remcard_icon_pixmap
 from rem_card.ui.styles.theme import (
     STYLE_SIDE_PATIENT_ACTION_BUTTON,
     STYLE_SIDE_PATIENT_CARD,
@@ -13,6 +18,11 @@ from rem_card.ui.styles.theme import (
     STYLE_SIDE_PATIENT_STATUS_FREE,
     get_side_patient_label_style,
 )
+
+
+PATIENT_PHOTO_SIZE = 320
+PATIENT_PHOTO_FRAME_WIDTH = 1
+EMPTY_BED_PHOTO_VERTICAL_OFFSET = 12
 
 
 class MultilineElidedLabel(QLabel):
@@ -100,6 +110,8 @@ class SidePatientCard(QFrame):
         self.setMinimumHeight(700)
 
         self.current_bed_number = None
+        self._current_patient = None
+        self._current_admission = None
         self._init_ui()
 
     def _init_ui(self):
@@ -117,6 +129,7 @@ class SidePatientCard(QFrame):
 
         # 1. Фото пациента
         self.photo_label = QLabel()
+        self.photo_label.setFixedSize(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
         self.photo_label.setAlignment(Qt.AlignCenter)
         self.photo_label.setStyleSheet(STYLE_SIDE_PATIENT_PHOTO)
 
@@ -179,27 +192,37 @@ class SidePatientCard(QFrame):
         if self.current_bed_number:
             self.open_card_clicked.emit(self.current_bed_number)
 
+    def _set_photo_label_mode(self, *, empty_bed: bool):
+        if empty_bed:
+            self.photo_label.setFixedSize(
+                PATIENT_PHOTO_SIZE,
+                PATIENT_PHOTO_SIZE + EMPTY_BED_PHOTO_VERTICAL_OFFSET,
+            )
+            self.photo_label.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+            return
+        self.photo_label.setFixedSize(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
+        self.photo_label.setAlignment(Qt.AlignCenter)
+
     @staticmethod
-    def _photo_path_for_gender(gender):
-        assets_path = os.path.join(PATIENT_ASSETS_DIR, "Patients")
+    def _photo_key_for_gender(gender):
         gender_text = str(gender or "").strip().casefold()
         if gender_text.startswith("ж"):
-            path = os.path.join(get_icon_dir(), "woman_in_oper_extr.png")
-            return path if os.path.isfile(path) else os.path.join(assets_path, "woman.png")
+            return REMCARD_FEMALE_PATIENT_ICON_KEY
         if gender_text.startswith("м"):
-            path = os.path.join(get_icon_dir(), "man_in_oper_extr.png")
-            return path if os.path.isfile(path) else os.path.join(assets_path, "man.png")
-        return os.path.join(assets_path, "noman.png")
+            return REMCARD_MALE_PATIENT_ICON_KEY
+        return REMCARD_EMPTY_BED_ICON_KEY
 
     def update_info(self, bed_number, patient=None, admission=None):
         self.current_bed_number = bed_number
-        assets_path = os.path.join(PATIENT_ASSETS_DIR, "Patients")
+        self._current_patient = patient
+        self._current_admission = admission
 
         if not patient or not admission:
-            self.photo_label.setPixmap(self._get_pixmap(os.path.join(assets_path, "noman.png")))
+            self._set_photo_label_mode(empty_bed=True)
+            self.photo_label.setPixmap(self._get_icon_pixmap(REMCARD_EMPTY_BED_ICON_KEY))
             self.photo_label.show()
             self.history_label.hide()
-            self.name_label.setText(f"КОЙКА № {bed_number}")
+            self.name_label.setText(format_patient_bed_label(bed_number, numbered=True, uppercase=True))
             self.name_label.setAlignment(Qt.AlignCenter)
             self.age_label.hide()
             self.diagnosis_label.hide()
@@ -210,6 +233,7 @@ class SidePatientCard(QFrame):
             self.status_text.show()
             self.action_btn.setText("ЗАНЯТЬ КОЙКУ")
         else:
+            self._set_photo_label_mode(empty_bed=False)
             self.photo_label.show()
             self.history_label.show()
             self.name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -219,7 +243,12 @@ class SidePatientCard(QFrame):
             birth_date = getattr(patient, "birth_date", None)
             reference_date = admission.admission_datetime
 
-            self.photo_label.setPixmap(self._get_pixmap(self._photo_path_for_gender(admission.patient_gender)))
+            self.photo_label.setPixmap(
+                self._get_icon_pixmap(
+                    self._photo_key_for_gender(admission.patient_gender),
+                    patient_frame=True,
+                )
+            )
 
             self.age_label.show()
             self.diagnosis_label.show()
@@ -240,9 +269,70 @@ class SidePatientCard(QFrame):
             self.diagnosis_label.setToolTip(str(diagnosis_text) if diagnosis_text != "—" else "")
             self.admission_label.setText(f"Поступил: {admission.admission_datetime.strftime('%d.%m.%Y %H:%M') if admission.admission_datetime else '—'}")
 
-    def _get_pixmap(self, path):
-        pix = QPixmap(path)
+    def apply_remcard_icon_settings(self):
+        if self.current_bed_number is None:
+            return
+        self.update_info(self.current_bed_number, self._current_patient, self._current_admission)
+
+    def _get_icon_pixmap(self, icon_key: str, *, patient_frame: bool = False):
+        pix = load_remcard_icon_pixmap(icon_key)
         if pix.isNull():
             return QPixmap()
-        # Scale to 312x312 to fit inside the 320x320 QLabel with 4px border (320 - 8 = 312)
-        return pix.scaled(312, 312, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        if patient_frame:
+            return self._circular_patient_photo(pix)
+        return self._empty_bed_photo(pix)
+
+    @staticmethod
+    def _empty_bed_photo(pixmap: QPixmap) -> QPixmap:
+        scaled = pixmap.scaled(
+            PATIENT_PHOTO_SIZE,
+            PATIENT_PHOTO_SIZE,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        result = QPixmap(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
+        result.fill(Qt.transparent)
+
+        x = max(0, (PATIENT_PHOTO_SIZE - scaled.width()) // 2)
+        y = max(0, (PATIENT_PHOTO_SIZE - scaled.height()) // 2)
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawPixmap(x, y, scaled)
+        painter.end()
+        return result
+
+    @staticmethod
+    def _circular_patient_photo(pixmap: QPixmap) -> QPixmap:
+        scaled = pixmap.scaled(
+            PATIENT_PHOTO_SIZE,
+            PATIENT_PHOTO_SIZE,
+            Qt.KeepAspectRatioByExpanding,
+            Qt.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - PATIENT_PHOTO_SIZE) // 2)
+        y = max(0, (scaled.height() - PATIENT_PHOTO_SIZE) // 2)
+        cropped = scaled.copy(x, y, PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
+
+        result = QPixmap(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
+        result.fill(Qt.transparent)
+
+        inset = PATIENT_PHOTO_FRAME_WIDTH / 2
+        rect = QRectF(
+            inset,
+            inset,
+            PATIENT_PHOTO_SIZE - PATIENT_PHOTO_FRAME_WIDTH,
+            PATIENT_PHOTO_SIZE - PATIENT_PHOTO_FRAME_WIDTH,
+        )
+        path = QPainterPath()
+        path.addEllipse(rect)
+
+        painter = QPainter(result)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor("#1f2933"), PATIENT_PHOTO_FRAME_WIDTH))
+        painter.drawEllipse(rect)
+        painter.end()
+        return result

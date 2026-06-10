@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import sqlite3
 from typing import Any
 
@@ -14,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1005
+OPERBLOCK_SCHEMA_VERSION = 1006
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -81,9 +82,14 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "preop_pulse",
         "preop_spo2",
         "preop_save_initial_vitals",
+        "anesthesia_protocol_number",
+        "anesthesia_protocol_date",
+        "transfer_department",
     }.issubset(case_columns):
         return False
     if not _index_exists(conn, "idx_operation_cases_one_active_per_table"):
+        return False
+    if not _index_exists(conn, "idx_operation_cases_protocol_sequence"):
         return False
     if not _index_exists(conn, "idx_operation_assignments_one_active_per_table"):
         return False
@@ -165,6 +171,9 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             preop_pulse INTEGER,
             preop_spo2 INTEGER,
             preop_save_initial_vitals INTEGER NOT NULL DEFAULT 1,
+            anesthesia_protocol_number INTEGER,
+            anesthesia_protocol_date TEXT,
+            transfer_department TEXT,
             CHECK (table_code IN ('emergency', 'planned')),
             CHECK (status IN ('active', 'closed', 'transferred_to_rao', 'cancelled')),
             CHECK (ended_at IS NULL OR ended_at >= started_at),
@@ -189,6 +198,9 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     _ensure_column(conn, "operation_cases", "preop_pulse", "INTEGER", logger)
     _ensure_column(conn, "operation_cases", "preop_spo2", "INTEGER", logger)
     _ensure_column(conn, "operation_cases", "preop_save_initial_vitals", "INTEGER NOT NULL DEFAULT 1", logger)
+    _ensure_column(conn, "operation_cases", "anesthesia_protocol_number", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "anesthesia_protocol_date", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "transfer_department", "TEXT", logger)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS operation_table_assignments (
@@ -289,6 +301,15 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_operation_cases_updated ON operation_cases(updated_at, id)"
     )
+    _backfill_anesthesia_protocol_numbers(cursor)
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_cases_protocol_sequence
+        ON operation_cases(table_code, anesthesia_protocol_date, anesthesia_protocol_number)
+        WHERE anesthesia_protocol_number IS NOT NULL
+          AND anesthesia_protocol_date IS NOT NULL
+        """
+    )
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_operation_assignments_case ON operation_table_assignments(operation_case_id)"
     )
@@ -360,7 +381,80 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         use_updated_at_gate=False,
     )
     _mark_schema_migration(conn, 1001, "operblock operation cases and table assignments")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock patient metadata")
+    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock anesthesia protocol numbers and transfer target")
+
+
+def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:
+    conn = cursor.connection
+    if not _table_exists(conn, "operation_cases") or not _table_exists(conn, "operblock_timeline_events"):
+        return
+    columns = _columns(conn, "operation_cases")
+    if not {"anesthesia_protocol_number", "anesthesia_protocol_date"}.issubset(columns):
+        return
+
+    next_numbers: dict[tuple[str, str], int] = {}
+    for row in cursor.execute(
+        """
+        SELECT table_code, anesthesia_protocol_date, MAX(anesthesia_protocol_number) AS max_number
+        FROM operation_cases
+        WHERE anesthesia_protocol_number IS NOT NULL
+          AND anesthesia_protocol_date IS NOT NULL
+        GROUP BY table_code, anesthesia_protocol_date
+        """
+    ).fetchall():
+        key = (str(row["table_code"] or ""), str(row["anesthesia_protocol_date"] or ""))
+        next_numbers[key] = int(row["max_number"] or 0) + 1
+
+    rows = cursor.execute(
+        """
+        SELECT
+            oc.id,
+            oc.table_code,
+            MIN(ote.event_time) AS first_anesthesia_start
+        FROM operation_cases oc
+        JOIN operblock_timeline_events ote ON ote.operation_case_id = oc.id
+        WHERE (oc.anesthesia_protocol_number IS NULL OR oc.anesthesia_protocol_date IS NULL)
+          AND ote.event_type = 'clinical_event'
+          AND COALESCE(ote.status, '') NOT IN ('deleted', 'cancelled')
+          AND COALESCE(ote.payload_json, '') LIKE '%anesthesia_start%'
+        GROUP BY oc.id, oc.table_code
+        ORDER BY oc.table_code, datetime(MIN(ote.event_time)), oc.id
+        """
+    ).fetchall()
+
+    candidates: list[tuple[str, str, str, int]] = []
+    for row in rows:
+        raw_started_at = str(row["first_anesthesia_start"] or "")
+        try:
+            started_at = datetime.fromisoformat(raw_started_at.replace(" ", "T"))
+        except Exception:
+            continue
+        candidates.append(
+            (
+                str(row["table_code"] or ""),
+                started_at.date().isoformat(),
+                started_at.isoformat(timespec="seconds"),
+                int(row["id"]),
+            )
+        )
+    candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+
+    for table_code, protocol_date, _started_at, case_id in candidates:
+        key = (table_code, protocol_date)
+        protocol_number = int(next_numbers.get(key, 1))
+        next_numbers[key] = protocol_number + 1
+        cursor.execute(
+            """
+            UPDATE operation_cases
+            SET anesthesia_protocol_number = ?,
+                anesthesia_protocol_date = ?,
+                revision = COALESCE(revision, 0) + 1,
+                last_modified_by = 'operblock'
+            WHERE id = ?
+              AND (anesthesia_protocol_number IS NULL OR anesthesia_protocol_date IS NULL)
+            """,
+            (protocol_number, protocol_date, case_id),
+        )
 
 
 def _run_checks(db_manager: Any) -> tuple[str, str]:

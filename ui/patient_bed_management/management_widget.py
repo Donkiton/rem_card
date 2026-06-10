@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from rem_card.app.logger import logger
 from rem_card.services.patient_bed_management import PatientBedManagementService
+from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.patient_bed_management.bed_widget import BedWidget
 from rem_card.ui.patient_bed_management.patient_form import PatientForm
 from rem_card.ui.patient_bed_management.side_patient_card import SidePatientCard
@@ -270,6 +271,13 @@ class PatientBedManagementWidget(QWidget):
             return
         source_bed_data = self.patient_bed_service.get_bed_by_number(source_bed)
         target_bed_data = self.patient_bed_service.get_bed_by_number(target_bed)
+        if self._moves_recovery_patient_to_regular_bed(source_bed, target_bed, target_bed_data):
+            CustomMessageBox.warning(
+                self,
+                "Перенос пациента",
+                "Койку пробуждения нельзя переносить или обменивать с обычной койкой.",
+            )
+            return
         if not source_bed_data or source_bed_data["status"] == "FREE":
             return
         _source_patient, source_admission = self.patient_bed_service.get_patient_with_current_admission(source_bed)
@@ -336,6 +344,15 @@ class PatientBedManagementWidget(QWidget):
             )
         except Exception as exc:
             on_error(exc)
+
+    @staticmethod
+    def _moves_recovery_patient_to_regular_bed(source_bed: int, target_bed: int, target_bed_data) -> bool:
+        source_is_recovery = is_recovery_bed(source_bed)
+        target_is_recovery = is_recovery_bed(target_bed)
+        if source_is_recovery and not target_is_recovery:
+            return True
+        target_is_occupied = bool(target_bed_data and target_bed_data["status"] != "FREE")
+        return bool(target_is_recovery and not source_is_recovery and target_is_occupied)
 
     def _begin_move_pending(self):
         self._move_pending = True

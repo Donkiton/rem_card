@@ -20305,6 +20305,8 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
     )
     from rem_card.services.operblock_icon_defaults import (
         DEFAULT_ICON_DEFINITION_BY_KEY,
+        OPERBLOCK_PATIENT_FEMALE_ICON_KEY,
+        OPERBLOCK_PATIENT_MALE_ICON_KEY,
         OPERBLOCK_ICONS_KEY,
         default_icon_file_for_key,
         default_drug_icon_file,
@@ -20313,6 +20315,7 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         edit_icon_key,
         type_icon_key,
     )
+    from rem_card.services.remcard_icon_defaults import REMCARD_ICON_DEFINITIONS
     from rem_card.services.settings.settings_service import (
         SettingsService,
         configure_settings_service,
@@ -20347,6 +20350,17 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         return False, "settings schema did not create operblock_icons catalog version"
 
     records = service.list_operblock_icons()
+    remcard_records = service.list_remcard_icons()
+    for definition in REMCARD_ICON_DEFINITIONS:
+        record = remcard_records.get(definition.icon_key)
+        if not record:
+            return False, f"иконка ремкарты {definition.icon_key} не получила стартовую запись"
+        source_path = os.path.join(icon_dir, definition.source_file or definition.default_file)
+        if record.get("image_blob") != Path(source_path).read_bytes():
+            return False, f"иконка ремкарты {definition.icon_key} должна быть загружена из {os.path.basename(source_path)}"
+        if record.get("source") != "seed":
+            return False, f"иконка ремкарты {definition.icon_key} должна быть seed-строкой"
+
     sevo_record = records.get("drug:manual:gas:sevoflurane")
     if not sevo_record:
         return False, "севофлюран не получил стартовую пользовательскую иконку"
@@ -20374,6 +20388,14 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         return False, "иконка этапа операции не попала в список настраиваемых иконок"
     if operation_stage_edit_key not in DEFAULT_ICON_DEFINITION_BY_KEY:
         return False, "иконка изменения этапа операции не попала в список настраиваемых иконок"
+    if OPERBLOCK_PATIENT_MALE_ICON_KEY not in DEFAULT_ICON_DEFINITION_BY_KEY:
+        return False, "фото пациента-мужчины оперблока не попало в список настраиваемых иконок"
+    if OPERBLOCK_PATIENT_FEMALE_ICON_KEY not in DEFAULT_ICON_DEFINITION_BY_KEY:
+        return False, "фото пациента-женщины оперблока не попало в список настраиваемых иконок"
+    if default_icon_file_for_key(OPERBLOCK_PATIENT_MALE_ICON_KEY) != "man_in_oper_extr.png":
+        return False, "фото пациента-мужчины оперблока должно иметь fallback man_in_oper_extr.png"
+    if default_icon_file_for_key(OPERBLOCK_PATIENT_FEMALE_ICON_KEY) != "woman_in_oper_extr.png":
+        return False, "фото пациента-женщины оперблока должно иметь fallback woman_in_oper_extr.png"
     if not os.path.isfile(os.path.join(icon_dir, "etap1.png")):
         return False, "файл стандартной иконки этапа операции etap1.png не найден"
     if not os.path.isfile(os.path.join(icon_dir, "etap2.png")):

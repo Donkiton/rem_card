@@ -1217,14 +1217,22 @@ class OperBlockChartWidget(ChartWidget):
     def _operation_stage_display_label(row: dict) -> str:
         stage_kind = str((row or {}).get("stage_kind") or "").strip()
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        if stage_kind == "custom":
-            return str(
+        saved_label = re.sub(
+            r"\s+",
+            " ",
+            str(
                 (payload or {}).get("label")
                 or (row or {}).get("display_label")
                 or (row or {}).get("raw_text")
-                or "Этап операции"
-            )
-        return str(OperBlockChartWidget.OPERATION_STAGE_LABELS.get(stage_kind) or (row or {}).get("display_label") or "Этап")
+                or ""
+            ).strip(),
+        )
+        if stage_kind == "custom":
+            return saved_label or "Этап операции"
+        default_label = str(OperBlockChartWidget.OPERATION_STAGE_LABELS.get(stage_kind) or "")
+        if saved_label and saved_label != default_label:
+            return saved_label
+        return default_label or saved_label or "Этап"
 
     @staticmethod
     def _operation_stage_sort_id(row: dict) -> int:

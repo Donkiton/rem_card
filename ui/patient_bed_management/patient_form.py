@@ -19,6 +19,7 @@ from rem_card.app.logger import logger
 from rem_card.app.patient_age import storage_age_from_birth_date
 from rem_card.services.mkb import MKBService
 from rem_card.services.patient_bed_management import AdmissionRecord, PatientBedManagementService, PatientRecord
+from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label
 from rem_card.ui.patient_bed_management.tabs.diagnosis_tab import DiagnosisTabWidget
 from rem_card.ui.patient_bed_management.tabs.general_tab import GeneralTabWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -89,8 +90,9 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self._closing = False
         self._mkb_closed = False
         self._write_description = ""
+        self.bed_label = format_patient_bed_label(self.bed_number)
 
-        self.setWindowTitle(f"Карта пациента - Койка {self.bed_number}")
+        self.setWindowTitle(f"Карта пациента - {self.bed_label}")
         self.setMinimumSize(800, 600)
         self.resize(980, 770)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -133,7 +135,7 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         header_layout = QHBoxLayout(self.header_panel)
         header_layout.setContentsMargins(10, 0, 0, 0)
 
-        title_label = QLabel(f"КАРТОЧКА ПАЦИЕНТА - КОЙКА {self.bed_number}")
+        title_label = QLabel(f"КАРТОЧКА ПАЦИЕНТА - {format_patient_bed_label(self.bed_number, uppercase=True)}")
         title_label.setStyleSheet(STYLE_PATIENT_FORM_TITLE)
         header_layout.addWidget(title_label)
         header_layout.addStretch()

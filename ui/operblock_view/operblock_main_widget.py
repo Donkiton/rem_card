@@ -19,7 +19,6 @@ from PySide6.QtGui import (
     QFontMetrics,
     QIcon,
     QImage,
-    QImageReader,
     QIntValidator,
     QPainter,
     QPainterPath,
@@ -66,9 +65,11 @@ from rem_card.services.mkb import MKBService
 from rem_card.services.operblock_service import (
     OPERBLOCK_BLOOD_GROUP_OPTIONS,
     OPERBLOCK_BLOOD_RH_OPTIONS,
+    OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS,
     OPERBLOCK_TABLES,
     OperBlockConflictError,
     OperBlockService,
+    normalize_operblock_transfer_department,
     is_complete_operblock_mkb_code,
     normalize_operblock_blood_group,
     normalize_operblock_blood_rh,
@@ -116,6 +117,8 @@ from rem_card.services.operblock_route_settings import (
     operblock_routes_for_drug_group,
 )
 from rem_card.services.operblock_icon_defaults import (
+    OPERBLOCK_PATIENT_FEMALE_ICON_KEY,
+    OPERBLOCK_PATIENT_MALE_ICON_KEY,
     default_drug_icon_file,
     drug_icon_candidate_keys_from_payload,
     edit_icon_key,
@@ -146,6 +149,7 @@ from rem_card.ui.rem_card_sectors.sector_8 import Sector8
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
 from rem_card.ui.shared.operblock_icon_settings import load_operblock_icon_pixmap
+from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.vitals_widget import VitalsWidget
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.shared_styles import apply_custom_dialog_style
@@ -2758,6 +2762,71 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
     def accept(self) -> None:
         if not self.selected_assistance_type():
             CustomMessageBox.warning(self, "Начать пособие", "Укажите вид пособия.")
+            return
+        super().accept()
+
+
+class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
+    def __init__(self, departments: list[str], parent=None, *, initial_department: str = ""):
+        super().__init__(
+            "Завершить пособие",
+            "end_anesthesia_transfer_dialog_geometry",
+            parent,
+            minimum_size=(520, 210),
+            initial_size=(620, 250),
+        )
+        self._init_ui(departments, initial_department)
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self, departments: list[str], initial_department: str):
+        layout = self.content_layout
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        self.department_combo = QComboBox()
+        self.department_combo.setEditable(True)
+        self.department_combo.setFixedHeight(36)
+        self.department_combo.setMinimumWidth(380)
+        self.department_combo.setMinimumContentsLength(34)
+        self.department_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.department_combo.setStyleSheet(_operblock_combo_box_style())
+        line_edit = self.department_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Куда переводится пациент")
+
+        seen: set[str] = set()
+        for department in departments or []:
+            label = normalize_operblock_transfer_department(department)
+            key = label.casefold()
+            if label and key not in seen:
+                seen.add(key)
+                self.department_combo.addItem(label, label)
+        self.department_combo.setCurrentIndex(-1)
+        self.department_combo.setEditText(normalize_operblock_transfer_department(initial_department))
+        form.addRow("Переводится в:", self.department_combo)
+        layout.addLayout(form)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.finish_button = QPushButton("Завершить")
+        self.finish_button.setMinimumHeight(34)
+        self.finish_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.finish_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.finish_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.finish_button)
+        layout.addStretch(1)
+        layout.addLayout(footer)
+
+    def selected_department(self) -> str:
+        return normalize_operblock_transfer_department(self.department_combo.currentText())
+
+    def accept(self) -> None:
+        if not self.selected_department():
+            CustomMessageBox.warning(self, "Завершить пособие", "Укажите, куда переводится пациент.")
             return
         super().accept()
 
@@ -7952,6 +8021,7 @@ class OperBlockMainWidget(QWidget):
         self._current_surgery_active = False
         self._current_anesthesia_assistance_type = ""
         self._current_operation_name = ""
+        self._current_protocol_display = ""
         self._current_protocol_date = datetime.now()
         self._vitals_context_key: tuple[int, int, str] | None = None
         self._refresh_generation = 0
@@ -8016,6 +8086,7 @@ class OperBlockMainWidget(QWidget):
         self._board_refresh_seq = 0
         self._board_refresh_count_before_ready = 0
         self._current_board_apply_metrics: dict | None = None
+        self._operation_report_pdf_worker = None
         init_ui_started = operblock_startup_metrics.timer_start()
         try:
             self._init_ui()
@@ -8308,7 +8379,7 @@ class OperBlockMainWidget(QWidget):
         self.operation_stages_button.clicked.connect(self._open_operation_stages_dialog)
         self.close_case_button.clicked.connect(self._end_surgery)
         self.release_table_button.clicked.connect(self._confirm_release_current_case)
-        self.report_button.clicked.connect(self._show_report_placeholder)
+        self.report_button.clicked.connect(self._build_operation_report_pdf)
 
         for button in (
             self.start_anesthesia_button,
@@ -8467,15 +8538,17 @@ class OperBlockMainWidget(QWidget):
             getattr(self, "_current_anesthesia_assistance_type", "")
         )
         operation_name = normalize_operblock_team_text(getattr(self, "_current_operation_name", ""))
+        protocol_display = re.sub(r"\s+", " ", str(getattr(self, "_current_protocol_display", "") or "").strip())
 
         parts: list[str] = []
         if assistance_type:
             parts.append(assistance_type)
         if operation_name:
             parts.append(operation_name)
+        prefix = f"Протокол анестезии № {protocol_display}" if protocol_display else "Протокол анестезии"
         if not parts:
-            return "Протокол анестезии"
-        return f"Протокол анестезии: {', '.join(parts)}"
+            return prefix
+        return f"{prefix}: {', '.join(parts)}"
 
     def _update_protocol_title_label(self):
         label = getattr(self, "protocol_title_label", None)
@@ -9533,10 +9606,20 @@ class OperBlockMainWidget(QWidget):
         self._active_infusions_render_signature = ""
         self._rendered_medication_group_signatures.clear()
         self._rendered_active_infusion_signatures.clear()
-        if self.protocol_page is not None and self.stack.currentWidget() == self.protocol_page and self._current_operation_case_id:
+        self._board_photo_thumbnail_cache.clear()
+        current_widget = self.stack.currentWidget()
+        if self.protocol_page is not None and current_widget == self.protocol_page and self._current_operation_case_id:
             self.refresh_protocol(force=True)
-        elif getattr(self, "quick_orders_list", None) is not None:
-            self._refresh_quick_orders()
+            return
+        if getattr(self, "quick_orders_list", None) is not None:
+            try:
+                self._refresh_quick_orders()
+            except Exception:
+                pass
+        if self.archive_page is not None and current_widget == self.archive_page:
+            self.refresh_operblock_archive(force=True)
+        else:
+            self.refresh_board(force=True, refresh_reason="operblock_icon_settings")
 
     def refresh_board(self, *, force: bool = False, refresh_reason: str = "refresh_board"):
         if self._is_closing:
@@ -9950,6 +10033,7 @@ class OperBlockMainWidget(QWidget):
         self._current_surgery_active = False
         self._current_anesthesia_assistance_type = ""
         self._current_operation_name = ""
+        self._current_protocol_display = ""
         self._update_protocol_title_label()
         self._update_operblock_staff_legend()
         self.refresh_operblock_archive(force=True)
@@ -11023,14 +11107,18 @@ class OperBlockMainWidget(QWidget):
 
     @staticmethod
     def _board_stage_label(kind: str, fallback: str = "") -> str:
+        clean_fallback = re.sub(r"\s+", " ", str(fallback or "").strip())
         labels = {
             "anesthesia_start": "Начало анестезии",
             "anesthesia_end": "Завершение анестезии",
             "surgery_start": "Начало операции",
             "surgery_end": "Завершение операции",
-            "custom": fallback or "Этап операции",
+            "custom": clean_fallback or "Этап операции",
         }
-        return labels.get(kind, fallback or "Этап операции")
+        default = labels.get(kind, clean_fallback or "Этап операции")
+        if kind == "anesthesia_end" and clean_fallback and clean_fallback not in {"Конец пособия", default}:
+            return clean_fallback
+        return default
 
     @staticmethod
     def _board_stage_history(patient: dict) -> list[dict]:
@@ -11427,6 +11515,7 @@ class OperBlockMainWidget(QWidget):
         self._current_surgery_active = False
         self._current_anesthesia_assistance_type = ""
         self._current_operation_name = ""
+        self._current_protocol_display = ""
         self._update_protocol_title_label()
         self._update_operblock_staff_legend()
         self._current_protocol_date = datetime.now()
@@ -11470,6 +11559,7 @@ class OperBlockMainWidget(QWidget):
         diagnosis_code = header.get("diagnosis_code")
         diagnosis_line = f"{diagnosis_code}: {diagnosis_text}" if diagnosis_code else diagnosis_text
         self.protocol_diagnosis_label.set_full_text(f"Диагноз: {diagnosis_line}")
+        self._current_protocol_display = str(header.get("protocol_display") or "").strip()
         self._update_protocol_status_label(started_at, active=header.get("status") == "active")
         self._current_case_active = header.get("status") == "active"
         self._current_operation_has_vitals = bool((snapshot.get("vitals") or {}).get("vitals"))
@@ -16971,9 +17061,22 @@ class OperBlockMainWidget(QWidget):
         if not self._current_operation_case_id:
             return
         case_id = int(self._current_operation_case_id)
+        defaults = self._operation_case_defaults(case_id)
+        initial_department = normalize_operblock_transfer_department(defaults.get("department_profile") or "")
+        departments = list(OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS)
+        if initial_department and initial_department.casefold() not in {item.casefold() for item in departments}:
+            departments.insert(1, initial_department)
+        dialog = EndAnesthesiaTransferDialog(
+            departments,
+            self,
+            initial_department=initial_department,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        transfer_department = dialog.selected_department()
         self._run_stage_action(
             f"operblock_end_anesthesia:{case_id}",
-            lambda: self.operblock_service.end_anesthesia(case_id),
+            lambda: self.operblock_service.end_anesthesia_with_transfer(case_id, transfer_department),
             "Анестезиологическое пособие завершено.",
         )
 
@@ -17522,12 +17625,46 @@ class OperBlockMainWidget(QWidget):
         if not entities or entities.intersection(watched):
             QTimer.singleShot(0, lambda: self.auto_refresh(force=False))
 
-    def _show_report_placeholder(self):
-        CustomMessageBox.information(
-            self,
-            "Отчет за операцию",
-            "Отчет за операцию будет сформирован на следующем этапе",
+    def _build_operation_report_pdf(self):
+        if not self._current_operation_case_id:
+            CustomMessageBox.warning(self, "Отчет за операцию", "Откройте протокол операции.")
+            return
+        worker = getattr(self, "_operation_report_pdf_worker", None)
+        if worker is not None and worker.isRunning():
+            CustomMessageBox.information(self, "Отчет за операцию", "PDF отчета уже формируется.")
+            return
+        try:
+            pdf_path = self.operblock_service.build_operation_report_pdf_path(int(self._current_operation_case_id))
+        except Exception as exc:
+            CustomMessageBox.critical(self, "Отчет за операцию", f"Не удалось подготовить путь PDF:\n{exc}")
+            return
+        from rem_card.ui.operblock_view.operblock_report_pdf_worker import OperBlockReportPdfWorker
+
+        self.report_button.setEnabled(False)
+        self.report_button.setText(" Формирование PDF...")
+        self._operation_report_pdf_worker = OperBlockReportPdfWorker(
+            self.operblock_service,
+            int(self._current_operation_case_id),
+            pdf_path,
+            parent=self,
         )
+        self._operation_report_pdf_worker.completed.connect(self._on_operation_report_pdf_ready)
+        self._operation_report_pdf_worker.failed.connect(self._on_operation_report_pdf_error)
+        self._operation_report_pdf_worker.finished.connect(self._clear_operation_report_pdf_worker)
+        self._operation_report_pdf_worker.start()
+
+    def _on_operation_report_pdf_ready(self, pdf_path: str):
+        self.report_button.setText(" Отчет за операцию")
+        self.report_button.setEnabled(True)
+        open_pdf_file(pdf_path, parent=self)
+
+    def _on_operation_report_pdf_error(self, message: str):
+        self.report_button.setText(" Отчет за операцию")
+        self.report_button.setEnabled(True)
+        CustomMessageBox.critical(self, "Отчет за операцию", f"Не удалось сформировать PDF отчета:\n{message}")
+
+    def _clear_operation_report_pdf_worker(self):
+        self._operation_report_pdf_worker = None
 
     def _show_board(self):
         self._set_protocol_chrome(False)
@@ -17548,6 +17685,7 @@ class OperBlockMainWidget(QWidget):
         self._current_surgery_active = False
         self._current_anesthesia_assistance_type = ""
         self._current_operation_name = ""
+        self._current_protocol_display = ""
         self._update_protocol_title_label()
         self._update_operblock_staff_legend()
         self._vitals_context_key = None
@@ -17640,6 +17778,9 @@ class OperBlockMainWidget(QWidget):
         timer = getattr(self, "_protocol_clock_timer", None)
         if timer is not None:
             timer.stop()
+        worker = getattr(self, "_operation_report_pdf_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.wait(1500)
 
     def closeEvent(self, event):
         self.shutdown()
@@ -17655,85 +17796,42 @@ class OperBlockMainWidget(QWidget):
             path_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
             gender_text = str(gender or "").lower()
             if gender_text.startswith("жен"):
-                name = "woman.png"
+                icon_key = OPERBLOCK_PATIENT_FEMALE_ICON_KEY
+                fallback_file = "woman_in_oper_extr.png"
+                fallback_asset = "woman.png"
             elif gender_text.startswith("муж") or gender_text.startswith("м"):
-                name = "man.png"
+                icon_key = OPERBLOCK_PATIENT_MALE_ICON_KEY
+                fallback_file = "man_in_oper_extr.png"
+                fallback_asset = "man.png"
             else:
-                name = "noman.png"
-            operating_room_photo_by_name = {
-                "man.png": "man_in_oper_extr.png",
-                "woman.png": "woman_in_oper_extr.png",
-            }
-            operating_room_photo = operating_room_photo_by_name.get(name)
-            if operating_room_photo:
-                path = os.path.join(get_icon_dir(), operating_room_photo)
-                if not os.path.isfile(path):
-                    path = os.path.join(get_patient_assets_dir(), "Patients", name)
-            else:
-                path = os.path.join(get_patient_assets_dir(), "Patients", name)
-            if not os.path.isfile(path):
-                path = os.path.join(get_patient_assets_dir(), "Patients", "noman.png")
+                icon_key = ""
+                fallback_file = ""
+                fallback_asset = "noman.png"
             operblock_startup_metrics.record_since(
                 "board_apply_card_photo_path_ms",
                 path_started,
                 source="operblock_widget",
                 **metric_fields,
             )
-            if os.path.isfile(path):
-                load_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
-                target_size = label.size()
-                try:
-                    stat = os.stat(path)
-                    cache_key = (
-                        path,
-                        int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))),
-                        int(stat.st_size),
-                        int(target_size.width()),
-                        int(target_size.height()),
-                    )
-                except Exception:
-                    cache_key = None
-                cached = self._board_photo_thumbnail_cache.get(cache_key) if cache_key is not None else None
-                if cached is not None and not cached.isNull():
-                    if apply_metrics is not None:
-                        apply_metrics["photo_cache_hit_count"] = int(apply_metrics.get("photo_cache_hit_count") or 0) + 1
-                        operblock_startup_metrics.record_since(
-                            "board_apply_card_photo_pixmap_load_ms",
-                            load_started,
-                            source="operblock_widget",
-                            cache_hit=True,
-                            **metric_fields,
-                        )
-                        operblock_startup_metrics.record_duration(
-                            "board_apply_card_photo_scaled_ms",
-                            0.0,
-                            source="operblock_widget",
-                            cache_hit=True,
-                            **metric_fields,
-                        )
-                    label.setPixmap(cached)
-                    return
-                if apply_metrics is not None:
-                    apply_metrics["photo_cache_miss_count"] = int(apply_metrics.get("photo_cache_miss_count") or 0) + 1
-                reader = QImageReader(path)
-                reader.setAutoTransform(True)
-                source_size = reader.size()
-                if source_size.isValid() and target_size.isValid() and not target_size.isEmpty():
-                    scaled_size = source_size.scaled(target_size, Qt.KeepAspectRatio)
-                    if scaled_size.isValid() and not scaled_size.isEmpty():
-                        reader.setScaledSize(scaled_size)
-                image = reader.read()
-                if image.isNull():
-                    source_pixmap = QPixmap(path)
-                else:
-                    source_pixmap = QPixmap.fromImage(image)
-                operblock_startup_metrics.record_since(
-                    "board_apply_card_photo_pixmap_load_ms",
-                    load_started,
-                    source="operblock_widget",
-                    cache_hit=False,
-                    **metric_fields,
-                )
+            load_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
+            target_size = label.size()
+            source_pixmap = (
+                load_operblock_icon_pixmap(icon_key, fallback_file=fallback_file)
+                if icon_key
+                else QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
+            )
+            if source_pixmap.isNull():
+                source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
+            if source_pixmap.isNull():
+                source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", "noman.png"))
+            operblock_startup_metrics.record_since(
+                "board_apply_card_photo_pixmap_load_ms",
+                load_started,
+                source="operblock_widget",
+                cache_hit=False,
+                **metric_fields,
+            )
+            if not source_pixmap.isNull() and target_size.isValid() and not target_size.isEmpty():
                 scale_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
                 pixmap = source_pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 operblock_startup_metrics.record_since(
@@ -17743,8 +17841,6 @@ class OperBlockMainWidget(QWidget):
                     **metric_fields,
                 )
                 if not pixmap.isNull():
-                    if cache_key is not None:
-                        self._board_photo_thumbnail_cache[cache_key] = pixmap
                     label.setPixmap(pixmap)
                     return
             if apply_metrics is not None:

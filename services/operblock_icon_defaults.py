@@ -8,6 +8,8 @@ from typing import Any, Iterable
 OPERBLOCK_ICONS_KEY = "operblock_icons"
 MAX_OPERBLOCK_ICON_BLOB_BYTES = 32 * 1024 * 1024
 SUPPORTED_OPERBLOCK_ICON_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".svg"}
+OPERBLOCK_PATIENT_MALE_ICON_KEY = "operblock:patient_photo:male"
+OPERBLOCK_PATIENT_FEMALE_ICON_KEY = "operblock:patient_photo:female"
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,27 @@ EDIT_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
     ),
 )
 
+PATIENT_PHOTO_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
+    OperBlockIconDefinition(
+        OPERBLOCK_PATIENT_MALE_ICON_KEY,
+        "patient_photo",
+        "male",
+        "Фото пациента в оперблоке: мужчина",
+        "man_in_oper_extr.png",
+        210,
+        "Показывается в карточке пациента на доске оперблока для мужского пола.",
+    ),
+    OperBlockIconDefinition(
+        OPERBLOCK_PATIENT_FEMALE_ICON_KEY,
+        "patient_photo",
+        "female",
+        "Фото пациента в оперблоке: женщина",
+        "woman_in_oper_extr.png",
+        220,
+        "Показывается в карточке пациента на доске оперблока для женского пола.",
+    ),
+)
+
 
 DEFAULT_DRUG_ICON_FILES = {
     "bolus": "bolus-izm.png",
@@ -203,6 +226,7 @@ DRUG_ICON_LABEL_ALIAS_KEYS: dict[str, tuple[str, ...]] = {
 DEFAULT_ICON_DEFINITIONS: tuple[OperBlockIconDefinition, ...] = (
     *TYPE_ICON_DEFINITIONS,
     *EDIT_ICON_DEFINITIONS,
+    *PATIENT_PHOTO_ICON_DEFINITIONS,
 )
 
 DEFAULT_ICON_DEFINITION_BY_KEY = {

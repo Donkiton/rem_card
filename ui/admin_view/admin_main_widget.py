@@ -29,6 +29,7 @@ class AdminMainWidget(QWidget):
         self.display_settings_dialog = None
         self.background_settings_dialog = None
         self.operblock_icon_settings_dialog = None
+        self.remcard_icon_settings_dialog = None
         self.operblock_medications_dialog = None
         self.operblock_quick_buttons_settings_widget = None
         self.operblock_route_settings_widget = None
@@ -69,6 +70,7 @@ class AdminMainWidget(QWidget):
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
         self.btn_background_settings = QPushButton("Изменение фона")
+        self.btn_remcard_icon_settings = QPushButton("Настройка иконок рем карты")
         self.btn_operblock_icon_settings = QPushButton("Настройка иконок оперблока")
         self.btn_operblock_medications = QPushButton("Настройки препаратов")
         self.btn_operblock_quick_buttons = QPushButton("Кнопки быстрых назначений")
@@ -100,7 +102,12 @@ class AdminMainWidget(QWidget):
             template_buttons.append(self.btn_diet_templates)
 
         self.btn_style.setVisible(False)
-        program_buttons = [self.btn_print, self.btn_display_settings, self.btn_background_settings]
+        program_buttons = [
+            self.btn_print,
+            self.btn_display_settings,
+            self.btn_background_settings,
+            self.btn_remcard_icon_settings,
+        ]
         if self.role == "doctor":
             program_buttons.append(self.btn_emergency_password)
             program_buttons.append(self.btn_db_rotation)
@@ -162,6 +169,7 @@ class AdminMainWidget(QWidget):
         self.btn_print.clicked.connect(self.open_print)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
+        self.btn_remcard_icon_settings.clicked.connect(self.open_remcard_icon_settings)
         self.btn_operblock_icon_settings.clicked.connect(self.open_operblock_icon_settings)
         self.btn_operblock_medications.clicked.connect(self.open_operblock_medications_settings)
         self.btn_operblock_quick_buttons.clicked.connect(self.open_operblock_quick_buttons_settings)
@@ -344,6 +352,12 @@ class AdminMainWidget(QWidget):
 
         dialog = BackgroundSettingsDialog(parent=self)
         dialog.exec()
+
+    def open_remcard_icon_settings(self):
+        from .remcard_icon_settings_dialog import RemCardIconSettingsDialog
+
+        self.remcard_icon_settings_dialog = RemCardIconSettingsDialog(parent=self)
+        self.remcard_icon_settings_dialog.exec()
 
     def open_operblock_icon_settings(self):
         from .operblock_icon_settings_dialog import OperBlockIconSettingsDialog

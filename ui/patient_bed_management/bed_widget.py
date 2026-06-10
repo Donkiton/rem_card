@@ -9,6 +9,7 @@ from rem_card.ui.styles.theme import (
     STYLE_PATIENT_BED_STATUS_FREE,
     get_patient_bed_card_style,
 )
+from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label, is_recovery_bed
 
 class BedWidget(QFrame):
     clicked = Signal(int, int)
@@ -35,8 +36,8 @@ class BedWidget(QFrame):
         self.layout.setContentsMargins(20, 20, 20, 20)
         self.layout.setSpacing(5)
 
-        # 1. Номер койки (КОЙКА № *)
-        self.bed_label = QLabel(f"КОЙКА № {self.bed_number}")
+        # 1. Название койки
+        self.bed_label = QLabel(format_patient_bed_label(self.bed_number, numbered=True, uppercase=True))
         self.bed_label.setStyleSheet(STYLE_PATIENT_BED_LABEL)
 
         # 2. Номер истории болезни (ИБ № *)
@@ -123,10 +124,20 @@ class BedWidget(QFrame):
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
-            source_bed = event.mimeData().text()
-            if source_bed != str(self.bed_number):
-                event.acceptProposedAction()
-                self.setStyleSheet(get_patient_bed_card_style(self.status, drop_target=True))
+            source_bed_str = event.mimeData().text()
+            if not source_bed_str.isdigit():
+                return
+            source_bed = int(source_bed_str)
+            if source_bed == self.bed_number:
+                return
+            if is_recovery_bed(source_bed) and not is_recovery_bed(self.bed_number):
+                event.ignore()
+                return
+            if is_recovery_bed(self.bed_number) and not is_recovery_bed(source_bed) and self.status != "FREE":
+                event.ignore()
+                return
+            event.acceptProposedAction()
+            self.setStyleSheet(get_patient_bed_card_style(self.status, drop_target=True))
 
     def dragLeaveEvent(self, event):
         self._update_display()
@@ -136,6 +147,14 @@ class BedWidget(QFrame):
         if not source_bed_str.isdigit(): return
         source_bed = int(source_bed_str)
         target_bed = self.bed_number
+        if is_recovery_bed(source_bed) and not is_recovery_bed(target_bed):
+            event.ignore()
+            self._update_display()
+            return
+        if is_recovery_bed(target_bed) and not is_recovery_bed(source_bed) and self.status != "FREE":
+            event.ignore()
+            self._update_display()
+            return
         # Ищем через parent пока не найдем метод move_patient.
         ptr = self.parent()
         while ptr:

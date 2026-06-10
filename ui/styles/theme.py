@@ -406,7 +406,7 @@ STYLE_SIDE_PATIENT_CARD = f"""
 """
 STYLE_SIDE_PATIENT_PHOTO = f"""
     QLabel {{
-        border: 3px solid {BORDER_COLOR};
+        border: none;
         background-color: transparent;
     }}
 """

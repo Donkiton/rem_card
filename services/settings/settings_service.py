@@ -26,6 +26,7 @@ from rem_card.services.operblock_icon_defaults import (
     SEEDED_CUSTOM_ICON_DEFINITIONS,
     SUPPORTED_OPERBLOCK_ICON_EXTENSIONS,
 )
+from rem_card.services.remcard_icon_defaults import REMCARD_ICON_DEFINITIONS
 from rem_card.services.shift_service import ShiftService
 
 
@@ -71,7 +72,11 @@ PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
 OPERBLOCK_ICONS_SEED_META_VERSION_KEY = "operblock_icons_seed_version"
 OPERBLOCK_ICONS_SEED_META_HASH_KEY = "operblock_icons_seed_hash"
-OPERBLOCK_ICONS_SEED_VERSION = "seeded_custom_icons_v1"
+OPERBLOCK_ICONS_SEED_VERSION = "seeded_custom_icons_v2"
+SEEDED_ICON_DEFINITIONS = (
+    *SEEDED_CUSTOM_ICON_DEFINITIONS,
+    *REMCARD_ICON_DEFINITIONS,
+)
 
 
 @dataclass(frozen=True)
@@ -2659,12 +2664,12 @@ class SettingsService:
                     "sort_order": int(definition.sort_order or 0),
                     "source_file": definition.source_file or definition.default_file,
                 }
-                for definition in SEEDED_CUSTOM_ICON_DEFINITIONS
+                for definition in SEEDED_ICON_DEFINITIONS
             ]
         )
 
     def _operblock_icons_seed_fastpath_state(self) -> dict[str, Any]:
-        expected_keys = tuple(definition.icon_key for definition in SEEDED_CUSTOM_ICON_DEFINITIONS)
+        expected_keys = tuple(definition.icon_key for definition in SEEDED_ICON_DEFINITIONS)
         expected_hash = self._operblock_icons_seed_hash()
         if not expected_keys:
             return {
@@ -2711,7 +2716,7 @@ class SettingsService:
 
     @staticmethod
     def _missing_operblock_seed_icon_keys(cursor) -> list[str]:
-        expected_keys = tuple(definition.icon_key for definition in SEEDED_CUSTOM_ICON_DEFINITIONS)
+        expected_keys = tuple(definition.icon_key for definition in SEEDED_ICON_DEFINITIONS)
         if not expected_keys:
             return []
         placeholders = ",".join("?" for _ in expected_keys)
@@ -2775,7 +2780,7 @@ class SettingsService:
             icon_dir = get_icon_dir()
             expected_hash = str(fastpath_state.get("expected_hash") or self._operblock_icons_seed_hash())
             with self.db.transaction("settings_operblock_icons_seed") as cursor:
-                for definition in SEEDED_CUSTOM_ICON_DEFINITIONS:
+                for definition in SEEDED_ICON_DEFINITIONS:
                     existing = cursor.execute(
                         "SELECT 1 FROM operblock_icons WHERE icon_key = ?",
                         (definition.icon_key,),
@@ -2893,6 +2898,15 @@ class SettingsService:
             result[str(item.get("icon_key") or "")] = item
         return result
 
+    def list_remcard_icons(self) -> dict[str, dict[str, Any]]:
+        records = self.list_operblock_icons()
+        remcard_keys = {definition.icon_key for definition in REMCARD_ICON_DEFINITIONS}
+        return {
+            key: record
+            for key, record in records.items()
+            if key in remcard_keys or str(record.get("category") or "").startswith("remcard")
+        }
+
     def save_operblock_icon(
         self,
         *,
@@ -2973,6 +2987,29 @@ class SettingsService:
                     "image_hash": image_hash,
                 },
             )
+
+    def save_remcard_icon(
+        self,
+        *,
+        icon_key: str,
+        category: str,
+        target_key: str,
+        name: str,
+        default_file: str,
+        image_path: str,
+        sort_order: int = 0,
+        changed_by_role: str | None = "doctor",
+    ) -> None:
+        self.save_operblock_icon(
+            icon_key=icon_key,
+            category=category or "remcard",
+            target_key=target_key,
+            name=name,
+            default_file=default_file,
+            image_path=image_path,
+            sort_order=sort_order,
+            changed_by_role=changed_by_role,
+        )
 
     def _compute_app_settings_hash(self, scope: str, key: str) -> str:
         value = self.get_app_setting(scope, key, default=None)
