@@ -10,12 +10,21 @@ import tempfile
 from typing import Any, Mapping
 
 from rem_card.app.paths import SEED_DIR, USER_DICT_DIR
+from rem_card.services.settings.settings_service import (
+    OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+    OPERBLOCK_SETTINGS_KEY,
+    OPERBLOCK_SETTINGS_SCOPE,
+    get_settings_service,
+)
 from rem_card.services.operblock_quick_orders import (
     build_operblock_quick_order_text,
     load_operblock_quick_orders,
     normalize_operblock_quick_order_kind,
 )
-from rem_card.services.operblock_quick_order_buttons import normalize_operblock_extra_quick_type_keys
+from rem_card.services.operblock_quick_order_buttons import (
+    load_operblock_quick_order_buttons,
+    normalize_operblock_extra_quick_type_keys,
+)
 
 
 OPERBLOCK_MEDICATION_PRESETS_FILE = "operblock_medication_presets.seed.json"
@@ -393,7 +402,12 @@ def project_drug_to_operblock_preset(
     return preset.to_dict()
 
 
-def _normalize_preset(raw: Mapping[str, Any], *, base: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+def _normalize_preset(
+    raw: Mapping[str, Any],
+    *,
+    base: Mapping[str, Any] | None = None,
+    quick_buttons: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     data = dict(base or {})
     data.update(dict(raw or {}))
     label = _as_text(data.get("label") or data.get("drug_name") or data.get("drug") or data.get("latin"))
@@ -437,6 +451,7 @@ def _normalize_preset(raw: Mapping[str, Any], *, base: Mapping[str, Any] | None 
         card_color=_as_hex_color(_preset_color_value(data)),
         extra_quick_types=normalize_operblock_extra_quick_type_keys(
             data.get("extra_quick_types") or data.get("additional_quick_types") or data.get("additional_types"),
+            buttons=quick_buttons,
             include_unknown=True,
         ),
         uses_line=_as_bool(data.get("uses_line")),
@@ -488,6 +503,28 @@ def load_operblock_diluent_options(
     seed_dir: str | None = None,
     user_dict_dir: str | None = None,
 ) -> list[dict[str, Any]]:
+    if seed_dir is None and user_dict_dir is None:
+        diluents = get_settings_service().drug_catalog_snapshot().solvents
+        options: list[dict[str, Any]] = []
+        for diluent_id, raw in sorted(
+            diluents.items(),
+            key=lambda item: _label_key(_diluent_label(diluents, item[0]) or item[0]),
+        ):
+            if not isinstance(raw, Mapping):
+                continue
+            label = _diluent_label(diluents, diluent_id) or _as_text(diluent_id)
+            if not label:
+                continue
+            options.append(
+                {
+                    "id": _as_text(diluent_id),
+                    "label": label,
+                    "latin": _as_optional_text(raw.get("latin")),
+                    "display": _as_optional_text(raw.get("display") or raw.get("display_name")),
+                }
+            )
+        return options
+
     resolved_seed_dir = seed_dir or SEED_DIR
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides = _read_json_dict(os.path.join(resolved_user_dir, "user_overrides.json"))
@@ -518,6 +555,8 @@ def _apply_opblock_seed(
     drugs: Mapping[str, Any],
     diluents: Mapping[str, Any],
     raw_items: list[dict[str, Any]],
+    *,
+    quick_buttons: list[dict[str, Any]] | None = None,
 ) -> None:
     for raw_item in raw_items:
         if not isinstance(raw_item, Mapping):
@@ -533,7 +572,7 @@ def _apply_opblock_seed(
                 enabled=False,
                 preset_id=preset_id or None,
             )
-        normalized = _normalize_preset(raw_item, base=base)
+        normalized = _normalize_preset(raw_item, base=base, quick_buttons=quick_buttons)
         if not normalized:
             continue
         normalized["enabled"] = _as_bool(raw_item.get("enabled"), default=True)
@@ -542,7 +581,12 @@ def _apply_opblock_seed(
         presets[normalized["preset_id"]] = normalized
 
 
-def quick_order_to_medication_preset(raw: Mapping[str, Any], *, sort_order: int | None = None) -> dict[str, Any] | None:
+def quick_order_to_medication_preset(
+    raw: Mapping[str, Any],
+    *,
+    sort_order: int | None = None,
+    quick_buttons: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(raw, Mapping):
         return None
     label = _as_text(raw.get("label") or raw.get("drug_name") or raw.get("drug"))
@@ -571,15 +615,25 @@ def quick_order_to_medication_preset(raw: Mapping[str, Any], *, sort_order: int 
             "sort_order": sort_order,
             "card_color": raw.get("card_color") or raw.get("card_color_hex") or raw.get("color"),
             "payload": {"compat_source": "operblock_quick_orders", "legacy_group": raw.get("group")},
-        }
+        },
+        quick_buttons=quick_buttons,
     )
     return preset
 
 
-def _apply_quick_orders_compat(presets: dict[str, dict[str, Any]], quick_items: list[dict[str, Any]]) -> None:
+def _apply_quick_orders_compat(
+    presets: dict[str, dict[str, Any]],
+    quick_items: list[dict[str, Any]],
+    *,
+    quick_buttons: list[dict[str, Any]] | None = None,
+) -> None:
     label_index = {_label_key(item.get("label")): preset_id for preset_id, item in presets.items()}
     for index, quick_item in enumerate(quick_items):
-        preset = quick_order_to_medication_preset(quick_item, sort_order=10_000 + index)
+        preset = quick_order_to_medication_preset(
+            quick_item,
+            sort_order=10_000 + index,
+            quick_buttons=quick_buttons,
+        )
         if not preset:
             continue
         existing_id = label_index.get(_label_key(preset.get("label")))
@@ -591,13 +645,18 @@ def _apply_quick_orders_compat(presets: dict[str, dict[str, Any]], quick_items: 
                     existing[key] = value
             existing["enabled"] = True
             existing["payload"] = _merge(existing.get("payload") or {}, preset.get("payload") or {})
-            presets[existing_id] = _normalize_preset(existing) or existing
+            presets[existing_id] = _normalize_preset(existing, quick_buttons=quick_buttons) or existing
             continue
         presets[preset["preset_id"]] = preset
         label_index[_label_key(preset.get("label"))] = preset["preset_id"]
 
 
-def _apply_overrides(presets: dict[str, dict[str, Any]], raw_items: list[Any]) -> None:
+def _apply_overrides(
+    presets: dict[str, dict[str, Any]],
+    raw_items: list[Any],
+    *,
+    quick_buttons: list[dict[str, Any]] | None = None,
+) -> None:
     seen: set[str] = set()
     for raw_item in raw_items:
         if not isinstance(raw_item, Mapping):
@@ -608,7 +667,7 @@ def _apply_overrides(presets: dict[str, dict[str, Any]], raw_items: list[Any]) -
                 seen.add(preset_id)
             continue
         base = presets.get(preset_id) if preset_id else None
-        normalized = _normalize_preset(raw_item, base=base)
+        normalized = _normalize_preset(raw_item, base=base, quick_buttons=quick_buttons)
         if not normalized:
             continue
         seen.add(normalized["preset_id"])
@@ -653,7 +712,7 @@ def normalize_operblock_medication_presets_payload(payload: Any) -> dict[str, An
     for raw_item in payload.get("items") or []:
         if not isinstance(raw_item, Mapping):
             continue
-        normalized = _normalize_preset(raw_item)
+        normalized = _normalize_preset(raw_item, quick_buttons=[])
         if not normalized:
             continue
         if _is_disabled_base_drug_preset(normalized):
@@ -667,7 +726,7 @@ def normalize_operblock_medication_presets_payload(payload: Any) -> dict[str, An
     return {"version": OPERBLOCK_MEDICATION_PRESETS_VERSION, "items": items}
 
 
-def load_operblock_medication_presets(
+def _load_operblock_medication_presets_from_legacy(
     *,
     seed_dir: str | None = None,
     user_dict_dir: str | None = None,
@@ -681,6 +740,10 @@ def load_operblock_medication_presets(
         user_dict_dir=resolved_user_dir,
         overrides_data=overrides,
     )
+    try:
+        quick_buttons = load_operblock_quick_order_buttons(user_dict_dir=resolved_user_dir)
+    except Exception:
+        quick_buttons = []
 
     presets: dict[str, dict[str, Any]] = {}
     for drug_id, raw in drugs.items():
@@ -699,21 +762,69 @@ def load_operblock_medication_presets(
         )
 
     if include_opblock_seed:
-        _apply_opblock_seed(presets, drugs, diluents, opblock_items)
+        _apply_opblock_seed(presets, drugs, diluents, opblock_items, quick_buttons=quick_buttons)
     if include_quick_orders_compat:
         try:
-            quick_items = load_operblock_quick_orders()
+            quick_items = load_operblock_quick_orders(seed_dir=resolved_seed_dir, user_dict_dir=resolved_user_dir)
         except Exception:
             quick_items = []
-        _apply_quick_orders_compat(presets, quick_items)
+        _apply_quick_orders_compat(presets, quick_items, quick_buttons=quick_buttons)
 
     if isinstance(override_payload, Mapping):
         raw_override_items = override_payload.get("items") if isinstance(override_payload.get("items"), list) else []
-        _apply_overrides(presets, raw_override_items)
+        _apply_overrides(presets, raw_override_items, quick_buttons=quick_buttons)
 
     items = [item for item in presets.values() if include_disabled or bool(item.get("enabled"))]
     items.sort(key=_sort_key)
     return [deepcopy(item) for item in items]
+
+
+def _base_drug_presets_from_settings_catalog() -> dict[str, dict[str, Any]]:
+    snapshot = get_settings_service().drug_catalog_snapshot()
+    presets: dict[str, dict[str, Any]] = {}
+    for drug_id, raw in (snapshot.drugs or {}).items():
+        if not isinstance(raw, Mapping):
+            continue
+        preset = project_drug_to_operblock_preset(
+            str(drug_id),
+            raw,
+            diluents=snapshot.solvents,
+            enabled=False,
+        )
+        presets[preset["preset_id"]] = preset
+    return presets
+
+
+def _load_operblock_medication_presets_from_settings(*, include_disabled: bool = True) -> list[dict[str, Any]]:
+    payload = get_settings_service().get_app_setting(
+        OPERBLOCK_SETTINGS_SCOPE,
+        OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+        default={},
+    )
+    normalized_payload = normalize_operblock_medication_presets_payload(payload)
+    presets = _base_drug_presets_from_settings_catalog()
+    for item in normalized_payload["items"]:
+        preset_id = _as_text((item or {}).get("preset_id"))
+        if preset_id:
+            presets[preset_id] = dict(item)
+    items = [item for item in presets.values() if include_disabled or bool(item.get("enabled"))]
+    items.sort(key=_sort_key)
+    return [deepcopy(item) for item in items]
+
+
+def load_operblock_medication_presets(
+    *,
+    seed_dir: str | None = None,
+    user_dict_dir: str | None = None,
+    include_disabled: bool = True,
+) -> list[dict[str, Any]]:
+    if seed_dir is None and user_dict_dir is None:
+        return _load_operblock_medication_presets_from_settings(include_disabled=include_disabled)
+    return _load_operblock_medication_presets_from_legacy(
+        seed_dir=seed_dir,
+        user_dict_dir=user_dict_dir,
+        include_disabled=include_disabled,
+    )
 
 
 def save_operblock_medication_presets(
@@ -724,6 +835,26 @@ def save_operblock_medication_presets(
     payload = normalize_operblock_medication_presets_payload(
         {"version": OPERBLOCK_MEDICATION_PRESETS_VERSION, "items": items}
     )
+    if user_dict_dir is None:
+        existing_payload = get_settings_service().get_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+            default={},
+        )
+        if isinstance(existing_payload, Mapping):
+            for flag in ("include_opblock_seed", "include_quick_orders_compat"):
+                if flag in existing_payload:
+                    payload[flag] = _as_bool(existing_payload.get(flag), default=True)
+        get_settings_service().set_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+            payload,
+            catalog_key=OPERBLOCK_SETTINGS_KEY,
+            entity_type="operblock_medication_presets",
+            operation="replace",
+            changed_by_role="doctor",
+        )
+        return list(payload["items"])
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)
@@ -738,6 +869,18 @@ def save_operblock_medication_presets(
 
 
 def reset_operblock_medication_presets_override(*, user_dict_dir: str | None = None) -> None:
+    if user_dict_dir is None:
+        payload = normalize_operblock_medication_presets_payload({"version": OPERBLOCK_MEDICATION_PRESETS_VERSION, "items": []})
+        get_settings_service().set_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+            payload,
+            catalog_key=OPERBLOCK_SETTINGS_KEY,
+            entity_type="operblock_medication_presets",
+            operation="reset",
+            changed_by_role="doctor",
+        )
+        return
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)

@@ -8,6 +8,12 @@ from typing import Any, Mapping
 
 from rem_card.app.paths import USER_DICT_DIR
 from rem_card.services.doctor_list_service import DoctorListStore
+from rem_card.services.settings.settings_service import (
+    OPERBLOCK_SETTINGS_KEY,
+    OPERBLOCK_SETTINGS_SCOPE,
+    OPERBLOCK_TEAM_APP_KEY,
+    get_settings_service,
+)
 
 
 OPERBLOCK_TEAM_OVERRIDE_KEY = "operblock_team"
@@ -123,6 +129,13 @@ def normalize_operblock_team_payload(payload: Any) -> dict[str, Any]:
 
 
 def load_operblock_team(*, user_dict_dir: str | None = None) -> list[dict[str, Any]]:
+    if user_dict_dir is None:
+        payload = get_settings_service().get_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_TEAM_APP_KEY,
+            default={},
+        )
+        return list(normalize_operblock_team_payload(payload)["items"])
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)
@@ -136,6 +149,17 @@ def save_operblock_team(
     user_dict_dir: str | None = None,
 ) -> list[dict[str, Any]]:
     payload = normalize_operblock_team_payload({"version": OPERBLOCK_TEAM_VERSION, "items": items})
+    if user_dict_dir is None:
+        get_settings_service().set_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_TEAM_APP_KEY,
+            payload,
+            catalog_key=OPERBLOCK_SETTINGS_KEY,
+            entity_type="operblock_team",
+            operation="replace",
+            changed_by_role="doctor",
+        )
+        return list(payload["items"])
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)

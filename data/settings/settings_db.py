@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import glob
+import hashlib
 import json
 import re
 import socket
@@ -84,6 +85,8 @@ SETTINGS_BACKUP_FORCE_SOURCE_PREFIXES = (
     "settings_legacy_import",
     "settings_legacy_prescription_overrides",
 )
+SETTINGS_PRE_WRITE_BACKUP_STAMP_PLACEHOLDER = "00000000_000000_000000"
+SETTINGS_PRE_WRITE_WINDOWS_PATH_LIMIT = 240
 
 
 def _settings_backup_source_tag(source: str) -> str:
@@ -91,6 +94,26 @@ def _settings_backup_source_tag(source: str) -> str:
     tag = re.sub(r"[^a-z0-9_]+", "_", raw).strip("_")
     tag = re.sub(r"_+", "_", tag)
     return (tag or "settings_write")[:96]
+
+
+def _settings_backup_source_tag_for_dir(source: str, backup_dir: str) -> str:
+    source_tag = _settings_backup_source_tag(source)
+    if os.name != "nt":
+        return source_tag
+
+    backup_dir_abs = os.path.abspath(os.path.normpath(backup_dir))
+    prefix = "settings_pre_"
+    suffix = f"_{SETTINGS_PRE_WRITE_BACKUP_STAMP_PLACEHOLDER}.db"
+    max_tag_len = SETTINGS_PRE_WRITE_WINDOWS_PATH_LIMIT - len(backup_dir_abs) - 1 - len(prefix) - len(suffix)
+    if max_tag_len >= len(source_tag):
+        return source_tag
+
+    digest = hashlib.sha1(source_tag.encode("utf-8", errors="replace")).hexdigest()[:10]
+    if max_tag_len <= len(digest):
+        return digest
+    readable_len = max_tag_len - len(digest) - 1
+    readable = source_tag[:readable_len].strip("_")
+    return f"{readable}_{digest}" if readable else digest
 
 
 def _settings_source_forces_backup(source: str) -> bool:
@@ -505,7 +528,7 @@ class SettingsDatabase:
                 return None
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         backup_dir = self.backups_dir
-        source_tag = _settings_backup_source_tag(source)
+        source_tag = _settings_backup_source_tag_for_dir(source, backup_dir)
         backup_path = os.path.join(backup_dir, f"settings_pre_{source_tag}_{stamp}.db")
         created_path = backup_connection(
             conn,
@@ -526,7 +549,7 @@ class SettingsDatabase:
     def _find_recent_valid_pre_write_backup(self, source: str) -> str | None:
         if SETTINGS_PRE_WRITE_BACKUP_COALESCE_SEC <= 0:
             return None
-        source_tag = _settings_backup_source_tag(source)
+        source_tag = _settings_backup_source_tag_for_dir(source, self.backups_dir)
         pattern = os.path.join(self.backups_dir, f"settings_pre_{source_tag}_*.db")
         candidates = [
             path

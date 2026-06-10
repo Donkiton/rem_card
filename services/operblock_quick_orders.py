@@ -4,9 +4,15 @@ from copy import deepcopy
 import json
 import os
 import tempfile
-from typing import Any
+from typing import Any, Mapping
 
 from rem_card.app.paths import SEED_DIR, USER_DICT_DIR
+from rem_card.services.settings.settings_service import (
+    OPERBLOCK_QUICK_ORDERS_APP_KEY,
+    OPERBLOCK_SETTINGS_KEY,
+    OPERBLOCK_SETTINGS_SCOPE,
+    get_settings_service,
+)
 
 
 OPERBLOCK_QUICK_ORDERS_FILE = "operblock_quick_orders.seed.json"
@@ -154,12 +160,29 @@ def normalize_operblock_quick_orders_payload(payload: Any) -> dict[str, Any]:
     return {"version": OPERBLOCK_QUICK_ORDERS_VERSION, "items": items}
 
 
-def load_operblock_quick_orders() -> list[dict[str, Any]]:
-    seed_path = os.path.join(SEED_DIR, OPERBLOCK_QUICK_ORDERS_FILE)
+def load_operblock_quick_orders(
+    *,
+    seed_dir: str | None = None,
+    user_dict_dir: str | None = None,
+) -> list[dict[str, Any]]:
+    if seed_dir is None and user_dict_dir is None:
+        payload = get_settings_service().get_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_QUICK_ORDERS_APP_KEY,
+            default={},
+        )
+        if isinstance(payload, Mapping):
+            normalized = normalize_operblock_quick_orders_payload(payload)
+            return list(normalized["items"])
+        return list(normalize_operblock_quick_orders_payload(DEFAULT_OPERBLOCK_QUICK_ORDERS)["items"])
+
+    resolved_seed_dir = seed_dir or SEED_DIR
+    resolved_user_dir = user_dict_dir or USER_DICT_DIR
+    seed_path = os.path.join(resolved_seed_dir, OPERBLOCK_QUICK_ORDERS_FILE)
     seed_payload = _read_json_dict(seed_path) or deepcopy(DEFAULT_OPERBLOCK_QUICK_ORDERS)
     payload = normalize_operblock_quick_orders_payload(seed_payload)
 
-    overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
+    overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)
     override_payload = overrides.get(OPERBLOCK_QUICK_ORDERS_OVERRIDE_KEY)
     if isinstance(override_payload, dict):
@@ -168,11 +191,27 @@ def load_operblock_quick_orders() -> list[dict[str, Any]]:
     return list(payload["items"])
 
 
-def save_operblock_quick_orders(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def save_operblock_quick_orders(
+    items: list[dict[str, Any]],
+    *,
+    user_dict_dir: str | None = None,
+) -> list[dict[str, Any]]:
     payload = normalize_operblock_quick_orders_payload(
         {"version": OPERBLOCK_QUICK_ORDERS_VERSION, "items": items}
     )
-    overrides_path = os.path.join(USER_DICT_DIR, "user_overrides.json")
+    if user_dict_dir is None:
+        get_settings_service().set_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_QUICK_ORDERS_APP_KEY,
+            payload,
+            catalog_key=OPERBLOCK_SETTINGS_KEY,
+            entity_type="operblock_quick_orders",
+            operation="replace",
+            changed_by_role="doctor",
+        )
+        return list(payload["items"])
+    resolved_user_dir = user_dict_dir or USER_DICT_DIR
+    overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)
     overrides[OPERBLOCK_QUICK_ORDERS_OVERRIDE_KEY] = payload
     _write_json_atomic(overrides_path, overrides)

@@ -18582,6 +18582,176 @@ def _check_operblock_route_settings_order_and_default(temp_root: str) -> tuple[b
         reset_settings_service()
 
 
+def _check_operblock_runtime_settings_from_settings_db(temp_root: str) -> tuple[bool, str]:
+    import sqlite3
+
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_release import (
+        SETTINGS_RELEASE_SNAPSHOT_FILE,
+        apply_settings_release_snapshot,
+        export_settings_release_snapshot,
+    )
+    from rem_card.services.operblock_anesthesia_types import (
+        load_operblock_anesthesia_types,
+        save_operblock_anesthesia_types,
+    )
+    from rem_card.services.operblock_medication_presets import (
+        load_operblock_medication_presets,
+        save_operblock_medication_presets,
+    )
+    from rem_card.services.operblock_quick_order_buttons import (
+        load_operblock_quick_order_buttons,
+        save_operblock_quick_order_buttons,
+    )
+    from rem_card.services.operblock_quick_orders import (
+        load_operblock_quick_orders,
+        save_operblock_quick_orders,
+    )
+    from rem_card.services.operblock_team import load_operblock_team, save_operblock_team
+    from rem_card.services.settings.settings_service import (
+        OPERBLOCK_SETTINGS_KEY,
+        OPERBLOCK_SETTINGS_SCOPE,
+        OPERBLOCK_TEAM_APP_KEY,
+        SettingsService,
+        configure_settings_service,
+        reset_settings_service,
+    )
+
+    source_baza = os.path.join(temp_root, "SourceBaza")
+    source_db_path = os.path.join(source_baza, "settings", "remcard_settings.db")
+    target_baza = os.path.join(temp_root, "TargetBaza")
+    preserve_baza = os.path.join(temp_root, "PreserveBaza")
+    snapshot_path = os.path.join(temp_root, SETTINGS_RELEASE_SNAPSHOT_FILE)
+
+    expected_team = [
+        {"name": "Регресс Хирург", "position": "Хирург"},
+        {"name": "Регресс Оперсестра", "position": "Операционная медсестра"},
+        {"name": "Регресс Анестезистка", "position": "Анестезистка"},
+    ]
+    expected_anesthesia = [{"label": "Регрессионное пособие"}]
+    expected_buttons = [
+        {"key": "bolus", "label": "Болюсы", "built_in": True, "sort_order": 10},
+        {"key": "extra:regional", "label": "Регионарные", "built_in": False, "sort_order": 60},
+    ]
+    expected_quick_orders = [
+        {
+            "drug_name": "Regressini",
+            "label": "Regressini",
+            "group": 1,
+            "kind": "bolus",
+            "doses": ["1 мл", "2 мл"],
+        }
+    ]
+    expected_presets = [
+        {
+            "preset_id": "manual:bolus:regressini",
+            "label": "Regressini",
+            "display_name": "S. Regressini",
+            "aliases": ["регресс"],
+            "kind": "bolus",
+            "drug_group": "regression_group",
+            "enabled": True,
+            "sort_order": 10,
+        }
+    ]
+
+    def app_setting_payload(db_path: str, key: str) -> dict:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT value_json FROM app_settings WHERE scope = ? AND key = ?",
+                (OPERBLOCK_SETTINGS_SCOPE, key),
+            ).fetchone()
+            return json.loads(row["value_json"]) if row else {}
+        finally:
+            conn.close()
+
+    try:
+        service = configure_settings_service(settings_db_path=source_db_path)
+        service.ensure_ready()
+        before_version, before_hash = service.get_catalog_version(OPERBLOCK_SETTINGS_KEY)
+        before_change_id = service.latest_change_id()
+
+        saved_team = save_operblock_team(expected_team)
+        saved_anesthesia = save_operblock_anesthesia_types(expected_anesthesia)
+        saved_buttons = save_operblock_quick_order_buttons(expected_buttons)
+        saved_quick_orders = save_operblock_quick_orders(expected_quick_orders)
+        saved_presets = save_operblock_medication_presets(expected_presets)
+
+        after_version, after_hash = service.get_catalog_version(OPERBLOCK_SETTINGS_KEY)
+        after_change_id = service.latest_change_id()
+        if after_version <= before_version:
+            return False, "operblock_settings catalog version did not advance"
+        if after_hash == before_hash:
+            return False, "operblock_settings content hash did not change"
+        if after_change_id <= before_change_id:
+            return False, "settings change log did not advance for operblock settings"
+
+        reset_settings_service()
+        configure_settings_service(settings_db_path=source_db_path).ensure_ready()
+        if load_operblock_team() != saved_team:
+            return False, f"team was not loaded from shared settings DB: {load_operblock_team()!r}"
+        if load_operblock_anesthesia_types() != saved_anesthesia:
+            return False, "anesthesia types were not loaded from shared settings DB"
+        loaded_buttons = load_operblock_quick_order_buttons()
+        if not any(item.get("key") == "extra:regional" for item in loaded_buttons):
+            return False, f"quick buttons were not loaded from shared settings DB: {loaded_buttons!r}"
+        if load_operblock_quick_orders() != saved_quick_orders:
+            return False, "quick orders were not loaded from shared settings DB"
+        loaded_presets = load_operblock_medication_presets(include_disabled=False)
+        if [item.get("preset_id") for item in loaded_presets] != [item.get("preset_id") for item in saved_presets]:
+            return False, f"medication presets were not loaded from shared settings DB: {loaded_presets!r}"
+
+        export_settings_release_snapshot(source_baza, snapshot_path, release_version="regression", release_commit="")
+        target_service = SettingsService(SettingsDatabase(baza_dir=target_baza))
+        target_service.ensure_ready()
+        report = apply_settings_release_snapshot(
+            target_service.db,
+            snapshot_path,
+            bump_catalog_version=target_service._bump_catalog_version,
+        )
+        if not report.get("applied"):
+            return False, f"release snapshot did not apply: {report!r}"
+        target_db_path = os.path.join(target_baza, "settings", "remcard_settings.db")
+        target_team = app_setting_payload(target_db_path, "team").get("items") or []
+        if target_team != saved_team:
+            return False, f"release snapshot did not carry operblock team: {target_team!r}"
+        target_presets = app_setting_payload(target_db_path, "medication_presets").get("items") or []
+        if [item.get("preset_id") for item in target_presets] != [item.get("preset_id") for item in saved_presets]:
+            return False, f"release snapshot did not carry operblock presets: {target_presets!r}"
+
+        preserve_service = SettingsService(SettingsDatabase(baza_dir=preserve_baza))
+        preserve_service.ensure_ready()
+        edited_team_payload = {
+            "version": 1,
+            "items": [{"id": "member_runtime", "name": "Рабочий ПК Хирург", "position": "Хирург", "sort_order": 10}],
+        }
+        preserve_service.set_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_TEAM_APP_KEY,
+            edited_team_payload,
+            catalog_key=OPERBLOCK_SETTINGS_KEY,
+            entity_type="operblock_team",
+            operation="runtime_edit",
+            changed_by_role="doctor",
+        )
+        preserve_report = apply_settings_release_snapshot(
+            preserve_service.db,
+            snapshot_path,
+            bump_catalog_version=preserve_service._bump_catalog_version,
+        )
+        if int(preserve_report.get("preserved_rows") or 0) <= 0:
+            return False, f"newer runtime app_settings row was not reported as preserved: {preserve_report!r}"
+        preserve_db_path = os.path.join(preserve_baza, "settings", "remcard_settings.db")
+        preserved_team = app_setting_payload(preserve_db_path, "team").get("items") or []
+        if preserved_team != edited_team_payload["items"]:
+            return False, f"newer runtime operblock team was overwritten by release snapshot: {preserved_team!r}"
+        return True, "ok"
+    finally:
+        reset_settings_service()
+
+
 def _check_operblock_medication_aliases_quick_search(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -19188,7 +19358,7 @@ def _check_operblock_board_preview_stages_layout(
             (
                 label
                 for label in empty_stage_notice.findChildren(QLabel)
-                if label.text() == "Этапы операции не начаты"
+                if label.text() == "Операция еще не начата"
             ),
             None,
         )
@@ -19213,9 +19383,19 @@ def _check_operblock_board_preview_stages_layout(
     return True, "ok"
 
 
-def _check_operblock_board_preview_edit_button(full_card) -> tuple[bool, str]:
+def _check_operblock_board_preview_action_buttons(full_card) -> tuple[bool, str]:
     from PySide6.QtWidgets import QPushButton
 
+    open_buttons = [
+        button
+        for button in full_card.findChildren(QPushButton)
+        if "ОТКРЫТЬ КАРТОЧКУ" in button.text()
+    ]
+    if not open_buttons:
+        return False, "board preview open button was not rendered"
+    open_style = open_buttons[0].styleSheet()
+    if "QPushButton:hover" not in open_style or "background-color: #E2E8F0" not in open_style:
+        return False, "board preview open button hover does not fill the button background"
     edit_buttons = [
         button
         for button in full_card.findChildren(QPushButton)
@@ -19483,8 +19663,8 @@ def _check_operblock_board_preview_full_card_layout(
     operation_events: list[dict],
     medication_history: list[dict],
 ) -> tuple[bool, str]:
-    from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QLabel, QScrollArea
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtWidgets import QLabel, QScrollArea, QWidget
 
     widget._current_board_apply_metrics = None
     widget._board_photo_thumbnail_cache = {}
@@ -19513,10 +19693,13 @@ def _check_operblock_board_preview_full_card_layout(
         app.processEvents()
         app.processEvents()
 
+        patient_label = _find_operblock_board_label(full_card, "ИБ № REGBOARD1")
+        admission_title = _find_operblock_board_label(full_card, "Диагноз при поступлении")
         vitals_title = _find_operblock_board_label(full_card, "Текущие показатели")
         meds_title = _find_operblock_board_label(full_card, "Назначения и препараты")
-        if vitals_title is None or meds_title is None:
-            return False, "board preview did not render vitals or medication title"
+        allergies_title = _find_operblock_board_label(full_card, "Аллергии")
+        if patient_label is None or admission_title is None or vitals_title is None or meds_title is None or allergies_title is None:
+            return False, "board preview did not render patient, admission, vitals, medication or allergies title"
         vitals_y = vitals_title.mapTo(full_card, QPoint(0, 0)).y()
         meds_y = meds_title.mapTo(full_card, QPoint(0, 0)).y()
         if abs(vitals_y - meds_y) > 1:
@@ -19532,16 +19715,35 @@ def _check_operblock_board_preview_full_card_layout(
         if full_scroll.verticalScrollBar().value() != full_scroll.verticalScrollBar().maximum():
             return False, "full board preview medication scroll is not positioned at latest rows"
         progress_title = _find_operblock_board_label(full_card, "Ход операции: Лапароскопическая холецистэктомия")
+        patient_block = _find_operblock_board_owner_block(patient_label)
+        admission_block = _find_operblock_board_owner_block(admission_title)
         progress_block = _find_operblock_board_owner_block(progress_title)
         vitals_block = _find_operblock_board_owner_block(vitals_title)
         meds_block = _find_operblock_board_owner_block(meds_title)
-        if progress_block is None or vitals_block is None or meds_block is None:
-            return False, "board preview did not render progress or medication block frame"
+        allergies_block = _find_operblock_board_owner_block(allergies_title)
+        if (
+            patient_block is None
+            or admission_block is None
+            or progress_block is None
+            or vitals_block is None
+            or meds_block is None
+            or allergies_block is None
+        ):
+            return False, "board preview did not render patient, admission, progress, vitals, medication or allergies block frame"
+        for guarded_block, description in (
+            (patient_block, "patient info"),
+            (admission_block, "admission diagnosis"),
+            (vitals_block, "vitals"),
+            (allergies_block, "allergies"),
+        ):
+            context_widgets = [guarded_block, *guarded_block.findChildren(QWidget)]
+            if any(widget.contextMenuPolicy() != Qt.NoContextMenu for widget in context_widgets):
+                return False, f"board {description} block allows a context menu on right click"
         if not operation_events:
             progress_empty_labels = [
                 label.text()
                 for label in progress_block.findChildren(QLabel)
-                if label.text() == "Этапы операции не начаты"
+                if label.text() == "Операция еще не начата"
             ]
             if progress_empty_labels:
                 return False, "empty operation stages notice is still rendered in the progress block"
@@ -19562,13 +19764,47 @@ def _check_operblock_board_preview_full_card_layout(
         )
         if not ok:
             return False, details
-        ok, details = _check_operblock_board_preview_edit_button(full_card)
+        ok, details = _check_operblock_board_preview_action_buttons(full_card)
         if not ok:
             return False, details
         return True, "ok"
     finally:
         full_card.deleteLater()
         app.processEvents()
+
+
+def _check_operblock_board_vitals_header_icon_alignment(app, widget, operblock_widget_cls) -> tuple[bool, str]:
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QLabel
+
+    for source, title_text in (("current", "Текущие показатели"), ("initial", "Исходные показатели")):
+        vitals_block = operblock_widget_cls._board_vitals_block(
+            widget,
+            {"latest": {"ad": "120/80", "pulse": 70, "spo2": 98, "source": source}},
+        )
+        try:
+            vitals_block.resize(248, 220)
+            vitals_block.show()
+            app.processEvents()
+            title_label = _find_operblock_board_label(vitals_block, title_text)
+            header_icon = vitals_block.findChild(QLabel, "OperBlockBoardBlockHeaderIcon")
+            if title_label is None or header_icon is None:
+                return False, f"board vitals {source} header did not render title or icon"
+            title_y = title_label.mapTo(vitals_block, QPoint(0, 0)).y()
+            icon_y = header_icon.mapTo(vitals_block, QPoint(0, 0)).y()
+            if abs(icon_y - title_y) > 2:
+                return False, f"board vitals {source} header icon is shifted: {icon_y} != {title_y}"
+            title_label.setMinimumHeight(title_label.sizeHint().height() + 32)
+            vitals_block.layout().activate()
+            app.processEvents()
+            title_y = title_label.mapTo(vitals_block, QPoint(0, 0)).y()
+            icon_y = header_icon.mapTo(vitals_block, QPoint(0, 0)).y()
+            if abs(icon_y - title_y) > 2:
+                return False, f"board vitals {source} header icon shifts when title row grows: {icon_y} != {title_y}"
+        finally:
+            vitals_block.deleteLater()
+            app.processEvents()
+    return True, "ok"
 
 
 def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool, str]:
@@ -19588,6 +19824,10 @@ def _check_operblock_board_preview_bounded_history(temp_root: str) -> tuple[bool
     app = QApplication.instance() or QApplication([])
     widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
     base_dt = datetime(2026, 6, 8, 12, 0)
+
+    ok, details = _check_operblock_board_vitals_header_icon_alignment(app, widget, OperBlockMainWidget)
+    if not ok:
+        return False, details
 
     timeline = {
         "bolus_events": [
@@ -21187,6 +21427,7 @@ def main():
         ("lab_materials_management_from_settings_db", _check_lab_materials_management_from_settings_db),
         ("settings_change_log_invalidates_cache", _check_settings_change_log_invalidates_cache),
         ("operblock_route_settings_order_and_default", _check_operblock_route_settings_order_and_default),
+        ("operblock_runtime_settings_from_settings_db", _check_operblock_runtime_settings_from_settings_db),
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
         ("operblock_occupy_dialog_manual_birth_date_and_plain_groups", _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups),

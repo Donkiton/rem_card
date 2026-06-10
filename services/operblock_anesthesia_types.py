@@ -7,6 +7,12 @@ import tempfile
 from typing import Any, Mapping
 
 from rem_card.app.paths import USER_DICT_DIR
+from rem_card.services.settings.settings_service import (
+    OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+    OPERBLOCK_SETTINGS_KEY,
+    OPERBLOCK_SETTINGS_SCOPE,
+    get_settings_service,
+)
 
 
 OPERBLOCK_ANESTHESIA_TYPES_OVERRIDE_KEY = "operblock_anesthesia_types"
@@ -109,6 +115,13 @@ def normalize_operblock_anesthesia_types_payload(payload: Any) -> dict[str, Any]
 
 
 def load_operblock_anesthesia_types(*, user_dict_dir: str | None = None) -> list[dict[str, Any]]:
+    if user_dict_dir is None:
+        payload = get_settings_service().get_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+            default={},
+        )
+        return list(normalize_operblock_anesthesia_types_payload(payload)["items"])
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)
@@ -124,6 +137,17 @@ def save_operblock_anesthesia_types(
     payload = normalize_operblock_anesthesia_types_payload(
         {"version": OPERBLOCK_ANESTHESIA_TYPES_VERSION, "items": items}
     )
+    if user_dict_dir is None:
+        get_settings_service().set_app_setting(
+            OPERBLOCK_SETTINGS_SCOPE,
+            OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+            payload,
+            catalog_key=OPERBLOCK_SETTINGS_KEY,
+            entity_type="operblock_anesthesia_types",
+            operation="replace",
+            changed_by_role="doctor",
+        )
+        return list(payload["items"])
     resolved_user_dir = user_dict_dir or USER_DICT_DIR
     overrides_path = os.path.join(resolved_user_dir, "user_overrides.json")
     overrides = _read_json_dict(overrides_path)

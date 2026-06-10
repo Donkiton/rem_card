@@ -10415,7 +10415,7 @@ class OperBlockMainWidget(QWidget):
                 font-weight: 800;
                 padding: 4px 12px;
             }
-            QPushButton:hover { background-color: #F8FAFC; border-color: #94A3B8; }
+            QPushButton:hover { background-color: #E2E8F0; border-color: #64748B; }
         """
 
     @staticmethod
@@ -10459,13 +10459,16 @@ class OperBlockMainWidget(QWidget):
             header.setContentsMargins(0, 0, 0, 0)
             header.setSpacing(8)
             if icon_kind:
-                header.addWidget(OperBlockMainWidget._board_line_icon(icon_kind, color=icon_color, size=20), 0)
+                header_icon = OperBlockMainWidget._board_line_icon(icon_kind, color=icon_color, size=20)
+                header_icon.setObjectName("OperBlockBoardBlockHeaderIcon")
+                header.addWidget(header_icon, 0, Qt.AlignTop)
             elif icon_text:
                 marker = QLabel(icon_text)
+                marker.setObjectName("OperBlockBoardBlockHeaderIcon")
                 marker.setFixedSize(18, 18)
                 marker.setAlignment(Qt.AlignCenter)
                 marker.setStyleSheet(f"color: {icon_color}; font-size: 12px; font-weight: 900;")
-                header.addWidget(marker, 0)
+                header.addWidget(marker, 0, Qt.AlignTop)
             title_label = QLabel(title)
             title_label.setWordWrap(True)
             title_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -10474,6 +10477,11 @@ class OperBlockMainWidget(QWidget):
             header.addWidget(title_label, 1, Qt.AlignTop)
             layout.addLayout(header)
         return frame, layout
+
+    @staticmethod
+    def _disable_context_menu_for_widget_tree(widget: QWidget) -> None:
+        for item in [widget, *widget.findChildren(QWidget)]:
+            item.setContextMenuPolicy(Qt.NoContextMenu)
 
     @staticmethod
     def _board_separator() -> QFrame:
@@ -10866,6 +10874,7 @@ class OperBlockMainWidget(QWidget):
         layout.addLayout(grid)
 
         layout.addStretch(1)
+        self._disable_context_menu_for_widget_tree(block)
         return block
 
     def _board_vitals_block(self, patient: dict) -> QFrame:
@@ -10928,6 +10937,7 @@ class OperBlockMainWidget(QWidget):
             notice_layout.addWidget(icon, 0, Qt.AlignTop)
             notice_layout.addWidget(text, 1)
             layout.addWidget(notice)
+        self._disable_context_menu_for_widget_tree(block)
         return block
 
     def _board_admission_block(self, table: dict, patient: dict) -> QFrame:
@@ -10966,6 +10976,7 @@ class OperBlockMainWidget(QWidget):
             item_layout.addLayout(text_layout, 1)
             grid.addWidget(item, row, col)
         layout.addLayout(grid)
+        self._disable_context_menu_for_widget_tree(block)
         return block
 
     @staticmethod
@@ -11041,7 +11052,7 @@ class OperBlockMainWidget(QWidget):
     @staticmethod
     def _board_operation_stages_empty_notice() -> QFrame:
         return OperBlockMainWidget._board_empty_notice(
-            "Этапы операции не начаты",
+            "Операция еще не начата",
             object_name="OperBlockStagesEmptyNotice",
         )
 
@@ -11178,6 +11189,7 @@ class OperBlockMainWidget(QWidget):
             row.addWidget(text, 1)
             row.addWidget(self._board_allergy_status_icon(has_allergies=False), 0, Qt.AlignRight | Qt.AlignTop)
         layout.addLayout(row)
+        self._disable_context_menu_for_widget_tree(block)
         return block
 
     def _board_special_notes_block(self, patient: dict) -> QFrame:

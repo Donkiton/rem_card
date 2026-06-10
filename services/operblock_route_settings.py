@@ -4,7 +4,7 @@ import re
 from typing import Any, Mapping
 from urllib.parse import quote, unquote
 
-from rem_card.services.settings.settings_service import get_settings_service
+from rem_card.services.settings.settings_service import OPERBLOCK_SETTINGS_KEY, get_settings_service
 
 
 OPERBLOCK_ROUTE_SETTINGS_SCOPE = "operblock"
@@ -258,6 +258,7 @@ def save_operblock_group_route_settings(routes_by_group: Mapping[str, Any]) -> d
         OPERBLOCK_ROUTE_SETTINGS_SCOPE,
         OPERBLOCK_GROUP_ROUTES_KEY,
         payload,
+        catalog_key=OPERBLOCK_SETTINGS_KEY,
         entity_type="operblock_group_routes",
         operation="update",
         changed_by_role="doctor",

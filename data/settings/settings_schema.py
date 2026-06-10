@@ -74,6 +74,7 @@ REQUIRED_CATALOG_KEYS = (
     "display_settings",
     "background_settings",
     "operblock_icons",
+    "operblock_settings",
     "style_settings",
 )
 

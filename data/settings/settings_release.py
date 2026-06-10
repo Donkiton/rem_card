@@ -70,6 +70,12 @@ APP_SETTING_CATALOG_KEYS: dict[str, str] = {
     "lab_orders_columns": "display_settings",
     "style_settings": "style_settings",
     "background_settings": "background_settings",
+    "operblock:group_routes": "operblock_settings",
+    "operblock:team": "operblock_settings",
+    "operblock:anesthesia_types": "operblock_settings",
+    "operblock:quick_order_buttons": "operblock_settings",
+    "operblock:quick_orders": "operblock_settings",
+    "operblock:medication_presets": "operblock_settings",
 }
 
 
@@ -123,6 +129,9 @@ def _snapshot_payload_for_hash(snapshot: dict[str, Any]) -> dict[str, Any]:
 def _catalog_key_for_row(table: str, row: dict[str, Any]) -> str | None:
     if table == "app_settings":
         key = str(row.get("key") or "")
+        scope_key = f"{str(row.get('scope') or '')}:{key}"
+        if scope_key in APP_SETTING_CATALOG_KEYS:
+            return APP_SETTING_CATALOG_KEYS.get(scope_key)
         return APP_SETTING_CATALOG_KEYS.get(key)
     return TABLE_CATALOG_KEYS.get(table)
 
@@ -261,6 +270,17 @@ def _manual_row_is_newer_than_snapshot(existing: dict[str, Any] | None, snapshot
     return bool(existing_updated_at and snapshot_time and existing_updated_at > snapshot_time)
 
 
+def _app_setting_is_newer_user_edit_than_snapshot(existing: dict[str, Any] | None, snapshot_exported_at: Any) -> bool:
+    if not existing:
+        return False
+    role = str(existing.get("updated_by_role") or "").strip().lower()
+    if not role or role == "system":
+        return False
+    existing_updated_at = _parse_settings_datetime(existing.get("updated_at"))
+    snapshot_time = _parse_settings_datetime(snapshot_exported_at)
+    return bool(existing_updated_at and snapshot_time and existing_updated_at > snapshot_time)
+
+
 def _upsert_release_row(
     cursor: sqlite3.Cursor,
     table: ReleaseTable,
@@ -275,6 +295,8 @@ def _upsert_release_row(
     if _rows_equal(existing, row):
         return "unchanged"
     if _manual_row_is_newer_than_snapshot(existing, snapshot_exported_at):
+        return "preserved"
+    if table.name == "app_settings" and _app_setting_is_newer_user_edit_than_snapshot(existing, snapshot_exported_at):
         return "preserved"
 
     columns = list(row.keys())

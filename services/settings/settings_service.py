@@ -41,6 +41,29 @@ STYLE_SETTINGS_KEY = "style_settings"
 EMERGENCY_PASSWORD_KEY = "emergency_password"
 EMERGENCY_PASSWORD_CATALOG_KEY = "emergency_password"
 OPERBLOCK_ICONS_KEY = "operblock_icons"
+OPERBLOCK_SETTINGS_KEY = "operblock_settings"
+OPERBLOCK_SETTINGS_SCOPE = "operblock"
+OPERBLOCK_GROUP_ROUTES_APP_KEY = "group_routes"
+OPERBLOCK_TEAM_APP_KEY = "team"
+OPERBLOCK_ANESTHESIA_TYPES_APP_KEY = "anesthesia_types"
+OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY = "quick_order_buttons"
+OPERBLOCK_QUICK_ORDERS_APP_KEY = "quick_orders"
+OPERBLOCK_MEDICATION_PRESETS_APP_KEY = "medication_presets"
+OPERBLOCK_APP_SETTING_KEYS = (
+    OPERBLOCK_GROUP_ROUTES_APP_KEY,
+    OPERBLOCK_TEAM_APP_KEY,
+    OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+    OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY,
+    OPERBLOCK_QUICK_ORDERS_APP_KEY,
+    OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+)
+OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS = (
+    OPERBLOCK_TEAM_APP_KEY,
+    OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+    OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY,
+    OPERBLOCK_QUICK_ORDERS_APP_KEY,
+    OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+)
 DEFAULT_EMERGENCY_PASSWORD = "2u1x8dxgeD"
 MIN_EMERGENCY_PASSWORD_LENGTH = 6
 MAX_BACKGROUND_IMAGE_BLOB_BYTES = 32 * 1024 * 1024
@@ -117,6 +140,7 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
     STYLE_SETTINGS_KEY: (("app_settings", "key"),),
     EMERGENCY_PASSWORD_CATALOG_KEY: (("app_settings", "key"),),
     OPERBLOCK_ICONS_KEY: (("operblock_icons", "icon_key"),),
+    OPERBLOCK_SETTINGS_KEY: (("app_settings", "key"),),
 }
 
 APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
@@ -126,6 +150,7 @@ APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
     BACKGROUND_SETTINGS_KEY: ("background_settings",),
     STYLE_SETTINGS_KEY: ("style_settings",),
     EMERGENCY_PASSWORD_CATALOG_KEY: (EMERGENCY_PASSWORD_KEY,),
+    OPERBLOCK_SETTINGS_KEY: OPERBLOCK_APP_SETTING_KEYS,
 }
 
 PRESCRIPTION_DATASET_TABLES = {
@@ -342,6 +367,7 @@ class SettingsService:
                 self._ready_info = dict(info)
                 return dict(info)
             self._ensure_legacy_import()
+            self._ensure_operblock_settings_imported()
             release_report = self._apply_bundled_release_snapshot_if_needed()
             if release_report:
                 info = {**info, "settings_release_snapshot": release_report}
@@ -421,6 +447,7 @@ class SettingsService:
                 DISPLAY_SETTINGS_KEY,
                 BACKGROUND_SETTINGS_KEY,
                 OPERBLOCK_ICONS_KEY,
+                OPERBLOCK_SETTINGS_KEY,
                 STYLE_SETTINGS_KEY,
                 EMERGENCY_PASSWORD_CATALOG_KEY,
             ):
@@ -444,6 +471,149 @@ class SettingsService:
             if not ok:
                 raise RuntimeError(f"settings DB integrity_check after import failed: {reason}")
         self._ensure_legacy_prescription_overrides_imported()
+
+    def _legacy_operblock_settings_payloads(self) -> dict[str, Any]:
+        from rem_card.app import paths as app_paths
+        from rem_card.services.operblock_anesthesia_types import (
+            OPERBLOCK_ANESTHESIA_TYPES_VERSION,
+            load_operblock_anesthesia_types,
+            normalize_operblock_anesthesia_types_payload,
+        )
+        from rem_card.services.operblock_medication_presets import (
+            OPERBLOCK_MEDICATION_PRESETS_VERSION,
+            load_operblock_medication_presets,
+            normalize_operblock_medication_presets_payload,
+        )
+        from rem_card.services.operblock_quick_order_buttons import (
+            OPERBLOCK_QUICK_ORDER_BUTTONS_VERSION,
+            load_operblock_quick_order_buttons,
+            normalize_operblock_quick_order_buttons_payload,
+        )
+        from rem_card.services.operblock_quick_orders import (
+            OPERBLOCK_QUICK_ORDERS_VERSION,
+            load_operblock_quick_orders,
+            normalize_operblock_quick_orders_payload,
+        )
+        from rem_card.services.operblock_team import (
+            OPERBLOCK_TEAM_VERSION,
+            load_operblock_team,
+            normalize_operblock_team_payload,
+        )
+
+        seed_dir = str(getattr(app_paths, "SEED_DIR", "") or "")
+        user_dir = self._legacy_user_dict_dir(app_paths)
+
+        def safe_payload(key: str, builder, fallback: dict[str, Any]) -> dict[str, Any]:
+            try:
+                payload = builder()
+                return payload if isinstance(payload, dict) else dict(fallback)
+            except Exception as exc:
+                logger.warning("Legacy operblock settings import skipped for %s: %s", key, exc)
+                return dict(fallback)
+
+        return {
+            OPERBLOCK_TEAM_APP_KEY: safe_payload(
+                OPERBLOCK_TEAM_APP_KEY,
+                lambda: normalize_operblock_team_payload(
+                    {
+                        "version": OPERBLOCK_TEAM_VERSION,
+                        "items": load_operblock_team(user_dict_dir=user_dir),
+                    }
+                ),
+                {"version": OPERBLOCK_TEAM_VERSION, "items": []},
+            ),
+            OPERBLOCK_ANESTHESIA_TYPES_APP_KEY: safe_payload(
+                OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+                lambda: normalize_operblock_anesthesia_types_payload(
+                    {
+                        "version": OPERBLOCK_ANESTHESIA_TYPES_VERSION,
+                        "items": load_operblock_anesthesia_types(user_dict_dir=user_dir),
+                    }
+                ),
+                {"version": OPERBLOCK_ANESTHESIA_TYPES_VERSION, "items": []},
+            ),
+            OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY: safe_payload(
+                OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY,
+                lambda: normalize_operblock_quick_order_buttons_payload(
+                    {
+                        "version": OPERBLOCK_QUICK_ORDER_BUTTONS_VERSION,
+                        "items": load_operblock_quick_order_buttons(user_dict_dir=user_dir),
+                    }
+                ),
+                {"version": OPERBLOCK_QUICK_ORDER_BUTTONS_VERSION, "items": []},
+            ),
+            OPERBLOCK_QUICK_ORDERS_APP_KEY: safe_payload(
+                OPERBLOCK_QUICK_ORDERS_APP_KEY,
+                lambda: normalize_operblock_quick_orders_payload(
+                    {
+                        "version": OPERBLOCK_QUICK_ORDERS_VERSION,
+                        "items": load_operblock_quick_orders(seed_dir=seed_dir, user_dict_dir=user_dir),
+                    }
+                ),
+                {"version": OPERBLOCK_QUICK_ORDERS_VERSION, "items": []},
+            ),
+            OPERBLOCK_MEDICATION_PRESETS_APP_KEY: safe_payload(
+                OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+                lambda: normalize_operblock_medication_presets_payload(
+                    {
+                        "version": OPERBLOCK_MEDICATION_PRESETS_VERSION,
+                        "items": load_operblock_medication_presets(
+                            seed_dir=seed_dir,
+                            user_dict_dir=user_dir,
+                            include_disabled=True,
+                        ),
+                    }
+                ),
+                {"version": OPERBLOCK_MEDICATION_PRESETS_VERSION, "items": []},
+            ),
+        }
+
+    def _ensure_operblock_settings_imported(self) -> None:
+        with self.db.read_connection() as conn:
+            placeholders = ",".join("?" for _ in OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS)
+            rows = conn.execute(
+                f"""
+                SELECT key
+                FROM app_settings
+                WHERE scope = ? AND key IN ({placeholders})
+                """,
+                (OPERBLOCK_SETTINGS_SCOPE, *OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS),
+            ).fetchall()
+            existing_keys = {str(row["key"]) for row in rows}
+        missing_keys = [key for key in OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS if key not in existing_keys]
+        if not missing_keys:
+            return
+        payloads = self._legacy_operblock_settings_payloads()
+        if not payloads:
+            return
+
+        changed: dict[str, Any] = {}
+        with self.db.transaction("settings_operblock_legacy_import") as cursor:
+            for key in missing_keys:
+                if self._select_app_setting(cursor, OPERBLOCK_SETTINGS_SCOPE, key) is not None:
+                    continue
+                payload = payloads[key]
+                self._write_app_setting_in_tx(
+                    cursor,
+                    OPERBLOCK_SETTINGS_SCOPE,
+                    key,
+                    payload,
+                    changed_by_role="system",
+                    catalog_key=OPERBLOCK_SETTINGS_KEY,
+                    log_change=False,
+                )
+                changed[key] = payload
+            if changed:
+                self._bump_catalog_version(
+                    cursor,
+                    OPERBLOCK_SETTINGS_KEY,
+                    "operblock_settings",
+                    None,
+                    "import",
+                    changed_by_role="system",
+                    before=None,
+                    after=changed,
+                )
 
     def _apply_bundled_release_snapshot_if_needed(self) -> dict[str, Any]:
         from rem_card.app.runtime_paths import is_compiled
