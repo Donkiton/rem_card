@@ -9,6 +9,7 @@ from rem_card.app.patient_age import (
     parse_date_value,
     storage_age_from_birth_date,
 )
+from rem_card.services.patient_departments import PROFILE_DEPARTMENTS, normalize_profile_department
 from rem_card.ui.styles.theme import STYLE_FORM_DATETIME_EDIT
 
 
@@ -119,10 +120,12 @@ class GeneralTabWidget(QWidget):
         self._add_row("Откуда поступил пациент:", self.source_department_input)
 
         self.department_profile_input = SingleClickComboBox()
-        self.department_profile_input.addItems([
-            "Терапия", "Хирургия", "Травматология", "Гинекология", "Неврология", "Кардиология", "Инфекционно-педиатрическое"
-        ])
+        self.department_profile_input.setEditable(True)
+        self.department_profile_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.department_profile_input.addItems(list(PROFILE_DEPARTMENTS))
         self.department_profile_input.setCurrentText("Терапия")
+        if self.department_profile_input.lineEdit() is not None:
+            self.department_profile_input.lineEdit().setPlaceholderText("Укажите отделение")
         self.department_profile_input.setFixedHeight(34)
         self.department_profile_input.setMinimumWidth(430)
         self._add_row("Профиль основного отделения:", self.department_profile_input)
@@ -196,7 +199,7 @@ class GeneralTabWidget(QWidget):
             "months": age_data["patient_months"],
             "admission_datetime": admission_datetime,
             "source_department": self.source_department_input.currentText(),
-            "department_profile": self.department_profile_input.currentText()
+            "department_profile": normalize_profile_department(self.department_profile_input.currentText())
         }
 
     @staticmethod
@@ -247,6 +250,6 @@ class GeneralTabWidget(QWidget):
             self._update_age_preview()
 
             if admission.department_profile:
-                self.department_profile_input.setCurrentText(admission.department_profile)
+                self.department_profile_input.setEditText(normalize_profile_department(admission.department_profile))
             if admission.source_department:
                 self.source_department_input.setCurrentText(admission.source_department)

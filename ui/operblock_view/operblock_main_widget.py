@@ -136,6 +136,7 @@ from rem_card.services.operblock_team import (
     normalize_operblock_team_text,
     save_operblock_team,
 )
+from rem_card.services.patient_departments import PROFILE_DEPARTMENTS, normalize_profile_department
 from rem_card.ui.nurse_view.sectors.nurse_sector_4v import VitalBadge
 from rem_card.ui.rem_card_sectors.sector_1a import Sector1a
 from rem_card.ui.rem_card_sectors.sector_1b import Sector1b
@@ -7313,6 +7314,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         code_line.addWidget(self.diagnosis_name, 1)
         diagnosis_form.addRow("Код диагноза МКБ-10 *:", code_line)
         diagnosis_form.addRow("Диагноз *:", self.diagnosis_text_input)
+        self.department_profile_combo = self._profile_department_combo()
+        diagnosis_form.addRow("Профильное отделение:", self.department_profile_combo)
         page_layout.addWidget(diagnosis)
 
         operation, operation_form = self._section("3. ОПЕРАЦИОННАЯ ИНФОРМАЦИЯ")
@@ -7530,6 +7533,24 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         return combo
 
     @staticmethod
+    def _profile_department_combo() -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setFixedHeight(34)
+        combo.setMinimumWidth(430)
+        combo.setMinimumContentsLength(38)
+        combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        combo.setStyleSheet(_operblock_combo_box_style())
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText("Не указано")
+        for department in PROFILE_DEPARTMENTS:
+            combo.addItem(department)
+        combo.setCurrentIndex(-1)
+        return combo
+
+    @staticmethod
     def _set_combo_text(combo: QComboBox, value: str) -> None:
         text = normalize_operblock_team_text(value)
         if combo.isEditable():
@@ -7691,6 +7712,11 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self._replace_surgeons([normalize_operblock_team_text(item) for item in (data or {}).get("surgeons") or []])
         self._set_combo_text(self.anesthesiologist_combo, str((data or {}).get("anesthesiologist") or ""))
         self._set_combo_text(self.anesthetist_combo, str((data or {}).get("anesthetist") or ""))
+        department_profile = normalize_profile_department(
+            (data or {}).get("department_profile"),
+            clear_legacy_operblock=True,
+        )
+        self.department_profile_combo.setEditText(department_profile)
         for edit, key in (
             (self.sys_input, "preop_sys"),
             (self.dia_input, "preop_dia"),
@@ -7869,6 +7895,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "birth_date": birth_date,
             "diagnosis_code": diagnosis_code or None,
             "diagnosis_text": diagnosis_text,
+            "department_profile": normalize_profile_department(self.department_profile_combo.currentText()),
             "operation_name": normalize_operblock_team_text(self.operation_name_input.text()),
             "height_cm": self._optional_int(self.height_input.text(), "Рост", 1, 260),
             "weight_kg": self._optional_weight(self.weight_input.text()),
@@ -10940,6 +10967,10 @@ class OperBlockMainWidget(QWidget):
         self._disable_context_menu_for_widget_tree(block)
         return block
 
+    @staticmethod
+    def _board_department_profile_text(value) -> str:
+        return normalize_profile_department(value, clear_legacy_operblock=True) or "—"
+
     def _board_admission_block(self, table: dict, patient: dict) -> QFrame:
         block, layout = self._board_block("Диагноз при поступлении", shadow=False)
         diagnosis = self._board_value_label(self._board_diagnosis_text(patient), size=15, weight=700)
@@ -10956,7 +10987,7 @@ class OperBlockMainWidget(QWidget):
         values = [
             ("calendar", "Поступление", _format_dt(patient.get("started_at"))),
             ("clock", "Текущее время в операционной", current_time_text),
-            ("room", "Операционная", self._board_operating_room_text(table.get("display_name"))),
+            ("room", "Отделение", self._board_department_profile_text(patient.get("department_profile"))),
             ("team", "Бригада", team),
         ]
         for index, (icon_kind, name, value) in enumerate(values):

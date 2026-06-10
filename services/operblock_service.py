@@ -39,6 +39,7 @@ from rem_card.services.operblock_timeline import (
     operation_stage_kind_from_payload,
     with_timeline_content_hash,
 )
+from rem_card.services.patient_departments import normalize_profile_department
 
 
 OPERBLOCK_ROLE = "operblock"
@@ -106,6 +107,7 @@ class OperBlockPatientInput:
     birth_date: date
     diagnosis_code: Optional[str]
     diagnosis_text: str
+    department_profile: str = ""
     operation_name: str = ""
     surgeons: tuple[str, ...] = ()
     anesthesiologist: str = ""
@@ -642,6 +644,7 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         birth_date=_to_birth_date(payload.get("birth_date")),
         diagnosis_code=payload.get("diagnosis_code"),
         diagnosis_text=str(payload.get("diagnosis_text") or ""),
+        department_profile=normalize_profile_department(payload.get("department_profile")),
         operation_name=_normalize_case_text(payload.get("operation_name")),
         surgeons=_normalize_case_surgeons(payload.get("surgeons")),
         anesthesiologist=_normalize_case_text(payload.get("anesthesiologist")),
@@ -807,6 +810,7 @@ class OperBlockService:
                 a.patient_age_unit,
                 a.diagnosis_code,
                 a.diagnosis_text,
+                a.department_profile,
                 (
                     SELECT v.id FROM vitals v
                     WHERE v.admission_id = oc.admission_id
@@ -933,6 +937,7 @@ class OperBlockService:
                     "gender": row.get("patient_gender") or "",
                     "diagnosis_code": row.get("diagnosis_code") or "",
                     "diagnosis_text": row.get("diagnosis_text") or "",
+                    "department_profile": row.get("department_profile") or "",
                     "operation_name": row.get("planned_operation_name") or "",
                     "surgeons": _surgeons_from_json(row.get("planned_surgeons_json")),
                     "anesthesiologist": row.get("planned_anesthesiologist") or "",
@@ -1712,6 +1717,7 @@ class OperBlockService:
         diagnosis_text = str(data.diagnosis_text or "").strip()
         if not diagnosis_text:
             raise ValueError("Диагноз не заполнен.")
+        department_profile = normalize_profile_department(data.department_profile)
 
         birth_date = _to_birth_date(data.birth_date)
         now = _now_text()
@@ -1757,7 +1763,7 @@ class OperBlockService:
                     data.gender,
                     diagnosis_code or None,
                     diagnosis_text,
-                    "Оперблок",
+                    department_profile or None,
                     "Оперблок",
                     now,
                     now,
@@ -1858,6 +1864,7 @@ class OperBlockService:
                     a.patient_gender,
                     a.diagnosis_code,
                     a.diagnosis_text,
+                    a.department_profile,
                     oc.planned_operation_name,
                     oc.planned_surgeons_json,
                     oc.planned_anesthesiologist,
@@ -1935,6 +1942,7 @@ class OperBlockService:
                 "birth_date": data.get("birth_date"),
                 "diagnosis_code": data.get("diagnosis_code") or "",
                 "diagnosis_text": data.get("diagnosis_text") or "",
+                "department_profile": data.get("department_profile") or "",
                 "operation_name": operation_name,
                 "surgeons": surgeons,
                 "anesthesiologist": anesthesiologist,
@@ -1973,6 +1981,7 @@ class OperBlockService:
         diagnosis_text = _normalize_case_text(data.diagnosis_text)
         if not diagnosis_text:
             raise ValueError("Диагноз не заполнен.")
+        department_profile = normalize_profile_department(data.department_profile)
         birth_date = _to_birth_date(data.birth_date)
         age = storage_age_from_birth_date(birth_date, datetime.now())
         last_name, first_name, middle_name = _split_name(full_name)
@@ -2004,6 +2013,7 @@ class OperBlockService:
                     patient_gender = ?,
                     diagnosis_code = ?,
                     diagnosis_text = ?,
+                    department_profile = ?,
                     updated_at = ?,
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ?
@@ -2016,6 +2026,7 @@ class OperBlockService:
                     data.gender,
                     diagnosis_code or None,
                     diagnosis_text,
+                    department_profile or None,
                     now,
                     admission_id,
                 ),
