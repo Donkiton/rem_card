@@ -15,7 +15,21 @@ except ImportError:
     pd = None
     plt = None
 
-from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
+from rem_card.services.analytics.constants import (
+    RECOVERY_FLOW_DURATION_KEY,
+    RECOVERY_FLOW_GRAPH_KEYS,
+    RECOVERY_FLOW_MONTHS_KEY,
+    RECOVERY_FLOW_OUTCOMES_KEY,
+    RECOVERY_FLOW_TABLE_KEY,
+    STATISTICAL_BED_COUNT,
+    STATISTICAL_HIGH_LOAD_THRESHOLD,
+)
+from rem_card.services.analytics.recovery_summary import (
+    DURATION_BUCKETS,
+    build_recovery_bed_summary,
+    fetch_recovery_bed_admission_rows,
+    render_recovery_summary_table,
+)
 from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend, save_plot as _save_plot
 
 
@@ -23,7 +37,7 @@ def save_plot(title, img_paths, chart_colors=None):
     return _save_plot(title, img_paths)
 
 
-def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content):
+def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content, *, include_recovery_beds=False):
     """Поток пациентов"""
 
     # 1. Поступления по месяцам
@@ -103,7 +117,134 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
                 plt.ylabel("Количество пациентов")
                 html_content += save_plot("5. Поступления из профильных отделений", img_paths)
 
+    if RECOVERY_FLOW_GRAPH_KEYS.intersection(selected):
+        html_content = _append_recovery_flow_items(
+            selected,
+            conn,
+            params,
+            chart_colors,
+            img_paths,
+            html_content,
+            include_recovery_beds=include_recovery_beds,
+        )
+
     return html_content
+
+
+def _append_recovery_flow_items(
+    selected,
+    conn,
+    params,
+    chart_colors,
+    img_paths,
+    html_content,
+    *,
+    include_recovery_beds,
+):
+    start_date_str, end_date_str = params
+    summary = build_recovery_bed_summary(conn, start_date_str, end_date_str)
+    recovery_rows = None
+
+    if RECOVERY_FLOW_TABLE_KEY in selected:
+        html_content += render_recovery_summary_table(
+            summary,
+            include_recovery_beds=include_recovery_beds,
+        )
+
+    if RECOVERY_FLOW_MONTHS_KEY in selected:
+        recovery_rows = _recovery_rows_once(recovery_rows, conn, start_date_str, end_date_str)
+        html_content = _append_recovery_months_graph(recovery_rows, chart_colors, img_paths, html_content)
+
+    if RECOVERY_FLOW_DURATION_KEY in selected:
+        html_content = _append_recovery_duration_graph(summary, chart_colors, img_paths, html_content)
+
+    if RECOVERY_FLOW_OUTCOMES_KEY in selected:
+        html_content = _append_recovery_outcomes_graph(summary, chart_colors, img_paths, html_content)
+
+    return html_content
+
+
+def _recovery_rows_once(current_rows, conn, start_date_str, end_date_str):
+    if current_rows is not None:
+        return current_rows
+    return fetch_recovery_bed_admission_rows(conn, start_date_str, end_date_str)
+
+
+def _append_recovery_months_graph(recovery_rows, chart_colors, img_paths, html_content):
+    if not recovery_rows:
+        return _append_no_data_message(
+            html_content,
+            "Пробуждение: поступления по месяцам",
+            "Нет пациентов через койки пробуждения за выбранный период.",
+        )
+
+    df = pd.DataFrame(recovery_rows)
+    df["month"] = pd.to_datetime(df["admission_datetime"], errors="coerce").dt.strftime("%Y-%m")
+    df = df.dropna(subset=["month"])
+    if df.empty:
+        return _append_no_data_message(
+            html_content,
+            "Пробуждение: поступления по месяцам",
+            "Нет корректных дат поступления для пациентов через койки пробуждения.",
+        )
+
+    grouped = df.groupby("month").size().reset_index(name="count").sort_values("month")
+    plt.figure(figsize=(8, 4))
+    plt.bar(range(len(grouped)), grouped["count"], color=chart_colors[0])
+    plt.xticks(range(len(grouped)), grouped["month"], rotation=45)
+    plt.title("Пробуждение: поступления по месяцам")
+    plt.ylabel("Количество пациентов")
+    return html_content + save_plot("Пробуждение: поступления по месяцам", img_paths)
+
+
+def _append_recovery_duration_graph(summary, chart_colors, img_paths, html_content):
+    if summary.recovery_admissions <= 0:
+        return _append_no_data_message(
+            html_content,
+            "Пробуждение: распределение по длительности",
+            "Нет пациентов через койки пробуждения за выбранный период.",
+        )
+
+    labels = [label for label, _lower, _upper in DURATION_BUCKETS]
+    counts = [int(summary.duration_buckets.get(label, 0)) for label in labels]
+    if not any(counts):
+        return _append_no_data_message(
+            html_content,
+            "Пробуждение: распределение по длительности",
+            "Нет данных о длительности пребывания на койках пробуждения.",
+        )
+
+    plt.figure(figsize=(8, 4))
+    plt.bar(range(len(labels)), counts, color=chart_colors[1])
+    plt.xticks(range(len(labels)), labels, rotation=20, ha="right")
+    plt.title("Пробуждение: распределение по длительности")
+    plt.ylabel("Количество пациентов")
+    return html_content + save_plot("Пробуждение: распределение по длительности", img_paths)
+
+
+def _append_recovery_outcomes_graph(summary, chart_colors, img_paths, html_content):
+    values = [summary.transferred, summary.deceased, summary.active_or_unknown]
+    if summary.recovery_admissions <= 0 or not any(values):
+        return _append_no_data_message(
+            html_content,
+            "Пробуждение: исходы пациентов",
+            "Нет пациентов через койки пробуждения за выбранный период.",
+        )
+
+    plt.figure(figsize=(8, 6))
+    plot_pie_with_legend(
+        values,
+        ["Переведены", "Умерли", "Без конечного исхода"],
+        chart_colors[:3],
+        legend_title="Исход",
+        value_formatter=lambda value: f"{int(value)}",
+    )
+    plt.title("Пробуждение: исходы пациентов")
+    return html_content + save_plot("Пробуждение: исходы пациентов", img_paths)
+
+
+def _append_no_data_message(html_content, title, message):
+    return f"{html_content}<div style='text-align:center'><h3>{title}</h3><p>{message}</p></div><br>"
 
 
 def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content):

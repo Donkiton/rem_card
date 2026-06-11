@@ -11,7 +11,7 @@ from rem_card.services.analytics.graphs_service import _thread_local_manager
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.services.analytics.recovery_summary import (
     build_recovery_bed_summary,
-    render_recovery_summary_table,
+    build_recovery_summary_rows,
 )
 from rem_card.ui.styles.theme import (
     BG_CARD,
@@ -23,6 +23,8 @@ from rem_card.ui.styles.theme import (
 )
 
 
+RECOVERY_SECTION_KEY = "s_recovery"
+
 SECTION_GROUPS = {
     "Основная деятельность": {
         "s1": "1. Общая деятельность отделения",
@@ -33,22 +35,38 @@ SECTION_GROUPS = {
         "s6": "6. Исходы лечения",
         "s7": "7. Время до смерти",
         "s8": "8. Летальность по группам",
+        RECOVERY_SECTION_KEY: "9. Пробуждение",
     },
     "Интенсивная терапия и вмешательства": {
-        "s9": "9. ИВЛ",
-        "s10": "10. Операции",
-        "s11": "11. Переливания",
-        "s12": "12. Центральные венозные катетеры",
-        "s13": "13. Люмбальные пункции",
-        "s14": "14. Осложнения процедур",
-        "s16": "16. Индексы интенсивности",
-        "s17": "17. Индексы нагрузки",
-        "s18": "18. Специальные показатели",
-        "s19": "19. Нагрузка персонала",
+        "s9": "10. ИВЛ",
+        "s10": "11. Операции",
+        "s11": "12. Переливания",
+        "s12": "13. Центральные венозные катетеры",
+        "s13": "14. Люмбальные пункции",
+        "s14": "15. Осложнения процедур",
+        "s16": "17. Индексы интенсивности",
+        "s17": "18. Индексы нагрузки",
+        "s18": "19. Специальные показатели",
+        "s19": "20. Нагрузка персонала",
         "sx": "➕ Дополнительные показатели",
     },
 }
-TOP_SECTIONS = ["s1", "s2", "s6", "s7", "s9", "s10", "s11", "s12", "s13", "s14", "s18", "s19", "sx"]
+TOP_SECTIONS = [
+    "s1",
+    "s2",
+    "s6",
+    "s7",
+    RECOVERY_SECTION_KEY,
+    "s9",
+    "s10",
+    "s11",
+    "s12",
+    "s13",
+    "s14",
+    "s18",
+    "s19",
+    "sx",
+]
 
 PERFORMED_PROCEDURE_STATUSES = {
     "active",
@@ -1367,12 +1385,12 @@ class DetailedStatisticsReportBuilder:
             "load_coefficient": indexes["load_coefficient"],
         }
 
-    def _build_recovery_summary_html(self) -> str:
+    def _build_recovery_summary_rows(self):
         manager, cleanup = _thread_local_manager(self.db_manager)
         conn = manager.get_connection()
         try:
             summary = build_recovery_bed_summary(conn, self.start_date_str, self.end_date_str)
-            return render_recovery_summary_table(
+            return build_recovery_summary_rows(
                 summary,
                 include_recovery_beds=self.include_recovery_beds,
             )
@@ -1383,6 +1401,9 @@ class DetailedStatisticsReportBuilder:
     def _section_rows(self, section_key: str, s: dict):
         total_n = s["N"]
         deaths = s["deaths"]
+
+        if section_key == RECOVERY_SECTION_KEY:
+            return self._build_recovery_summary_rows()
 
         if section_key == "s1":
             return [
@@ -1469,113 +1490,113 @@ class DetailedStatisticsReportBuilder:
 
         if section_key == "s9":
             return [
-                ("9.1 Пациенты на ИВЛ", "Пациенты с ИВЛ", self._fmt_num(s["N_IVL"], 0)),
-                ("9.2 Доля пациентов на ИВЛ", "Доля ИВЛ = Пациенты с ИВЛ / Госпитализации × 100%", self._fmt_pct(s["N_IVL"], total_n)),
-                ("9.3 Эпизоды ИВЛ", "Эпизоды", self._fmt_num(s["ivl_episodes_count"], 0)),
-                ("9.4 Средняя длительность ИВЛ", "Средняя ИВЛ = ИВЛ-дни / Пациенты с ИВЛ", self._fmt_num(self._safe_div(s["ivl_days"], s["N_IVL"]))),
-                ("9.5 ИВЛ-дни", "ИВЛ-дни", self._fmt_num(s["ivl_days"])),
-                ("9.6 Летальность на ИВЛ", "Летальность ИВЛ = Умершие на ИВЛ / Пациенты с ИВЛ × 100%", self._fmt_pct(s["deaths_ivl"], s["N_IVL"])),
+                ("10.1 Пациенты на ИВЛ", "Пациенты с ИВЛ", self._fmt_num(s["N_IVL"], 0)),
+                ("10.2 Доля пациентов на ИВЛ", "Доля ИВЛ = Пациенты с ИВЛ / Госпитализации × 100%", self._fmt_pct(s["N_IVL"], total_n)),
+                ("10.3 Эпизоды ИВЛ", "Эпизоды", self._fmt_num(s["ivl_episodes_count"], 0)),
+                ("10.4 Средняя длительность ИВЛ", "Средняя ИВЛ = ИВЛ-дни / Пациенты с ИВЛ", self._fmt_num(self._safe_div(s["ivl_days"], s["N_IVL"]))),
+                ("10.5 ИВЛ-дни", "ИВЛ-дни", self._fmt_num(s["ivl_days"])),
+                ("10.6 Летальность на ИВЛ", "Летальность ИВЛ = Умершие на ИВЛ / Пациенты с ИВЛ × 100%", self._fmt_pct(s["deaths_ivl"], s["N_IVL"])),
             ]
 
         if section_key == "s10":
             return [
-                ("10.1 Пациенты с операциями", "Пациенты с операциями", self._fmt_num(s["N_surg"], 0)),
-                ("10.2 Операции", "Операции", self._fmt_num(s["operations_count"], 0)),
-                ("10.3 Частота операций", "Частота = Пациенты с операциями / Госпитализации", self._fmt_num(self._safe_div(s["N_surg"], total_n))),
-                ("10.4 Летальность у оперированных", "Летальность = Умершие после операций / Пациенты с операциями × 100%", self._fmt_pct(s["deaths_surg"], s["N_surg"])),
+                ("11.1 Пациенты с операциями", "Пациенты с операциями", self._fmt_num(s["N_surg"], 0)),
+                ("11.2 Операции", "Операции", self._fmt_num(s["operations_count"], 0)),
+                ("11.3 Частота операций", "Частота = Пациенты с операциями / Госпитализации", self._fmt_num(self._safe_div(s["N_surg"], total_n))),
+                ("11.4 Летальность у оперированных", "Летальность = Умершие после операций / Пациенты с операциями × 100%", self._fmt_pct(s["deaths_surg"], s["N_surg"])),
             ]
 
         if section_key == "s11":
             return [
-                ("11.1 Число переливаний", "Переливания", self._fmt_num(s["transfusion_units"], 0)),
-                ("11.2 Пациенты с переливаниями", "Пациенты с переливаниями", self._fmt_num(s["N_transf"], 0)),
-                ("11.3 Общий объем, мл", "Общий объем переливаний", self._fmt_num(s["volume_total"])),
-                ("11.4 Средний объем дозы, мл", "Средняя доза = Общий объем переливаний / Число доз", self._fmt_num(self._safe_div(s["volume_total"], s["transfusion_units"]))),
-                ("11.5 Летальность при переливаниях", "Летальность = Умершие после переливаний / Пациенты с переливаниями × 100%", self._fmt_pct(s["deaths_transf"], s["N_transf"])),
-                ("11.6 Перелито крови", "Количество доз / суммарный объем крови", self._count_volume_text(s["blood_units"], s["blood_volume"])),
-                ("11.7 Перелито плазмы", "Количество доз / суммарный объем плазмы", self._count_volume_text(s["plasma_units"], s["plasma_volume"])),
-                ("11.8 Прочие компоненты", "Количество доз / суммарный объем прочих компонентов", self._count_volume_text(s["other_transfusion_units"], s["other_transfusion_volume"])),
-                ("11.9 По типам", "Доля = Число доз данного типа / Число доз × 100%; указан суммарный объем", self._count_volume_distribution_lines(s["transf_volume_by_type"], s["transfusion_units"])),
-                ("11.10 Протоколы гемотрансфузий", "Сохраненные выполненные протоколы гемотрансфузий", self._fmt_num(s["procedure_transfusion_count"], 0)),
-                ("11.11 Кровь по протоколам", "Количество протоколов / суммарный объем крови", self._count_volume_text(s["procedure_blood_units"], s["procedure_blood_volume"])),
-                ("11.12 Плазма по протоколам", "Количество протоколов / суммарный объем плазмы", self._count_volume_text(s["procedure_plasma_units"], s["procedure_plasma_volume"])),
-                ("11.13 Реакции при гемотрансфузиях", "Реакции = протоколы с симптомами/тяжестью реакции", f"{self._fmt_num(s['procedure_transfusion_reactions'], 0)} / {self._fmt_num(s['procedure_transfusion_count'], 0)}"),
-                ("11.14 Реакции по врачам", "Врач-исполнитель протокола гемотрансфузии", self._distribution_lines(s["procedure_transfusion_reactions_by_doctor"], s["procedure_transfusion_reactions"])),
+                ("12.1 Число переливаний", "Переливания", self._fmt_num(s["transfusion_units"], 0)),
+                ("12.2 Пациенты с переливаниями", "Пациенты с переливаниями", self._fmt_num(s["N_transf"], 0)),
+                ("12.3 Общий объем, мл", "Общий объем переливаний", self._fmt_num(s["volume_total"])),
+                ("12.4 Средний объем дозы, мл", "Средняя доза = Общий объем переливаний / Число доз", self._fmt_num(self._safe_div(s["volume_total"], s["transfusion_units"]))),
+                ("12.5 Летальность при переливаниях", "Летальность = Умершие после переливаний / Пациенты с переливаниями × 100%", self._fmt_pct(s["deaths_transf"], s["N_transf"])),
+                ("12.6 Перелито крови", "Количество доз / суммарный объем крови", self._count_volume_text(s["blood_units"], s["blood_volume"])),
+                ("12.7 Перелито плазмы", "Количество доз / суммарный объем плазмы", self._count_volume_text(s["plasma_units"], s["plasma_volume"])),
+                ("12.8 Прочие компоненты", "Количество доз / суммарный объем прочих компонентов", self._count_volume_text(s["other_transfusion_units"], s["other_transfusion_volume"])),
+                ("12.9 По типам", "Доля = Число доз данного типа / Число доз × 100%; указан суммарный объем", self._count_volume_distribution_lines(s["transf_volume_by_type"], s["transfusion_units"])),
+                ("12.10 Протоколы гемотрансфузий", "Сохраненные выполненные протоколы гемотрансфузий", self._fmt_num(s["procedure_transfusion_count"], 0)),
+                ("12.11 Кровь по протоколам", "Количество протоколов / суммарный объем крови", self._count_volume_text(s["procedure_blood_units"], s["procedure_blood_volume"])),
+                ("12.12 Плазма по протоколам", "Количество протоколов / суммарный объем плазмы", self._count_volume_text(s["procedure_plasma_units"], s["procedure_plasma_volume"])),
+                ("12.13 Реакции при гемотрансфузиях", "Реакции = протоколы с симптомами/тяжестью реакции", f"{self._fmt_num(s['procedure_transfusion_reactions'], 0)} / {self._fmt_num(s['procedure_transfusion_count'], 0)}"),
+                ("12.14 Реакции по врачам", "Врач-исполнитель протокола гемотрансфузии", self._distribution_lines(s["procedure_transfusion_reactions_by_doctor"], s["procedure_transfusion_reactions"])),
             ]
 
         if section_key == "s12":
             return [
-                ("12.1 Установлено ЦВК", "Выполненные/активные процедуры ЦВК", self._fmt_num(s["cvc_count"], 0)),
-                ("12.2 Пациенты с ЦВК", "Уникальные госпитализации с ЦВК", self._fmt_num(s["cvc_patients"], 0)),
-                ("12.3 Локализации ЦВК", "Доля = число ЦВК в локализации / все ЦВК × 100%", self._distribution_lines(s["cvc_accesses"], s["cvc_count"])),
-                ("12.4 Статус катетера", "Доля = число катетеров в статусе / все ЦВК × 100%", self._distribution_lines(s["cvc_statuses"], s["cvc_count"])),
-                ("12.5 Врачи-исполнители", "Доля = число ЦВК врача / все ЦВК × 100%", self._distribution_lines(s["cvc_doctors"], s["cvc_count"])),
-                ("12.6 Среднее число попыток", "Среднее число попыток среди заполненных протоколов", self._fmt_num(s["cvc_avg_attempts"])),
-                ("12.7 Среднее число просветов", "Среднее число просветов среди заполненных протоколов", self._fmt_num(s["cvc_avg_lumens"])),
-                ("12.8 Средняя длина катетера, см", "Средняя длина среди заполненных протоколов", self._fmt_num(s["cvc_avg_length"])),
-                ("12.9 Средний диаметр, F", "Средний диаметр среди заполненных протоколов", self._fmt_num(s["cvc_avg_diameter"])),
-                ("12.10 ЦВК с рассчитанной длительностью", "Катетеры с временем окончания пребывания", self._fmt_num(s["cvc_closed_count"], 0)),
-                ("12.11 Суммарная длительность ЦВК, дней", "Сумма времени от установки до удаления/переустановки/исхода", self._fmt_num(s["cvc_total_dwell_days"])),
-                ("12.12 Средняя длительность ЦВК, дней", "Среднее время от установки до удаления/переустановки/исхода", self._fmt_num(s["cvc_avg_dwell_days"])),
+                ("13.1 Установлено ЦВК", "Выполненные/активные процедуры ЦВК", self._fmt_num(s["cvc_count"], 0)),
+                ("13.2 Пациенты с ЦВК", "Уникальные госпитализации с ЦВК", self._fmt_num(s["cvc_patients"], 0)),
+                ("13.3 Локализации ЦВК", "Доля = число ЦВК в локализации / все ЦВК × 100%", self._distribution_lines(s["cvc_accesses"], s["cvc_count"])),
+                ("13.4 Статус катетера", "Доля = число катетеров в статусе / все ЦВК × 100%", self._distribution_lines(s["cvc_statuses"], s["cvc_count"])),
+                ("13.5 Врачи-исполнители", "Доля = число ЦВК врача / все ЦВК × 100%", self._distribution_lines(s["cvc_doctors"], s["cvc_count"])),
+                ("13.6 Среднее число попыток", "Среднее число попыток среди заполненных протоколов", self._fmt_num(s["cvc_avg_attempts"])),
+                ("13.7 Среднее число просветов", "Среднее число просветов среди заполненных протоколов", self._fmt_num(s["cvc_avg_lumens"])),
+                ("13.8 Средняя длина катетера, см", "Средняя длина среди заполненных протоколов", self._fmt_num(s["cvc_avg_length"])),
+                ("13.9 Средний диаметр, F", "Средний диаметр среди заполненных протоколов", self._fmt_num(s["cvc_avg_diameter"])),
+                ("13.10 ЦВК с рассчитанной длительностью", "Катетеры с временем окончания пребывания", self._fmt_num(s["cvc_closed_count"], 0)),
+                ("13.11 Суммарная длительность ЦВК, дней", "Сумма времени от установки до удаления/переустановки/исхода", self._fmt_num(s["cvc_total_dwell_days"])),
+                ("13.12 Средняя длительность ЦВК, дней", "Среднее время от установки до удаления/переустановки/исхода", self._fmt_num(s["cvc_avg_dwell_days"])),
             ]
 
         if section_key == "s13":
             return [
-                ("13.1 Выполнено люмбальных пункций", "Выполненные процедуры люмбальной пункции", self._fmt_num(s["lp_count"], 0)),
-                ("13.2 Пациенты с пункциями", "Уникальные госпитализации с люмбальной пункцией", self._fmt_num(s["lp_patients"], 0)),
-                ("13.3 Результат пункции", "Доля = число результатов / все пункции × 100%", self._distribution_lines(s["lp_results"], s["lp_count"])),
-                ("13.4 Доступ", "Доля = число доступов / все пункции × 100%", self._distribution_lines(s["lp_accesses"], s["lp_count"])),
-                ("13.5 Уровень пункции", "Доля = число уровней / все пункции × 100%", self._distribution_lines(s["lp_levels"], s["lp_count"])),
-                ("13.6 Врачи-исполнители", "Доля = число пункций врача / все пункции × 100%", self._distribution_lines(s["lp_doctors"], s["lp_count"])),
+                ("14.1 Выполнено люмбальных пункций", "Выполненные процедуры люмбальной пункции", self._fmt_num(s["lp_count"], 0)),
+                ("14.2 Пациенты с пункциями", "Уникальные госпитализации с люмбальной пункцией", self._fmt_num(s["lp_patients"], 0)),
+                ("14.3 Результат пункции", "Доля = число результатов / все пункции × 100%", self._distribution_lines(s["lp_results"], s["lp_count"])),
+                ("14.4 Доступ", "Доля = число доступов / все пункции × 100%", self._distribution_lines(s["lp_accesses"], s["lp_count"])),
+                ("14.5 Уровень пункции", "Доля = число уровней / все пункции × 100%", self._distribution_lines(s["lp_levels"], s["lp_count"])),
+                ("14.6 Врачи-исполнители", "Доля = число пункций врача / все пункции × 100%", self._distribution_lines(s["lp_doctors"], s["lp_count"])),
             ]
 
         if section_key == "s14":
             return [
-                ("14.1 Осложнения при постановке ЦВК", "Осложнения / все ЦВК", f"{self._fmt_num(s['cvc_technical_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
-                ("14.2 Без осложнений при постановке ЦВК", "Без осложнений / все ЦВК", f"{self._fmt_num(s['cvc_technical_no_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
-                ("14.3 Осложнения при использовании/удалении ЦВК", "Осложнения / все ЦВК", f"{self._fmt_num(s['cvc_usage_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
-                ("14.4 ЦВК с любыми осложнениями", "Уникальные ЦВК с осложнениями постановки или использования", self._fmt_num(s["cvc_any_complications"], 0)),
-                ("14.5 Осложнения ЦВК по локализации", "Локализация выбранного доступа при осложнении", self._distribution_lines(s["cvc_comp_by_access"], s["cvc_any_complications"])),
-                ("14.6 Осложнения ЦВК по врачу-исполнителю", "Врач-исполнитель ЦВК, где отмечено осложнение", self._distribution_lines(s["cvc_comp_by_doctor"], s["cvc_any_complications"])),
-                ("14.7 Осложнения удаления/использования ЦВК по врачу", "Врач удаления/переустановки; если не указан, врач-исполнитель ЦВК", self._distribution_lines(s["cvc_usage_comp_by_doctor"], s["cvc_usage_complications"])),
-                ("14.8 Осложнения люмбальных пункций", "Осложнения / все люмбальные пункции", f"{self._fmt_num(s['lp_complications'], 0)} / {self._fmt_num(s['lp_count'], 0)}"),
-                ("14.9 Без осложнений люмбальных пункций", "Без осложнений / все люмбальные пункции", f"{self._fmt_num(s['lp_no_complications'], 0)} / {self._fmt_num(s['lp_count'], 0)}"),
-                ("14.10 Осложнения пункций по доступу", "Доступ при осложненной люмбальной пункции", self._distribution_lines(s["lp_comp_by_access"], s["lp_complications"])),
-                ("14.11 Осложнения пункций по уровню", "Уровень при осложненной люмбальной пункции", self._distribution_lines(s["lp_comp_by_level"], s["lp_complications"])),
-                ("14.12 Осложнения пункций по врачу", "Врач-исполнитель люмбальной пункции", self._distribution_lines(s["lp_comp_by_doctor"], s["lp_complications"])),
-                ("14.13 Реакции гемотрансфузий", "Реакции / все выполненные протоколы гемотрансфузии", f"{self._fmt_num(s['procedure_transfusion_reactions'], 0)} / {self._fmt_num(s['procedure_transfusion_count'], 0)}"),
-                ("14.14 Реакции гемотрансфузий по врачу", "Врач-исполнитель протокола гемотрансфузии", self._distribution_lines(s["procedure_transfusion_reactions_by_doctor"], s["procedure_transfusion_reactions"])),
+                ("15.1 Осложнения при постановке ЦВК", "Осложнения / все ЦВК", f"{self._fmt_num(s['cvc_technical_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
+                ("15.2 Без осложнений при постановке ЦВК", "Без осложнений / все ЦВК", f"{self._fmt_num(s['cvc_technical_no_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
+                ("15.3 Осложнения при использовании/удалении ЦВК", "Осложнения / все ЦВК", f"{self._fmt_num(s['cvc_usage_complications'], 0)} / {self._fmt_num(s['cvc_count'], 0)}"),
+                ("15.4 ЦВК с любыми осложнениями", "Уникальные ЦВК с осложнениями постановки или использования", self._fmt_num(s["cvc_any_complications"], 0)),
+                ("15.5 Осложнения ЦВК по локализации", "Локализация выбранного доступа при осложнении", self._distribution_lines(s["cvc_comp_by_access"], s["cvc_any_complications"])),
+                ("15.6 Осложнения ЦВК по врачу-исполнителю", "Врач-исполнитель ЦВК, где отмечено осложнение", self._distribution_lines(s["cvc_comp_by_doctor"], s["cvc_any_complications"])),
+                ("15.7 Осложнения удаления/использования ЦВК по врачу", "Врач удаления/переустановки; если не указан, врач-исполнитель ЦВК", self._distribution_lines(s["cvc_usage_comp_by_doctor"], s["cvc_usage_complications"])),
+                ("15.8 Осложнения люмбальных пункций", "Осложнения / все люмбальные пункции", f"{self._fmt_num(s['lp_complications'], 0)} / {self._fmt_num(s['lp_count'], 0)}"),
+                ("15.9 Без осложнений люмбальных пункций", "Без осложнений / все люмбальные пункции", f"{self._fmt_num(s['lp_no_complications'], 0)} / {self._fmt_num(s['lp_count'], 0)}"),
+                ("15.10 Осложнения пункций по доступу", "Доступ при осложненной люмбальной пункции", self._distribution_lines(s["lp_comp_by_access"], s["lp_complications"])),
+                ("15.11 Осложнения пункций по уровню", "Уровень при осложненной люмбальной пункции", self._distribution_lines(s["lp_comp_by_level"], s["lp_complications"])),
+                ("15.12 Осложнения пункций по врачу", "Врач-исполнитель люмбальной пункции", self._distribution_lines(s["lp_comp_by_doctor"], s["lp_complications"])),
+                ("15.13 Реакции гемотрансфузий", "Реакции / все выполненные протоколы гемотрансфузии", f"{self._fmt_num(s['procedure_transfusion_reactions'], 0)} / {self._fmt_num(s['procedure_transfusion_count'], 0)}"),
+                ("15.14 Реакции гемотрансфузий по врачу", "Врач-исполнитель протокола гемотрансфузии", self._distribution_lines(s["procedure_transfusion_reactions_by_doctor"], s["procedure_transfusion_reactions"])),
             ]
 
         if section_key == "s16":
             return [
-                ("16.1 ИВЛ на пациента", "Индекс ИВЛ = Пациенты с ИВЛ / Госпитализации", self._fmt_num(s["IVL_index"])),
-                ("16.2 Операции на пациента", "Индекс операций = Пациенты с операциями / Госпитализации", self._fmt_num(s["Surgery_index"])),
-                ("16.3 Переливания на пациента", "Индекс переливаний = Пациенты с переливаниями / Госпитализации", self._fmt_num(s["Transfusion_index"])),
+                ("17.1 ИВЛ на пациента", "Индекс ИВЛ = Пациенты с ИВЛ / Госпитализации", self._fmt_num(s["IVL_index"])),
+                ("17.2 Операции на пациента", "Индекс операций = Пациенты с операциями / Госпитализации", self._fmt_num(s["Surgery_index"])),
+                ("17.3 Переливания на пациента", "Индекс переливаний = Пациенты с переливаниями / Госпитализации", self._fmt_num(s["Transfusion_index"])),
             ]
 
         if section_key == "s17":
             return [
-                ("17.1 Оборот койки", "Оборот койки = Госпитализации / Койки", self._fmt_num(s["turnover"])),
-                ("17.2 Койко-дни на пациента", "Средняя длительность лечения", self._fmt_num(s["alos"])),
+                ("18.1 Оборот койки", "Оборот койки = Госпитализации / Койки", self._fmt_num(s["turnover"])),
+                ("18.2 Койко-дни на пациента", "Средняя длительность лечения", self._fmt_num(s["alos"])),
             ]
 
         if section_key == "s18":
             return [
-                ("18.1 Доля ранней летальности", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
-                ("18.2 Индекс интенсивности лечения", "Индекс интенсивности = (Пациенты с ИВЛ + Пациенты с операциями + Пациенты с переливаниями) / Госпитализации", self._fmt_num(s["intensity_index"])),
-                ("18.3 Индекс тяжести потока", "Индекс тяжести = Ранние смерти / Умершие", self._fmt_num(s["severity_index"])),
-                ("18.4 Длительное пребывание", "Длительное пребывание = Госпитализации дольше 7 суток / Госпитализации × 100%", f"{self._fmt_num(s['long_stay_pct'])}%"),
-                ("18.5 Индекс технологичности", "Индекс технологичности = Госпитализации с вмешательствами / Госпитализации × 100%", f"{self._fmt_num(s['technology_index'])}%"),
+                ("19.1 Доля ранней летальности", "Ранняя летальность = Смерти <24ч / Умершие × 100%", self._fmt_pct(s["early_deaths"], deaths)),
+                ("19.2 Индекс интенсивности лечения", "Индекс интенсивности = (Пациенты с ИВЛ + Пациенты с операциями + Пациенты с переливаниями) / Госпитализации", self._fmt_num(s["intensity_index"])),
+                ("19.3 Индекс тяжести потока", "Индекс тяжести = Ранние смерти / Умершие", self._fmt_num(s["severity_index"])),
+                ("19.4 Длительное пребывание", "Длительное пребывание = Госпитализации дольше 7 суток / Госпитализации × 100%", f"{self._fmt_num(s['long_stay_pct'])}%"),
+                ("19.5 Индекс технологичности", "Индекс технологичности = Госпитализации с вмешательствами / Госпитализации × 100%", f"{self._fmt_num(s['technology_index'])}%"),
             ]
 
         if section_key == "s19":
             return [
-                ("19.1 Среднесуточная занятость", "Среднее число пациентов в отделении за сутки = Койко-дни / Дни периода", self._fmt_num(s["mean_patients"])),
-                ("19.2 Использование коек", "Использование коек = Среднесуточная занятость / Количество коек", self._fmt_num(s["utilization"])),
-                ("19.3 Максимальная загрузка", "Максимум пациентов одновременно", self._fmt_num(s["max_patients"], 0)),
+                ("20.1 Среднесуточная занятость", "Среднее число пациентов в отделении за сутки = Койко-дни / Дни периода", self._fmt_num(s["mean_patients"])),
+                ("20.2 Использование коек", "Использование коек = Среднесуточная занятость / Количество коек", self._fmt_num(s["utilization"])),
+                ("20.3 Максимальная загрузка", "Максимум пациентов одновременно", self._fmt_num(s["max_patients"], 0)),
                 (
-                    "19.4 Высокая нагрузка",
+                    "20.4 Высокая нагрузка",
                     "Время высокой нагрузки = Время ≥ порог / Общее время × 100%",
                     f"{self._fmt_num(s['load_time_pct'])}% (порог: ≥{self._fmt_num(s['load_threshold'], 0)} пациентов)",
                 ),
@@ -1650,7 +1671,6 @@ class DetailedStatisticsReportBuilder:
         try:
             stats = self._calculate_statistics()
 
-            recovery_summary_html = self._build_recovery_summary_html()
             html_body = self._render_sections_html(selected, stats)
             generated_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             period = f"{self._start_dt.strftime('%d.%m.%Y')} - {self._end_dt.strftime('%d.%m.%Y')}"
@@ -1713,18 +1733,12 @@ class DetailedStatisticsReportBuilder:
                         color: {TEXT_SECONDARY};
                         font-size: 11px;
                     }}
-                    .recovery-note {{
-                        margin: 4px 0 10px 0;
-                        color: {TEXT_SECONDARY};
-                        font-size: 12px;
-                    }}
                 </style>
             </head>
             <body>
                 <div class="page">
                     <h1>Статистический отчет ОАР №3</h1>
                     <p class="period">Период: {period}</p>
-                    {recovery_summary_html}
                     {html_body}
                     <p class="footnote">Сформировано автоматически: {generated_at}</p>
                 </div>

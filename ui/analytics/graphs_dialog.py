@@ -5,7 +5,13 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 
-from rem_card.services.analytics.constants import STATISTICAL_HIGH_LOAD_THRESHOLD
+from rem_card.services.analytics.constants import (
+    RECOVERY_FLOW_DURATION_KEY,
+    RECOVERY_FLOW_MONTHS_KEY,
+    RECOVERY_FLOW_OUTCOMES_KEY,
+    RECOVERY_FLOW_TABLE_KEY,
+    STATISTICAL_HIGH_LOAD_THRESHOLD,
+)
 from rem_card.services.analytics.graphs_service import build_graphs_html, build_graphs_pdf
 from rem_card.ui.analytics.chart_renderer import fit_chart_images_to_width
 from rem_card.ui.shared.analytics_worker import AnalyticsWorker
@@ -144,7 +150,11 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
                 "g2": "2. Поступления пациентов по дням недели",
                 "g3": "3. Поступления пациентов по датам (динамика)",
                 "g4": "4. Источники поступления пациентов (тип)",
-                "g5": "5. Распределение по отделениям-источникам"
+                "g5": "5. Распределение по отделениям-источникам",
+                RECOVERY_FLOW_TABLE_KEY: "Пациенты через койки пробуждения (таблица)",
+                RECOVERY_FLOW_MONTHS_KEY: "Пробуждение: поступления по месяцам",
+                RECOVERY_FLOW_DURATION_KEY: "Пробуждение: распределение по длительности",
+                RECOVERY_FLOW_OUTCOMES_KEY: "Пробуждение: исходы пациентов",
             },
             "Использование коечного фонда": {
                 "g6": "6. Койко-дни по месяцам",

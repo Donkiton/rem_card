@@ -10,10 +10,6 @@ from xml.sax.saxutils import escape as xml_escape
 
 from rem_card.ui.analytics.chart_renderer import configure_chart_style
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
-from rem_card.services.analytics.recovery_summary import (
-    build_recovery_bed_summary,
-    render_recovery_summary_graphs_html,
-)
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
     BG_CARD,
@@ -54,16 +50,9 @@ def build_graphs_html(
     conn = manager.get_connection()
     params = (start_date_str, end_date_str)
     img_paths: list[str] = []
-    recovery_summary = build_recovery_bed_summary(conn, start_date_str, end_date_str)
-    recovery_summary_html = render_recovery_summary_graphs_html(
-        recovery_summary,
-        include_recovery_beds=include_recovery_beds,
-        chart_colors=chart_colors,
-    )
     html_content = (
         "<h2>Графический отчет ОАР №3</h2>"
         f"<p>Период: {start_date_str.split(' ')[0]} - {end_date_str.split(' ')[0]}</p>"
-        f"{recovery_summary_html}"
     )
 
     try:
@@ -97,7 +86,15 @@ def build_graphs_html(
             )
             adms = [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
 
-            html_content = generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content)
+            html_content = generate_g1_g5(
+                selected,
+                conn,
+                params,
+                chart_colors,
+                img_paths,
+                html_content,
+                include_recovery_beds=include_recovery_beds,
+            )
             html_content = generate_g6_g13(
                 selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
             )
@@ -208,6 +205,9 @@ class _GraphsPdfHtmlParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         tag = str(tag or "").lower()
         attrs_map = {str(key).lower(): str(value or "") for key, value in attrs}
+        if tag == "br" and self._text_stack:
+            self._text_stack[-1][1].append("\n")
+            return
         if tag == "img":
             src = attrs_map.get("src", "").strip()
             if src:
@@ -215,6 +215,9 @@ class _GraphsPdfHtmlParser(HTMLParser):
             return
         if tag in {"h2", "h3", "p"}:
             self._text_stack.append((tag, []))
+            return
+        if tag == "tr":
+            self._text_stack.append(("tr", []))
             return
         if tag == "div":
             style = attrs_map.get("style", "").lower().replace(" ", "")
@@ -235,7 +238,7 @@ class _GraphsPdfHtmlParser(HTMLParser):
         self._text_stack.pop()
         text = " ".join("".join(chunks).split())
         if text:
-            self.items.append(_GraphsPdfItem(kind, text))
+            self.items.append(_GraphsPdfItem("p" if kind == "tr" else kind, text))
 
 
 def _graphs_pdf_styles(report_builder, colors, alignment, paragraph_style_cls):

@@ -99,87 +99,117 @@ def build_recovery_bed_summary(conn, start_date_str: str, end_date_str: str) -> 
     )
 
 
-def render_recovery_summary_table(summary: RecoveryBedAnalyticsSummary, *, include_recovery_beds: bool) -> str:
-    mode_text = _mode_text(include_recovery_beds)
-    if not summary.has_admissions_table:
-        return f"""
-            <h2>Пациенты через койки пробуждения</h2>
-            <p class="recovery-note">{escape(mode_text)}</p>
-            <p class="recovery-note">Таблица госпитализаций недоступна для расчета показателей пробуждения.</p>
-        """
+def fetch_recovery_bed_admission_rows(conn, start_date_str: str, end_date_str: str) -> list[dict[str, Any]]:
+    if conn is None or not _table_exists(conn, "admissions"):
+        return []
 
+    start_dt = _parse_datetime(start_date_str)
+    end_dt = _parse_datetime(end_date_str)
+    if start_dt is None or end_dt is None:
+        return []
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    return [row for row in _fetch_admission_rows(conn, start_dt, end_dt) if _is_recovery_admission(row)]
+
+
+def build_recovery_summary_rows(
+    summary: RecoveryBedAnalyticsSummary,
+    *,
+    include_recovery_beds: bool,
+) -> list[tuple[str, str, str]]:
+    mode_text = _mode_text(include_recovery_beds)
     rows = [
         (
             "Режим учета",
             "Как переключатель влияет на остальные разделы отчета",
             mode_text,
         ),
-        (
-            "Проведено через пробуждение",
-            "Госпитализации с признаком пробуждения / все госпитализации периода",
-            f"{_fmt_int(summary.recovery_admissions)} ({_fmt_pct_value(summary.recovery_share_pct)} от всех)",
-        ),
-        (
-            "Всего госпитализаций периода",
-            "Данные до применения фильтра пробуждения",
-            _fmt_int(summary.total_admissions),
-        ),
-        (
-            "Уникальные пациенты через пробуждение",
-            "Уникальные patient_id среди госпитализаций пробуждения",
-            _fmt_int(summary.unique_recovery_patients),
-        ),
-        (
-            "Суммарное время в отделении",
-            "От поступления до перевода, смерти или конца выбранного периода",
-            f"{_fmt_duration(summary.total_hours)} ({_fmt_num(summary.total_days)} сут.)",
-        ),
-        (
-            "Среднее время в отделении",
-            "Среднее по пациентам, проведенным через пробуждение",
-            _fmt_duration(summary.average_hours),
-        ),
-        (
-            "Медианное время в отделении",
-            "Медиана по пациентам, проведенным через пробуждение",
-            _fmt_duration(summary.median_hours),
-        ),
-        (
-            "Минимум / максимум",
-            "Диапазон времени в отделении",
-            f"{_fmt_duration(summary.min_hours)} / {_fmt_duration(summary.max_hours)}",
-        ),
-        (
-            "Распределение по длительности",
-            "Доля внутри группы пробуждения",
-            _duration_distribution_lines(summary),
-        ),
-        (
-            "Исходы группы пробуждения",
-            "По данным госпитализации на момент формирования отчета",
-            _outcome_distribution_text(summary),
-        ),
     ]
+    if not summary.has_admissions_table:
+        rows.append(
+            (
+                "Доступность данных",
+                "Проверка таблицы госпитализаций",
+                "Таблица госпитализаций недоступна для расчета показателей пробуждения.",
+            )
+        )
+        return rows
+
+    rows.extend(
+        [
+            (
+                "Проведено через пробуждение",
+                "Госпитализации с признаком пробуждения / все госпитализации периода",
+                f"{_fmt_int(summary.recovery_admissions)} ({_fmt_pct_value(summary.recovery_share_pct)} от всех)",
+            ),
+            (
+                "Всего госпитализаций периода",
+                "Данные до применения фильтра пробуждения",
+                _fmt_int(summary.total_admissions),
+            ),
+            (
+                "Уникальные пациенты через пробуждение",
+                "Уникальные patient_id среди госпитализаций пробуждения",
+                _fmt_int(summary.unique_recovery_patients),
+            ),
+            (
+                "Суммарное время в отделении",
+                "От поступления до перевода, смерти или конца выбранного периода",
+                f"{_fmt_duration(summary.total_hours)} ({_fmt_num(summary.total_days)} сут.)",
+            ),
+            (
+                "Среднее время в отделении",
+                "Среднее по пациентам, проведенным через пробуждение",
+                _fmt_duration(summary.average_hours),
+            ),
+            (
+                "Медианное время в отделении",
+                "Медиана по пациентам, проведенным через пробуждение",
+                _fmt_duration(summary.median_hours),
+            ),
+            (
+                "Минимум / максимум",
+                "Диапазон времени в отделении",
+                f"{_fmt_duration(summary.min_hours)} / {_fmt_duration(summary.max_hours)}",
+            ),
+            (
+                "Распределение по длительности",
+                "Доля внутри группы пробуждения",
+                _duration_distribution_lines(summary),
+            ),
+            (
+                "Исходы группы пробуждения",
+                "По данным госпитализации на момент формирования отчета",
+                _outcome_distribution_text(summary),
+            ),
+        ]
+    )
+    return rows
+
+
+def render_recovery_summary_table(summary: RecoveryBedAnalyticsSummary, *, include_recovery_beds: bool) -> str:
+    rows = build_recovery_summary_rows(summary, include_recovery_beds=include_recovery_beds)
 
     rows_html = []
     for name, formula, value in rows:
         rows_html.append(
             f"""
             <tr>
-                <td>{escape(name)}</td>
-                <td>{escape(formula)}</td>
-                <td class="value">{value if '<br/>' in value else escape(str(value))}</td>
+                <td style="border:1px solid #d8dee9; padding:6px 8px; vertical-align:top;">{escape(name)}</td>
+                <td style="border:1px solid #d8dee9; padding:6px 8px; vertical-align:top;">{escape(formula)}</td>
+                <td class="value" style="border:1px solid #d8dee9; padding:6px 8px; vertical-align:top; font-weight:600;">{value if '<br/>' in value else escape(str(value))}</td>
             </tr>
             """
         )
 
     return f"""
         <h2>Пациенты через койки пробуждения</h2>
-        <table>
+        <table style="width:100%; border-collapse:collapse; margin:8px 0 18px 0;">
             <tr>
-                <th>Показатель</th>
-                <th>Расчет</th>
-                <th class="value">Значение</th>
+                <th style="border:1px solid #d8dee9; padding:6px 8px; text-align:left;">Показатель</th>
+                <th style="border:1px solid #d8dee9; padding:6px 8px; text-align:left;">Расчет</th>
+                <th class="value" style="border:1px solid #d8dee9; padding:6px 8px; text-align:left;">Значение</th>
             </tr>
             {''.join(rows_html)}
         </table>

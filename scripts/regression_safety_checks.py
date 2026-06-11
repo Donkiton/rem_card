@@ -6634,7 +6634,10 @@ def _check_sector_events_refresh_snapshot(temp_root: str) -> tuple[bool, str]:
 
 def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.analytics.multi_db_analytics import FALLBACK_DDL
-    from rem_card.services.analytics.detailed_statistics_service import DetailedStatisticsReportBuilder
+    from rem_card.services.analytics.detailed_statistics_service import (
+        DetailedStatisticsReportBuilder,
+        RECOVERY_SECTION_KEY,
+    )
 
     class Manager:
         def __init__(self, conn):
@@ -6703,22 +6706,116 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     def snapshot(with_data: bool):
         builder = make_builder(make_conn(with_data))
         stats = builder._calculate_statistics()
-        selected = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s16", "s17", "s18", "s19", "sx"]
+        selected = [
+            "s1",
+            "s2",
+            "s3",
+            "s4",
+            "s5",
+            "s6",
+            "s7",
+            "s8",
+            RECOVERY_SECTION_KEY,
+            "s9",
+            "s10",
+            "s11",
+            "s16",
+            "s17",
+            "s18",
+            "s19",
+            "sx",
+        ]
         return {
             "stats": stats,
             "rows": {key: builder._section_rows(key, stats) for key in selected},
         }
 
+    def recovery_filter_snapshot(include_recovery_beds: bool):
+        conn = make_conn(False)
+        conn.executemany(
+            """
+            INSERT INTO admissions (
+                id, patient_id, admission_datetime, transfer_datetime, death_datetime,
+                outcome, patient_age, patient_age_unit, patient_gender,
+                source_department, diagnosis_code, diagnosis_text, bed_number, recovery_bed_stay
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (10, 201, "2026-04-01 08:00:00", "2026-04-02 08:00:00", None, "переведен", 40, "л", "М", "СМП", "Z00", "Обычная койка", 1, 0),
+                (11, 202, "2026-04-01 09:00:00", "2026-04-02 09:00:00", None, "переведен", 41, "л", "Ж", "СМП", "Z00", "Койка пробуждения", 11, 0),
+                (12, 203, "2026-04-01 10:00:00", "2026-04-02 10:00:00", None, "переведен", 42, "л", "М", "СМП", "Z00", "Признак пробуждения", 3, 1),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO operations VALUES (?, ?, ?, ?)",
+            [
+                (10, 10, "2026-04-01 12:00:00", "Операция обычная"),
+                (11, 11, "2026-04-01 12:00:00", "Операция пробуждение"),
+                (12, 12, "2026-04-01 12:00:00", "Операция признак пробуждения"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO transfusions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (10, 10, "2026-04-01 13:00:00", "Плазма", 100, "journal", None, None),
+                (11, 11, "2026-04-01 13:00:00", "Плазма", 100, "journal", None, None),
+                (12, 12, "2026-04-01 13:00:00", "Плазма", 100, "journal", None, None),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO ivl_episodes VALUES (?, ?, ?, ?)",
+            [
+                (10, 10, "2026-04-01 14:00:00", "2026-04-01 15:00:00"),
+                (11, 11, "2026-04-01 14:00:00", "2026-04-01 15:00:00"),
+                (12, 12, "2026-04-01 14:00:00", "2026-04-01 15:00:00"),
+            ],
+        )
+        builder = DetailedStatisticsReportBuilder(
+            Manager(conn),
+            "2026-04-01",
+            "2026-04-30",
+            include_recovery_beds=include_recovery_beds,
+        )
+        stats = builder._calculate_statistics()
+        return {
+            "N": stats["N"],
+            "N_surg": stats["N_surg"],
+            "operations_count": stats["operations_count"],
+            "N_transf": stats["N_transf"],
+            "N_IVL": stats["N_IVL"],
+            "ivl_episodes_count": stats["ivl_episodes_count"],
+        }
+
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "5a551b15499bfd6f9813772d4f9b739d7dd369306486002945777fa50280e0fe"
+    expected_digest = "ec1f03f3d11fdf5ebcdc8ed0c2eb5d5d66ea533eee4e39d3c6d73cc5835b4b39"
     if digest != expected_digest:
         return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
         return False, f"unexpected filled core stats: {result['filled']['stats']}"
     if result["empty"]["stats"]["N"] != 0 or result["empty"]["stats"]["bed_days"] != 0:
         return False, f"unexpected empty stats: {result['empty']['stats']}"
+    recovery_off = recovery_filter_snapshot(False)
+    recovery_on = recovery_filter_snapshot(True)
+    expected_off = {
+        "N": 1,
+        "N_surg": 1,
+        "operations_count": 1,
+        "N_transf": 1,
+        "N_IVL": 1,
+        "ivl_episodes_count": 1,
+    }
+    expected_on = {
+        "N": 3,
+        "N_surg": 3,
+        "operations_count": 3,
+        "N_transf": 3,
+        "N_IVL": 3,
+        "ivl_episodes_count": 3,
+    }
+    if recovery_off != expected_off or recovery_on != expected_on:
+        return False, f"unexpected recovery filter stats: off={recovery_off}, on={recovery_on}"
     return True, "ok"
 
 
