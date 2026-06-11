@@ -3200,6 +3200,10 @@ class OperationStagesDialog(OperBlockStyledDialog):
             _safe_int((row or {}).get("event_id") or (row or {}).get("source_id")) or 0,
         )
 
+    @staticmethod
+    def _default_new_stage_time() -> str:
+        return datetime.now().replace(second=0, microsecond=0).isoformat(timespec="seconds")
+
     @classmethod
     def _normalized_stage_rows(cls, stages: list[dict]) -> list[dict]:
         auto_rows = []
@@ -3237,6 +3241,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
                 "kind": self.CUSTOM_STAGE_KIND,
                 "label": "",
                 "event_id": None,
+                "event_time": self._default_new_stage_time(),
                 "revision": 0,
                 "readonly": False,
                 "new": True,
@@ -3282,7 +3287,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
         number_label.setStyleSheet(f"font-size: 13px; font-weight: 800; color: {COLOR_PRIMARY_DARK};")
         layout.addWidget(number_label)
 
-        can_edit_time = bool(row.get("event_id")) and not bool(row.get("readonly")) and not bool(row.get("new"))
+        can_edit_time = not bool(row.get("readonly")) and bool(row.get("event_time"))
         time_text = _format_order_time(row.get("event_time")) if row.get("event_time") else ""
         if can_edit_time:
             time_label = OperBlockClickableLabel(time_text, click_callback=lambda key=row_key: self._request_time_edit(key))
@@ -3320,6 +3325,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
             """
         )
         layout.addWidget(edit, 1)
+        edit.returnPressed.connect(lambda key=row_key: self._request_save(key))
 
         save_button = QPushButton("Сохранить")
         save_button.setFixedWidth(104)
@@ -3372,6 +3378,8 @@ class OperationStagesDialog(OperBlockStyledDialog):
         button = widgets.get("button")
         if edit is None or button is None:
             return
+        if row.get("readonly"):
+            return
         label = self._clean_label(edit.text())
         if not label:
             CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
@@ -3386,6 +3394,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
                 "event_id": _safe_int(row.get("event_id")),
                 "expected_revision": int(row.get("revision") or 0),
                 "label": label,
+                "event_time": row.get("event_time"),
                 "is_new": bool(row.get("new")),
             }
         )
@@ -3393,14 +3402,15 @@ class OperationStagesDialog(OperBlockStyledDialog):
     def _request_time_edit(self, row_key: str) -> None:
         widgets = self._row_widgets.get(row_key) or {}
         row = dict(widgets.get("row") or {})
-        if row.get("readonly") or row.get("new"):
+        if row.get("readonly"):
             return
         event_id = _safe_int(row.get("event_id"))
-        if not event_id:
+        is_new = bool(row.get("new"))
+        if not is_new and not event_id:
             return
         edit = widgets.get("edit")
         label = self._clean_label(edit.text()) if edit is not None else self._stage_label(row)
-        if not label:
+        if not label and not is_new:
             CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
             if edit is not None:
                 edit.setFocus(Qt.OtherFocusReason)
@@ -3412,6 +3422,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
                 "expected_revision": int(row.get("revision") or 0),
                 "label": label,
                 "event_time": row.get("event_time"),
+                "is_new": is_new,
             }
         )
 
@@ -3424,6 +3435,26 @@ class OperationStagesDialog(OperBlockStyledDialog):
         if time_label is not None:
             time_label.setEnabled(True)
         self._sync_row_button(str(row_key or ""))
+
+    def apply_pending_stage_time(self, row_key: str, event_time: str) -> None:
+        key = str(row_key or "")
+        parsed = _minute_floor_dt(_parse_datetime_value(event_time))
+        if parsed is None:
+            return
+        normalized = parsed.isoformat(timespec="seconds")
+        for row in self._rows:
+            if self._row_key(row) == key:
+                row["event_time"] = normalized
+                break
+        widgets = self._row_widgets.get(key) or {}
+        row = widgets.get("row")
+        if isinstance(row, dict):
+            row["event_time"] = normalized
+        time_label = widgets.get("time_label")
+        if time_label is not None:
+            time_label.setText(_format_order_time(normalized))
+            time_label.setEnabled(True)
+        self._sync_row_button(key)
 
     def apply_saved_stage(self, row_key: str, stage: dict) -> None:
         event_id = _safe_int((stage or {}).get("source_id") or (stage or {}).get("event_id"))
@@ -7011,6 +7042,8 @@ class OperationStageTimeEditDialog(MedicationEditDialogBase):
         *,
         stage_label: str = "",
         field_label: str = "Время этапа",
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
     ):
         base_dt = _minute_floor_dt(_parse_datetime_value(base_datetime)) or datetime.now().replace(second=0, microsecond=0)
         clean_label = re.sub(r"\s+", " ", str(stage_label or "").strip()) or "Этап операции"
@@ -7028,6 +7061,8 @@ class OperationStageTimeEditDialog(MedicationEditDialogBase):
             geometry_key="operblock/operation_stage_time_edit_dialog_geometry_v2",
             parent=parent,
             start_datetime=base_dt,
+            min_datetime=min_datetime,
+            max_datetime=max_datetime,
             show_time=True,
             show_value=False,
             show_route=False,
@@ -7038,6 +7073,35 @@ class OperationStageTimeEditDialog(MedicationEditDialogBase):
         self.setMinimumSize(max(self.minimumWidth(), 540), max(self.minimumHeight(), 342))
         if self.height() < 342:
             self.resize(max(self.width(), 540), 342)
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = self._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        candidates = [same_day]
+        if hour < 6:
+            candidates.append(same_day + timedelta(days=1))
+        previous_day_is_plausible = (
+            base_dt.hour < 6
+            or (self._time_min_datetime and self._time_min_datetime.date() < base_dt.date())
+        )
+        if hour >= 12 and previous_day_is_plausible:
+            candidates.append(same_day - timedelta(days=1))
+
+        def in_bounds(candidate: datetime) -> bool:
+            if self._time_min_datetime and candidate < self._time_min_datetime:
+                return False
+            if self._time_max_datetime and candidate > self._time_max_datetime:
+                return False
+            return True
+
+        bounded = [candidate for candidate in candidates if in_bounds(candidate)]
+        source = bounded or candidates
+        return min(source, key=lambda candidate: abs((candidate - base_dt).total_seconds()))
 
     def datetime_text(self) -> str:
         selected_text = self.start_time_text()
@@ -17217,17 +17281,24 @@ class OperBlockMainWidget(QWidget):
                 dialog.apply_save_error(row_key)
             return
         event_id = _safe_int((payload or {}).get("event_id"))
+        is_new = bool((payload or {}).get("is_new"))
         old_event_dt = _minute_floor_dt(_parse_datetime_value((payload or {}).get("event_time")))
         label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
-        if not event_id or old_event_dt is None or not label:
+        if old_event_dt is None:
+            dialog.apply_save_error(row_key)
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить этап. Обновите протокол.")
+            return
+        if not is_new and (not event_id or not label):
             dialog.apply_save_error(row_key)
             CustomMessageBox.warning(self, "Время этапа", "Не удалось определить этап. Обновите протокол.")
             return
         time_dialog = OperationStageTimeEditDialog(
             old_event_dt,
             self,
-            stage_label=label,
+            stage_label=label or "Новый этап операции",
             field_label="Время этапа",
+            min_datetime=self._current_surgery_start,
+            max_datetime=self._current_anesthesia_end if not self._current_anesthesia_active else None,
         )
         if time_dialog.exec() != QDialog.Accepted:
             return
@@ -17236,6 +17307,9 @@ class OperBlockMainWidget(QWidget):
         if new_event_dt == old_event_dt:
             return
         if not self._validate_operation_stage_datetime_or_warn(event_time):
+            return
+        if is_new:
+            dialog.apply_pending_stage_time(row_key, event_time)
             return
         self._save_operation_stage_from_dialog(
             dialog_ref,
@@ -17289,7 +17363,7 @@ class OperBlockMainWidget(QWidget):
 
         def operation():
             if is_new:
-                return self.operblock_service.add_operation_stage(case_id, label)
+                return self.operblock_service.add_operation_stage(case_id, label, event_time=event_time)
             return self.operblock_service.update_operation_stage(
                 int(event_id),
                 label,

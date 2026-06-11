@@ -16,6 +16,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -19802,7 +19803,11 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
     from rem_card.app.operblock_schema import _apply_operblock_schema
     from rem_card.data.dao.db_manager import DatabaseManager
     from rem_card.services.operblock_service import OperBlockService
-    from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget, OperationStagesDialog
+    from rem_card.ui.operblock_view.operblock_main_widget import (
+        OperBlockMainWidget,
+        OperationStageTimeEditDialog,
+        OperationStagesDialog,
+    )
     from PySide6.QtWidgets import QApplication
     import weakref
 
@@ -19857,13 +19862,13 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         )
         if int(edited.get("revision") or 0) != int(added.get("revision") or 0) + 1:
             return False, f"custom stage revision did not increase: added={added!r}, edited={edited!r}"
-        second_added = service.add_operation_stage(case_id, "Ревизия брюшной полости")
-        second_moved_later = service.update_operation_stage(
-            int(second_added["source_id"]),
+        second_moved_later = service.add_operation_stage(
+            case_id,
             "Ревизия брюшной полости",
-            expected_revision=int(second_added["revision"]),
             event_time=second_stage_time,
         )
+        if datetime.fromisoformat(str(second_moved_later.get("event_time")).replace(" ", "T")) != second_stage_time:
+            return False, f"custom stage insert ignored explicit event_time: {second_moved_later!r}"
         snapshot_after_edit = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
         edited_events = list(snapshot_after_edit.get("operation_events") or [])
         labels_after_edit = [event.get("display_label") for event in edited_events]
@@ -19999,6 +20004,48 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
                 },
             ]
         )
+        new_widgets = dialog._row_widgets.get("new") or {}
+        new_row = new_widgets.get("row") or {}
+        new_time_label = new_widgets.get("time_label")
+        if not str(new_row.get("event_time") or ""):
+            return False, "new operation stage row has no pending event_time"
+        if new_time_label is None or not re.fullmatch(r"\d{2}:\d{2}", str(new_time_label.text() or "")):
+            return False, "new operation stage row does not show editable current time"
+        pending_time = (surgery_start_dt + timedelta(minutes=120)).isoformat(timespec="seconds")
+        dialog.apply_pending_stage_time("new", pending_time)
+        if (dialog._row_widgets.get("new") or {}).get("row", {}).get("event_time") != pending_time:
+            return False, "new operation stage pending time was not updated in dialog row"
+        if str(new_time_label.text() or "") != (surgery_start_dt + timedelta(minutes=120)).strftime("%H:%M"):
+            return False, "new operation stage pending time label was not updated"
+        afternoon_dialog = OperationStageTimeEditDialog(
+            surgery_start_dt.replace(hour=17, minute=40),
+            min_datetime=surgery_start_dt.replace(hour=8, minute=0),
+            stage_label="Проверка даты этапа",
+        )
+        try:
+            afternoon_dialog.time_input.setText("15:00")
+            afternoon_dt = datetime.fromisoformat(afternoon_dialog.datetime_text())
+            if afternoon_dt.date() != surgery_start_dt.date() or afternoon_dt.hour != 15 or afternoon_dt.minute != 0:
+                return False, f"operation stage afternoon time was moved to wrong date: {afternoon_dt!r}"
+        finally:
+            afternoon_dialog.close()
+            afternoon_dialog.deleteLater()
+            app.processEvents()
+        midnight_dialog = OperationStageTimeEditDialog(
+            surgery_start_dt.replace(hour=23, minute=40),
+            min_datetime=surgery_start_dt.replace(hour=22, minute=0),
+            stage_label="Переход через полночь",
+        )
+        try:
+            midnight_dialog.time_input.setText("00:15")
+            midnight_dt = datetime.fromisoformat(midnight_dialog.datetime_text())
+            expected_midnight = (surgery_start_dt + timedelta(days=1)).date()
+            if midnight_dt.date() != expected_midnight or midnight_dt.hour != 0 or midnight_dt.minute != 15:
+                return False, f"operation stage midnight time did not resolve to next day: {midnight_dt!r}"
+        finally:
+            midnight_dialog.close()
+            midnight_dialog.deleteLater()
+            app.processEvents()
         render_calls = 0
         original_render_rows = dialog._render_rows
 

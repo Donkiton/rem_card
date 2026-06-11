@@ -1746,6 +1746,8 @@ class OperBlockService:
                     "display": _normalize_case_text(event.get("display_label") or event.get("raw_text") or event.get("drug_label")),
                     "dose_value": event.get("dose_value"),
                     "dose_unit": event.get("dose_unit"),
+                    "volume_ml": event.get("volume_ml"),
+                    "concentration_text": event.get("concentration_text"),
                     "route": event.get("route") or (payload or {}).get("route"),
                 }
             )
@@ -2582,12 +2584,22 @@ class OperBlockService:
     def end_surgery(self, operation_case_id: int) -> int:
         return self._add_stage_event(operation_case_id, "surgery_end")
 
-    def add_operation_stage(self, operation_case_id: int, label: str) -> dict[str, Any]:
+    def add_operation_stage(
+        self,
+        operation_case_id: int,
+        label: str,
+        *,
+        event_time: Any = None,
+    ) -> dict[str, Any]:
         validate_operblock_runtime_path(self.db)
         clean_label = _normalize_operation_stage_label(label)
         if not clean_label:
             raise ValueError("Укажите название этапа операции.")
-        event_dt = _minute_floor(datetime.now())
+        event_dt = (
+            self._normalize_timeline_event_datetime(event_time)
+            if event_time is not None
+            else _minute_floor(datetime.now())
+        )
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
