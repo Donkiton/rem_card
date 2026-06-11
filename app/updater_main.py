@@ -5,7 +5,6 @@ import os
 import shutil
 import socket
 import stat
-import subprocess
 import sys
 import threading
 import time
@@ -24,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from rem_card.app.process_launch import hidden_window_creationflags, hidden_window_startupinfo, popen_hidden
 from rem_card.app.update_checker import get_update_lock_path, update_lock_scope_id
 
 # Обновлятор запускается из пакета в UPD. Общую тему приложения сюда не
@@ -485,16 +485,16 @@ def _spawn_deferred_cleanup(paths: list[str], log: Optional[Callable[[str], None
     for path in pending:
         args.extend(["--path", path])
 
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
     try:
-        subprocess.Popen(
-            args,
-            cwd=os.path.dirname(os.path.abspath(sys.executable)),
-            close_fds=True,
-            creationflags=creationflags,
-        )
+        popen_kwargs = {
+            "cwd": os.path.dirname(os.path.abspath(sys.executable)),
+            "close_fds": True,
+            "creationflags": hidden_window_creationflags(detached=True),
+        }
+        startupinfo = hidden_window_startupinfo()
+        if startupinfo is not None:
+            popen_kwargs["startupinfo"] = startupinfo
+        popen_hidden(args, **popen_kwargs)
         if log:
             log("Запущена отложенная очистка временных папок обновления: " + "; ".join(pending))
         return True
@@ -739,7 +739,7 @@ class UpdateWorker(QObject):
                 restart_path = os.path.join(target, restart_exe)
                 if os.path.isfile(restart_path):
                     self._status("Запуск новой версии...", 100)
-                    subprocess.Popen([restart_path], cwd=target)
+                    popen_hidden([restart_path], cwd=target)
             self.succeeded.emit(str(payload["target_version"] or ""))
         except UpdateAlreadyRunning as exc:
             self.failed.emit(str(exc))

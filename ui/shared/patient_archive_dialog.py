@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QListWidget, QListWi
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt, Signal, QSize, QTimer
 from datetime import datetime
+from rem_card.app.logger import logger
 from .async_call import AsyncCallThread
 from .custom_title_bar import CustomTitleBar
 from rem_card.ui.styles.shared_styles import (
@@ -70,6 +71,7 @@ class CardListWidget(QWidget):
             self.list_widget.addItem(item)
 
     def _on_load_failed(self, exc: Exception):
+        logger.warning("Не удалось загрузить список карт пациента: %s", exc, exc_info=True)
         self.list_widget.clear()
         item = QListWidgetItem("Не удалось загрузить список карт")
         item.setFlags(Qt.NoItemFlags)

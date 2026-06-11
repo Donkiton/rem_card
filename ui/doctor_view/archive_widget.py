@@ -2,6 +2,7 @@ import os
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
                              QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit)
+from rem_card.app.logger import logger
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.styles.theme import (
@@ -231,7 +232,7 @@ class ArchiveWidget(QWidget):
         self.filter_data()
 
     def _on_load_failed(self, exc: Exception):
-        pass
+        logger.warning("Не удалось загрузить архив пациентов: %s", exc, exc_info=True)
 
     def _on_load_finished(self, worker):
         if self._load_worker is worker:

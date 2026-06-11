@@ -1,12 +1,12 @@
 import json
 import os
 import socket
-import subprocess
 import sys
 import time
 from datetime import datetime
 from typing import Any, Optional
 
+from rem_card.app.process_launch import popen_hidden
 from rem_card.app.runtime_paths import get_executable_dir, is_compiled, resolve_baza_dir
 from rem_card.app.update_checker import (
     UpdateCandidate,
@@ -224,7 +224,7 @@ def launch_update(
         args.extend(["--restart-exe", restart_exe])
 
     try:
-        subprocess.Popen(args)
+        popen_hidden(args)
         return True
     except Exception:
         _remove_lock_quietly(starting_lock_path)

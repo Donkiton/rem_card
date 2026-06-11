@@ -3883,6 +3883,130 @@ def _check_archive_delete_enqueue_error_refreshes(temp_root: str) -> tuple[bool,
             widget.close()
 
 
+def _check_process_launch_hides_console_windows(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import process_launch
+
+    _ = temp_root
+    calls = []
+    original_popen = process_launch.subprocess.Popen
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeProcess()
+
+    process_launch.subprocess.Popen = fake_popen
+    try:
+        result = process_launch.popen_hidden(["probe.exe"], cwd=temp_root)
+    finally:
+        process_launch.subprocess.Popen = original_popen
+
+    if not isinstance(result, FakeProcess):
+        return False, "popen_hidden не вернул результат Popen"
+    if len(calls) != 1:
+        return False, f"popen_hidden вызвал Popen неверное число раз: {len(calls)}"
+
+    kwargs = calls[0][1]
+    if os.name == "nt":
+        flags = int(kwargs.get("creationflags") or 0)
+        expected_flag = int(getattr(process_launch.subprocess, "CREATE_NO_WINDOW", 0) or 0)
+        if expected_flag and not (flags & expected_flag):
+            return False, f"popen_hidden не добавил CREATE_NO_WINDOW: flags={flags}"
+        if kwargs.get("startupinfo") is None:
+            return False, "popen_hidden не добавил startupinfo для скрытия окна"
+    else:
+        if "creationflags" in kwargs or "startupinfo" in kwargs:
+            return False, f"popen_hidden добавил Windows-параметры вне Windows: {kwargs}"
+    return True, "ok"
+
+
+def _check_archive_first_load_does_not_spawn_process(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    import subprocess as subprocess_module
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.doctor_view.archive_widget import ArchiveWidget
+    from rem_card.ui.shared.patient_archive_dialog import PatientArchiveDialog
+
+    _ = temp_root
+    app = QApplication.instance() or QApplication([])
+
+    class FakePatientService:
+        def __init__(self):
+            self.archive_calls = 0
+
+        def get_archived_patients(self, start_dt=None, end_dt=None):
+            self.archive_calls += 1
+            _ = start_dt, end_dt
+            return []
+
+        def get_archive_db_paths_for_period(self, start_dt, end_dt):
+            _ = start_dt, end_dt
+            return []
+
+    class FakeRemCardService:
+        def __init__(self):
+            self.card_date_calls = 0
+
+        def get_all_card_dates(self, patient_id):
+            self.card_date_calls += 1
+            _ = patient_id
+            return [datetime(2026, 5, 3, 8, 0)]
+
+    class FakePatient(SimpleNamespace):
+        def get_display_name(self):
+            return "Иванов Иван"
+
+    popen_calls = []
+    original_popen = subprocess_module.Popen
+
+    def fake_popen(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+        raise AssertionError(f"Первое открытие архива не должно запускать внешний процесс: {args}")
+
+    archive_widget = None
+    card_dialog = None
+    subprocess_module.Popen = fake_popen
+    try:
+        patient_service = FakePatientService()
+        archive_widget = ArchiveWidget(patient_service, remcard_service=object())
+        archive_widget.load_data()
+        deadline = time.monotonic() + 3.0
+        while getattr(archive_widget, "_load_worker", None) is not None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        if patient_service.archive_calls != 1:
+            return False, f"ArchiveWidget load_data не вызвал сервис ровно один раз: {patient_service.archive_calls}"
+        if getattr(archive_widget, "_load_worker", None) is not None:
+            return False, "ArchiveWidget load_data не завершился"
+
+        remcard_service = FakeRemCardService()
+        patient = FakePatient(id=1)
+        card_dialog = PatientArchiveDialog(remcard_service, patient)
+        deadline = time.monotonic() + 3.0
+        while getattr(card_dialog.card_list_widget, "_load_worker", None) is not None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+        if remcard_service.card_date_calls != 1:
+            return False, f"PatientArchiveDialog не загрузил список карт один раз: {remcard_service.card_date_calls}"
+    finally:
+        subprocess_module.Popen = original_popen
+        if card_dialog is not None:
+            card_dialog.close()
+        if archive_widget is not None:
+            archive_widget.close()
+
+    if popen_calls:
+        return False, f"первое открытие архива запустило процесс: {popen_calls}"
+    return True, "ok"
+
+
 def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
     from types import MethodType, SimpleNamespace
@@ -21973,6 +22097,8 @@ def main(argv: list[str] | None = None):
         ("side_patient_card_child_photo_uses_gender_assets", _check_side_patient_card_child_photo_uses_gender_assets),
         ("patient_bed_move_enqueue_error_refreshes", _check_patient_bed_move_enqueue_error_refreshes),
         ("archive_delete_enqueue_error_refreshes", _check_archive_delete_enqueue_error_refreshes),
+        ("process_launch_hides_console_windows", _check_process_launch_hides_console_windows),
+        ("archive_first_load_does_not_spawn_process", _check_archive_first_load_does_not_spawn_process),
         ("doctor_create_card_enqueue_error_refreshes", _check_doctor_create_card_enqueue_error_refreshes),
         (
             "doctor_archive_outcome_blocks_new_card_before_snapshot",

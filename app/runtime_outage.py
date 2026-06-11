@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ from rem_card.app.db_access_classifier import classify_database_access_error
 from rem_card.app.emergency_paths import resolve_emergency_root
 from rem_card.app.emergency_store import get_or_create_local_emergency_client_id
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.process_launch import popen_hidden
 from rem_card.app.version import APP_VERSION
 
 
@@ -309,7 +309,7 @@ def launch_emergency_restart(
         cwd = os.path.dirname(args[0]) or None
         if len(args) > 1 and os.path.isfile(args[1]):
             cwd = os.path.dirname(args[1]) or cwd
-        subprocess.Popen(command, cwd=cwd)
+        popen_hidden(command, cwd=cwd)
     except Exception as exc:
         record_metric("runtime_outage_emergency_relaunch_failed", 1, error=str(exc))
         return False
