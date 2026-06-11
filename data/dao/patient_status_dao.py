@@ -759,14 +759,20 @@ class PatientStatusDAO:
                         return False
 
                     current_start = self._parse_sqlite_dt(current_active["start_time"])
-                    if current_start and event_dt < current_start.replace(second=0, microsecond=0):
-                        logger.warning(
-                            "[StatusDAO] Outcome time %s is earlier than current status start %s for admission %s",
-                            event_dt,
-                            current_start,
-                            admission_id,
-                        )
-                        return False
+                    if current_start:
+                        current_start_exact = current_start.replace(microsecond=0)
+                        if event_dt < current_start_exact:
+                            if event_dt.replace(second=0, microsecond=0) == current_start_exact.replace(second=0, microsecond=0):
+                                event_dt = current_start_exact
+                                event_time_str = event_dt.isoformat()
+                            else:
+                                logger.warning(
+                                    "[StatusDAO] Outcome time %s is earlier than current status start %s for admission %s",
+                                    event_dt,
+                                    current_start,
+                                    admission_id,
+                                )
+                                return False
 
                     latest_activity = self.get_latest_patient_activity_datetime(admission_id, cursor=cursor)
                     if latest_activity and event_dt < latest_activity.replace(second=0, microsecond=0):

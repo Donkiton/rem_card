@@ -1,7 +1,6 @@
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget)
 from PySide6.QtCore import Qt
-from rem_card.services.shift_service import ShiftService
 from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
 
 class Sector4(BaseSectorWidget):
@@ -92,7 +91,7 @@ class Sector4(BaseSectorWidget):
         self.lbl_age = QLabel("Возраст: -")
         self.lbl_age.setStyleSheet("background: transparent;")
         
-        self.lbl_days = QLabel("Сутки: -")
+        self.lbl_days = QLabel("Время в отделении: -")
         self.lbl_days.setStyleSheet("background: transparent;")
         
         self.lbl_diagnosis = QLabel("Диагноз: -")
@@ -124,15 +123,17 @@ class Sector4(BaseSectorWidget):
         age_str = patient.get_display_age(current_date) or "-"
         self.lbl_age.setText(f"Возраст: {age_str}")
         
-        # Расчет суток
         if patient.admission_datetime:
-            adm_shift_start, _ = ShiftService.get_day_period(patient.admission_datetime)
-            cur_shift_start, _ = ShiftService.get_day_period(current_date)
-            days = (cur_shift_start.date() - adm_shift_start.date()).days + 1
-            days = max(1, days)
-            self.lbl_days.setText(f"Сутки: {days}")
+            self.lbl_days.setText(f"Время в отделении: {self._format_department_time(patient.admission_datetime, current_date)}")
         else:
-            self.lbl_days.setText("Сутки: -")
+            self.lbl_days.setText("Время в отделении: -")
             
         diag = patient.diagnosis_text if patient.diagnosis_text else "-"
         self.lbl_diagnosis.setText(f"Диагноз: {diag}")
+
+    @staticmethod
+    def _format_department_time(admission_datetime, current_date) -> str:
+        elapsed_seconds = max(0, int((current_date - admission_datetime).total_seconds()))
+        total_minutes = (elapsed_seconds // 60 // 10) * 10
+        hours, minutes = divmod(total_minutes, 60)
+        return f"{hours}ч {minutes:02d}м"

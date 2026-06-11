@@ -4,7 +4,6 @@ from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget, QPushButton, QFrame)
 from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
-from rem_card.services.shift_service import ShiftService
 from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
 
 class VitalBadge(QFrame):
@@ -132,7 +131,7 @@ class Sector4b(BaseSectorWidget):
         self.lbl_age = QLabel("Возраст: -")
         self.lbl_age.setStyleSheet("font-size: 14px; background: transparent;")
         
-        self.lbl_days = QLabel("Сутки: -")
+        self.lbl_days = QLabel("Время в отделении: -")
         self.lbl_days.setStyleSheet("font-size: 14px; background: transparent;")
         
         self.lbl_diagnosis = QLabel("Диагноз: -")
@@ -256,20 +255,21 @@ class Sector4b(BaseSectorWidget):
         age_str = patient.get_display_age(current_date) or "-"
         self.lbl_age.setText(f"Возраст: {age_str}")
         if patient.admission_datetime:
-            # Нумерация суток должна идти по сменам 08:00-08:00, а не по полным 24 часам
-            # от времени поступления. Это гарантирует, что первая карта всегда "Сутки: 1".
-            adm_shift_start, _ = ShiftService.get_day_period(patient.admission_datetime)
-            cur_shift_start, _ = ShiftService.get_day_period(current_date)
-            days = (cur_shift_start.date() - adm_shift_start.date()).days + 1
-            days = max(1, days)
-            self.lbl_days.setText(f"Сутки: {days}")
+            self.lbl_days.setText(f"Время в отделении: {self._format_department_time(patient.admission_datetime, current_date)}")
         else:
-            self.lbl_days.setText("Сутки: -")
+            self.lbl_days.setText("Время в отделении: -")
         
         diag = patient.diagnosis_text if patient.diagnosis_text else "-"
         metrics = self.lbl_diagnosis.fontMetrics()
         elided_diag = metrics.elidedText(f"Диагноз: {diag}", Qt.ElideRight, 600)
         self.lbl_diagnosis.setText(elided_diag)
+
+    @staticmethod
+    def _format_department_time(admission_datetime, current_date) -> str:
+        elapsed_seconds = max(0, int((current_date - admission_datetime).total_seconds()))
+        total_minutes = (elapsed_seconds // 60 // 10) * 10
+        hours, minutes = divmod(total_minutes, 60)
+        return f"{hours}ч {minutes:02d}м"
 
 class Sector4v(BaseSectorWidget):
     """Нижняя часть объединенного блока (4в)"""
@@ -394,7 +394,7 @@ class Sector4v(BaseSectorWidget):
         self.btn_all_print.setStyleSheet(button_style)
         self.btn_all_print.clicked.connect(self.full_report_requested.emit)
 
-        self.btn_recovery_transfer = QPushButton(" Перевод")
+        self.btn_recovery_transfer = QPushButton(" Перевод в отделение")
         self.btn_recovery_transfer.setMinimumHeight(32)
         self.btn_recovery_transfer.setStyleSheet(button_style)
         self.btn_recovery_transfer.clicked.connect(self.recovery_transfer_requested.emit)
@@ -509,7 +509,7 @@ class Sector4v(BaseSectorWidget):
             button.setVisible(not enabled)
         self.btn_recovery_transfer.setVisible(enabled)
         self.btn_recovery_transfer.setEnabled(bool(enabled and can_transfer))
-        self.btn_recovery_cancel_transfer.setVisible(bool(enabled and can_cancel_transfer))
+        self.btn_recovery_cancel_transfer.setVisible(enabled)
         self.btn_recovery_cancel_transfer.setEnabled(bool(enabled and can_cancel_transfer))
 
     def update_latest_vitals(self, latest_values, settings=None):

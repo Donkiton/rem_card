@@ -16,7 +16,6 @@ from rem_card.ui.shared.recovery_bed_status_actions import (
     open_recovery_transfer_dialog,
 )
 from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
-from rem_card.data.dto.remcard_dto import PatientStatus
 import pathlib
 import datetime
 
@@ -394,14 +393,11 @@ class NurseBedsSelectionWidget(QWidget):
 
         card_exists = bool(runtime_snapshot.get("card_exists", False))
         yest_exists = bool(runtime_snapshot.get("yest_exists", False))
-        status_value = getattr(status_dto, "status", None)
         is_recovery = is_recovery_bed(getattr(patient, "bed_number", None))
-        is_transferred = status_value == PatientStatus.TRANSFERRED
-        has_outcome = bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
         row.sector_4v.set_recovery_mode(
             is_recovery,
-            can_transfer=not has_outcome,
-            can_cancel_transfer=is_transferred,
+            can_transfer=False,
+            can_cancel_transfer=False,
         )
         row.sector_4v.set_buttons_state(card_exists, yest_exists)
 

@@ -157,7 +157,7 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_all_print.setStyleSheet(button_style)
         self.btn_all_print.clicked.connect(self.full_report_requested.emit)
 
-        self.btn_recovery_transfer = QPushButton(" Перевод")
+        self.btn_recovery_transfer = QPushButton(" Перевод в отделение")
         self.btn_recovery_transfer.setMinimumHeight(32)
         self.btn_recovery_transfer.setStyleSheet(button_style)
         self.btn_recovery_transfer.clicked.connect(self.recovery_transfer_requested.emit)
@@ -269,7 +269,7 @@ class NurseSector4v(BaseSectorWidget):
             button.setVisible(not enabled)
         self.btn_recovery_transfer.setVisible(enabled)
         self.btn_recovery_transfer.setEnabled(bool(enabled and can_transfer))
-        self.btn_recovery_cancel_transfer.setVisible(bool(enabled and can_cancel_transfer))
+        self.btn_recovery_cancel_transfer.setVisible(enabled)
         self.btn_recovery_cancel_transfer.setEnabled(bool(enabled and can_cancel_transfer))
 
     def update_latest_vitals(self, latest_values, settings=None):
