@@ -229,6 +229,16 @@ class PatientBedManagementService:
 
         def operation(cursor):
             cursor.execute(
+                "SELECT admission_datetime FROM admissions WHERE id = ?",
+                (int(admission_id),),
+            )
+            old_admission = cursor.fetchone()
+            old_admission_dt = self._parse_dt(old_admission["admission_datetime"]) if old_admission else None
+            new_admission_dt_text = self._to_sql_dt(admission_data.get("admission_datetime"))
+            new_admission_dt = self._parse_dt(new_admission_dt_text)
+            bed_number = int(admission_data["bed_number"])
+
+            cursor.execute(
                 "UPDATE patients SET full_name = ?, birth_date = ? WHERE id = ?",
                 (full_name, birth_date, int(patient_id)),
             )
@@ -253,9 +263,9 @@ class PatientBedManagementService:
                   AND (? IS NULL OR COALESCE(revision, 0) = ?)
                 """,
                 (
-                    int(admission_data["bed_number"]),
+                    bed_number,
                     str(admission_data.get("history_number") or "").strip(),
-                    self._to_sql_dt(admission_data.get("admission_datetime")),
+                    new_admission_dt_text,
                     self._safe_int_or_none(admission_data.get("patient_age")),
                     self._safe_int_or_none(admission_data.get("patient_months")),
                     admission_data.get("patient_age_unit"),
@@ -275,6 +285,13 @@ class PatientBedManagementService:
                 from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE
 
                 raise DataConflictError(DATA_CONFLICT_MESSAGE)
+            self._sync_admission_datetime_dependents(
+                cursor,
+                int(admission_id),
+                old_admission_dt,
+                new_admission_dt,
+                bed_number=bed_number,
+            )
             return True
 
         return bool(self.db.run_write_operation(operation, source="patient_bed_update_admission"))
@@ -424,6 +441,226 @@ class PatientBedManagementService:
             """,
             (int(admission_id), PatientStatus.ACTIVE.value, start_text, "SYSTEM", start_text, start_text),
         )
+
+    def _sync_admission_datetime_dependents(
+        self,
+        cursor,
+        admission_id: int,
+        old_admission_dt: Optional[datetime],
+        new_admission_dt: Optional[datetime],
+        *,
+        bed_number: int,
+    ) -> None:
+        if new_admission_dt is None:
+            return
+
+        new_start = new_admission_dt.replace(second=0, microsecond=0)
+        old_start = old_admission_dt.replace(second=0, microsecond=0) if old_admission_dt else None
+        if old_start != new_start:
+            self._relocate_initial_active_status(cursor, admission_id, old_start, new_start)
+            self._relocate_empty_admission_vital(cursor, admission_id, old_start, new_start)
+
+        if is_recovery_bed_number(bed_number) or self._has_any_card_record(cursor, admission_id):
+            self._ensure_status_for_existing_card(cursor, admission_id, new_start)
+
+    def _relocate_initial_active_status(
+        self,
+        cursor,
+        admission_id: int,
+        old_start: Optional[datetime],
+        new_start: datetime,
+    ) -> bool:
+        if not self._table_exists(cursor, "patient_status_events"):
+            return False
+
+        cursor.execute(
+            """
+            SELECT id, status, start_time, end_time, created_at
+            FROM patient_status_events
+            WHERE admission_id = ?
+            ORDER BY datetime(start_time) ASC, id ASC
+            """,
+            (int(admission_id),),
+        )
+        events = cursor.fetchall()
+        if not events:
+            return False
+
+        first = events[0]
+        if first["status"] != PatientStatus.ACTIVE.value:
+            return False
+
+        first_start = self._parse_dt(first["start_time"])
+        if first_start is None:
+            return False
+        first_start = first_start.replace(second=0, microsecond=0)
+
+        end_dt = self._parse_dt(first["end_time"])
+        if end_dt is not None and new_start >= end_dt.replace(second=0, microsecond=0):
+            return False
+
+        starts_at_old_admission = old_start is not None and first_start == old_start
+        starts_after_new_admission = first_start > new_start and not self._status_covers_time(
+            cursor,
+            admission_id,
+            new_start,
+        )
+        if not starts_at_old_admission and not starts_after_new_admission:
+            return False
+
+        old_text = first_start.isoformat()
+        new_text = new_start.isoformat()
+        now_text = self._now_text()
+        cursor.execute(
+            """
+            UPDATE patient_status_events
+            SET start_time = ?,
+                created_at = CASE
+                    WHEN created_at IS NULL OR datetime(created_at) = datetime(?) THEN ?
+                    ELSE created_at
+                END,
+                updated_at = ?,
+                last_modified_by = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (new_text, old_text, new_text, now_text, "SYSTEM", int(first["id"])),
+        )
+        return cursor.rowcount == 1
+
+    def _ensure_status_for_existing_card(self, cursor, admission_id: int, admission_start: datetime) -> None:
+        if not self._table_exists(cursor, "patient_status_events"):
+            return
+        if self._status_covers_time(cursor, admission_id, admission_start):
+            return
+
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM patient_status_events
+            WHERE admission_id = ?
+            """,
+            (int(admission_id),),
+        )
+        row = cursor.fetchone()
+        if row and int(row["cnt"] or 0) > 0:
+            return
+        self._insert_initial_active_status(cursor, admission_id, admission_start)
+
+    def _relocate_empty_admission_vital(
+        self,
+        cursor,
+        admission_id: int,
+        old_start: Optional[datetime],
+        new_start: datetime,
+    ) -> None:
+        if old_start is None or old_start == new_start or not self._table_exists(cursor, "vitals"):
+            return
+
+        columns = self._table_columns(cursor, "vitals")
+        value_columns = [name for name in ("sys", "dia", "pulse", "temp", "spo2", "rr", "cvp", "gcs") if name in columns]
+        if not value_columns:
+            return
+
+        empty_condition = " AND ".join(f"{name} IS NULL" for name in value_columns)
+        old_minute = old_start.strftime("%Y-%m-%d %H:%M")
+        new_minute = new_start.strftime("%Y-%m-%d %H:%M")
+        cursor.execute(
+            f"""
+            SELECT id
+            FROM vitals
+            WHERE admission_id = ?
+              AND strftime('%Y-%m-%d %H:%M', datetime) = ?
+              AND {empty_condition}
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(admission_id), old_minute),
+        )
+        old_vital = cursor.fetchone()
+        if not old_vital:
+            return
+
+        cursor.execute(
+            """
+            SELECT id
+            FROM vitals
+            WHERE admission_id = ?
+              AND strftime('%Y-%m-%d %H:%M', datetime) = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(admission_id), new_minute),
+        )
+        existing_new = cursor.fetchone()
+        if existing_new and int(existing_new["id"]) != int(old_vital["id"]):
+            cursor.execute("DELETE FROM vitals WHERE id = ?", (int(old_vital["id"]),))
+            return
+
+        cursor.execute(
+            """
+            UPDATE vitals
+            SET datetime = ?,
+                updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now'),
+                last_modified_by = COALESCE(last_modified_by, ?),
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (new_start.isoformat(), "SYSTEM", int(old_vital["id"])),
+        )
+
+    def _has_any_card_record(self, cursor, admission_id: int) -> bool:
+        checks = (
+            ("vitals", "admission_id"),
+            ("fluids", "admission_id"),
+            ("orders", "admission_id"),
+            ("lab_orders", "admission_id"),
+            ("oral_intake_events", "admission_id"),
+        )
+        for table_name, column_name in checks:
+            if not self._table_exists(cursor, table_name):
+                continue
+            if column_name not in self._table_columns(cursor, table_name):
+                continue
+            cursor.execute(
+                f'SELECT 1 FROM "{table_name}" WHERE "{column_name}" = ? LIMIT 1',
+                (int(admission_id),),
+            )
+            if cursor.fetchone():
+                return True
+        return False
+
+    def _status_covers_time(self, cursor, admission_id: int, timestamp: datetime) -> bool:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM patient_status_events
+            WHERE admission_id = ?
+              AND datetime(start_time) <= datetime(?)
+              AND (end_time IS NULL OR datetime(end_time) >= datetime(?))
+            LIMIT 1
+            """,
+            (int(admission_id), timestamp.isoformat(), timestamp.isoformat()),
+        )
+        return bool(cursor.fetchone())
+
+    @staticmethod
+    def _table_exists(cursor, table_name: str) -> bool:
+        cursor.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1
+            """,
+            (table_name,),
+        )
+        return bool(cursor.fetchone())
+
+    @staticmethod
+    def _table_columns(cursor, table_name: str) -> set[str]:
+        cursor.execute(f'PRAGMA table_info("{table_name}")')
+        return {str(row["name"] if hasattr(row, "keys") else row[1]) for row in cursor.fetchall()}
 
     def _ensure_recovery_release_card(self, cursor, admission_id: int, admission_row) -> None:
         active_start = self._first_active_status_start(cursor, admission_id)

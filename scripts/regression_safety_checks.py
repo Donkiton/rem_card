@@ -3617,20 +3617,35 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
     from PySide6.QtWidgets import QApplication
 
     from rem_card.app.paths import get_icon_dir
-    from rem_card.ui.patient_bed_management.side_patient_card import SidePatientCard
+    from rem_card.ui.patient_bed_management import side_patient_card as side_module
+    from rem_card.ui.patient_bed_management.side_patient_card import PATIENT_PHOTO_SIZE, SidePatientCard
 
     _ = temp_root
     app = QApplication.instance() or QApplication([])
-    card = SidePatientCard()
     checks = (
-        ("Мужской", "man_in_oper_extr.png"),
-        ("Женский", "woman_in_oper_extr.png"),
+        ("Мужской", "man_in_oper_extr.png", side_module.REMCARD_MALE_PATIENT_ICON_KEY),
+        ("Женский", "woman_in_oper_extr.png", side_module.REMCARD_FEMALE_PATIENT_ICON_KEY),
     )
+    asset_by_key = {}
+    for _gender, asset_name, icon_key in checks:
+        asset_path = os.path.join(get_icon_dir(), asset_name)
+        if not os.path.isfile(asset_path):
+            return False, f"side patient card asset is missing: {asset_name}"
+        asset_by_key[icon_key] = asset_path
+
+    requested_keys = []
+    original_loader = side_module.load_remcard_icon_pixmap
+
+    def fake_load_remcard_icon_pixmap(icon_key, *, fallback_file=""):
+        _ = fallback_file
+        requested_keys.append(icon_key)
+        return QPixmap(asset_by_key.get(icon_key, ""))
+
+    side_module.load_remcard_icon_pixmap = fake_load_remcard_icon_pixmap
+    card = SidePatientCard()
     try:
-        for gender, asset_name in checks:
-            asset_path = os.path.join(get_icon_dir(), asset_name)
-            if not os.path.isfile(asset_path):
-                return False, f"side patient card asset is missing: {asset_name}"
+        for gender, asset_name, icon_key in checks:
+            asset_path = asset_by_key[icon_key]
             patient = SimpleNamespace(full_name=f"Тест {gender}", birth_date=datetime(2022, 1, 1).date())
             admission = SimpleNamespace(
                 history_number="REG-SIDE-001",
@@ -3643,12 +3658,16 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
             )
             card.update_info(1, patient, admission)
             app.processEvents()
+            if requested_keys[-1:] != [icon_key]:
+                return False, f"side patient card requested wrong photo key for {gender}: {requested_keys[-1:]}"
             actual = card.photo_label.pixmap()
             if actual is None or actual.isNull():
                 return False, f"side patient card did not render photo for {gender}"
-            expected = QPixmap(asset_path).scaled(312, 312, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            expected = card._circular_patient_photo(QPixmap(asset_path))
             if actual.size() != expected.size():
                 return False, f"side patient card photo size mismatch for {gender}: {actual.size()} != {expected.size()}"
+            if actual.size().width() != PATIENT_PHOTO_SIZE or actual.size().height() != PATIENT_PHOTO_SIZE:
+                return False, f"side patient card photo frame size changed for {gender}: {actual.size()}"
             actual_image = actual.toImage()
             expected_image = expected.toImage()
             for x, y in (
@@ -3668,6 +3687,7 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
                     return False, f"side patient card photo pixels do not match gender asset for {gender}"
         return True, "ok"
     finally:
+        side_module.load_remcard_icon_pixmap = original_loader
         card.close()
         app.processEvents()
 
@@ -6629,7 +6649,13 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
 
     def seed(conn):
         conn.executemany(
-            "INSERT INTO admissions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO admissions (
+                id, patient_id, admission_datetime, transfer_datetime, death_datetime,
+                outcome, patient_age, patient_age_unit, patient_gender,
+                source_department, diagnosis_code, diagnosis_text, bed_number
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             [
                 (1, 101, "2026-04-01 08:00:00", "2026-04-05 10:00:00", None, "переведен", 70, "л", "М", "СМП", "I21", "Инфаркт", 1),
                 (2, 102, "2026-04-02 11:00:00", None, "2026-04-03 05:00:00", "умер", 6, "месяцев", "Ж", "Приемное", "J96", "ДН", 2),
@@ -6934,6 +6960,156 @@ def _check_vitals_boundary_minutes(temp_root: str) -> tuple[bool, str]:
         return True, "ok"
     finally:
         manager.close()
+
+
+def _check_future_admission_date_edit_repairs_status_and_card(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime, timedelta
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.patient_dao import PatientDAO
+    from rem_card.data.dao.patient_status_dao import PatientStatusDAO
+    from rem_card.data.dto.remcard_dto import PatientStatus
+    from rem_card.services.patient_bed_management.service import PatientBedManagementService
+    from rem_card.services.patient_status_service import PatientStatusService
+
+    saved_local_first = os.environ.get("REMCARD_LOCAL_FIRST_SYNC")
+    os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
+    db_path = os.path.join(temp_root, "future_admission_date_edit.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        today_admission = datetime(2026, 5, 6, 9, 30)
+        future_admission = today_admission + timedelta(days=1)
+        shift_start = datetime(2026, 5, 6, 8, 0)
+
+        with manager.remcard_transaction(source="regression_seed_future_admission_beds") as cursor:
+            cursor.execute("INSERT INTO beds(bed_number, status, current_admission_id) VALUES (1, 'FREE', NULL)")
+
+        bed_service = PatientBedManagementService(manager)
+        patient_dao = PatientDAO(manager)
+        status_service = PatientStatusService(PatientStatusDAO(manager))
+
+        admission_id = bed_service.create_patient_and_admission(
+            {"full_name": "Future Date Patient"},
+            {
+                "bed_number": 1,
+                "history_number": "REG-FUTURE-DATE",
+                "admission_datetime": future_admission,
+                "patient_gender": "Мужской",
+            },
+        )
+
+        status_service.ensure_initial_status(admission_id, shift_start, future_admission, user_id="REGRESSION")
+        status_count = manager.fetch_one_remcard(
+            "SELECT COUNT(*) AS cnt FROM patient_status_events WHERE admission_id = ?",
+            (admission_id,),
+        )
+        if int(status_count["cnt"] or 0) != 0:
+            return False, "future admission created an initial status for the current shift"
+
+        with manager.remcard_transaction(source="regression_seed_old_future_status") as cursor:
+            cursor.execute(
+                """
+                INSERT INTO patient_status_events(
+                    admission_id, status, start_time, created_by, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 'REGRESSION', ?, ?)
+                """,
+                (
+                    admission_id,
+                    PatientStatus.ACTIVE.value,
+                    future_admission.isoformat(),
+                    future_admission.isoformat(),
+                    future_admission.isoformat(),
+                ),
+            )
+            cursor.execute(
+                "INSERT INTO vitals(admission_id, datetime, last_modified_by, updated_at) VALUES (?, ?, 'REGRESSION', ?)",
+                (admission_id, future_admission.isoformat(), future_admission.isoformat()),
+            )
+
+        patient, admission = bed_service.get_patient_with_current_admission(1)
+        if not patient or not admission:
+            return False, "patient was not visible on the bed before date edit"
+
+        bed_service.update_patient_and_admission(
+            patient.id,
+            admission_id,
+            {"full_name": patient.full_name},
+            {
+                "bed_number": 1,
+                "history_number": admission.history_number,
+                "admission_datetime": today_admission,
+                "patient_gender": admission.patient_gender,
+            },
+        )
+
+        active = manager.fetch_one_remcard(
+            """
+            SELECT status, start_time, end_time
+            FROM patient_status_events
+            WHERE admission_id = ?
+            ORDER BY datetime(start_time), id
+            LIMIT 1
+            """,
+            (admission_id,),
+        )
+        if not active or active["status"] != PatientStatus.ACTIVE.value:
+            return False, f"active status was not present after date edit: {dict(active) if active else None}"
+        if datetime.fromisoformat(str(active["start_time"])) != today_admission:
+            return False, f"active status was not moved to the edited admission time: {active['start_time']}"
+
+        vital = manager.fetch_one_remcard(
+            "SELECT datetime FROM vitals WHERE admission_id = ? ORDER BY id LIMIT 1",
+            (admission_id,),
+        )
+        if not vital or datetime.fromisoformat(str(vital["datetime"])) != today_admission:
+            return False, f"empty admission vital was not moved to edited admission time: {dict(vital) if vital else None}"
+
+        archived = patient_dao.get_archived_patients()
+        if admission_id not in {int(item.id) for item in archived}:
+            return False, "patient was not visible through archive query after date edit"
+
+        transfer_time = today_admission + timedelta(hours=2)
+        if not status_service.change_status_with_outcome_details(
+            admission_id,
+            PatientStatus.TRANSFERRED,
+            transfer_time,
+            user_id="REGRESSION",
+            admission_details={"transfer_department": "Отделение терапии"},
+        ):
+            return False, "transfer was rejected after repairing future admission date"
+
+        outcome = manager.fetch_one_remcard(
+            "SELECT outcome, transfer_datetime FROM admissions WHERE id = ?",
+            (admission_id,),
+        )
+        if not outcome or outcome["outcome"] != "переведен":
+            return False, f"transfer outcome was not saved: {dict(outcome) if outcome else None}"
+        if datetime.fromisoformat(str(outcome["transfer_datetime"])) != transfer_time:
+            return False, f"transfer time was not saved exactly: {outcome['transfer_datetime']}"
+
+        first_status = manager.fetch_one_remcard(
+            """
+            SELECT start_time, end_time
+            FROM patient_status_events
+            WHERE admission_id = ? AND status = ?
+            ORDER BY id
+            LIMIT 1
+            """,
+            (admission_id, PatientStatus.ACTIVE.value),
+        )
+        if datetime.fromisoformat(str(first_status["start_time"])) != today_admission:
+            return False, f"active status start shifted unexpectedly after transfer: {first_status['start_time']}"
+        if datetime.fromisoformat(str(first_status["end_time"])) != transfer_time:
+            return False, f"active status end did not match transfer time: {first_status['end_time']}"
+
+        return True, "ok"
+    finally:
+        manager.close()
+        if saved_local_first is None:
+            os.environ.pop("REMCARD_LOCAL_FIRST_SYNC", None)
+        else:
+            os.environ["REMCARD_LOCAL_FIRST_SYNC"] = saved_local_first
 
 
 def _check_orders_force_refresh_accepts_unchanged_version(temp_root: str) -> tuple[bool, str]:
@@ -21242,6 +21418,7 @@ def main(argv: list[str] | None = None):
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
         ("graph_outcome_labels_hide_nan", _check_graph_outcome_labels_hide_nan),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
+        ("future_admission_date_edit_repairs_status_and_card", _check_future_admission_date_edit_repairs_status_and_card),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("orders_tab_targeted_diagnostics_performance", _check_orders_tab_targeted_diagnostics_performance),
         ("orders_reload_storm_coalesces_and_cancels", _check_orders_reload_storm_coalesces_and_cancels),

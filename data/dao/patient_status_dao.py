@@ -1,6 +1,6 @@
 import json
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from ..dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from rem_card.app.logger import logger
 from rem_card.services.concurrency import DataConflictError, DATA_CONFLICT_MESSAGE, assert_revision_matches
@@ -762,14 +762,23 @@ class PatientStatusDAO:
                     if current_start:
                         current_start_exact = current_start.replace(microsecond=0)
                         if event_dt < current_start_exact:
-                            if event_dt.replace(second=0, microsecond=0) == current_start_exact.replace(second=0, microsecond=0):
+                            repaired_start = self._repair_future_initial_status_before_outcome(
+                                cursor,
+                                admission_id,
+                                current_active,
+                                event_dt,
+                                user_id,
+                            )
+                            if repaired_start is not None:
+                                current_start_exact = repaired_start.replace(microsecond=0)
+                            if event_dt < current_start_exact and event_dt.replace(second=0, microsecond=0) == current_start_exact.replace(second=0, microsecond=0):
                                 event_dt = current_start_exact
                                 event_time_str = event_dt.isoformat()
-                            else:
+                            elif event_dt < current_start_exact:
                                 logger.warning(
                                     "[StatusDAO] Outcome time %s is earlier than current status start %s for admission %s",
                                     event_dt,
-                                    current_start,
+                                    current_start_exact,
                                     admission_id,
                                 )
                                 return False
@@ -914,6 +923,39 @@ class PatientStatusDAO:
                 exc_info=True,
             )
             return False
+
+    def _repair_future_initial_status_before_outcome(
+        self,
+        cursor,
+        admission_id: int,
+        current_active,
+        event_dt: datetime,
+        user_id: Optional[str],
+    ) -> Optional[datetime]:
+        if not current_active or current_active["status"] != PatientStatus.ACTIVE.value:
+            return None
+
+        cursor.execute(
+            "SELECT admission_datetime FROM admissions WHERE id = ?",
+            (admission_id,),
+        )
+        row = cursor.fetchone()
+        admission_dt = self._parse_sqlite_dt(row["admission_datetime"]) if row and row["admission_datetime"] else None
+        if admission_dt is None:
+            return None
+
+        admission_start = admission_dt.replace(second=0, microsecond=0)
+        if admission_start > event_dt.replace(second=0, microsecond=0):
+            return None
+
+        if self._repair_future_initial_active_status(
+            cursor,
+            admission_id,
+            admission_start,
+            user_id or "SYSTEM",
+        ):
+            return admission_start
+        return None
 
     def rollback_last_status(
         self,
@@ -1084,6 +1126,16 @@ class PatientStatusDAO:
                 # Очищаем от микросекунд для сравнения в SQLite
                 min_allowed_str = min_allowed.replace(microsecond=0).isoformat()
                 shift_start_str = shift_start.replace(microsecond=0).isoformat()
+                shift_end = shift_start.replace(microsecond=0) + timedelta(days=1)
+                if admission_datetime and min_allowed.replace(microsecond=0) >= shift_end:
+                    logger.info(
+                        "[StatusDAO] Skip initial status for admission %s: admission time %s is outside current shift %s - %s",
+                        admission_id,
+                        min_allowed_str,
+                        shift_start_str,
+                        shift_end.isoformat(),
+                    )
+                    return
 
                 if total_cnt == 0:
                     # САМАЯ ПЕРВАЯ ЗАПИСЬ СТАТУСА для пациента в системе
@@ -1131,11 +1183,85 @@ class PatientStatusDAO:
                 else:
                     # Событий ДО начала смены нет. Это значит, что все существующие события
                     # начинаются ПОЗЖЕ shift_start (например, пациент поступил сегодня в 10:40).
-                    # В этом случае НИКАКИХ мостиков на 08:00 строить нельзя.
-                    pass
+                    # В этом случае НИКАКИХ мостиков на 08:00 строить нельзя. Но если первый
+                    # ACTIVE начинается позже уже исправленного времени поступления, это след
+                    # неудачной попытки создать карту при ошибочной будущей дате поступления.
+                    self._repair_future_initial_active_status(
+                        cursor,
+                        admission_id,
+                        min_allowed.replace(second=0, microsecond=0),
+                        user_id,
+                    )
 
         except Exception as e:
             logger.error(f"[StatusDAO] Error ensuring initial status for {admission_id}: {e}")
+
+    def _repair_future_initial_active_status(
+        self,
+        cursor,
+        admission_id: int,
+        expected_start: datetime,
+        user_id: str = "SYSTEM",
+    ) -> bool:
+        cursor.execute(
+            """
+            SELECT id, status, start_time, end_time, created_at
+            FROM patient_status_events
+            WHERE admission_id = ?
+            ORDER BY datetime(start_time) ASC, id ASC
+            LIMIT 1
+            """,
+            (admission_id,),
+        )
+        first = cursor.fetchone()
+        if not first or first["status"] != PatientStatus.ACTIVE.value:
+            return False
+
+        current_start = self._parse_sqlite_dt(first["start_time"])
+        if current_start is None:
+            return False
+        current_start = current_start.replace(second=0, microsecond=0)
+        if current_start <= expected_start:
+            return False
+
+        current_end = self._parse_sqlite_dt(first["end_time"])
+        if current_end is not None and expected_start >= current_end.replace(second=0, microsecond=0):
+            return False
+
+        expected_start_str = expected_start.isoformat()
+        current_start_str = current_start.isoformat()
+        now_str = datetime.now().replace(microsecond=0).isoformat()
+        cursor.execute(
+            """
+            UPDATE patient_status_events
+            SET start_time = ?,
+                created_at = CASE
+                    WHEN created_at IS NULL OR datetime(created_at) = datetime(?) THEN ?
+                    ELSE created_at
+                END,
+                updated_at = ?,
+                last_modified_by = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (
+                expected_start_str,
+                current_start_str,
+                expected_start_str,
+                now_str,
+                user_id or "SYSTEM",
+                int(first["id"]),
+            ),
+        )
+        if cursor.rowcount == 1:
+            logger.info(
+                "[StatusDAO] Repaired future initial ACTIVE for admission %s: %s -> %s",
+                admission_id,
+                current_start_str,
+                expected_start_str,
+            )
+            return True
+        return False
 
     def update_event_bounds(
         self,
