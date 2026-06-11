@@ -10,6 +10,10 @@ from xml.sax.saxutils import escape as xml_escape
 
 from rem_card.ui.analytics.chart_renderer import configure_chart_style
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
+from rem_card.services.analytics.recovery_summary import (
+    build_recovery_bed_summary,
+    render_recovery_summary_graphs_html,
+)
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
     BG_CARD,
@@ -50,9 +54,16 @@ def build_graphs_html(
     conn = manager.get_connection()
     params = (start_date_str, end_date_str)
     img_paths: list[str] = []
+    recovery_summary = build_recovery_bed_summary(conn, start_date_str, end_date_str)
+    recovery_summary_html = render_recovery_summary_graphs_html(
+        recovery_summary,
+        include_recovery_beds=include_recovery_beds,
+        chart_colors=chart_colors,
+    )
     html_content = (
         "<h2>Графический отчет ОАР №3</h2>"
         f"<p>Период: {start_date_str.split(' ')[0]} - {end_date_str.split(' ')[0]}</p>"
+        f"{recovery_summary_html}"
     )
 
     try:

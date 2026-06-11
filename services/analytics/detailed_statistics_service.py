@@ -9,6 +9,10 @@ from typing import Iterable
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
 from rem_card.services.analytics.graphs_service import _thread_local_manager
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
+from rem_card.services.analytics.recovery_summary import (
+    build_recovery_bed_summary,
+    render_recovery_summary_table,
+)
 from rem_card.ui.styles.theme import (
     BG_CARD,
     BG_LIGHT,
@@ -1363,6 +1367,19 @@ class DetailedStatisticsReportBuilder:
             "load_coefficient": indexes["load_coefficient"],
         }
 
+    def _build_recovery_summary_html(self) -> str:
+        manager, cleanup = _thread_local_manager(self.db_manager)
+        conn = manager.get_connection()
+        try:
+            summary = build_recovery_bed_summary(conn, self.start_date_str, self.end_date_str)
+            return render_recovery_summary_table(
+                summary,
+                include_recovery_beds=self.include_recovery_beds,
+            )
+        finally:
+            if cleanup:
+                cleanup()
+
     def _section_rows(self, section_key: str, s: dict):
         total_n = s["N"]
         deaths = s["deaths"]
@@ -1633,6 +1650,7 @@ class DetailedStatisticsReportBuilder:
         try:
             stats = self._calculate_statistics()
 
+            recovery_summary_html = self._build_recovery_summary_html()
             html_body = self._render_sections_html(selected, stats)
             generated_at = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
             period = f"{self._start_dt.strftime('%d.%m.%Y')} - {self._end_dt.strftime('%d.%m.%Y')}"
@@ -1695,12 +1713,18 @@ class DetailedStatisticsReportBuilder:
                         color: {TEXT_SECONDARY};
                         font-size: 11px;
                     }}
+                    .recovery-note {{
+                        margin: 4px 0 10px 0;
+                        color: {TEXT_SECONDARY};
+                        font-size: 12px;
+                    }}
                 </style>
             </head>
             <body>
                 <div class="page">
                     <h1>Статистический отчет ОАР №3</h1>
                     <p class="period">Период: {period}</p>
+                    {recovery_summary_html}
                     {html_body}
                     <p class="footnote">Сформировано автоматически: {generated_at}</p>
                 </div>
