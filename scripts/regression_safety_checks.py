@@ -18607,6 +18607,309 @@ def _check_settings_release_snapshot_preserves_runtime_template_edits(temp_root:
     return True, "ok"
 
 
+def _check_settings_release_snapshot_preserves_all_user_settings(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.paths import get_icon_dir
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_release import apply_settings_release_snapshot, export_settings_release_snapshot
+    from rem_card.services.settings.settings_service import (
+        BACKGROUND_SETTINGS_KEY,
+        DISPLAY_SETTINGS_KEY,
+        EMERGENCY_PASSWORD_CATALOG_KEY,
+        EMERGENCY_PASSWORD_KEY,
+        LAB_ANALYSIS_KEY,
+        OPERBLOCK_ANESTHESIA_TYPES_APP_KEY,
+        OPERBLOCK_GROUP_ROUTES_APP_KEY,
+        OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
+        OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY,
+        OPERBLOCK_QUICK_ORDERS_APP_KEY,
+        OPERBLOCK_SETTINGS_KEY,
+        OPERBLOCK_SETTINGS_SCOPE,
+        OPERBLOCK_TEAM_APP_KEY,
+        PRINT_SETTINGS_KEY,
+        STYLE_SETTINGS_KEY,
+        SettingsService,
+    )
+    from rem_card.ui.shared import background_settings as bg
+
+    marker = f"all_user_settings_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+    old_time = "2000-01-01 00:00:00"
+    source_service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "SourceBaza")))
+    target_service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "TargetBaza")))
+    source_service.ensure_ready()
+    target_service.ensure_ready()
+
+    def mark_old_row(service: SettingsService, table: str, key_column: str, key: str) -> None:
+        with service.db.transaction(f"regression_old_{table}") as cursor:
+            cursor.execute(
+                f"UPDATE {table} SET source = 'legacy_json', updated_at = ? WHERE {key_column} = ?",
+                (old_time, key),
+            )
+            if cursor.rowcount != 1:
+                raise AssertionError(f"строка {table}.{key_column}={key} не найдена")
+
+    def mark_old_app(service: SettingsService, scope: str, key: str) -> None:
+        with service.db.transaction(f"regression_old_app_{key}") as cursor:
+            cursor.execute(
+                "UPDATE app_settings SET updated_at = ? WHERE scope = ? AND key = ?",
+                (old_time, scope, key),
+            )
+            if cursor.rowcount != 1:
+                raise AssertionError(f"app_setting {scope}:{key} не найден")
+
+    def row_by_key(service: SettingsService, table: str, key_column: str, key: str) -> sqlite3.Row | None:
+        with service.db.read_connection() as conn:
+            return conn.execute(f"SELECT * FROM {table} WHERE {key_column} = ?", (key,)).fetchone()
+
+    def json_column(row: sqlite3.Row | None, column: str) -> Any:
+        if not row or not row[column]:
+            return {}
+        decoded = json.loads(row[column])
+        return decoded
+
+    def set_app_pair(scope: str, key: str, catalog_key: str, release_value: Any, user_value: Any) -> None:
+        source_service.set_app_setting(
+            scope,
+            key,
+            release_value,
+            catalog_key=catalog_key,
+            entity_type=key,
+            operation="release_probe",
+            changed_by_role="system",
+        )
+        target_service.set_app_setting(
+            scope,
+            key,
+            user_value,
+            catalog_key=catalog_key,
+            entity_type=key,
+            operation="user_probe",
+            changed_by_role="doctor",
+        )
+        mark_old_app(target_service, scope, key)
+
+    def app_value(scope: str, key: str) -> Any:
+        target_service.invalidate_cache()
+        return target_service.get_app_setting(scope, key, default=None)
+
+    group_key = f"group_{marker}"
+    form_key = f"form_{marker}"
+    route_key = f"route_{marker}"
+    solvent_key = f"solvent_{marker}"
+    drug_key = f"drug_{marker}"
+    template_key = f"template_{marker}"
+    new_release_group_key = f"group_new_{marker}"
+    stale_release_group_key = f"group_stale_release_{marker}"
+
+    prescription_pairs = (
+        ("groups", "drug_groups", "code", group_key, {"name": "Релизная группа"}, {"name": "Пользовательская группа"}),
+        ("forms", "dosage_forms", "code", form_key, {"name": "Релизная форма"}, {"name": "Пользовательская форма"}),
+        ("admin_types", "administration_routes", "code", route_key, {"name": "Релизный путь"}, {"name": "Пользовательский путь"}),
+        ("diluents", "solvents", "code", solvent_key, {"display": "Релизный раствор"}, {"display": "Пользовательский раствор"}),
+    )
+    for dict_name, table, key_column, key, release_payload, user_payload in prescription_pairs:
+        source_service.save_prescription_item(dict_name, key, release_payload)
+        target_service.save_prescription_item(dict_name, key, user_payload)
+        mark_old_row(target_service, table, key_column, key)
+    source_service.save_prescription_item("groups", new_release_group_key, {"name": "Новая релизная группа"})
+    source_service.save_prescription_item("groups", stale_release_group_key, {"name": "Обновленная release-строка"})
+    with target_service.db.transaction("regression_stale_release_like_manual_row") as cursor:
+        cursor.execute(
+            """
+            INSERT INTO drug_groups (
+                code, name, display_name, sort_order, enabled, revision,
+                payload_json, source, created_at, updated_at
+            )
+            VALUES (?, 'Старая release-строка', 'Старая release-строка', 0, 1, 1, ?, 'manual', ?, ?)
+            """,
+            (
+                stale_release_group_key,
+                json.dumps({"name": "Старая release-строка"}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                old_time,
+                old_time,
+            ),
+        )
+
+    source_service.save_prescription_item(
+        "drugs",
+        drug_key,
+        {
+            "name": "Релизный препарат",
+            "group": group_key,
+            "form_key": form_key,
+            "route_code": route_key,
+            "unit": "мг",
+            "default_dose": "1",
+        },
+    )
+    target_service.save_prescription_item(
+        "drugs",
+        drug_key,
+        {
+            "name": "Пользовательский препарат",
+            "group": group_key,
+            "form_key": form_key,
+            "route_code": route_key,
+            "unit": "мг",
+            "default_dose": "9",
+        },
+    )
+    mark_old_row(target_service, "drugs", "code", drug_key)
+
+    source_service.save_prescription_item(
+        "templates",
+        template_key,
+        {"name": "Релизный шаблон", "template_type": "simple", "drugs": [{"drug": drug_key, "dose": 1}]},
+    )
+    target_service.save_prescription_item(
+        "templates",
+        template_key,
+        {"name": "Пользовательский шаблон", "template_type": "simple", "drugs": [{"drug": drug_key, "dose": 9}]},
+    )
+    mark_old_row(target_service, "order_templates", "template_key", template_key)
+
+    doctor_name = f"Доктор {marker}"
+    source_service.save_doctor_records([{"full_name": doctor_name, "position": "Релизная должность"}])
+    target_service.save_doctor_records([{"full_name": doctor_name, "position": "Пользовательская должность"}])
+    mark_old_row(target_service, "doctors", "full_name", doctor_name)
+
+    diet_name = f"Диета {marker}"
+    source_diet_id = source_service.create_diet_template(diet_name, "Релизный рацион")
+    target_diet_id = target_service.create_diet_template(diet_name, "Пользовательский рацион")
+    source_diet_key = row_by_key(source_service, "diet_templates", "id", str(source_diet_id))["template_key"]
+    target_diet_key = row_by_key(target_service, "diet_templates", "id", str(target_diet_id))["template_key"]
+    if source_diet_key != target_diet_key:
+        return False, f"ключи шаблона питания не совпали: {source_diet_key} != {target_diet_key}"
+    mark_old_row(target_service, "diet_templates", "template_key", str(target_diet_key))
+
+    analysis_code = f"analysis_{marker}"
+    source_service.create_lab_template(name=f"Анализ {marker}", code=analysis_code, comment="Релизный комментарий")
+    target_service.create_lab_template(name=f"Анализ {marker}", code=analysis_code, comment="Пользовательский комментарий")
+    mark_old_row(target_service, "lab_analysis_templates", "analysis_code", analysis_code)
+
+    icon_dir = get_icon_dir()
+    release_icon_path = os.path.join(icon_dir, "gas_izm.png")
+    user_icon_path = os.path.join(icon_dir, "bolus.png")
+    if not os.path.isfile(release_icon_path) or not os.path.isfile(user_icon_path):
+        return False, "не найдены тестовые иконки gas_izm.png/bolus.png"
+    icon_key = f"drug:manual:probe:{marker}"
+    source_service.save_operblock_icon(
+        icon_key=icon_key,
+        category="drug",
+        target_key=f"manual:probe:{marker}",
+        name="Релизная иконка",
+        default_file="gas_izm.png",
+        image_path=release_icon_path,
+        sort_order=9100,
+        changed_by_role="system",
+    )
+    target_service.save_operblock_icon(
+        icon_key=icon_key,
+        category="drug",
+        target_key=f"manual:probe:{marker}",
+        name="Пользовательская иконка",
+        default_file="bolus.png",
+        image_path=user_icon_path,
+        sort_order=9100,
+        changed_by_role="doctor",
+    )
+    mark_old_row(target_service, "operblock_icons", "icon_key", icon_key)
+
+    background_key = f"background_{marker}"
+    release_background = bg.normalize_background_settings_payload(
+        {"backgrounds": [{"id": background_key, "name": "Релизный фон", "file": "", "start": "01-01", "end": "12-31"}]}
+    )
+    user_background = bg.normalize_background_settings_payload(
+        {"backgrounds": [{"id": background_key, "name": "Пользовательский фон", "file": "", "start": "02-01", "end": "02-02"}]}
+    )
+    set_app_pair("shared", "background_settings", BACKGROUND_SETTINGS_KEY, release_background, user_background)
+    with target_service.db.transaction("regression_old_background_row") as cursor:
+        cursor.execute("UPDATE ui_backgrounds SET updated_at = ? WHERE background_key = ?", (old_time, background_key))
+
+    app_cases = (
+        ("shared", "display_settings", DISPLAY_SETTINGS_KEY, {"value": "release"}, {"value": "user_display"}),
+        ("shared", "lab_orders_columns", DISPLAY_SETTINGS_KEY, {"value": "release"}, {"value": "user_columns"}),
+        ("shared", "style_settings", STYLE_SETTINGS_KEY, {"value": "release"}, {"value": "user_style"}),
+        ("shared", "lab_materials", LAB_ANALYSIS_KEY, [{"code": f"mat_{marker}", "label": "Релизный материал"}], [{"code": f"mat_{marker}", "label": "Пользовательский материал"}]),
+        ("doctor", "print_config", PRINT_SETTINGS_KEY, {"marker": marker, "value": "release"}, {"marker": marker, "value": "user_print"}),
+        ("shared", EMERGENCY_PASSWORD_KEY, EMERGENCY_PASSWORD_CATALOG_KEY, f"release-secret-{marker}", f"user-secret-{marker}"),
+        (OPERBLOCK_SETTINGS_SCOPE, OPERBLOCK_GROUP_ROUTES_APP_KEY, OPERBLOCK_SETTINGS_KEY, {"items": ["release"]}, {"items": ["user_group_routes"]}),
+        (OPERBLOCK_SETTINGS_SCOPE, OPERBLOCK_TEAM_APP_KEY, OPERBLOCK_SETTINGS_KEY, {"items": ["release"]}, {"items": ["user_team"]}),
+        (OPERBLOCK_SETTINGS_SCOPE, OPERBLOCK_ANESTHESIA_TYPES_APP_KEY, OPERBLOCK_SETTINGS_KEY, {"items": ["release"]}, {"items": ["user_anesthesia"]}),
+        (OPERBLOCK_SETTINGS_SCOPE, OPERBLOCK_QUICK_ORDER_BUTTONS_APP_KEY, OPERBLOCK_SETTINGS_KEY, {"items": ["release"]}, {"items": ["user_buttons"]}),
+        (OPERBLOCK_SETTINGS_SCOPE, OPERBLOCK_QUICK_ORDERS_APP_KEY, OPERBLOCK_SETTINGS_KEY, {"items": ["release"]}, {"items": ["user_orders"]}),
+        (OPERBLOCK_SETTINGS_SCOPE, OPERBLOCK_MEDICATION_PRESETS_APP_KEY, OPERBLOCK_SETTINGS_KEY, {"items": ["release"]}, {"items": ["user_presets"]}),
+    )
+    for scope, key, catalog_key, release_value, user_value in app_cases:
+        set_app_pair(scope, key, catalog_key, release_value, user_value)
+
+    snapshot_path = os.path.join(temp_root, "settings_release_snapshot.json")
+    export_settings_release_snapshot(
+        os.path.join(temp_root, "SourceBaza"),
+        snapshot_path,
+        release_version="all-settings-preserve-regression",
+        release_commit="regression",
+    )
+    apply_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    if not apply_report.get("applied"):
+        return False, f"release snapshot не применился: {apply_report}"
+    if int(apply_report.get("preserved_rows") or 0) < 20:
+        return False, f"release snapshot сохранил слишком мало пользовательских строк: {apply_report}"
+
+    expected_names = (
+        ("drug_groups", "code", group_key, "name", "Пользовательская группа"),
+        ("dosage_forms", "code", form_key, "name", "Пользовательская форма"),
+        ("administration_routes", "code", route_key, "name", "Пользовательский путь"),
+        ("solvents", "code", solvent_key, "name", "Пользовательский раствор"),
+        ("doctors", "full_name", doctor_name, "position", "Пользовательская должность"),
+        ("diet_templates", "template_key", str(target_diet_key), "description", "Пользовательский рацион"),
+    )
+    for table, key_column, key, value_column, expected in expected_names:
+        row = row_by_key(target_service, table, key_column, key)
+        if not row or row[value_column] != expected:
+            actual = None if not row else row[value_column]
+            return False, f"{table}.{value_column} перезаписан: {actual!r}, ожидалось {expected!r}"
+
+    drug_row = row_by_key(target_service, "drugs", "code", drug_key)
+    if not drug_row or str(drug_row["default_dose"]) != "9":
+        return False, "release snapshot перезаписал пользовательскую дозу препарата"
+    template_payload = json_column(row_by_key(target_service, "order_templates", "template_key", template_key), "params_json")
+    if template_payload.get("name") != "Пользовательский шаблон" or template_payload.get("drugs", [{}])[0].get("dose") != 9:
+        return False, f"release snapshot перезаписал пользовательский шаблон назначения: {template_payload}"
+    lab_payload = json_column(row_by_key(target_service, "lab_analysis_templates", "analysis_code", analysis_code), "payload_json")
+    if lab_payload.get("comment") != "Пользовательский комментарий":
+        return False, f"release snapshot перезаписал пользовательский анализ: {lab_payload}"
+
+    icon_row = row_by_key(target_service, "operblock_icons", "icon_key", icon_key)
+    if not icon_row or icon_row["image_blob"] != Path(user_icon_path).read_bytes():
+        return False, "release snapshot перезаписал пользовательскую иконку"
+    background_row_payload = json_column(row_by_key(target_service, "ui_backgrounds", "background_key", background_key), "value_json")
+    if background_row_payload.get("name") != "Пользовательский фон":
+        return False, f"release snapshot перезаписал строку фона: {background_row_payload}"
+
+    for scope, key, _catalog_key, _release_value, user_value in app_cases:
+        final_value = app_value(scope, key)
+        if final_value != user_value:
+            return False, f"app_setting {scope}:{key} перезаписан: {final_value!r}, ожидалось {user_value!r}"
+    if app_value("shared", "background_settings") != user_background:
+        return False, "release snapshot перезаписал background_settings"
+
+    new_row = row_by_key(target_service, "drug_groups", "code", new_release_group_key)
+    if not new_row or new_row["name"] != "Новая релизная группа":
+        return False, "новая dev-настройка не была добавлена в целевую БД"
+    if str(new_row["source"] or "") != "release":
+        return False, f"release-строка не помечена source='release': {new_row['source']!r}"
+    stale_row = row_by_key(target_service, "drug_groups", "code", stale_release_group_key)
+    if not stale_row or stale_row["name"] != "Обновленная release-строка":
+        return False, "старая release-похожая строка без пользовательского журнала ошибочно сохранена"
+    if str(stale_row["source"] or "") != "release":
+        return False, f"обновленная release-строка не получила source='release': {stale_row['source']!r}"
+    return True, "ok"
+
+
 def _check_runtime_catalog_services_default_to_settings_db(temp_root: str) -> tuple[bool, str]:
     from rem_card.services.diet_service import DietTemplateService
     from rem_card.services.doctor_list_service import DoctorListStore
@@ -22085,6 +22388,7 @@ def main(argv: list[str] | None = None):
         ("legacy_overrides_do_not_reapply_after_settings_import", _check_legacy_overrides_do_not_reapply_after_settings_import),
         ("settings_release_snapshot_applies_dev_settings_to_target_db", _check_settings_release_snapshot_applies_dev_settings_to_target_db),
         ("settings_release_snapshot_preserves_runtime_template_edits", _check_settings_release_snapshot_preserves_runtime_template_edits),
+        ("settings_release_snapshot_preserves_all_user_settings", _check_settings_release_snapshot_preserves_all_user_settings),
         ("runtime_catalog_services_default_to_settings_db", _check_runtime_catalog_services_default_to_settings_db),
         ("settings_change_log_source_client_id_is_non_empty", _check_settings_change_log_source_client_id_is_non_empty),
         ("settings_source_client_id_is_stable_within_process", _check_settings_source_client_id_is_stable_within_process),

@@ -21,6 +21,8 @@ SETTINGS_RELEASE_SNAPSHOT_FILE = "settings_release_snapshot.json"
 SETTINGS_RELEASE_APPLIED_HASH_KEY = "settings_release_snapshot_applied_hash"
 SETTINGS_RELEASE_APPLIED_AT_KEY = "settings_release_snapshot_applied_at"
 SETTINGS_RELEASE_VERSION_KEY = "settings_release_snapshot_version"
+SYSTEM_CHANGED_BY_ROLES = {"", "system"}
+USER_ROW_SOURCES = {"manual", "override"}
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ APP_SETTING_CATALOG_KEYS: dict[str, str] = {
     "display_settings": "display_settings",
     "lab_orders_columns": "display_settings",
     "style_settings": "style_settings",
+    "emergency_password": "emergency_password",
     "background_settings": "background_settings",
     "operblock:group_routes": "operblock_settings",
     "operblock:team": "operblock_settings",
@@ -263,7 +266,7 @@ def _parse_settings_datetime(value: Any) -> datetime | None:
 def _manual_row_is_newer_than_snapshot(existing: dict[str, Any] | None, snapshot_exported_at: Any) -> bool:
     if not existing:
         return False
-    if str(existing.get("source") or "") != "manual":
+    if str(existing.get("source") or "").strip().lower() not in USER_ROW_SOURCES:
         return False
     existing_updated_at = _parse_settings_datetime(existing.get("updated_at"))
     snapshot_time = _parse_settings_datetime(snapshot_exported_at)
@@ -274,24 +277,77 @@ def _app_setting_is_newer_user_edit_than_snapshot(existing: dict[str, Any] | Non
     if not existing:
         return False
     role = str(existing.get("updated_by_role") or "").strip().lower()
-    if not role or role == "system":
+    if role in SYSTEM_CHANGED_BY_ROLES:
         return False
     existing_updated_at = _parse_settings_datetime(existing.get("updated_at"))
     snapshot_time = _parse_settings_datetime(snapshot_exported_at)
     return bool(existing_updated_at and snapshot_time and existing_updated_at > snapshot_time)
 
 
-def _is_background_settings_row(row: dict[str, Any] | None) -> bool:
-    if not row:
-        return False
-    return str(row.get("scope") or "") == "shared" and str(row.get("key") or "") == "background_settings"
-
-
 def _app_setting_is_user_edit(existing: dict[str, Any] | None) -> bool:
     if not existing:
         return False
     role = str(existing.get("updated_by_role") or "").strip().lower()
-    return bool(role and role != "system")
+    return role not in SYSTEM_CHANGED_BY_ROLES
+
+
+def _row_entity_id_candidates(table: ReleaseTable, existing: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for value in (existing.get("id"), row.get("id")):
+        if value is not None and str(value) != "":
+            candidates.append(str(value))
+    for column in table.key_columns:
+        for payload in (existing, row):
+            value = payload.get(column)
+            if value is not None and str(value) != "":
+                candidates.append(str(value))
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in candidates:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _row_has_user_change_log(
+    cursor: sqlite3.Cursor,
+    table: ReleaseTable,
+    existing: dict[str, Any] | None,
+    row: dict[str, Any],
+) -> bool:
+    if not existing:
+        return False
+    candidates = _row_entity_id_candidates(table, existing, row)
+    entity_filter = "entity_id IS NULL"
+    params: list[Any] = [table.name]
+    if candidates:
+        placeholders = ", ".join("?" for _ in candidates)
+        entity_filter = f"(entity_id IS NULL OR entity_id IN ({placeholders}))"
+        params.extend(candidates)
+    try:
+        found = cursor.execute(
+            f"""
+            SELECT 1
+            FROM settings_change_log
+            WHERE entity_type = ?
+              AND LOWER(COALESCE(changed_by_role, '')) NOT IN ('', 'system')
+              AND {entity_filter}
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(found)
+
+
+def _release_row_for_apply(row: dict[str, Any]) -> dict[str, Any]:
+    applied = dict(row)
+    if "source" in applied:
+        applied["source"] = "release"
+    return applied
 
 
 def _upsert_release_row(
@@ -302,22 +358,25 @@ def _upsert_release_row(
     snapshot_exported_at: Any,
     preserve_existing_background_rows: bool = False,
 ) -> str:
-    values = _row_key(row, table.key_columns)
+    apply_row = _release_row_for_apply(row)
+    values = _row_key(apply_row, table.key_columns)
     if any(value is None or str(value) == "" for value in values):
         return "skipped"
-    existing = _fetch_existing_row(cursor, table, row)
-    if _rows_equal(existing, row):
+    existing = _fetch_existing_row(cursor, table, apply_row)
+    if _rows_equal(existing, apply_row):
         return "unchanged"
     if table.name == "ui_backgrounds" and preserve_existing_background_rows and existing is not None:
         return "preserved"
-    if table.name == "app_settings" and _is_background_settings_row(row) and _app_setting_is_user_edit(existing):
+    if table.name == "app_settings" and _app_setting_is_user_edit(existing):
+        return "preserved"
+    if _row_has_user_change_log(cursor, table, existing, apply_row):
         return "preserved"
     if _manual_row_is_newer_than_snapshot(existing, snapshot_exported_at):
         return "preserved"
     if table.name == "app_settings" and _app_setting_is_newer_user_edit_than_snapshot(existing, snapshot_exported_at):
         return "preserved"
 
-    columns = list(row.keys())
+    columns = list(apply_row.keys())
     placeholders = ", ".join("?" for _ in columns)
     update_columns = [column for column in columns if column not in table.key_columns]
     update_sql = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
@@ -328,7 +387,7 @@ def _upsert_release_row(
         VALUES ({placeholders})
         ON CONFLICT({conflict_columns}) DO UPDATE SET {update_sql}
         """,
-        tuple(row[column] for column in columns),
+        tuple(apply_row[column] for column in columns),
     )
     return "inserted" if existing is None else "updated"
 

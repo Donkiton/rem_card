@@ -1986,6 +1986,7 @@ class SettingsService:
                 f"""
                 UPDATE {table}
                 SET enabled = 0,
+                    source = 'manual',
                     revision = COALESCE(revision, 0) + 1,
                     updated_at = ?
                 WHERE {key_column} = ?
@@ -1999,7 +2000,7 @@ class SettingsService:
         with self.db.transaction("settings_order_templates_reorder") as cursor:
             for sort_order, key in enumerate(order_keys or [], start=1):
                 cursor.execute(
-                    "UPDATE order_templates SET sort_order = ?, updated_at = ? WHERE template_key = ?",
+                    "UPDATE order_templates SET sort_order = ?, source = 'manual', updated_at = ? WHERE template_key = ?",
                     (sort_order, now_text(), str(key)),
                 )
             self._bump_catalog_version(
@@ -2277,6 +2278,7 @@ class SettingsService:
                     display_name = ?,
                     material = ?,
                     payload_json = ?,
+                    source = 'manual',
                     revision = revision + 1,
                     updated_at = ?
                 WHERE id = ? AND revision = ?
@@ -2296,7 +2298,7 @@ class SettingsService:
             if expected_version is not None and int(current["revision"] or 0) != int(expected_version):
                 raise ValueError("Шаблон анализа был изменен другим пользователем")
             cursor.execute(
-                "UPDATE lab_analysis_templates SET enabled = 0, revision = revision + 1, updated_at = ? WHERE id = ?",
+                "UPDATE lab_analysis_templates SET enabled = 0, source = 'manual', revision = revision + 1, updated_at = ? WHERE id = ?",
                 (now_text(), int(template_id)),
             )
             self._bump_catalog_version(cursor, LAB_ANALYSIS_KEY, "lab_analysis_templates", str(template_id), "delete", before=dict(current), after={"enabled": False})
@@ -2306,7 +2308,7 @@ class SettingsService:
         with self.db.transaction("settings_lab_template_reorder") as cursor:
             for sort_order, raw_id in enumerate(ordered_template_ids or [], start=1):
                 cursor.execute(
-                    "UPDATE lab_analysis_templates SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE lab_analysis_templates SET sort_order = ?, source = 'manual', updated_at = ? WHERE id = ?",
                     (sort_order, now_text(), int(raw_id)),
                 )
             self._bump_catalog_version(cursor, LAB_ANALYSIS_KEY, "lab_analysis_templates", None, "reorder", after={"order": list(ordered_template_ids or [])})
@@ -2407,6 +2409,7 @@ class SettingsService:
                     display_name = ?,
                     description = ?,
                     payload_json = ?,
+                    source = 'manual',
                     revision = revision + 1,
                     updated_at = ?
                 WHERE id = ? AND revision = ?
@@ -2426,7 +2429,7 @@ class SettingsService:
             if expected_version is not None and int(expected_version) > 0 and int(current["revision"] or 0) != int(expected_version):
                 raise ValueError("Шаблон питания был изменен другим пользователем")
             cursor.execute(
-                "UPDATE diet_templates SET enabled = 0, revision = revision + 1, updated_at = ? WHERE id = ?",
+                "UPDATE diet_templates SET enabled = 0, source = 'manual', revision = revision + 1, updated_at = ? WHERE id = ?",
                 (now_text(), int(template_id)),
             )
             self._bump_catalog_version(cursor, DIET_TEMPLATES_KEY, "diet_templates", str(template_id), "delete", before=dict(current), after={"enabled": False})
@@ -2436,7 +2439,7 @@ class SettingsService:
         with self.db.transaction("settings_diet_template_reorder") as cursor:
             for sort_order, raw_id in enumerate(ordered_template_ids or [], start=1):
                 cursor.execute(
-                    "UPDATE diet_templates SET sort_order = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE diet_templates SET sort_order = ?, source = 'manual', updated_at = ? WHERE id = ?",
                     (sort_order, now_text(), int(raw_id)),
                 )
             self._bump_catalog_version(cursor, DIET_TEMPLATES_KEY, "diet_templates", None, "reorder", after={"order": list(ordered_template_ids or [])})
@@ -2494,7 +2497,7 @@ class SettingsService:
             normalized.append({"full_name": full_name, "position": position})
         with self.db.transaction("settings_doctors_save") as cursor:
             before_rows = [dict(row) for row in cursor.execute("SELECT * FROM doctors ORDER BY sort_order").fetchall()]
-            cursor.execute("UPDATE doctors SET enabled = 0, updated_at = ?", (now_text(),))
+            cursor.execute("UPDATE doctors SET enabled = 0, source = 'manual', updated_at = ?", (now_text(),))
             for sort_order, item in enumerate(normalized, start=1):
                 full_name = item["full_name"]
                 position = item["position"]
@@ -2516,6 +2519,7 @@ class SettingsService:
                         sort_order = excluded.sort_order,
                         revision = doctors.revision + 1,
                         payload_json = excluded.payload_json,
+                        source = excluded.source,
                         updated_at = excluded.updated_at
                     """,
                     (
