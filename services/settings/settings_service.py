@@ -376,6 +376,9 @@ class SettingsService:
             release_report = self._apply_bundled_release_snapshot_if_needed()
             if release_report:
                 info = {**info, "settings_release_snapshot": release_report}
+            background_repair_report = self._repair_background_settings_from_rows()
+            if background_repair_report:
+                info = {**info, "background_settings_repair": background_repair_report}
             self._ensure_default_operblock_icons()
             self._ready = True
             self._ready_info = dict(info)
@@ -645,6 +648,86 @@ class SettingsService:
             self.invalidate_cache()
         logger.info("Settings release snapshot result: %s", report)
         return report
+
+    def _repair_background_settings_from_rows(self) -> dict[str, Any] | None:
+        try:
+            from rem_card.ui.shared.background_settings import normalize_background_settings_payload
+        except Exception:
+            return None
+
+        with self.db.read_connection() as conn:
+            app_row = conn.execute(
+                "SELECT * FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
+            ).fetchone()
+            background_rows = conn.execute(
+                """
+                SELECT background_key, value_json
+                FROM ui_backgrounds
+                WHERE enabled = 1
+                ORDER BY active DESC, background_key ASC
+                """
+            ).fetchall()
+
+        current_payload: dict[str, Any] = {}
+        if app_row and app_row["value_json"]:
+            try:
+                raw_payload = json.loads(app_row["value_json"])
+                current_payload = raw_payload if isinstance(raw_payload, dict) else {}
+            except Exception:
+                current_payload = {}
+        current_normalized = normalize_background_settings_payload(current_payload)
+        current_backgrounds = list(current_normalized.get("backgrounds") or [])
+        current_ids = {str(item.get("id") or "") for item in current_backgrounds if isinstance(item, dict)}
+
+        restored_entries: list[dict[str, Any]] = []
+        for row in background_rows:
+            background_key = str(row["background_key"] or "").strip()
+            if not background_key or background_key in current_ids:
+                continue
+            try:
+                value = json.loads(row["value_json"] or "{}")
+            except Exception:
+                value = {}
+            if not isinstance(value, dict):
+                continue
+            entry = dict(value)
+            entry["id"] = str(entry.get("id") or background_key)
+            if entry["id"] in current_ids:
+                continue
+            restored_entries.append(entry)
+            current_ids.add(entry["id"])
+
+        if not restored_entries:
+            return None
+
+        repaired_payload = normalize_background_settings_payload({"backgrounds": [*current_backgrounds, *restored_entries]})
+        with self.db.transaction("settings_background_settings_repair") as cursor:
+            before = self._select_app_setting(cursor, "shared", "background_settings")
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                "background_settings",
+                repaired_payload,
+                changed_by_role="repair",
+                catalog_key=BACKGROUND_SETTINGS_KEY,
+                log_change=False,
+            )
+            self._sync_background_rows_in_tx(cursor, repaired_payload)
+            self._bump_catalog_version(
+                cursor,
+                BACKGROUND_SETTINGS_KEY,
+                "background_settings",
+                "shared:background_settings",
+                "repair_missing_rows",
+                changed_by_role="repair",
+                before=before,
+                after=repaired_payload,
+            )
+        return {
+            "repaired": True,
+            "restored_rows": len(restored_entries),
+            "restored_ids": [str(item.get("id") or "") for item in restored_entries],
+        }
 
     def _import_legacy_sources(self, cursor) -> dict[str, Any]:
         started = time.perf_counter()

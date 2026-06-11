@@ -20984,6 +20984,144 @@ def _check_background_files_use_shared_settings_folder(temp_root: str) -> tuple[
             os.environ["REMCARD_BAZA_DIR"] = saved_baza_dir
 
 
+def _check_background_release_preserves_user_settings(temp_root: str) -> tuple[bool, str]:
+    from rem_card.data.settings.settings_db import SettingsDatabase
+    from rem_card.data.settings.settings_release import apply_settings_release_snapshot, export_settings_release_snapshot
+    from rem_card.services.settings.settings_service import BACKGROUND_SETTINGS_KEY, SettingsService
+    from rem_card.ui.shared import background_settings as bg
+
+    source_baza = os.path.join(temp_root, "SourceBaza")
+    target_baza = os.path.join(temp_root, "TargetBaza")
+    background_key = "background_release_conflict_regression"
+
+    source_service = SettingsService(SettingsDatabase(baza_dir=source_baza))
+    source_service.ensure_ready()
+    release_payload = bg.normalize_background_settings_payload(
+        {
+            "backgrounds": [
+                {
+                    "id": background_key,
+                    "name": "Релизный фон",
+                    "file": "",
+                    "start": "01-01",
+                    "end": "12-31",
+                }
+            ]
+        }
+    )
+    source_service.set_app_setting(
+        "shared",
+        "background_settings",
+        release_payload,
+        catalog_key=BACKGROUND_SETTINGS_KEY,
+        entity_type="background_settings",
+        operation="release_probe",
+        changed_by_role="system",
+    )
+    snapshot_path = os.path.join(temp_root, "settings_release_snapshot.json")
+    export_settings_release_snapshot(
+        source_baza,
+        snapshot_path,
+        release_version="background-preserve-regression",
+        release_commit="regression",
+    )
+
+    target_service = SettingsService(SettingsDatabase(baza_dir=target_baza))
+    target_service.ensure_ready()
+    user_payload = bg.normalize_background_settings_payload(
+        {
+            "backgrounds": [
+                {
+                    "id": background_key,
+                    "name": "Пользовательский фон",
+                    "file": "",
+                    "start": "02-01",
+                    "end": "02-02",
+                }
+            ]
+        }
+    )
+    target_service.set_app_setting(
+        "shared",
+        "background_settings",
+        user_payload,
+        catalog_key=BACKGROUND_SETTINGS_KEY,
+        entity_type="background_settings",
+        operation="user_probe",
+        changed_by_role="doctor",
+    )
+    with target_service.db.transaction("regression_old_background_user_edit") as cursor:
+        cursor.execute(
+            """
+            UPDATE app_settings
+            SET updated_at = '2000-01-01 00:00:00'
+            WHERE scope = 'shared' AND key = 'background_settings'
+            """
+        )
+        cursor.execute(
+            "UPDATE ui_backgrounds SET updated_at = '2000-01-01 00:00:00' WHERE background_key = ?",
+            (background_key,),
+        )
+
+    apply_report = apply_settings_release_snapshot(
+        target_service.db,
+        snapshot_path,
+        bump_catalog_version=target_service._bump_catalog_version,
+    )
+    table_reports = apply_report.get("tables") or {}
+    if int((table_reports.get("app_settings") or {}).get("preserved") or 0) < 1:
+        return False, f"background_settings app row was not preserved: {apply_report}"
+    if int((table_reports.get("ui_backgrounds") or {}).get("preserved") or 0) < 1:
+        return False, f"background row was not preserved: {apply_report}"
+
+    target_service.invalidate_cache()
+    final_payload = target_service.get_app_setting("shared", "background_settings", default={})
+    final_names = [str(item.get("name") or "") for item in final_payload.get("backgrounds") or []]
+    if "Пользовательский фон" not in final_names or "Релизный фон" in final_names:
+        return False, f"release snapshot overwrote user background app setting: {final_names}"
+    with target_service.db.read_connection() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM ui_backgrounds WHERE background_key = ?",
+            (background_key,),
+        ).fetchone()
+    row_payload = json.loads(row["value_json"]) if row and row["value_json"] else {}
+    if row_payload.get("name") != "Пользовательский фон":
+        return False, f"release snapshot overwrote user background row: {row_payload}"
+
+    repair_baza = os.path.join(temp_root, "RepairBaza")
+    repair_service = SettingsService(SettingsDatabase(baza_dir=repair_baza))
+    repair_service.ensure_ready()
+    repair_service.set_app_setting(
+        "shared",
+        "background_settings",
+        user_payload,
+        catalog_key=BACKGROUND_SETTINGS_KEY,
+        entity_type="background_settings",
+        operation="user_probe",
+        changed_by_role="doctor",
+    )
+    default_only_payload = bg.normalize_background_settings_payload({"backgrounds": []})
+    with repair_service.db.transaction("regression_broken_background_app_setting") as cursor:
+        cursor.execute(
+            """
+            UPDATE app_settings
+            SET value_json = ?, updated_by_role = 'system', updated_at = '2000-01-01 00:00:00'
+            WHERE scope = 'shared' AND key = 'background_settings'
+            """,
+            (json.dumps(default_only_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),),
+        )
+    restarted = SettingsService(SettingsDatabase(baza_dir=repair_baza))
+    repair_info = restarted.ensure_ready()
+    repair_report = repair_info.get("background_settings_repair") or {}
+    if int(repair_report.get("restored_rows") or 0) < 1:
+        return False, f"background repair did not restore missing rows: {repair_info}"
+    repaired_payload = restarted.get_app_setting("shared", "background_settings", default={})
+    repaired_names = [str(item.get("name") or "") for item in repaired_payload.get("backgrounds") or []]
+    if "Пользовательский фон" not in repaired_names:
+        return False, f"background repair did not restore user background: {repaired_names}"
+    return True, "ok"
+
+
 def _create_db_cycle_fixture(path: str, *, admission_dt: str, active_bed: bool = False, cycle_days_old: int = 200) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     for candidate in (path, f"{path}-journal", f"{path}-wal", f"{path}-shm"):
@@ -21969,6 +22107,7 @@ def main(argv: list[str] | None = None):
         ("print_and_background_settings_from_db", _check_print_and_background_settings_from_db),
         ("operblock_icons_settings_db", _check_operblock_icons_settings_db),
         ("background_files_use_shared_settings_folder", _check_background_files_use_shared_settings_folder),
+        ("background_release_preserves_user_settings", _check_background_release_preserves_user_settings),
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
 

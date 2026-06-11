@@ -281,12 +281,26 @@ def _app_setting_is_newer_user_edit_than_snapshot(existing: dict[str, Any] | Non
     return bool(existing_updated_at and snapshot_time and existing_updated_at > snapshot_time)
 
 
+def _is_background_settings_row(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    return str(row.get("scope") or "") == "shared" and str(row.get("key") or "") == "background_settings"
+
+
+def _app_setting_is_user_edit(existing: dict[str, Any] | None) -> bool:
+    if not existing:
+        return False
+    role = str(existing.get("updated_by_role") or "").strip().lower()
+    return bool(role and role != "system")
+
+
 def _upsert_release_row(
     cursor: sqlite3.Cursor,
     table: ReleaseTable,
     row: dict[str, Any],
     *,
     snapshot_exported_at: Any,
+    preserve_existing_background_rows: bool = False,
 ) -> str:
     values = _row_key(row, table.key_columns)
     if any(value is None or str(value) == "" for value in values):
@@ -294,6 +308,10 @@ def _upsert_release_row(
     existing = _fetch_existing_row(cursor, table, row)
     if _rows_equal(existing, row):
         return "unchanged"
+    if table.name == "ui_backgrounds" and preserve_existing_background_rows and existing is not None:
+        return "preserved"
+    if table.name == "app_settings" and _is_background_settings_row(row) and _app_setting_is_user_edit(existing):
+        return "preserved"
     if _manual_row_is_newer_than_snapshot(existing, snapshot_exported_at):
         return "preserved"
     if table.name == "app_settings" and _app_setting_is_newer_user_edit_than_snapshot(existing, snapshot_exported_at):
@@ -355,6 +373,12 @@ def apply_settings_release_snapshot(
     snapshot_exported_at = snapshot.get("exported_at")
     table_by_name = {table.name: table for table in RELEASE_TABLES}
     with db.transaction("settings_release_snapshot_apply") as cursor:
+        existing_background_setting = cursor.execute(
+            "SELECT * FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
+        ).fetchone()
+        preserve_existing_background_rows = _app_setting_is_user_edit(
+            dict(existing_background_setting) if existing_background_setting else None
+        )
         for table_name, rows_raw in tables_raw.items():
             table = table_by_name.get(str(table_name))
             if table is None:
@@ -371,6 +395,7 @@ def apply_settings_release_snapshot(
                     table,
                     row,
                     snapshot_exported_at=snapshot_exported_at,
+                    preserve_existing_background_rows=preserve_existing_background_rows,
                 )
                 table_report[status] += 1
                 if status in {"inserted", "updated"}:
