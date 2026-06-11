@@ -2658,6 +2658,206 @@ class OperBlockTeamDialog(OperBlockStyledDialog):
         return result
 
 
+class OperBlockDialogTimeInput(QFrame):
+    def __init__(
+        self,
+        initial_datetime: datetime | None = None,
+        parent=None,
+        *,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+        object_prefix: str = "OperBlockDialogTime",
+    ):
+        super().__init__(parent)
+        self._object_prefix = re.sub(r"\W+", "", str(object_prefix or "OperBlockDialogTime")) or "OperBlockDialogTime"
+        self._start_datetime = _minute_floor_dt(initial_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._time_min_datetime = _minute_floor_dt(min_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        self._time_text_updating = False
+        self._init_ui()
+
+    def _init_ui(self) -> None:
+        frame_name = f"{self._object_prefix}InputFrame"
+        input_name = f"{self._object_prefix}Input"
+        stepper_name = f"{self._object_prefix}StepperColumn"
+        button_name = f"{self._object_prefix}StepButton"
+        self.setObjectName(frame_name)
+        self.setFixedHeight(52)
+        self.setMinimumWidth(170)
+        self.setMaximumWidth(240)
+        self.setProperty("focused", False)
+        self.setStyleSheet(
+            f"""
+            QFrame#{frame_name} {{
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }}
+            QFrame#{frame_name}[focused="true"] {{
+                border: 1px solid #6366F1;
+            }}
+            QLineEdit#{input_name} {{
+                background-color: transparent;
+                color: #111827;
+                border: none;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }}
+            QFrame#{stepper_name} {{
+                background-color: transparent;
+                border: none;
+            }}
+            """
+            + operblock_arrow_button_style(f"QPushButton#{button_name}")
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName(input_name)
+        start_dt = self._coerce_time_datetime(self._start_datetime)
+        self.time_input.setText(f"{start_dt.hour:02d}:{start_dt.minute:02d}")
+        self.time_input.setPlaceholderText("09:10")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName(stepper_name)
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        up_button = QPushButton()
+        up_button.setObjectName(button_name)
+        up_button.setFixedSize(30, 20)
+        up_button.setIcon(_gas_time_step_icon(up=True))
+        up_button.setIconSize(QSize(14, 14))
+        up_button.setCursor(Qt.PointingHandCursor)
+        up_button.clicked.connect(lambda _=False: self._step_time(1))
+        down_button = QPushButton()
+        down_button.setObjectName(button_name)
+        down_button.setFixedSize(30, 20)
+        down_button.setIcon(_gas_time_step_icon(up=False))
+        down_button.setIconSize(QSize(14, 14))
+        down_button.setCursor(Qt.PointingHandCursor)
+        down_button.clicked.connect(lambda _=False: self._step_time(-1))
+        stepper_layout.addWidget(up_button)
+        stepper_layout.addWidget(down_button)
+        layout.addWidget(stepper, 0)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        self.setProperty("focused", bool(focused))
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        digits = re.sub(r"\D", "", str(text or ""))
+        if len(digits) < 4:
+            return
+        event_dt = self._time_datetime_from_text(digits[:4])
+        if event_dt is None:
+            return
+        self._set_time_input_text(self._time_text_from_datetime(self._coerce_time_datetime(event_dt)), select_all=False)
+
+    def _commit_time_text(self) -> str:
+        raw_text = self.time_input.text()
+        event_dt = self._time_datetime_from_text(raw_text)
+        if event_dt is None:
+            event_dt = self._fallback_time_datetime()
+        normalized = self._time_text_from_datetime(self._coerce_time_datetime(event_dt))
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _step_time(self, delta_minutes: int) -> None:
+        current_dt = self._time_datetime_from_text(self.time_input.text())
+        if current_dt is None:
+            current_dt = self._fallback_time_datetime()
+        stepped = self._coerce_time_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(text)
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(text))
+        finally:
+            self._time_text_updating = False
+
+    def _fallback_time_datetime(self) -> datetime:
+        return self._coerce_time_datetime(self._start_datetime)
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = OperationStageTimeEditDialog._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        candidates = [same_day]
+        if hour < 6:
+            candidates.append(same_day + timedelta(days=1))
+        previous_day_is_plausible = (
+            base_dt.hour < 6
+            or (self._time_min_datetime and self._time_min_datetime.date() < base_dt.date())
+        )
+        if hour >= 12 and previous_day_is_plausible:
+            candidates.append(same_day - timedelta(days=1))
+
+        def in_bounds(candidate: datetime) -> bool:
+            if self._time_min_datetime and candidate < self._time_min_datetime:
+                return False
+            if self._time_max_datetime and candidate > self._time_max_datetime:
+                return False
+            return True
+
+        bounded = [candidate for candidate in candidates if in_bounds(candidate)]
+        source = bounded or candidates
+        return min(source, key=lambda candidate: abs((candidate - base_dt).total_seconds()))
+
+    def _coerce_time_datetime(self, value: datetime) -> datetime:
+        event_dt = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        if self._time_min_datetime and event_dt < self._time_min_datetime:
+            return self._time_min_datetime
+        if self._time_max_datetime and event_dt > self._time_max_datetime:
+            return self._time_max_datetime
+        return event_dt
+
+    @staticmethod
+    def _time_text_from_datetime(value: datetime) -> str:
+        return f"{value.hour:02d}:{value.minute:02d}"
+
+    def datetime_text(self) -> str:
+        selected_text = self._commit_time_text()
+        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
+        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+
+
 class StartAnesthesiaDialog(OperBlockStyledDialog):
     def __init__(
         self,
@@ -2668,13 +2868,22 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         *,
         initial_anesthesiologist: str = "",
         initial_anesthetist: str = "",
+        initial_start_datetime: datetime | None = None,
+        min_start_datetime: datetime | None = None,
+        max_start_datetime: datetime | None = None,
     ):
+        self._start_datetime = _minute_floor_dt(initial_start_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._time_min_datetime = _minute_floor_dt(min_start_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_start_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
+        self._time_text_updating = False
         super().__init__(
             "Начать пособие",
             "start_anesthesia_dialog_geometry",
             parent,
-            minimum_size=(560, 260),
-            initial_size=(660, 310),
+            minimum_size=(560, 330),
+            initial_size=(660, 380),
         )
         self._init_ui(anesthesia_types, anesthesiologists or [], anesthetists or [])
         if initial_anesthesiologist:
@@ -2685,6 +2894,7 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
 
     def _init_ui(self, anesthesia_types: list[dict], anesthesiologists: list[str], anesthetists: list[str]):
         layout = self.content_layout
+        self._apply_time_field_style()
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
         self.assistance_combo = QComboBox()
@@ -2709,6 +2919,8 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
 
         self.anesthetist_combo = self._staff_combo(anesthetists)
         form.addRow("Анестезист:", self.anesthetist_combo)
+
+        form.addRow("Время начала:", self._time_input_widget())
         layout.addLayout(form)
 
         footer = QHBoxLayout()
@@ -2726,6 +2938,183 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         footer.addWidget(self.start_button)
         layout.addStretch(1)
         layout.addLayout(footer)
+
+    def _apply_time_field_style(self) -> None:
+        self.setStyleSheet(
+            (self.styleSheet() or "")
+            + """
+            QFrame#StartAnesthesiaTimeInputFrame {
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }
+            QFrame#StartAnesthesiaTimeInputFrame[focused="true"] {
+                border: 1px solid #6366F1;
+            }
+            QLineEdit#StartAnesthesiaTimeInput {
+                background-color: transparent;
+                color: #111827;
+                border: none;
+                font-size: 18px;
+                font-weight: 400;
+                padding: 0 14px;
+                selection-background-color: #C7D2FE;
+            }
+            QFrame#StartAnesthesiaTimeStepperColumn {
+                background-color: transparent;
+                border: none;
+            }
+            """
+            + operblock_arrow_button_style("QPushButton#StartAnesthesiaTimeStepButton")
+        )
+
+    def _time_input_widget(self) -> QWidget:
+        self.time_frame = QFrame()
+        self.time_frame.setObjectName("StartAnesthesiaTimeInputFrame")
+        self.time_frame.setFixedHeight(52)
+        self.time_frame.setMinimumWidth(170)
+        self.time_frame.setMaximumWidth(240)
+        self.time_frame.setProperty("focused", False)
+        time_layout = QHBoxLayout(self.time_frame)
+        time_layout.setContentsMargins(0, 0, 0, 0)
+        time_layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("StartAnesthesiaTimeInput")
+        start_dt = self._coerce_time_datetime(self._start_datetime)
+        self.time_input.setText(f"{start_dt.hour:02d}:{start_dt.minute:02d}")
+        self.time_input.setPlaceholderText("09:10")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        time_layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName("StartAnesthesiaTimeStepperColumn")
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        up_button = QPushButton()
+        up_button.setObjectName("StartAnesthesiaTimeStepButton")
+        up_button.setFixedSize(30, 20)
+        up_button.setIcon(_gas_time_step_icon(up=True))
+        up_button.setIconSize(QSize(14, 14))
+        up_button.setCursor(Qt.PointingHandCursor)
+        up_button.clicked.connect(lambda _=False: self._step_time(1))
+        down_button = QPushButton()
+        down_button.setObjectName("StartAnesthesiaTimeStepButton")
+        down_button.setFixedSize(30, 20)
+        down_button.setIcon(_gas_time_step_icon(up=False))
+        down_button.setIconSize(QSize(14, 14))
+        down_button.setCursor(Qt.PointingHandCursor)
+        down_button.clicked.connect(lambda _=False: self._step_time(-1))
+        stepper_layout.addWidget(up_button)
+        stepper_layout.addWidget(down_button)
+        time_layout.addWidget(stepper, 0)
+        return self.time_frame
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        frame = getattr(self, "time_frame", None)
+        if frame is None:
+            return
+        frame.setProperty("focused", bool(focused))
+        frame.style().unpolish(frame)
+        frame.style().polish(frame)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        digits = re.sub(r"\D", "", str(text or ""))
+        if len(digits) < 4:
+            return
+        event_dt = self._time_datetime_from_text(digits[:4])
+        if event_dt is None:
+            return
+        self._set_time_input_text(self._time_text_from_datetime(self._coerce_time_datetime(event_dt)), select_all=False)
+
+    def _commit_time_text(self) -> str:
+        raw_text = self.time_input.text()
+        event_dt = self._time_datetime_from_text(raw_text)
+        if event_dt is None:
+            event_dt = self._fallback_time_datetime()
+        normalized = self._time_text_from_datetime(self._coerce_time_datetime(event_dt))
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _step_time(self, delta_minutes: int) -> None:
+        current_dt = self._time_datetime_from_text(self.time_input.text())
+        if current_dt is None:
+            current_dt = self._fallback_time_datetime()
+        stepped = self._coerce_time_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(text)
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(text))
+        finally:
+            self._time_text_updating = False
+
+    def _fallback_time_datetime(self) -> datetime:
+        return self._coerce_time_datetime(self._start_datetime)
+
+    def _time_datetime_from_text(self, value: str) -> datetime | None:
+        minutes = OperationStageTimeEditDialog._time_minutes_from_text(value)
+        if minutes is None:
+            return None
+        hour = minutes // 60
+        minute = minutes % 60
+        base_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
+        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
+        candidates = [same_day]
+        if hour < 6:
+            candidates.append(same_day + timedelta(days=1))
+        previous_day_is_plausible = (
+            base_dt.hour < 6
+            or (self._time_min_datetime and self._time_min_datetime.date() < base_dt.date())
+        )
+        if hour >= 12 and previous_day_is_plausible:
+            candidates.append(same_day - timedelta(days=1))
+
+        def in_bounds(candidate: datetime) -> bool:
+            if self._time_min_datetime and candidate < self._time_min_datetime:
+                return False
+            if self._time_max_datetime and candidate > self._time_max_datetime:
+                return False
+            return True
+
+        bounded = [candidate for candidate in candidates if in_bounds(candidate)]
+        source = bounded or candidates
+        return min(source, key=lambda candidate: abs((candidate - base_dt).total_seconds()))
+
+    def _coerce_time_datetime(self, value: datetime) -> datetime:
+        event_dt = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        if self._time_min_datetime and event_dt < self._time_min_datetime:
+            return self._time_min_datetime
+        if self._time_max_datetime and event_dt > self._time_max_datetime:
+            return self._time_max_datetime
+        return event_dt
+
+    @staticmethod
+    def _time_text_from_datetime(value: datetime) -> str:
+        return f"{value.hour:02d}:{value.minute:02d}"
 
     @staticmethod
     def _staff_combo(items: list[str]) -> QComboBox:
@@ -2759,10 +3148,16 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
     def selected_anesthetist(self) -> str:
         return normalize_operblock_team_text(self.anesthetist_combo.currentText())
 
+    def start_datetime_text(self) -> str:
+        selected_text = self._commit_time_text()
+        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
+        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+
     def accept(self) -> None:
         if not self.selected_assistance_type():
             CustomMessageBox.warning(self, "Начать пособие", "Укажите вид пособия.")
             return
+        self._commit_time_text()
         super().accept()
 
 
@@ -2841,13 +3236,21 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         initial_operation_name: str = "",
         initial_surgeons: list[str] | None = None,
         initial_operating_nurse: str = "",
+        initial_start_datetime: datetime | None = None,
+        min_start_datetime: datetime | None = None,
+        max_start_datetime: datetime | None = None,
     ):
+        self._start_datetime = _minute_floor_dt(initial_start_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._time_min_datetime = _minute_floor_dt(min_start_datetime)
+        self._time_max_datetime = _minute_floor_dt(max_start_datetime)
+        if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
+            self._time_max_datetime = None
         super().__init__(
             "Начать операцию",
             "start_surgery_dialog_geometry",
             parent,
-            minimum_size=(560, 360),
-            initial_size=(660, 430),
+            minimum_size=(560, 390),
+            initial_size=(660, 460),
         )
         self._surgeon_options = list(surgeons or [])
         self._surgeon_combos: list[QComboBox] = []
@@ -2873,6 +3276,16 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         if self._initial_operation_name:
             self.operation_name_edit.setText(self._initial_operation_name)
         form.addRow("Название операции:", self.operation_name_edit)
+
+        self.start_time_input = OperBlockDialogTimeInput(
+            self._start_datetime,
+            self,
+            min_datetime=self._time_min_datetime,
+            max_datetime=self._time_max_datetime,
+            object_prefix="StartSurgeryTime",
+        )
+        self.time_input = self.start_time_input.time_input
+        form.addRow("Время начала:", self.start_time_input)
 
         self.surgeons_scroll = QScrollArea()
         self.surgeons_scroll.setObjectName("OperBlockSurgeryTeamScroll")
@@ -3075,11 +3488,15 @@ class StartSurgeryDialog(OperBlockStyledDialog):
     def selected_operating_nurse(self) -> str:
         return normalize_operblock_team_text(self.operating_nurse_combo.currentText())
 
+    def start_datetime_text(self) -> str:
+        return self.start_time_input.datetime_text()
+
     def accept(self) -> None:
         if not self.operation_name():
             CustomMessageBox.warning(self, "Начать операцию", "Укажите название операции.")
             self.operation_name_edit.setFocus(Qt.OtherFocusReason)
             return
+        self.start_datetime_text()
         super().accept()
 
 
@@ -11692,12 +12109,14 @@ class OperBlockMainWidget(QWidget):
         case_active = bool(getattr(self, "_current_case_active", False))
         aid_active = bool(getattr(self, "_current_anesthesia_active", False))
         surgery_active = bool(getattr(self, "_current_surgery_active", False))
-        has_initial_vitals = bool(getattr(self, "_current_operation_has_vitals", False))
         write_enabled = case_active and not self._write_pending
         if hasattr(self, "start_anesthesia_button"):
+            has_initial_vitals = bool(getattr(self, "_current_operation_has_vitals", False))
             self.start_anesthesia_button.setEnabled(write_enabled and not aid_active and has_initial_vitals)
             if write_enabled and not aid_active and not has_initial_vitals:
-                self.start_anesthesia_button.setToolTip("Введите исходные витальные показатели, чтобы начать пособие.")
+                self.start_anesthesia_button.setToolTip(
+                    "Введите исходные витальные показатели, чтобы начать пособие."
+                )
             else:
                 self.start_anesthesia_button.setToolTip("")
             self.end_anesthesia_button.setEnabled(write_enabled and aid_active)
@@ -17061,29 +17480,52 @@ class OperBlockMainWidget(QWidget):
             logger.error("operblock operation case defaults load failed: %s", exc, exc_info=True)
             return {}
 
+    def _default_anesthesia_start_datetime(self, operation_case_id: int) -> datetime:
+        fallback = (
+            _minute_floor_dt(self._current_operation_start)
+            or _minute_floor_dt(self._current_protocol_date)
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+        try:
+            vitals = self.operblock_service.list_operation_vitals(int(operation_case_id))
+        except Exception as exc:
+            logger.error("operblock anesthesia default time vitals load failed: %s", exc, exc_info=True)
+            vitals = []
+        latest_vital_dt = None
+        for vital in vitals or []:
+            timestamp = _minute_floor_dt(getattr(vital, "timestamp", None))
+            if timestamp is not None and (latest_vital_dt is None or timestamp > latest_vital_dt):
+                latest_vital_dt = timestamp
+        if latest_vital_dt is not None:
+            return latest_vital_dt + timedelta(minutes=5)
+        return fallback
+
+    def _default_surgery_start_datetime(self) -> datetime:
+        base_dt = (
+            _minute_floor_dt(self._current_anesthesia_start)
+            or _minute_floor_dt(self._current_operation_start)
+            or _minute_floor_dt(self._current_protocol_date)
+            or datetime.now().replace(second=0, microsecond=0)
+        )
+        return base_dt + timedelta(minutes=5)
+
     def _start_anesthesia(self):
         if not self._current_operation_case_id:
             return
         case_id = int(self._current_operation_case_id)
         try:
-            self._current_operation_has_vitals = bool(self.operblock_service.operation_has_initial_vitals(case_id))
+            has_initial_vitals = bool(self.operblock_service.operation_has_initial_vitals(case_id))
         except Exception as exc:
-            logger.error("operblock initial vitals check before anesthesia start failed: %s", exc, exc_info=True)
-            self._current_operation_has_vitals = False
-            self._apply_protocol_controls_state()
-            CustomMessageBox.warning(
-                self,
-                "Начать пособие",
-                f"Не удалось проверить исходные витальные показатели:\n{exc}",
-            )
+            CustomMessageBox.warning(self, "Начать пособие", f"Не удалось проверить исходные витальные показатели: {exc}")
             return
-        if not self._current_operation_has_vitals:
-            self._apply_protocol_controls_state()
+        if not has_initial_vitals:
             CustomMessageBox.warning(
                 self,
                 "Начать пособие",
                 "Перед началом пособия введите исходные витальные показатели.",
             )
+            self._current_operation_has_vitals = False
+            self._apply_protocol_controls_state()
             return
         try:
             anesthesia_types = load_operblock_anesthesia_types()
@@ -17097,6 +17539,7 @@ class OperBlockMainWidget(QWidget):
             CustomMessageBox.warning(self, "Начать пособие", f"Не удалось загрузить сотрудников для пособия: {exc}")
             return
         defaults = self._operation_case_defaults(case_id)
+        initial_start_dt = self._default_anesthesia_start_datetime(case_id)
         dialog = StartAnesthesiaDialog(
             anesthesia_types,
             anesthesiologists,
@@ -17104,12 +17547,16 @@ class OperBlockMainWidget(QWidget):
             self,
             initial_anesthesiologist=str(defaults.get("anesthesiologist") or ""),
             initial_anesthetist=str(defaults.get("anesthetist") or ""),
+            initial_start_datetime=initial_start_dt,
+            min_start_datetime=self._current_operation_start,
+            max_start_datetime=self._current_operation_end,
         )
         if dialog.exec() != QDialog.Accepted:
             return
         assistance_type = dialog.selected_assistance_type()
         anesthesiologist = dialog.selected_anesthesiologist()
         anesthetist = dialog.selected_anesthetist()
+        event_time = dialog.start_datetime_text()
         self._run_stage_action(
             f"operblock_start_anesthesia:{case_id}",
             lambda: self.operblock_service.start_anesthesia(
@@ -17117,6 +17564,7 @@ class OperBlockMainWidget(QWidget):
                 assistance_type,
                 anesthesiologist=anesthesiologist,
                 anesthetist=anesthetist,
+                event_time=event_time,
             ),
             "Анестезиологическое пособие начато.",
         )
@@ -17155,18 +17603,24 @@ class OperBlockMainWidget(QWidget):
             CustomMessageBox.warning(self, "Начать операцию", f"Не удалось загрузить сотрудников для операции: {exc}")
             return
         defaults = self._operation_case_defaults(case_id)
+        initial_start_dt = self._default_surgery_start_datetime()
         dialog = StartSurgeryDialog(
             surgeons,
             operating_nurses,
             self,
             initial_operation_name=str(defaults.get("operation_name") or ""),
             initial_surgeons=list(defaults.get("surgeons") or []),
+            initial_operating_nurse=str(defaults.get("operating_nurse") or ""),
+            initial_start_datetime=initial_start_dt,
+            min_start_datetime=self._current_anesthesia_start or self._current_operation_start,
+            max_start_datetime=self._current_anesthesia_end,
         )
         if dialog.exec() != QDialog.Accepted:
             return
         operation_name = dialog.operation_name()
         surgeons = dialog.selected_surgeons()
         operating_nurse = dialog.selected_operating_nurse()
+        event_time = dialog.start_datetime_text()
         self._run_stage_action(
             f"operblock_start_surgery:{case_id}",
             lambda: self.operblock_service.start_surgery(
@@ -17174,6 +17628,7 @@ class OperBlockMainWidget(QWidget):
                 operation_name=operation_name,
                 surgeons=surgeons,
                 operating_nurse=operating_nurse,
+                event_time=event_time,
             ),
         )
 

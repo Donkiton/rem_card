@@ -2544,6 +2544,7 @@ class OperBlockService:
         *,
         anesthesiologist: str | None = None,
         anesthetist: str | None = None,
+        event_time: Any = None,
     ) -> int:
         return self._add_stage_event(
             operation_case_id,
@@ -2551,6 +2552,7 @@ class OperBlockService:
             assistance_type=assistance_type,
             anesthesiologist=anesthesiologist,
             anesthetist=anesthetist,
+            event_time=event_time,
         )
 
     def end_anesthesia(self, operation_case_id: int) -> int:
@@ -2571,6 +2573,7 @@ class OperBlockService:
         surgeons: list[str] | None = None,
         surgeon: str | None = None,
         operating_nurse: str | None = None,
+        event_time: Any = None,
     ) -> int:
         return self._add_stage_event(
             operation_case_id,
@@ -2579,10 +2582,11 @@ class OperBlockService:
             surgeons=surgeons,
             surgeon=surgeon,
             operating_nurse=operating_nurse,
+            event_time=event_time,
         )
 
-    def end_surgery(self, operation_case_id: int) -> int:
-        return self._add_stage_event(operation_case_id, "surgery_end")
+    def end_surgery(self, operation_case_id: int, *, event_time: Any = None) -> int:
+        return self._add_stage_event(operation_case_id, "surgery_end", event_time=event_time)
 
     def add_operation_stage(
         self,
@@ -2923,12 +2927,17 @@ class OperBlockService:
         surgeon: str | None = None,
         operating_nurse: str | None = None,
         transfer_department: str | None = None,
+        event_time: Any = None,
     ) -> int:
         validate_operblock_runtime_path(self.db)
         clean_kind = str(stage_kind or "").strip()
         if clean_kind not in OPERBLOCK_STAGE_KIND_LABELS:
             raise ValueError("Неизвестный этап операции.")
-        event_dt = _minute_floor(datetime.now())
+        event_dt = (
+            self._normalize_timeline_event_datetime(event_time)
+            if event_time is not None
+            else _minute_floor(datetime.now())
+        )
         clean_assistance_type = normalize_operblock_anesthesia_type_label(assistance_type)
         clean_anesthesiologist = re.sub(r"\s+", " ", str(anesthesiologist or "").strip())
         clean_anesthetist = re.sub(r"\s+", " ", str(anesthetist or "").strip())

@@ -19802,10 +19802,13 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
 
     from rem_card.app.operblock_schema import _apply_operblock_schema
     from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dto.remcard_dto import VitalDTO
     from rem_card.services.operblock_service import OperBlockService
     from rem_card.ui.operblock_view.operblock_main_widget import (
         OperBlockMainWidget,
         OperationStageTimeEditDialog,
+        StartAnesthesiaDialog,
+        StartSurgeryDialog,
         OperationStagesDialog,
     )
     from PySide6.QtWidgets import QApplication
@@ -19816,6 +19819,29 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
     try:
         manager.run_write_operation(_apply_operblock_schema, source="regression_operblock_schema")
         service = OperBlockService(manager)
+        no_vitals_case = service.create_operation_case(
+            {
+                "table_code": "planned",
+                "history_number": "REGSTAGE0",
+                "full_name": "Без Виталов",
+                "gender": "м",
+                "birth_date": date(1980, 1, 1),
+                "diagnosis_code": "K35",
+                "diagnosis_text": "Острый аппендицит",
+            }
+        )
+        no_vitals_case_id = int(no_vitals_case["operation_case_id"])
+        no_vitals_defaults = service.build_operblock_patient_header_snapshot(no_vitals_case_id)
+        no_vitals_started_at = datetime.fromisoformat(str(no_vitals_defaults["started_at"]).replace(" ", "T")).replace(second=0, microsecond=0)
+        no_vitals_anesthesia_time = no_vitals_started_at + timedelta(minutes=7)
+        try:
+            service.start_anesthesia(no_vitals_case_id, "ОА", event_time=no_vitals_anesthesia_time)
+        except ValueError as exc:
+            if "Перед началом пособия" not in str(exc):
+                return False, f"unexpected anesthesia without vitals error: {exc}"
+        else:
+            return False, "anesthesia was started without initial vitals"
+
         case = service.create_operation_case(
             {
                 "table_code": "emergency",
@@ -19829,11 +19855,36 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         )
         admission_id = int(case["admission_id"])
         case_id = int(case["operation_case_id"])
-        service.add_vitals(admission_id, sys=120, dia=80, pulse=70, spo2=98)
-        service.start_anesthesia(case_id, "ОА")
-        service.start_surgery(case_id, operation_name="Операция", surgeons=["Хирург"])
+        case_defaults = service.build_operblock_patient_header_snapshot(case_id)
+        case_started_at = datetime.fromisoformat(str(case_defaults["started_at"]).replace(" ", "T")).replace(second=0, microsecond=0)
+        vital_time = case_started_at + timedelta(minutes=10)
+        service.add_vital_record(
+            VitalDTO(id=None, admission_id=admission_id, timestamp=vital_time, sys=120, dia=80, pulse=70, spo2=98)
+        )
+        default_widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
+        default_widget.operblock_service = service
+        default_widget._current_operation_start = case_started_at
+        default_widget._current_protocol_date = case_started_at
+        default_anesthesia_time = OperBlockMainWidget._default_anesthesia_start_datetime(default_widget, case_id)
+        if default_anesthesia_time != vital_time + timedelta(minutes=5):
+            return False, f"anesthesia default time is not latest vitals + 5 min: {default_anesthesia_time!r}"
+        default_widget._current_anesthesia_start = case_started_at
+        default_surgery_time = OperBlockMainWidget._default_surgery_start_datetime(default_widget)
+        if default_surgery_time != case_started_at + timedelta(minutes=5):
+            return False, f"surgery default time is not anesthesia start + 5 min: {default_surgery_time!r}"
+        service.start_anesthesia(case_id, "ОА", event_time=case_started_at)
+        service.start_surgery(
+            case_id,
+            operation_name="Операция",
+            surgeons=["Хирург"],
+            event_time=default_surgery_time,
+        )
 
-        added = service.add_operation_stage(case_id, "Аппендэктомия")
+        added = service.add_operation_stage(
+            case_id,
+            "Аппендэктомия",
+            event_time=default_surgery_time + timedelta(minutes=30),
+        )
         if added.get("display_label") != "Аппендэктомия" or (added.get("payload") or {}).get("stage_kind") != "custom":
             return False, f"custom stage insert returned unexpected payload: {added!r}"
         snapshot_after_add = service.build_operblock_timeline_snapshot(admission_id, operation_case_id=case_id).to_dict()
@@ -19966,6 +20017,46 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
             return False, f"single chart marker patch expected, got {len(save_widget.vitals_chart.calls)}"
 
         app = QApplication.instance() or QApplication([])
+        start_dialog = StartAnesthesiaDialog(
+            [{"label": "ОА"}],
+            ["Анестезиолог"],
+            ["Анестезист"],
+            initial_start_datetime=default_anesthesia_time,
+            min_start_datetime=case_started_at,
+        )
+        try:
+            if start_dialog.time_input.text() != default_anesthesia_time.strftime("%H:%M"):
+                return False, "start anesthesia dialog did not show default time"
+            edited_start_dt = default_anesthesia_time + timedelta(minutes=20)
+            start_dialog.time_input.setText(edited_start_dt.strftime("%H:%M"))
+            selected_start_dt = datetime.fromisoformat(start_dialog.start_datetime_text())
+            if selected_start_dt != edited_start_dt:
+                return False, f"start anesthesia dialog resolved edited time to wrong datetime: {selected_start_dt!r}"
+        finally:
+            start_dialog.close()
+            start_dialog.deleteLater()
+            app.processEvents()
+        start_surgery_dialog = StartSurgeryDialog(
+            ["Хирург"],
+            ["Операционная медсестра"],
+            initial_operation_name="Операция",
+            initial_surgeons=["Хирург"],
+            initial_operating_nurse="Операционная медсестра",
+            initial_start_datetime=surgery_start_dt,
+            min_start_datetime=case_started_at,
+        )
+        try:
+            if start_surgery_dialog.time_input.text() != surgery_start_dt.strftime("%H:%M"):
+                return False, "start surgery dialog did not show default time"
+            edited_surgery_dt = surgery_start_dt + timedelta(minutes=20)
+            start_surgery_dialog.time_input.setText(edited_surgery_dt.strftime("%H:%M"))
+            selected_surgery_dt = datetime.fromisoformat(start_surgery_dialog.start_datetime_text())
+            if selected_surgery_dt != edited_surgery_dt:
+                return False, f"start surgery dialog resolved edited time to wrong datetime: {selected_surgery_dt!r}"
+        finally:
+            start_surgery_dialog.close()
+            start_surgery_dialog.deleteLater()
+            app.processEvents()
         dialog = OperationStagesDialog(
             [
                 {
@@ -20092,7 +20183,7 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         dialog.deleteLater()
         app.processEvents()
 
-        service.end_surgery(case_id)
+        service.end_surgery(case_id, event_time=surgery_start_dt + timedelta(minutes=180))
         try:
             service.add_operation_stage(case_id, "Поздний этап")
         except ValueError as exc:
