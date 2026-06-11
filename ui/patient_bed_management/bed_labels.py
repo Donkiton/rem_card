@@ -1,3 +1,6 @@
+from rem_card.services.patient_bed_management.recovery_beds import is_recovery_bed_number
+
+
 SPECIAL_BED_LABELS = {
     11: "Койка пробуждения",
     12: "Койка пробуждения",
@@ -5,10 +8,7 @@ SPECIAL_BED_LABELS = {
 
 
 def is_recovery_bed(bed_number: int) -> bool:
-    try:
-        return int(bed_number) in SPECIAL_BED_LABELS
-    except (TypeError, ValueError):
-        return False
+    return is_recovery_bed_number(bed_number)
 
 
 def format_patient_bed_label(bed_number: int, *, numbered: bool = False, uppercase: bool = False) -> str:

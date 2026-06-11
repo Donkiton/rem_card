@@ -155,6 +155,11 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
             button.setStyleSheet(STYLE_ANALYTICS_OPTION_BUTTON)
             ctrl_layout.addWidget(button)
 
+        self.chk_include_recovery = QCheckBox("Учитывать пробуждение")
+        self.chk_include_recovery.setChecked(False)
+        self.chk_include_recovery.setStyleSheet(STYLE_ANALYTICS_CHECKBOX)
+        ctrl_layout.addWidget(self.chk_include_recovery)
+
         self.btn_select_all.clicked.connect(self._select_all)
         self.btn_deselect_all.clicked.connect(self._deselect_all)
         self.btn_select_top.clicked.connect(self._select_top)
@@ -248,6 +253,7 @@ class StatisticsDialog(SavedFramelessDialogMixin, QDialog):
                 self.start_date_str,
                 self.end_date_str,
                 selected,
+                include_recovery_beds=self.chk_include_recovery.isChecked(),
             ),
             parent=self,
         )

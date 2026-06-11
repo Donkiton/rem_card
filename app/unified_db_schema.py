@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 18
-SCHEMA_MIN_MIGRATION_VERSION = 18
+SCHEMA_FASTPATH_REV = 19
+SCHEMA_MIN_MIGRATION_VERSION = 19
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -56,6 +56,7 @@ _FASTPATH_REQUIRED_COLUMNS: dict[str, set[str]] = {
         "cardiac_arrest_measures_json",
         "emergency_notice_number",
         "emergency_notice_entered_at",
+        "recovery_bed_stay",
         "revision",
     },
     "beds": {"revision"},
@@ -634,6 +635,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             cardiac_arrest_measures_json TEXT,
             emergency_notice_number TEXT,
             emergency_notice_entered_at DATETIME,
+            recovery_bed_stay INTEGER DEFAULT 0,
             revision INTEGER DEFAULT 0,
             FOREIGN KEY (patient_id) REFERENCES patients(id)
         )
@@ -1256,6 +1258,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _ensure_column(conn, "admissions", "cardiac_arrest_measures_json", "TEXT", logger)
     _ensure_column(conn, "admissions", "emergency_notice_number", "TEXT", logger)
     _ensure_column(conn, "admissions", "emergency_notice_entered_at", "DATETIME", logger)
+    _ensure_column(conn, "admissions", "recovery_bed_stay", "INTEGER DEFAULT 0", logger)
     _ensure_column(conn, "admissions", "revision", "INTEGER DEFAULT 0", logger)
 
     _ensure_column(conn, "beds", "revision", "INTEGER DEFAULT 0", logger)
@@ -1500,6 +1503,8 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(conn, 15, "schema contract satisfied")
     _mark_schema_migration(conn, 16, "admissions emergency notice fields")
     _mark_schema_migration(conn, 17, "lab orders worklist")
+    _mark_schema_migration(conn, 18, "operblock and remcard icon settings")
+    _mark_schema_migration(conn, 19, "recovery bed admission marker")
 
     for table in (
         "vitals",

@@ -8,6 +8,7 @@ from typing import Iterable
 
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
 from rem_card.services.analytics.graphs_service import _thread_local_manager
+from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.ui.styles.theme import (
     BG_CARD,
     BG_LIGHT,
@@ -111,13 +112,27 @@ def build_detailed_statistics_report_html(
     start_date_str: str,
     end_date_str: str,
     selected_sections: Iterable[str],
+    *,
+    include_recovery_beds: bool = False,
 ) -> str:
-    builder = DetailedStatisticsReportBuilder(db_manager, start_date_str, end_date_str)
+    builder = DetailedStatisticsReportBuilder(
+        db_manager,
+        start_date_str,
+        end_date_str,
+        include_recovery_beds=include_recovery_beds,
+    )
     return builder.generate_report_html(list(selected_sections or []))
 
 
 class DetailedStatisticsReportBuilder:
-    def __init__(self, db_manager, start_date_str: str, end_date_str: str):
+    def __init__(
+        self,
+        db_manager,
+        start_date_str: str,
+        end_date_str: str,
+        *,
+        include_recovery_beds: bool = False,
+    ):
         self.db_manager = db_manager
         self._start_dt = self._parse_datetime(start_date_str) or (datetime.now() - timedelta(days=30))
         self._end_dt = self._parse_datetime(end_date_str) or datetime.now()
@@ -126,6 +141,7 @@ class DetailedStatisticsReportBuilder:
         self.start_date_str = self._start_dt.strftime("%Y-%m-%d 00:00:00")
         self.end_date_str = self._end_dt.strftime("%Y-%m-%d 23:59:59")
         self.section_groups = SECTION_GROUPS
+        self.include_recovery_beds = bool(include_recovery_beds)
 
     @staticmethod
     def _parse_datetime(value):
@@ -450,165 +466,166 @@ class DetailedStatisticsReportBuilder:
         conn = manager.get_connection()
         cursor = conn.cursor()
         try:
-            period_params = (self.start_date_str, self.end_date_str)
-            admission_columns = self._table_columns(cursor, "admissions")
-            cardiac_measures_expr = self._select_expr(admission_columns, "cardiac_arrest_measures_json")
+            with recovery_bed_analytics_filter(conn, include_recovery_beds=self.include_recovery_beds):
+                period_params = (self.start_date_str, self.end_date_str)
+                admission_columns = self._table_columns(cursor, "admissions")
+                cardiac_measures_expr = self._select_expr(admission_columns, "cardiac_arrest_measures_json")
 
-            cursor.execute(
-                f"""
-                SELECT
-                    id,
-                    patient_id,
-                    admission_datetime,
-                    transfer_datetime,
-                    death_datetime,
-                    outcome,
-                    patient_age,
-                    patient_age_unit,
-                    patient_gender,
-                    source_department,
-                    diagnosis_code,
-                    diagnosis_text,
-                    {cardiac_measures_expr}
-                FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
-                """,
-                period_params,
-            )
-            columns = [column[0] for column in cursor.description]
-            raw_admissions = [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-            admissions = []
-            for row in raw_admissions:
-                admission_id = self._safe_int(row.get("id"), default=0)
-                patient_id = row.get("patient_id")
-                adm_dt = self._parse_datetime(row.get("admission_datetime"))
-                if adm_dt is None:
-                    continue
-
-                transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
-                death_dt = self._parse_datetime(row.get("death_datetime"))
-
-                raw_end_candidates = [dt for dt in (death_dt, transfer_dt, self._end_dt) if dt is not None]
-                los_end_dt = min(raw_end_candidates) if raw_end_candidates else self._end_dt
-                if los_end_dt < adm_dt:
-                    los_end_dt = adm_dt
-
-                los_days = max(0.0, (los_end_dt - adm_dt).total_seconds() / 86400.0)
-
-                outcome = self._normalize_outcome(row.get("outcome"), transfer_dt, death_dt)
-                is_death = outcome == "умер"
-                death_time_hours = None
-                if is_death and death_dt is not None:
-                    death_time_hours = max(0.0, (death_dt - adm_dt).total_seconds() / 3600.0)
-                death_doctor = self._death_doctor_from_payload(row.get("cardiac_arrest_measures_json")) if is_death else ""
-
-                age_years = self._age_to_years(row.get("patient_age"), row.get("patient_age_unit"))
-                gender = self._normalize_text(row.get("patient_gender"))
-                source = self._normalize_text(row.get("source_department"))
-                diagnosis_code = str(row.get("diagnosis_code") or "").strip()
-                diagnosis_text = str(row.get("diagnosis_text") or "").strip()
-
-                admissions.append(
-                    {
-                        "admission_id": admission_id,
-                        "patient_id": patient_id,
-                        "admission_dt": adm_dt,
-                        "transfer_dt": transfer_dt,
-                        "death_dt": death_dt,
-                        "outcome": outcome,
-                        "los_days": los_days,
-                        "age_years": age_years,
-                        "age_group": self._age_group(age_years),
-                        "gender": gender,
-                        "source": source,
-                        "diagnosis_code": diagnosis_code,
-                        "diagnosis_text": diagnosis_text,
-                        "diagnosis_key": self._diagnosis_key(diagnosis_code, diagnosis_text),
-                        "mkb_class": self._mkb_class(diagnosis_code),
-                        "weekday_name": self._weekday_name(adm_dt),
-                        "month_label": adm_dt.strftime("%Y-%m"),
-                        "is_death": is_death,
-                        "death_time_hours": death_time_hours,
-                        "death_doctor": death_doctor,
-                    }
+                cursor.execute(
+                    f"""
+                    SELECT
+                        id,
+                        patient_id,
+                        admission_datetime,
+                        transfer_datetime,
+                        death_datetime,
+                        outcome,
+                        patient_age,
+                        patient_age_unit,
+                        patient_gender,
+                        source_department,
+                        diagnosis_code,
+                        diagnosis_text,
+                        {cardiac_measures_expr}
+                    FROM admissions
+                    WHERE admission_datetime BETWEEN ? AND ?
+                    """,
+                    period_params,
                 )
+                columns = [column[0] for column in cursor.description]
+                raw_admissions = [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-            admission_ids = {row["admission_id"] for row in admissions if row["admission_id"]}
+                admissions = []
+                for row in raw_admissions:
+                    admission_id = self._safe_int(row.get("id"), default=0)
+                    patient_id = row.get("patient_id")
+                    adm_dt = self._parse_datetime(row.get("admission_datetime"))
+                    if adm_dt is None:
+                        continue
 
-            cursor.execute(
-                """
-                SELECT admission_id
-                FROM operations
-                WHERE operation_datetime BETWEEN ? AND ?
-                """,
-                period_params,
-            )
-            raw_ops = [self._safe_int(r[0], default=0) for r in cursor.fetchall()]
-            operations_adm_ids = [aid for aid in raw_ops if aid and aid in admission_ids]
+                    transfer_dt = self._parse_datetime(row.get("transfer_datetime"))
+                    death_dt = self._parse_datetime(row.get("death_datetime"))
 
-            cursor.execute(
-                """
-                SELECT admission_id, type, volume_ml
-                FROM transfusions
-                WHERE datetime BETWEEN ? AND ?
-                """,
-                period_params,
-            )
-            transfusions = []
-            for admission_id, transf_type, volume_ml in cursor.fetchall():
-                aid = self._safe_int(admission_id, default=0)
-                if not aid or aid not in admission_ids:
-                    continue
-                transfusions.append(
-                    {
-                        "admission_id": aid,
-                        "type": self._transfusion_type_label(transf_type),
-                        "volume_ml": self._safe_float(volume_ml, default=0.0),
-                    }
+                    raw_end_candidates = [dt for dt in (death_dt, transfer_dt, self._end_dt) if dt is not None]
+                    los_end_dt = min(raw_end_candidates) if raw_end_candidates else self._end_dt
+                    if los_end_dt < adm_dt:
+                        los_end_dt = adm_dt
+
+                    los_days = max(0.0, (los_end_dt - adm_dt).total_seconds() / 86400.0)
+
+                    outcome = self._normalize_outcome(row.get("outcome"), transfer_dt, death_dt)
+                    is_death = outcome == "умер"
+                    death_time_hours = None
+                    if is_death and death_dt is not None:
+                        death_time_hours = max(0.0, (death_dt - adm_dt).total_seconds() / 3600.0)
+                    death_doctor = self._death_doctor_from_payload(row.get("cardiac_arrest_measures_json")) if is_death else ""
+
+                    age_years = self._age_to_years(row.get("patient_age"), row.get("patient_age_unit"))
+                    gender = self._normalize_text(row.get("patient_gender"))
+                    source = self._normalize_text(row.get("source_department"))
+                    diagnosis_code = str(row.get("diagnosis_code") or "").strip()
+                    diagnosis_text = str(row.get("diagnosis_text") or "").strip()
+
+                    admissions.append(
+                        {
+                            "admission_id": admission_id,
+                            "patient_id": patient_id,
+                            "admission_dt": adm_dt,
+                            "transfer_dt": transfer_dt,
+                            "death_dt": death_dt,
+                            "outcome": outcome,
+                            "los_days": los_days,
+                            "age_years": age_years,
+                            "age_group": self._age_group(age_years),
+                            "gender": gender,
+                            "source": source,
+                            "diagnosis_code": diagnosis_code,
+                            "diagnosis_text": diagnosis_text,
+                            "diagnosis_key": self._diagnosis_key(diagnosis_code, diagnosis_text),
+                            "mkb_class": self._mkb_class(diagnosis_code),
+                            "weekday_name": self._weekday_name(adm_dt),
+                            "month_label": adm_dt.strftime("%Y-%m"),
+                            "is_death": is_death,
+                            "death_time_hours": death_time_hours,
+                            "death_doctor": death_doctor,
+                        }
+                    )
+
+                admission_ids = {row["admission_id"] for row in admissions if row["admission_id"]}
+
+                cursor.execute(
+                    """
+                    SELECT admission_id
+                    FROM operations
+                    WHERE operation_datetime BETWEEN ? AND ?
+                    """,
+                    period_params,
                 )
+                raw_ops = [self._safe_int(r[0], default=0) for r in cursor.fetchall()]
+                operations_adm_ids = [aid for aid in raw_ops if aid and aid in admission_ids]
 
-            cursor.execute(
-                """
-                SELECT admission_id, start_time, end_time
-                FROM ivl_episodes
-                WHERE start_time BETWEEN ? AND ?
-                """,
-                period_params,
-            )
-            ivl_episodes = []
-            for admission_id, start_time, end_time in cursor.fetchall():
-                aid = self._safe_int(admission_id, default=0)
-                if not aid or aid not in admission_ids:
-                    continue
-                start_dt = self._parse_datetime(start_time)
-                if start_dt is None:
-                    continue
-                end_dt = self._parse_datetime(end_time) or self._end_dt
-                if end_dt < start_dt:
-                    end_dt = start_dt
-                end_dt = min(end_dt, self._end_dt)
-                duration_hours = max(0.0, (end_dt - start_dt).total_seconds() / 3600.0)
-                ivl_episodes.append(
-                    {
-                        "admission_id": aid,
-                        "duration_hours": duration_hours,
-                    }
+                cursor.execute(
+                    """
+                    SELECT admission_id, type, volume_ml
+                    FROM transfusions
+                    WHERE datetime BETWEEN ? AND ?
+                    """,
+                    period_params,
                 )
+                transfusions = []
+                for admission_id, transf_type, volume_ml in cursor.fetchall():
+                    aid = self._safe_int(admission_id, default=0)
+                    if not aid or aid not in admission_ids:
+                        continue
+                    transfusions.append(
+                        {
+                            "admission_id": aid,
+                            "type": self._transfusion_type_label(transf_type),
+                            "volume_ml": self._safe_float(volume_ml, default=0.0),
+                        }
+                    )
 
-            cvc_procedures = self._fetch_cvc_procedures(cursor, admission_ids)
-            lumbar_punctures = self._fetch_lumbar_punctures(cursor, admission_ids)
-            procedure_transfusions = self._fetch_procedure_transfusions(cursor, admission_ids)
+                cursor.execute(
+                    """
+                    SELECT admission_id, start_time, end_time
+                    FROM ivl_episodes
+                    WHERE start_time BETWEEN ? AND ?
+                    """,
+                    period_params,
+                )
+                ivl_episodes = []
+                for admission_id, start_time, end_time in cursor.fetchall():
+                    aid = self._safe_int(admission_id, default=0)
+                    if not aid or aid not in admission_ids:
+                        continue
+                    start_dt = self._parse_datetime(start_time)
+                    if start_dt is None:
+                        continue
+                    end_dt = self._parse_datetime(end_time) or self._end_dt
+                    if end_dt < start_dt:
+                        end_dt = start_dt
+                    end_dt = min(end_dt, self._end_dt)
+                    duration_hours = max(0.0, (end_dt - start_dt).total_seconds() / 3600.0)
+                    ivl_episodes.append(
+                        {
+                            "admission_id": aid,
+                            "duration_hours": duration_hours,
+                        }
+                    )
 
-            return {
-                "admissions": admissions,
-                "operations_adm_ids": operations_adm_ids,
-                "transfusions": transfusions,
-                "ivl_episodes": ivl_episodes,
-                "cvc_procedures": cvc_procedures,
-                "lumbar_punctures": lumbar_punctures,
-                "procedure_transfusions": procedure_transfusions,
-            }
+                cvc_procedures = self._fetch_cvc_procedures(cursor, admission_ids)
+                lumbar_punctures = self._fetch_lumbar_punctures(cursor, admission_ids)
+                procedure_transfusions = self._fetch_procedure_transfusions(cursor, admission_ids)
+
+                return {
+                    "admissions": admissions,
+                    "operations_adm_ids": operations_adm_ids,
+                    "transfusions": transfusions,
+                    "ivl_episodes": ivl_episodes,
+                    "cvc_procedures": cvc_procedures,
+                    "lumbar_punctures": lumbar_punctures,
+                    "procedure_transfusions": procedure_transfusions,
+                }
         finally:
             if cleanup:
                 cleanup()

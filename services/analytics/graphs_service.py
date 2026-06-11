@@ -9,6 +9,7 @@ from typing import Sequence
 from xml.sax.saxutils import escape as xml_escape
 
 from rem_card.ui.analytics.chart_renderer import configure_chart_style
+from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
     BG_CARD,
@@ -37,6 +38,8 @@ def build_graphs_html(
     end_date_str: str,
     selected: Sequence[str],
     chart_colors: Sequence[str] | None = None,
+    *,
+    include_recovery_beds: bool = False,
 ) -> GraphsBuildResult:
     selected = list(selected or [])
     if not selected:
@@ -53,54 +56,55 @@ def build_graphs_html(
     )
 
     try:
-        _configure_plot_style(chart_colors)
-        (
-            generate_g1_g5,
-            generate_g6_g13,
-            generate_g14_g18,
-            generate_g19_g22,
-            generate_g23_g30,
-            generate_g31_g35,
-            generate_g36_g40,
-            generate_g41_g45,
-            generate_g46_g50,
-            generate_g51_g55,
-            generate_g56_g60,
-            generate_g61_g65,
-        ) = _load_generators()
+        with recovery_bed_analytics_filter(conn, include_recovery_beds=include_recovery_beds):
+            _configure_plot_style(chart_colors)
+            (
+                generate_g1_g5,
+                generate_g6_g13,
+                generate_g14_g18,
+                generate_g19_g22,
+                generate_g23_g30,
+                generate_g31_g35,
+                generate_g36_g40,
+                generate_g41_g45,
+                generate_g46_g50,
+                generate_g51_g55,
+                generate_g56_g60,
+                generate_g61_g65,
+            ) = _load_generators()
 
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, patient_id, admission_datetime, transfer_datetime, death_datetime,
-                   outcome, patient_age, patient_age_unit, patient_gender,
-                   source_department, diagnosis_code, diagnosis_text
-            FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
-            """,
-            params,
-        )
-        adms = [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, patient_id, admission_datetime, transfer_datetime, death_datetime,
+                       outcome, patient_age, patient_age_unit, patient_gender,
+                       source_department, diagnosis_code, diagnosis_text
+                FROM admissions
+                WHERE admission_datetime BETWEEN ? AND ?
+                """,
+                params,
+            )
+            adms = [dict(zip([column[0] for column in cursor.description], row)) for row in cursor.fetchall()]
 
-        html_content = generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content)
-        html_content = generate_g6_g13(
-            selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
-        )
-        html_content = generate_g14_g18(
-            selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
-        )
-        html_content = generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html_content)
-        html_content = generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_content)
-        html_content = generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_content)
-        html_content = generate_g36_g40(selected, conn, params, chart_colors, img_paths, adms, html_content)
-        html_content = generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_content)
-        html_content = generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html_content)
-        html_content = generate_g51_g55(
-            selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
-        )
-        html_content = generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_content)
-        html_content = generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_content)
-        return GraphsBuildResult(html=html_content, image_paths=img_paths)
+            html_content = generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content)
+            html_content = generate_g6_g13(
+                selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
+            )
+            html_content = generate_g14_g18(
+                selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
+            )
+            html_content = generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html_content)
+            html_content = generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_content)
+            html_content = generate_g31_g35(selected, conn, params, chart_colors, img_paths, html_content)
+            html_content = generate_g36_g40(selected, conn, params, chart_colors, img_paths, adms, html_content)
+            html_content = generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_content)
+            html_content = generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html_content)
+            html_content = generate_g51_g55(
+                selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
+            )
+            html_content = generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_content)
+            html_content = generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_content)
+            return GraphsBuildResult(html=html_content, image_paths=img_paths)
     finally:
         if cleanup:
             cleanup()

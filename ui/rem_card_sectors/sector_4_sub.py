@@ -279,6 +279,8 @@ class Sector4v(BaseSectorWidget):
     yest_card_requested = Signal()
     full_report_requested = Signal()
     daily_report_requested = Signal()
+    recovery_transfer_requested = Signal()
+    recovery_cancel_transfer_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__("4в", parent)
@@ -391,6 +393,22 @@ class Sector4v(BaseSectorWidget):
         self.btn_all_print.setMinimumHeight(32)
         self.btn_all_print.setStyleSheet(button_style)
         self.btn_all_print.clicked.connect(self.full_report_requested.emit)
+
+        self.btn_recovery_transfer = QPushButton(" Перевод")
+        self.btn_recovery_transfer.setMinimumHeight(32)
+        self.btn_recovery_transfer.setStyleSheet(button_style)
+        self.btn_recovery_transfer.clicked.connect(self.recovery_transfer_requested.emit)
+        self.btn_recovery_transfer.setVisible(False)
+
+        self.btn_recovery_cancel_transfer = QPushButton(" Отменить перевод")
+        cancel_icon_path = os.path.join(self.icon_dir, "icon-cancelled.png")
+        if os.path.exists(cancel_icon_path):
+            self.btn_recovery_cancel_transfer.setIcon(QIcon(cancel_icon_path))
+            self.btn_recovery_cancel_transfer.setIconSize(QSize(20, 20))
+        self.btn_recovery_cancel_transfer.setMinimumHeight(32)
+        self.btn_recovery_cancel_transfer.setStyleSheet(button_style)
+        self.btn_recovery_cancel_transfer.clicked.connect(self.recovery_cancel_transfer_requested.emit)
+        self.btn_recovery_cancel_transfer.setVisible(False)
         
         self.content_layout.addWidget(self.btn_show_card)
         self.content_layout.addWidget(self.btn_yest_card)
@@ -398,6 +416,8 @@ class Sector4v(BaseSectorWidget):
         self.content_layout.addWidget(self.btn_card_list)
         self.content_layout.addWidget(self.btn_daily_print)
         self.content_layout.addWidget(self.btn_all_print)
+        self.content_layout.addWidget(self.btn_recovery_transfer)
+        self.content_layout.addWidget(self.btn_recovery_cancel_transfer)
         self.content_layout.addStretch()
 
         from rem_card.ui.styles.theme import (COLOR_VITAL_AD_LINE, COLOR_VITAL_PULSE, 
@@ -475,6 +495,22 @@ class Sector4v(BaseSectorWidget):
         self.btn_new_card.setEnabled(not card_exists)
         self.btn_show_card.setEnabled(card_exists)
         self.btn_yest_card.setEnabled(yest_card_exists)
+
+    def set_recovery_mode(self, enabled: bool, *, can_transfer: bool = True, can_cancel_transfer: bool = False):
+        standard_buttons = (
+            self.btn_show_card,
+            self.btn_yest_card,
+            self.btn_new_card,
+            self.btn_card_list,
+            self.btn_daily_print,
+            self.btn_all_print,
+        )
+        for button in standard_buttons:
+            button.setVisible(not enabled)
+        self.btn_recovery_transfer.setVisible(enabled)
+        self.btn_recovery_transfer.setEnabled(bool(enabled and can_transfer))
+        self.btn_recovery_cancel_transfer.setVisible(bool(enabled and can_cancel_transfer))
+        self.btn_recovery_cancel_transfer.setEnabled(bool(enabled and can_cancel_transfer))
 
     def update_latest_vitals(self, latest_values, settings=None):
         if settings is None:

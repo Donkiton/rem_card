@@ -35,7 +35,8 @@ FALLBACK_DDL: dict[str, str] = {
             source_department TEXT,
             diagnosis_code TEXT,
             diagnosis_text TEXT,
-            bed_number INTEGER
+            bed_number INTEGER,
+            recovery_bed_stay INTEGER DEFAULT 0
         )
     """,
     "operations": """
@@ -181,7 +182,7 @@ def create_multi_db_analytics_manager(
         isolation_level=None,
         timeout=10.0,
     )
-    configure_connection(conn, readonly=True)
+    configure_connection(conn, readonly=False)
 
     aliases = []
     for idx, db_path in enumerate(valid_paths):
@@ -192,6 +193,8 @@ def create_multi_db_analytics_manager(
     try:
         for table_name, spec in TABLE_SPECS.items():
             _prepare_target_table(conn, aliases, table_name)
+            if table_name == "admissions":
+                _ensure_column(conn, "admissions", "recovery_bed_stay", "INTEGER DEFAULT 0")
             for alias in aliases:
                 if not _table_exists(conn, table_name, schema=alias):
                     continue
@@ -256,6 +259,12 @@ def _prepare_target_table(conn: sqlite3.Connection, aliases: Sequence[str], tabl
     ddl = FALLBACK_DDL.get(table_name)
     if ddl:
         conn.execute(ddl)
+
+
+def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_def: str):
+    if column_name in _get_columns(conn, table_name, schema="main"):
+        return
+    conn.execute(f'ALTER TABLE main."{table_name}" ADD COLUMN "{column_name}" {column_def}')
 
 
 def _get_columns(conn: sqlite3.Connection, table_name: str, *, schema: str = "main") -> list[str]:

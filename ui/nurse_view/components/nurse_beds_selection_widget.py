@@ -11,6 +11,12 @@ from rem_card.ui.shared.w1_bed_sorting import sort_patients_for_w1
 from rem_card.ui.shared.w1_beds_signature import build_w1_bed_row_signature
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.report_guard import ensure_daily_card_exists
+from rem_card.ui.shared.recovery_bed_status_actions import (
+    cancel_recovery_transfer,
+    open_recovery_transfer_dialog,
+)
+from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
+from rem_card.data.dto.remcard_dto import PatientStatus
 import pathlib
 import datetime
 
@@ -348,6 +354,8 @@ class NurseBedsSelectionWidget(QWidget):
         row.archive_requested.connect(lambda p: self.patient_selected.emit(p, "archive"))
         row.full_report_requested.connect(self.on_full_report_requested)
         row.daily_report_requested.connect(self.on_daily_report_requested)
+        row.transfer_requested.connect(self.on_recovery_transfer_requested)
+        row.cancel_transfer_requested.connect(self.on_recovery_cancel_transfer_requested)
         return row
 
     @staticmethod
@@ -386,6 +394,15 @@ class NurseBedsSelectionWidget(QWidget):
 
         card_exists = bool(runtime_snapshot.get("card_exists", False))
         yest_exists = bool(runtime_snapshot.get("yest_exists", False))
+        status_value = getattr(status_dto, "status", None)
+        is_recovery = is_recovery_bed(getattr(patient, "bed_number", None))
+        is_transferred = status_value == PatientStatus.TRANSFERRED
+        has_outcome = bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
+        row.sector_4v.set_recovery_mode(
+            is_recovery,
+            can_transfer=not has_outcome,
+            can_cancel_transfer=is_transferred,
+        )
         row.sector_4v.set_buttons_state(card_exists, yest_exists)
 
         latest_values = runtime_snapshot.get("latest_values") or {
@@ -399,6 +416,22 @@ class NurseBedsSelectionWidget(QWidget):
         }
         settings = runtime_snapshot.get("settings") or {"ad": 1, "pulse": 1, "temp": 1, "spo2": 1, "rr": 0, "cvp": 0}
         row.sector_4v.update_latest_vitals(latest_values, settings)
+
+    def on_recovery_transfer_requested(self, patient):
+        open_recovery_transfer_dialog(
+            self,
+            self.remcard_service,
+            patient,
+            on_finished=lambda: self.refresh(queue_if_running=False),
+        )
+
+    def on_recovery_cancel_transfer_requested(self, patient):
+        cancel_recovery_transfer(
+            self,
+            self.remcard_service,
+            patient,
+            on_finished=lambda: self.refresh(queue_if_running=False),
+        )
 
     def on_daily_report_requested(self, patient):
         """РћР±СЂР°Р±РѕС‚РєР° Р·Р°РїСЂРѕСЃР° РѕС‚С‡РµС‚Р° Р·Р° СЃСѓС‚РєРё РёР· СЃРїРёСЃРєР° РєРѕРµРє (РјРµРґСЃРµСЃС‚СЂР°)."""

@@ -271,11 +271,12 @@ class PatientBedManagementWidget(QWidget):
             return
         source_bed_data = self.patient_bed_service.get_bed_by_number(source_bed)
         target_bed_data = self.patient_bed_service.get_bed_by_number(target_bed)
-        if self._moves_recovery_patient_to_regular_bed(source_bed, target_bed, target_bed_data):
+        recovery_move_error = self._recovery_move_error(source_bed, target_bed, target_bed_data)
+        if recovery_move_error:
             CustomMessageBox.warning(
                 self,
                 "Перенос пациента",
-                "Койку пробуждения нельзя переносить или обменивать с обычной койкой.",
+                recovery_move_error,
             )
             return
         if not source_bed_data or source_bed_data["status"] == "FREE":
@@ -346,13 +347,15 @@ class PatientBedManagementWidget(QWidget):
             on_error(exc)
 
     @staticmethod
-    def _moves_recovery_patient_to_regular_bed(source_bed: int, target_bed: int, target_bed_data) -> bool:
+    def _recovery_move_error(source_bed: int, target_bed: int, target_bed_data) -> str:
         source_is_recovery = is_recovery_bed(source_bed)
         target_is_recovery = is_recovery_bed(target_bed)
-        if source_is_recovery and not target_is_recovery:
-            return True
         target_is_occupied = bool(target_bed_data and target_bed_data["status"] != "FREE")
-        return bool(target_is_recovery and not source_is_recovery and target_is_occupied)
+        if not source_is_recovery and target_is_recovery:
+            return "Пациента с обычной койки нельзя перенести на койку пробуждения."
+        if source_is_recovery and target_is_occupied:
+            return "Пациента с койки пробуждения можно перенести только на свободную койку."
+        return ""
 
     def _begin_move_pending(self):
         self._move_pending = True

@@ -10,6 +10,8 @@ class NursePatientBedRow(QWidget):
     archive_requested = Signal(object)
     full_report_requested = Signal(object)
     daily_report_requested = Signal(object)
+    transfer_requested = Signal(object)
+    cancel_transfer_requested = Signal(object)
 
     def __init__(self, patient, parent=None):
         super().__init__(parent)
@@ -61,6 +63,8 @@ class NursePatientBedRow(QWidget):
         self.sector_4v.archive_requested.connect(lambda: self.archive_requested.emit(self.patient))
         self.sector_4v.full_report_requested.connect(lambda: self.full_report_requested.emit(self.patient))
         self.sector_4v.daily_report_requested.connect(lambda: self.daily_report_requested.emit(self.patient))
+        self.sector_4v.recovery_transfer_requested.connect(lambda: self.transfer_requested.emit(self.patient))
+        self.sector_4v.recovery_cancel_transfer_requested.connect(lambda: self.cancel_transfer_requested.emit(self.patient))
         
         self.main_layout.addWidget(self.sector_4b)
         self.main_layout.addWidget(self.sector_4v)

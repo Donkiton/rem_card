@@ -7,6 +7,9 @@ from typing import Any, Callable, Optional
 
 from rem_card.app.patient_age import parse_date_value
 from rem_card.services.concurrency import assert_revision_matches
+from rem_card.services.patient_bed_management.recovery_beds import is_recovery_bed_number
+from rem_card.services.shift_service import ShiftService
+from rem_card.data.dto.remcard_dto import PatientStatus
 
 
 @dataclass
@@ -154,6 +157,9 @@ class PatientBedManagementService:
             raise ValueError("ФИО пациента не заполнено.")
 
         def operation(cursor):
+            bed_number = int(admission_data["bed_number"])
+            admission_dt_text = self._to_sql_dt(admission_data.get("admission_datetime"))
+            recovery_bed_stay = 1 if is_recovery_bed_number(bed_number) else 0
             cursor.execute(
                 "INSERT INTO patients (full_name, admission_uid, birth_date) VALUES (?, ?, ?)",
                 (full_name, admission_uid, birth_date),
@@ -166,14 +172,14 @@ class PatientBedManagementService:
                     patient_id, bed_number, history_number, admission_datetime,
                     patient_age, patient_months, patient_age_unit, patient_gender,
                     diagnosis_code, diagnosis_text, department_profile, source_department,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    recovery_bed_stay, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     patient_id,
-                    int(admission_data["bed_number"]),
+                    bed_number,
                     str(admission_data.get("history_number") or "").strip(),
-                    self._to_sql_dt(admission_data.get("admission_datetime")),
+                    admission_dt_text,
                     self._safe_int_or_none(admission_data.get("patient_age")),
                     self._safe_int_or_none(admission_data.get("patient_months")),
                     admission_data.get("patient_age_unit"),
@@ -182,11 +188,14 @@ class PatientBedManagementService:
                     admission_data.get("diagnosis_text"),
                     admission_data.get("department_profile"),
                     admission_data.get("source_department"),
+                    recovery_bed_stay,
                     now,
                     now,
                 ),
             )
             admission_id = int(cursor.lastrowid)
+            if recovery_bed_stay:
+                self._insert_initial_active_status(cursor, admission_id, admission_dt_text)
             cursor.execute(
                 """
                 UPDATE beds
@@ -197,7 +206,7 @@ class PatientBedManagementService:
                   AND status = 'FREE'
                   AND current_admission_id IS NULL
                 """,
-                ("OCCUPIED", admission_id, int(admission_data["bed_number"])),
+                ("OCCUPIED", admission_id, bed_number),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError(f"Койка {admission_data['bed_number']} уже занята другим пользователем.")
@@ -237,6 +246,7 @@ class PatientBedManagementService:
                     diagnosis_text = ?,
                     department_profile = ?,
                     source_department = ?,
+                    recovery_bed_stay = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(recovery_bed_stay, 0) END,
                     updated_at = ?,
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ?
@@ -254,6 +264,7 @@ class PatientBedManagementService:
                     admission_data.get("diagnosis_text"),
                     admission_data.get("department_profile"),
                     admission_data.get("source_department"),
+                    1 if is_recovery_bed_number(admission_data["bed_number"]) else 0,
                     self._now_text(),
                     int(admission_id),
                     expected_admission_revision,
@@ -284,22 +295,29 @@ class PatientBedManagementService:
         def operation(cursor):
             source = cursor.execute("SELECT * FROM beds WHERE bed_number = ?", (source_bed,)).fetchone()
             target = cursor.execute("SELECT * FROM beds WHERE bed_number = ?", (target_bed,)).fetchone()
-            if not source or source["status"] == "FREE" or source["current_admission_id"] is None:
+            if not source or not target or source["status"] == "FREE" or source["current_admission_id"] is None:
                 return False
+            source_is_recovery = is_recovery_bed_number(source_bed)
+            target_is_recovery = is_recovery_bed_number(target_bed)
+            target_is_occupied = bool(target["status"] != "FREE" and target["current_admission_id"] is not None)
+            if not source_is_recovery and target_is_recovery:
+                raise RuntimeError("Пациента с обычной койки нельзя перенести на койку пробуждения.")
+            if source_is_recovery and target_is_occupied:
+                raise RuntimeError("Пациента с койки пробуждения можно перенести только на свободную койку.")
+
             assert_revision_matches(source["revision"] if "revision" in source.keys() else 0, expected_source_bed_revision)
-            if target:
-                assert_revision_matches(target["revision"] if "revision" in target.keys() else 0, expected_target_bed_revision)
+            assert_revision_matches(target["revision"] if "revision" in target.keys() else 0, expected_target_bed_revision)
 
             source_admission_id = int(source["current_admission_id"])
             source_admission = cursor.execute(
-                "SELECT COALESCE(revision, 0) AS revision FROM admissions WHERE id = ?",
+                "SELECT id, admission_datetime, COALESCE(revision, 0) AS revision FROM admissions WHERE id = ?",
                 (source_admission_id,),
             ).fetchone()
             assert_revision_matches(
                 source_admission["revision"] if source_admission else 0,
                 expected_source_admission_revision,
             )
-            if target and target["status"] != "FREE" and target["current_admission_id"] is not None:
+            if target_is_occupied:
                 target_admission_id = int(target["current_admission_id"])
                 target_admission = cursor.execute(
                     "SELECT COALESCE(revision, 0) AS revision FROM admissions WHERE id = ?",
@@ -320,12 +338,36 @@ class PatientBedManagementService:
                     (source_bed, target_bed),
                 )
                 cursor.execute(
-                    "UPDATE admissions SET bed_number = ?, updated_at = ?, revision = COALESCE(revision, 0) + 1 WHERE id = ?",
-                    (target_bed, self._now_text(), source_admission_id),
+                    """
+                    UPDATE admissions
+                    SET bed_number = ?,
+                        recovery_bed_stay = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(recovery_bed_stay, 0) END,
+                        updated_at = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (
+                        target_bed,
+                        1 if source_is_recovery or target_is_recovery else 0,
+                        self._now_text(),
+                        source_admission_id,
+                    ),
                 )
                 cursor.execute(
-                    "UPDATE admissions SET bed_number = ?, updated_at = ?, revision = COALESCE(revision, 0) + 1 WHERE id = ?",
-                    (source_bed, self._now_text(), target_admission_id),
+                    """
+                    UPDATE admissions
+                    SET bed_number = ?,
+                        recovery_bed_stay = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(recovery_bed_stay, 0) END,
+                        updated_at = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (
+                        source_bed,
+                        1 if target_is_recovery else 0,
+                        self._now_text(),
+                        target_admission_id,
+                    ),
                 )
                 cursor.execute(
                     "UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED', revision = COALESCE(revision, 0) + 1 WHERE bed_number = ?",
@@ -341,16 +383,140 @@ class PatientBedManagementService:
                     (source_bed,),
                 )
                 cursor.execute(
-                    "UPDATE admissions SET bed_number = ?, updated_at = ?, revision = COALESCE(revision, 0) + 1 WHERE id = ?",
-                    (target_bed, self._now_text(), source_admission_id),
+                    """
+                    UPDATE admissions
+                    SET bed_number = ?,
+                        recovery_bed_stay = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(recovery_bed_stay, 0) END,
+                        updated_at = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (
+                        target_bed,
+                        1 if source_is_recovery or target_is_recovery else 0,
+                        self._now_text(),
+                        source_admission_id,
+                    ),
                 )
                 cursor.execute(
                     "UPDATE beds SET current_admission_id = ?, status = 'OCCUPIED', revision = COALESCE(revision, 0) + 1 WHERE bed_number = ?",
                     (source_admission_id, target_bed),
                 )
+                if source_is_recovery and not target_is_recovery:
+                    self._ensure_recovery_release_card(cursor, source_admission_id, source_admission)
             return True
 
         return self.db.run_write_operation(operation, source="patient_bed_move_patient")
+
+    def _insert_initial_active_status(self, cursor, admission_id: int, admission_datetime) -> None:
+        cursor.execute("SELECT COUNT(*) AS cnt FROM patient_status_events WHERE admission_id = ?", (int(admission_id),))
+        row = cursor.fetchone()
+        if row and int(row["cnt"] or 0) > 0:
+            return
+
+        start_dt = self._parse_dt(admission_datetime) or datetime.now()
+        start_text = start_dt.replace(microsecond=0).isoformat()
+        cursor.execute(
+            """
+            INSERT INTO patient_status_events
+            (admission_id, status, start_time, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (int(admission_id), PatientStatus.ACTIVE.value, start_text, "SYSTEM", start_text, start_text),
+        )
+
+    def _ensure_recovery_release_card(self, cursor, admission_id: int, admission_row) -> None:
+        active_start = self._first_active_status_start(cursor, admission_id)
+        if active_start is None:
+            admission_dt = admission_row["admission_datetime"] if admission_row else None
+            active_start = self._parse_dt(admission_dt) or datetime.now()
+            self._insert_initial_active_status(cursor, admission_id, active_start)
+
+        active_start = active_start.replace(second=0, microsecond=0)
+        shift_start, shift_end = ShiftService.get_day_period(active_start)
+        if self._has_any_card_record_in_shift(cursor, admission_id, shift_start, shift_end):
+            return
+
+        cursor.execute(
+            """
+            INSERT INTO vitals (admission_id, datetime, last_modified_by, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                int(admission_id),
+                active_start.isoformat(),
+                "SYSTEM",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:23],
+            ),
+        )
+
+    def _first_active_status_start(self, cursor, admission_id: int) -> Optional[datetime]:
+        row = cursor.execute(
+            """
+            SELECT start_time
+            FROM patient_status_events
+            WHERE admission_id = ?
+              AND status = ?
+            ORDER BY datetime(start_time) ASC, id ASC
+            LIMIT 1
+            """,
+            (int(admission_id), PatientStatus.ACTIVE.value),
+        ).fetchone()
+        if not row:
+            return None
+        return self._parse_dt(row["start_time"])
+
+    @staticmethod
+    def _has_any_card_record_in_shift(cursor, admission_id: int, shift_start: datetime, shift_end: datetime) -> bool:
+        admission_id = int(admission_id)
+        start_iso = shift_start.isoformat()
+        end_iso = shift_end.isoformat()
+        start_min = shift_start.isoformat(timespec="minutes").replace("T", " ")
+        end_min = shift_end.isoformat(timespec="minutes").replace("T", " ")
+        row = cursor.execute(
+            """
+            SELECT 1
+            WHERE EXISTS (
+                SELECT 1 FROM vitals
+                WHERE admission_id = ? AND datetime >= ? AND datetime < ?
+            )
+            OR EXISTS (
+                SELECT 1 FROM fluids
+                WHERE admission_id = ? AND datetime >= ? AND datetime < ?
+            )
+            OR EXISTS (
+                SELECT 1 FROM orders
+                WHERE admission_id = ? AND datetime >= ? AND datetime < ?
+            )
+            OR EXISTS (
+                SELECT 1 FROM diet_plan
+                WHERE admission_id = ? AND shift_start >= ? AND shift_start < ?
+            )
+            OR EXISTS (
+                SELECT 1 FROM oral_intake_events
+                WHERE admission_id = ? AND event_time >= ? AND event_time < ?
+            )
+            LIMIT 1
+            """,
+            (
+                admission_id,
+                start_iso,
+                end_iso,
+                admission_id,
+                start_iso,
+                end_iso,
+                admission_id,
+                start_iso,
+                end_iso,
+                admission_id,
+                start_min,
+                end_min,
+                admission_id,
+                start_min,
+                end_min,
+            ),
+        ).fetchone()
+        return bool(row)
 
     @staticmethod
     def _safe_int_or_none(value):
