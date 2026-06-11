@@ -160,6 +160,7 @@ class NurseSector4v(BaseSectorWidget):
         self.btn_recovery_transfer = QPushButton(" Перевод в отделение")
         self.btn_recovery_transfer.setMinimumHeight(32)
         self.btn_recovery_transfer.setStyleSheet(button_style)
+        self.btn_recovery_transfer.setMinimumWidth(self.btn_recovery_transfer.sizeHint().width() + 10)
         self.btn_recovery_transfer.clicked.connect(self.recovery_transfer_requested.emit)
         self.btn_recovery_transfer.setVisible(False)
 
