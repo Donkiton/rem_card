@@ -10811,6 +10811,55 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_w1_days_label_scope_by_bed_type(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from PySide6.QtWidgets import QApplication
+
+    from rem_card.ui.rem_card_sectors.sector_4_sub import Sector4b
+
+    class _Patient:
+        def __init__(self, bed_number: int, admission_datetime: datetime):
+            self.id = bed_number
+            self.bed_number = bed_number
+            self.history_number = f"REG-{bed_number}"
+            self.admission_datetime = admission_datetime
+            self.diagnosis_text = ""
+
+        def get_display_name(self):
+            return f"Пациент {self.bed_number}"
+
+        def get_display_age(self, current_date):
+            _ = current_date
+            return "40 лет"
+
+    app = QApplication.instance() or QApplication([])
+    widget = Sector4b()
+    try:
+        current_date = datetime(2026, 5, 7, 9, 25)
+        ordinary_patient = _Patient(1, datetime(2026, 5, 6, 9, 0))
+        recovery_patient = _Patient(11, datetime(2026, 5, 7, 8, 3))
+
+        widget.update_patient_info(ordinary_patient, current_date)
+        if widget.lbl_days.text() != "Сутки: 2":
+            return False, f"ordinary bed must use ICU day label, got: {widget.lbl_days.text()!r}"
+
+        widget.update_patient_info(recovery_patient, current_date)
+        if widget.lbl_days.text() != "Время в отделении: 1ч 20м":
+            return False, f"recovery bed must use 10-minute department time, got: {widget.lbl_days.text()!r}"
+
+        widget.update_patient_info(ordinary_patient, current_date)
+        if widget.lbl_days.text() != "Сутки: 2":
+            return False, f"ordinary bed label must recover after recovery patient, got: {widget.lbl_days.text()!r}"
+
+        return True, "ok"
+    finally:
+        widget.close()
+        widget.deleteLater()
+        app.processEvents()
+
+
 def _check_w1a_display_settings_sleep_behavior(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21474,6 +21523,7 @@ def main(argv: list[str] | None = None):
         ("chart_snapshot_dedupes_unchanged_payload", _check_chart_snapshot_dedupes_unchanged_payload),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
+        ("w1_days_label_scope_by_bed_type", _check_w1_days_label_scope_by_bed_type),
         ("w1a_w1b_targeted_layout_and_read_model", _check_w1a_w1b_targeted_layout_and_read_model),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),
         ("beds_mode_reentry_does_not_warn", _check_beds_mode_reentry_does_not_warn),

@@ -1,3 +1,5 @@
+from rem_card.services.shift_service import ShiftService
+from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from PySide6.QtWidgets import (QHBoxLayout, QVBoxLayout, QLabel, QWidget)
 from PySide6.QtCore import Qt
@@ -9,6 +11,7 @@ class Sector4(BaseSectorWidget):
         self.label.hide()
         self.setFrameStyle(BaseSectorWidget.NoFrame)
         self.setStyleSheet("background: transparent;")
+        self._recovery_mode = False
         
         self.init_ui()
 
@@ -91,7 +94,7 @@ class Sector4(BaseSectorWidget):
         self.lbl_age = QLabel("Возраст: -")
         self.lbl_age.setStyleSheet("background: transparent;")
         
-        self.lbl_days = QLabel("Время в отделении: -")
+        self.lbl_days = QLabel("Сутки: -")
         self.lbl_days.setStyleSheet("background: transparent;")
         
         self.lbl_diagnosis = QLabel("Диагноз: -")
@@ -113,9 +116,14 @@ class Sector4(BaseSectorWidget):
             if item.widget(): item.widget().setParent(None)
         if widget: self.content_layout.addWidget(widget)
 
-    def update_patient_info(self, patient, current_date):
+    def set_recovery_mode(self, enabled: bool):
+        self._recovery_mode = bool(enabled)
+
+    def update_patient_info(self, patient, current_date, *, is_recovery: bool | None = None):
         if not patient:
             return
+        recovery_mode = self._resolve_recovery_mode(patient, is_recovery)
+        self._recovery_mode = recovery_mode
             
         self.lbl_history.setText(f"№ {patient.history_number}")
         self.lbl_name.setText(patient.get_display_name())
@@ -124,12 +132,31 @@ class Sector4(BaseSectorWidget):
         self.lbl_age.setText(f"Возраст: {age_str}")
         
         if patient.admission_datetime:
-            self.lbl_days.setText(f"Время в отделении: {self._format_department_time(patient.admission_datetime, current_date)}")
+            if recovery_mode:
+                value = self._format_department_time(patient.admission_datetime, current_date)
+                self.lbl_days.setText(f"Время в отделении: {value}")
+            else:
+                value = self._format_icu_day(patient.admission_datetime, current_date)
+                self.lbl_days.setText(f"Сутки: {value}")
         else:
-            self.lbl_days.setText("Время в отделении: -")
+            self.lbl_days.setText("Время в отделении: -" if recovery_mode else "Сутки: -")
             
         diag = patient.diagnosis_text if patient.diagnosis_text else "-"
         self.lbl_diagnosis.setText(f"Диагноз: {diag}")
+
+    def _resolve_recovery_mode(self, patient, explicit_value) -> bool:
+        if explicit_value is not None:
+            return bool(explicit_value)
+        bed_number = getattr(patient, "bed_number", None)
+        try:
+            return is_recovery_bed(bed_number)
+        except Exception:
+            return bool(getattr(self, "_recovery_mode", False))
+
+    @staticmethod
+    def _format_icu_day(admission_datetime, current_date) -> str:
+        icu_day = ShiftService.calculate_icu_day(admission_datetime, current_date)
+        return str(icu_day) if icu_day is not None else "-"
 
     @staticmethod
     def _format_department_time(admission_datetime, current_date) -> str:

@@ -394,6 +394,8 @@ class NurseBedsSelectionWidget(QWidget):
         card_exists = bool(runtime_snapshot.get("card_exists", False))
         yest_exists = bool(runtime_snapshot.get("yest_exists", False))
         is_recovery = is_recovery_bed(getattr(patient, "bed_number", None))
+        if hasattr(row.sector_4b, "set_recovery_mode"):
+            row.sector_4b.set_recovery_mode(is_recovery)
         row.sector_4v.set_recovery_mode(
             is_recovery,
             can_transfer=False,

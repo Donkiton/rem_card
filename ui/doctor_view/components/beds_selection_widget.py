@@ -435,6 +435,8 @@ class BedsSelectionWidget(QWidget):
         status_value = getattr(status_dto, "status", None)
         has_outcome = bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
         is_recovery = is_recovery_bed(getattr(patient, "bed_number", None))
+        if hasattr(row.sector_4b, "set_recovery_mode"):
+            row.sector_4b.set_recovery_mode(is_recovery)
         is_transferred = status_value == PatientStatus.TRANSFERRED
         row.sector_4v.set_recovery_mode(
             is_recovery,

@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (QSizePolicy, QVBoxLayout, QWidget)
 from PySide6.QtCore import Qt, Signal
 from datetime import datetime
+from ...patient_bed_management.bed_labels import is_recovery_bed
 from ...rem_card_sectors.sector_4_sub import Sector4b
 from ..sectors.nurse_sector_4v import NurseSector4v
 
@@ -26,7 +27,11 @@ class NursePatientBedRow(QWidget):
         self.patient = patient
         bed_num = self.patient.bed_number if hasattr(self.patient, "bed_number") else "-"
         self.sector_4b.header_lbl.setText(f"Информация (Койка {bed_num})")
-        self.sector_4b.update_patient_info(self.patient, now or datetime.now())
+        self.sector_4b.update_patient_info(
+            self.patient,
+            now or datetime.now(),
+            is_recovery=is_recovery_bed(getattr(self.patient, "bed_number", None)),
+        )
 
     def init_ui(self):
         # Используем стандартный сектор 4б (инфо), так как он не меняется
@@ -55,7 +60,11 @@ class NursePatientBedRow(QWidget):
         self.sector_4v.content_layout.setContentsMargins(7, 3, 10, 3)
         
         now = datetime.now()
-        self.sector_4b.update_patient_info(self.patient, now)
+        self.sector_4b.update_patient_info(
+            self.patient,
+            now,
+            is_recovery=is_recovery_bed(getattr(self.patient, "bed_number", None)),
+        )
         
         # Настройка сигналов
         self.sector_4v.show_card_requested.connect(lambda: self.show_card_requested.emit(self.patient, "show"))
