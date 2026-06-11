@@ -11536,6 +11536,19 @@ def _check_build_release_reuses_prepared_version(temp_root: str) -> tuple[bool, 
     return True, "ok"
 
 
+def _check_pyinstaller_settings_release_snapshot_source(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "RemCard.spec").read_text(encoding="utf-8")
+    if "REMCARD_SETTINGS_RELEASE_SOURCE_BAZA" not in source:
+        return False, "RemCard.spec must keep explicit settings release source override"
+    if "from rem_card.app.runtime_paths import get_dev_baza_dir" in source:
+        return False, "RemCard.spec must not resolve release settings source through alias runtime_paths"
+    if 'os.path.join(PROJECT_ROOT, "Baza_rao3_jurnal")' not in source:
+        return False, "RemCard.spec must default release settings source to real project Baza_rao3_jurnal"
+    return True, "ok"
+
+
 def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime
@@ -21468,6 +21481,7 @@ def main(argv: list[str] | None = None):
         ("data_update_monitor_suppresses_shutdown_db_closed", _check_data_update_monitor_suppresses_shutdown_db_closed),
         ("outcome_rollback_restores_released_w1_bed", _check_outcome_rollback_restores_released_w1_bed),
         ("build_release_reuses_prepared_version", _check_build_release_reuses_prepared_version),
+        ("pyinstaller_settings_release_snapshot_source", _check_pyinstaller_settings_release_snapshot_source),
         ("patient_card_cache_lru_10", _check_patient_card_cache_lru_10),
         ("patient_open_cached_card_always_rehydrates", _check_patient_open_cached_card_always_rehydrates),
         ("patient_snapshot_cache_invalidates_on_vitals_change", _check_patient_snapshot_cache_invalidates_on_vitals_change),

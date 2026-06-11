@@ -192,7 +192,6 @@ def _settings_release_snapshot_datas():
         print("===> Settings release snapshot export skipped by REMCARD_SKIP_SETTINGS_RELEASE_EXPORT <===")
         return []
 
-    from rem_card.app.runtime_paths import get_dev_baza_dir
     from rem_card.data.settings.settings_release import (
         SETTINGS_RELEASE_SNAPSHOT_FILE,
         export_settings_release_snapshot,
@@ -200,7 +199,7 @@ def _settings_release_snapshot_datas():
 
     source_baza = os.path.abspath(
         os.environ.get("REMCARD_SETTINGS_RELEASE_SOURCE_BAZA")
-        or get_dev_baza_dir()
+        or os.path.join(PROJECT_ROOT, "Baza_rao3_jurnal")
     )
     snapshot_dir = os.path.join(APP_ROOT, "build", "settings_release")
     snapshot_path = os.path.join(snapshot_dir, SETTINGS_RELEASE_SNAPSHOT_FILE)
