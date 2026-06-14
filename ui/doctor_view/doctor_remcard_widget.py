@@ -3409,7 +3409,7 @@ class DoctorRemCardWidget(QWidget):
         if layout is not None and hasattr(layout, "set_patient_selection_mode"):
             layout.current_admission_id = None
             layout.set_patient_selection_mode("beds")
-        if layout is not None and hasattr(layout, "bottom_row"):
+        if self._full_layout_created and layout is not None and hasattr(layout, "bottom_row"):
             layout.bottom_row.show()
 
     def reset_to_beds(self):

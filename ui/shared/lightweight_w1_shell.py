@@ -125,7 +125,7 @@ class LightweightW1Shell(QWidget):
         self._journal_layout.setContentsMargins(0, 0, 0, 0)
         self.selection_stack.addWidget(self.journal_view)
 
-        self.bottom_row = QWidget()
+        self.bottom_row = QWidget(self)
         self.bottom_row.hide()
 
         self.lower_area.addWidget(self.left_column)

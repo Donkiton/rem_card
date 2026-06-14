@@ -11036,10 +11036,7 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
-def _check_lazy_full_card_layout_contract(temp_root: str) -> tuple[bool, str]:
-    _ = temp_root
-    root = Path(__file__).resolve().parents[1]
-
+def _check_lazy_w1_shell_contract(root: Path) -> tuple[bool, str]:
     shell_path = root / "ui" / "shared" / "lightweight_w1_shell.py"
     if not shell_path.exists():
         return False, "Lightweight W1 shell module not found"
@@ -11055,8 +11052,91 @@ def _check_lazy_full_card_layout_contract(temp_root: str) -> tuple[bool, str]:
     ):
         if marker not in shell_source:
             return False, f"Lightweight W1 shell missing contract marker: {marker}"
+    if "self.bottom_row = QWidget(self)" not in shell_source:
+        return False, "Lightweight W1 shell bottom_row must not be a top-level QWidget"
     if "RemCardLayoutManager" in shell_source or "NurseRemCardLayoutManager" in shell_source:
         return False, "Lightweight W1 shell must not instantiate full card layouts"
+    return True, "ok"
+
+
+def _class_methods_from_source(source: str, class_name: str):
+    tree = ast.parse(source)
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+    if not class_defs:
+        return None
+    return {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+
+
+def _method_source(source: str, methods: dict, name: str) -> str:
+    node = methods.get(name)
+    return ast.get_source_segment(source, node) if node is not None else ""
+
+
+def _check_lazy_full_card_role_contract(
+    role: str,
+    source_path: Path,
+    class_name: str,
+    full_layout_name: str,
+) -> tuple[bool, str]:
+    source = source_path.read_text(encoding="utf-8")
+    methods = _class_methods_from_source(source, class_name)
+    if methods is None:
+        return False, f"{role}: {class_name} not found"
+
+    init_source = _method_source(source, methods, "init_ui")
+    ensure_source = _method_source(source, methods, "_ensure_full_layout")
+    load_source = _method_source(source, methods, "load_patient_card")
+    if not init_source or not ensure_source or not load_source:
+        return False, f"{role}: lazy layout methods missing"
+    if "LightweightW1Shell" not in init_source:
+        return False, f"{role}: startup must create LightweightW1Shell"
+    if full_layout_name in init_source:
+        return False, f"{role}: init_ui must not create {full_layout_name}"
+    if full_layout_name not in ensure_source:
+        return False, f"{role}: _ensure_full_layout must create {full_layout_name}"
+    for marker in ("_full_layout_created", "_retire_w1_shell", "_wire_full_layout_signals"):
+        if marker not in ensure_source:
+            return False, f"{role}: _ensure_full_layout missing {marker}"
+    if "_ensure_full_layout(reason=\"patient_open\")" not in load_source:
+        return False, f"{role}: patient open must ensure full layout first"
+    if "_patient_open_generation" not in load_source or "_set_nurse_orders_context_if_current" not in source:
+        return False, f"{role}: deferred patient context must use generation guard"
+
+    prewarm_source = _method_source(source, methods, "_schedule_card_ui_prewarm")
+    if "_full_layout_created" not in prewarm_source:
+        return False, f"{role}: card UI prewarm must not create full layout before patient open"
+    selection_source = _method_source(source, methods, "_on_selection_mode_changed")
+    if "ignored stale beds selection signal" not in selection_source:
+        return False, f"{role}: stale beds selection signal guard missing"
+    show_beds_source = _method_source(source, methods, "show_beds_mode")
+    if role == "doctor" and "layout.bottom_row.show()" in show_beds_source and "_full_layout_created" not in show_beds_source:
+        return False, "doctor: shell bottom_row must not be shown before full layout exists"
+    return True, "ok"
+
+
+def _check_lazy_full_card_main_window_contract(root: Path) -> tuple[bool, str]:
+    main_source = (root / "ui" / "main_window.py").read_text(encoding="utf-8")
+    forbidden = (
+        "doctor_main.remcard_widget.layout_manager",
+        "nurse_main.layout_manager",
+        ".layout_manager.set_patient_selection_mode(\"beds\")",
+    )
+    for marker in forbidden:
+        if marker in main_source:
+            return False, f"MainWindow must use role-level API instead of {marker}"
+    for marker in ("doctor_main.reset_to_beds()", "nurse_main.reset_to_beds()"):
+        if marker not in main_source:
+            return False, f"MainWindow missing role-level beds reset call: {marker}"
+    return True, "ok"
+
+
+def _check_lazy_full_card_layout_contract(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+
+    ok, details = _check_lazy_w1_shell_contract(root)
+    if not ok:
+        return ok, details
 
     cases = [
         (
@@ -11073,56 +11153,11 @@ def _check_lazy_full_card_layout_contract(temp_root: str) -> tuple[bool, str]:
         ),
     ]
     for role, source_path, class_name, full_layout_name in cases:
-        source = source_path.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
-        if not class_defs:
-            return False, f"{role}: {class_name} not found"
-        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
-        init_ui = methods.get("init_ui")
-        ensure_full = methods.get("_ensure_full_layout")
-        load_patient = methods.get("load_patient_card")
-        schedule_prewarm = methods.get("_schedule_card_ui_prewarm")
-        selection_changed = methods.get("_on_selection_mode_changed")
-        if init_ui is None or ensure_full is None or load_patient is None:
-            return False, f"{role}: lazy layout methods missing"
-        init_source = ast.get_source_segment(source, init_ui) or ""
-        ensure_source = ast.get_source_segment(source, ensure_full) or ""
-        load_source = ast.get_source_segment(source, load_patient) or ""
-        if "LightweightW1Shell" not in init_source:
-            return False, f"{role}: startup must create LightweightW1Shell"
-        if full_layout_name in init_source:
-            return False, f"{role}: init_ui must not create {full_layout_name}"
-        if full_layout_name not in ensure_source:
-            return False, f"{role}: _ensure_full_layout must create {full_layout_name}"
-        for marker in ("_full_layout_created", "_retire_w1_shell", "_wire_full_layout_signals"):
-            if marker not in ensure_source:
-                return False, f"{role}: _ensure_full_layout missing {marker}"
-        if "_ensure_full_layout(reason=\"patient_open\")" not in load_source:
-            return False, f"{role}: patient open must ensure full layout first"
-        if "_patient_open_generation" not in load_source or "_set_nurse_orders_context_if_current" not in source:
-            return False, f"{role}: deferred patient context must use generation guard"
-        prewarm_source = ast.get_source_segment(source, schedule_prewarm) if schedule_prewarm else ""
-        if "_full_layout_created" not in (prewarm_source or ""):
-            return False, f"{role}: card UI prewarm must not create full layout before patient open"
-        selection_source = ast.get_source_segment(source, selection_changed) if selection_changed else ""
-        if "ignored stale beds selection signal" not in (selection_source or ""):
-            return False, f"{role}: stale beds selection signal guard missing"
+        ok, details = _check_lazy_full_card_role_contract(role, source_path, class_name, full_layout_name)
+        if not ok:
+            return ok, details
 
-    main_source = (root / "ui" / "main_window.py").read_text(encoding="utf-8")
-    forbidden = (
-        "doctor_main.remcard_widget.layout_manager",
-        "nurse_main.layout_manager",
-        ".layout_manager.set_patient_selection_mode(\"beds\")",
-    )
-    for marker in forbidden:
-        if marker in main_source:
-            return False, f"MainWindow must use role-level API instead of {marker}"
-    for marker in ("doctor_main.reset_to_beds()", "nurse_main.reset_to_beds()"):
-        if marker not in main_source:
-            return False, f"MainWindow missing role-level beds reset call: {marker}"
-
-    return True, "ok"
+    return _check_lazy_full_card_main_window_contract(root)
 
 
 def _check_w1_days_label_scope_by_bed_type(temp_root: str) -> tuple[bool, str]:
