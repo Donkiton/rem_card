@@ -57,9 +57,9 @@ class CountingDatabaseManager(DatabaseManager):
         self.fetch_all_count = 0
         self.fetch_one_count = 0
 
-    def fetch_all_remcard(self, query: str, params=()):
+    def fetch_all_remcard(self, query: str, params=(), *, cancel_check=None):
         self.fetch_all_count += 1
-        return super().fetch_all_remcard(query, params)
+        return super().fetch_all_remcard(query, params, cancel_check=cancel_check)
 
     def fetch_one_remcard(self, query: str, params=()):
         self.fetch_one_count += 1

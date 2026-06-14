@@ -7979,6 +7979,25 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         vitals_form.addRow("АД:", ad_row)
         vitals_form.addRow("ЧСС:", self.pulse_input)
         vitals_form.addRow("SpO₂:", self.spo2_input)
+        self.save_initial_vitals_checkbox = QCheckBox("Сохранить исходные показатели в протокол")
+        self.save_initial_vitals_checkbox.setObjectName("OperBlockSaveInitialVitalsCheckbox")
+        self.save_initial_vitals_checkbox.setChecked(True)
+        self.save_initial_vitals_checkbox.setStyleSheet(
+            f"""
+            QCheckBox#OperBlockSaveInitialVitalsCheckbox {{
+                background: transparent;
+                border: none;
+                color: {TEXT_PRIMARY};
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QCheckBox#OperBlockSaveInitialVitalsCheckbox::indicator {{
+                width: 16px;
+                height: 16px;
+            }}
+            """
+        )
+        vitals_form.addRow("", self.save_initial_vitals_checkbox)
         page_layout.addWidget(vitals)
         page_layout.addStretch(1)
 
@@ -8252,6 +8271,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         ):
             value = (data or {}).get(key)
             edit.setText("" if value in (None, "") else str(value))
+        self.save_initial_vitals_checkbox.setChecked(bool((data or {}).get("save_initial_vitals", True)))
 
     def _on_mkb_code_text_edited(self, text: str):
         normalized = normalize_operblock_mkb_code(text)
@@ -8435,7 +8455,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "preop_dia": preop_dia,
             "preop_pulse": preop_pulse,
             "preop_spo2": preop_spo2,
-            "save_initial_vitals": True,
+            "save_initial_vitals": bool(self.save_initial_vitals_checkbox.isChecked()),
         }
 
 

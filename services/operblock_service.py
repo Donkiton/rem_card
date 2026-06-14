@@ -750,7 +750,7 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         preop_dia=_normalize_optional_int(payload.get("preop_dia"), "АД диастолическое", 0, 300),
         preop_pulse=_normalize_optional_int(payload.get("preop_pulse"), "ЧСС", 0, 300),
         preop_spo2=_normalize_optional_int(payload.get("preop_spo2"), "SpO₂", 0, 100),
-        save_initial_vitals=True,
+        save_initial_vitals=bool(payload.get("save_initial_vitals", True)),
     )
 
 
@@ -2276,7 +2276,7 @@ class OperBlockService:
                     data.preop_dia,
                     data.preop_pulse,
                     data.preop_spo2,
-                    1,
+                    1 if data.save_initial_vitals else 0,
                 ),
             )
             operation_case_id = int(cursor.lastrowid)
@@ -2298,7 +2298,7 @@ class OperBlockService:
                 """,
                 (admission_id, now),
             )
-            if _has_case_vitals(data):
+            if data.save_initial_vitals and _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, {
                     "operation_case_id": operation_case_id,
                     "admission_id": admission_id,
@@ -2397,14 +2397,14 @@ class OperBlockService:
                 preop_pulse = first_vital.get("pulse")
                 preop_spo2 = first_vital.get("spo2")
                 vitals_source = "vitals"
-                save_initial_vitals = True
+                save_initial_vitals = bool(data.get("preop_save_initial_vitals", 1))
             else:
                 preop_sys = data.get("preop_sys")
                 preop_dia = data.get("preop_dia")
                 preop_pulse = data.get("preop_pulse")
                 preop_spo2 = data.get("preop_spo2")
                 vitals_source = "case"
-                save_initial_vitals = True
+                save_initial_vitals = bool(data.get("preop_save_initial_vitals", 1))
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
                 "table_code": data.get("table_code") or "",
@@ -2540,7 +2540,7 @@ class OperBlockService:
                     data.preop_dia,
                     data.preop_pulse,
                     data.preop_spo2,
-                    1,
+                    1 if data.save_initial_vitals else 0,
                     int(operation_case_id),
                 ),
             )
@@ -2549,7 +2549,7 @@ class OperBlockService:
             case_for_vitals = dict(case)
             case_for_vitals["started_at"] = case.get("started_at")
             case_for_vitals["ended_at"] = case.get("ended_at")
-            if _has_case_vitals(data):
+            if data.save_initial_vitals and _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, case_for_vitals, data)
             synced = self._sync_case_metadata_to_stage_payloads(
                 cursor,

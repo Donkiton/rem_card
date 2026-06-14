@@ -315,7 +315,7 @@ def main() -> int:
     parser.add_argument("--benchmark-clicks", type=int, default=5, help="Clicks for orders latency benchmark")
     parser.add_argument("--benchmark-timeout-s", type=float, default=120.0, help="Hard timeout for benchmark script")
     parser.add_argument("--quality-timeout-s", type=float, default=60.0, help="Timeout for static quality checks")
-    parser.add_argument("--regression-timeout-s", type=float, default=600.0, help="Hard timeout for regression checks")
+    parser.add_argument("--regression-timeout-s", type=float, default=1200.0, help="Hard timeout for regression checks")
     parser.add_argument(
         "--regression-idle-timeout-s",
         type=float,

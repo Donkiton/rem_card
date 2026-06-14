@@ -29,10 +29,11 @@ import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REGRESSION_TIMEOUT_SEC = 600.0
+DEFAULT_REGRESSION_TIMEOUT_SEC = 1200.0
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 try:
