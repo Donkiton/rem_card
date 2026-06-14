@@ -11036,6 +11036,95 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
     return True, "ok"
 
 
+def _check_lazy_full_card_layout_contract(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    root = Path(__file__).resolve().parents[1]
+
+    shell_path = root / "ui" / "shared" / "lightweight_w1_shell.py"
+    if not shell_path.exists():
+        return False, "Lightweight W1 shell module not found"
+    shell_source = shell_path.read_text(encoding="utf-8")
+    for marker in (
+        "class LightweightW1Shell",
+        "selection_mode_changed = Signal(str)",
+        "beds_selection_widget",
+        "def set_patient_selection_mode",
+        "def refresh_beds",
+        "def refresh_w1a",
+        "def shutdown",
+    ):
+        if marker not in shell_source:
+            return False, f"Lightweight W1 shell missing contract marker: {marker}"
+    if "RemCardLayoutManager" in shell_source or "NurseRemCardLayoutManager" in shell_source:
+        return False, "Lightweight W1 shell must not instantiate full card layouts"
+
+    cases = [
+        (
+            "doctor",
+            root / "ui" / "doctor_view" / "doctor_remcard_widget.py",
+            "DoctorRemCardWidget",
+            "RemCardLayoutManager",
+        ),
+        (
+            "nurse",
+            root / "ui" / "nurse_view" / "nurse_main_widget.py",
+            "NurseMainWidget",
+            "NurseRemCardLayoutManager",
+        ),
+    ]
+    for role, source_path, class_name, full_layout_name in cases:
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name]
+        if not class_defs:
+            return False, f"{role}: {class_name} not found"
+        methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+        init_ui = methods.get("init_ui")
+        ensure_full = methods.get("_ensure_full_layout")
+        load_patient = methods.get("load_patient_card")
+        schedule_prewarm = methods.get("_schedule_card_ui_prewarm")
+        selection_changed = methods.get("_on_selection_mode_changed")
+        if init_ui is None or ensure_full is None or load_patient is None:
+            return False, f"{role}: lazy layout methods missing"
+        init_source = ast.get_source_segment(source, init_ui) or ""
+        ensure_source = ast.get_source_segment(source, ensure_full) or ""
+        load_source = ast.get_source_segment(source, load_patient) or ""
+        if "LightweightW1Shell" not in init_source:
+            return False, f"{role}: startup must create LightweightW1Shell"
+        if full_layout_name in init_source:
+            return False, f"{role}: init_ui must not create {full_layout_name}"
+        if full_layout_name not in ensure_source:
+            return False, f"{role}: _ensure_full_layout must create {full_layout_name}"
+        for marker in ("_full_layout_created", "_retire_w1_shell", "_wire_full_layout_signals"):
+            if marker not in ensure_source:
+                return False, f"{role}: _ensure_full_layout missing {marker}"
+        if "_ensure_full_layout(reason=\"patient_open\")" not in load_source:
+            return False, f"{role}: patient open must ensure full layout first"
+        if "_patient_open_generation" not in load_source or "_set_nurse_orders_context_if_current" not in source:
+            return False, f"{role}: deferred patient context must use generation guard"
+        prewarm_source = ast.get_source_segment(source, schedule_prewarm) if schedule_prewarm else ""
+        if "_full_layout_created" not in (prewarm_source or ""):
+            return False, f"{role}: card UI prewarm must not create full layout before patient open"
+        selection_source = ast.get_source_segment(source, selection_changed) if selection_changed else ""
+        if "ignored stale beds selection signal" not in (selection_source or ""):
+            return False, f"{role}: stale beds selection signal guard missing"
+
+    main_source = (root / "ui" / "main_window.py").read_text(encoding="utf-8")
+    forbidden = (
+        "doctor_main.remcard_widget.layout_manager",
+        "nurse_main.layout_manager",
+        ".layout_manager.set_patient_selection_mode(\"beds\")",
+    )
+    for marker in forbidden:
+        if marker in main_source:
+            return False, f"MainWindow must use role-level API instead of {marker}"
+    for marker in ("doctor_main.reset_to_beds()", "nurse_main.reset_to_beds()"):
+        if marker not in main_source:
+            return False, f"MainWindow missing role-level beds reset call: {marker}"
+
+    return True, "ok"
+
+
 def _check_w1_days_label_scope_by_bed_type(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -22328,6 +22417,7 @@ def main(argv: list[str] | None = None):
         ("chart_snapshot_dedupes_unchanged_payload", _check_chart_snapshot_dedupes_unchanged_payload),
         ("journal_prewarm_is_opt_in", _check_journal_prewarm_is_opt_in),
         ("w1_beds_refreshes_on_vitals_change", _check_w1_beds_refreshes_on_vitals_change),
+        ("lazy_full_card_layout_contract", _check_lazy_full_card_layout_contract),
         ("w1_days_label_scope_by_bed_type", _check_w1_days_label_scope_by_bed_type),
         ("w1a_w1b_targeted_layout_and_read_model", _check_w1a_w1b_targeted_layout_and_read_model),
         ("w1_outcome_timer_ticks_without_beds_refresh", _check_w1_outcome_timer_ticks_without_beds_refresh),

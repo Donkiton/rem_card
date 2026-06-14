@@ -128,6 +128,9 @@ class NurseMainWidget(QWidget):
         self._balance_runtime_cache = None
         self._is_closing = False
         self.diet_intake_widget = None
+        self._full_layout_created = False
+        self._full_layout_static_signals_bound = False
+        self._patient_open_generation = 0
         
         self.init_ui()
         self._balance_update_delay_ms = 120
@@ -1306,32 +1309,24 @@ class NurseMainWidget(QWidget):
         self._disconnect_monitor()
 
     def init_ui(self):
-        from .nurse_remcard_layout import NurseRemCardLayoutManager
         from .components.nurse_sector8_panel import NurseSector8Panel
+        from ..shared.lightweight_w1_shell import LightweightW1Shell
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
         
         self.main_stack = QStackedWidget()
         
-        # Используем ИЗОЛИРОВАННЫЙ лайаут медсестры
-        self.layout_manager = NurseRemCardLayoutManager(patient_service=self.patient_service,
-                                                      remcard_service=self.remcard_service,
-                                                      parent=self.main_stack)
-        self.layout_manager.patient_status_service = self.remcard_service.status_service
-        if hasattr(self.layout_manager, "sector_w1a"):
-            self.layout_manager.sector_w1a.set_service(self.remcard_service)
+        self._w1_shell = LightweightW1Shell(
+            role="nurse",
+            patient_service=self.patient_service,
+            remcard_service=self.remcard_service,
+            parent=self.main_stack,
+        )
+        self.layout_manager = self._w1_shell
         
         self.main_stack.addWidget(self.layout_manager)
         main_layout.addWidget(self.main_stack)
-        
-        # Настройка сигналов медсестринского сектора 4в
-        if hasattr(self.layout_manager, 'sector_4v'):
-            self.layout_manager.sector_4v.show_card_requested.connect(lambda: self.load_patient_card(self.layout_manager.current_admission_id, datetime.now()))
-            self.layout_manager.sector_4v.yest_card_requested.connect(self.on_yest_card_clicked)
-            self.layout_manager.sector_4v.full_report_requested.connect(self.on_full_report_clicked)
-            self.layout_manager.sector_4v.daily_report_requested.connect(self.on_daily_report_clicked)
-            self.layout_manager.sector_4v.archive_requested.connect(self.show_archive)
 
         # Панель управления медсестры (Сектор 8)
         self.sector8_panel = NurseSector8Panel()
@@ -1348,20 +1343,108 @@ class NurseMainWidget(QWidget):
         if hasattr(self.layout_manager, "selection_mode_changed"):
             self.layout_manager.selection_mode_changed.connect(self._on_selection_mode_changed)
             self._on_selection_mode_changed(getattr(self.layout_manager, "current_mode", "beds"))
-        if hasattr(self.layout_manager, "sector_2b"):
-            self.layout_manager.sector_2b.tab_changed.connect(self.on_tab_changed)
-
-        # Инициализация событий (аналогично врачу), без раннего создания тяжелой вкладки.
-        if hasattr(self.layout_manager, "register_events_status_handler"):
-            self.layout_manager.register_events_status_handler(self.refresh_data)
-        elif hasattr(self.layout_manager, 'sector_events') and self.layout_manager.sector_events:
-            self.layout_manager.sector_events.role = "Медсестра"
-            self.layout_manager.sector_events.status_changed.connect(self.refresh_data)
 
         # Подключаем выбор пациента из списка коек
         self.layout_manager.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+
+    def has_full_layout(self) -> bool:
+        return bool(self._full_layout_created)
+
+    def _ensure_full_layout(self, reason: str = "") -> bool:
+        if self._is_closing:
+            return False
+        if self._full_layout_created:
+            return True
+        if not hasattr(self, "main_stack"):
+            return False
+
+        from .nurse_remcard_layout import NurseRemCardLayoutManager
+
+        old_shell = getattr(self, "_w1_shell", None)
+        layout = NurseRemCardLayoutManager(
+            patient_service=self.patient_service,
+            remcard_service=self.remcard_service,
+            parent=self.main_stack,
+        )
+        layout.patient_status_service = self.remcard_service.status_service
+        layout.current_admission_id = None
+        layout.current_date = self._current_date
+        if hasattr(layout, "sector_w1a"):
+            layout.sector_w1a.set_service(self.remcard_service)
+
+        self.main_stack.addWidget(layout)
+        self.layout_manager = layout
+        self._full_layout_created = True
+        self._full_layout_static_signals_bound = False
+        self._wire_full_layout_signals()
+        self.main_stack.setCurrentWidget(layout)
+        self._retire_w1_shell(old_shell)
+        logger.info("[NURSE_VIEW] lazy full layout created reason=%s", reason)
+        return True
+
+    def _wire_full_layout_signals(self):
+        if self._full_layout_static_signals_bound:
+            return
+        layout = getattr(self, "layout_manager", None)
+        if layout is None or layout is getattr(self, "_w1_shell", None):
+            return
+
+        if hasattr(layout, 'sector_4v'):
+            layout.sector_4v.show_card_requested.connect(
+                lambda: self.load_patient_card(layout.current_admission_id, datetime.now())
+            )
+            layout.sector_4v.yest_card_requested.connect(self.on_yest_card_clicked)
+            layout.sector_4v.full_report_requested.connect(self.on_full_report_clicked)
+            layout.sector_4v.daily_report_requested.connect(self.on_daily_report_clicked)
+            layout.sector_4v.archive_requested.connect(self.show_archive)
+
+        layout.sector_8.set_content(self.sector8_panel)
+        if hasattr(layout, "selection_mode_changed"):
+            layout.selection_mode_changed.connect(self._on_selection_mode_changed)
+            self._on_selection_mode_changed(getattr(layout, "current_mode", "beds"))
+        if hasattr(layout, "sector_2b"):
+            layout.sector_2b.tab_changed.connect(self.on_tab_changed)
+
+        if hasattr(layout, "register_events_status_handler"):
+            layout.register_events_status_handler(self.refresh_data)
+        elif hasattr(layout, 'sector_events') and layout.sector_events:
+            layout.sector_events.role = "Медсестра"
+            layout.sector_events.status_changed.connect(self.refresh_data)
+
+        layout.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+        self._archive_signals_bound = False
+        self._admin_signals_bound = False
+        self._orders_balance_signals_bound = False
+        self._nurse_orders_balance_signals_bound = False
         self._bind_orders_balance_signals()
         self._bind_nurse_orders_balance_signals()
+        self._full_layout_static_signals_bound = True
+
+    def _retire_w1_shell(self, shell):
+        if shell is None:
+            return
+        try:
+            if hasattr(shell, "beds_selection_widget"):
+                shell.beds_selection_widget.patient_selected.disconnect(self.on_patient_selected)
+        except Exception:
+            pass
+        try:
+            if hasattr(shell, "selection_mode_changed"):
+                shell.selection_mode_changed.disconnect(self._on_selection_mode_changed)
+        except Exception:
+            pass
+        try:
+            if hasattr(shell, "shutdown"):
+                shell.shutdown()
+        except Exception:
+            logger.debug("Nurse W1 shell shutdown failed", exc_info=True)
+        try:
+            if self.main_stack.indexOf(shell) >= 0:
+                self.main_stack.removeWidget(shell)
+        except Exception:
+            pass
+        shell.deleteLater()
+        self._w1_shell = None
 
     def _refresh_w1a(self, payload: dict | None = None):
         sector = getattr(getattr(self, "layout_manager", None), "sector_w1a", None)
@@ -1466,6 +1549,8 @@ class NurseMainWidget(QWidget):
         )
 
     def _schedule_card_ui_prewarm(self):
+        if not self._full_layout_created:
+            return
         if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
             return
         self._card_ui_prewarm_started = True
@@ -1629,6 +1714,8 @@ class NurseMainWidget(QWidget):
         if hasattr(self, "vitals_input") and hasattr(self, "balance_controller"):
             self._schedule_chart_init()
             return
+        if not self._full_layout_created:
+            return
 
         from ..shared.vitals_widget import VitalsWidget
         from ..shared.components.balance_controller import BalanceController
@@ -1744,6 +1831,10 @@ class NurseMainWidget(QWidget):
     def load_patient_card(self, admission_id, date):
         if self._is_closing:
             return
+        self._patient_open_generation += 1
+        patient_open_generation = self._patient_open_generation
+        if not self._ensure_full_layout(reason="patient_open"):
+            return
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
         self._balance_update_timer.stop()
@@ -1818,7 +1909,12 @@ class NurseMainWidget(QWidget):
             nurse_orders_mgr = self.layout_manager.nurse_orders_manager
         if nurse_orders_mgr:
             self._bind_nurse_orders_balance_signals()
-            QTimer.singleShot(0, lambda mgr=nurse_orders_mgr, aid=admission_id, d=date: mgr.set_context(aid, d))
+            QTimer.singleShot(
+                0,
+                lambda mgr=nurse_orders_mgr, aid=admission_id, d=date, gen=patient_open_generation: (
+                    self._set_nurse_orders_context_if_current(mgr, aid, d, gen)
+                ),
+            )
 
         self._last_change_id = 0
         if not cached_card_snapshot:
@@ -1849,6 +1945,19 @@ class NurseMainWidget(QWidget):
                 self.layout_manager.sector_2b.select_tab(active_tab, emit=False)
             if active_tab != "Витальные функции":
                 self.on_tab_changed(active_tab)
+
+    def _set_nurse_orders_context_if_current(self, mgr, admission_id, date, generation: int):
+        if self._is_closing or generation != self._patient_open_generation:
+            return
+        current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
+        if int(admission_id or 0) != int(current_admission_id or 0):
+            return
+        if date != self._current_date:
+            return
+        try:
+            mgr.set_context(admission_id, date)
+        except RuntimeError:
+            logger.debug("Nurse orders panel context skipped for deleted widget", exc_info=True)
 
     def _prime_patient_header_from_w1(self, patient, target_date):
         """Заполняет 4б/4в данными W1 до показа карты, чтобы не было визуального скачка."""
@@ -2161,6 +2270,13 @@ class NurseMainWidget(QWidget):
             raise
 
     def _on_selection_mode_changed(self, mode: str):
+        if (
+            str(mode or "") == "beds"
+            and self._full_layout_created
+            and getattr(getattr(self, "layout_manager", None), "current_mode", None) == "card"
+        ):
+            logger.debug("Nurse ignored stale beds selection signal during card mode")
+            return
         self._selection_mode = str(mode or "")
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE:
             self._release_add_patient_lock()
@@ -2218,6 +2334,25 @@ class NurseMainWidget(QWidget):
         self.layout_manager.set_patient_selection_mode("beds")
         return True
 
+    def show_beds_mode(self):
+        if self._is_closing:
+            return
+        layout = getattr(self, "layout_manager", None)
+        if layout is not None:
+            layout.current_admission_id = None
+            if hasattr(layout, "set_patient_selection_mode"):
+                layout.set_patient_selection_mode("beds")
+
+    def reset_to_beds(self):
+        self.show_beds_mode()
+
+    def refresh_w1(self):
+        layout = getattr(self, "layout_manager", None)
+        beds_widget = getattr(layout, "beds_selection_widget", None)
+        if beds_widget is not None and hasattr(beds_widget, "refresh"):
+            beds_widget.refresh(queue_if_running=False)
+        self._refresh_w1a()
+
     def shutdown(self):
         self._is_closing = True
         self._shutdown_snapshot_worker()
@@ -2227,14 +2362,18 @@ class NurseMainWidget(QWidget):
             self._add_patient_lock_watch_timer.stop()
         self._disconnect_monitor()
         self._release_add_patient_lock()
-        if hasattr(self.layout_manager, "beds_selection_widget") and hasattr(self.layout_manager.beds_selection_widget, "shutdown"):
-            self.layout_manager.beds_selection_widget.shutdown()
-        if hasattr(self.layout_manager, 'orders_widget') and hasattr(self.layout_manager.orders_widget, "shutdown"):
-            self.layout_manager.orders_widget.shutdown()
-        if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
-            self.layout_manager.nurse_orders_manager.shutdown()
-        if hasattr(self.layout_manager, "sector_w1a") and hasattr(self.layout_manager.sector_w1a, "shutdown"):
-            self.layout_manager.sector_w1a.shutdown()
+        if getattr(self, "layout_manager", None) is getattr(self, "_w1_shell", None):
+            if hasattr(self.layout_manager, "shutdown"):
+                self.layout_manager.shutdown()
+        else:
+            if hasattr(self.layout_manager, "beds_selection_widget") and hasattr(self.layout_manager.beds_selection_widget, "shutdown"):
+                self.layout_manager.beds_selection_widget.shutdown()
+            if hasattr(self.layout_manager, 'orders_widget') and hasattr(self.layout_manager.orders_widget, "shutdown"):
+                self.layout_manager.orders_widget.shutdown()
+            if hasattr(self.layout_manager, "nurse_orders_manager") and hasattr(self.layout_manager.nurse_orders_manager, "shutdown"):
+                self.layout_manager.nurse_orders_manager.shutdown()
+            if hasattr(self.layout_manager, "sector_w1a") and hasattr(self.layout_manager.sector_w1a, "shutdown"):
+                self.layout_manager.sector_w1a.shutdown()
 
     def closeEvent(self, event):
         self.shutdown()

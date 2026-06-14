@@ -126,6 +126,22 @@ class DoctorMainWidget(QWidget):
     def _get_data_service(self):
         return getattr(self.remcard_service, "data_service", None)
 
+    def show_beds_mode(self):
+        remcard_widget = getattr(self, "remcard_widget", None)
+        if remcard_widget is not None and hasattr(remcard_widget, "show_beds_mode"):
+            remcard_widget.show_beds_mode()
+
+    def reset_to_beds(self):
+        self.show_beds_mode()
+
+    def refresh_w1(self):
+        remcard_widget = getattr(self, "remcard_widget", None)
+        if remcard_widget is not None and hasattr(remcard_widget, "refresh_w1"):
+            remcard_widget.refresh_w1()
+            return
+        self._refresh_beds_if_available(queue_if_running=False, allow_hidden=True)
+        self._refresh_w1a()
+
     def _refresh_w1a(self, payload: dict | None = None):
         if self._is_closing or _app_is_closing():
             return

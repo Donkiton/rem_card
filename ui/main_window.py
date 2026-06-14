@@ -932,8 +932,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.doctor_main)
         self.stack.setCurrentWidget(self.doctor_main)
 
-        self.doctor_main.remcard_widget.admission_id = None
-        self.doctor_main.remcard_widget.layout_manager.set_patient_selection_mode("beds")
+        self.doctor_main.reset_to_beds()
 
         self._initial_role_ui_ready = True
         QTimer.singleShot(1500, lambda: _apply_role_icon("doctor"))
@@ -1018,9 +1017,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.nurse_main)
         self.stack.setCurrentWidget(self.nurse_main)
 
-        if hasattr(self.nurse_main, 'layout_manager'):
-            self.nurse_main.layout_manager.current_admission_id = None
-            self.nurse_main.layout_manager.set_patient_selection_mode("beds")
+        self.nurse_main.reset_to_beds()
 
         self._initial_role_ui_ready = True
         QTimer.singleShot(1500, lambda: _apply_role_icon("nurse"))
@@ -1095,8 +1092,7 @@ class MainWindow(QMainWindow):
                 self.stack.addWidget(self.doctor_main)
             
             self.stack.setCurrentWidget(self.doctor_main)
-            self.doctor_main.remcard_widget.admission_id = None
-            self.doctor_main.remcard_widget.layout_manager.set_patient_selection_mode("beds")
+            self.doctor_main.reset_to_beds()
             
             QTimer.singleShot(1500, lambda: _apply_role_icon("doctor"))
             self._schedule_maintenance()
@@ -1120,9 +1116,7 @@ class MainWindow(QMainWindow):
                 self.stack.addWidget(self.nurse_main)
             
             self.stack.setCurrentWidget(self.nurse_main)
-            if hasattr(self.nurse_main, 'layout_manager'):
-                self.nurse_main.layout_manager.current_admission_id = None
-                self.nurse_main.layout_manager.set_patient_selection_mode("beds")
+            self.nurse_main.reset_to_beds()
             
             QTimer.singleShot(1500, lambda: _apply_role_icon("nurse"))
             self._schedule_maintenance()
