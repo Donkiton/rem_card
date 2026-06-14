@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import html
+import math
 import pathlib
 import re
 from typing import Any
@@ -215,12 +216,12 @@ class _VitalsChartFlowable(Flowable):
             else:
                 canvas.drawCentredString(x, label_y, label)
 
-        self._draw_vital_line(canvas, "sys", colors.HexColor("#EF4444"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=1.0)
-        self._draw_vital_line(canvas, "dia", colors.HexColor("#EF4444"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=0.65)
-        self._draw_vital_line(canvas, "pulse", colors.HexColor("#1D4ED8"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=1.0)
-        self._draw_vital_line(canvas, "spo2", colors.HexColor("#0284C7"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=1.0)
+        self._draw_vital_line(canvas, "sys", colors.HexColor("#EF4444"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=1.0, marker="triangle_down")
+        self._draw_vital_line(canvas, "dia", colors.HexColor("#EF4444"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=0.65, marker="triangle_up")
+        self._draw_vital_line(canvas, "pulse", colors.HexColor("#1D4ED8"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=1.0, marker="star")
+        self._draw_vital_line(canvas, "spo2", colors.HexColor("#0284C7"), start, end, plot_left, plot_width, plot_bottom, plot_height, width_pt=1.0, marker="circle")
 
-    def _draw_vital_line(self, canvas, key: str, color, start: datetime, end: datetime, left: float, width: float, bottom: float, height: float, *, width_pt: float):
+    def _draw_vital_line(self, canvas, key: str, color, start: datetime, end: datetime, left: float, width: float, bottom: float, height: float, *, width_pt: float, marker: str):
         points: list[tuple[float, float]] = []
         for vital in self.context.get("vitals") or []:
             dt = self._parse_dt((vital or {}).get("datetime"))
@@ -238,7 +239,35 @@ class _VitalsChartFlowable(Flowable):
             if index:
                 prev_x, prev_y = points[index - 1]
                 canvas.line(prev_x, prev_y, x, y)
+        for x, y in points:
+            self._draw_vital_marker(canvas, x, y, marker)
+
+    def _draw_vital_marker(self, canvas, x: float, y: float, marker: str) -> None:
+        if marker == "triangle_up":
+            self._draw_polygon(canvas, ((x, y + 2.4), (x - 2.2, y - 1.6), (x + 2.2, y - 1.6)))
+        elif marker == "triangle_down":
+            self._draw_polygon(canvas, ((x, y - 2.4), (x - 2.2, y + 1.6), (x + 2.2, y + 1.6)))
+        elif marker == "star":
+            points: list[tuple[float, float]] = []
+            for index in range(10):
+                radius = 2.55 if index % 2 == 0 else 1.05
+                angle = -math.pi / 2 + index * math.pi / 5
+                points.append((x + math.cos(angle) * radius, y + math.sin(angle) * radius))
+            self._draw_polygon(canvas, points)
+        else:
             canvas.circle(x, y, 1.25, stroke=0, fill=1)
+
+    @staticmethod
+    def _draw_polygon(canvas, points) -> None:
+        if not points:
+            return
+        path = canvas.beginPath()
+        first_x, first_y = points[0]
+        path.moveTo(first_x, first_y)
+        for point_x, point_y in points[1:]:
+            path.lineTo(point_x, point_y)
+        path.close()
+        canvas.drawPath(path, stroke=0, fill=1)
 
 
 class OperBlockReportLabBuilder:
@@ -445,7 +474,8 @@ class OperBlockReportLabBuilder:
                 entries.append((dt, sequence, name, item))
                 sequence += 1
             if not interval_items:
-                name = cls._medication_name(data, fallback="Инфузия")
+                raw_name = cls._medication_name(data, fallback="Инфузия")
+                name = cls._normalized_solution_name(raw_name) or raw_name
                 entries.append((dt, sequence, name, cls._infusion_medication_item(data, name)))
                 sequence += 1
 
@@ -669,7 +699,171 @@ class OperBlockReportLabBuilder:
         if kind == "solvent":
             item = cls._solvent_medication_item(interval)
             return [(item["name"], item)] if item else []
+        if cls._is_continuous_infusion_interval(interval):
+            return cls._continuous_infusion_medication_items(interval)
         return []
+
+    @classmethod
+    def _is_continuous_infusion_interval(cls, interval: dict[str, Any]) -> bool:
+        payload = interval.get("payload") if isinstance(interval.get("payload"), dict) else {}
+        kind = str((payload or {}).get("kind") or "").strip().casefold()
+        if kind in {"continuous_infusion", "continuous", "dozator", "дозатор", "перфузор"}:
+            return True
+        if kind in {"gas", "timed_infusion", "solvent"}:
+            return False
+        return bool(
+            interval.get("rate_history")
+            or interval.get("rate_value")
+            or interval.get("current_rate_value")
+        )
+
+    @classmethod
+    def _continuous_infusion_medication_items(cls, interval: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        name = cls._medication_name(interval, fallback="Дозатор")
+        start = cls._parse_dt(interval.get("start"))
+        end = cls._parse_dt(interval.get("end"))
+        events = cls._continuous_rate_events(interval, start=start)
+        if not events:
+            return []
+
+        stopped = end is not None and str(interval.get("status") or "").strip().casefold() != "active"
+        if stopped and end is not None:
+            display_events = [event for event in events if event["time"] <= end]
+            if not display_events:
+                display_events = events[:1]
+        else:
+            display_events = list(events)
+
+        total_volume = cls._continuous_infusion_total_volume_ml(interval, events)
+        items: list[tuple[str, dict[str, Any]]] = []
+        for index, event in enumerate(display_events):
+            rate_text = cls._continuous_rate_text(event.get("rate_value"), event.get("rate_unit"))
+            if not rate_text:
+                continue
+            line = f"{event['time'].strftime('%H:%M')} - {rate_text}"
+            if not stopped:
+                line = f"{event['time'].strftime('%H:%M')} - скорость {rate_text}"
+            item: dict[str, Any] = {
+                "kind": "continuous_infusion",
+                "line": line,
+            }
+            if index == 0 and total_volume is not None:
+                item["volume_total_ml"] = total_volume
+            items.append((name, item))
+        return items
+
+    @classmethod
+    def _continuous_rate_events(cls, interval: dict[str, Any], *, start: datetime | None = None) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        fallback_unit = interval.get("rate_unit") or interval.get("current_rate_unit")
+        for index, item in enumerate(list(interval.get("rate_history") or [])):
+            data = item if isinstance(item, dict) else {}
+            event_time = cls._parse_dt(data.get("event_time"))
+            rate_value = cls._decimal(data.get("rate_value"))
+            rate_unit = cls._normalize_rate_unit(data.get("rate_unit") or fallback_unit)
+            if event_time is None or rate_value is None or not rate_unit:
+                continue
+            events.append(
+                {
+                    "time": event_time,
+                    "rate_value": rate_value,
+                    "rate_unit": rate_unit,
+                    "order": index,
+                }
+            )
+
+        if not events:
+            event_time = start or cls._parse_dt(interval.get("start"))
+            rate_value = cls._decimal(interval.get("rate_value") or interval.get("current_rate_value"))
+            rate_unit = cls._normalize_rate_unit(interval.get("rate_unit") or interval.get("current_rate_unit"))
+            if event_time is not None and rate_value is not None and rate_unit:
+                events.append(
+                    {
+                        "time": event_time,
+                        "rate_value": rate_value,
+                        "rate_unit": rate_unit,
+                        "order": 0,
+                    }
+                )
+
+        events.sort(key=lambda item: (item["time"], item["order"]))
+        deduped: list[dict[str, Any]] = []
+        for event in events:
+            clean_event = {key: value for key, value in event.items() if key != "order"}
+            if deduped and deduped[-1]["time"] == clean_event["time"]:
+                deduped[-1] = clean_event
+            else:
+                deduped.append(clean_event)
+
+        if start is None or not deduped:
+            return deduped
+        before_or_at = [event for event in deduped if event["time"] <= start]
+        after = [event for event in deduped if event["time"] > start]
+        if before_or_at:
+            first = dict(before_or_at[-1])
+            first["time"] = start
+            if before_or_at[-1]["time"] == start:
+                return before_or_at[-1:] + after
+            return [first] + after
+        first = dict(deduped[0])
+        first["time"] = start
+        return [first] + deduped[1:]
+
+    @classmethod
+    def _normalize_rate_unit(cls, unit: Any) -> str:
+        clean = cls._clean_text(unit)
+        if not clean:
+            return ""
+        compact = re.sub(r"\s+", "", clean.casefold()).replace("ё", "е")
+        if compact in {"мл/час", "мл/ч", "ml/h", "ml/hr", "ml/hour"}:
+            return "мл/час"
+        return clean
+
+    @classmethod
+    def _continuous_rate_text(cls, value: Any, unit: Any) -> str:
+        rate_value = value if isinstance(value, Decimal) else cls._decimal(value)
+        unit_text = cls._normalize_rate_unit(unit)
+        if rate_value is None or not unit_text:
+            return ""
+        return f"{cls._format_decimal(rate_value)} {unit_text}"
+
+    @classmethod
+    def _continuous_infusion_total_volume_ml(
+        cls,
+        interval: dict[str, Any],
+        events: list[dict[str, Any]],
+    ) -> Decimal | None:
+        start = cls._parse_dt(interval.get("start"))
+        end = cls._parse_dt(interval.get("end"))
+        if start is None or end is None or end <= start:
+            return None
+        direct = cls._volume_decimal_ml(interval.get("volume_ml"))
+        if not events:
+            return direct
+
+        total = Decimal("0")
+        has_segment = False
+        for index, event in enumerate(events):
+            rate_value = event.get("rate_value")
+            if not isinstance(rate_value, Decimal) or not cls._is_ml_per_hour_unit(event.get("rate_unit")):
+                return direct
+            segment_start = max(start, event["time"])
+            segment_end = end
+            if index + 1 < len(events):
+                segment_end = min(end, events[index + 1]["time"])
+            if segment_end <= segment_start:
+                continue
+            minutes = Decimal(str((segment_end - segment_start).total_seconds())) / Decimal("60")
+            total += rate_value * minutes / Decimal("60")
+            has_segment = True
+        if not has_segment:
+            return direct
+        return total
+
+    @classmethod
+    def _is_ml_per_hour_unit(cls, unit: Any) -> bool:
+        compact = re.sub(r"\s+", "", str(unit or "").strip().casefold()).replace("ё", "е")
+        return compact in {"мл/час", "мл/ч", "ml/h", "ml/hr", "ml/hour"}
 
     @classmethod
     def _gas_medication_items(cls, interval: dict[str, Any], *, report_end: datetime | None = None) -> list[tuple[str, dict[str, Any]]]:
@@ -831,37 +1025,64 @@ class OperBlockReportLabBuilder:
         label = cls._clean_text((payload or {}).get("solvent_label"))
         if not label and str((payload or {}).get("kind") or "").strip().casefold() == "solvent":
             label = cls._clean_text((payload or {}).get("display_name") or (payload or {}).get("label") or interval.get("name") or interval.get("display"))
-        normalized = label.casefold().replace(",", ".")
-        if solvent_id == "nacl_09" or "nacl 0.9" in normalized or "natrii chloridi 0.9" in normalized:
+        normalized_label = cls._normalized_solution_name(label)
+        if solvent_id == "nacl_09":
             return "S. NaCl 0.9%"
-        if solvent_id == "glucose_5" or "glucose 5" in normalized or "glucosae 5" in normalized:
+        if solvent_id == "glucose_5":
             return "S. Glucosae 5%"
-        if solvent_id == "ringer" or "ringer" in normalized:
+        if solvent_id == "ringer":
             return "S. Ringeri"
+        if normalized_label:
+            return normalized_label
         return label
+
+    @classmethod
+    def _normalized_solution_name(cls, value: Any) -> str:
+        clean = cls._clean_text(value)
+        if not clean:
+            return ""
+        normalized = re.sub(r"\s+", " ", clean.casefold().replace(",", ".")).strip()
+        if (
+            ("nacl" in normalized and "0.9" in normalized)
+            or ("natrii chloridi" in normalized and "0.9" in normalized)
+            or ("sodium chloride" in normalized and "0.9" in normalized)
+            or ("натрия хлор" in normalized and "0.9" in normalized)
+            or ("натрий хлор" in normalized and "0.9" in normalized)
+        ):
+            return "S. NaCl 0.9%"
+        if ("glucose" in normalized or "glucosae" in normalized or "глюкоз" in normalized) and "5" in normalized:
+            return "S. Glucosae 5%"
+        if "ringer" in normalized or "рингер" in normalized:
+            return "S. Ringeri"
+        return ""
 
     @classmethod
     def _infusion_medication_item(cls, interval: dict[str, Any], name: str) -> dict[str, Any]:
         dose_text = cls._infusion_dose_text(interval, name)
-        return {
+        volume_ml = cls._infusion_volume_ml(interval or {})
+        item = {
             "kind": "infusion",
             "line": f"{cls._time_range(interval.get('start'), interval.get('end'))} - {dose_text}",
         }
+        if volume_ml is not None and cls._normalized_solution_name(name):
+            item["kind"] = "solvent"
+            item["volume_ml"] = volume_ml
+        return item
 
     @classmethod
     def _medication_group_summary(cls, group: dict[str, Any]) -> str:
         items = [item for item in list(group.get("items") or []) if isinstance(item, dict)]
         if not items:
             return ""
-        if all(item.get("kind") == "solvent" for item in items):
-            volume_items = [item for item in items if isinstance(item.get("volume_ml"), Decimal)]
-            if len(volume_items) == len(items):
-                volume_total = sum((item["volume_ml"] for item in volume_items), Decimal("0"))
-                return f" - {cls._format_volume_decimal(volume_total)}"
-            return ""
+        volume_summary = cls._volume_group_summary(group, items)
+        if volume_summary:
+            return volume_summary
 
         if all(item.get("kind") == "gas" for item in items):
             return cls._gas_group_summary(items)
+
+        if all(item.get("kind") == "continuous_infusion" for item in items):
+            return cls._continuous_infusion_group_summary(items)
 
         dose_group_kinds = {"bolus", "timed_infusion_drug"}
         dose_group = [item for item in items if item.get("kind") in dose_group_kinds]
@@ -899,6 +1120,51 @@ class OperBlockReportLabBuilder:
         if volume_text:
             return f" - {volume_text}"
         return ""
+
+    @classmethod
+    def _continuous_infusion_group_summary(cls, items: list[dict[str, Any]]) -> str:
+        volumes = [
+            item.get("volume_total_ml")
+            for item in items
+            if isinstance(item.get("volume_total_ml"), Decimal)
+        ]
+        if not volumes:
+            return ""
+        return f" - {cls._format_volume_decimal(sum(volumes, Decimal('0')))}"
+
+    @classmethod
+    def _volume_group_summary(cls, group: dict[str, Any], items: list[dict[str, Any]]) -> str:
+        allowed_kinds = {"solvent", "infusion"}
+        if any(item.get("kind") not in allowed_kinds for item in items):
+            return ""
+        is_solution_group = bool(cls._normalized_solution_name(group.get("name")))
+        if not is_solution_group and not all(item.get("kind") == "solvent" for item in items):
+            return ""
+
+        volumes: list[Decimal] = []
+        for item in items:
+            volume = cls._item_volume_decimal_ml(item)
+            if volume is None:
+                return ""
+            volumes.append(volume)
+        if not volumes:
+            return ""
+        return f" - {cls._format_volume_decimal(sum(volumes, Decimal('0')))}"
+
+    @classmethod
+    def _item_volume_decimal_ml(cls, item: dict[str, Any]) -> Decimal | None:
+        value = item.get("volume_ml")
+        if isinstance(value, Decimal):
+            return value
+        line = cls._clean_text(item.get("line"))
+        if not line:
+            return None
+        if re.search(r"(?i)(скорость|мл\s*/\s*(?:ч|час|h|hour)|ml\s*/\s*(?:h|hour))", line):
+            return None
+        matches = re.findall(r"(?i)(\d+(?:[.,]\d+)?)\s*(?:мл|ml)\b", line)
+        if not matches:
+            return None
+        return cls._decimal(matches[-1])
 
     @classmethod
     def _gas_group_summary(cls, items: list[dict[str, Any]]) -> str:

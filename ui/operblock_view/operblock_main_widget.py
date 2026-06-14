@@ -8,7 +8,7 @@ import json
 import os
 import re
 import time
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 import weakref
 
 from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QRegularExpression, QSize, Qt, QTime, QTimer, Signal
@@ -5455,7 +5455,8 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             self.COL_DRUG_GROUP,
             self._text_item(self._drug_group_display_text(preset.get("drug_group")), template_index),
         )
-        self.table.setItem(row, self.COL_DOSES, self._text_item(_join_semicolon_list(preset.get("doses") or []), template_index))
+        doses = self._dose_list_for_kind(kind, preset.get("doses") or [])
+        self.table.setItem(row, self.COL_DOSES, self._text_item(_join_semicolon_list(doses), template_index))
         self.table.setItem(row, self.COL_RATES, self._text_item(_join_semicolon_list(preset.get("rates") or []), template_index))
         self.table.setItem(row, self.COL_CONCENTRATION, self._text_item(str(preset.get("concentration") or ""), template_index))
         self.table.setItem(row, self.COL_SOLVENT, self._text_item(self._solvent_display_text(preset), template_index))
@@ -5538,13 +5539,28 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             template["aliases"] = _split_semicolon_list(item.text())
         elif column == self.COL_KIND:
             template["kind"] = self._kind_from_value(item.text(), allow_invalid=True)
+            if template["kind"] == "continuous_infusion":
+                template["doses"] = self._dose_list_for_kind(template["kind"], template.get("doses") or [])
             QTimer.singleShot(0, self._render_table)
         elif column == self.COL_GROUP:
             template["group"] = item.text().strip()
         elif column == self.COL_DRUG_GROUP:
             template["drug_group"] = self._resolve_drug_group_text(item.text())
         elif column == self.COL_DOSES:
-            template["doses"] = _split_semicolon_list(item.text())
+            doses = _split_semicolon_list(item.text())
+            if self._kind_from_value(template.get("kind")) == "continuous_infusion" and len(doses) > 1:
+                doses = doses[:1]
+                previous_block = self.table.blockSignals(True)
+                try:
+                    item.setText(_join_semicolon_list(doses))
+                finally:
+                    self.table.blockSignals(previous_block)
+                CustomMessageBox.warning(
+                    self,
+                    "Дозы",
+                    "Для типа «Дозатор» можно указать только одну дозу.",
+                )
+            template["doses"] = doses
         elif column == self.COL_RATES:
             template["rates"] = _split_semicolon_list(item.text())
         elif column == self.COL_CONCENTRATION:
@@ -5618,6 +5634,16 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         if allow_invalid and text:
             return text
         return normalize_operblock_medication_preset_kind(text)
+
+    @staticmethod
+    def _dose_list_for_kind(kind: str, values) -> list[str]:
+        if isinstance(values, str):
+            doses = _split_semicolon_list(values)
+        else:
+            doses = _split_semicolon_list(_join_semicolon_list(values or []))
+        if kind == "continuous_infusion":
+            return doses[:1]
+        return doses
 
     def _solvent_display_text(self, preset: dict) -> str:
         solvent_id = str(preset.get("solvent_id") or "").strip()
@@ -5742,7 +5768,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                     include_unknown=True,
                 ),
                 "drug_group": self._resolve_drug_group_text(self._drug_group_display_text(item.get("drug_group"))),
-                "doses": _split_semicolon_list(_join_semicolon_list(item.get("doses") or [])),
+                "doses": self._dose_list_for_kind(kind, item.get("doses") or []),
                 "rates": _split_semicolon_list(_join_semicolon_list(item.get("rates") or [])),
                 "concentration": str(item.get("concentration") or "").strip() or None,
                 "solvent_id": solvent_id,
@@ -7988,20 +8014,6 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         vitals_form.addRow("АД:", ad_row)
         vitals_form.addRow("ЧСС:", self.pulse_input)
         vitals_form.addRow("SpO₂:", self.spo2_input)
-        self.save_initial_vitals_checkbox = QCheckBox("Сохранить как исходные показатели")
-        self.save_initial_vitals_checkbox.setObjectName("OperBlockSaveInitialVitalsCheckbox")
-        self.save_initial_vitals_checkbox.setStyleSheet(
-            f"""
-            QCheckBox#OperBlockSaveInitialVitalsCheckbox {{
-                background: transparent;
-                border: none;
-                color: {TEXT_PRIMARY};
-                spacing: 8px;
-            }}
-            """
-        )
-        self.save_initial_vitals_checkbox.setChecked(True)
-        vitals_form.addRow("", self.save_initial_vitals_checkbox)
         page_layout.addWidget(vitals)
         page_layout.addStretch(1)
 
@@ -8275,7 +8287,6 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         ):
             value = (data or {}).get(key)
             edit.setText("" if value in (None, "") else str(value))
-        self.save_initial_vitals_checkbox.setChecked(bool((data or {}).get("save_initial_vitals", True)))
 
     def _on_mkb_code_text_edited(self, text: str):
         normalized = normalize_operblock_mkb_code(text)
@@ -8459,7 +8470,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "preop_dia": preop_dia,
             "preop_pulse": preop_pulse,
             "preop_spo2": preop_spo2,
-            "save_initial_vitals": self.save_initial_vitals_checkbox.isChecked(),
+            "save_initial_vitals": True,
         }
 
 
@@ -8568,6 +8579,7 @@ class OperBlockMainWidget(QWidget):
         self._board_refresh_count_before_ready = 0
         self._current_board_apply_metrics: dict | None = None
         self._operation_report_pdf_worker = None
+        self._operation_report_pdf_buttons: list[tuple[Any, str, bool]] = []
         init_ui_started = operblock_startup_metrics.timer_start()
         try:
             self._init_ui()
@@ -8860,7 +8872,7 @@ class OperBlockMainWidget(QWidget):
         self.operation_stages_button.clicked.connect(self._open_operation_stages_dialog)
         self.close_case_button.clicked.connect(self._end_surgery)
         self.release_table_button.clicked.connect(self._confirm_release_current_case)
-        self.report_button.clicked.connect(self._build_operation_report_pdf)
+        self.report_button.clicked.connect(lambda _=False: self._build_operation_report_pdf())
 
         for button in (
             self.start_anesthesia_button,
@@ -10940,12 +10952,18 @@ class OperBlockMainWidget(QWidget):
         if os.path.exists(edit_icon_path):
             edit_btn.setIcon(QIcon(edit_icon_path))
             edit_btn.setIconSize(QSize(24, 24))
+        print_btn = QPushButton("ПЕЧАТЬ ОТЧЕТА")
+        print_icon_path = os.path.join(get_icon_dir(), "allprint.png")
+        if os.path.exists(print_icon_path):
+            print_btn.setIcon(QIcon(print_icon_path))
+            print_btn.setIconSize(QSize(24, 24))
         close_btn = QPushButton("ОСВОБОДИТЬ СТОЛ")
-        for button in (open_btn, edit_btn, close_btn):
+        for button in (open_btn, edit_btn, print_btn, close_btn):
             button.setFixedHeight(48)
             button.setCursor(Qt.PointingHandCursor)
         open_btn.setStyleSheet(self._board_action_button_style("open"))
         edit_btn.setStyleSheet(self._board_action_button_style("edit"))
+        print_btn.setStyleSheet(self._board_action_button_style("print"))
         close_btn.setStyleSheet(self._board_action_button_style("danger"))
         open_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._open_protocol(int(case_id))
@@ -10953,11 +10971,15 @@ class OperBlockMainWidget(QWidget):
         edit_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._open_edit_patient_dialog(int(case_id))
         )
+        print_btn.clicked.connect(
+            lambda _=False, case_id=patient.get("operation_case_id"), button=print_btn: self._build_operation_report_pdf(case_id, trigger_button=button)
+        )
         close_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._confirm_release_case(int(case_id))
         )
         buttons.addWidget(open_btn, 1)
         buttons.addWidget(edit_btn, 1)
+        buttons.addWidget(print_btn, 1)
         buttons.addWidget(close_btn, 2)
         body_layout.addLayout(buttons)
         layout.addWidget(body, 1)
@@ -10976,6 +10998,19 @@ class OperBlockMainWidget(QWidget):
                 QPushButton {
                     background-color: #FFFFFF;
                     color: #2563EB;
+                    border: 1px solid #93C5FD;
+                    border-radius: 6px;
+                    font-size: 13px;
+                    font-weight: 800;
+                    padding: 4px 12px;
+                }
+                QPushButton:hover { background-color: #DBEAFE; border-color: #2563EB; }
+            """
+        if kind == "print":
+            return """
+                QPushButton {
+                    background-color: #FFFFFF;
+                    color: #1D4ED8;
                     border: 1px solid #93C5FD;
                     border-radius: 6px;
                     font-size: 13px;
@@ -18154,8 +18189,9 @@ class OperBlockMainWidget(QWidget):
         if not entities or entities.intersection(watched):
             QTimer.singleShot(0, lambda: self.auto_refresh(force=False))
 
-    def _build_operation_report_pdf(self):
-        if not self._current_operation_case_id:
+    def _build_operation_report_pdf(self, operation_case_id: int | None = None, *, trigger_button: QPushButton | None = None):
+        case_id = _safe_int(operation_case_id) or _safe_int(self._current_operation_case_id)
+        if not case_id:
             CustomMessageBox.warning(self, "Отчет за операцию", "Откройте протокол операции.")
             return
         worker = getattr(self, "_operation_report_pdf_worker", None)
@@ -18163,17 +18199,16 @@ class OperBlockMainWidget(QWidget):
             CustomMessageBox.information(self, "Отчет за операцию", "PDF отчета уже формируется.")
             return
         try:
-            pdf_path = self.operblock_service.build_operation_report_pdf_path(int(self._current_operation_case_id))
+            pdf_path = self.operblock_service.build_operation_report_pdf_path(int(case_id))
         except Exception as exc:
             CustomMessageBox.critical(self, "Отчет за операцию", f"Не удалось подготовить путь PDF:\n{exc}")
             return
         from rem_card.ui.operblock_view.operblock_report_pdf_worker import OperBlockReportPdfWorker
 
-        self.report_button.setEnabled(False)
-        self.report_button.setText(" Формирование PDF...")
+        self._set_operation_report_buttons_busy(trigger_button)
         self._operation_report_pdf_worker = OperBlockReportPdfWorker(
             self.operblock_service,
-            int(self._current_operation_case_id),
+            int(case_id),
             pdf_path,
             parent=self,
         )
@@ -18182,17 +18217,46 @@ class OperBlockMainWidget(QWidget):
         self._operation_report_pdf_worker.finished.connect(self._clear_operation_report_pdf_worker)
         self._operation_report_pdf_worker.start()
 
+    def _set_operation_report_buttons_busy(self, trigger_button: QPushButton | None = None) -> None:
+        buttons: list[QPushButton] = []
+        if trigger_button is not None:
+            buttons.append(trigger_button)
+        protocol_button = getattr(self, "report_button", None)
+        if protocol_button is not None and all(button is not protocol_button for button in buttons):
+            buttons.append(protocol_button)
+
+        self._operation_report_pdf_buttons = []
+        for button in buttons:
+            try:
+                self._operation_report_pdf_buttons.append((weakref.ref(button), button.text(), button.isEnabled()))
+                button.setEnabled(False)
+                button.setText(" Формирование PDF..." if button is protocol_button else "ФОРМИРОВАНИЕ PDF...")
+            except RuntimeError:
+                continue
+
+    def _restore_operation_report_buttons(self) -> None:
+        buttons = list(getattr(self, "_operation_report_pdf_buttons", []) or [])
+        self._operation_report_pdf_buttons = []
+        for button_ref, text, was_enabled in buttons:
+            try:
+                button = button_ref()
+                if button is None:
+                    continue
+                button.setText(text)
+                button.setEnabled(bool(was_enabled))
+            except RuntimeError:
+                continue
+
     def _on_operation_report_pdf_ready(self, pdf_path: str):
-        self.report_button.setText(" Отчет за операцию")
-        self.report_button.setEnabled(True)
+        self._restore_operation_report_buttons()
         open_pdf_file(pdf_path, parent=self)
 
     def _on_operation_report_pdf_error(self, message: str):
-        self.report_button.setText(" Отчет за операцию")
-        self.report_button.setEnabled(True)
+        self._restore_operation_report_buttons()
         CustomMessageBox.critical(self, "Отчет за операцию", f"Не удалось сформировать PDF отчета:\n{message}")
 
     def _clear_operation_report_pdf_worker(self):
+        self._restore_operation_report_buttons()
         self._operation_report_pdf_worker = None
 
     def _show_board(self):

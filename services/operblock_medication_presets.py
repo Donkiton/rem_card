@@ -290,6 +290,13 @@ def _as_list(value: Any) -> list[str]:
     return result
 
 
+def _dose_options_for_kind(kind: str, value: Any) -> list[str]:
+    options = _as_list(value)
+    if kind == "continuous_infusion":
+        return options[:1]
+    return options
+
+
 def _format_decimal(value: Any) -> str:
     try:
         number = Decimal(str(value).replace(",", "."))
@@ -389,7 +396,7 @@ def project_drug_to_operblock_preset(
         drug_group=_as_optional_text(raw.get("group")),
         unit=_as_optional_text(raw.get("unit")),
         default_dose=_dose_option(raw.get("default_dose"), raw.get("unit")) if raw.get("default_dose") is not None else None,
-        doses=_dose_options_from_drug(raw),
+        doses=_dose_options_for_kind(kind, _dose_options_from_drug(raw)),
         solvent_id=solvent_id,
         solvent_label=solvent_label,
         solvent_volume_ml=_as_optional_text(default_dilution.get("volume")),
@@ -440,7 +447,7 @@ def _normalize_preset(
         route=_as_optional_text(data.get("route")),
         unit=_as_optional_text(data.get("unit")),
         default_dose=_as_optional_text(data.get("default_dose")),
-        doses=_as_list(data.get("doses")),
+        doses=_dose_options_for_kind(kind, data.get("doses")),
         rates=_as_list(data.get("rates")),
         rate_unit=_as_optional_text(data.get("rate_unit")),
         concentration=_as_optional_text(data.get("concentration") or data.get("concentration_text")),

@@ -750,7 +750,7 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         preop_dia=_normalize_optional_int(payload.get("preop_dia"), "АД диастолическое", 0, 300),
         preop_pulse=_normalize_optional_int(payload.get("preop_pulse"), "ЧСС", 0, 300),
         preop_spo2=_normalize_optional_int(payload.get("preop_spo2"), "SpO₂", 0, 100),
-        save_initial_vitals=bool(payload.get("save_initial_vitals", True)),
+        save_initial_vitals=True,
     )
 
 
@@ -985,7 +985,6 @@ class OperBlockService:
                 latest_source = "current" if latest_time else ""
                 if (
                     latest_time
-                    and row.get("preop_save_initial_vitals")
                     and row.get("latest_vitals_id") is not None
                     and row.get("latest_vitals_id") == row.get("first_vitals_id")
                     and any(
@@ -2172,7 +2171,7 @@ class OperBlockService:
                     data.preop_dia,
                     data.preop_pulse,
                     data.preop_spo2,
-                    1 if data.save_initial_vitals else 0,
+                    1,
                 ),
             )
             operation_case_id = int(cursor.lastrowid)
@@ -2194,7 +2193,7 @@ class OperBlockService:
                 """,
                 (admission_id, now),
             )
-            if data.save_initial_vitals and _has_case_vitals(data):
+            if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, {
                     "operation_case_id": operation_case_id,
                     "admission_id": admission_id,
@@ -2300,7 +2299,7 @@ class OperBlockService:
                 preop_pulse = data.get("preop_pulse")
                 preop_spo2 = data.get("preop_spo2")
                 vitals_source = "case"
-                save_initial_vitals = bool(data.get("preop_save_initial_vitals", 1))
+                save_initial_vitals = True
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
                 "table_code": data.get("table_code") or "",
@@ -2436,7 +2435,7 @@ class OperBlockService:
                     data.preop_dia,
                     data.preop_pulse,
                     data.preop_spo2,
-                    1 if data.save_initial_vitals else 0,
+                    1,
                     int(operation_case_id),
                 ),
             )
@@ -2445,7 +2444,7 @@ class OperBlockService:
             case_for_vitals = dict(case)
             case_for_vitals["started_at"] = case.get("started_at")
             case_for_vitals["ended_at"] = case.get("ended_at")
-            if data.save_initial_vitals and _has_case_vitals(data):
+            if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, case_for_vitals, data)
             synced = self._sync_case_metadata_to_stage_payloads(
                 cursor,
@@ -4602,18 +4601,22 @@ class OperBlockService:
 
             event = cursor.execute(
                 """
-                SELECT id, operation_case_id, event_type, event_time, updated_at, display_label, drug_label,
-                       parent_event_id, payload_json, COALESCE(revision, 0) AS revision
+                SELECT id, operation_case_id, event_type, event_time, created_at, updated_at,
+                       display_label, drug_label, parent_event_id, payload_json, COALESCE(revision, 0) AS revision
                 FROM operblock_timeline_events
                 WHERE operation_case_id = ?
                   AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
-                ORDER BY datetime(COALESCE(updated_at, event_time)) DESC, id DESC
+                  AND NOT (
+                    event_type = 'infusion_stop'
+                    AND COALESCE(payload_json, '') LIKE '%auto_stopped_by%'
+                  )
+                ORDER BY datetime(COALESCE(created_at, updated_at, event_time)) DESC, id DESC
                 LIMIT 1
                 """,
                 (int(operation_case_id),),
             ).fetchone()
             if event:
-                action_dt = _parse_dt(event["updated_at"]) or _parse_dt(event["event_time"]) or datetime.min
+                action_dt = _parse_dt(event["created_at"]) or _parse_dt(event["updated_at"]) or _parse_dt(event["event_time"]) or datetime.min
                 candidates.append({"kind": "timeline_event", "row": event, "action_dt": action_dt, "id": int(event["id"] or 0)})
 
             if not candidates:
