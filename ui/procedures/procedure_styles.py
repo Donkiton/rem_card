@@ -1,6 +1,29 @@
 from __future__ import annotations
 
+import os
+
+from PySide6.QtCore import QEvent, QObject
 from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QWidget
+
+from rem_card.app.paths import get_icon_dir
+
+
+def _procedure_combo_arrow_image() -> str:
+    arrow_path = os.path.join(get_icon_dir(), "combo_arrow_down.svg")
+    if not os.path.exists(arrow_path):
+        return "none"
+    return f"url({arrow_path.replace(os.sep, '/')})"
+
+
+class _ProcedureComboWheelBlocker(QObject):
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel:
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+
+PROCEDURE_COMBO_ARROW_IMAGE = _procedure_combo_arrow_image()
 
 
 PROCEDURE_COMBO_STYLE = """
@@ -31,6 +54,11 @@ QComboBox::drop-down {
     border-top-right-radius: 5px;
     border-bottom-right-radius: 5px;
 }
+QComboBox::down-arrow {
+    image: __PROCEDURE_COMBO_ARROW_IMAGE__;
+    width: 12px;
+    height: 12px;
+}
 QComboBox QAbstractItemView {
     background-color: #ffffff;
     color: #172033;
@@ -51,7 +79,7 @@ QComboBox QAbstractItemView::item:selected {
     background-color: #dbeafe;
     color: #172033;
 }
-"""
+""".replace("__PROCEDURE_COMBO_ARROW_IMAGE__", PROCEDURE_COMBO_ARROW_IMAGE)
 
 PROCEDURE_COMBO_VIEW_STYLE = """
 QAbstractItemView {
@@ -364,12 +392,28 @@ def apply_procedure_combo_style(root: QWidget) -> None:
     combos.extend(root.findChildren(QComboBox))
     for combo in combos:
         combo.setStyleSheet(PROCEDURE_COMBO_STYLE)
+        _disable_combo_wheel(combo)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            _disable_combo_wheel(line_edit)
         try:
             view = combo.view()
             view.setAlternatingRowColors(True)
             view.setStyleSheet(PROCEDURE_COMBO_VIEW_STYLE)
+            _disable_combo_wheel(view)
+            _disable_combo_wheel(view.viewport())
+            _disable_combo_wheel(view.verticalScrollBar())
+            _disable_combo_wheel(view.horizontalScrollBar())
         except Exception:
             pass
+
+
+def _disable_combo_wheel(widget: QWidget) -> None:
+    blocker = getattr(widget, "_procedure_combo_wheel_blocker", None)
+    if blocker is None:
+        blocker = _ProcedureComboWheelBlocker(widget)
+        widget._procedure_combo_wheel_blocker = blocker
+        widget.installEventFilter(blocker)
 
 
 def apply_procedure_datetime_style(root: QWidget) -> None:
