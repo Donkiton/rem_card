@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QEvent, QObject
-from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QWidget
+from PySide6.QtWidgets import QComboBox, QDateTimeEdit, QScrollArea, QWidget
 
 from rem_card.app.paths import get_icon_dir
 
@@ -16,11 +16,39 @@ def _procedure_combo_arrow_image() -> str:
 
 
 class _ProcedureComboWheelBlocker(QObject):
+    def __init__(self, parent=None, scroll_source: QWidget | None = None):
+        super().__init__(parent)
+        self._scroll_source = scroll_source
+
+    def set_scroll_source(self, scroll_source: QWidget | None) -> None:
+        self._scroll_source = scroll_source
+
     def eventFilter(self, watched, event):
         if event.type() == QEvent.Wheel:
+            self._scroll_outer_area(event)
             event.accept()
             return True
         return super().eventFilter(watched, event)
+
+    def _scroll_outer_area(self, event) -> None:
+        scroll = _find_parent_scroll_area(self._scroll_source)
+        if scroll is None:
+            return
+        bar = scroll.verticalScrollBar()
+        if bar.maximum() <= bar.minimum():
+            return
+        pixel_delta = event.pixelDelta().y() if hasattr(event, "pixelDelta") else 0
+        angle_delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        delta = pixel_delta or angle_delta
+        if not delta:
+            return
+        if pixel_delta:
+            shift = -pixel_delta
+        else:
+            steps = max(1, int(round(abs(angle_delta) / 120)))
+            shift = (-1 if angle_delta > 0 else 1) * bar.singleStep() * steps
+        next_value = max(bar.minimum(), min(bar.maximum(), bar.value() + shift))
+        bar.setValue(next_value)
 
 
 PROCEDURE_COMBO_ARROW_IMAGE = _procedure_combo_arrow_image()
@@ -392,28 +420,39 @@ def apply_procedure_combo_style(root: QWidget) -> None:
     combos.extend(root.findChildren(QComboBox))
     for combo in combos:
         combo.setStyleSheet(PROCEDURE_COMBO_STYLE)
-        _disable_combo_wheel(combo)
+        _disable_combo_wheel(combo, combo)
         line_edit = combo.lineEdit()
         if line_edit is not None:
-            _disable_combo_wheel(line_edit)
+            _disable_combo_wheel(line_edit, combo)
         try:
             view = combo.view()
             view.setAlternatingRowColors(True)
             view.setStyleSheet(PROCEDURE_COMBO_VIEW_STYLE)
-            _disable_combo_wheel(view)
-            _disable_combo_wheel(view.viewport())
-            _disable_combo_wheel(view.verticalScrollBar())
-            _disable_combo_wheel(view.horizontalScrollBar())
+            _disable_combo_wheel(view, combo)
+            _disable_combo_wheel(view.viewport(), combo)
+            _disable_combo_wheel(view.verticalScrollBar(), combo)
+            _disable_combo_wheel(view.horizontalScrollBar(), combo)
         except Exception:
             pass
 
 
-def _disable_combo_wheel(widget: QWidget) -> None:
+def _find_parent_scroll_area(widget: QWidget | None) -> QScrollArea | None:
+    current = widget
+    while current is not None:
+        if isinstance(current, QScrollArea):
+            return current
+        current = current.parentWidget()
+    return None
+
+
+def _disable_combo_wheel(widget: QWidget, scroll_source: QWidget) -> None:
     blocker = getattr(widget, "_procedure_combo_wheel_blocker", None)
     if blocker is None:
-        blocker = _ProcedureComboWheelBlocker(widget)
+        blocker = _ProcedureComboWheelBlocker(widget, scroll_source)
         widget._procedure_combo_wheel_blocker = blocker
         widget.installEventFilter(blocker)
+    else:
+        blocker.set_scroll_source(scroll_source)
 
 
 def apply_procedure_datetime_style(root: QWidget) -> None:
