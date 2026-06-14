@@ -2,7 +2,9 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushBu
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen, QPixmap
 from rem_card.app.patient_age import format_patient_age, format_patient_age_from_birth_date
+from rem_card.data.dto.remcard_dto import PatientStatus
 from rem_card.services.remcard_icon_defaults import (
+    REMCARD_DEAD_PATIENT_ICON_KEY,
     REMCARD_EMPTY_BED_ICON_KEY,
     REMCARD_FEMALE_PATIENT_ICON_KEY,
     REMCARD_MALE_PATIENT_ICON_KEY,
@@ -212,6 +214,17 @@ class SidePatientCard(QFrame):
             return REMCARD_MALE_PATIENT_ICON_KEY
         return REMCARD_EMPTY_BED_ICON_KEY
 
+    @classmethod
+    def _photo_key_for_admission(cls, admission):
+        status_value = getattr(admission, "current_status", None)
+        if isinstance(status_value, PatientStatus):
+            status_text = status_value.value
+        else:
+            status_text = str(status_value or "").strip().upper()
+        if status_text == PatientStatus.DEAD.value:
+            return REMCARD_DEAD_PATIENT_ICON_KEY
+        return cls._photo_key_for_gender(getattr(admission, "patient_gender", None))
+
     def update_info(self, bed_number, patient=None, admission=None):
         self.current_bed_number = bed_number
         self._current_patient = patient
@@ -245,7 +258,7 @@ class SidePatientCard(QFrame):
 
             self.photo_label.setPixmap(
                 self._get_icon_pixmap(
-                    self._photo_key_for_gender(admission.patient_gender),
+                    self._photo_key_for_admission(admission),
                     patient_frame=True,
                 )
             )

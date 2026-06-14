@@ -3,7 +3,7 @@ import socket
 import time
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QDialog
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QDialog, QStackedWidget
 from PySide6.QtCore import Signal, Qt, QTimer
 from datetime import datetime
 from rem_card.app.foreground_activity import mark_foreground_activity, should_defer_background_io
@@ -76,12 +76,13 @@ class DoctorRemCardWidget(QWidget):
     back_to_roles_requested = Signal()
     refresh_requested = Signal()
 
-    def __init__(self, remcard_service, admission_id, patient_service=None, parent=None):
+    def __init__(self, remcard_service, admission_id, patient_service=None, parent=None, operblock_service=None):
         super().__init__(parent)
         self._primary_service = remcard_service
         self.service = remcard_service
         self.admission_id = admission_id
         self.patient_service = patient_service
+        self.operblock_service = operblock_service
         self._current_date = datetime.now()
         self._is_loading = False 
         self._last_status = None 
@@ -120,6 +121,7 @@ class DoctorRemCardWidget(QWidget):
         self._card_snapshot_cache = None
         self._balance_runtime_cache = None
         self._read_only_widget_signature = None
+        self._operblock_archive_viewer = None
         self._is_closing = False
         self.diet_intake_widget = None
         self._add_patient_lock = self._build_add_patient_lock()
@@ -1921,15 +1923,22 @@ class DoctorRemCardWidget(QWidget):
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
+        self.content_stack = QStackedWidget(self)
         
         # Передаем remcard_service В конструктор, чтобы он был доступен СРАЗУ при создании секторов
         p_service = self.patient_service
-        self.layout_manager = RemCardLayoutManager(role="Врач", patient_service=p_service, remcard_service=self.service)
+        self.layout_manager = RemCardLayoutManager(
+            role="Врач",
+            patient_service=p_service,
+            remcard_service=self.service,
+            operblock_service=self.operblock_service,
+        )
         self.layout_manager.patient_status_service = self.service.status_service
         self.layout_manager.current_admission_id = self.admission_id
         self.layout_manager.current_date = self._current_date
         
-        main_layout.addWidget(self.layout_manager)
+        self.content_stack.addWidget(self.layout_manager)
+        main_layout.addWidget(self.content_stack)
 
         if hasattr(self.layout_manager, 'orders_widget'):
             self.layout_manager.orders_widget.service = self.service
@@ -2000,12 +2009,68 @@ class DoctorRemCardWidget(QWidget):
             archive_widget.back_requested.connect(lambda: self.on_back_clicked())
             archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
             archive_widget.edit_requested.connect(self.on_patient_edit_requested_from_archive)
+            if hasattr(archive_widget, "operblock_case_selected"):
+                archive_widget.operblock_case_selected.connect(self.on_operblock_case_selected_from_archive)
             self._archive_signals_bound = True
 
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
         if admin_widget and not self._admin_signals_bound:
             admin_widget.btn_back_to_roles.clicked.connect(lambda: self.on_back_clicked())
             self._admin_signals_bound = True
+
+    def _ensure_operblock_archive_viewer(self):
+        viewer = getattr(self, "_operblock_archive_viewer", None)
+        if self._is_qobject_alive(viewer):
+            return viewer
+        if self.operblock_service is None:
+            CustomMessageBox.warning(self, "Архив оперблока", "Сервис оперблока недоступен.")
+            return None
+        if not hasattr(self, "content_stack"):
+            CustomMessageBox.warning(self, "Архив оперблока", "Не удалось открыть просмотр протокола.")
+            return None
+
+        from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
+
+        viewer = OperBlockMainWidget(
+            self.patient_service,
+            self.service,
+            self.operblock_service,
+            parent=self.content_stack,
+            view_only=True,
+        )
+        viewer.view_back_requested.connect(self._return_from_operblock_archive_viewer)
+        self._operblock_archive_viewer = viewer
+        self.content_stack.addWidget(viewer)
+        return viewer
+
+    def on_operblock_case_selected_from_archive(self, case):
+        try:
+            case_id = int((case or {}).get("operation_case_id") or 0)
+        except Exception:
+            case_id = 0
+        if not case_id:
+            CustomMessageBox.warning(self, "Архив оперблока", "Не удалось определить запись оперблока.")
+            return
+
+        viewer = self._ensure_operblock_archive_viewer()
+        if viewer is None:
+            return
+        self._card_return_mode = None
+        self._card_opened_from_global_archive = False
+        self._exit_archive_read_only_mode()
+        self.content_stack.setCurrentWidget(viewer)
+        viewer.open_archive_protocol(case_id)
+
+    def _return_from_operblock_archive_viewer(self):
+        if hasattr(self, "content_stack") and hasattr(self, "layout_manager"):
+            self.content_stack.setCurrentWidget(self.layout_manager)
+        if hasattr(self, "layout_manager"):
+            self.layout_manager.set_patient_selection_mode("archive")
+            self._wire_dynamic_views()
+            if hasattr(self.layout_manager, "_refresh_archive_if_needed"):
+                self.layout_manager._refresh_archive_if_needed(force=True)
+            if hasattr(self.layout_manager, "bottom_row"):
+                self.layout_manager.bottom_row.hide()
 
     def _ensure_orders_widget(self):
         layout = getattr(self, "layout_manager", None)
@@ -2740,6 +2805,14 @@ class DoctorRemCardWidget(QWidget):
         if reply == CustomMessageBox.Yes: self.window().close()
 
     def on_back_clicked(self):
+        viewer = getattr(self, "_operblock_archive_viewer", None)
+        if (
+            hasattr(self, "content_stack")
+            and self._is_qobject_alive(viewer)
+            and self.content_stack.currentWidget() == viewer
+        ):
+            self._return_from_operblock_archive_viewer()
+            return
         self._balance_update_timer.stop()
         current_idx = self.layout_manager.selection_stack.currentIndex()
         journal_idx = -1
@@ -2964,6 +3037,8 @@ class DoctorRemCardWidget(QWidget):
             CustomMessageBox.warning(self, "Бонус", f"Не удалось открыть бонус:\n{exc}")
 
     def on_global_archive_clicked(self):
+        if hasattr(self, "content_stack"):
+            self.content_stack.setCurrentWidget(self.layout_manager)
         self._exit_archive_read_only_mode()
         self._card_return_mode = None
         self._card_opened_from_global_archive = False

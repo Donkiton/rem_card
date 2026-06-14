@@ -31,6 +31,7 @@ class AdmissionRecord:
     patient_months: Optional[int] = None
     patient_age_unit: Optional[str] = None
     patient_gender: Optional[str] = None
+    current_status: Optional[str] = None
     diagnosis_code: Optional[str] = None
     diagnosis_text: Optional[str] = None
     department_profile: Optional[str] = None
@@ -92,7 +93,15 @@ class PatientBedManagementService:
                 p.full_name,
                 p.admission_uid,
                 p.birth_date,
-                a.*
+                a.*,
+                (
+                    SELECT pse.status
+                    FROM patient_status_events pse
+                    WHERE pse.admission_id = a.id
+                      AND pse.end_time IS NULL
+                    ORDER BY datetime(pse.start_time) DESC, pse.id DESC
+                    LIMIT 1
+                ) AS current_status
             FROM beds b
             JOIN admissions a ON a.id = b.current_admission_id
             JOIN patients p ON p.id = a.patient_id
@@ -112,7 +121,15 @@ class PatientBedManagementService:
                 p.full_name,
                 p.admission_uid,
                 p.birth_date,
-                a.*
+                a.*,
+                (
+                    SELECT pse.status
+                    FROM patient_status_events pse
+                    WHERE pse.admission_id = a.id
+                      AND pse.end_time IS NULL
+                    ORDER BY datetime(pse.start_time) DESC, pse.id DESC
+                    LIMIT 1
+                ) AS current_status
             FROM admissions a
             JOIN patients p ON p.id = a.patient_id
             WHERE a.id = ?
@@ -141,6 +158,7 @@ class PatientBedManagementService:
             patient_months=self._safe_int_or_none(data.get("patient_months")),
             patient_age_unit=data.get("patient_age_unit"),
             patient_gender=data.get("patient_gender"),
+            current_status=data.get("current_status"),
             diagnosis_code=data.get("diagnosis_code"),
             diagnosis_text=data.get("diagnosis_text"),
             department_profile=data.get("department_profile"),

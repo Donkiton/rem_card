@@ -102,6 +102,32 @@ def open_analytics_graphs_dialog(
             cleanup()
 
 
+def open_operblock_statistics_dialog(
+    parent=None,
+    *,
+    db_manager=None,
+    start_dt: str | None = None,
+    end_dt: str | None = None,
+):
+    now = datetime.now()
+    if not start_dt:
+        start_dt = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
+    if not end_dt:
+        end_dt = now.strftime("%Y-%m-%d 23:59:59")
+    if db_manager is None:
+        raise ValueError("Не найден менеджер базы данных для статистики оперблока.")
+
+    from rem_card.ui.analytics.operblock_statistics_dialog import OperBlockStatisticsDialog
+
+    dialog = OperBlockStatisticsDialog(
+        db_manager,
+        start_date_str=start_dt,
+        end_date_str=end_dt,
+        parent=parent,
+    )
+    dialog.exec()
+
+
 def _get_base_db_manager(*, remcard_service=None, db_manager=None):
     if db_manager is not None:
         return db_manager

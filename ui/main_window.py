@@ -923,7 +923,12 @@ class MainWindow(QMainWindow):
             self.close()
             return
 
-        self.doctor_main = DoctorMainWidget(self.container.patient_service, self.container.remcard_service, parent=self.stack)
+        self.doctor_main = DoctorMainWidget(
+            self.container.patient_service,
+            self.container.remcard_service,
+            parent=self.stack,
+            operblock_service=self.container.operblock_service,
+        )
         self.stack.addWidget(self.doctor_main)
         self.stack.setCurrentWidget(self.doctor_main)
 
@@ -1081,7 +1086,12 @@ class MainWindow(QMainWindow):
 
             if self.doctor_main is None:
                 from .doctor_view.doctor_main_widget import DoctorMainWidget
-                self.doctor_main = DoctorMainWidget(self.container.patient_service, self.container.remcard_service, parent=self.stack)
+                self.doctor_main = DoctorMainWidget(
+                    self.container.patient_service,
+                    self.container.remcard_service,
+                    parent=self.stack,
+                    operblock_service=self.container.operblock_service,
+                )
                 self.stack.addWidget(self.doctor_main)
             
             self.stack.setCurrentWidget(self.doctor_main)

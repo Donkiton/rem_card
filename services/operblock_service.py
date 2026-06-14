@@ -1102,9 +1102,12 @@ class OperBlockService:
             JOIN operating_tables t ON t.code = oc.table_code
             JOIN admissions a ON a.id = oc.admission_id
             JOIN patients p ON p.id = oc.patient_id
-            WHERE oc.status = 'closed'
+            WHERE oc.status IN ('active', 'closed')
               AND COALESCE(a.unit_scope, '') = 'operblock'
-            ORDER BY datetime(oc.ended_at) DESC, oc.id DESC
+            ORDER BY
+                CASE WHEN oc.status = 'active' THEN 0 ELSE 1 END,
+                datetime(COALESCE(oc.ended_at, oc.started_at)) DESC,
+                oc.id DESC
             LIMIT 500
             """
         )
@@ -1208,13 +1211,138 @@ class OperBlockService:
 
         return dict(self.db.run_write_operation(operation, source="operblock_restore_archived_case"))
 
+    @staticmethod
+    def _table_exists_for_delete(cursor: sqlite3.Cursor, table_name: str) -> bool:
+        row = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    @classmethod
+    def _delete_where_in(cls, cursor: sqlite3.Cursor, table_name: str, column_name: str, values: list[int]) -> int:
+        clean_values = [int(value) for value in values if value is not None]
+        if not clean_values or not cls._table_exists_for_delete(cursor, table_name):
+            return 0
+        placeholders = ", ".join("?" for _ in clean_values)
+        cursor.execute(
+            f"DELETE FROM {table_name} WHERE {column_name} IN ({placeholders})",
+            tuple(clean_values),
+        )
+        return int(cursor.rowcount or 0)
+
+    @classmethod
+    def _hard_delete_archived_operation_cases(
+        cls,
+        cursor: sqlite3.Cursor,
+        case_rows: list[sqlite3.Row],
+    ) -> dict[str, int]:
+        case_ids = sorted({int(row["id"]) for row in case_rows if row["id"] is not None})
+        admission_ids = sorted({int(row["admission_id"]) for row in case_rows if row["admission_id"] is not None})
+        patient_ids = sorted({int(row["patient_id"]) for row in case_rows if row["patient_id"] is not None})
+        if not case_ids:
+            return {"deleted": 0}
+
+        cls._delete_where_in(cursor, "operblock_timeline_events", "operation_case_id", case_ids)
+        cls._delete_where_in(cursor, "operation_table_assignments", "operation_case_id", case_ids)
+
+        deleted_cases = cls._delete_where_in(cursor, "operation_cases", "id", case_ids)
+
+        removable_admission_ids: list[int] = []
+        if admission_ids:
+            placeholders = ", ".join("?" for _ in admission_ids)
+            remaining_rows = cursor.execute(
+                f"""
+                SELECT DISTINCT admission_id
+                FROM operation_cases
+                WHERE admission_id IN ({placeholders})
+                """,
+                tuple(admission_ids),
+            ).fetchall()
+            remaining_admission_ids = {int(row["admission_id"]) for row in remaining_rows}
+            removable_admission_ids = [admission_id for admission_id in admission_ids if admission_id not in remaining_admission_ids]
+
+        if removable_admission_ids:
+            if cls._table_exists_for_delete(cursor, "procedures"):
+                placeholders = ", ".join("?" for _ in removable_admission_ids)
+                procedure_rows = cursor.execute(
+                    f"SELECT id FROM procedures WHERE admission_id IN ({placeholders})",
+                    tuple(removable_admission_ids),
+                ).fetchall()
+                procedure_ids = [int(row["id"]) for row in procedure_rows]
+                for table_name in (
+                    "procedure_consents",
+                    "procedure_cvc",
+                    "procedure_lumbar_puncture",
+                    "procedure_transfusion",
+                ):
+                    cls._delete_where_in(cursor, table_name, "procedure_id", procedure_ids)
+                cls._delete_where_in(cursor, "procedures", "id", procedure_ids)
+
+            order_ids: list[int] = []
+            if cls._table_exists_for_delete(cursor, "orders"):
+                placeholders = ", ".join("?" for _ in removable_admission_ids)
+                order_rows = cursor.execute(
+                    f"SELECT id FROM orders WHERE admission_id IN ({placeholders})",
+                    tuple(removable_admission_ids),
+                ).fetchall()
+                order_ids = [int(row["id"]) for row in order_rows]
+            cls._delete_where_in(cursor, "administrations", "order_id", order_ids)
+            cls._delete_where_in(cursor, "orders", "id", order_ids)
+
+            for table_name in (
+                "order_audit_log",
+                "change_log",
+                "medical_audit_log",
+                "patient_status_events",
+                "vital_settings",
+                "vitals",
+                "fluids",
+                "operations",
+                "ivl_episodes",
+                "transfusions",
+                "clinical_events",
+                "devices",
+                "respiratory_support",
+                "lab_data",
+                "lab_orders",
+                "diet_plan",
+                "oral_intake_events",
+            ):
+                cls._delete_where_in(cursor, table_name, "admission_id", removable_admission_ids)
+
+            if cls._table_exists_for_delete(cursor, "beds"):
+                placeholders = ", ".join("?" for _ in removable_admission_ids)
+                cursor.execute(
+                    f"UPDATE beds SET current_admission_id = NULL WHERE current_admission_id IN ({placeholders})",
+                    tuple(removable_admission_ids),
+                )
+            cls._delete_where_in(cursor, "admissions", "id", removable_admission_ids)
+
+        removable_patient_ids: list[int] = []
+        if patient_ids:
+            placeholders = ", ".join("?" for _ in patient_ids)
+            remaining_rows = cursor.execute(
+                f"""
+                SELECT DISTINCT patient_id
+                FROM admissions
+                WHERE patient_id IN ({placeholders})
+                """,
+                tuple(patient_ids),
+            ).fetchall()
+            remaining_patient_ids = {int(row["patient_id"]) for row in remaining_rows}
+            removable_patient_ids = [patient_id for patient_id in patient_ids if patient_id not in remaining_patient_ids]
+        cls._delete_where_in(cursor, "patients", "id", removable_patient_ids)
+
+        return {"deleted": deleted_cases}
+
     def delete_archived_operation_case(self, operation_case_id: int) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
 
         def operation(cursor: sqlite3.Cursor):
             case = cursor.execute(
                 """
-                SELECT oc.id, oc.admission_id, oc.status
+                SELECT oc.id, oc.patient_id, oc.admission_id, oc.status
                 FROM operation_cases oc
                 JOIN admissions a ON a.id = oc.admission_id
                 WHERE oc.id = ?
@@ -1224,20 +1352,10 @@ class OperBlockService:
             ).fetchone()
             if not case:
                 raise OperBlockConflictError("Архивный случай не найден.")
-            if str(case["status"] or "") != "closed":
+            if str(case["status"] or "") not in {"closed", "cancelled"}:
                 raise OperBlockConflictError("Удалить можно только пациента из архива.")
-            cursor.execute(
-                """
-                UPDATE operation_cases
-                SET status = 'cancelled',
-                    last_modified_by = 'operblock',
-                    revision = COALESCE(revision, 0) + 1
-                WHERE id = ?
-                  AND status = 'closed'
-                """,
-                (int(operation_case_id),),
-            )
-            if cursor.rowcount != 1:
+            result = self._hard_delete_archived_operation_cases(cursor, [case])
+            if int(result.get("deleted") or 0) != 1:
                 raise OperBlockConflictError("Случай изменён другим рабочим местом. Обновите архив.")
             return {"operation_case_id": int(operation_case_id), "admission_id": int(case["admission_id"])}
 
@@ -1255,31 +1373,18 @@ class OperBlockService:
                 params.append(clean_table_code)
             rows = cursor.execute(
                 f"""
-                SELECT oc.id
+                SELECT oc.id, oc.patient_id, oc.admission_id
                 FROM operation_cases oc
                 JOIN admissions a ON a.id = oc.admission_id
-                WHERE oc.status = 'closed'
+                WHERE oc.status IN ('closed', 'cancelled')
                   AND COALESCE(a.unit_scope, '') = 'operblock'
                   {table_clause}
                 """,
                 tuple(params),
             ).fetchall()
-            case_ids = [int(row["id"]) for row in rows]
-            if not case_ids:
+            if not rows:
                 return {"deleted": 0}
-            placeholders = ", ".join("?" for _ in case_ids)
-            cursor.execute(
-                f"""
-                UPDATE operation_cases
-                SET status = 'cancelled',
-                    last_modified_by = 'operblock',
-                    revision = COALESCE(revision, 0) + 1
-                WHERE status = 'closed'
-                  AND id IN ({placeholders})
-                """,
-                tuple(case_ids),
-            )
-            return {"deleted": int(cursor.rowcount or 0)}
+            return self._hard_delete_archived_operation_cases(cursor, list(rows))
 
         return dict(self.db.run_write_operation(operation, source="operblock_delete_all_archived_cases"))
 
@@ -2554,14 +2659,21 @@ class OperBlockService:
             event_time=event_time,
         )
 
-    def end_anesthesia(self, operation_case_id: int) -> int:
-        return self._add_stage_event(operation_case_id, "anesthesia_end")
+    def end_anesthesia(self, operation_case_id: int, *, event_time: Any = None) -> int:
+        return self._add_stage_event(operation_case_id, "anesthesia_end", event_time=event_time)
 
-    def end_anesthesia_with_transfer(self, operation_case_id: int, transfer_department: str) -> int:
+    def end_anesthesia_with_transfer(
+        self,
+        operation_case_id: int,
+        transfer_department: str,
+        *,
+        event_time: Any = None,
+    ) -> int:
         return self._add_stage_event(
             operation_case_id,
             "anesthesia_end",
             transfer_department=transfer_department,
+            event_time=event_time,
         )
 
     def start_surgery(
@@ -2977,6 +3089,17 @@ class OperBlockService:
                 active_start = _parse_dt(state.get("current_anesthesia_start"))
                 if active_start is None:
                     raise OperBlockConflictError("Не удалось определить начало пособия. Обновите протокол.")
+                if event_dt < _minute_floor(active_start):
+                    raise ValueError(
+                        f"Конец пособия не может быть раньше начала пособия: "
+                        f"{_format_bound_time(_minute_floor(active_start))}."
+                    )
+                last_surgery_end = _parse_dt(state.get("last_surgery_end"))
+                if last_surgery_end is not None and event_dt < _minute_floor(last_surgery_end):
+                    raise ValueError(
+                        f"Конец пособия не может быть раньше окончания операции: "
+                        f"{_format_bound_time(_minute_floor(last_surgery_end))}."
+                    )
                 self._validate_medications_before_anesthesia_end(
                     cursor,
                     case,

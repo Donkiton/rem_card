@@ -3624,11 +3624,12 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
     _ = temp_root
     app = QApplication.instance() or QApplication([])
     checks = (
-        ("Мужской", "man_in_oper_extr.png", side_module.REMCARD_MALE_PATIENT_ICON_KEY),
-        ("Женский", "woman_in_oper_extr.png", side_module.REMCARD_FEMALE_PATIENT_ICON_KEY),
+        ("Мужской", "man_in_oper_extr.png", side_module.REMCARD_MALE_PATIENT_ICON_KEY, None),
+        ("Женский", "woman_in_oper_extr.png", side_module.REMCARD_FEMALE_PATIENT_ICON_KEY, None),
+        ("Умер", "deadman.png", side_module.REMCARD_DEAD_PATIENT_ICON_KEY, "DEAD"),
     )
     asset_by_key = {}
-    for _gender, asset_name, icon_key in checks:
+    for _label, asset_name, icon_key, _status in checks:
         asset_path = os.path.join(get_icon_dir(), asset_name)
         if not os.path.isfile(asset_path):
             return False, f"side patient card asset is missing: {asset_name}"
@@ -3645,30 +3646,31 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
     side_module.load_remcard_icon_pixmap = fake_load_remcard_icon_pixmap
     card = SidePatientCard()
     try:
-        for gender, asset_name, icon_key in checks:
+        for label, asset_name, icon_key, current_status in checks:
             asset_path = asset_by_key[icon_key]
-            patient = SimpleNamespace(full_name=f"Тест {gender}", birth_date=datetime(2022, 1, 1).date())
+            patient = SimpleNamespace(full_name=f"Тест {label}", birth_date=datetime(2022, 1, 1).date())
             admission = SimpleNamespace(
                 history_number="REG-SIDE-001",
                 patient_age=4,
                 patient_months=None,
                 patient_age_unit="годы",
-                patient_gender=gender,
+                patient_gender="Мужской" if current_status else label,
+                current_status=current_status,
                 admission_datetime=datetime(2026, 1, 1, 9, 0),
                 diagnosis_text="Тестовый диагноз",
             )
             card.update_info(1, patient, admission)
             app.processEvents()
             if requested_keys[-1:] != [icon_key]:
-                return False, f"side patient card requested wrong photo key for {gender}: {requested_keys[-1:]}"
+                return False, f"side patient card requested wrong photo key for {label}: {requested_keys[-1:]}"
             actual = card.photo_label.pixmap()
             if actual is None or actual.isNull():
-                return False, f"side patient card did not render photo for {gender}"
+                return False, f"side patient card did not render photo for {label}"
             expected = card._circular_patient_photo(QPixmap(asset_path))
             if actual.size() != expected.size():
-                return False, f"side patient card photo size mismatch for {gender}: {actual.size()} != {expected.size()}"
+                return False, f"side patient card photo size mismatch for {label}: {actual.size()} != {expected.size()}"
             if actual.size().width() != PATIENT_PHOTO_SIZE or actual.size().height() != PATIENT_PHOTO_SIZE:
-                return False, f"side patient card photo frame size changed for {gender}: {actual.size()}"
+                return False, f"side patient card photo frame size changed for {label}: {actual.size()}"
             actual_image = actual.toImage()
             expected_image = expected.toImage()
             for x, y in (
@@ -3685,7 +3687,7 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
                     + abs(actual_color.alpha() - expected_color.alpha())
                 )
                 if channel_delta > 12:
-                    return False, f"side patient card photo pixels do not match gender asset for {gender}"
+                    return False, f"side patient card photo pixels do not match expected asset for {label}"
         return True, "ok"
     finally:
         side_module.load_remcard_icon_pixmap = original_loader

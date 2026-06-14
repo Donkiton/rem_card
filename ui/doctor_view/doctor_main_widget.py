@@ -63,10 +63,11 @@ def _app_is_closing() -> bool:
 
 class DoctorMainWidget(QWidget):
     """Главный виджет врача. Теперь является оберткой над DoctorRemCardWidget."""
-    def __init__(self, patient_service, remcard_service, parent=None):
+    def __init__(self, patient_service, remcard_service, parent=None, operblock_service=None):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.operblock_service = operblock_service
         self._last_global_change_id = 0
         self._monitor_connected = False
         self._is_closing = False
@@ -222,10 +223,17 @@ class DoctorMainWidget(QWidget):
         
         # Режим карты (DoctorRemCardWidget)
         from .doctor_remcard_widget import DoctorRemCardWidget
-        self.remcard_widget = DoctorRemCardWidget(self.remcard_service, None, self.patient_service, parent=self.main_stack)
+        self.remcard_widget = DoctorRemCardWidget(
+            self.remcard_service,
+            None,
+            self.patient_service,
+            parent=self.main_stack,
+            operblock_service=self.operblock_service,
+        )
         # ВАЖНО: передаем remcard_service в LayoutManager
         if hasattr(self.remcard_widget, 'layout_manager'):
             self.remcard_widget.layout_manager.remcard_service = self.remcard_service
+            self.remcard_widget.layout_manager.operblock_service = self.operblock_service
             if hasattr(self.remcard_widget.layout_manager, "sector_w1a"):
                 self.remcard_widget.layout_manager.sector_w1a.set_service(self.remcard_service)
         self.remcard_widget.back_to_roles_requested.connect(self.back_to_roles)

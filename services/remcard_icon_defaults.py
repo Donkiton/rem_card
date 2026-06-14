@@ -8,6 +8,7 @@ REMCARD_ICON_STORAGE_CATALOG_KEY = "operblock_icons"
 REMCARD_EMPTY_BED_ICON_KEY = "remcard:patient_preview:empty_bed"
 REMCARD_MALE_PATIENT_ICON_KEY = "remcard:patient_preview:male"
 REMCARD_FEMALE_PATIENT_ICON_KEY = "remcard:patient_preview:female"
+REMCARD_DEAD_PATIENT_ICON_KEY = "remcard:patient_preview:dead"
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,16 @@ REMCARD_ICON_DEFINITIONS: tuple[RemCardIconDefinition, ...] = (
         20120,
         "Показывается в предпросмотре карточки пациента для женского пола.",
         source_file="woman_in_oper_extr.png",
+    ),
+    RemCardIconDefinition(
+        REMCARD_DEAD_PATIENT_ICON_KEY,
+        "remcard_patient_preview",
+        "dead_patient",
+        "Фото пациента: умер",
+        "deadman.png",
+        20130,
+        "Показывается в предпросмотре карточки пациента, если пациент умер и еще находится на койке.",
+        source_file="deadman.png",
     ),
 )
 

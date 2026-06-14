@@ -72,7 +72,7 @@ PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
 OPERBLOCK_ICONS_SEED_META_VERSION_KEY = "operblock_icons_seed_version"
 OPERBLOCK_ICONS_SEED_META_HASH_KEY = "operblock_icons_seed_hash"
-OPERBLOCK_ICONS_SEED_VERSION = "seeded_custom_icons_v2"
+OPERBLOCK_ICONS_SEED_VERSION = "seeded_custom_icons_v4"
 SEEDED_ICON_DEFINITIONS = (
     *SEEDED_CUSTOM_ICON_DEFINITIONS,
     *REMCARD_ICON_DEFINITIONS,
@@ -2867,13 +2867,8 @@ class SettingsService:
             icon_dir = get_icon_dir()
             expected_hash = str(fastpath_state.get("expected_hash") or self._operblock_icons_seed_hash())
             with self.db.transaction("settings_operblock_icons_seed") as cursor:
+                updated_seed: list[str] = []
                 for definition in SEEDED_ICON_DEFINITIONS:
-                    existing = cursor.execute(
-                        "SELECT 1 FROM operblock_icons WHERE icon_key = ?",
-                        (definition.icon_key,),
-                    ).fetchone()
-                    if existing:
-                        continue
                     source_file = definition.source_file or definition.default_file
                     source_path = os.path.join(icon_dir, source_file)
                     if not os.path.isfile(source_path):
@@ -2886,6 +2881,47 @@ class SettingsService:
                         "default_file": definition.default_file,
                     }
                     now = now_text()
+                    existing = cursor.execute(
+                        "SELECT source, image_hash FROM operblock_icons WHERE icon_key = ?",
+                        (definition.icon_key,),
+                    ).fetchone()
+                    if existing:
+                        existing_source = str(existing["source"] or "")
+                        existing_hash = str(existing["image_hash"] or "")
+                        if existing_source == "seed" and existing_hash != image_hash:
+                            cursor.execute(
+                                """
+                                UPDATE operblock_icons
+                                SET category = ?,
+                                    target_key = ?,
+                                    name = ?,
+                                    default_file = ?,
+                                    value_json = ?,
+                                    image_blob = ?,
+                                    image_mime = ?,
+                                    image_hash = ?,
+                                    enabled = 1,
+                                    sort_order = ?,
+                                    revision = COALESCE(revision, 0) + 1,
+                                    updated_at = ?
+                                WHERE icon_key = ?
+                                """,
+                                (
+                                    definition.category,
+                                    definition.target_key,
+                                    definition.name,
+                                    definition.default_file,
+                                    _stable_json(value),
+                                    image_blob,
+                                    image_mime,
+                                    image_hash,
+                                    int(definition.sort_order or 0),
+                                    now,
+                                    definition.icon_key,
+                                ),
+                            )
+                            updated_seed.append(definition.icon_key)
+                        continue
                     cursor.execute(
                         """
                         INSERT INTO operblock_icons (
@@ -2912,7 +2948,7 @@ class SettingsService:
                     )
                     inserted.append(definition.icon_key)
                 missing_after_seed = self._missing_operblock_seed_icon_keys(cursor)
-                if inserted:
+                if inserted or updated_seed:
                     self._bump_catalog_version(
                         cursor,
                         OPERBLOCK_ICONS_KEY,
@@ -2920,7 +2956,7 @@ class SettingsService:
                         None,
                         "seed_defaults",
                         changed_by_role="system",
-                        after={"inserted": inserted},
+                        after={"inserted": inserted, "updated_seed": updated_seed},
                     )
                 if not missing_after_seed:
                     self._set_meta(cursor, OPERBLOCK_ICONS_SEED_META_VERSION_KEY, OPERBLOCK_ICONS_SEED_VERSION)

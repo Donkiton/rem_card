@@ -1,7 +1,9 @@
 import os
+from datetime import datetime
 
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame,
-                             QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit)
+                             QPushButton, QLabel, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QLineEdit,
+                             QButtonGroup)
 from rem_card.app.logger import logger
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -17,17 +19,40 @@ from rem_card.ui.styles.theme import (
 from PySide6.QtCore import Qt, QDate, Signal, QTimer
 from math import ceil
 
+ARCHIVE_MODE_RAO = "rao"
+ARCHIVE_MODE_OPERBLOCK = "operblock"
+
+STYLE_ARCHIVE_MODE_BUTTON = STYLE_SMALL_NEUTRAL_BUTTON + """
+    QPushButton:checked {
+        background-color: #566573;
+        color: white;
+        border-color: #34495e;
+    }
+"""
+
 class ArchiveWidget(QWidget):
     patient_selected = Signal(object) # передает PatientDTO
+    operblock_case_selected = Signal(object) # передает dict с operation_case_id
     edit_requested = Signal(object) # передает PatientDTO
     delete_requested = Signal(object) # передает PatientDTO
     back_requested = Signal()
 
-    def __init__(self, patient_service, remcard_service=None, parent=None, *, allow_edit: bool = False):
+    def __init__(
+        self,
+        patient_service,
+        remcard_service=None,
+        parent=None,
+        *,
+        allow_edit: bool = False,
+        operblock_service=None,
+    ):
         super().__init__(parent)
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.operblock_service = operblock_service
         self.allow_edit = bool(allow_edit)
+        self.archive_source_mode = ARCHIVE_MODE_RAO
+        self.show_operblock_toggle = bool(self.allow_edit and self.operblock_service is not None)
         self.all_archived_patients = []
         self.filtered_patients = []
         self.page_size = 50
@@ -35,6 +60,7 @@ class ArchiveWidget(QWidget):
         self.total_pages = 1
         self._load_worker = None
         self._load_pending = False
+        self._load_token = 0
         self._delete_pending = False
         self._period_db_paths = []
         self.init_ui()
@@ -49,11 +75,11 @@ class ArchiveWidget(QWidget):
         layout = QVBoxLayout(self.frame)
         
         header_layout = QHBoxLayout()
-        title = QLabel("Архив пациентов")
-        title.setProperty("heading", "true")
-        title.setStyleSheet(STYLE_ARCHIVE_TITLE)
+        self.archive_title = QLabel("Архив пациентов РАО")
+        self.archive_title.setProperty("heading", "true")
+        self.archive_title.setStyleSheet(STYLE_ARCHIVE_TITLE)
         
-        header_layout.addWidget(title, alignment=Qt.AlignCenter)
+        header_layout.addWidget(self.archive_title, alignment=Qt.AlignCenter)
         layout.addLayout(header_layout)
         
         # Фильтры
@@ -105,8 +131,7 @@ class ArchiveWidget(QWidget):
         # Таблица архива
         self.table = QTableWidget()
         self.table.setStyleSheet(STYLE_ARCHIVE_TABLE)
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["ФИО", "ИБ №", "Диагноз", "Поступил", "Выписан"])
+        self._apply_table_headers()
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -161,6 +186,32 @@ class ArchiveWidget(QWidget):
         buttons_layout = QHBoxLayout()
         buttons_layout.addStretch()
 
+        if self.show_operblock_toggle:
+            self.archive_mode_group = QButtonGroup(self)
+            self.archive_mode_group.setExclusive(True)
+
+            self.btn_mode_operblock = QPushButton("Оперблок")
+            self.btn_mode_operblock.setCheckable(True)
+            self.btn_mode_operblock.setStyleSheet(STYLE_ARCHIVE_MODE_BUTTON)
+            self.btn_mode_operblock.setFixedHeight(35)
+            self.btn_mode_operblock.toggled.connect(
+                lambda checked: checked and self.set_archive_source_mode(ARCHIVE_MODE_OPERBLOCK)
+            )
+
+            self.btn_mode_rao = QPushButton("РАО")
+            self.btn_mode_rao.setCheckable(True)
+            self.btn_mode_rao.setChecked(True)
+            self.btn_mode_rao.setStyleSheet(STYLE_ARCHIVE_MODE_BUTTON)
+            self.btn_mode_rao.setFixedHeight(35)
+            self.btn_mode_rao.toggled.connect(
+                lambda checked: checked and self.set_archive_source_mode(ARCHIVE_MODE_RAO)
+            )
+
+            self.archive_mode_group.addButton(self.btn_mode_operblock)
+            self.archive_mode_group.addButton(self.btn_mode_rao)
+            buttons_layout.addWidget(self.btn_mode_operblock)
+            buttons_layout.addWidget(self.btn_mode_rao)
+
         self.btn_open = QPushButton(" Открыть карту")
         self.btn_open.setStyleSheet(STYLE_NEUTRAL_BUTTON)
         self.btn_open.setFixedHeight(35)
@@ -211,28 +262,48 @@ class ArchiveWidget(QWidget):
     def load_data(self):
         if self._load_worker and self._load_worker.isRunning():
             self._load_pending = True
+            self._load_token += 1
             return
 
         self._load_pending = False
         start_dt, end_dt = self._get_archive_period_bounds()
+        mode = self.archive_source_mode
+        self._load_token += 1
+        load_token = self._load_token
+        if mode == ARCHIVE_MODE_OPERBLOCK:
+            loader = lambda: self._load_operblock_archive_cases(start_dt, end_dt)
+        else:
+            loader = lambda: self.patient_service.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
         worker = AsyncCallThread(
-            lambda: self.patient_service.get_archived_patients(start_dt=start_dt, end_dt=end_dt),
+            loader,
             parent=self,
         )
         self._load_worker = worker
-        worker.succeeded.connect(self._apply_loaded_patients)
-        worker.failed.connect(self._on_load_failed)
+        worker.succeeded.connect(lambda rows, token=load_token, source_mode=mode: self._apply_loaded_records(token, source_mode, rows))
+        worker.failed.connect(lambda exc, token=load_token, source_mode=mode: self._on_load_failed(exc, token, source_mode))
         worker.finished.connect(lambda: self._on_load_finished(worker))
         worker.start()
 
-    def _apply_loaded_patients(self, patients):
-        self.all_archived_patients = list(patients or [])
-        self._period_db_paths = self._collect_db_paths_for_archive_period()
+    def _apply_loaded_records(self, load_token: int, source_mode: str, records):
+        if load_token != self._load_token or source_mode != self.archive_source_mode:
+            return
+        self.all_archived_patients = list(records or [])
+        self._period_db_paths = (
+            []
+            if source_mode == ARCHIVE_MODE_OPERBLOCK
+            else self._collect_db_paths_for_archive_period()
+        )
         self.current_page = 1
         self.filter_data()
 
-    def _on_load_failed(self, exc: Exception):
-        logger.warning("Не удалось загрузить архив пациентов: %s", exc, exc_info=True)
+    def _on_load_failed(self, exc: Exception, load_token: int, source_mode: str):
+        if load_token != self._load_token or source_mode != self.archive_source_mode:
+            return
+        if source_mode == ARCHIVE_MODE_OPERBLOCK:
+            logger.warning("Не удалось загрузить архив оперблока: %s", exc, exc_info=True)
+            CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось загрузить архив оперблока:\n{exc}")
+        else:
+            logger.warning("Не удалось загрузить архив пациентов: %s", exc, exc_info=True)
 
     def _on_load_finished(self, worker):
         if self._load_worker is worker:
@@ -258,18 +329,18 @@ class ArchiveWidget(QWidget):
         filtered = []
         for p in self.all_archived_patients:
             # Проверка дат поступления
-            adm_dt = p.admission_datetime
+            adm_dt = self._record_admission_datetime(p)
             if adm_dt:
                 adm_date = adm_dt.date()
                 if not (start_date <= adm_date <= end_date):
                     continue
             
             # Проверка строк
-            if name_filter and name_filter not in p.get_display_name().lower():
+            if name_filter and name_filter not in self._record_display_name(p).lower():
                 continue
-            if ib_filter and ib_filter not in (p.history_number or "").lower():
+            if ib_filter and ib_filter not in self._record_history_number(p).lower():
                 continue
-            diag = p.diagnosis_text or ""
+            diag = self._record_diagnosis_text(p)
             if diag_filter and diag_filter not in diag.lower():
                 continue
                 
@@ -294,12 +365,19 @@ class ArchiveWidget(QWidget):
         self._apply_action_buttons_state(patient)
 
     def on_item_double_clicked(self, item):
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            case = self._patient_from_row(item.row())
+            if isinstance(case, dict):
+                self.operblock_case_selected.emit(dict(case))
+            return
         patient = self._patient_from_row(item.row())
         if not patient:
             return
         self.patient_selected.emit(patient)
 
     def on_open_clicked(self):
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            return
         row = self.table.currentRow()
         if row >= 0:
             patient = self._patient_from_row(row)
@@ -308,6 +386,8 @@ class ArchiveWidget(QWidget):
             self.patient_selected.emit(patient)
 
     def on_edit_clicked(self):
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            return
         if not self.allow_edit:
             return
         row = self.table.currentRow()
@@ -322,6 +402,24 @@ class ArchiveWidget(QWidget):
 
     def on_report_stats_clicked(self):
         try:
+            if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+                if self.date_from.date() > self.date_to.date():
+                    CustomMessageBox.warning(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
+                    return
+                if self.operblock_service is None:
+                    CustomMessageBox.warning(self, "Статистика", "Сервис оперблока недоступен.")
+                    return
+
+                from ..shared.analytics_integration import open_operblock_statistics_dialog
+
+                start_dt, end_dt = self._get_archive_period_bounds()
+                open_operblock_statistics_dialog(
+                    self,
+                    db_manager=self.operblock_service.db,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                )
+                return
             if self.date_from.date() > self.date_to.date():
                 CustomMessageBox.warning(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
                 return
@@ -352,6 +450,9 @@ class ArchiveWidget(QWidget):
 
     def on_graphs_clicked(self):
         try:
+            if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+                CustomMessageBox.information(self, "Графики", "Графики доступны для архива РАО.")
+                return
             if self.date_from.date() > self.date_to.date():
                 CustomMessageBox.warning(self, "Внимание", "Дата начала периода не может быть позже даты окончания.")
                 return
@@ -375,6 +476,9 @@ class ArchiveWidget(QWidget):
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось открыть окно графиков:\n{exc}")
 
     def on_delete_last_clicked(self):
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            self._delete_selected_operblock_archive_case()
+            return
         if self._delete_pending:
             return
         row = self.table.currentRow()
@@ -417,6 +521,9 @@ class ArchiveWidget(QWidget):
                     )
 
     def on_delete_clicked(self):
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            self._delete_all_operblock_archive_cases()
+            return
         if self._delete_pending:
             return
         row = self.table.currentRow()
@@ -500,6 +607,10 @@ class ArchiveWidget(QWidget):
             self.date_to,
         ):
             widget.setEnabled(enabled)
+        if hasattr(self, "btn_mode_operblock"):
+            self.btn_mode_operblock.setEnabled(enabled)
+        if hasattr(self, "btn_mode_rao"):
+            self.btn_mode_rao.setEnabled(enabled)
         self._set_layout_widgets_enabled(self.page_buttons_layout, enabled)
         if enabled:
             patient = self._patient_from_row(self.table.currentRow()) if self.table.currentRow() >= 0 else None
@@ -514,6 +625,8 @@ class ArchiveWidget(QWidget):
                 widget.setEnabled(enabled)
 
     def _patient_key(self, patient) -> str:
+        if isinstance(patient, dict):
+            return f"operblock::{patient.get('operation_case_id') or patient.get('admission_id') or ''}"
         source_db = patient.source_db_path or "current"
         source_admission_id = (
             patient.source_admission_id
@@ -537,6 +650,7 @@ class ArchiveWidget(QWidget):
         self._render_current_page(selected_key=selected_key)
 
     def _render_current_page(self, selected_key: str = None):
+        self._apply_table_headers()
         self.table.clearSelection()
         self.table.setRowCount(0)
 
@@ -548,6 +662,12 @@ class ArchiveWidget(QWidget):
         selected_patient = None
 
         for row, patient in enumerate(page_items):
+            if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+                self._render_operblock_case_row(row, patient, selected_key)
+                if selected_key and self._patient_key(patient) == selected_key:
+                    selected_patient = patient
+                continue
+
             diagnosis = patient.diagnosis_text if patient.diagnosis_text else "без диагноза"
             admitted_at = patient.admission_datetime.strftime("%d.%m.%Y %H:%M") if patient.admission_datetime else "?"
             transferred_at = patient.transfer_datetime.strftime("%d.%m.%Y %H:%M") if patient.transfer_datetime else "не указано"
@@ -611,6 +731,17 @@ class ArchiveWidget(QWidget):
         self._set_page(int(raw))
 
     def _apply_action_buttons_state(self, patient):
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            has_selected_case = isinstance(patient, dict) and bool(patient.get("operation_case_id"))
+            selected_closed = has_selected_case and str(patient.get("status") or "").strip().lower() == "closed"
+            self.btn_report_stats.setEnabled(self.operblock_service is not None and not self._delete_pending)
+            self.btn_graphs.setEnabled(False)
+            self.btn_open.setEnabled(False)
+            self.btn_edit.setEnabled(False)
+            self.btn_delete_last.setEnabled(selected_closed and not self._delete_pending)
+            self.btn_delete.setEnabled(self.operblock_service is not None and not self._delete_pending)
+            return
+
         has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
         self.btn_report_stats.setEnabled(has_period_data)
         self.btn_graphs.setEnabled(has_period_data)
@@ -635,6 +766,8 @@ class ArchiveWidget(QWidget):
         self.btn_delete.setEnabled(True)
 
     def _collect_db_paths_for_current_filter(self) -> list[str]:
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            return []
         rows = self.filtered_patients
         if not rows:
             return []
@@ -655,6 +788,8 @@ class ArchiveWidget(QWidget):
         return paths
 
     def _collect_db_paths_for_archive_period(self) -> list[str]:
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            return []
         start_dt, end_dt = self._get_archive_period_bounds()
         try:
             if hasattr(self.patient_service, "get_archive_db_paths_for_period"):
@@ -671,3 +806,224 @@ class ArchiveWidget(QWidget):
             "Только просмотр",
             "Запись прошлых периодов доступна только для просмотра.",
         )
+
+    def _delete_selected_operblock_archive_case(self):
+        if self._delete_pending:
+            return
+        case = self._patient_from_row(self.table.currentRow()) if self.table.currentRow() >= 0 else None
+        if not isinstance(case, dict):
+            return
+        case_id = self._safe_int(case.get("operation_case_id"))
+        if not case_id:
+            return
+        patient_name = str(case.get("full_name") or "выбранного пациента")
+        reply = CustomMessageBox.question(
+            self,
+            "Удаление из архива оперблока",
+            f"Действительно удалить из архива оперблока пациента {patient_name}?",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+
+        def operation():
+            return self.operblock_service.delete_archived_operation_case(case_id)
+
+        def on_success(_result):
+            self._finish_delete_pending()
+            self.load_data()
+
+        self._enqueue_operblock_archive_write(
+            f"doctor_archive_operblock_delete_case:{case_id}",
+            operation,
+            on_success=on_success,
+            error_message="Не удалось удалить запись архива оперблока",
+        )
+
+    def _delete_all_operblock_archive_cases(self):
+        if self._delete_pending:
+            return
+        reply = CustomMessageBox.question(
+            self,
+            "Очистка архива оперблока",
+            "Действительно полностью очистить архив оперблока?\n"
+            "Будут удалены все архивные записи оперблока, не только текущая выборка.",
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+
+        def operation():
+            return self.operblock_service.delete_all_archived_operation_cases()
+
+        def on_success(_result):
+            self._finish_delete_pending()
+            self.load_data()
+
+        self._enqueue_operblock_archive_write(
+            "doctor_archive_operblock_delete_all_cases",
+            operation,
+            on_success=on_success,
+            error_message="Не удалось очистить архив оперблока",
+        )
+
+    def _enqueue_operblock_archive_write(self, description: str, operation, *, on_success, error_message: str):
+        if self.operblock_service is None:
+            CustomMessageBox.warning(self, "Архив оперблока", "Сервис оперблока недоступен.")
+            return
+
+        data_service = getattr(self.remcard_service, "data_service", None)
+
+        def on_error(exc):
+            self._finish_delete_pending()
+            self.load_data()
+            CustomMessageBox.warning(self, "Архив оперблока", f"{error_message}:\n{exc}")
+
+        self._begin_delete_pending()
+        try:
+            if data_service is not None and hasattr(data_service, "enqueue_write"):
+                data_service.enqueue_write(
+                    description=description,
+                    operation=operation,
+                    on_success=on_success,
+                    on_error=on_error,
+                )
+                return
+            result = operation()
+        except Exception as exc:
+            on_error(exc)
+            return
+        on_success(result)
+
+    def set_archive_source_mode(self, mode: str):
+        mode = ARCHIVE_MODE_OPERBLOCK if mode == ARCHIVE_MODE_OPERBLOCK else ARCHIVE_MODE_RAO
+        if mode == ARCHIVE_MODE_OPERBLOCK and not self.show_operblock_toggle:
+            return
+        if mode == self.archive_source_mode:
+            self._sync_archive_mode_ui()
+            return
+        self.archive_source_mode = mode
+        self.all_archived_patients = []
+        self.filtered_patients = []
+        self._period_db_paths = []
+        self.current_page = 1
+        self.total_pages = 1
+        self._sync_archive_mode_ui()
+        self._render_current_page()
+        self.load_data()
+
+    def _sync_archive_mode_ui(self):
+        if hasattr(self, "archive_title"):
+            title = "Архив пациентов оперблока" if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK else "Архив пациентов РАО"
+            self.archive_title.setText(title)
+        if hasattr(self, "btn_mode_operblock"):
+            self.btn_mode_operblock.setChecked(self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK)
+        if hasattr(self, "btn_mode_rao"):
+            self.btn_mode_rao.setChecked(self.archive_source_mode == ARCHIVE_MODE_RAO)
+        self._apply_table_headers()
+
+    def _apply_table_headers(self):
+        if not hasattr(self, "table"):
+            return
+        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            self.table.setColumnCount(7)
+            self.table.setHorizontalHeaderLabels(["Операционная", "ФИО", "ИБ №", "Диагноз", "Начало", "Переведён", "Статус"])
+        else:
+            self.table.setColumnCount(5)
+            self.table.setHorizontalHeaderLabels(["ФИО", "ИБ №", "Диагноз", "Поступил", "Выписан"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+    def _load_operblock_archive_cases(self, start_dt: str, end_dt: str) -> list[dict]:
+        if self.operblock_service is None:
+            return []
+        start = self._parse_datetime_value(start_dt)
+        end = self._parse_datetime_value(end_dt)
+        cases = self.operblock_service.list_archived_operation_cases()
+        result = []
+        for case in cases or []:
+            item = dict(case or {})
+            case_dt = self._parse_datetime_value(item.get("started_at")) or self._parse_datetime_value(item.get("ended_at"))
+            if case_dt and start and case_dt < start:
+                continue
+            if case_dt and end and case_dt > end:
+                continue
+            result.append(item)
+        return result
+
+    def _render_operblock_case_row(self, row: int, case: dict, selected_key: str = None):
+        diagnosis_text = self._record_diagnosis_text(case) or "—"
+        status = str(case.get("status") or "").strip().lower()
+        values = [
+            self._operblock_table_short_name(case.get("table_code") or case.get("table_display_name")),
+            self._record_display_name(case),
+            self._record_history_number(case),
+            diagnosis_text,
+            self._format_datetime_text(case.get("started_at")),
+            "" if status == "active" else self._format_datetime_text(case.get("ended_at")),
+            "В операционной" if status == "active" else "В архиве",
+        ]
+        for column, value in enumerate(values):
+            item = QTableWidgetItem(str(value))
+            if column == 0:
+                item.setData(Qt.UserRole, dict(case))
+            self.table.setItem(row, column, item)
+        if selected_key and self._patient_key(case) == selected_key:
+            self.table.selectRow(row)
+
+    def _record_display_name(self, record) -> str:
+        if isinstance(record, dict):
+            return str(record.get("full_name") or "Неизвестно")
+        return record.get_display_name()
+
+    def _record_history_number(self, record) -> str:
+        if isinstance(record, dict):
+            return str(record.get("history_number") or "")
+        return str(record.history_number or "")
+
+    def _record_diagnosis_text(self, record) -> str:
+        if isinstance(record, dict):
+            diagnosis_text = str(record.get("diagnosis_text") or "")
+            diagnosis_code = str(record.get("diagnosis_code") or "").strip()
+            return f"{diagnosis_code}: {diagnosis_text}" if diagnosis_code else diagnosis_text
+        return record.diagnosis_text or ""
+
+    def _record_admission_datetime(self, record):
+        if isinstance(record, dict):
+            return self._parse_datetime_value(record.get("started_at")) or self._parse_datetime_value(record.get("ended_at"))
+        return record.admission_datetime
+
+    @staticmethod
+    def _parse_datetime_value(value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text)
+        except Exception:
+            return None
+
+    def _format_datetime_text(self, value) -> str:
+        parsed = self._parse_datetime_value(value)
+        return parsed.strftime("%d.%m.%Y %H:%M") if parsed else "—"
+
+    @staticmethod
+    def _operblock_table_short_name(value) -> str:
+        text = str(value or "").strip().lower()
+        if text == "emergency" or "экстр" in text:
+            return "Экстренная"
+        if text == "planned" or "план" in text:
+            return "Плановая"
+        return str(value or "—")
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default

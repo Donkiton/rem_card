@@ -11,7 +11,7 @@ import time
 from typing import Any, TYPE_CHECKING
 import weakref
 
-from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QRegularExpression, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QRegularExpression, QSettings, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QDrag,
@@ -2877,7 +2877,6 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         self._time_max_datetime = _minute_floor_dt(max_start_datetime)
         if self._time_min_datetime and self._time_max_datetime and self._time_max_datetime < self._time_min_datetime:
             self._time_max_datetime = None
-        self._time_text_updating = False
         super().__init__(
             "Начать пособие",
             "start_anesthesia_dialog_geometry",
@@ -2894,12 +2893,25 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
 
     def _init_ui(self, anesthesia_types: list[dict], anesthesiologists: list[str], anesthetists: list[str]):
         layout = self.content_layout
-        self._apply_time_field_style()
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+
+        def add_labeled_row(caption: str, widget: QWidget, *, expand: bool = True) -> None:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(10)
+            label = QLabel(caption)
+            label.setFixedWidth(120)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            row.addWidget(label)
+            row.addWidget(widget, 1 if expand else 0)
+            if not expand:
+                row.addStretch(1)
+            layout.addLayout(row)
+
         self.assistance_combo = QComboBox()
         self.assistance_combo.setEditable(True)
-        self.assistance_combo.setMinimumWidth(430)
+        self.assistance_combo.setMinimumWidth(260)
+        self.assistance_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.assistance_combo.setMinimumContentsLength(38)
         self.assistance_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.assistance_combo.setStyleSheet(_operblock_combo_box_style())
@@ -2912,16 +2924,28 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
                 self.assistance_combo.addItem(label, label)
         self.assistance_combo.setCurrentIndex(-1)
         self.assistance_combo.setEditText("")
-        form.addRow("Вид пособия:", self.assistance_combo)
+        add_labeled_row("Вид пособия:", self.assistance_combo)
 
         self.anesthesiologist_combo = self._staff_combo(anesthesiologists)
-        form.addRow("Анестезиолог:", self.anesthesiologist_combo)
+        self.anesthesiologist_combo.setMinimumWidth(260)
+        self.anesthesiologist_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        add_labeled_row("Анестезиолог:", self.anesthesiologist_combo)
 
         self.anesthetist_combo = self._staff_combo(anesthetists)
-        form.addRow("Анестезист:", self.anesthetist_combo)
+        self.anesthetist_combo.setMinimumWidth(260)
+        self.anesthetist_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        add_labeled_row("Анестезист:", self.anesthetist_combo)
 
-        form.addRow("Время начала:", self._time_input_widget())
-        layout.addLayout(form)
+        self.start_time_input = OperBlockDialogTimeInput(
+            self._start_datetime,
+            self,
+            min_datetime=self._time_min_datetime,
+            max_datetime=self._time_max_datetime,
+            object_prefix="StartAnesthesiaTime",
+        )
+        self.time_frame = self.start_time_input
+        self.time_input = self.start_time_input.time_input
+        add_labeled_row("Время начала:", self.start_time_input, expand=False)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
@@ -2938,183 +2962,6 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         footer.addWidget(self.start_button)
         layout.addStretch(1)
         layout.addLayout(footer)
-
-    def _apply_time_field_style(self) -> None:
-        self.setStyleSheet(
-            (self.styleSheet() or "")
-            + """
-            QFrame#StartAnesthesiaTimeInputFrame {
-                background-color: #FFFFFF;
-                border: 1px solid #D1D5DB;
-                border-radius: 8px;
-            }
-            QFrame#StartAnesthesiaTimeInputFrame[focused="true"] {
-                border: 1px solid #6366F1;
-            }
-            QLineEdit#StartAnesthesiaTimeInput {
-                background-color: transparent;
-                color: #111827;
-                border: none;
-                font-size: 18px;
-                font-weight: 400;
-                padding: 0 14px;
-                selection-background-color: #C7D2FE;
-            }
-            QFrame#StartAnesthesiaTimeStepperColumn {
-                background-color: transparent;
-                border: none;
-            }
-            """
-            + operblock_arrow_button_style("QPushButton#StartAnesthesiaTimeStepButton")
-        )
-
-    def _time_input_widget(self) -> QWidget:
-        self.time_frame = QFrame()
-        self.time_frame.setObjectName("StartAnesthesiaTimeInputFrame")
-        self.time_frame.setFixedHeight(52)
-        self.time_frame.setMinimumWidth(170)
-        self.time_frame.setMaximumWidth(240)
-        self.time_frame.setProperty("focused", False)
-        time_layout = QHBoxLayout(self.time_frame)
-        time_layout.setContentsMargins(0, 0, 0, 0)
-        time_layout.setSpacing(0)
-
-        self.time_input = QLineEdit()
-        self.time_input.setObjectName("StartAnesthesiaTimeInput")
-        start_dt = self._coerce_time_datetime(self._start_datetime)
-        self.time_input.setText(f"{start_dt.hour:02d}:{start_dt.minute:02d}")
-        self.time_input.setPlaceholderText("09:10")
-        self.time_input.setMaxLength(5)
-        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-        self.time_input.textEdited.connect(self._on_time_text_edited)
-        self.time_input.editingFinished.connect(self._commit_time_text)
-        self.time_input.installEventFilter(self)
-        time_layout.addWidget(self.time_input, 1)
-
-        stepper = QFrame()
-        stepper.setObjectName("StartAnesthesiaTimeStepperColumn")
-        stepper.setFixedWidth(42)
-        stepper_layout = QVBoxLayout(stepper)
-        stepper_layout.setContentsMargins(6, 4, 6, 4)
-        stepper_layout.setSpacing(4)
-
-        up_button = QPushButton()
-        up_button.setObjectName("StartAnesthesiaTimeStepButton")
-        up_button.setFixedSize(30, 20)
-        up_button.setIcon(_gas_time_step_icon(up=True))
-        up_button.setIconSize(QSize(14, 14))
-        up_button.setCursor(Qt.PointingHandCursor)
-        up_button.clicked.connect(lambda _=False: self._step_time(1))
-        down_button = QPushButton()
-        down_button.setObjectName("StartAnesthesiaTimeStepButton")
-        down_button.setFixedSize(30, 20)
-        down_button.setIcon(_gas_time_step_icon(up=False))
-        down_button.setIconSize(QSize(14, 14))
-        down_button.setCursor(Qt.PointingHandCursor)
-        down_button.clicked.connect(lambda _=False: self._step_time(-1))
-        stepper_layout.addWidget(up_button)
-        stepper_layout.addWidget(down_button)
-        time_layout.addWidget(stepper, 0)
-        return self.time_frame
-
-    def eventFilter(self, obj, event):
-        if obj is getattr(self, "time_input", None):
-            if event.type() == QEvent.FocusIn:
-                self._set_time_focus(True)
-            elif event.type() == QEvent.FocusOut:
-                self._set_time_focus(False)
-        return super().eventFilter(obj, event)
-
-    def _set_time_focus(self, focused: bool) -> None:
-        frame = getattr(self, "time_frame", None)
-        if frame is None:
-            return
-        frame.setProperty("focused", bool(focused))
-        frame.style().unpolish(frame)
-        frame.style().polish(frame)
-
-    def _on_time_text_edited(self, text: str) -> None:
-        if self._time_text_updating:
-            return
-        digits = re.sub(r"\D", "", str(text or ""))
-        if len(digits) < 4:
-            return
-        event_dt = self._time_datetime_from_text(digits[:4])
-        if event_dt is None:
-            return
-        self._set_time_input_text(self._time_text_from_datetime(self._coerce_time_datetime(event_dt)), select_all=False)
-
-    def _commit_time_text(self) -> str:
-        raw_text = self.time_input.text()
-        event_dt = self._time_datetime_from_text(raw_text)
-        if event_dt is None:
-            event_dt = self._fallback_time_datetime()
-        normalized = self._time_text_from_datetime(self._coerce_time_datetime(event_dt))
-        self._set_time_input_text(normalized, select_all=False)
-        return normalized
-
-    def _step_time(self, delta_minutes: int) -> None:
-        current_dt = self._time_datetime_from_text(self.time_input.text())
-        if current_dt is None:
-            current_dt = self._fallback_time_datetime()
-        stepped = self._coerce_time_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
-        self._set_time_input_text(self._time_text_from_datetime(stepped), select_all=True)
-
-    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
-        self._time_text_updating = True
-        try:
-            self.time_input.setText(text)
-            if select_all:
-                self.time_input.setFocus(Qt.OtherFocusReason)
-                self.time_input.selectAll()
-            else:
-                self.time_input.setCursorPosition(len(text))
-        finally:
-            self._time_text_updating = False
-
-    def _fallback_time_datetime(self) -> datetime:
-        return self._coerce_time_datetime(self._start_datetime)
-
-    def _time_datetime_from_text(self, value: str) -> datetime | None:
-        minutes = OperationStageTimeEditDialog._time_minutes_from_text(value)
-        if minutes is None:
-            return None
-        hour = minutes // 60
-        minute = minutes % 60
-        base_dt = self._start_datetime or self._time_min_datetime or datetime.now().replace(second=0, microsecond=0)
-        same_day = datetime.combine(base_dt.date(), datetime.min.time()).replace(hour=hour, minute=minute)
-        candidates = [same_day]
-        if hour < 6:
-            candidates.append(same_day + timedelta(days=1))
-        previous_day_is_plausible = (
-            base_dt.hour < 6
-            or (self._time_min_datetime and self._time_min_datetime.date() < base_dt.date())
-        )
-        if hour >= 12 and previous_day_is_plausible:
-            candidates.append(same_day - timedelta(days=1))
-
-        def in_bounds(candidate: datetime) -> bool:
-            if self._time_min_datetime and candidate < self._time_min_datetime:
-                return False
-            if self._time_max_datetime and candidate > self._time_max_datetime:
-                return False
-            return True
-
-        bounded = [candidate for candidate in candidates if in_bounds(candidate)]
-        source = bounded or candidates
-        return min(source, key=lambda candidate: abs((candidate - base_dt).total_seconds()))
-
-    def _coerce_time_datetime(self, value: datetime) -> datetime:
-        event_dt = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
-        if self._time_min_datetime and event_dt < self._time_min_datetime:
-            return self._time_min_datetime
-        if self._time_max_datetime and event_dt > self._time_max_datetime:
-            return self._time_max_datetime
-        return event_dt
-
-    @staticmethod
-    def _time_text_from_datetime(value: datetime) -> str:
-        return f"{value.hour:02d}:{value.minute:02d}"
 
     @staticmethod
     def _staff_combo(items: list[str]) -> QComboBox:
@@ -3149,40 +2996,152 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         return normalize_operblock_team_text(self.anesthetist_combo.currentText())
 
     def start_datetime_text(self) -> str:
-        selected_text = self._commit_time_text()
-        selected_dt = self._time_datetime_from_text(selected_text) or self._fallback_time_datetime()
-        return self._coerce_time_datetime(selected_dt).isoformat(timespec="seconds")
+        return self.start_time_input.datetime_text()
 
     def accept(self) -> None:
         if not self.selected_assistance_type():
             CustomMessageBox.warning(self, "Начать пособие", "Укажите вид пособия.")
             return
-        self._commit_time_text()
+        self.start_time_input.datetime_text()
         super().accept()
 
 
+class EndSurgeryDialog(OperBlockStyledDialog):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        initial_end_datetime: datetime | None = None,
+        min_end_datetime: datetime | None = None,
+        max_end_datetime: datetime | None = None,
+    ):
+        super().__init__(
+            "Завершить операцию",
+            "end_surgery_dialog_geometry",
+            parent,
+            minimum_size=(430, 190),
+            initial_size=(520, 230),
+        )
+        self._init_ui(initial_end_datetime, min_end_datetime, max_end_datetime)
+        self._finalize_dialog_chrome()
+
+    def _init_ui(
+        self,
+        initial_end_datetime: datetime | None,
+        min_end_datetime: datetime | None,
+        max_end_datetime: datetime | None,
+    ):
+        layout = self.content_layout
+        label_width = 120
+        row_spacing = 10
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(row_spacing)
+        label = QLabel("Время завершения:")
+        label.setFixedWidth(label_width)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.end_time_input = OperBlockDialogTimeInput(
+            initial_end_datetime,
+            self,
+            min_datetime=min_end_datetime,
+            max_datetime=max_end_datetime,
+            object_prefix="EndSurgeryTime",
+        )
+        row.addWidget(label)
+        row.addWidget(self.end_time_input, 0)
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        footer_frame = QFrame()
+        footer_frame.setObjectName("EndSurgeryDialogFooter")
+        footer_frame.setStyleSheet("QFrame#EndSurgeryDialogFooter { background: transparent; border: none; }")
+        footer_frame.setFixedWidth(label_width + row_spacing + self.end_time_input.maximumWidth())
+        footer_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        footer = QHBoxLayout(footer_frame)
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(row_spacing)
+        footer.addStretch(1)
+        cancel_button = QPushButton("Отмена")
+        cancel_button.setMinimumHeight(34)
+        cancel_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        cancel_button.clicked.connect(self.reject)
+        self.finish_button = QPushButton("Завершить")
+        self.finish_button.setMinimumHeight(34)
+        self.finish_button.setStyleSheet(DANGER_BUTTON_STYLE)
+        self.finish_button.clicked.connect(self.accept)
+        self._configure_enter_accept_button(cancel_button, self.finish_button)
+        footer.addWidget(cancel_button)
+        footer.addWidget(self.finish_button)
+        layout.addStretch(1)
+        layout.addWidget(footer_frame, 0, Qt.AlignLeft)
+
+    def end_datetime_text(self) -> str:
+        return self.end_time_input.datetime_text()
+
+
 class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
-    def __init__(self, departments: list[str], parent=None, *, initial_department: str = ""):
+    def __init__(
+        self,
+        departments: list[str],
+        parent=None,
+        *,
+        initial_department: str = "",
+        initial_end_datetime: datetime | None = None,
+        min_end_datetime: datetime | None = None,
+        max_end_datetime: datetime | None = None,
+    ):
         super().__init__(
             "Завершить пособие",
             "end_anesthesia_transfer_dialog_geometry",
             parent,
-            minimum_size=(520, 210),
-            initial_size=(620, 250),
+            minimum_size=(520, 260),
+            initial_size=(620, 300),
         )
-        self._init_ui(departments, initial_department)
+        self._init_ui(departments, initial_department, initial_end_datetime, min_end_datetime, max_end_datetime)
         self._finalize_dialog_chrome()
 
-    def _init_ui(self, departments: list[str], initial_department: str):
+    def _init_ui(
+        self,
+        departments: list[str],
+        initial_department: str,
+        initial_end_datetime: datetime | None,
+        min_end_datetime: datetime | None,
+        max_end_datetime: datetime | None,
+    ):
         layout = self.content_layout
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        time_row = QHBoxLayout()
+        time_row.setContentsMargins(0, 0, 0, 0)
+        time_row.setSpacing(10)
+        time_label = QLabel("Время завершения:")
+        time_label.setFixedWidth(120)
+        time_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        time_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.end_time_input = OperBlockDialogTimeInput(
+            initial_end_datetime,
+            self,
+            min_datetime=min_end_datetime,
+            max_datetime=max_end_datetime,
+            object_prefix="EndAnesthesiaTime",
+        )
+        time_row.addWidget(time_label)
+        time_row.addWidget(self.end_time_input, 0)
+        time_row.addStretch(1)
+        layout.addLayout(time_row)
+
+        transfer_row = QHBoxLayout()
+        transfer_row.setContentsMargins(0, 0, 0, 0)
+        transfer_row.setSpacing(10)
+        transfer_label = QLabel("Переводится в:")
+        transfer_label.setFixedWidth(120)
+        transfer_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        transfer_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.department_combo = QComboBox()
         self.department_combo.setEditable(True)
         self.department_combo.setFixedHeight(36)
-        self.department_combo.setMinimumWidth(380)
-        self.department_combo.setMinimumContentsLength(34)
-        self.department_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.department_combo.setMinimumWidth(260)
+        self.department_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.department_combo.setSizeAdjustPolicy(QComboBox.AdjustToContentsOnFirstShow)
         self.department_combo.setStyleSheet(_operblock_combo_box_style())
         line_edit = self.department_combo.lineEdit()
         if line_edit is not None:
@@ -3197,10 +3156,13 @@ class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
                 self.department_combo.addItem(label, label)
         self.department_combo.setCurrentIndex(-1)
         self.department_combo.setEditText(normalize_operblock_transfer_department(initial_department))
-        form.addRow("Переводится в:", self.department_combo)
-        layout.addLayout(form)
+        transfer_row.addWidget(transfer_label)
+        transfer_row.addWidget(self.department_combo, 1)
+        layout.addLayout(transfer_row)
 
         footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(10)
         footer.addStretch(1)
         cancel_button = QPushButton("Отмена")
         cancel_button.setMinimumHeight(34)
@@ -3218,6 +3180,9 @@ class EndAnesthesiaTransferDialog(OperBlockStyledDialog):
 
     def selected_department(self) -> str:
         return normalize_operblock_transfer_department(self.department_combo.currentText())
+
+    def end_datetime_text(self) -> str:
+        return self.end_time_input.datetime_text()
 
     def accept(self) -> None:
         if not self.selected_department():
@@ -3328,7 +3293,7 @@ class StartSurgeryDialog(OperBlockStyledDialog):
         if self._initial_operating_nurse:
             self.operating_nurse_combo.setEditText(self._initial_operating_nurse)
         self._install_surgery_team_combo_event_filter(self.operating_nurse_combo)
-        self.surgeons_layout.addRow("Операционная медсестра:", self.operating_nurse_combo)
+        self.surgeons_layout.addRow("Опер. сестра:", self.operating_nurse_combo)
         self.surgeons_scroll.setWidget(self.surgeons_widget)
         self.surgeons_scroll.setStyleSheet(
             """
@@ -8475,6 +8440,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
 
 
 class OperBlockMainWidget(QWidget):
+    view_back_requested = Signal()
+
     def __init__(
         self,
         patient_service,
@@ -8483,6 +8450,7 @@ class OperBlockMainWidget(QWidget):
         parent=None,
         *,
         table_code: str | None = None,
+        view_only: bool = False,
     ):
         super().__init__(parent)
         self.patient_service = patient_service
@@ -8494,6 +8462,7 @@ class OperBlockMainWidget(QWidget):
         self.operblock_vitals_service = OperBlockVitalsServiceAdapter(remcard_service, operblock_service)
         self._table_filter_code = _normalize_operblock_table_filter(table_code)
         self._table_filter_name = _operblock_table_display_name(self._table_filter_code)
+        self._view_only_mode = bool(view_only)
         self._is_closing = False
         self._board_hash = ""
         self._protocol_hash = ""
@@ -8591,6 +8560,23 @@ class OperBlockMainWidget(QWidget):
         self._update_protocol_current_time_label()
         self._connect_updates()
 
+    def open_archive_protocol(self, operation_case_id: int):
+        self._open_protocol(int(operation_case_id))
+
+    def is_view_only_mode(self) -> bool:
+        return bool(getattr(self, "_view_only_mode", False))
+
+    def _apply_view_only_chrome_state(self):
+        if not self.is_view_only_mode():
+            return
+        panel = getattr(self, "sector_8_panel", None)
+        if panel is None:
+            return
+        for button_name in ("btn_archive", "btn_settings"):
+            button = getattr(panel, button_name, None)
+            if button is not None:
+                button.setVisible(False)
+
     def _init_ui(self):
         self.setStyleSheet(f"QWidget {{ background-color: {BG_MAIN}; color: {TEXT_PRIMARY}; }}")
         root = QVBoxLayout(self)
@@ -8607,6 +8593,7 @@ class OperBlockMainWidget(QWidget):
         self.sector_8_panel.btn_settings.clicked.connect(self._open_unified_settings)
         self.sector_8_panel.btn_back.clicked.connect(self.on_back_clicked)
         self.sector_8_panel.btn_exit.clicked.connect(lambda: self.window().close())
+        self._apply_view_only_chrome_state()
         self.sector_8.set_content(self.sector_8_panel)
         root.addWidget(self.sector_8)
 
@@ -8751,7 +8738,7 @@ class OperBlockMainWidget(QWidget):
 
         self.archive_table = QTableWidget()
         self.archive_table.setColumnCount(7)
-        self.archive_table.setHorizontalHeaderLabels(["Стол", "ФИО", "ИБ №", "Диагноз", "Поступил", "Освобождён", "Статус"])
+        self.archive_table.setHorizontalHeaderLabels(["Стол", "ФИО", "ИБ №", "Диагноз", "Поступил", "Переведён", "Статус"])
         self.archive_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.archive_table.setSelectionMode(QTableWidget.SingleSelection)
         self.archive_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -9359,7 +9346,7 @@ class OperBlockMainWidget(QWidget):
         layout = getattr(self, "vitals_staff_legend_layout", None)
         if layout is None or (not names and not force):
             return False
-        edit_callback = self._open_operblock_staff_editor
+        edit_callback = None if self.is_view_only_mode() else self._open_operblock_staff_editor
         layout.addWidget(self._staff_legend_label(title, "OperBlockStaffRoleLabel", edit_callback))
         if names:
             names_widget = QWidget()
@@ -9422,6 +9409,8 @@ class OperBlockMainWidget(QWidget):
         panel.setVisible(has_content)
 
     def _open_operblock_staff_editor(self) -> None:
+        if self.is_view_only_mode():
+            return
         if self._write_pending:
             return
         if not self._current_operation_case_id:
@@ -10569,14 +10558,15 @@ class OperBlockMainWidget(QWidget):
             diagnosis_code = str(case.get("diagnosis_code") or "").strip()
             if diagnosis_code:
                 diagnosis_text = f"{diagnosis_code}: {diagnosis_text}"
+            status = str(case.get("status") or "").strip().lower()
             values = [
                 case.get("table_display_name") or "—",
                 case.get("full_name") or "Неизвестно",
                 case.get("history_number") or "",
                 diagnosis_text,
                 _format_dt(case.get("started_at")),
-                _format_dt(case.get("ended_at")),
-                "В архиве",
+                "" if status == "active" else _format_dt(case.get("ended_at")),
+                "В операционной" if status == "active" else "В архиве",
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -10604,15 +10594,19 @@ class OperBlockMainWidget(QWidget):
     def _update_operblock_archive_buttons(self):
         selected = self._selected_archive_case()
         enabled = bool(selected) and not self._write_pending
-        has_cases = bool(getattr(self, "_archive_cases", None)) and not self._write_pending
+        selected_closed = enabled and str((selected or {}).get("status") or "").strip().lower() == "closed"
+        has_closed_cases = any(
+            str((case or {}).get("status") or "").strip().lower() == "closed"
+            for case in (getattr(self, "_archive_cases", None) or [])
+        ) and not self._write_pending
         if hasattr(self, "archive_open_button"):
             self.archive_open_button.setEnabled(enabled)
         if hasattr(self, "archive_restore_button"):
-            self.archive_restore_button.setEnabled(enabled)
+            self.archive_restore_button.setEnabled(selected_closed)
         if hasattr(self, "archive_delete_button"):
-            self.archive_delete_button.setEnabled(enabled)
+            self.archive_delete_button.setEnabled(selected_closed)
         if hasattr(self, "archive_delete_all_button"):
-            self.archive_delete_all_button.setEnabled(has_cases)
+            self.archive_delete_all_button.setEnabled(has_closed_cases)
 
     def _open_selected_archive_case(self):
         selected = self._selected_archive_case()
@@ -10756,7 +10750,9 @@ class OperBlockMainWidget(QWidget):
             }
             """
         )
-        button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
+        button.setEnabled(not self.is_view_only_mode())
+        if not self.is_view_only_mode():
+            button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
         return button
 
     @staticmethod
@@ -10977,6 +10973,9 @@ class OperBlockMainWidget(QWidget):
         close_btn.clicked.connect(
             lambda _=False, case_id=patient.get("operation_case_id"): self._confirm_release_case(int(case_id))
         )
+        if self.is_view_only_mode():
+            edit_btn.setEnabled(False)
+            close_btn.setEnabled(False)
         buttons.addWidget(open_btn, 1)
         buttons.addWidget(edit_btn, 1)
         buttons.addWidget(print_btn, 1)
@@ -11898,6 +11897,8 @@ class OperBlockMainWidget(QWidget):
     def _open_occupy_dialog(self, table_code: str, table_name: str):
         if self._is_closing or self._write_pending:
             return
+        if self.is_view_only_mode():
+            return
         dialog = OccupyTableDialog(table_code, table_name, self)
         dialog_ref = weakref.ref(dialog)
 
@@ -11928,6 +11929,8 @@ class OperBlockMainWidget(QWidget):
 
     def _open_edit_patient_dialog(self, operation_case_id: int):
         if self._is_closing or self._write_pending:
+            return
+        if self.is_view_only_mode():
             return
         try:
             initial_data = self.operblock_service.get_operation_case_form_data(int(operation_case_id))
@@ -12144,7 +12147,8 @@ class OperBlockMainWidget(QWidget):
         case_active = bool(getattr(self, "_current_case_active", False))
         aid_active = bool(getattr(self, "_current_anesthesia_active", False))
         surgery_active = bool(getattr(self, "_current_surgery_active", False))
-        write_enabled = case_active and not self._write_pending
+        view_only = self.is_view_only_mode()
+        write_enabled = case_active and not self._write_pending and not view_only
         if hasattr(self, "start_anesthesia_button"):
             has_initial_vitals = bool(getattr(self, "_current_operation_has_vitals", False))
             self.start_anesthesia_button.setEnabled(write_enabled and not aid_active and has_initial_vitals)
@@ -12159,9 +12163,11 @@ class OperBlockMainWidget(QWidget):
             self.operation_stages_button.setEnabled(write_enabled and aid_active and surgery_active)
             self.close_case_button.setEnabled(write_enabled and aid_active and surgery_active)
             self.release_table_button.setEnabled(write_enabled and not aid_active)
+            if hasattr(self, "report_button"):
+                self.report_button.setEnabled(bool(self._current_operation_case_id))
         if getattr(self, "vitals_input", None) is not None:
             try:
-                self.vitals_input.set_forced_read_only(not case_active)
+                self.vitals_input.set_forced_read_only(view_only or not case_active)
             except Exception:
                 pass
             if hasattr(self.vitals_input, "save_btn"):
@@ -12182,6 +12188,8 @@ class OperBlockMainWidget(QWidget):
                 self._set_protocol_tab_by_id("vitals")
             self._ensure_visible_protocol_tab()
         self._set_orders_entry_controls_enabled(orders_controls_enabled)
+        if view_only and orders_tab_available:
+            self._set_quick_order_buttons_enabled(True)
 
     def _set_orders_entry_controls_enabled(self, enabled: bool):
         for widget_name in ("order_input", "order_dose_input", "order_type_combo", "save_order_button"):
@@ -12614,6 +12622,8 @@ class OperBlockMainWidget(QWidget):
                     continue
             result.append(dict(preset))
         result.sort(key=self._quick_order_preset_sort_key)
+        if self.is_view_only_mode():
+            result = self._apply_view_only_quick_order(result)
         return result
 
     @staticmethod
@@ -12823,6 +12833,46 @@ class OperBlockMainWidget(QWidget):
                 preset["sort_order"] = sort_order_by_id[preset_id]
         return save_operblock_medication_presets(presets)
 
+    def _view_only_quick_order_settings_key(self) -> str:
+        filter_kind = str(getattr(self, "_preset_kind_filter", "all") or "all").strip() or "all"
+        return f"operblock/view_only_quick_order/{filter_kind}"
+
+    def _load_view_only_quick_order_ids(self) -> list[str]:
+        raw = QSettings("MyHospital", "RemCard").value(self._view_only_quick_order_settings_key(), "[]")
+        try:
+            data = json.loads(str(raw or "[]"))
+        except Exception:
+            return []
+        return [str(item) for item in data if str(item or "").strip()]
+
+    def _save_view_only_quick_order_ids(self, order: list[str]) -> None:
+        ids = [str(item) for item in order if str(item or "").strip()]
+        QSettings("MyHospital", "RemCard").setValue(
+            self._view_only_quick_order_settings_key(),
+            json.dumps(ids, ensure_ascii=False),
+        )
+
+    def _apply_view_only_quick_order(self, presets: list[dict]) -> list[dict]:
+        if not presets:
+            return []
+        order = self._load_view_only_quick_order_ids()
+        if not order:
+            return presets
+        by_id = {self._quick_order_preset_id(preset): dict(preset or {}) for preset in presets}
+        ordered: list[dict] = []
+        used: set[str] = set()
+        for preset_id in order:
+            preset = by_id.get(preset_id)
+            if preset is None:
+                continue
+            ordered.append(preset)
+            used.add(preset_id)
+        for preset in presets:
+            preset_id = self._quick_order_preset_id(preset)
+            if preset_id not in used:
+                ordered.append(dict(preset or {}))
+        return ordered
+
     def _commit_quick_order_drag(self) -> bool:
         source_id = str(getattr(self, "_quick_order_drag_source_id", "") or "")
         order = list(getattr(self, "_quick_order_drag_order", []) or [])
@@ -12833,6 +12883,18 @@ class OperBlockMainWidget(QWidget):
             self._quick_order_drag_committed = True
             return True
         scroll_state = self._capture_quick_orders_scroll_state()
+        if self.is_view_only_mode():
+            try:
+                self._save_view_only_quick_order_ids(order)
+            except Exception as exc:
+                logger.warning("operblock view-only quick order reorder cache failed: %s", exc, exc_info=True)
+                self._cancel_quick_order_drag()
+                self._refresh_quick_orders()
+                return False
+            self._quick_order_drag_committed = True
+            self._finish_quick_order_drag_layout(order)
+            self._restore_quick_orders_scroll_state_later(scroll_state)
+            return True
         try:
             self._medication_presets = self._save_quick_order_preset_order(order)
             self._rebuild_quick_order_search_index()
@@ -13211,6 +13273,8 @@ class OperBlockMainWidget(QWidget):
     def _open_unified_settings(self):
         if self._is_closing:
             return
+        if self.is_view_only_mode():
+            return
         self._remember_settings_return_page()
         if not self._ensure_settings_page_created():
             return
@@ -13268,6 +13332,8 @@ class OperBlockMainWidget(QWidget):
     def _open_operblock_settings(self):
         if self._is_closing:
             return
+        if self.is_view_only_mode():
+            return
         dialog = OperBlockSettingsDialog(self)
         dialog.medications_button.clicked.connect(lambda: self._open_quick_orders_settings(dialog))
         dialog.anesthesia_types_button.clicked.connect(lambda: self._open_anesthesia_types_settings(dialog))
@@ -13275,6 +13341,8 @@ class OperBlockMainWidget(QWidget):
         dialog.exec()
 
     def _open_anesthesia_types_settings(self, dialog_parent: QWidget | None = None):
+        if self.is_view_only_mode():
+            return
         try:
             items = load_operblock_anesthesia_types()
         except Exception as exc:
@@ -13293,6 +13361,8 @@ class OperBlockMainWidget(QWidget):
     def _open_operblock_team_settings(self, dialog_parent: QWidget | None = None):
         if self._is_closing:
             return
+        if self.is_view_only_mode():
+            return
         try:
             items = load_operblock_team()
         except Exception as exc:
@@ -13310,6 +13380,8 @@ class OperBlockMainWidget(QWidget):
 
     def _open_quick_orders_settings(self, dialog_parent: QWidget | None = None):
         if self._is_closing or self._write_pending:
+            return
+        if self.is_view_only_mode():
             return
         self._load_quick_orders_data()
         parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
@@ -14286,6 +14358,8 @@ class OperBlockMainWidget(QWidget):
         self._apply_orders({"orders": getattr(self, "_current_orders_rows", [])}, update_chart_markers=False)
 
     def _edit_infusion_from_group_row(self, interval: dict):
+        if self.is_view_only_mode():
+            return
         if _is_gas_infusion(interval):
             self._change_gas_dose(interval, include_time=True)
             return
@@ -14468,6 +14542,8 @@ class OperBlockMainWidget(QWidget):
         return menu
 
     def _show_order_actions_menu(self, button: QPushButton, row: dict):
+        if self.is_view_only_mode():
+            return
         menu = self._actions_menu()
         menu.addAction("Изменить", lambda payload=dict(row): self._edit_order_with_time(payload))
         menu.addSeparator()
@@ -14475,6 +14551,8 @@ class OperBlockMainWidget(QWidget):
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
 
     def _show_infusion_actions_menu(self, button: QPushButton, interval: dict):
+        if self.is_view_only_mode():
+            return
         menu = self._actions_menu()
         status = str(interval.get("status") or "")
         menu.addAction("Изменить", lambda payload=dict(interval): self._edit_infusion_from_group_row(payload))
@@ -15108,6 +15186,8 @@ class OperBlockMainWidget(QWidget):
         concentration_text: str = "",
         preset_payload: dict | None = None,
     ):
+        if self.is_view_only_mode():
+            return
         if self._write_pending or not self._ensure_infusion_write_context_or_warn():
             return
         rate_value, rate_unit = _split_infusion_rate_text(rate_text)
@@ -15199,6 +15279,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _change_gas_dose(self, interval: dict, *, include_time: bool = False):
+        if self.is_view_only_mode():
+            return
         if self._write_pending or not self._ensure_infusion_write_context_or_warn():
             return
         start_event_id, expected_revision = self._infusion_identity(interval)
@@ -15279,6 +15361,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _change_infusion_rate(self, interval: dict, *, include_time: bool = False):
+        if self.is_view_only_mode():
+            return
         if self._write_pending or not self._ensure_infusion_write_context_or_warn():
             return
         start_event_id, expected_revision = self._infusion_identity(interval)
@@ -15365,6 +15449,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _change_infusion_volume(self, interval: dict, *, include_time: bool = False):
+        if self.is_view_only_mode():
+            return
         if self._write_pending or not self._ensure_infusion_write_context_or_warn():
             return
         start_event_id, expected_revision = self._infusion_identity(interval)
@@ -15432,6 +15518,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _stop_infusion(self, interval: dict):
+        if self.is_view_only_mode():
+            return
         if self._write_pending or not self._ensure_infusion_write_context_or_warn():
             return
         start_event_id, expected_revision = self._infusion_identity(interval)
@@ -15484,6 +15572,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _delete_infusion(self, interval: dict):
+        if self.is_view_only_mode():
+            return
         if self._write_pending or not self._ensure_infusion_write_context_or_warn():
             return
         start_event_id, expected_revision = self._infusion_identity(interval)
@@ -16138,6 +16228,8 @@ class OperBlockMainWidget(QWidget):
         }
 
     def _save_order(self):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         if not self._orders_tab_enabled():
@@ -16217,6 +16309,8 @@ class OperBlockMainWidget(QWidget):
         return payload
 
     def _start_manual_continuous_infusion(self, drug_text: str, dose_text: str, rate_text: str):
+        if self.is_view_only_mode():
+            return
         drug_name = re.sub(r"\s+", " ", str(drug_text or "").strip())
         clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
         if not drug_name:
@@ -16259,6 +16353,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _start_manual_timed_infusion(self, drug_text: str, dose_text: str):
+        if self.is_view_only_mode():
+            return
         drug_name = re.sub(r"\s+", " ", str(drug_text or "").strip())
         clean_dose = re.sub(r"\s+", " ", str(dose_text or "").strip())
         if not drug_name:
@@ -16309,6 +16405,8 @@ class OperBlockMainWidget(QWidget):
         source_key: str = "operblock_gas",
         on_saved=None,
     ):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         if not self._ensure_infusion_write_context_or_warn():
@@ -17041,6 +17139,8 @@ class OperBlockMainWidget(QWidget):
 
 
     def _edit_order_with_time(self, row: dict):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         order_id = _safe_int(row.get("id"))
@@ -17249,6 +17349,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _delete_order(self, row: dict):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         order_id = _safe_int(row.get("id"))
@@ -17300,6 +17402,8 @@ class OperBlockMainWidget(QWidget):
         self.refresh_protocol(force=True)
 
     def _add_quick_order(self, drug_name: str, dose: str, *, kind: str = "bolus"):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         if not self._orders_tab_enabled():
@@ -17340,6 +17444,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _add_preset_bolus(self, preset: dict, dose: str):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         if not self._orders_tab_enabled():
@@ -17375,6 +17481,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _add_preset_gas(self, preset: dict, dose: str):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         if not self._orders_tab_enabled():
@@ -17391,6 +17499,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _start_timed_infusion_preset(self, preset: dict, dose_text: str = ""):
+        if self.is_view_only_mode():
+            return
         if not self._current_admission_id or self._write_pending:
             return
         drug_name = operblock_medication_preset_display_name(preset)
@@ -17544,7 +17654,40 @@ class OperBlockMainWidget(QWidget):
         )
         return base_dt + timedelta(minutes=5)
 
+    @staticmethod
+    def _clamp_stage_datetime(
+        value: datetime | None,
+        *,
+        min_datetime: datetime | None = None,
+        max_datetime: datetime | None = None,
+    ) -> datetime:
+        result = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        min_dt = _minute_floor_dt(min_datetime)
+        max_dt = _minute_floor_dt(max_datetime)
+        if min_dt is not None and max_dt is not None and max_dt < min_dt:
+            max_dt = None
+        if min_dt is not None and result < min_dt:
+            result = min_dt
+        if max_dt is not None and result > max_dt:
+            result = max_dt
+        return result
+
+    def _default_surgery_end_datetime(self) -> datetime:
+        min_dt = _minute_floor_dt(self._current_surgery_start) or _minute_floor_dt(self._current_anesthesia_start)
+        return self._clamp_stage_datetime(datetime.now(), min_datetime=min_dt, max_datetime=self._current_anesthesia_end)
+
+    def _default_anesthesia_end_datetime(self) -> datetime:
+        lower_bounds = [
+            _minute_floor_dt(self._current_operation_start),
+            _minute_floor_dt(self._current_anesthesia_start),
+            _minute_floor_dt(self._current_surgery_end),
+        ]
+        min_dt = max((dt for dt in lower_bounds if dt is not None), default=None)
+        return self._clamp_stage_datetime(datetime.now(), min_datetime=min_dt, max_datetime=self._current_operation_end)
+
     def _start_anesthesia(self):
+        if self.is_view_only_mode():
+            return
         if not self._current_operation_case_id:
             return
         case_id = int(self._current_operation_case_id)
@@ -17605,6 +17748,8 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _end_anesthesia(self):
+        if self.is_view_only_mode():
+            return
         if not self._current_operation_case_id:
             return
         case_id = int(self._current_operation_case_id)
@@ -17617,17 +17762,38 @@ class OperBlockMainWidget(QWidget):
             departments,
             self,
             initial_department=initial_department,
+            initial_end_datetime=self._default_anesthesia_end_datetime(),
+            min_end_datetime=max(
+                (
+                    dt
+                    for dt in (
+                        _minute_floor_dt(self._current_operation_start),
+                        _minute_floor_dt(self._current_anesthesia_start),
+                        _minute_floor_dt(self._current_surgery_end),
+                    )
+                    if dt is not None
+                ),
+                default=None,
+            ),
+            max_end_datetime=self._current_operation_end,
         )
         if dialog.exec() != QDialog.Accepted:
             return
         transfer_department = dialog.selected_department()
+        event_time = dialog.end_datetime_text()
         self._run_stage_action(
             f"operblock_end_anesthesia:{case_id}",
-            lambda: self.operblock_service.end_anesthesia_with_transfer(case_id, transfer_department),
+            lambda: self.operblock_service.end_anesthesia_with_transfer(
+                case_id,
+                transfer_department,
+                event_time=event_time,
+            ),
             "Анестезиологическое пособие завершено.",
         )
 
     def _start_surgery(self):
+        if self.is_view_only_mode():
+            return
         if not self._current_operation_case_id:
             return
         case_id = int(self._current_operation_case_id)
@@ -17668,12 +17834,23 @@ class OperBlockMainWidget(QWidget):
         )
 
     def _end_surgery(self):
+        if self.is_view_only_mode():
+            return
         if not self._current_operation_case_id:
             return
         case_id = int(self._current_operation_case_id)
+        dialog = EndSurgeryDialog(
+            self,
+            initial_end_datetime=self._default_surgery_end_datetime(),
+            min_end_datetime=self._current_surgery_start or self._current_anesthesia_start or self._current_operation_start,
+            max_end_datetime=self._current_anesthesia_end,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        event_time = dialog.end_datetime_text()
         self._run_stage_action(
             f"operblock_end_surgery:{case_id}",
-            lambda: self.operblock_service.end_surgery(case_id),
+            lambda: self.operblock_service.end_surgery(case_id, event_time=event_time),
         )
 
     def _operation_stage_dialog_rows(self) -> list[dict]:
@@ -17724,6 +17901,8 @@ class OperBlockMainWidget(QWidget):
         return rows
 
     def _open_operation_stages_dialog(self):
+        if self.is_view_only_mode():
+            return
         if self._write_pending:
             return
         if not self._current_operation_case_id:
@@ -17999,6 +18178,8 @@ class OperBlockMainWidget(QWidget):
             self._confirm_release_case(self._current_operation_case_id)
 
     def _confirm_release_case(self, operation_case_id: int):
+        if self.is_view_only_mode():
+            return
         if self._write_pending:
             return
         reply = CustomMessageBox.question(
@@ -18037,6 +18218,11 @@ class OperBlockMainWidget(QWidget):
             self.refresh_protocol(force=True)
 
     def _enqueue_write(self, description: str, operation, on_success, on_error):
+        if self.is_view_only_mode():
+            logger.info("Operblock view-only write skipped: %s", description)
+            self._write_pending = False
+            self._apply_protocol_controls_state()
+            return
         if not self.data_service:
             try:
                 result = operation()
@@ -18304,6 +18490,7 @@ class OperBlockMainWidget(QWidget):
             enabled,
             launcher_back=bool(getattr(self, "_role_launcher_mode", False) and not enabled),
         )
+        self._apply_view_only_chrome_state()
 
     def _current_page_requires_back_chrome(self) -> bool:
         current_widget = self.stack.currentWidget()
@@ -18323,6 +18510,7 @@ class OperBlockMainWidget(QWidget):
     def apply_display_settings(self):
         if hasattr(self, "sector_8_panel"):
             self.sector_8_panel.apply_display_settings()
+            self._apply_view_only_chrome_state()
             self._set_protocol_chrome(self._current_page_requires_back_chrome())
         self._apply_protocol_tab_display_settings()
 
@@ -18347,6 +18535,9 @@ class OperBlockMainWidget(QWidget):
 
     def on_back_clicked(self):
         current_widget = self.stack.currentWidget()
+        if self.is_view_only_mode() and current_widget in (self.protocol_page, self.board_page, self.archive_page):
+            self.view_back_requested.emit()
+            return
         if current_widget == self.settings_page:
             self._on_settings_back_clicked()
             return

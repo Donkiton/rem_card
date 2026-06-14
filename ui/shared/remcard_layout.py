@@ -19,11 +19,12 @@ BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
 class RemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
 
-    def __init__(self, role="Врач", patient_service=None, remcard_service=None, parent=None):
+    def __init__(self, role="Врач", patient_service=None, remcard_service=None, parent=None, operblock_service=None):
         super().__init__(parent)
         self.role = role
         self.patient_service = patient_service
         self.remcard_service = remcard_service
+        self.operblock_service = operblock_service
         self.current_admission_id = None
         self.current_date = None
         self.current_mode = "normal"
@@ -758,6 +759,7 @@ class RemCardLayoutManager(QWidget):
                     self.patient_service,
                     remcard_service=self.remcard_service,
                     allow_edit=allow_archive_edit,
+                    operblock_service=self.operblock_service if allow_archive_edit else None,
                 )
                 self._archive_layout.addWidget(self.archive_widget)
             self.selection_stack.setCurrentIndex(2)
