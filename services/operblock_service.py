@@ -1132,7 +1132,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime ASC, v.id ASC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) ASC, v.id ASC
                     LIMIT 1
                 ) AS first_vitals_id,
                 (
@@ -1140,7 +1140,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime DESC, v.id DESC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_vitals_id,
                 (
@@ -1148,7 +1148,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime DESC, v.id DESC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_sys,
                 (
@@ -1156,7 +1156,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime DESC, v.id DESC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_dia,
                 (
@@ -1164,7 +1164,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime DESC, v.id DESC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_pulse,
                 (
@@ -1172,7 +1172,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime DESC, v.id DESC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_spo2,
                 (
@@ -1180,7 +1180,7 @@ class OperBlockService:
                     WHERE v.admission_id = oc.admission_id
                       AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY v.datetime DESC, v.id DESC
+                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_vitals_time
             FROM operating_tables t
@@ -1700,7 +1700,7 @@ class OperBlockService:
             FROM vitals
             WHERE admission_id = ?
               {bounds_clause}
-            ORDER BY datetime DESC, id DESC
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
             LIMIT 50
             """,
             tuple(params),
@@ -3598,29 +3598,13 @@ class OperBlockService:
             return None
 
         admission_dt = _minute_floor(event_dt + timedelta(minutes=10))
-        admission_dt_text = admission_dt.isoformat(timespec="seconds")
-        history_number = str(source.get("history_number") or "").strip()
-        full_name = _normalize_case_text(source.get("full_name"))
-        diagnosis_text = _normalize_case_text(source.get("diagnosis_text"))
-        birth_date = parse_date_value(source.get("birth_date"))
-        missing_fields: list[str] = []
-        if not history_number:
-            missing_fields.append("history_number")
-        if not full_name:
-            missing_fields.append("full_name")
-        if birth_date is None:
-            missing_fields.append("birth_date")
-        elif birth_date > admission_dt.date():
-            missing_fields.append("birth_date_after_admission")
-        if not diagnosis_text:
-            missing_fields.append("diagnosis_text")
-        if missing_fields:
-            logger.error(
-                "operblock_rao_auto_admission_required_field_missing case_id=%s source_admission_id=%s missing=%s",
-                operation_case_id,
-                source.get("source_admission_id"),
-                ",".join(missing_fields),
-            )
+        admission_data = self._prepare_rao_recovery_admission_data(
+            operation_case_id,
+            source,
+            event_dt,
+            admission_dt,
+        )
+        if admission_data is None:
             return None
 
         bed_number = self._select_free_recovery_bed_for_rao(cursor)
@@ -3632,108 +3616,9 @@ class OperBlockService:
             )
             return None
 
-        assert birth_date is not None
-        age = storage_age_from_birth_date(birth_date, admission_dt)
-        last_name, first_name, middle_name = _split_name(full_name)
-        admission_uid = str(uuid.uuid4())
-        now = _now_text()
-        department_profile = normalize_profile_department(source.get("department_profile")) or None
-        diagnosis_code = normalize_operblock_mkb_code(source.get("diagnosis_code") or "") or None
-        operation_name = _normalize_case_text(source.get("operation_name"))
-        intake_extra_json = json.dumps(
-            {
-                "source": "operblock_rao_transfer",
-                "operation_case_id": operation_case_id,
-                "source_patient_id": source.get("source_patient_id"),
-                "source_admission_id": source.get("source_admission_id"),
-                "table_code": source.get("table_code") or "",
-                "operation_finished_at": _minute_floor(event_dt).isoformat(timespec="seconds"),
-                "transfer_department": "РАО",
-                "operation_name": operation_name,
-                "surgeons": source.get("surgeons") or [],
-                "anesthesiologist": source.get("anesthesiologist") or "",
-                "anesthetist": source.get("anesthetist") or "",
-                "height_cm": source.get("height_cm"),
-                "weight_kg": source.get("weight_kg"),
-                "allergies": source.get("allergies") or "",
-                "blood_group": source.get("blood_group") or "",
-                "blood_rh": source.get("blood_rh") or "",
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            default=str,
-        )
-
-        cursor.execute(
-            """
-            INSERT INTO patients (
-                full_name, admission_uid, birth_date, last_name, first_name, middle_name
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (full_name, admission_uid, birth_date.isoformat(), last_name, first_name, middle_name),
-        )
-        patient_id = int(cursor.lastrowid)
-        cursor.execute(
-            """
-            INSERT INTO admissions (
-                patient_id, bed_number, history_number, admission_datetime,
-                patient_age, patient_months, patient_age_unit, patient_gender,
-                diagnosis_code, diagnosis_text, department_profile, source_department,
-                operation_description, intake_extra_json, recovery_bed_stay,
-                created_at, updated_at, is_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
-            """,
-            (
-                patient_id,
-                int(bed_number),
-                history_number,
-                admission_dt_text,
-                age["patient_age"],
-                age["patient_months"],
-                age["patient_age_unit"],
-                source.get("patient_gender") or None,
-                diagnosis_code,
-                diagnosis_text,
-                department_profile,
-                "Профильное отделение",
-                operation_name or None,
-                intake_extra_json,
-                now,
-                now,
-            ),
-        )
-        admission_id = int(cursor.lastrowid)
-        cursor.execute(
-            """
-            UPDATE beds
-            SET status = 'OCCUPIED',
-                current_admission_id = ?,
-                revision = COALESCE(revision, 0) + 1
-            WHERE bed_number = ?
-              AND status = 'FREE'
-              AND current_admission_id IS NULL
-            """,
-            (admission_id, int(bed_number)),
-        )
-        if cursor.rowcount != 1:
-            raise OperBlockConflictError("Свободная койка пробуждения была занята до автоперевода.")
-
-        cursor.execute(
-            """
-            INSERT INTO patient_status_events (
-                admission_id, status, reason_type, reason_text, start_time,
-                created_by, created_at, updated_at, last_modified_by
-            ) VALUES (?, ?, 'operblock_rao_transfer', 'Поступил после операции из оперблока',
-                      ?, 'operblock', ?, ?, 'operblock')
-            """,
-            (
-                admission_id,
-                PatientStatus.ACTIVE.value,
-                admission_dt_text,
-                admission_dt_text,
-                admission_dt_text,
-            ),
-        )
+        admission_id = self._insert_rao_recovery_patient_admission(cursor, admission_data, bed_number)
+        self._occupy_rao_recovery_bed(cursor, admission_id, bed_number)
+        self._insert_rao_recovery_status_event(cursor, admission_id, admission_data["admission_dt_text"])
         self._copy_latest_operblock_vitals_to_rao(
             cursor,
             int(source["source_admission_id"]),
@@ -3760,6 +3645,170 @@ class OperBlockService:
             bed_number,
         )
         return admission_id
+
+    def _prepare_rao_recovery_admission_data(
+        self,
+        operation_case_id: int,
+        source: dict[str, Any],
+        event_dt: datetime,
+        admission_dt: datetime,
+    ) -> Optional[dict[str, Any]]:
+        history_number = str(source.get("history_number") or "").strip()
+        full_name = _normalize_case_text(source.get("full_name"))
+        diagnosis_text = _normalize_case_text(source.get("diagnosis_text"))
+        birth_date = parse_date_value(source.get("birth_date"))
+        missing_fields: list[str] = []
+        if not history_number:
+            missing_fields.append("history_number")
+        if not full_name:
+            missing_fields.append("full_name")
+        if birth_date is None:
+            missing_fields.append("birth_date")
+        elif birth_date > admission_dt.date():
+            missing_fields.append("birth_date_after_admission")
+        if not diagnosis_text:
+            missing_fields.append("diagnosis_text")
+        if missing_fields:
+            logger.error(
+                "operblock_rao_auto_admission_required_field_missing case_id=%s source_admission_id=%s missing=%s",
+                operation_case_id,
+                source.get("source_admission_id"),
+                ",".join(missing_fields),
+            )
+            return None
+
+        assert birth_date is not None
+        operation_name = _normalize_case_text(source.get("operation_name"))
+        intake_extra_json = json.dumps(
+            {
+                "source": "operblock_rao_transfer",
+                "operation_case_id": int(operation_case_id),
+                "source_patient_id": source.get("source_patient_id"),
+                "source_admission_id": source.get("source_admission_id"),
+                "table_code": source.get("table_code") or "",
+                "operation_finished_at": _minute_floor(event_dt).isoformat(timespec="seconds"),
+                "transfer_department": "РАО",
+                "operation_name": operation_name,
+                "surgeons": source.get("surgeons") or [],
+                "anesthesiologist": source.get("anesthesiologist") or "",
+                "anesthetist": source.get("anesthetist") or "",
+                "height_cm": source.get("height_cm"),
+                "weight_kg": source.get("weight_kg"),
+                "allergies": source.get("allergies") or "",
+                "blood_group": source.get("blood_group") or "",
+                "blood_rh": source.get("blood_rh") or "",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        age = storage_age_from_birth_date(birth_date, admission_dt)
+        return {
+            "admission_dt_text": admission_dt.isoformat(timespec="seconds"),
+            "birth_date": birth_date,
+            "department_profile": normalize_profile_department(source.get("department_profile")) or None,
+            "diagnosis_code": normalize_operblock_mkb_code(source.get("diagnosis_code") or "") or None,
+            "diagnosis_text": diagnosis_text,
+            "full_name": full_name,
+            "history_number": history_number,
+            "intake_extra_json": intake_extra_json,
+            "operation_name": operation_name,
+            "patient_age": age["patient_age"],
+            "patient_age_unit": age["patient_age_unit"],
+            "patient_gender": source.get("patient_gender") or None,
+            "patient_months": age["patient_months"],
+        }
+
+    @staticmethod
+    def _insert_rao_recovery_patient_admission(
+        cursor: sqlite3.Cursor,
+        admission_data: dict[str, Any],
+        bed_number: int,
+    ) -> int:
+        full_name = str(admission_data["full_name"])
+        birth_date = admission_data["birth_date"]
+        last_name, first_name, middle_name = _split_name(full_name)
+        admission_uid = str(uuid.uuid4())
+        now = _now_text()
+        cursor.execute(
+            """
+            INSERT INTO patients (
+                full_name, admission_uid, birth_date, last_name, first_name, middle_name
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (full_name, admission_uid, birth_date.isoformat(), last_name, first_name, middle_name),
+        )
+        patient_id = int(cursor.lastrowid)
+        cursor.execute(
+            """
+            INSERT INTO admissions (
+                patient_id, bed_number, history_number, admission_datetime,
+                patient_age, patient_months, patient_age_unit, patient_gender,
+                diagnosis_code, diagnosis_text, department_profile, source_department,
+                operation_description, intake_extra_json, recovery_bed_stay,
+                created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+            """,
+            (
+                patient_id,
+                int(bed_number),
+                admission_data["history_number"],
+                admission_data["admission_dt_text"],
+                admission_data["patient_age"],
+                admission_data["patient_months"],
+                admission_data["patient_age_unit"],
+                admission_data["patient_gender"],
+                admission_data["diagnosis_code"],
+                admission_data["diagnosis_text"],
+                admission_data["department_profile"],
+                "Профильное отделение",
+                admission_data["operation_name"] or None,
+                admission_data["intake_extra_json"],
+                now,
+                now,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _occupy_rao_recovery_bed(cursor: sqlite3.Cursor, admission_id: int, bed_number: int) -> None:
+        cursor.execute(
+            """
+            UPDATE beds
+            SET status = 'OCCUPIED',
+                current_admission_id = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE bed_number = ?
+              AND status = 'FREE'
+              AND current_admission_id IS NULL
+            """,
+            (int(admission_id), int(bed_number)),
+        )
+        if cursor.rowcount != 1:
+            raise OperBlockConflictError("Свободная койка пробуждения была занята до автоперевода.")
+
+    @staticmethod
+    def _insert_rao_recovery_status_event(
+        cursor: sqlite3.Cursor,
+        admission_id: int,
+        admission_dt_text: str,
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO patient_status_events (
+                admission_id, status, reason_type, reason_text, start_time,
+                created_by, created_at, updated_at, last_modified_by
+            ) VALUES (?, ?, 'operblock_rao_transfer', 'Поступил после операции из оперблока',
+                      ?, 'operblock', ?, ?, 'operblock')
+            """,
+            (
+                int(admission_id),
+                PatientStatus.ACTIVE.value,
+                admission_dt_text,
+                admission_dt_text,
+                admission_dt_text,
+            ),
+        )
 
     def _fetch_rao_transfer_source_data(
         self,
@@ -3836,28 +3885,34 @@ class OperBlockService:
 
     @staticmethod
     def _select_free_recovery_bed_for_rao(cursor: sqlite3.Cursor) -> Optional[int]:
-        for bed_number in RECOVERY_BED_TRANSFER_ORDER:
-            cursor.execute(
-                """
-                INSERT OR IGNORE INTO beds (bed_number, status, current_admission_id, revision)
-                VALUES (?, 'FREE', NULL, 0)
-                """,
-                (int(bed_number),),
-            )
-
-        placeholders = ", ".join("?" for _ in RECOVERY_BED_TRANSFER_ORDER)
-        rows = cursor.execute(
+        transfer_order = tuple(int(bed_number) for bed_number in RECOVERY_BED_TRANSFER_ORDER)
+        insert_placeholders = ", ".join("(?, 'FREE', NULL, 0)" for _ in transfer_order)
+        cursor.execute(
             f"""
-            SELECT bed_number
-            FROM beds
-            WHERE bed_number IN ({placeholders})
-              AND status = 'FREE'
-              AND current_admission_id IS NULL
+            INSERT OR IGNORE INTO beds (bed_number, status, current_admission_id, revision)
+            VALUES {insert_placeholders}
             """,
-            tuple(int(bed_number) for bed_number in RECOVERY_BED_TRANSFER_ORDER),
-        ).fetchall()
-        free_beds = {int(row["bed_number"]) for row in rows}
-        return next((bed_number for bed_number in RECOVERY_BED_TRANSFER_ORDER if int(bed_number) in free_beds), None)
+            transfer_order,
+        )
+
+        ordered_values = ", ".join("(?, ?)" for _ in transfer_order)
+        ordered_params: list[int] = []
+        for sort_order, bed_number in enumerate(transfer_order):
+            ordered_params.extend((bed_number, sort_order))
+        row = cursor.execute(
+            f"""
+            WITH desired_beds(bed_number, sort_order) AS (VALUES {ordered_values})
+            SELECT bed_number
+            FROM desired_beds
+            JOIN beds USING (bed_number)
+            WHERE beds.status = 'FREE'
+              AND beds.current_admission_id IS NULL
+            ORDER BY desired_beds.sort_order ASC
+            LIMIT 1
+            """,
+            tuple(ordered_params),
+        ).fetchone()
+        return int(row["bed_number"]) if row else None
 
     @staticmethod
     def _copy_latest_operblock_vitals_to_rao(
@@ -3873,12 +3928,12 @@ class OperBlockService:
             SELECT sys, dia, pulse, temp, spo2, rr, cvp
             FROM vitals
             WHERE admission_id = ?
-              AND DATETIME(datetime) <= DATETIME(?)
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
               AND (
                   sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR temp IS NOT NULL
                   OR spo2 IS NOT NULL OR rr IS NOT NULL OR cvp IS NOT NULL
               )
-            ORDER BY DATETIME(datetime) DESC, id DESC
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
             LIMIT 1
             """,
             (int(source_admission_id), event_dt_text),
@@ -5891,7 +5946,7 @@ class OperBlockService:
             FROM vitals
             WHERE admission_id = ?
               AND (sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR spo2 IS NOT NULL)
-            ORDER BY datetime DESC, id DESC
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
             LIMIT 1
             """,
             (int(admission_id),),

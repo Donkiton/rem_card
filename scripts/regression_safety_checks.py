@@ -7187,6 +7187,67 @@ def _check_vitals_boundary_minutes(temp_root: str) -> tuple[bool, str]:
         manager.close()
 
 
+def _check_vitals_datetime_sort_normalizes_space_and_t(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.vitals_dao import VitalsDAO
+
+    db_path = os.path.join(temp_root, "vitals_datetime_sort_formats.db")
+    manager = DatabaseManager(db_path, db_path)
+    try:
+        with manager.remcard_transaction(source="regression_seed_vitals_datetime_sort_formats") as cursor:
+            cursor.execute("INSERT INTO patients(full_name) VALUES ('Vitals Sort Patient')")
+            patient_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime, is_active)
+                VALUES (?, 1, 'REGVITALSORT', '2026-04-24T08:00:00', 1)
+                """,
+                (patient_id,),
+            )
+            admission_id = int(cursor.lastrowid)
+            cursor.execute(
+                """
+                INSERT INTO vitals(admission_id, datetime, sys, pulse, last_modified_by, updated_at)
+                VALUES (?, '2026-04-24T09:00:00', 110, 80, 'REGRESSION', '2026-04-24T09:00:00')
+                """,
+                (admission_id,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO vitals(admission_id, datetime, sys, pulse, last_modified_by, updated_at)
+                VALUES (?, '2026-04-24 10:00:00', 120, 90, 'REGRESSION', '2026-04-24 10:00:00')
+                """,
+                (admission_id,),
+            )
+
+        dao = VitalsDAO(manager)
+        latest_values = dao.get_latest_vital_values(admission_id)
+        if latest_values.get("sys") != 120 or latest_values.get("pulse") != 90:
+            return False, f"single latest vital values used textual datetime ordering: {latest_values!r}"
+        bulk_values = dao.get_latest_vital_values_bulk([admission_id]).get(admission_id)
+        if not bulk_values or bulk_values.get("sys") != 120 or bulk_values.get("pulse") != 90:
+            return False, f"bulk latest vital values used textual datetime ordering: {bulk_values!r}"
+        latest_dt = dao.get_latest_vital_datetime(admission_id)
+        if latest_dt != datetime(2026, 4, 24, 10, 0):
+            return False, f"latest vital datetime used textual ordering: {latest_dt!r}"
+        all_dates = dao.get_all_vital_dates(admission_id)
+        if all_dates != [datetime(2026, 4, 24, 9, 0), datetime(2026, 4, 24, 10, 0)]:
+            return False, f"all vital dates used textual ordering: {all_dates!r}"
+
+        ranged = dao.get_vitals(admission_id, datetime(2026, 4, 24, 9, 30), datetime(2026, 4, 24, 10, 30))
+        if len(ranged) != 1 or ranged[0].sys != 120:
+            return False, f"vitals range did not normalize datetime formats: {ranged!r}"
+        dao.clear_vitals(admission_id, datetime(2026, 4, 24, 9, 30), datetime(2026, 4, 24, 10, 30))
+        after_clear = dao.get_latest_vital_values(admission_id)
+        if after_clear.get("sys") != 110 or after_clear.get("pulse") != 80:
+            return False, f"clear_vitals did not normalize datetime formats: {after_clear!r}"
+        return True, "ok"
+    finally:
+        manager.close()
+
+
 def _check_future_admission_date_edit_repairs_status_and_card(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
 
@@ -20323,6 +20384,263 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         manager.close()
 
 
+def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) -> tuple[bool, str]:
+    from datetime import date, timedelta
+
+    from rem_card.app.operblock_schema import _apply_operblock_schema
+    from rem_card.data.dao.db_manager import DatabaseManager
+    from rem_card.data.dao.vitals_dao import VitalsDAO
+    from rem_card.data.dto.remcard_dto import VitalDTO
+    from rem_card.services.operblock_service import OperBlockService
+
+    def _occupy_recovery_beds(manager: DatabaseManager, bed_numbers: tuple[int, ...]) -> None:
+        with manager.remcard_transaction(source="regression_seed_occupied_recovery_beds") as cursor:
+            for bed_number in (10, 11, 12):
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO beds(bed_number, status, current_admission_id, revision)
+                    VALUES (?, 'FREE', NULL, 0)
+                    """,
+                    (bed_number,),
+                )
+            for index, bed_number in enumerate(bed_numbers, start=1):
+                cursor.execute("INSERT INTO patients(full_name) VALUES (?)", (f"Occupied Recovery {bed_number}",))
+                patient_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime, is_active)
+                    VALUES (?, ?, ?, ?, 1)
+                    """,
+                    (patient_id, bed_number, f"OCC-{index}", "2026-06-01T08:00:00"),
+                )
+                admission_id = int(cursor.lastrowid)
+                cursor.execute(
+                    """
+                    UPDATE beds
+                    SET status = 'OCCUPIED',
+                        current_admission_id = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE bed_number = ?
+                    """,
+                    (admission_id, bed_number),
+                )
+
+    def _finish_case_to_rao(
+        manager: DatabaseManager,
+        service: OperBlockService,
+        *,
+        history_number: str,
+        clear_source_diagnosis: bool = False,
+    ) -> tuple[int, int, datetime]:
+        case = service.create_operation_case(
+            {
+                "table_code": "emergency",
+                "history_number": history_number,
+                "full_name": "Рао Тест Пациент",
+                "gender": "м",
+                "birth_date": date(1980, 1, 1),
+                "diagnosis_code": "K35",
+                "diagnosis_text": "Острый аппендицит",
+                "department_profile": "Хирургия",
+                "operation_name": "Аппендэктомия",
+                "surgeons": ["Хирург"],
+                "anesthesiologist": "Анестезиолог",
+                "anesthetist": "Анестезист",
+                "preop_sys": 111,
+                "preop_dia": 71,
+                "preop_pulse": 81,
+                "preop_spo2": 97,
+                "save_initial_vitals": True,
+            }
+        )
+        admission_id = int(case["admission_id"])
+        case_id = int(case["operation_case_id"])
+        started_row = manager.fetch_one_remcard(
+            "SELECT started_at FROM operation_cases WHERE id = ?",
+            (case_id,),
+        )
+        started_at = datetime.fromisoformat(str(started_row["started_at"]).replace(" ", "T")).replace(second=0, microsecond=0)
+        service.add_vital_record(
+            VitalDTO(
+                id=None,
+                admission_id=admission_id,
+                timestamp=started_at + timedelta(minutes=25),
+                sys=123,
+                dia=77,
+                pulse=88,
+                temp=36.7,
+                spo2=99,
+                rr=15,
+                cvp=4,
+            )
+        )
+        if clear_source_diagnosis:
+            with manager.remcard_transaction(source="regression_clear_source_diagnosis") as cursor:
+                cursor.execute("UPDATE admissions SET diagnosis_text = NULL WHERE id = ?", (admission_id,))
+
+        service.start_anesthesia(
+            case_id,
+            "ОА",
+            anesthesiologist="Анестезиолог",
+            anesthetist="Анестезист",
+            event_time=started_at + timedelta(minutes=5),
+        )
+        service.start_surgery(
+            case_id,
+            operation_name="Аппендэктомия",
+            surgeons=["Хирург"],
+            event_time=started_at + timedelta(minutes=10),
+        )
+        service.end_surgery(case_id, event_time=started_at + timedelta(minutes=30))
+        anesthesia_end = started_at + timedelta(minutes=40)
+        service.end_anesthesia_with_transfer(case_id, "РАО", event_time=anesthesia_end)
+        return case_id, admission_id, anesthesia_end
+
+    def _run_transfer_scenario(
+        name: str,
+        index: int,
+        occupied_beds: tuple[int, ...],
+        *,
+        expected_bed: int | None,
+        clear_source_diagnosis: bool = False,
+        check_vitals: bool = False,
+    ) -> tuple[bool, str]:
+        db_path = os.path.join(temp_root, f"operblock_rao_transfer_{name}.db")
+        manager = DatabaseManager(db_path, db_path)
+        try:
+            manager.run_write_operation(_apply_operblock_schema, source="regression_operblock_schema")
+            _occupy_recovery_beds(manager, occupied_beds)
+            service = OperBlockService(manager)
+            case_id, source_admission_id, anesthesia_end = _finish_case_to_rao(
+                manager,
+                service,
+                history_number=f"RAO{index:03d}",
+                clear_source_diagnosis=clear_source_diagnosis,
+            )
+            case_row = manager.fetch_one_remcard(
+                "SELECT transfer_department, future_rao_admission_id FROM operation_cases WHERE id = ?",
+                (case_id,),
+            )
+            if not case_row or case_row["transfer_department"] != "РАО":
+                return False, f"{name}: transfer_department was not saved as RAO"
+            future_rao_admission_id = case_row["future_rao_admission_id"]
+            if expected_bed is None:
+                if future_rao_admission_id is not None:
+                    return False, f"{name}: RAO admission was created unexpectedly: {future_rao_admission_id}"
+                created = manager.fetch_one_remcard(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM admissions
+                    WHERE intake_extra_json LIKE '%operblock_rao_transfer%'
+                    """
+                )
+                if int(created["count"] or 0) != 0:
+                    return False, f"{name}: RAO transfer admission exists despite blocked creation"
+                return True, "ok"
+
+            if future_rao_admission_id is None:
+                return False, f"{name}: RAO admission was not linked to operation case"
+            admission_row = manager.fetch_one_remcard(
+                """
+                SELECT a.*, p.full_name, p.birth_date
+                FROM admissions a
+                JOIN patients p ON p.id = a.patient_id
+                WHERE a.id = ?
+                """,
+                (int(future_rao_admission_id),),
+            )
+            if not admission_row:
+                return False, f"{name}: linked RAO admission was not found"
+            if int(admission_row["bed_number"]) != expected_bed:
+                return False, f"{name}: expected bed {expected_bed}, got {admission_row['bed_number']}"
+            expected_admission_dt = (anesthesia_end + timedelta(minutes=10)).isoformat(timespec="seconds")
+            if str(admission_row["admission_datetime"]) != expected_admission_dt:
+                return False, f"{name}: wrong RAO admission time: {admission_row['admission_datetime']!r}"
+            if admission_row["source_department"] != "Профильное отделение":
+                return False, f"{name}: wrong source department: {admission_row['source_department']!r}"
+            if admission_row["department_profile"] != "Хирургия":
+                return False, f"{name}: wrong department profile: {admission_row['department_profile']!r}"
+            if admission_row["diagnosis_text"] != "Острый аппендицит":
+                return False, f"{name}: diagnosis was not copied"
+            if int(admission_row["recovery_bed_stay"] or 0) != 1:
+                return False, f"{name}: recovery_bed_stay was not set"
+
+            bed_row = manager.fetch_one_remcard(
+                "SELECT status, current_admission_id FROM beds WHERE bed_number = ?",
+                (expected_bed,),
+            )
+            if not bed_row or bed_row["status"] != "OCCUPIED" or int(bed_row["current_admission_id"]) != int(future_rao_admission_id):
+                return False, f"{name}: selected recovery bed was not occupied by new admission"
+
+            if check_vitals:
+                vitals_dao = VitalsDAO(manager)
+                preview = vitals_dao.get_latest_vital_values_bulk([int(future_rao_admission_id)]).get(int(future_rao_admission_id))
+                expected_preview = {"sys": 123, "dia": 77, "pulse": 88, "temp": 36.7, "spo2": 99, "rr": 15, "cvp": 4}
+                if preview != expected_preview:
+                    return False, f"{name}: copied vitals are not visible in preview: {preview!r}"
+                vitals_dao.add_vital(
+                    VitalDTO(
+                        id=None,
+                        admission_id=int(future_rao_admission_id),
+                        timestamp=datetime.fromisoformat(expected_admission_dt) + timedelta(minutes=5),
+                        sys=130,
+                        pulse=91,
+                    )
+                )
+                updated_preview = vitals_dao.get_latest_vital_values_bulk([int(future_rao_admission_id)]).get(int(future_rao_admission_id))
+                if not updated_preview or updated_preview.get("sys") != 130 or updated_preview.get("pulse") != 91:
+                    return False, f"{name}: new RAO vitals did not update preview: {updated_preview!r}"
+                if updated_preview.get("dia") != 77 or updated_preview.get("spo2") != 99:
+                    return False, f"{name}: old copied non-null vitals were lost after partial update: {updated_preview!r}"
+
+            source_link = manager.fetch_one_remcard(
+                """
+                SELECT COUNT(*) AS count
+                FROM admissions
+                WHERE id = ?
+                  AND intake_extra_json LIKE ?
+                """,
+                (int(future_rao_admission_id), f"%\"source_admission_id\": {int(source_admission_id)}%"),
+            )
+            if int(source_link["count"] or 0) != 1:
+                return False, f"{name}: intake metadata does not reference source admission"
+            return True, "ok"
+        finally:
+            manager.close()
+
+    scenarios = [
+        ("free_all", (), 11),
+        ("bed_11_busy", (11,), 12),
+        ("bed_12_busy", (12,), 11),
+        ("bed_10_busy", (10,), 11),
+        ("beds_11_12_busy", (11, 12), 10),
+        ("beds_10_12_busy", (10, 12), 11),
+        ("beds_10_11_busy", (10, 11), 12),
+        ("all_busy", (10, 11, 12), None),
+    ]
+    for index, (name, occupied_beds, expected_bed) in enumerate(scenarios, start=1):
+        ok, details = _run_transfer_scenario(
+            name,
+            index,
+            occupied_beds,
+            expected_bed=expected_bed,
+            check_vitals=name == "beds_11_12_busy",
+        )
+        if not ok:
+            return ok, details
+
+    ok, details = _run_transfer_scenario(
+        "missing_required_diagnosis",
+        len(scenarios) + 1,
+        (),
+        expected_bed=None,
+        clear_source_diagnosis=True,
+    )
+    if not ok:
+        return ok, details
+    return True, "ok"
+
+
 def _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups(temp_root: str) -> tuple[bool, str]:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22705,6 +23023,7 @@ def main(argv: list[str] | None = None):
         ("statistics_dialog_snapshot", _check_statistics_dialog_snapshot),
         ("graph_outcome_labels_hide_nan", _check_graph_outcome_labels_hide_nan),
         ("vitals_boundary_minutes", _check_vitals_boundary_minutes),
+        ("vitals_datetime_sort_normalizes_space_and_t", _check_vitals_datetime_sort_normalizes_space_and_t),
         ("future_admission_date_edit_repairs_status_and_card", _check_future_admission_date_edit_repairs_status_and_card),
         ("orders_force_refresh_accepts_unchanged_version", _check_orders_force_refresh_accepts_unchanged_version),
         ("orders_tab_targeted_diagnostics_performance", _check_orders_tab_targeted_diagnostics_performance),
@@ -23091,6 +23410,7 @@ def main(argv: list[str] | None = None):
         ("operblock_runtime_settings_from_settings_db", _check_operblock_runtime_settings_from_settings_db),
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
+        ("operblock_rao_auto_transfer_recovery_beds_and_vitals", _check_operblock_rao_auto_transfer_recovery_beds_and_vitals),
         ("operblock_occupy_dialog_manual_birth_date_and_plain_groups", _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups),
         ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
         ("operblock_empty_table_card_layout", _check_operblock_empty_table_card_layout),

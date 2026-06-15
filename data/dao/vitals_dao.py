@@ -111,8 +111,10 @@ class VitalsDAO:
         query = """
             SELECT id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp, last_modified_by, updated_at, COALESCE(revision, 0) AS revision
             FROM vitals
-            WHERE admission_id = ? AND datetime >= ? AND datetime <= ?
-            ORDER BY datetime ASC
+            WHERE admission_id = ?
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) ASC, id ASC
         """
         rows = self.db.fetch_all_remcard(query, (admission_id, start.isoformat(), end.isoformat()))
         return [
@@ -185,7 +187,13 @@ class VitalsDAO:
         return vitals, new_sync_cursor["updated_at"]
 
     def get_latest_vital_datetime(self, admission_id: int) -> Optional[datetime]:
-        query = "SELECT MAX(datetime) as dt FROM vitals WHERE admission_id = ?"
+        query = """
+            SELECT datetime AS dt
+            FROM vitals
+            WHERE admission_id = ?
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
+            LIMIT 1
+        """
         row = self.db.fetch_one_remcard(query, (admission_id,))
         return datetime.fromisoformat(row["dt"]) if row and row["dt"] else None
 
@@ -195,7 +203,7 @@ class VitalsDAO:
             FROM vitals
             WHERE admission_id = ?
               AND (sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR temp IS NOT NULL OR spo2 IS NOT NULL OR rr IS NOT NULL OR cvp IS NOT NULL)
-            ORDER BY datetime DESC, id DESC
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
             LIMIT 1
         """
         r = self.db.fetch_one_remcard(query, (admission_id,))
@@ -219,7 +227,12 @@ class VitalsDAO:
         )
 
     def get_all_vital_dates(self, admission_id: int) -> List[datetime]:
-        query = "SELECT DISTINCT datetime as dt FROM vitals WHERE admission_id = ? ORDER BY datetime ASC"
+        query = """
+            SELECT DISTINCT datetime AS dt
+            FROM vitals
+            WHERE admission_id = ?
+            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) ASC
+        """
         rows = self.db.fetch_all_remcard(query, (admission_id,))
         dates = []
         for r in rows:
@@ -228,7 +241,12 @@ class VitalsDAO:
         return dates
 
     def clear_vitals(self, admission_id: int, start: datetime, end: datetime):
-        query = "DELETE FROM vitals WHERE admission_id = ? AND datetime >= ? AND datetime <= ?"
+        query = """
+            DELETE FROM vitals
+            WHERE admission_id = ?
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) >= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+        """
         self.db.execute_remcard(query, (admission_id, start.isoformat(), end.isoformat()))
 
     def delete_all_for_admission(self, admission_id: int):
@@ -299,13 +317,13 @@ class VitalsDAO:
         """Return latest non-null vitals for one admission by a single query."""
         query = """
             SELECT
-                (SELECT v.sys   FROM vitals v WHERE v.admission_id = ? AND v.sys  IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS sys,
-                (SELECT v.dia   FROM vitals v WHERE v.admission_id = ? AND v.dia  IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS dia,
-                (SELECT v.pulse FROM vitals v WHERE v.admission_id = ? AND v.pulse IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS pulse,
-                (SELECT v.temp  FROM vitals v WHERE v.admission_id = ? AND v.temp IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS temp,
-                (SELECT v.spo2  FROM vitals v WHERE v.admission_id = ? AND v.spo2 IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS spo2,
-                (SELECT v.rr    FROM vitals v WHERE v.admission_id = ? AND v.rr   IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS rr,
-                (SELECT v.cvp   FROM vitals v WHERE v.admission_id = ? AND v.cvp  IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS cvp
+                (SELECT v.sys   FROM vitals v WHERE v.admission_id = ? AND v.sys  IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS sys,
+                (SELECT v.dia   FROM vitals v WHERE v.admission_id = ? AND v.dia  IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS dia,
+                (SELECT v.pulse FROM vitals v WHERE v.admission_id = ? AND v.pulse IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS pulse,
+                (SELECT v.temp  FROM vitals v WHERE v.admission_id = ? AND v.temp IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS temp,
+                (SELECT v.spo2  FROM vitals v WHERE v.admission_id = ? AND v.spo2 IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS spo2,
+                (SELECT v.rr    FROM vitals v WHERE v.admission_id = ? AND v.rr   IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS rr,
+                (SELECT v.cvp   FROM vitals v WHERE v.admission_id = ? AND v.cvp  IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS cvp
         """
         row = self.db.fetch_one_remcard(query, (admission_id,) * 7)
         if not row:
@@ -514,13 +532,13 @@ class VitalsDAO:
             WITH ids(admission_id) AS (VALUES {placeholders})
             SELECT
                 ids.admission_id AS admission_id,
-                (SELECT v.sys   FROM vitals v WHERE v.admission_id = ids.admission_id AND v.sys  IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS sys,
-                (SELECT v.dia   FROM vitals v WHERE v.admission_id = ids.admission_id AND v.dia  IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS dia,
-                (SELECT v.pulse FROM vitals v WHERE v.admission_id = ids.admission_id AND v.pulse IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS pulse,
-                (SELECT v.temp  FROM vitals v WHERE v.admission_id = ids.admission_id AND v.temp IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS temp,
-                (SELECT v.spo2  FROM vitals v WHERE v.admission_id = ids.admission_id AND v.spo2 IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS spo2,
-                (SELECT v.rr    FROM vitals v WHERE v.admission_id = ids.admission_id AND v.rr   IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS rr,
-                (SELECT v.cvp   FROM vitals v WHERE v.admission_id = ids.admission_id AND v.cvp  IS NOT NULL ORDER BY v.datetime DESC, v.id DESC LIMIT 1) AS cvp
+                (SELECT v.sys   FROM vitals v WHERE v.admission_id = ids.admission_id AND v.sys  IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS sys,
+                (SELECT v.dia   FROM vitals v WHERE v.admission_id = ids.admission_id AND v.dia  IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS dia,
+                (SELECT v.pulse FROM vitals v WHERE v.admission_id = ids.admission_id AND v.pulse IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS pulse,
+                (SELECT v.temp  FROM vitals v WHERE v.admission_id = ids.admission_id AND v.temp IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS temp,
+                (SELECT v.spo2  FROM vitals v WHERE v.admission_id = ids.admission_id AND v.spo2 IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS spo2,
+                (SELECT v.rr    FROM vitals v WHERE v.admission_id = ids.admission_id AND v.rr   IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS rr,
+                (SELECT v.cvp   FROM vitals v WHERE v.admission_id = ids.admission_id AND v.cvp  IS NOT NULL ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC LIMIT 1) AS cvp
             FROM ids
         """
         rows = self.db.fetch_all_remcard(query, tuple(ids))
