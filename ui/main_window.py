@@ -184,10 +184,20 @@ class MainWindow(QMainWindow):
 
         self._emergency_banner = None
         runtime_context = getattr(self.container, "runtime_context", None)
-        if getattr(runtime_context, "mode", "") == "emergency":
+        runtime_mode = getattr(runtime_context, "mode", "")
+        if runtime_mode in {"emergency", "opblock_offline"}:
+            if runtime_mode == "opblock_offline":
+                banner_text = (
+                    "Локальный режим оперблока: работа ведется на этом ПК. "
+                    "Завершённые случаи будут перенесены после восстановления связи."
+                )
+            else:
+                banner_text = (
+                    "Аварийный режим: работа ведется на локальной базе этого ПК. "
+                    "До восстановления сети работайте только здесь."
+                )
             self._emergency_banner = QLabel(
-                "Аварийный режим: работа ведется на локальной базе этого ПК. "
-                "До восстановления сети работайте только здесь."
+                banner_text
             )
             self._emergency_banner.setObjectName("EmergencyModeBanner")
             self._emergency_banner.setWordWrap(True)
@@ -204,20 +214,23 @@ class MainWindow(QMainWindow):
             )
             self.main_layout.addWidget(self._emergency_banner)
 
-            self._restore_probe_status_label = QLabel("Ожидание восстановления сетевой базы")
-            self._restore_probe_status_label.setObjectName("EmergencyRestoreProbeStatus")
-            self._restore_probe_status_label.setStyleSheet(
-                """
-                QLabel#EmergencyRestoreProbeStatus {
-                    background-color: #e8f2ff;
-                    color: #174264;
-                    border-bottom: 1px solid #9fc4e8;
-                    padding: 5px 14px;
-                    font-weight: 600;
-                }
-                """
-            )
-            self.main_layout.addWidget(self._restore_probe_status_label)
+            if runtime_mode == "emergency":
+                self._restore_probe_status_label = QLabel("Ожидание восстановления сетевой базы")
+                self._restore_probe_status_label.setObjectName("EmergencyRestoreProbeStatus")
+                self._restore_probe_status_label.setStyleSheet(
+                    """
+                    QLabel#EmergencyRestoreProbeStatus {
+                        background-color: #e8f2ff;
+                        color: #174264;
+                        border-bottom: 1px solid #9fc4e8;
+                        padding: 5px 14px;
+                        font-weight: 600;
+                    }
+                    """
+                )
+                self.main_layout.addWidget(self._restore_probe_status_label)
+            else:
+                self._restore_probe_status_label = None
         else:
             self._restore_probe_status_label = None
         
@@ -319,6 +332,9 @@ class MainWindow(QMainWindow):
         self._runtime_outage_handling = True
         data_service = getattr(self.container, "data_service", None)
         role = str((payload or {}).get("role") or self._initial_role or self._current_role_key() or "").lower()
+        if is_operblock_role(role):
+            self._handle_operblock_runtime_network_outage(payload, data_service=data_service, role=role)
+            return
         try:
             self.stack.setEnabled(False)
         except Exception:
@@ -397,6 +413,210 @@ class MainWindow(QMainWindow):
                     "RemCard будет закрыта. Запустите RemCard медсестры снова, чтобы открыть аварийный режим.",
                 )
         self.close()
+
+    def _handle_operblock_runtime_network_outage(self, payload: dict, *, data_service=None, role: str = ""):
+        from rem_card.app.operblock_offline_store import (
+            OPERBLOCK_RUNTIME_DROP_WARNING,
+            mirror_active_operblock_cases_from_network_db,
+            start_or_resume_operblock_offline_session,
+        )
+        from rem_card.services.settings.settings_service import reset_settings_service
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            self.stack.setEnabled(False)
+        except Exception:
+            pass
+        try:
+            if data_service is not None:
+                data_service.prepare_runtime_outage_shutdown(timeout=5.0)
+        except Exception as exc:
+            logger.warning("Operblock runtime outage shutdown of network data service failed: %s", exc, exc_info=True)
+        try:
+            db_manager = getattr(self.container, "db_manager", None)
+            if db_manager is not None:
+                mirror_active_operblock_cases_from_network_db(db_manager, reason="runtime_drop_after_queue_shutdown")
+        except Exception as exc:
+            logger.warning("Operblock runtime outage active-case mirror failed: %s", exc, exc_info=True)
+
+        network_db_path = str(getattr(getattr(self.container, "db_manager", None), "db_path", "") or "")
+        try:
+            session = start_or_resume_operblock_offline_session(
+                reason=str((payload or {}).get("reason") or "runtime_drop"),
+                network_db_path=network_db_path,
+            )
+            from rem_card.app.bootstrap import bootstrap
+
+            reset_settings_service()
+            local_container = bootstrap(role=role or ROLE_OPERBLOCK, runtime_context=session.runtime_context)
+            self._replace_operblock_container_after_runtime_drop(local_container, role or ROLE_OPERBLOCK)
+            CustomMessageBox.warning(self, "Оперблок: локальный режим", OPERBLOCK_RUNTIME_DROP_WARNING)
+        except Exception as exc:
+            logger.warning("Operblock runtime offline switch failed: %s", exc, exc_info=True)
+            CustomMessageBox.warning(
+                self,
+                "Оперблок: локальный режим",
+                "Не удалось переключить оперблок на локальную базу. Локальные данные, если они были созданы, сохранены.",
+            )
+            self.close()
+        finally:
+            try:
+                self.stack.setEnabled(True)
+            except Exception:
+                pass
+            self._runtime_outage_handling = False
+
+    def _replace_operblock_container_after_runtime_drop(self, local_container, role_key: str) -> None:
+        from .operblock_view.operblock_main_widget import OperBlockMainWidget
+
+        self._ensure_operblock_offline_banner()
+        clean_role = role_key if is_operblock_role(role_key) else ROLE_OPERBLOCK
+        old_widgets = list(dict.fromkeys((self._operblock_widgets or {}).values()))
+        if self.operblock_main is not None and self.operblock_main not in old_widgets:
+            old_widgets.append(self.operblock_main)
+        for widget in old_widgets:
+            try:
+                if hasattr(widget, "shutdown"):
+                    widget.shutdown()
+                elif hasattr(widget, "stop_auto_refresh"):
+                    widget.stop_auto_refresh()
+            except Exception as exc:
+                logger.warning("Failed to shutdown old operblock widget during offline switch: %s", exc)
+            try:
+                self.stack.removeWidget(widget)
+                widget.setParent(None)
+            except Exception:
+                pass
+
+        self._default_container = local_container
+        self._operblock_container = local_container
+        self._activate_container(local_container)
+        self._operblock_widgets = {}
+        self.operblock_main = OperBlockMainWidget(
+            self.container.patient_service,
+            self.container.remcard_service,
+            self.container.operblock_service,
+            table_code=operblock_table_code_for_role(clean_role),
+            parent=self.stack,
+        )
+        self._operblock_widgets[clean_role] = self.operblock_main
+        self._active_operblock_role_key = clean_role
+        self.stack.addWidget(self.operblock_main)
+        self.stack.setCurrentWidget(self.operblock_main)
+        self._initial_role = clean_role
+        self._initial_role_ui_ready = True
+        self._initial_role_auto_refresh_started = False
+        QTimer.singleShot(0, self.operblock_main.start_auto_refresh)
+
+    def _ensure_operblock_offline_banner(self) -> None:
+        if getattr(self, "_emergency_banner", None) is not None:
+            self._emergency_banner.setText(
+                "Локальный режим оперблока: работа ведется на этом ПК. "
+                "Завершённые случаи будут перенесены после восстановления связи."
+            )
+            return
+        self._emergency_banner = QLabel(
+            "Локальный режим оперблока: работа ведется на этом ПК. "
+            "Завершённые случаи будут перенесены после восстановления связи."
+        )
+        self._emergency_banner.setObjectName("EmergencyModeBanner")
+        self._emergency_banner.setWordWrap(True)
+        self._emergency_banner.setStyleSheet(
+            """
+            QLabel#EmergencyModeBanner {
+                background-color: #fff3cd;
+                color: #5f4300;
+                border-bottom: 1px solid #e0b849;
+                padding: 8px 14px;
+                font-weight: 700;
+            }
+            """
+        )
+        self.main_layout.insertWidget(1, self._emergency_banner)
+
+    def _show_operblock_migration_dialog(self):
+        from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Перенос данных оперблока")
+        dialog.setModal(True)
+        dialog.setWindowFlags(
+            (dialog.windowFlags() | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+            & ~Qt.WindowCloseButtonHint
+        )
+        layout = QVBoxLayout(dialog)
+        label = QLabel("Не выключайте ПК. Идёт перенос данных оперблока.")
+        label.setWordWrap(True)
+        label.setMinimumWidth(360)
+        layout.addWidget(label)
+        dialog.show()
+        QApplication.processEvents()
+        return dialog
+
+    def _close_operblock_migration_dialog(self, dialog) -> None:
+        if dialog is None:
+            return
+        try:
+            dialog.close()
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _maybe_migrate_operblock_offline_after_release(self) -> None:
+        runtime_context = getattr(getattr(self.container, "db_manager", None), "runtime_context", None)
+        if getattr(runtime_context, "mode", "") != "opblock_offline":
+            return
+        try:
+            from rem_card.app.operblock_offline_migration import run_pending_operblock_offline_migration
+            from rem_card.app.operblock_offline_store import (
+                has_active_local_operblock_case,
+                pending_completed_local_cases_count,
+            )
+
+            if has_active_local_operblock_case() or pending_completed_local_cases_count() <= 0:
+                return
+            from rem_card.app.db_runtime_context import build_network_runtime_context
+            from rem_card.app.operblock_schema import ensure_operblock_schema
+            from rem_card.data.dao.db_manager import DatabaseManager
+        except Exception as exc:
+            logger.warning("Operblock offline post-release migration precheck failed: %s", exc, exc_info=True)
+            return
+
+        dialog = None
+        network_manager = None
+        try:
+            dialog = self._show_operblock_migration_dialog()
+            network_context = build_network_runtime_context()
+            network_manager = DatabaseManager(
+                network_context.medical_db_path,
+                network_context.medical_db_path,
+                runtime_context=network_context,
+            )
+            ensure_operblock_schema(network_manager)
+            result = run_pending_operblock_offline_migration(network_manager)
+            if result.ok:
+                from rem_card.app.operblock_offline_store import cleanup_verified_operblock_offline_session
+
+                cleanup_verified_operblock_offline_session(network_manager)
+        except Exception as exc:
+            logger.info("Operblock offline post-release migration skipped: %s", exc)
+            return
+        finally:
+            if network_manager is not None:
+                try:
+                    network_manager.close(timeout_sec=1.0)
+                except Exception:
+                    pass
+            self._close_operblock_migration_dialog(dialog)
+
+        if not result.ok:
+            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+            CustomMessageBox.warning(
+                self,
+                "Перенос данных оперблока",
+                result.user_message or "Перенос не выполнен. Локальные данные сохранены. Повторите позже.",
+            )
 
     def _prepare_runtime_outage_emergency_session(self, marker_payload: dict) -> bool:
         try:

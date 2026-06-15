@@ -811,6 +811,19 @@ class OperBlockService:
         self.db = db_manager
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
 
+    def _runtime_mode(self) -> str:
+        return str(getattr(getattr(self.db, "runtime_context", None), "mode", "") or "")
+
+    def _is_opblock_offline_runtime(self) -> bool:
+        return self._runtime_mode() == "opblock_offline"
+
+    def _offline_session_id(self) -> str | None:
+        runtime_context = getattr(self.db, "runtime_context", None)
+        return str(getattr(runtime_context, "emergency_session_id", "") or "") or None
+
+    def _new_case_uuid(self) -> str:
+        return f"opblock:{uuid.uuid4()}"
+
     def _current_db_path(self) -> str:
         raw = str(getattr(self.db, "db_path", "") or getattr(self.db, "remcard_db_path", "") or "")
         return os.path.abspath(raw) if raw else ""
@@ -819,6 +832,8 @@ class OperBlockService:
         current_db_path = self._current_db_path()
         if not current_db_path:
             return []
+        if self._is_opblock_offline_runtime():
+            return [current_db_path] if include_current else []
         return discover_db_cycle_paths(
             current_db_path=current_db_path,
             include_current=include_current,
@@ -2419,6 +2434,8 @@ class OperBlockService:
         last_name, first_name, middle_name = _split_name(full_name)
         admission_uid = str(uuid.uuid4())
         bed_number = 0
+        offline_case_uuid = self._new_case_uuid()
+        offline_session_id = self._offline_session_id() if self._is_opblock_offline_runtime() else None
 
         def operation(cursor: sqlite3.Cursor):
             existing = cursor.execute(
@@ -2473,9 +2490,10 @@ class OperBlockService:
                     created_by_role, created_by_client_id, last_modified_by,
                     planned_operation_name, planned_surgeons_json, planned_anesthesiologist, planned_anesthetist,
                     height_cm, weight_kg, allergies, blood_group, blood_rh,
-                    preop_sys, preop_dia, preop_pulse, preop_spo2, preop_save_initial_vitals
+                    preop_sys, preop_dia, preop_pulse, preop_spo2, preop_save_initial_vitals,
+                    offline_case_uuid, offline_session_id, migration_status
                 ) VALUES (?, ?, ?, 'active', ?, ?, 'operblock', ?, 'operblock',
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     patient_id,
@@ -2498,9 +2516,22 @@ class OperBlockService:
                     data.preop_pulse,
                     data.preop_spo2,
                     1 if data.save_initial_vitals else 0,
+                    offline_case_uuid,
+                    offline_session_id,
+                    "active" if self._is_opblock_offline_runtime() else None,
                 ),
             )
             operation_case_id = int(cursor.lastrowid)
+            if self._is_opblock_offline_runtime():
+                cursor.execute(
+                    """
+                    UPDATE operation_cases
+                    SET original_local_id = ?,
+                        migration_status = 'active'
+                    WHERE id = ?
+                    """,
+                    (operation_case_id, operation_case_id),
+                )
             cursor.execute(
                 """
                 INSERT INTO operation_table_assignments (
@@ -2530,6 +2561,7 @@ class OperBlockService:
                 "patient_id": patient_id,
                 "admission_id": admission_id,
                 "operation_case_id": operation_case_id,
+                "offline_case_uuid": offline_case_uuid,
             }
 
         try:
@@ -2816,6 +2848,10 @@ class OperBlockService:
                 UPDATE operation_cases
                 SET status = 'closed',
                     ended_at = ?,
+                    migration_status = CASE
+                        WHEN COALESCE(offline_session_id, '') <> '' THEN 'pending'
+                        ELSE migration_status
+                    END,
                     last_modified_by = 'operblock',
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ? AND status = 'active'
@@ -3375,7 +3411,13 @@ class OperBlockService:
                 transfer_department=clean_transfer_department,
             )
             if clean_kind == "anesthesia_end" and _is_rao_transfer_department(clean_transfer_department):
-                self._maybe_create_rao_recovery_admission(cursor, case, event_dt)
+                if self._is_opblock_offline_runtime():
+                    logger.info(
+                        "operblock_offline_rao_transfer_archival_only case_id=%s",
+                        case.get("operation_case_id"),
+                    )
+                else:
+                    self._maybe_create_rao_recovery_admission(cursor, case, event_dt)
             return event_id
 
         return int(self.db.run_write_operation(operation, source=f"operblock_stage_{clean_kind}"))

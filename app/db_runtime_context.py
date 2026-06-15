@@ -12,7 +12,7 @@ from rem_card.app.settings_db_paths import (
 )
 
 
-RuntimeContextMode = Literal["network", "emergency", "snapshot"]
+RuntimeContextMode = Literal["network", "emergency", "snapshot", "opblock_offline"]
 
 
 def _normalize_path(path: str) -> str:
@@ -53,6 +53,7 @@ class DbRuntimeContext:
             "network": (True, False, False),
             "emergency": (False, True, False),
             "snapshot": (False, False, True),
+            "opblock_offline": (False, False, False),
         }[self.mode]
         actual = (bool(self.is_network), bool(self.is_emergency), bool(self.is_snapshot))
         if actual != expected:
@@ -110,6 +111,43 @@ def build_settings_snapshot_context(emergency_session_dir: str) -> DbRuntimeCont
         mode="snapshot",
         source_label="settings_snapshot",
         settings_readonly=True,
+    )
+
+
+def build_operblock_offline_runtime_context(session_dir: str) -> DbRuntimeContext:
+    root = _normalize_path(session_dir)
+    backups_root = os.path.join(root, "backups")
+    backup_health_dir = os.path.join(root, "backup_health")
+    settings_dir = os.path.join(root, "settings")
+    return DbRuntimeContext(
+        mode="opblock_offline",
+        medical_db_path=_normalize_path(os.path.join(root, "operblock_local.db")),
+        medical_db_lock_path=_normalize_path(os.path.join(root, "locks", "operblock_local.db.lock")),
+        medical_backups_valid_dir=_normalize_path(os.path.join(backups_root, "valid")),
+        medical_backup_health_dir=_normalize_path(backup_health_dir),
+        medical_quarantine_dir=_normalize_path(os.path.join(root, "quarantine")),
+        medical_snapshots_dir=_normalize_path(os.path.join(root, "snapshots")),
+        medical_logs_dir=_normalize_path(os.path.join(root, "logs")),
+        recovery_lock_path=_normalize_path(os.path.join(root, "locks", "recovery.lock")),
+        session_locks_dir=_normalize_path(os.path.join(root, "locks", "sessions")),
+        settings_db_path=_normalize_path(os.path.join(settings_dir, "opblock_settings_snapshot.db")),
+        settings_db_lock_path=_normalize_path(os.path.join(settings_dir, "settings.db.lock")),
+        settings_backups_dir=_normalize_path(os.path.join(settings_dir, "backups")),
+        settings_backup_health_dir=_normalize_path(os.path.join(settings_dir, "backup_health")),
+        settings_readonly=False,
+        source_label="opblock_offline",
+        is_network=False,
+        is_emergency=False,
+        is_snapshot=False,
+        baza_dir=root,
+        medical_backups_root_dir=_normalize_path(backups_root),
+        medical_invalid_backups_dir=_normalize_path(os.path.join(backup_health_dir, "invalid_backups")),
+        medical_db_rotation_lock_path=_normalize_path(os.path.join(root, "locks", "db_rotation.lock")),
+        medical_client_policy_path=_normalize_path(os.path.join(root, "config", "client_policy.json")),
+        medical_startup_quickcheck_state_path=_normalize_path(
+            os.path.join(backup_health_dir, "startup_quick_check_state.json")
+        ),
+        emergency_session_id=os.path.basename(root) or None,
     )
 
 

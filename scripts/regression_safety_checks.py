@@ -1024,13 +1024,15 @@ def _check_splash_before_startup_guard(temp_root: str) -> tuple[bool, str]:
         return False, "app/main.py must define _main_impl"
     body = source[main_start:]
     create_idx = body.find("_create_startup_qt_context(args.role)")
-    guard_idx = body.find("_validate_compiled_role_startup(")
+    guard_idx = body.find("_validate_compiled_startup_unless_runtime_preselected(")
+    if guard_idx < 0:
+        guard_idx = body.find("_validate_compiled_role_startup(")
     if create_idx < 0 or guard_idx < 0:
         return False, "startup must create Qt/splash context and run StartupDbGuard"
     if create_idx > guard_idx:
         return False, "splash must be created before StartupDbGuard"
     guard_block = body[guard_idx:body.find("role_suffix =", guard_idx)]
-    if "before_user_message=close_startup_splash" not in guard_block:
+    if "before_user_message=close_startup_splash" not in guard_block and "close_startup_splash=close_startup_splash" not in guard_block:
         return False, "StartupDbGuard user messages must close splash first"
     return True, "ok"
 
@@ -1042,7 +1044,9 @@ def _check_main_ui_waits_for_startup_gate(temp_root: str) -> tuple[bool, str]:
     if main_start < 0:
         return False, "app/main.py must define _main_impl"
     body = source[main_start:]
-    guard_idx = body.find("_validate_compiled_role_startup(")
+    guard_idx = body.find("_validate_compiled_startup_unless_runtime_preselected(")
+    if guard_idx < 0:
+        guard_idx = body.find("_validate_compiled_role_startup(")
     bootstrap_idx = body.find("_bootstrap_container_with_emergency_fallback(")
     window_idx = body.find("window = MainWindow(")
     show_idx = body.find("window.show()")
@@ -15793,7 +15797,9 @@ def _check_runtime_outage_no_live_db_swap(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = (PROJECT_ROOT / "ui" / "main_window.py").read_text(encoding="utf-8")
     start = text.find("def _handle_runtime_network_outage")
-    end = text.find("def _handle_restore_probe_status", start)
+    end = text.find("\n    def _handle_operblock_runtime_network_outage", start)
+    if end < 0:
+        end = text.find("def _handle_restore_probe_status", start)
     if end < 0:
         end = text.find("def _get_resize_edge", start)
     body = text[start:end]
@@ -17536,7 +17542,9 @@ def _check_compiled_offline_startup_does_not_import_file_logger_before_classific
     main_start = main_text.find("def _main_impl(")
     main_end = main_text.find("\ndef ", main_start + 1)
     body = main_text[main_start: main_end if main_end > main_start else len(main_text)]
-    guard_idx = body.find("_validate_compiled_role_startup(")
+    guard_idx = body.find("_validate_compiled_startup_unless_runtime_preselected(")
+    if guard_idx < 0:
+        guard_idx = body.find("_validate_compiled_role_startup(")
     pending_idx = body.find("_run_pending_emergency_merge_after_startup_guard(")
     logger_idx = body.find("from rem_card.app.logger import")
     if guard_idx < 0 or pending_idx < 0:
@@ -17773,7 +17781,9 @@ def _check_pending_emergency_merge_startup_gate_exists(temp_root: str) -> tuple[
     main_start = main_text.find("def _main_impl(")
     main_end = main_text.find("\ndef ", main_start + 1)
     main_body = main_text[main_start: main_end if main_end > main_start else len(main_text)]
-    guard_idx = main_body.find("_validate_compiled_role_startup(")
+    guard_idx = main_body.find("_validate_compiled_startup_unless_runtime_preselected(")
+    if guard_idx < 0:
+        guard_idx = main_body.find("_validate_compiled_role_startup(")
     pending_idx = main_body.find("_run_pending_emergency_merge_after_startup_guard(")
     main_required = (
         "_run_pending_emergency_merge_before_startup",
@@ -22902,12 +22912,83 @@ def _check_operblock_statistics_reads_rotated_db_without_id_collision(temp_root:
     return True, "ok"
 
 
+def _check_operblock_precommit_shadow_journal_contract(temp_root: str) -> tuple[bool, str]:
+    data_service_source = Path("services/data_service.py").read_text(encoding="utf-8")
+    store_source = Path("app/operblock_offline_store.py").read_text(encoding="utf-8")
+    if "def record_operblock_write_intent" not in store_source:
+        return False, "record_operblock_write_intent is missing"
+    for marker in (
+        "opblock_write_intent",
+        "opblock_write_remote_committed",
+        "opblock_write_failed",
+        "operation_uuid",
+        "remote_commit_state",
+    ):
+        if marker not in store_source:
+            return False, f"shadow journal marker is missing: {marker}"
+    enqueue_idx = data_service_source.find("def enqueue_write(")
+    intent_idx = data_service_source.find("operation_uuid = self._record_operblock_write_intent(description)", enqueue_idx)
+    submit_idx = data_service_source.find("self._queue.submit(", enqueue_idx)
+    if enqueue_idx < 0 or intent_idx < 0 or submit_idx < 0 or not intent_idx < submit_idx:
+        return False, "enqueue_write must record durable opblock intent before queue submit"
+    success_idx = data_service_source.find("def handle_success(result):", enqueue_idx)
+    mirror_idx = data_service_source.find(
+        "self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)",
+        success_idx,
+    )
+    shutdown_idx = data_service_source.find("if self._shutting_down:", success_idx)
+    if success_idx < 0 or mirror_idx < 0 or shutdown_idx < 0 or not mirror_idx < shutdown_idx:
+        return False, "queued committed writes must mirror before shutdown/outage success callbacks are skipped"
+    if "raise RuntimeError(\"Не удалось сохранить локальный журнал записи оперблока.\")" not in data_service_source:
+        return False, "opblock network write must not continue after pre-commit journal failure"
+    return True, "ok"
+
+
+def _check_operblock_migration_dialog_non_closable_contract(temp_root: str) -> tuple[bool, str]:
+    main_window_source = Path("ui/main_window.py").read_text(encoding="utf-8")
+    main_source = Path("app/main.py").read_text(encoding="utf-8")
+    for source_name, source in (("ui/main_window.py", main_window_source), ("app/main.py", main_source)):
+        if "Не выключайте ПК. Идёт перенос данных оперблока." not in source:
+            return False, f"migration progress text missing in {source_name}"
+        if "~Qt.WindowCloseButtonHint" not in source:
+            return False, f"migration dialog close button is not disabled in {source_name}"
+    if "_close_operblock_migration_dialog(dialog)" not in main_window_source:
+        return False, "post-release migration dialog is not closed in finally"
+    if "_close_operblock_migration_progress_dialog(dialog, app)" not in main_source:
+        return False, "pre-window migration dialog is not closed in finally"
+    if "_run_pending_operblock_offline_migration_before_window(" not in main_source:
+        return False, "pre-window migration hook is missing"
+    return True, "ok"
+
+
+def _check_operblock_offline_acceptance_runner_rc_scenarios(temp_root: str) -> tuple[bool, str]:
+    source = Path("scripts/operblock_offline_acceptance_runner.py").read_text(encoding="utf-8")
+    required = (
+        "initial_network_missing",
+        "migration",
+        "active_blocks_migration",
+        "table_conflict",
+        "protocol_conflict",
+        "cancelled_excluded",
+        "runtime_drop_same_case",
+        "precommit_journal_runtime_drop",
+        "unconfirmed_write_not_marked_saved",
+        "retention",
+        "retention_preserves_unverified",
+    )
+    missing = [name for name in required if name not in source]
+    if missing:
+        return False, f"acceptance runner is missing RC scenarios: {missing}"
+    return True, "ok"
+
+
 def main(argv: list[str] | None = None):
     args = _parse_args(argv)
     timeout_s = max(0.0, float(args.timeout_s or 0.0))
+    deadline = time.time() + timeout_s if timeout_s > 0 else None
     if timeout_s > 0:
         faulthandler.enable()
-        faulthandler.dump_traceback_later(timeout_s, repeat=False, exit=True)
+        faulthandler.dump_traceback_later(timeout_s, repeat=False, exit=False)
 
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
@@ -23004,6 +23085,9 @@ def main(argv: list[str] | None = None):
         ("db_cycle_period_selection", _check_db_cycle_period_selection),
         ("operblock_archive_reads_rotated_db", _check_operblock_archive_reads_rotated_db),
         ("operblock_statistics_reads_rotated_db_without_id_collision", _check_operblock_statistics_reads_rotated_db_without_id_collision),
+        ("operblock_precommit_shadow_journal_contract", _check_operblock_precommit_shadow_journal_contract),
+        ("operblock_migration_dialog_non_closable_contract", _check_operblock_migration_dialog_non_closable_contract),
+        ("operblock_offline_acceptance_runner_rc_scenarios", _check_operblock_offline_acceptance_runner_rc_scenarios),
         ("report_cleanup_uses_creation_age", _check_report_cleanup_uses_creation_age),
         ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),
@@ -23433,6 +23517,21 @@ def main(argv: list[str] | None = None):
             quiet=bool(args.quiet_progress),
         )
         for index, (name, fn) in enumerate(checks, start=1):
+            if deadline is not None and time.time() >= deadline:
+                failures += 1
+                result_items.append(
+                    {
+                        "check": "__timeout__",
+                        "ok": False,
+                        "details": f"Regression timeout reached before {index}/{total} {name}",
+                        "duration_sec": round(time.time() - started, 3),
+                    }
+                )
+                _print_progress(
+                    f"[regression] timeout before {index}/{total} {name}",
+                    quiet=bool(args.quiet_progress),
+                )
+                break
             check_root = os.path.join(temp_root, name)
             Path(check_root).mkdir(parents=True, exist_ok=True)
             check_started = time.time()
@@ -23461,6 +23560,21 @@ def main(argv: list[str] | None = None):
                 f"[regression] {index}/{total} {name} {status} {duration_sec:.3f}s",
                 quiet=bool(args.quiet_progress),
             )
+            if deadline is not None and time.time() >= deadline:
+                failures += 1
+                result_items.append(
+                    {
+                        "check": "__timeout__",
+                        "ok": False,
+                        "details": f"Regression timeout reached after {index}/{total} {name}",
+                        "duration_sec": round(time.time() - started, 3),
+                    }
+                )
+                _print_progress(
+                    f"[regression] timeout after {index}/{total} {name}",
+                    quiet=bool(args.quiet_progress),
+                )
+                break
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
         if timeout_s > 0:
@@ -23469,8 +23583,10 @@ def main(argv: list[str] | None = None):
     report = {
         "total": len(checks),
         "failed": failures,
-        "passed": len(checks) - failures,
+        "passed": sum(1 for item in result_items if item.get("ok")),
         "duration_sec": round(time.time() - started, 3),
+        "timed_out": any(item.get("check") == "__timeout__" for item in result_items),
+        "completed": sum(1 for item in result_items if item.get("check") != "__timeout__"),
         "checks": result_items,
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))

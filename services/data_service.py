@@ -158,11 +158,14 @@ class DataService(QObject):
     def run_write(self, description: str, operation: Callable):
         if self._reject_write_if_outage(description):
             raise RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
+        operation_uuid = self._record_operblock_write_intent(description)
         try:
             result = self.db.run_write_operation(operation, source=description)
         except Exception as exc:
+            self._mark_operblock_write_failed(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
             raise
+        self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)
         self.write_finished.emit(description)
         self.request_immediate_refresh(force_emit=True, source=description)
         return result
@@ -185,6 +188,59 @@ class DataService(QObject):
         self.write_failed.emit(f"{description}: {exc}")
         return True
 
+    def _is_operblock_network_write(self, description: str) -> bool:
+        role = str(self._runtime_role or "").strip().lower()
+        if not role.startswith("operblock"):
+            return False
+        if not str(description or "").startswith("operblock_"):
+            return False
+        runtime_context = getattr(self.db, "runtime_context", None)
+        return str(getattr(runtime_context, "mode", "") or "") == "network"
+
+    def _record_operblock_write_intent(self, description: str) -> str | None:
+        if not self._is_operblock_network_write(description):
+            return None
+        try:
+            from rem_card.app.operblock_offline_store import record_operblock_write_intent
+
+            return record_operblock_write_intent(self.db, description=str(description or ""))
+        except Exception as exc:
+            logger.warning("Operblock pre-commit local journal failed for %s: %s", description, exc, exc_info=True)
+            raise RuntimeError("Не удалось сохранить локальный журнал записи оперблока.") from exc
+
+    def _mark_operblock_write_failed(self, operation_uuid: str | None, description: str, exc: Exception) -> None:
+        if not operation_uuid:
+            return
+        try:
+            from rem_card.app.operblock_offline_store import mark_operblock_write_failed
+
+            mark_operblock_write_failed(
+                operation_uuid=operation_uuid,
+                description=str(description or ""),
+                error=exc,
+            )
+        except Exception as journal_exc:
+            logger.warning("Operblock failed-write local journal failed for %s: %s", description, journal_exc, exc_info=True)
+
+    def _mirror_operblock_write_after_commit(self, description: str, *, operation_uuid: str | None = None) -> None:
+        if not self._is_operblock_network_write(description):
+            return
+        try:
+            from rem_card.app.operblock_offline_store import (
+                mark_operblock_write_remote_committed,
+                mirror_active_operblock_cases_from_network_db,
+            )
+
+            mirror_active_operblock_cases_from_network_db(self.db, reason=str(description or ""))
+            if operation_uuid:
+                mark_operblock_write_remote_committed(
+                    self.db,
+                    operation_uuid=operation_uuid,
+                    description=str(description or ""),
+                )
+        except Exception as exc:
+            logger.warning("Operblock local shadow mirror failed after %s: %s", description, exc, exc_info=True)
+
     def enqueue_write(
         self,
         description: str,
@@ -200,8 +256,17 @@ class DataService(QObject):
                 self._error_callback_requested.emit(on_error, exc)
             return False
 
+        try:
+            operation_uuid = self._record_operblock_write_intent(description)
+        except Exception as exc:
+            self.write_failed.emit(f"{description}: {exc}")
+            if on_error:
+                self._error_callback_requested.emit(on_error, exc)
+            return False
+
         if self._shutting_down:
             exc = RuntimeError("Application is shutting down; queued write rejected")
+            self._mark_operblock_write_failed(operation_uuid, description, exc)
             logger.info("Queued write rejected during shutdown for %s", description)
             self.write_failed.emit(f"{description}: {exc}")
             if on_error:
@@ -212,6 +277,7 @@ class DataService(QObject):
             return False
 
         def handle_success(result):
+            self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)
             if self._shutting_down:
                 logger.info("Queued write success callbacks skipped during shutdown for %s", description)
                 return
@@ -224,6 +290,7 @@ class DataService(QObject):
 
         def handle_error(exc: Exception):
             logger.error("Queued write failed for %s: %s", description, exc)
+            self._mark_operblock_write_failed(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
             self.write_failed.emit(f"{description}: {exc}")
             self._error_callback_requested.emit(on_error, exc)

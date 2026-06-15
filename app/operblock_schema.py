@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1007
+OPERBLOCK_SCHEMA_VERSION = 1008
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -86,6 +86,14 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "anesthesia_protocol_date",
         "transfer_department",
         "future_rao_admission_id",
+        "offline_case_uuid",
+        "offline_session_id",
+        "migration_status",
+        "migrated_at",
+        "migrated_remote_id",
+        "original_local_id",
+        "original_protocol_number",
+        "excluded_from_migration",
     }.issubset(case_columns):
         return False
     if not _index_exists(conn, "idx_operation_cases_one_active_per_table"):
@@ -175,6 +183,14 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             anesthesia_protocol_number INTEGER,
             anesthesia_protocol_date TEXT,
             transfer_department TEXT,
+            offline_case_uuid TEXT,
+            offline_session_id TEXT,
+            migration_status TEXT,
+            migrated_at TEXT,
+            migrated_remote_id INTEGER,
+            original_local_id INTEGER,
+            original_protocol_number INTEGER,
+            excluded_from_migration INTEGER NOT NULL DEFAULT 0,
             CHECK (table_code IN ('emergency', 'planned')),
             CHECK (status IN ('active', 'closed', 'transferred_to_rao', 'cancelled')),
             CHECK (ended_at IS NULL OR ended_at >= started_at),
@@ -203,6 +219,14 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     _ensure_column(conn, "operation_cases", "anesthesia_protocol_date", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "transfer_department", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "future_rao_admission_id", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "offline_case_uuid", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "offline_session_id", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "migration_status", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "migrated_at", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "migrated_remote_id", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "original_local_id", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "original_protocol_number", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "excluded_from_migration", "INTEGER NOT NULL DEFAULT 0", logger)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS operation_table_assignments (
@@ -313,6 +337,19 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         """
     )
     cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_cases_offline_uuid
+        ON operation_cases(offline_case_uuid)
+        WHERE offline_case_uuid IS NOT NULL AND offline_case_uuid <> ''
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_operation_cases_migration_status
+        ON operation_cases(migration_status, migrated_at, status)
+        """
+    )
+    cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_operation_assignments_case ON operation_table_assignments(operation_case_id)"
     )
     cursor.execute(
@@ -384,7 +421,26 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     )
     _mark_schema_migration(conn, 1001, "operblock operation cases and table assignments")
     _mark_schema_migration(conn, 1006, "operblock anesthesia protocol numbers and transfer target")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock rao recovery auto admission link")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS opblock_offline_case_map (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            offline_case_uuid TEXT NOT NULL,
+            offline_session_id TEXT,
+            local_operation_case_id INTEGER,
+            remote_operation_case_id INTEGER,
+            original_protocol_number INTEGER,
+            network_protocol_number INTEGER,
+            content_hash TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            UNIQUE(offline_case_uuid)
+        )
+        """
+    )
+    _create_updated_at_trigger(conn, "opblock_offline_case_map")
+    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock offline metadata and idempotency")
 
 
 def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:

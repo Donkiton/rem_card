@@ -178,11 +178,15 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
         print(f"[SETTINGS DB] remcard_settings.db -> {settings_info.get('settings_db_path')}")
 
     if is_operblock_role(str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()):
+        local_db_used = str(bool(runtime_mode == "opblock_offline")).lower()
+        db_profile = "local_network_safe" if runtime_mode == "opblock_offline" else "network"
         logger.info(
-            "[OPERBLOCK DB] role=%s data_root=%s db_path=%s db_profile=network local_db_used=false",
+            "[OPERBLOCK DB] role=%s data_root=%s db_path=%s db_profile=%s local_db_used=%s",
             str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower() or "operblock",
             getattr(db_manager, "baza_dir", BAZA_DIR),
             getattr(db_manager, "db_path", medical_db_path),
+            db_profile,
+            local_db_used,
         )
         from rem_card.app.operblock_schema import ensure_operblock_schema
 

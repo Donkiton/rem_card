@@ -18315,6 +18315,10 @@ class OperBlockMainWidget(QWidget):
         self.refresh_board(force=True)
         if self._current_operation_case_id == int(operation_case_id):
             self._show_board()
+        parent = self.window()
+        migrate = getattr(parent, "_maybe_migrate_operblock_offline_after_release", None)
+        if callable(migrate):
+            migrate()
 
     def _on_release_case_error(self, exc: Exception):
         self._write_pending = False

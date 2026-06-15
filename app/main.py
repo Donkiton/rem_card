@@ -820,6 +820,62 @@ def _configure_emergency_settings_for_startup(runtime_context) -> None:
         pass
 
 
+def _startup_failure_category(failure: object) -> str:
+    try:
+        from rem_card.app.db_access_classifier import classify_database_access_error
+
+        technical = str(getattr(failure, "technical_reason", "") or failure or "")
+        if "database file does not exist" in technical.lower() or "missing_db" in technical.lower():
+            return "missing_db"
+        category = classify_database_access_error(RuntimeError(technical))
+        if category:
+            return str(category)
+    except Exception:
+        pass
+    return ""
+
+
+def _try_operblock_offline_startup_after_network_failure(
+    role: Optional[str],
+    failure: object,
+    *,
+    before_user_message: Optional[Callable[[], None]] = None,
+    reason: str = "",
+):
+    if not is_operblock_role(role):
+        return None
+
+    category = _startup_failure_category(failure)
+    technical = str(getattr(failure, "technical_reason", "") or failure or "")
+    allowed_categories = {"network_unavailable", "network_unavailable_or_missing", "missing_db", "path_inaccessible"}
+    if category not in allowed_categories:
+        text = technical.lower()
+        if not any(marker in text for marker in ("network", "unable to open", "no such file", "path not found", "недоступ", "сетев")):
+            return None
+
+    try:
+        from rem_card.app.operblock_offline_store import (
+            OPERBLOCK_OFFLINE_WARNING,
+            start_or_resume_operblock_offline_session,
+        )
+        from rem_card.app.runtime_paths import get_journal_db_path, resolve_baza_dir
+    except Exception:
+        return None
+
+    network_db_path = None
+    try:
+        network_db_path = get_journal_db_path(resolve_baza_dir())
+    except Exception:
+        network_db_path = None
+
+    _call_startup_message_callback(before_user_message)
+    _show_custom_warning("Оперблок: локальный режим", OPERBLOCK_OFFLINE_WARNING)
+    return start_or_resume_operblock_offline_session(
+        reason=reason or technical or category or "network_unavailable",
+        network_db_path=network_db_path,
+    )
+
+
 def _try_emergency_startup_after_network_failure(
     role: Optional[str],
     failure: object,
@@ -1005,6 +1061,15 @@ def _handle_emergency_startup_guard_failure(
     before_user_message: Optional[Callable[[], None]] = None,
     emergency_startup_request: str | None = None,
 ) -> tuple[Optional[bool], object | None]:
+    opblock_outcome = _try_operblock_offline_startup_after_network_failure(
+        role,
+        failure,
+        before_user_message=before_user_message,
+        reason="startup_guard",
+    )
+    if opblock_outcome is not None:
+        return True, opblock_outcome.runtime_context
+
     outcome = _try_emergency_startup_after_network_failure(
         role,
         failure,
@@ -1051,6 +1116,21 @@ def _bootstrap_container_with_emergency_fallback(
     try:
         return bootstrap_func(role=role), emergency_runtime_context, role_lock
     except Exception as exc:
+        opblock_outcome = _try_operblock_offline_startup_after_network_failure(
+            role,
+            exc,
+            before_user_message=before_user_message,
+            reason="bootstrap",
+        )
+        if opblock_outcome is not None:
+            if role_lock:
+                try:
+                    role_lock.release()
+                except Exception:
+                    pass
+                role_lock = None
+            return bootstrap_func(role=role, runtime_context=opblock_outcome.runtime_context), opblock_outcome.runtime_context, role_lock
+
         outcome = _try_emergency_startup_after_network_failure(
             role,
             exc,
@@ -1086,7 +1166,7 @@ def _validate_compiled_role_startup(
         result = run_startup_db_guard(role=role)
     except Exception as exc:
         _write_startup_local_log(f"startup db guard crashed for role={role}: {exc}")
-        handled = _call_startup_failure_callback(on_failure, exc) if role in ("doctor", "nurse") else None
+        handled = _call_startup_failure_callback(on_failure, exc) if role in ("doctor", "nurse") or is_operblock_role(role) else None
         if handled is not None:
             return handled
         _call_startup_message_callback(before_user_message)
@@ -1114,7 +1194,7 @@ def _validate_compiled_role_startup(
     _write_startup_local_log(
         f"startup blocked for role={role}: {result.user_message}; technical={result.technical_reason}"
     )
-    handled = _call_startup_failure_callback(on_failure, result) if role in ("doctor", "nurse") else None
+    handled = _call_startup_failure_callback(on_failure, result) if role in ("doctor", "nurse") or is_operblock_role(role) else None
     if handled is not None:
         return handled
     update_candidate = None
@@ -1269,6 +1349,61 @@ def _resolve_startup_role(parsed_role: Optional[str], forced_role: Optional[str]
     if forced_role:
         return forced_role
     return parsed_role or None
+
+
+def _preselect_operblock_offline_context_before_network_probe(role: Optional[str]) -> tuple[object | None, str]:
+    if not is_operblock_role(role):
+        return None, ""
+    try:
+        from rem_card.app.operblock_offline_store import (
+            has_active_local_operblock_case,
+            start_or_resume_operblock_offline_session,
+        )
+
+        if not has_active_local_operblock_case():
+            return None, ""
+        session = start_or_resume_operblock_offline_session(reason="active_local_case_blocks_network_probe")
+        return session.runtime_context, "active_local_case"
+    except Exception:
+        return None, ""
+
+
+def _show_preselected_operblock_offline_notice(
+    reason: str,
+    close_startup_splash: Callable[[], None],
+) -> None:
+    if reason != "active_local_case":
+        return
+    close_startup_splash()
+    _show_custom_warning(
+        "Оперблок: локальный режим",
+        "На этом ПК есть незавершённый локальный случай оперблока. "
+        "Оперблок открыт в локальном режиме без проверки сетевой базы.",
+    )
+
+
+def _validate_compiled_startup_unless_runtime_preselected(
+    role: Optional[str],
+    preselected_runtime_context,
+    *,
+    close_startup_splash: Callable[[], None],
+    emergency_startup_state: dict,
+    emergency_startup_request: str | None,
+) -> bool:
+    if preselected_runtime_context is not None:
+        return True
+    return _validate_compiled_role_startup(
+        role,
+        before_user_message=close_startup_splash,
+        on_success=_remember_startup_guard_quickcheck_ok,
+        on_failure=partial(
+            _compiled_startup_failure_handler,
+            role=role,
+            before_user_message=close_startup_splash,
+            state=emergency_startup_state,
+            emergency_startup_request=emergency_startup_request,
+        ),
+    )
 
 
 def _acquire_role_lock_for_startup(
@@ -1463,6 +1598,97 @@ def _resolve_startup_runtime_context_after_guard(
     return None
 
 
+def _show_operblock_migration_progress_dialog(app, close_startup_splash):
+    close_startup_splash()
+    try:
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout
+
+        dialog = QDialog()
+        dialog.setWindowTitle("Перенос данных оперблока")
+        dialog.setModal(True)
+        dialog.setWindowFlags(
+            (dialog.windowFlags() | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+            & ~Qt.WindowCloseButtonHint
+        )
+        layout = QVBoxLayout(dialog)
+        label = QLabel("Не выключайте ПК. Идёт перенос данных оперблока.")
+        label.setWordWrap(True)
+        label.setMinimumWidth(360)
+        layout.addWidget(label)
+        dialog.show()
+        app.processEvents()
+        return dialog
+    except Exception:
+        return None
+
+
+def _close_operblock_migration_progress_dialog(dialog, app) -> None:
+    if dialog is None:
+        return
+    try:
+        dialog.close()
+        app.processEvents()
+    except Exception:
+        pass
+
+
+def _run_pending_operblock_offline_migration_before_window(
+    *,
+    role: Optional[str],
+    container,
+    app,
+    close_startup_splash: Callable[[], None],
+    logger,
+) -> None:
+    if not is_operblock_role(role):
+        return
+    runtime_context = getattr(getattr(container, "db_manager", None), "runtime_context", None)
+    if getattr(runtime_context, "mode", "") != "network":
+        return
+    try:
+        from rem_card.app.operblock_offline_migration import run_pending_operblock_offline_migration
+        from rem_card.app.operblock_offline_store import (
+            has_active_local_operblock_case,
+            pending_completed_local_cases_count,
+        )
+    except Exception as exc:
+        logger.warning("Operblock offline migration import failed: %s", exc, exc_info=True)
+        return
+    try:
+        if has_active_local_operblock_case():
+            logger.info("Operblock offline pre-window migration skipped: active local case exists")
+            return
+        if pending_completed_local_cases_count() <= 0:
+            return
+    except Exception as exc:
+        logger.warning("Operblock offline migration precheck failed: %s", exc, exc_info=True)
+        return
+
+    dialog = _show_operblock_migration_progress_dialog(app, close_startup_splash)
+    try:
+        result = run_pending_operblock_offline_migration(container.db_manager)
+    finally:
+        _close_operblock_migration_progress_dialog(dialog, app)
+    if result.ok:
+        try:
+            from rem_card.app.operblock_offline_store import cleanup_verified_operblock_offline_session
+
+            cleanup_verified_operblock_offline_session(container.db_manager)
+        except Exception as exc:
+            logger.warning("Operblock offline retention cleanup failed: %s", exc, exc_info=True)
+        logger.info(
+            "Operblock offline migration startup result attempted=%s migrated=%s",
+            result.attempted,
+            result.migrated_cases,
+        )
+        return
+    _show_custom_warning(
+        "Перенос данных оперблока",
+        result.user_message or "Перенос не выполнен. Локальные данные сохранены. Повторите позже.",
+    )
+
+
 def main(forced_role: Optional[str] = None, path_setup: bool = False):
     try:
         compiled_role = _infer_compiled_role_from_executable()
@@ -1493,6 +1719,9 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     path_setup = bool(path_setup or args.path_setup)
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
     path_setup = _configure_operblock_startup_path(args.role, path_setup)
+    preselected_runtime_context, preselected_runtime_reason = (
+        _preselect_operblock_offline_context_before_network_probe(args.role)
+    )
 
     if _show_update_in_progress_if_needed():
         sys.exit(0)
@@ -1508,19 +1737,15 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         nonlocal splash
         splash = _close_startup_splash(app, splash)
 
-    emergency_startup_state = {"runtime_context": None}
+    emergency_startup_state = {"runtime_context": preselected_runtime_context}
+    _show_preselected_operblock_offline_notice(preselected_runtime_reason, close_startup_splash)
 
-    if not _validate_compiled_role_startup(
+    if not _validate_compiled_startup_unless_runtime_preselected(
         args.role,
-        before_user_message=close_startup_splash,
-        on_success=_remember_startup_guard_quickcheck_ok,
-        on_failure=partial(
-            _compiled_startup_failure_handler,
-            role=args.role,
-            before_user_message=close_startup_splash,
-            state=emergency_startup_state,
-            emergency_startup_request=args.emergency_startup_request,
-        ),
+        preselected_runtime_context,
+        close_startup_splash=close_startup_splash,
+        emergency_startup_state=emergency_startup_state,
+        emergency_startup_request=args.emergency_startup_request,
     ):
         close_startup_splash()
         sys.exit(1)
@@ -1591,6 +1816,14 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             )
             _opblock_startup_record_duration(args.role, "bootstrap_ms", bootstrap_elapsed_ms, source="app_main")
             _install_startup_trace_hooks(container, logger, startup_started_at)
+
+        _run_pending_operblock_offline_migration_before_window(
+            role=args.role,
+            container=container,
+            app=app,
+            close_startup_splash=close_startup_splash,
+            logger=logger,
+        )
 
         main_window_started = _opblock_startup_timer_start(args.role)
         window = MainWindow(
