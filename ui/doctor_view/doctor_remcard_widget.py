@@ -122,6 +122,8 @@ class DoctorRemCardWidget(QWidget):
         self._balance_runtime_cache = None
         self._read_only_widget_signature = None
         self._operblock_archive_viewer = None
+        self._operblock_archive_db_manager = None
+        self._operblock_archive_source_db_path = None
         self._is_closing = False
         self.diet_intake_widget = None
         self._full_layout_created = False
@@ -2124,10 +2126,40 @@ class DoctorRemCardWidget(QWidget):
             admin_widget.btn_back_to_roles.clicked.connect(lambda: self.on_back_clicked())
             self._admin_signals_bound = True
 
-    def _ensure_operblock_archive_viewer(self):
+    def _close_operblock_archive_viewer(self):
         viewer = getattr(self, "_operblock_archive_viewer", None)
         if self._is_qobject_alive(viewer):
+            try:
+                if hasattr(viewer, "shutdown"):
+                    viewer.shutdown()
+            except Exception as exc:
+                logger.warning("Failed to shutdown operblock archive viewer: %s", exc)
+            try:
+                if hasattr(self, "content_stack") and self.content_stack.indexOf(viewer) >= 0:
+                    self.content_stack.removeWidget(viewer)
+            except Exception:
+                pass
+            try:
+                viewer.deleteLater()
+            except Exception:
+                pass
+        self._operblock_archive_viewer = None
+        if self._operblock_archive_db_manager is not None:
+            try:
+                self._operblock_archive_db_manager.close()
+            except Exception as exc:
+                logger.warning("Failed to close operblock archive read-only DB manager: %s", exc)
+        self._operblock_archive_db_manager = None
+        self._operblock_archive_source_db_path = None
+
+    def _ensure_operblock_archive_viewer(self, source_db_path: str | None = None):
+        source_db = os.path.abspath(str(source_db_path or "")) if source_db_path else None
+        viewer = getattr(self, "_operblock_archive_viewer", None)
+        current_source = getattr(self, "_operblock_archive_source_db_path", None)
+        if self._is_qobject_alive(viewer) and (source_db or None) == (current_source or None):
             return viewer
+        if self._is_qobject_alive(viewer):
+            self._close_operblock_archive_viewer()
         if self.operblock_service is None:
             CustomMessageBox.warning(self, "Архив оперблока", "Сервис оперблока недоступен.")
             return None
@@ -2137,28 +2169,54 @@ class DoctorRemCardWidget(QWidget):
 
         from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMainWidget
 
-        viewer = OperBlockMainWidget(
-            self.patient_service,
-            self.service,
-            self.operblock_service,
-            parent=self.content_stack,
-            view_only=True,
-        )
+        patient_service = self.patient_service
+        remcard_service = self.service
+        operblock_service = self.operblock_service
+        db_manager = None
+        if source_db:
+            try:
+                remcard_service, db_manager = create_archive_readonly_service(source_db)
+                from rem_card.services.operblock_service import OperBlockService
+
+                operblock_service = OperBlockService(db_manager)
+                patient_service = getattr(remcard_service, "_patients", patient_service)
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть архивную БД:\n{exc}")
+                return None
+
+        try:
+            viewer = OperBlockMainWidget(
+                patient_service,
+                remcard_service,
+                operblock_service,
+                parent=self.content_stack,
+                view_only=True,
+            )
+        except Exception:
+            if db_manager is not None:
+                try:
+                    db_manager.close()
+                except Exception:
+                    pass
+            raise
         viewer.view_back_requested.connect(self._return_from_operblock_archive_viewer)
         self._operblock_archive_viewer = viewer
+        self._operblock_archive_db_manager = db_manager
+        self._operblock_archive_source_db_path = source_db
         self.content_stack.addWidget(viewer)
         return viewer
 
     def on_operblock_case_selected_from_archive(self, case):
         try:
-            case_id = int((case or {}).get("operation_case_id") or 0)
+            case_id = int((case or {}).get("source_operation_case_id") or (case or {}).get("operation_case_id") or 0)
         except Exception:
             case_id = 0
         if not case_id:
             CustomMessageBox.warning(self, "Архив оперблока", "Не удалось определить запись оперблока.")
             return
 
-        viewer = self._ensure_operblock_archive_viewer()
+        source_db_path = str((case or {}).get("source_db_path") or "").strip() if (case or {}).get("is_external_archive") else ""
+        viewer = self._ensure_operblock_archive_viewer(source_db_path or None)
         if viewer is None:
             return
         self._card_return_mode = None
@@ -2170,6 +2228,8 @@ class DoctorRemCardWidget(QWidget):
     def _return_from_operblock_archive_viewer(self):
         if hasattr(self, "content_stack") and hasattr(self, "layout_manager"):
             self.content_stack.setCurrentWidget(self.layout_manager)
+        if getattr(self, "_operblock_archive_source_db_path", None):
+            self._close_operblock_archive_viewer()
         if hasattr(self, "layout_manager"):
             self.layout_manager.set_patient_selection_mode("archive")
             self._wire_dynamic_views()
@@ -3451,6 +3511,7 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self.layout_manager, "sector_w1a") and hasattr(self.layout_manager.sector_w1a, "shutdown"):
                 self.layout_manager.sector_w1a.shutdown()
         self._close_archive_readonly_manager()
+        self._close_operblock_archive_viewer()
 
     def closeEvent(self, event):
         self.shutdown()

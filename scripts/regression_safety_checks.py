@@ -21887,6 +21887,201 @@ def _create_db_cycle_fixture(path: str, *, admission_dt: str, active_bed: bool =
         conn.close()
 
 
+def _create_operblock_cycle_fixture(
+    path: str,
+    *,
+    started_at: str,
+    full_name: str,
+    history_number: str,
+    table_code: str = "emergency",
+) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for candidate in (path, f"{path}-journal", f"{path}-wal", f"{path}-shm"):
+        try:
+            os.remove(candidate)
+        except FileNotFoundError:
+            pass
+    conn = sqlite3.connect(path)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE operating_tables (
+                code TEXT PRIMARY KEY,
+                display_name TEXT,
+                sort_order INTEGER
+            );
+            CREATE TABLE patients (
+                id INTEGER PRIMARY KEY,
+                full_name TEXT,
+                birth_date TEXT
+            );
+            CREATE TABLE admissions (
+                id INTEGER PRIMARY KEY,
+                patient_id INTEGER,
+                history_number TEXT,
+                admission_datetime TEXT,
+                unit_scope TEXT,
+                patient_gender TEXT,
+                patient_age INTEGER,
+                patient_months INTEGER,
+                patient_age_unit TEXT,
+                diagnosis_code TEXT,
+                diagnosis_text TEXT,
+                department_profile TEXT,
+                source_department TEXT
+            );
+            CREATE TABLE operation_cases (
+                id INTEGER PRIMARY KEY,
+                patient_id INTEGER,
+                admission_id INTEGER,
+                table_code TEXT,
+                status TEXT,
+                created_at TEXT,
+                started_at TEXT,
+                ended_at TEXT,
+                planned_operation_name TEXT,
+                planned_surgeons_json TEXT,
+                planned_anesthesiologist TEXT,
+                planned_anesthetist TEXT,
+                height_cm INTEGER,
+                weight_kg REAL,
+                allergies TEXT,
+                blood_group TEXT,
+                blood_rh TEXT,
+                preop_sys INTEGER,
+                preop_dia INTEGER,
+                preop_pulse INTEGER,
+                preop_spo2 INTEGER,
+                anesthesia_protocol_number INTEGER,
+                anesthesia_protocol_date TEXT,
+                transfer_department TEXT
+            );
+            CREATE TABLE operblock_timeline_events (
+                id INTEGER PRIMARY KEY,
+                operation_case_id INTEGER,
+                admission_id INTEGER,
+                table_code TEXT,
+                event_type TEXT,
+                event_time TEXT,
+                end_time TEXT,
+                drug_label TEXT,
+                display_label TEXT,
+                raw_text TEXT,
+                dose_value TEXT,
+                dose_unit TEXT,
+                volume_ml TEXT,
+                concentration_text TEXT,
+                rate_value TEXT,
+                rate_unit TEXT,
+                route TEXT,
+                status TEXT,
+                revision INTEGER,
+                source_order_id INTEGER,
+                parent_event_id INTEGER,
+                payload_json TEXT
+            );
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY,
+                admission_id INTEGER,
+                datetime TEXT,
+                text TEXT,
+                drug_key TEXT,
+                status TEXT,
+                comment TEXT
+            );
+            CREATE TABLE vitals (
+                id INTEGER PRIMARY KEY,
+                admission_id INTEGER,
+                datetime TEXT,
+                sys INTEGER,
+                dia INTEGER,
+                pulse INTEGER,
+                temp REAL,
+                spo2 INTEGER,
+                rr INTEGER,
+                cvp INTEGER
+            );
+            """
+        )
+        conn.execute("INSERT INTO meta (key, value) VALUES ('db_cycle_started_at', ?)", (str(int(time.time())),))
+        conn.executemany(
+            "INSERT INTO operating_tables (code, display_name, sort_order) VALUES (?, ?, ?)",
+            [
+                ("emergency", "Экстренная операционная", 1),
+                ("planned", "Плановая операционная", 2),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO patients (id, full_name, birth_date) VALUES (1, ?, '1980-01-01')",
+            (full_name,),
+        )
+        conn.execute(
+            """
+            INSERT INTO admissions (
+                id, patient_id, history_number, admission_datetime, unit_scope,
+                patient_gender, patient_age, patient_months, patient_age_unit,
+                diagnosis_code, diagnosis_text, department_profile, source_department
+            ) VALUES (1, 1, ?, ?, 'operblock', 'м', 46, 552, 'л', 'K35', 'Аппендицит', 'хирургия', 'приёмное')
+            """,
+            (history_number, started_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO operation_cases (
+                id, patient_id, admission_id, table_code, status, created_at, started_at, ended_at,
+                planned_operation_name, planned_surgeons_json, planned_anesthesiologist, planned_anesthetist,
+                height_cm, weight_kg, allergies, blood_group, blood_rh, preop_sys, preop_dia, preop_pulse,
+                preop_spo2, anesthesia_protocol_number, anesthesia_protocol_date, transfer_department
+            ) VALUES (
+                1, 1, 1, ?, 'closed', ?, ?, DATETIME(?, '+1 hour'),
+                'Операция', '["Хирург"]', 'Анестезиолог', 'Анестезистка',
+                175, 70, '', 'O(I) первая', 'Rh(+) положительный', 120, 80, 80,
+                99, 1, DATE(?), 'РАО'
+            )
+            """,
+            (table_code, started_at, started_at, started_at, started_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO operblock_timeline_events (
+                id, operation_case_id, admission_id, table_code, event_type, event_time,
+                drug_label, display_label, route, status, revision, payload_json
+            ) VALUES (1, 1, 1, ?, 'bolus', DATETIME(?, '+10 minutes'), 'Тест препарат', 'Тест препарат', 'iv', 'active', 1, '{}')
+            """,
+            (table_code, started_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO vitals (id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp)
+            VALUES (1, 1, DATETIME(?, '+5 minutes'), 120, 80, 80, 36.6, 99, NULL, NULL)
+            """,
+            (started_at,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+class _SimpleDbManager:
+    def __init__(self, db_path: str):
+        from rem_card.app.sqlite_shared import configure_connection
+
+        self.db_path = os.path.abspath(db_path)
+        self.conn = sqlite3.connect(self.db_path)
+        configure_connection(self.conn)
+
+    def fetch_all_remcard(self, query, params=()):
+        return self.conn.execute(query, tuple(params or ())).fetchall()
+
+    def fetch_one_remcard(self, query, params=()):
+        return self.conn.execute(query, tuple(params or ())).fetchone()
+
+    def close(self):
+        self.conn.close()
+
+
 def _check_db_rotation_forbids_emergency_runtime(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.db_lifecycle import maybe_rotate_database_if_due
 
@@ -22290,6 +22485,105 @@ def _check_db_cycle_period_selection(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_operblock_archive_reads_rotated_db(temp_root: str) -> tuple[bool, str]:
+    from rem_card.services.operblock_service import OperBlockService
+
+    archiv = os.path.join(temp_root, "Baza_operblock_archive", "archiv")
+    current = os.path.join(archiv, "rao_journal.db")
+    old = os.path.join(archiv, "rao_journal_archived_20250101_000000.db")
+    _create_operblock_cycle_fixture(
+        current,
+        started_at="2026-06-10 08:00:00",
+        full_name="Текущий Пациент",
+        history_number="CUR",
+    )
+    _create_operblock_cycle_fixture(
+        old,
+        started_at="2025-03-10 08:00:00",
+        full_name="Архивный Пациент",
+        history_number="OLD",
+    )
+
+    manager = _SimpleDbManager(current)
+    try:
+        service = OperBlockService(manager)
+        cases = service.list_archived_operation_cases()
+        by_history = {case.get("history_number"): case for case in cases}
+        if {"CUR", "OLD"} - set(by_history):
+            return False, f"operblock archive missed DB cycle cases: {by_history}"
+        if not by_history["OLD"].get("is_external_archive"):
+            return False, f"rotated operblock case is not marked external: {by_history['OLD']}"
+        if by_history["CUR"].get("is_external_archive"):
+            return False, f"current operblock case is incorrectly marked external: {by_history['CUR']}"
+
+        selected = service.get_archive_db_paths_for_period(
+            "2025-01-01 00:00:00",
+            "2025-12-31 23:59:59",
+        )
+        selected_keys = {os.path.normcase(path) for path in selected}
+        if os.path.normcase(old) not in selected_keys or os.path.normcase(current) in selected_keys:
+            return False, f"operblock period DB selection is wrong: {selected}"
+
+        period_cases = service.list_archived_operation_cases(
+            start_dt="2025-01-01 00:00:00",
+            end_dt="2025-12-31 23:59:59",
+        )
+        period_histories = {case.get("history_number") for case in period_cases}
+        if period_histories != {"OLD"}:
+            return False, f"operblock period archive returned unexpected cases: {period_histories}"
+    finally:
+        manager.close()
+    return True, "ok"
+
+
+def _check_operblock_statistics_reads_rotated_db_without_id_collision(temp_root: str) -> tuple[bool, str]:
+    from rem_card.services.analytics.operblock_statistics_service import OperBlockStatisticsReportBuilder
+
+    archiv = os.path.join(temp_root, "Baza_operblock_stats", "archiv")
+    current = os.path.join(archiv, "rao_journal.db")
+    old = os.path.join(archiv, "rao_journal_archived_20250101_000000.db")
+    _create_operblock_cycle_fixture(
+        current,
+        started_at="2026-06-10 08:00:00",
+        full_name="Текущий Пациент",
+        history_number="CUR",
+    )
+    _create_operblock_cycle_fixture(
+        old,
+        started_at="2025-03-10 08:00:00",
+        full_name="Архивный Пациент",
+        history_number="OLD",
+    )
+
+    manager = _SimpleDbManager(current)
+    try:
+        builder = OperBlockStatisticsReportBuilder(
+            manager,
+            "2025-01-01 00:00:00",
+            "2026-12-31 23:59:59",
+            db_paths=[old, current],
+        )
+        context = builder._fetch_multi_db_context([old, current], builder.start_date_str, builder.end_date_str)
+        case_ids = [int(row.get("operation_case_id") or 0) for row in context["cases"]]
+        source_case_ids = [int(row.get("source_operation_case_id") or 0) for row in context["cases"]]
+        if sorted(case_ids) != [1, 2]:
+            return False, f"operblock multi-DB context did not remap case ids: {case_ids}"
+        if source_case_ids != [1, 1]:
+            return False, f"operblock source ids should preserve per-DB ids: {source_case_ids}"
+        timeline_case_ids = {int(row.get("operation_case_id") or 0) for row in context["timeline"]}
+        if timeline_case_ids != {1, 2}:
+            return False, f"operblock timeline rows not mapped to both cases: {timeline_case_ids}"
+
+        stats = builder._calculate_statistics()
+        if int(stats.get("total") or 0) != 2:
+            return False, f"operblock stats missed rotated DB cases: total={stats.get('total')}"
+        if int(stats.get("bolus_count") or 0) != 2:
+            return False, f"operblock stats lost timeline rows across rotated DBs: bolus_count={stats.get('bolus_count')}"
+    finally:
+        manager.close()
+    return True, "ok"
+
+
 def main(argv: list[str] | None = None):
     args = _parse_args(argv)
     timeout_s = max(0.0, float(args.timeout_s or 0.0))
@@ -22390,6 +22684,8 @@ def main(argv: list[str] | None = None):
         ("archive_patients_sql_period_filter", _check_archive_patients_sql_period_filter),
         ("auto_rotation_after_doctor_exit_only", _check_auto_rotation_after_doctor_exit_only),
         ("db_cycle_period_selection", _check_db_cycle_period_selection),
+        ("operblock_archive_reads_rotated_db", _check_operblock_archive_reads_rotated_db),
+        ("operblock_statistics_reads_rotated_db_without_id_collision", _check_operblock_statistics_reads_rotated_db_without_id_collision),
         ("report_cleanup_uses_creation_age", _check_report_cleanup_uses_creation_age),
         ("runtime_backup_rotation_scans_valid_dir", _check_runtime_backup_rotation_scans_valid_dir),
         ("balance_admission_hour_visibility", _check_balance_admission_hour_visibility),

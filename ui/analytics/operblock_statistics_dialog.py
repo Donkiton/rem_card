@@ -44,9 +44,18 @@ from rem_card.ui.styles.theme import (
 
 
 class OperBlockStatisticsDialog(SavedFramelessDialogMixin, QDialog):
-    def __init__(self, db_manager, start_date_str: str, end_date_str: str, parent=None):
+    def __init__(
+        self,
+        db_manager,
+        start_date_str: str,
+        end_date_str: str,
+        parent=None,
+        *,
+        db_paths=None,
+    ):
         super().__init__(parent)
         self.db_manager = db_manager
+        self.db_paths = list(db_paths or [])
         self._start_dt = self._parse_datetime(start_date_str) or (datetime.now() - timedelta(days=30))
         self._end_dt = self._parse_datetime(end_date_str) or datetime.now()
         if self._end_dt < self._start_dt:
@@ -262,6 +271,7 @@ class OperBlockStatisticsDialog(SavedFramelessDialogMixin, QDialog):
                 self.start_date_str,
                 self.end_date_str,
                 selected,
+                db_paths=self.db_paths,
             ),
             parent=self,
         )

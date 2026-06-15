@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional
 import uuid
 
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.db_cycle_registry import discover_db_cycle_paths
 from rem_card.app.logger import logger
 from rem_card.app.patient_age import (
     format_patient_age,
@@ -22,7 +23,8 @@ from rem_card.app.patient_age import (
     storage_age_from_birth_date,
 )
 from rem_card.app.paths import REPORT_DIR
-from rem_card.data.dto.remcard_dto import VitalDTO
+from rem_card.app.sqlite_shared import configure_connection
+from rem_card.data.dto.remcard_dto import PatientStatus, VitalDTO
 from rem_card.services.concurrency import DATA_CONFLICT_MESSAGE, DataConflictError, assert_revision_matches
 from rem_card.services.operblock_medication_presets import (
     load_operblock_medication_presets,
@@ -43,6 +45,7 @@ from rem_card.services.operblock_timeline import (
 )
 from rem_card.services.patient_departments import normalize_profile_department
 from rem_card.services.patient_departments import PROFILE_DEPARTMENTS
+from rem_card.services.patient_bed_management.recovery_beds import RECOVERY_BED_TRANSFER_ORDER
 
 
 OPERBLOCK_ROLE = "operblock"
@@ -258,6 +261,10 @@ def normalize_operblock_transfer_department(value: Any) -> str:
     if text.casefold().replace("ё", "е") == "рао":
         return "РАО"
     return text
+
+
+def _is_rao_transfer_department(value: Any) -> bool:
+    return normalize_operblock_transfer_department(value) == "РАО"
 
 
 def _is_upper_abbreviation(text: str) -> bool:
@@ -784,10 +791,227 @@ def _row_to_dict(row) -> dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
+def _sqlite_table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        if row and row[0]
+    }
+
+
+def _sqlite_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall() if row and row[1]}
+    except Exception:
+        return set()
+
+
 class OperBlockService:
     def __init__(self, db_manager):
         self.db = db_manager
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
+
+    def _current_db_path(self) -> str:
+        raw = str(getattr(self.db, "db_path", "") or getattr(self.db, "remcard_db_path", "") or "")
+        return os.path.abspath(raw) if raw else ""
+
+    def _iter_archive_db_paths(self, *, include_current: bool = True) -> list[str]:
+        current_db_path = self._current_db_path()
+        if not current_db_path:
+            return []
+        return discover_db_cycle_paths(
+            current_db_path=current_db_path,
+            include_current=include_current,
+        )
+
+    def get_archive_db_paths_for_period(self, start_dt: str | None, end_dt: str | None) -> list[str]:
+        db_paths = self._iter_archive_db_paths(include_current=True)
+        if not start_dt or not end_dt:
+            return db_paths
+
+        start = _parse_dt(start_dt)
+        end = _parse_dt(end_dt)
+        if start is None or end is None:
+            return db_paths
+        if end < start:
+            start, end = end, start
+
+        result = []
+        for db_path in db_paths:
+            if self._db_has_operblock_cases_in_period(db_path, start, end):
+                result.append(db_path)
+        return result
+
+    @staticmethod
+    def _db_has_operblock_cases_in_period(db_path: str, start: datetime, end: datetime) -> bool:
+        if not db_path or not os.path.isfile(db_path):
+            return False
+        conn = None
+        try:
+            conn = sqlite3.connect(
+                f"file:{os.path.abspath(db_path)}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5.0,
+            )
+            configure_connection(conn, readonly=True)
+            tables = _sqlite_table_names(conn)
+            if "operation_cases" not in tables:
+                return False
+            case_columns = _sqlite_columns(conn, "operation_cases")
+            if "started_at" not in case_columns:
+                return False
+            join_sql = ""
+            where_sql = "WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
+            if "admissions" in tables and "admission_id" in case_columns:
+                admission_columns = _sqlite_columns(conn, "admissions")
+                join_sql = "LEFT JOIN admissions a ON a.id = oc.admission_id"
+                if "unit_scope" in admission_columns:
+                    where_sql += " AND COALESCE(a.unit_scope, '') = 'operblock'"
+            if "status" in case_columns:
+                where_sql += " AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')"
+            row = conn.execute(
+                f"""
+                SELECT 1
+                FROM operation_cases oc
+                {join_sql}
+                {where_sql}
+                LIMIT 1
+                """,
+                (
+                    start.strftime("%Y-%m-%d %H:%M:%S"),
+                    end.strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            ).fetchone()
+            return bool(row)
+        except Exception as exc:
+            logger.warning("Skipping operblock DB period check %s: %s", db_path, exc)
+            return False
+        finally:
+            if conn is not None:
+                conn.close()
+
+    @staticmethod
+    def _build_archive_cases_query(
+        *,
+        tables: set[str] | None = None,
+        admission_columns: set[str] | None = None,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+    ) -> tuple[str, tuple[Any, ...]]:
+        tables = set(tables or {"operating_tables", "admissions", "patients"})
+        admission_columns = set(admission_columns or {"unit_scope"})
+        table_join = "LEFT JOIN operating_tables t ON t.code = oc.table_code" if "operating_tables" in tables else ""
+        table_display_expr = (
+            "COALESCE(t.display_name, CASE oc.table_code WHEN 'emergency' THEN 'Экстренная операционная' "
+            "WHEN 'planned' THEN 'Плановая операционная' ELSE oc.table_code END)"
+            if "operating_tables" in tables
+            else "CASE oc.table_code WHEN 'emergency' THEN 'Экстренная операционная' WHEN 'planned' THEN 'Плановая операционная' ELSE oc.table_code END"
+        )
+        unit_scope_clause = (
+            "AND COALESCE(a.unit_scope, '') = 'operblock'"
+            if "unit_scope" in admission_columns
+            else ""
+        )
+        params: list[Any] = []
+        period_clause = ""
+        if start_dt and end_dt:
+            period_clause = "AND DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
+            params.extend([start_dt, end_dt])
+
+        query = f"""
+            SELECT
+                oc.id AS operation_case_id,
+                oc.patient_id,
+                oc.admission_id,
+                oc.table_code,
+                oc.status AS case_status,
+                oc.started_at,
+                oc.ended_at,
+                {table_display_expr} AS table_display_name,
+                p.full_name,
+                p.birth_date,
+                a.history_number,
+                a.patient_gender,
+                a.patient_age,
+                a.patient_months,
+                a.patient_age_unit,
+                a.diagnosis_code,
+                a.diagnosis_text
+            FROM operation_cases oc
+            {table_join}
+            JOIN admissions a ON a.id = oc.admission_id
+            JOIN patients p ON p.id = oc.patient_id
+            WHERE oc.status IN ('active', 'closed')
+              {unit_scope_clause}
+              {period_clause}
+            ORDER BY
+                CASE WHEN oc.status = 'active' THEN 0 ELSE 1 END,
+                datetime(COALESCE(oc.ended_at, oc.started_at)) DESC,
+                oc.id DESC
+            LIMIT 500
+            """
+        return query, tuple(params)
+
+    @staticmethod
+    def _archive_case_payload(data: Mapping[str, Any] | dict[str, Any], *, db_path: str, is_external: bool) -> dict[str, Any]:
+        source_path = os.path.abspath(str(db_path or "")) if db_path else ""
+        operation_case_id = int((data or {}).get("operation_case_id") or 0)
+        return {
+            "operation_case_id": operation_case_id,
+            "source_operation_case_id": operation_case_id,
+            "admission_id": int((data or {}).get("admission_id") or 0),
+            "source_admission_id": int((data or {}).get("admission_id") or 0),
+            "patient_id": int((data or {}).get("patient_id") or 0),
+            "source_patient_id": int((data or {}).get("patient_id") or 0),
+            "table_code": (data or {}).get("table_code"),
+            "table_display_name": (data or {}).get("table_display_name"),
+            "history_number": (data or {}).get("history_number") or "",
+            "full_name": (data or {}).get("full_name") or "Неизвестно",
+            "age": _age_text(data),
+            "gender": (data or {}).get("patient_gender") or "",
+            "diagnosis_code": (data or {}).get("diagnosis_code") or "",
+            "diagnosis_text": (data or {}).get("diagnosis_text") or "",
+            "started_at": (data or {}).get("started_at"),
+            "ended_at": (data or {}).get("ended_at"),
+            "status": (data or {}).get("case_status") or "closed",
+            "source_db_path": source_path,
+            "source_db_name": os.path.basename(source_path) if source_path else "",
+            "is_external_archive": bool(is_external),
+        }
+
+    @staticmethod
+    def _fetch_archive_case_rows_from_db(
+        db_path: str,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not db_path or not os.path.isfile(db_path):
+            return []
+        conn = sqlite3.connect(
+            f"file:{os.path.abspath(db_path)}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        try:
+            configure_connection(conn, readonly=True)
+            tables = _sqlite_table_names(conn)
+            if not {"operation_cases", "admissions", "patients"}.issubset(tables):
+                return []
+            admission_columns = _sqlite_columns(conn, "admissions")
+            query, params = OperBlockService._build_archive_cases_query(
+                tables=tables,
+                admission_columns=admission_columns,
+                start_dt=start_dt,
+                end_dt=end_dt,
+            )
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+        finally:
+            conn.close()
 
     @staticmethod
     def _board_operation_events_from_timeline(timeline: Mapping[str, Any] | dict[str, Any]) -> list[dict[str, Any]]:
@@ -1076,63 +1300,60 @@ class OperBlockService:
         )
         return payload
 
-    def list_archived_operation_cases(self) -> list[dict[str, Any]]:
+    def list_archived_operation_cases(
+        self,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+    ) -> list[dict[str, Any]]:
         validate_operblock_runtime_path(self.db)
-        rows = self.db.fetch_all_remcard(
-            """
-            SELECT
-                oc.id AS operation_case_id,
-                oc.patient_id,
-                oc.admission_id,
-                oc.table_code,
-                oc.status AS case_status,
-                oc.started_at,
-                oc.ended_at,
-                t.display_name AS table_display_name,
-                p.full_name,
-                p.birth_date,
-                a.history_number,
-                a.patient_gender,
-                a.patient_age,
-                a.patient_months,
-                a.patient_age_unit,
-                a.diagnosis_code,
-                a.diagnosis_text
-            FROM operation_cases oc
-            JOIN operating_tables t ON t.code = oc.table_code
-            JOIN admissions a ON a.id = oc.admission_id
-            JOIN patients p ON p.id = oc.patient_id
-            WHERE oc.status IN ('active', 'closed')
-              AND COALESCE(a.unit_scope, '') = 'operblock'
-            ORDER BY
-                CASE WHEN oc.status = 'active' THEN 0 ELSE 1 END,
-                datetime(COALESCE(oc.ended_at, oc.started_at)) DESC,
-                oc.id DESC
-            LIMIT 500
-            """
-        )
         result: list[dict[str, Any]] = []
-        for row in rows:
-            data = _row_to_dict(row)
-            result.append(
-                {
-                    "operation_case_id": int(data.get("operation_case_id") or 0),
-                    "admission_id": int(data.get("admission_id") or 0),
-                    "patient_id": int(data.get("patient_id") or 0),
-                    "table_code": data.get("table_code"),
-                    "table_display_name": data.get("table_display_name"),
-                    "history_number": data.get("history_number") or "",
-                    "full_name": data.get("full_name") or "Неизвестно",
-                    "age": _age_text(data),
-                    "gender": data.get("patient_gender") or "",
-                    "diagnosis_code": data.get("diagnosis_code") or "",
-                    "diagnosis_text": data.get("diagnosis_text") or "",
-                    "started_at": data.get("started_at"),
-                    "ended_at": data.get("ended_at"),
-                    "status": data.get("case_status") or "closed",
-                }
-            )
-        return result
+        current_db_path = self._current_db_path()
+        current_key = os.path.normcase(current_db_path) if current_db_path else ""
+        db_paths = self.get_archive_db_paths_for_period(start_dt, end_dt) if start_dt and end_dt else self._iter_archive_db_paths(include_current=True)
+        if not db_paths and current_db_path:
+            db_paths = [current_db_path]
+
+        for db_path in db_paths:
+            abs_path = os.path.abspath(str(db_path or ""))
+            is_current = bool(current_key) and os.path.normcase(abs_path) == current_key
+            try:
+                if is_current:
+                    query, params = self._build_archive_cases_query(
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                    )
+                    rows = [_row_to_dict(row) for row in self.db.fetch_all_remcard(query, params)]
+                else:
+                    rows = self._fetch_archive_case_rows_from_db(abs_path, start_dt=start_dt, end_dt=end_dt)
+                for row in rows:
+                    result.append(
+                        self._archive_case_payload(
+                            row,
+                            db_path=abs_path,
+                            is_external=not is_current,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("Skipping operblock archive DB %s due to read error: %s", abs_path, exc)
+
+        result.sort(
+            key=lambda item: (
+                0 if str(item.get("status") or "").strip().lower() == "active" else 1,
+                _parse_dt(item.get("ended_at")) or _parse_dt(item.get("started_at")) or datetime.min,
+                int(item.get("source_operation_case_id") or item.get("operation_case_id") or 0),
+            ),
+            reverse=False,
+        )
+        active = [item for item in result if str(item.get("status") or "").strip().lower() == "active"]
+        archived = [item for item in result if str(item.get("status") or "").strip().lower() != "active"]
+        archived.sort(
+            key=lambda item: (
+                _parse_dt(item.get("ended_at")) or _parse_dt(item.get("started_at")) or datetime.min,
+                int(item.get("source_operation_case_id") or item.get("operation_case_id") or 0),
+            ),
+            reverse=True,
+        )
+        return active + archived
 
     def restore_archived_operation_case(self, operation_case_id: int) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
@@ -3140,7 +3361,7 @@ class OperBlockService:
                     entity_label="Конец операции",
                 )
 
-            return self._insert_stage_event(
+            event_id = self._insert_stage_event(
                 cursor,
                 case,
                 clean_kind,
@@ -3153,6 +3374,9 @@ class OperBlockService:
                 operating_nurse=clean_operating_nurse,
                 transfer_department=clean_transfer_department,
             )
+            if clean_kind == "anesthesia_end" and _is_rao_transfer_department(clean_transfer_department):
+                self._maybe_create_rao_recovery_admission(cursor, case, event_dt)
+            return event_id
 
         return int(self.db.run_write_operation(operation, source=f"operblock_stage_{clean_kind}"))
 
@@ -3304,6 +3528,382 @@ class OperBlockService:
                 (clean_transfer_department or None, int(case["operation_case_id"])),
             )
         return event_id
+
+    def _maybe_create_rao_recovery_admission(
+        self,
+        cursor: sqlite3.Cursor,
+        case: dict[str, Any],
+        event_dt: datetime,
+    ) -> Optional[int]:
+        savepoint = "operblock_rao_auto_admission"
+        cursor.execute(f"SAVEPOINT {savepoint}")
+        try:
+            admission_id = self._create_rao_recovery_admission(cursor, case, event_dt)
+        except Exception as exc:
+            try:
+                cursor.execute(f"ROLLBACK TO {savepoint}")
+            except Exception:
+                logger.error(
+                    "operblock_rao_auto_admission_rollback_failed case_id=%s",
+                    case.get("operation_case_id"),
+                    exc_info=True,
+                )
+            try:
+                cursor.execute(f"RELEASE {savepoint}")
+            except Exception:
+                logger.error(
+                    "operblock_rao_auto_admission_release_after_rollback_failed case_id=%s",
+                    case.get("operation_case_id"),
+                    exc_info=True,
+                )
+            logger.error(
+                "operblock_rao_auto_admission_failed case_id=%s source_admission_id=%s: %s",
+                case.get("operation_case_id"),
+                case.get("admission_id"),
+                exc,
+                exc_info=True,
+            )
+            return None
+
+        try:
+            cursor.execute(f"RELEASE {savepoint}")
+        except Exception:
+            logger.error(
+                "operblock_rao_auto_admission_release_failed case_id=%s rao_admission_id=%s",
+                case.get("operation_case_id"),
+                admission_id,
+                exc_info=True,
+            )
+            return None
+        return admission_id
+
+    def _create_rao_recovery_admission(
+        self,
+        cursor: sqlite3.Cursor,
+        case: dict[str, Any],
+        event_dt: datetime,
+    ) -> Optional[int]:
+        operation_case_id = int(case["operation_case_id"])
+        source = self._fetch_rao_transfer_source_data(cursor, operation_case_id)
+        if not source:
+            raise OperBlockConflictError("Не удалось найти данные операции для автоперевода в РАО.")
+
+        existing_rao_admission_id = source.get("future_rao_admission_id")
+        if existing_rao_admission_id:
+            logger.info(
+                "operblock_rao_auto_admission_skipped_existing case_id=%s rao_admission_id=%s",
+                operation_case_id,
+                existing_rao_admission_id,
+            )
+            return None
+
+        admission_dt = _minute_floor(event_dt + timedelta(minutes=10))
+        admission_dt_text = admission_dt.isoformat(timespec="seconds")
+        history_number = str(source.get("history_number") or "").strip()
+        full_name = _normalize_case_text(source.get("full_name"))
+        diagnosis_text = _normalize_case_text(source.get("diagnosis_text"))
+        birth_date = parse_date_value(source.get("birth_date"))
+        missing_fields: list[str] = []
+        if not history_number:
+            missing_fields.append("history_number")
+        if not full_name:
+            missing_fields.append("full_name")
+        if birth_date is None:
+            missing_fields.append("birth_date")
+        elif birth_date > admission_dt.date():
+            missing_fields.append("birth_date_after_admission")
+        if not diagnosis_text:
+            missing_fields.append("diagnosis_text")
+        if missing_fields:
+            logger.error(
+                "operblock_rao_auto_admission_required_field_missing case_id=%s source_admission_id=%s missing=%s",
+                operation_case_id,
+                source.get("source_admission_id"),
+                ",".join(missing_fields),
+            )
+            return None
+
+        bed_number = self._select_free_recovery_bed_for_rao(cursor)
+        if bed_number is None:
+            logger.info(
+                "operblock_rao_auto_admission_skipped_no_free_recovery_bed case_id=%s source_admission_id=%s",
+                operation_case_id,
+                source.get("source_admission_id"),
+            )
+            return None
+
+        assert birth_date is not None
+        age = storage_age_from_birth_date(birth_date, admission_dt)
+        last_name, first_name, middle_name = _split_name(full_name)
+        admission_uid = str(uuid.uuid4())
+        now = _now_text()
+        department_profile = normalize_profile_department(source.get("department_profile")) or None
+        diagnosis_code = normalize_operblock_mkb_code(source.get("diagnosis_code") or "") or None
+        operation_name = _normalize_case_text(source.get("operation_name"))
+        intake_extra_json = json.dumps(
+            {
+                "source": "operblock_rao_transfer",
+                "operation_case_id": operation_case_id,
+                "source_patient_id": source.get("source_patient_id"),
+                "source_admission_id": source.get("source_admission_id"),
+                "table_code": source.get("table_code") or "",
+                "operation_finished_at": _minute_floor(event_dt).isoformat(timespec="seconds"),
+                "transfer_department": "РАО",
+                "operation_name": operation_name,
+                "surgeons": source.get("surgeons") or [],
+                "anesthesiologist": source.get("anesthesiologist") or "",
+                "anesthetist": source.get("anesthetist") or "",
+                "height_cm": source.get("height_cm"),
+                "weight_kg": source.get("weight_kg"),
+                "allergies": source.get("allergies") or "",
+                "blood_group": source.get("blood_group") or "",
+                "blood_rh": source.get("blood_rh") or "",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO patients (
+                full_name, admission_uid, birth_date, last_name, first_name, middle_name
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (full_name, admission_uid, birth_date.isoformat(), last_name, first_name, middle_name),
+        )
+        patient_id = int(cursor.lastrowid)
+        cursor.execute(
+            """
+            INSERT INTO admissions (
+                patient_id, bed_number, history_number, admission_datetime,
+                patient_age, patient_months, patient_age_unit, patient_gender,
+                diagnosis_code, diagnosis_text, department_profile, source_department,
+                operation_description, intake_extra_json, recovery_bed_stay,
+                created_at, updated_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1)
+            """,
+            (
+                patient_id,
+                int(bed_number),
+                history_number,
+                admission_dt_text,
+                age["patient_age"],
+                age["patient_months"],
+                age["patient_age_unit"],
+                source.get("patient_gender") or None,
+                diagnosis_code,
+                diagnosis_text,
+                department_profile,
+                "Профильное отделение",
+                operation_name or None,
+                intake_extra_json,
+                now,
+                now,
+            ),
+        )
+        admission_id = int(cursor.lastrowid)
+        cursor.execute(
+            """
+            UPDATE beds
+            SET status = 'OCCUPIED',
+                current_admission_id = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE bed_number = ?
+              AND status = 'FREE'
+              AND current_admission_id IS NULL
+            """,
+            (admission_id, int(bed_number)),
+        )
+        if cursor.rowcount != 1:
+            raise OperBlockConflictError("Свободная койка пробуждения была занята до автоперевода.")
+
+        cursor.execute(
+            """
+            INSERT INTO patient_status_events (
+                admission_id, status, reason_type, reason_text, start_time,
+                created_by, created_at, updated_at, last_modified_by
+            ) VALUES (?, ?, 'operblock_rao_transfer', 'Поступил после операции из оперблока',
+                      ?, 'operblock', ?, ?, 'operblock')
+            """,
+            (
+                admission_id,
+                PatientStatus.ACTIVE.value,
+                admission_dt_text,
+                admission_dt_text,
+                admission_dt_text,
+            ),
+        )
+        self._copy_latest_operblock_vitals_to_rao(
+            cursor,
+            int(source["source_admission_id"]),
+            admission_id,
+            event_dt,
+            admission_dt,
+        )
+        if "future_rao_admission_id" in _sqlite_columns(cursor.connection, "operation_cases"):
+            cursor.execute(
+                """
+                UPDATE operation_cases
+                SET future_rao_admission_id = ?,
+                    last_modified_by = 'operblock',
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (admission_id, operation_case_id),
+            )
+        logger.info(
+            "operblock_rao_auto_admission_created case_id=%s source_admission_id=%s rao_admission_id=%s bed=%s",
+            operation_case_id,
+            source.get("source_admission_id"),
+            admission_id,
+            bed_number,
+        )
+        return admission_id
+
+    def _fetch_rao_transfer_source_data(
+        self,
+        cursor: sqlite3.Cursor,
+        operation_case_id: int,
+    ) -> dict[str, Any]:
+        case_columns = _sqlite_columns(cursor.connection, "operation_cases")
+        future_expr = "oc.future_rao_admission_id" if "future_rao_admission_id" in case_columns else "NULL"
+        row = cursor.execute(
+            f"""
+            SELECT
+                oc.id AS operation_case_id,
+                oc.patient_id AS source_patient_id,
+                oc.admission_id AS source_admission_id,
+                oc.table_code,
+                oc.started_at,
+                oc.ended_at,
+                {future_expr} AS future_rao_admission_id,
+                oc.planned_operation_name,
+                oc.planned_surgeons_json,
+                oc.planned_anesthesiologist,
+                oc.planned_anesthetist,
+                oc.height_cm,
+                oc.weight_kg,
+                oc.allergies,
+                oc.blood_group,
+                oc.blood_rh,
+                p.full_name,
+                p.birth_date,
+                a.history_number,
+                a.patient_gender,
+                a.diagnosis_code,
+                a.diagnosis_text,
+                a.department_profile
+            FROM operation_cases oc
+            JOIN admissions a ON a.id = oc.admission_id
+            JOIN patients p ON p.id = oc.patient_id
+            WHERE oc.id = ?
+            """,
+            (int(operation_case_id),),
+        ).fetchone()
+        if not row:
+            return {}
+
+        data = _row_to_dict(row)
+        stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
+        stage_state = _build_stage_intervals(stage_rows)
+        data["operation_name"] = _normalize_case_text(
+            stage_state.get("current_operation_name")
+            or stage_state.get("last_operation_name")
+            or stage_state.get("first_operation_name")
+            or data.get("planned_operation_name")
+        )
+        data["surgeons"] = _normalize_stage_text_list(
+            stage_state.get("current_surgeons")
+            or stage_state.get("last_surgeons")
+            or stage_state.get("first_surgeons")
+            or _surgeons_from_json(data.get("planned_surgeons_json")),
+            split_commas=True,
+        )
+        data["anesthesiologist"] = _normalize_case_text(
+            stage_state.get("current_anesthesiologist")
+            or stage_state.get("last_anesthesiologist")
+            or stage_state.get("first_anesthesiologist")
+            or data.get("planned_anesthesiologist")
+        )
+        data["anesthetist"] = _normalize_case_text(
+            stage_state.get("current_anesthetist")
+            or stage_state.get("last_anesthetist")
+            or stage_state.get("first_anesthetist")
+            or data.get("planned_anesthetist")
+        )
+        return data
+
+    @staticmethod
+    def _select_free_recovery_bed_for_rao(cursor: sqlite3.Cursor) -> Optional[int]:
+        for bed_number in RECOVERY_BED_TRANSFER_ORDER:
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO beds (bed_number, status, current_admission_id, revision)
+                VALUES (?, 'FREE', NULL, 0)
+                """,
+                (int(bed_number),),
+            )
+
+        placeholders = ", ".join("?" for _ in RECOVERY_BED_TRANSFER_ORDER)
+        rows = cursor.execute(
+            f"""
+            SELECT bed_number
+            FROM beds
+            WHERE bed_number IN ({placeholders})
+              AND status = 'FREE'
+              AND current_admission_id IS NULL
+            """,
+            tuple(int(bed_number) for bed_number in RECOVERY_BED_TRANSFER_ORDER),
+        ).fetchall()
+        free_beds = {int(row["bed_number"]) for row in rows}
+        return next((bed_number for bed_number in RECOVERY_BED_TRANSFER_ORDER if int(bed_number) in free_beds), None)
+
+    @staticmethod
+    def _copy_latest_operblock_vitals_to_rao(
+        cursor: sqlite3.Cursor,
+        source_admission_id: int,
+        rao_admission_id: int,
+        event_dt: datetime,
+        admission_dt: datetime,
+    ) -> int:
+        event_dt_text = _minute_floor(event_dt).isoformat(timespec="seconds")
+        row = cursor.execute(
+            """
+            SELECT sys, dia, pulse, temp, spo2, rr, cvp
+            FROM vitals
+            WHERE admission_id = ?
+              AND DATETIME(datetime) <= DATETIME(?)
+              AND (
+                  sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR temp IS NOT NULL
+                  OR spo2 IS NOT NULL OR rr IS NOT NULL OR cvp IS NOT NULL
+              )
+            ORDER BY DATETIME(datetime) DESC, id DESC
+            LIMIT 1
+            """,
+            (int(source_admission_id), event_dt_text),
+        ).fetchone()
+        vitals = _row_to_dict(row)
+        cursor.execute(
+            """
+            INSERT INTO vitals (
+                admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp,
+                last_modified_by, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'operblock', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+            """,
+            (
+                int(rao_admission_id),
+                _minute_floor(admission_dt).isoformat(timespec="seconds"),
+                vitals.get("sys"),
+                vitals.get("dia"),
+                vitals.get("pulse"),
+                vitals.get("temp"),
+                vitals.get("spo2"),
+                vitals.get("rr"),
+                vitals.get("cvp"),
+            ),
+        )
+        return int(cursor.lastrowid)
 
     @staticmethod
     def _ensure_case_protocol_number(cursor: sqlite3.Cursor, case: dict[str, Any], event_dt: datetime) -> tuple[int, str]:

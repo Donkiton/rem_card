@@ -2,6 +2,7 @@ from rem_card.services.patient_bed_management.recovery_beds import is_recovery_b
 
 
 SPECIAL_BED_LABELS = {
+    10: "Койка пробуждения",
     11: "Койка пробуждения",
     12: "Койка пробуждения",
 }

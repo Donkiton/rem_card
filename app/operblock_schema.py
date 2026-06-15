@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1006
+OPERBLOCK_SCHEMA_VERSION = 1007
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -85,6 +85,7 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "anesthesia_protocol_number",
         "anesthesia_protocol_date",
         "transfer_department",
+        "future_rao_admission_id",
     }.issubset(case_columns):
         return False
     if not _index_exists(conn, "idx_operation_cases_one_active_per_table"):
@@ -201,6 +202,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     _ensure_column(conn, "operation_cases", "anesthesia_protocol_number", "INTEGER", logger)
     _ensure_column(conn, "operation_cases", "anesthesia_protocol_date", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "transfer_department", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "future_rao_admission_id", "INTEGER", logger)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS operation_table_assignments (
@@ -381,7 +383,8 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         use_updated_at_gate=False,
     )
     _mark_schema_migration(conn, 1001, "operblock operation cases and table assignments")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock anesthesia protocol numbers and transfer target")
+    _mark_schema_migration(conn, 1006, "operblock anesthesia protocol numbers and transfer target")
+    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock rao recovery auto admission link")
 
 
 def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:

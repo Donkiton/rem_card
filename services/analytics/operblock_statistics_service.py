@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -9,6 +10,7 @@ from html import escape
 from statistics import median
 from typing import Any, Iterable, Mapping
 
+from rem_card.app.logger import logger
 from rem_card.services.analytics.graphs_service import _thread_local_manager
 from rem_card.services.operblock_route_settings import operblock_route_from_comment
 from rem_card.services.operblock_timeline import parse_operblock_medication_text
@@ -167,13 +169,26 @@ def build_operblock_statistics_report_html(
     start_date_str: str,
     end_date_str: str,
     selected_indicators: Iterable[str] | None = None,
+    db_paths: Iterable[str] | None = None,
 ) -> str:
     selected = None if selected_indicators is None else list(selected_indicators)
-    return OperBlockStatisticsReportBuilder(db_manager, start_date_str, end_date_str).generate_report_html(selected)
+    return OperBlockStatisticsReportBuilder(
+        db_manager,
+        start_date_str,
+        end_date_str,
+        db_paths=db_paths,
+    ).generate_report_html(selected)
 
 
 class OperBlockStatisticsReportBuilder:
-    def __init__(self, db_manager, start_date_str: str, end_date_str: str):
+    def __init__(
+        self,
+        db_manager,
+        start_date_str: str,
+        end_date_str: str,
+        *,
+        db_paths: Iterable[str] | None = None,
+    ):
         self.db_manager = db_manager
         self._start_dt = self._parse_datetime(start_date_str) or (datetime.now() - timedelta(days=30))
         self._end_dt = self._parse_datetime(end_date_str) or datetime.now()
@@ -181,6 +196,24 @@ class OperBlockStatisticsReportBuilder:
             self._start_dt, self._end_dt = self._end_dt, self._start_dt
         self.start_date_str = self._start_dt.strftime("%Y-%m-%d 00:00:00")
         self.end_date_str = self._end_dt.strftime("%Y-%m-%d 23:59:59")
+        self.db_paths = self._normalize_db_paths(db_paths or [])
+
+    @staticmethod
+    def _normalize_db_paths(db_paths: Iterable[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for raw in db_paths or []:
+            if not raw:
+                continue
+            path = os.path.abspath(str(raw))
+            if not os.path.isfile(path):
+                continue
+            key = os.path.normcase(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(path)
+        return result
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
@@ -659,141 +692,215 @@ class OperBlockStatisticsReportBuilder:
     @classmethod
     def _fetch_context(cls, db_manager, start_date_str: str, end_date_str: str) -> dict[str, Any]:
         manager, cleanup = _thread_local_manager(db_manager)
-        conn = manager.get_connection()
-        cursor = conn.cursor()
         try:
-            if not cls._table_exists(cursor, "operation_cases"):
-                return {"cases": [], "timeline": [], "orders": [], "vitals": []}
-
-            cursor.execute(
-                """
-                SELECT
-                    oc.id AS operation_case_id,
-                    oc.patient_id,
-                    oc.admission_id,
-                    oc.table_code,
-                    oc.status,
-                    oc.created_at,
-                    oc.started_at,
-                    oc.ended_at,
-                    oc.planned_operation_name,
-                    oc.planned_surgeons_json,
-                    oc.planned_anesthesiologist,
-                    oc.planned_anesthetist,
-                    oc.height_cm,
-                    oc.weight_kg,
-                    oc.allergies,
-                    oc.blood_group,
-                    oc.blood_rh,
-                    oc.preop_sys,
-                    oc.preop_dia,
-                    oc.preop_pulse,
-                    oc.preop_spo2,
-                    oc.anesthesia_protocol_number,
-                    oc.anesthesia_protocol_date,
-                    oc.transfer_department,
-                    t.display_name AS table_display_name,
-                    p.full_name,
-                    p.birth_date,
-                    a.history_number,
-                    a.patient_gender,
-                    a.patient_age,
-                    a.patient_months,
-                    a.patient_age_unit,
-                    a.diagnosis_code,
-                    a.diagnosis_text,
-                    a.department_profile,
-                    a.source_department
-                FROM operation_cases oc
-                LEFT JOIN operating_tables t ON t.code = oc.table_code
-                LEFT JOIN admissions a ON a.id = oc.admission_id
-                LEFT JOIN patients p ON p.id = oc.patient_id
-                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
-                  AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
-                ORDER BY DATETIME(oc.started_at), oc.id
-                """,
-                (start_date_str, end_date_str),
-            )
-            cases = cls._cursor_dict_rows(cursor)
-            if not cases:
-                return {"cases": [], "timeline": [], "orders": [], "vitals": []}
-
-            if cls._table_exists(cursor, "operblock_timeline_events"):
-                cursor.execute(
-                    """
-                    SELECT e.*
-                    FROM operblock_timeline_events e
-                    JOIN operation_cases oc ON oc.id = e.operation_case_id
-                    WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
-                      AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
-                      AND COALESCE(e.status, '') NOT IN ('deleted', 'cancelled')
-                    ORDER BY e.operation_case_id, DATETIME(e.event_time), e.id
-                    """,
-                    (start_date_str, end_date_str),
-                )
-                timeline = cls._cursor_dict_rows(cursor)
-            else:
-                timeline = []
-
-            if cls._table_exists(cursor, "orders"):
-                cursor.execute(
-                    """
-                    SELECT
-                        oc.id AS operation_case_id,
-                        o.id,
-                        o.admission_id,
-                        o.datetime,
-                        o.text,
-                        o.drug_key,
-                        o.status,
-                        o.comment
-                    FROM operation_cases oc
-                    JOIN orders o ON o.admission_id = oc.admission_id
-                    WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
-                      AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
-                      AND COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
-                    ORDER BY oc.id, DATETIME(o.datetime), o.id
-                    """,
-                    (start_date_str, end_date_str),
-                )
-                orders = cls._cursor_dict_rows(cursor)
-            else:
-                orders = []
-
-            if cls._table_exists(cursor, "vitals"):
-                cursor.execute(
-                    """
-                    SELECT
-                        oc.id AS operation_case_id,
-                        v.id,
-                        v.admission_id,
-                        v.datetime,
-                        v.sys,
-                        v.dia,
-                        v.pulse,
-                        v.temp,
-                        v.spo2,
-                        v.rr,
-                        v.cvp
-                    FROM operation_cases oc
-                    JOIN vitals v ON v.admission_id = oc.admission_id
-                    WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
-                      AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
-                    ORDER BY oc.id, DATETIME(v.datetime), v.id
-                    """,
-                    (start_date_str, end_date_str),
-                )
-                vitals = cls._cursor_dict_rows(cursor)
-            else:
-                vitals = []
-
-            return {"cases": cases, "timeline": timeline, "orders": orders, "vitals": vitals}
+            return cls._fetch_context_from_connection(manager.get_connection(), start_date_str, end_date_str)
         finally:
             if cleanup:
                 cleanup()
 
+    @classmethod
+    def _fetch_context_from_connection(cls, conn, start_date_str: str, end_date_str: str) -> dict[str, Any]:
+        cursor = conn.cursor()
+        if not cls._table_exists(cursor, "operation_cases"):
+            return {"cases": [], "timeline": [], "orders": [], "vitals": []}
+
+        cursor.execute(
+            """
+            SELECT
+                oc.id AS operation_case_id,
+                oc.patient_id,
+                oc.admission_id,
+                oc.table_code,
+                oc.status,
+                oc.created_at,
+                oc.started_at,
+                oc.ended_at,
+                oc.planned_operation_name,
+                oc.planned_surgeons_json,
+                oc.planned_anesthesiologist,
+                oc.planned_anesthetist,
+                oc.height_cm,
+                oc.weight_kg,
+                oc.allergies,
+                oc.blood_group,
+                oc.blood_rh,
+                oc.preop_sys,
+                oc.preop_dia,
+                oc.preop_pulse,
+                oc.preop_spo2,
+                oc.anesthesia_protocol_number,
+                oc.anesthesia_protocol_date,
+                oc.transfer_department,
+                t.display_name AS table_display_name,
+                p.full_name,
+                p.birth_date,
+                a.history_number,
+                a.patient_gender,
+                a.patient_age,
+                a.patient_months,
+                a.patient_age_unit,
+                a.diagnosis_code,
+                a.diagnosis_text,
+                a.department_profile,
+                a.source_department
+            FROM operation_cases oc
+            LEFT JOIN operating_tables t ON t.code = oc.table_code
+            LEFT JOIN admissions a ON a.id = oc.admission_id
+            LEFT JOIN patients p ON p.id = oc.patient_id
+            WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+              AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
+            ORDER BY DATETIME(oc.started_at), oc.id
+            """,
+            (start_date_str, end_date_str),
+        )
+        cases = cls._cursor_dict_rows(cursor)
+        if not cases:
+            return {"cases": [], "timeline": [], "orders": [], "vitals": []}
+
+        if cls._table_exists(cursor, "operblock_timeline_events"):
+            cursor.execute(
+                """
+                SELECT e.*
+                FROM operblock_timeline_events e
+                JOIN operation_cases oc ON oc.id = e.operation_case_id
+                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+                  AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
+                  AND COALESCE(e.status, '') NOT IN ('deleted', 'cancelled')
+                ORDER BY e.operation_case_id, DATETIME(e.event_time), e.id
+                """,
+                (start_date_str, end_date_str),
+            )
+            timeline = cls._cursor_dict_rows(cursor)
+        else:
+            timeline = []
+
+        if cls._table_exists(cursor, "orders"):
+            cursor.execute(
+                """
+                SELECT
+                    oc.id AS operation_case_id,
+                    o.id,
+                    o.admission_id,
+                    o.datetime,
+                    o.text,
+                    o.drug_key,
+                    o.status,
+                    o.comment
+                FROM operation_cases oc
+                JOIN orders o ON o.admission_id = oc.admission_id
+                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+                  AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
+                  AND COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
+                ORDER BY oc.id, DATETIME(o.datetime), o.id
+                """,
+                (start_date_str, end_date_str),
+            )
+            orders = cls._cursor_dict_rows(cursor)
+        else:
+            orders = []
+
+        if cls._table_exists(cursor, "vitals"):
+            cursor.execute(
+                """
+                SELECT
+                    oc.id AS operation_case_id,
+                    v.id,
+                    v.admission_id,
+                    v.datetime,
+                    v.sys,
+                    v.dia,
+                    v.pulse,
+                    v.temp,
+                    v.spo2,
+                    v.rr,
+                    v.cvp
+                FROM operation_cases oc
+                JOIN vitals v ON v.admission_id = oc.admission_id
+                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+                  AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
+                ORDER BY oc.id, DATETIME(v.datetime), v.id
+                """,
+                (start_date_str, end_date_str),
+            )
+            vitals = cls._cursor_dict_rows(cursor)
+        else:
+            vitals = []
+
+        return {"cases": cases, "timeline": timeline, "orders": orders, "vitals": vitals}
+
+    @classmethod
+    def _fetch_multi_db_context(
+        cls,
+        db_paths: Iterable[str],
+        start_date_str: str,
+        end_date_str: str,
+    ) -> dict[str, Any]:
+        from rem_card.services.analytics.multi_db_analytics import create_readonly_analytics_manager
+
+        merged: dict[str, list[dict[str, Any]]] = {
+            "cases": [],
+            "timeline": [],
+            "orders": [],
+            "vitals": [],
+        }
+        next_case_id = 1
+
+        for db_path in cls._normalize_db_paths(db_paths):
+            manager = None
+            try:
+                manager = create_readonly_analytics_manager(db_path)
+                context = cls._fetch_context_from_connection(
+                    manager.get_connection(),
+                    start_date_str,
+                    end_date_str,
+                )
+            except Exception as exc:
+                logger.warning("Skipping operblock statistics DB %s: %s", db_path, exc)
+                continue
+            finally:
+                if manager is not None:
+                    manager.close_connection()
+
+            case_id_map: dict[int, int] = {}
+            for case in context.get("cases") or []:
+                item = dict(case or {})
+                source_case_id = cls._safe_int(item.get("operation_case_id"))
+                if not source_case_id:
+                    continue
+                remapped_case_id = next_case_id
+                next_case_id += 1
+                case_id_map[source_case_id] = remapped_case_id
+                item["source_db_path"] = db_path
+                item["source_operation_case_id"] = source_case_id
+                item["operation_case_id"] = remapped_case_id
+                merged["cases"].append(item)
+
+            for section in ("timeline", "orders", "vitals"):
+                for row in context.get(section) or []:
+                    item = dict(row or {})
+                    source_case_id = cls._safe_int(item.get("operation_case_id"))
+                    remapped_case_id = case_id_map.get(source_case_id)
+                    if not remapped_case_id:
+                        continue
+                    item["source_db_path"] = db_path
+                    item["source_operation_case_id"] = source_case_id
+                    item["operation_case_id"] = remapped_case_id
+                    merged[section].append(item)
+
+        return merged
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     def _calculate_statistics(self) -> dict[str, Any]:
-        context = self._fetch_context(self.db_manager, self.start_date_str, self.end_date_str)
+        if self.db_paths:
+            context = self._fetch_multi_db_context(self.db_paths, self.start_date_str, self.end_date_str)
+        else:
+            context = self._fetch_context(self.db_manager, self.start_date_str, self.end_date_str)
         timeline_by_case: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for row in context["timeline"]:
             timeline_by_case[int(row.get("operation_case_id") or 0)].append(row)

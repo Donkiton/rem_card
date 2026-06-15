@@ -8553,6 +8553,8 @@ class OperBlockMainWidget(QWidget):
         self._orders_empty_widget: QWidget | None = None
         self._last_infusion_elapsed_refresh_minute = ""
         self._archive_cases: list[dict] = []
+        self._external_archive_viewer = None
+        self._external_archive_db_manager = None
         self._role_launcher_mode = False
         self.protocol_page: QWidget | None = None
         self.archive_page: QWidget | None = None
@@ -10614,9 +10616,15 @@ class OperBlockMainWidget(QWidget):
     def _update_operblock_archive_buttons(self):
         selected = self._selected_archive_case()
         enabled = bool(selected) and not self._write_pending
-        selected_closed = enabled and str((selected or {}).get("status") or "").strip().lower() == "closed"
+        selected_external = enabled and bool((selected or {}).get("is_external_archive"))
+        selected_closed = (
+            enabled
+            and not selected_external
+            and str((selected or {}).get("status") or "").strip().lower() == "closed"
+        )
         has_closed_cases = any(
             str((case or {}).get("status") or "").strip().lower() == "closed"
+            and not bool((case or {}).get("is_external_archive"))
             for case in (getattr(self, "_archive_cases", None) or [])
         ) and not self._write_pending
         if hasattr(self, "archive_open_button"):
@@ -10630,14 +10638,88 @@ class OperBlockMainWidget(QWidget):
 
     def _open_selected_archive_case(self):
         selected = self._selected_archive_case()
+        if selected and selected.get("is_external_archive"):
+            self._open_external_archive_case(selected)
+            return
         case_id = _safe_int((selected or {}).get("operation_case_id"))
         if case_id:
             self._open_protocol(case_id)
+
+    def _close_external_archive_viewer(self):
+        viewer = getattr(self, "_external_archive_viewer", None)
+        if viewer is not None:
+            try:
+                if hasattr(viewer, "shutdown"):
+                    viewer.shutdown()
+            except Exception as exc:
+                logger.warning("Failed to shutdown external operblock archive viewer: %s", exc)
+            try:
+                if getattr(self, "stack", None) is not None and self.stack.indexOf(viewer) >= 0:
+                    self.stack.removeWidget(viewer)
+            except Exception:
+                pass
+            try:
+                viewer.deleteLater()
+            except Exception:
+                pass
+        self._external_archive_viewer = None
+        if self._external_archive_db_manager is not None:
+            try:
+                self._external_archive_db_manager.close()
+            except Exception as exc:
+                logger.warning("Failed to close external operblock archive DB manager: %s", exc)
+        self._external_archive_db_manager = None
+
+    def _return_from_external_archive_viewer(self):
+        if getattr(self, "archive_page", None) is not None:
+            self.stack.setCurrentWidget(self.archive_page)
+        self._close_external_archive_viewer()
+        self.refresh_operblock_archive(force=True)
+
+    def _open_external_archive_case(self, selected: dict):
+        source_db_path = str((selected or {}).get("source_db_path") or "").strip()
+        case_id = _safe_int((selected or {}).get("source_operation_case_id") or (selected or {}).get("operation_case_id"))
+        if not source_db_path or not case_id:
+            CustomMessageBox.warning(self, "Архив оперблока", "Не удалось определить архивную БД или запись оперблока.")
+            return
+        self._close_external_archive_viewer()
+        ro_db_manager = None
+        try:
+            from rem_card.services.archive_readonly_service import create_archive_readonly_service
+
+            ro_remcard_service, ro_db_manager = create_archive_readonly_service(source_db_path)
+            ro_operblock_service = OperBlockService(ro_db_manager)
+            ro_patient_service = getattr(ro_remcard_service, "_patients", self.patient_service)
+            viewer = OperBlockMainWidget(
+                ro_patient_service,
+                ro_remcard_service,
+                ro_operblock_service,
+                parent=self.stack,
+                table_code=self._table_filter_code,
+                view_only=True,
+            )
+        except Exception as exc:
+            if ro_db_manager is not None:
+                try:
+                    ro_db_manager.close()
+                except Exception:
+                    pass
+            CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть архивную БД:\n{exc}")
+            return
+        self._external_archive_viewer = viewer
+        self._external_archive_db_manager = ro_db_manager
+        viewer.view_back_requested.connect(self._return_from_external_archive_viewer)
+        self.stack.addWidget(viewer)
+        self.stack.setCurrentWidget(viewer)
+        viewer.open_archive_protocol(case_id)
 
     def _restore_selected_archive_case(self):
         selected = self._selected_archive_case()
         case_id = _safe_int((selected or {}).get("operation_case_id"))
         if not case_id or self._write_pending:
+            return
+        if (selected or {}).get("is_external_archive"):
+            CustomMessageBox.information(self, "Только просмотр", "Запись прошлых периодов доступна только для просмотра.")
             return
         reply = CustomMessageBox.question(
             self,
@@ -10679,6 +10761,9 @@ class OperBlockMainWidget(QWidget):
         case_id = _safe_int((selected or {}).get("operation_case_id"))
         if not case_id or self._write_pending:
             return
+        if (selected or {}).get("is_external_archive"):
+            CustomMessageBox.information(self, "Только просмотр", "Запись прошлых периодов доступна только для просмотра.")
+            return
         patient_name = str((selected or {}).get("full_name") or "выбранного пациента")
         reply = CustomMessageBox.question(
             self,
@@ -10712,7 +10797,8 @@ class OperBlockMainWidget(QWidget):
         reply = CustomMessageBox.question(
             self,
             "Удаление архива",
-            f"Действительно удалить всех пациентов из архива {archive_scope}? Количество: {count}.",
+            f"Действительно удалить пациентов из архива {archive_scope} в текущей БД? "
+            "Записи прошлых циклов после ротации останутся доступными только для просмотра.",
             CustomMessageBox.Yes | CustomMessageBox.No,
             CustomMessageBox.No,
         )
@@ -18579,6 +18665,7 @@ class OperBlockMainWidget(QWidget):
 
     def shutdown(self):
         self._is_closing = True
+        self._close_external_archive_viewer()
         timer = getattr(self, "_protocol_clock_timer", None)
         if timer is not None:
             timer.stop()

@@ -288,11 +288,7 @@ class ArchiveWidget(QWidget):
         if load_token != self._load_token or source_mode != self.archive_source_mode:
             return
         self.all_archived_patients = list(records or [])
-        self._period_db_paths = (
-            []
-            if source_mode == ARCHIVE_MODE_OPERBLOCK
-            else self._collect_db_paths_for_archive_period()
-        )
+        self._period_db_paths = self._collect_db_paths_for_archive_period()
         self.current_page = 1
         self.filter_data()
 
@@ -377,6 +373,11 @@ class ArchiveWidget(QWidget):
 
     def on_open_clicked(self):
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
+            row = self.table.currentRow()
+            if row >= 0:
+                case = self._patient_from_row(row)
+                if isinstance(case, dict):
+                    self.operblock_case_selected.emit(dict(case))
             return
         row = self.table.currentRow()
         if row >= 0:
@@ -413,11 +414,16 @@ class ArchiveWidget(QWidget):
                 from ..shared.analytics_integration import open_operblock_statistics_dialog
 
                 start_dt, end_dt = self._get_archive_period_bounds()
+                db_paths = self._collect_db_paths_for_archive_period()
+                if not db_paths:
+                    CustomMessageBox.information(self, "Инфо", "Нет данных в выбранном архивном интервале.")
+                    return
                 open_operblock_statistics_dialog(
                     self,
                     db_manager=self.operblock_service.db,
                     start_dt=start_dt,
                     end_dt=end_dt,
+                    db_paths=db_paths,
                 )
                 return
             if self.date_from.date() > self.date_to.date():
@@ -626,7 +632,14 @@ class ArchiveWidget(QWidget):
 
     def _patient_key(self, patient) -> str:
         if isinstance(patient, dict):
-            return f"operblock::{patient.get('operation_case_id') or patient.get('admission_id') or ''}"
+            source_db = patient.get("source_db_path") or "current"
+            source_case_id = (
+                patient.get("source_operation_case_id")
+                or patient.get("operation_case_id")
+                or patient.get("admission_id")
+                or ""
+            )
+            return f"operblock::{source_db}::{source_case_id}"
         source_db = patient.source_db_path or "current"
         source_admission_id = (
             patient.source_admission_id
@@ -734,12 +747,20 @@ class ArchiveWidget(QWidget):
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
             has_selected_case = isinstance(patient, dict) and bool(patient.get("operation_case_id"))
             selected_closed = has_selected_case and str(patient.get("status") or "").strip().lower() == "closed"
-            self.btn_report_stats.setEnabled(self.operblock_service is not None and not self._delete_pending)
+            selected_external = has_selected_case and bool(patient.get("is_external_archive"))
+            has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
+            has_current_closed_cases = any(
+                str((case or {}).get("status") or "").strip().lower() == "closed"
+                and not bool((case or {}).get("is_external_archive"))
+                for case in self.filtered_patients
+                if isinstance(case, dict)
+            )
+            self.btn_report_stats.setEnabled(self.operblock_service is not None and not self._delete_pending and has_period_data)
             self.btn_graphs.setEnabled(False)
-            self.btn_open.setEnabled(False)
+            self.btn_open.setEnabled(has_selected_case and not self._delete_pending)
             self.btn_edit.setEnabled(False)
-            self.btn_delete_last.setEnabled(selected_closed and not self._delete_pending)
-            self.btn_delete.setEnabled(self.operblock_service is not None and not self._delete_pending)
+            self.btn_delete_last.setEnabled(selected_closed and not selected_external and not self._delete_pending)
+            self.btn_delete.setEnabled(self.operblock_service is not None and has_current_closed_cases and not self._delete_pending)
             return
 
         has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
@@ -766,15 +787,16 @@ class ArchiveWidget(QWidget):
         self.btn_delete.setEnabled(True)
 
     def _collect_db_paths_for_current_filter(self) -> list[str]:
-        if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
-            return []
         rows = self.filtered_patients
         if not rows:
             return []
         paths = []
         seen = set()
         for patient in rows:
-            path = str(getattr(patient, "source_db_path", "") or "").strip()
+            if isinstance(patient, dict):
+                path = str(patient.get("source_db_path") or "").strip()
+            else:
+                path = str(getattr(patient, "source_db_path", "") or "").strip()
             if not path:
                 continue
             abs_path = os.path.abspath(path)
@@ -789,7 +811,14 @@ class ArchiveWidget(QWidget):
 
     def _collect_db_paths_for_archive_period(self) -> list[str]:
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
-            return []
+            start_dt, end_dt = self._get_archive_period_bounds()
+            try:
+                if self.operblock_service is not None and hasattr(self.operblock_service, "get_archive_db_paths_for_period"):
+                    paths = self.operblock_service.get_archive_db_paths_for_period(start_dt, end_dt)
+                    return [os.path.abspath(path) for path in paths if path and os.path.isfile(path)]
+            except Exception:
+                pass
+            return self._collect_db_paths_for_current_filter()
         start_dt, end_dt = self._get_archive_period_bounds()
         try:
             if hasattr(self.patient_service, "get_archive_db_paths_for_period"):
@@ -812,6 +841,9 @@ class ArchiveWidget(QWidget):
             return
         case = self._patient_from_row(self.table.currentRow()) if self.table.currentRow() >= 0 else None
         if not isinstance(case, dict):
+            return
+        if case.get("is_external_archive"):
+            self._show_external_archive_info(case)
             return
         case_id = self._safe_int(case.get("operation_case_id"))
         if not case_id:
@@ -847,8 +879,8 @@ class ArchiveWidget(QWidget):
         reply = CustomMessageBox.question(
             self,
             "Очистка архива оперблока",
-            "Действительно полностью очистить архив оперблока?\n"
-            "Будут удалены все архивные записи оперблока, не только текущая выборка.",
+            "Действительно очистить архив оперблока в текущей БД?\n"
+            "Записи прошлых циклов после ротации останутся доступными только для просмотра.",
             CustomMessageBox.Yes | CustomMessageBox.No,
             CustomMessageBox.No,
         )
@@ -940,7 +972,7 @@ class ArchiveWidget(QWidget):
             return []
         start = self._parse_datetime_value(start_dt)
         end = self._parse_datetime_value(end_dt)
-        cases = self.operblock_service.list_archived_operation_cases()
+        cases = self.operblock_service.list_archived_operation_cases(start_dt=start_dt, end_dt=end_dt)
         result = []
         for case in cases or []:
             item = dict(case or {})

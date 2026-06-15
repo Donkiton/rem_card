@@ -108,6 +108,7 @@ def open_operblock_statistics_dialog(
     db_manager=None,
     start_dt: str | None = None,
     end_dt: str | None = None,
+    db_paths: list[str] | None = None,
 ):
     now = datetime.now()
     if not start_dt:
@@ -124,6 +125,7 @@ def open_operblock_statistics_dialog(
         start_date_str=start_dt,
         end_date_str=end_dt,
         parent=parent,
+        db_paths=db_paths,
     )
     dialog.exec()
 
