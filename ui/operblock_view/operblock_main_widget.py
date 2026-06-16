@@ -2964,6 +2964,28 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         layout.addLayout(footer)
 
     @staticmethod
+    def _apply_staff_combo_popup_scrollbar(combo: QComboBox) -> None:
+        view = combo.view()
+        if view is None:
+            return
+        view.setObjectName("OperBlockStaffComboPopup")
+        scrollbar = view.verticalScrollBar()
+        if scrollbar is None:
+            return
+        scrollbar.setObjectName("OperBlockStaffComboPopupScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(36)
+        scrollbar.setPageStep(144)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockStaffComboPopupScrollBar",
+                width_px=14,
+                left_margin_px=2,
+                right_margin_px=1,
+            )
+        )
+
+    @staticmethod
     def _staff_combo(items: list[str]) -> QComboBox:
         combo = QComboBox()
         combo.setEditable(True)
@@ -2972,6 +2994,7 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         combo.setMinimumContentsLength(38)
         combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         combo.setStyleSheet(_operblock_combo_box_style())
+        StartAnesthesiaDialog._apply_staff_combo_popup_scrollbar(combo)
         line_edit = combo.lineEdit()
         if line_edit is not None:
             line_edit.setPlaceholderText("Не выбрано")
@@ -7676,6 +7699,11 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             logger.error("operblock surgeons load failed: %s", exc, exc_info=True)
             self._surgeon_options = []
         try:
+            self._operating_nurse_options = load_operblock_operating_nurses()
+        except Exception as exc:
+            logger.error("operblock operating nurses load failed: %s", exc, exc_info=True)
+            self._operating_nurse_options = []
+        try:
             self._anesthesiologist_options = load_operblock_anesthesiologists()
         except Exception as exc:
             logger.error("operblock anesthesiologists load failed: %s", exc, exc_info=True)
@@ -7867,6 +7895,34 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.height_input.setValidator(QIntValidator(1, 260, self.height_input))
         self.weight_input = _line_edit()
         self.weight_input.setPlaceholderText("кг")
+        height_weight_widget = QWidget()
+        height_weight_widget.setObjectName("OperBlockOccupyHeightWeightFields")
+        height_weight_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupyHeightWeightFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupyHeightWeightFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        height_weight_layout = QGridLayout(height_weight_widget)
+        height_weight_layout.setContentsMargins(0, 0, 0, 0)
+        height_weight_layout.setHorizontalSpacing(12)
+        height_weight_layout.setVerticalSpacing(4)
+        height_label = QLabel("Рост (см)")
+        weight_label = QLabel("Вес (кг)")
+        for label in (height_label, weight_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        height_weight_layout.addWidget(height_label, 0, 0)
+        height_weight_layout.addWidget(weight_label, 0, 1)
+        height_weight_layout.addWidget(self.height_input, 1, 0)
+        height_weight_layout.addWidget(self.weight_input, 1, 1)
+        height_weight_layout.setColumnStretch(0, 1)
+        height_weight_layout.setColumnStretch(1, 1)
         self.allergies_input = _line_edit()
         self.allergies_input.setPlaceholderText("Нет данных")
         self.blood_group_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_GROUP_OPTIONS)
@@ -7899,23 +7955,47 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         blood_layout.addWidget(self.blood_rh_combo, 1, 1)
         blood_layout.setColumnStretch(0, 1)
         blood_layout.setColumnStretch(1, 1)
-        self.surgeons_widget = QWidget()
-        self.surgeons_layout = QVBoxLayout(self.surgeons_widget)
-        self.surgeons_layout.setContentsMargins(0, 0, 0, 0)
-        self.surgeons_layout.setSpacing(6)
-        self._add_surgeon_row()
+        surgery_team_widget = QWidget()
+        surgery_team_widget.setObjectName("OperBlockOccupySurgeryFields")
+        surgery_team_widget.setStyleSheet(
+            """
+            QWidget#OperBlockOccupySurgeryFields {
+                background: transparent;
+                border: none;
+            }
+            QWidget#OperBlockOccupySurgeryFields QLabel {
+                background: transparent;
+                border: none;
+            }
+            """
+        )
+        surgery_team_layout = QGridLayout(surgery_team_widget)
+        surgery_team_layout.setContentsMargins(0, 0, 0, 0)
+        surgery_team_layout.setHorizontalSpacing(12)
+        surgery_team_layout.setVerticalSpacing(6)
+        self.surgery_team_layout = surgery_team_layout
+        surgeon_label = QLabel("Хирург")
+        operating_nurse_label = QLabel("Опер. сестра")
+        for label in (surgeon_label, operating_nurse_label):
+            label.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {TEXT_SECONDARY};")
+        surgery_team_layout.addWidget(surgeon_label, 0, 0)
+        surgery_team_layout.addWidget(operating_nurse_label, 0, 1)
+
+        self.operating_nurse_combo = StartAnesthesiaDialog._staff_combo(self._operating_nurse_options)
+        self._configure_occupy_team_combo(self.operating_nurse_combo)
         self.add_surgeon_button = QPushButton("+ Добавить хирурга")
         self.add_surgeon_button.setCursor(Qt.PointingHandCursor)
         self.add_surgeon_button.setFixedHeight(32)
         self.add_surgeon_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.add_surgeon_button.clicked.connect(lambda: self._add_surgeon_row())
-        self.surgeons_layout.addWidget(self.add_surgeon_button)
+        surgery_team_layout.setColumnStretch(0, 1)
+        surgery_team_layout.setColumnStretch(1, 1)
+        surgery_team_layout.setColumnStretch(2, 0)
+        self._add_surgeon_row()
         self.anesthesiologist_combo = StartAnesthesiaDialog._staff_combo(self._anesthesiologist_options)
         self.anesthetist_combo = StartAnesthesiaDialog._staff_combo(self._anesthetist_options)
         for combo in (self.anesthesiologist_combo, self.anesthetist_combo):
-            combo.setMinimumWidth(0)
-            combo.setMinimumContentsLength(18)
-            combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self._configure_occupy_team_combo(combo)
         anesthesia_team_widget = QWidget()
         anesthesia_team_widget.setObjectName("OperBlockOccupyAnesthesiaFields")
         anesthesia_team_widget.setStyleSheet(
@@ -7945,11 +8025,10 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         anesthesia_team_layout.setColumnStretch(0, 1)
         anesthesia_team_layout.setColumnStretch(1, 1)
         operation_form.addRow("Название операции:", self.operation_name_input)
-        operation_form.addRow("Рост (см):", self.height_input)
-        operation_form.addRow("Вес (кг):", self.weight_input)
+        operation_form.addRow("Рост / вес:", height_weight_widget)
         operation_form.addRow("Аллергии:", self.allergies_input)
         operation_form.addRow("Кровь:", blood_widget)
-        operation_form.addRow("Хирурги:", self.surgeons_widget)
+        operation_form.addRow("Хирургия:", surgery_team_widget)
         operation_form.addRow("Анестезия:", anesthesia_team_widget)
         page_layout.addWidget(operation)
 
@@ -7979,25 +8058,6 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         vitals_form.addRow("АД:", ad_row)
         vitals_form.addRow("ЧСС:", self.pulse_input)
         vitals_form.addRow("SpO₂:", self.spo2_input)
-        self.save_initial_vitals_checkbox = QCheckBox("Сохранить исходные показатели в протокол")
-        self.save_initial_vitals_checkbox.setObjectName("OperBlockSaveInitialVitalsCheckbox")
-        self.save_initial_vitals_checkbox.setChecked(True)
-        self.save_initial_vitals_checkbox.setStyleSheet(
-            f"""
-            QCheckBox#OperBlockSaveInitialVitalsCheckbox {{
-                background: transparent;
-                border: none;
-                color: {TEXT_PRIMARY};
-                font-size: 12px;
-                font-weight: 600;
-            }}
-            QCheckBox#OperBlockSaveInitialVitalsCheckbox::indicator {{
-                width: 16px;
-                height: 16px;
-            }}
-            """
-        )
-        vitals_form.addRow("", self.save_initial_vitals_checkbox)
         page_layout.addWidget(vitals)
         page_layout.addStretch(1)
 
@@ -8024,12 +8084,15 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         content_layout.addLayout(buttons)
         main.addWidget(content, 1)
 
+    @staticmethod
+    def _configure_occupy_team_combo(combo: QComboBox) -> None:
+        combo.setMinimumWidth(0)
+        combo.setMinimumContentsLength(18)
+        combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
     def _add_surgeon_row(self, text: str = "") -> QComboBox:
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.setSpacing(6)
         combo = StartAnesthesiaDialog._staff_combo(self._surgeon_options)
+        self._configure_occupy_team_combo(combo)
         if text:
             combo.setEditText(text)
         remove_button = QPushButton("Удалить")
@@ -8038,13 +8101,17 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         remove_button.setFixedWidth(remove_button.sizeHint().width() + 20)
         remove_button.setCursor(Qt.PointingHandCursor)
         remove_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
+        row = QWidget()
+        row.setObjectName("OperBlockOccupySurgeonRow")
+        row.setStyleSheet("QWidget#OperBlockOccupySurgeonRow { background: transparent; border: none; }")
+        row_layout = QVBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(0)
+        row_layout.addWidget(combo)
+        row._remove_button = remove_button
         remove_button.clicked.connect(lambda _=False, widget=row: self._remove_surgeon_row(widget))
-        row_layout.addWidget(combo, 1)
-        row_layout.addWidget(remove_button, 0)
-        insert_at = max(0, self.surgeons_layout.count() - 1)
-        self.surgeons_layout.insertWidget(insert_at, row)
         self._surgeon_rows.append((row, combo))
-        self._refresh_surgeon_remove_buttons()
+        self._refresh_surgery_team_layout()
         return combo
 
     def _remove_surgeon_row(self, row: QWidget) -> None:
@@ -8052,19 +8119,35 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             if widget is not row:
                 continue
             self._surgeon_rows.pop(index)
-            self.surgeons_layout.removeWidget(widget)
+            button = getattr(widget, "_remove_button", None)
+            self.surgery_team_layout.removeWidget(widget)
+            if button is not None:
+                self.surgery_team_layout.removeWidget(button)
+                button.deleteLater()
             widget.deleteLater()
             break
         if not self._surgeon_rows:
             self._add_surgeon_row()
-        self._refresh_surgeon_remove_buttons()
+            return
+        self._refresh_surgery_team_layout()
 
     def _refresh_surgeon_remove_buttons(self) -> None:
         single = len(self._surgeon_rows) <= 1
         for widget, _combo in self._surgeon_rows:
-            button = widget.findChild(QPushButton)
+            button = getattr(widget, "_remove_button", None)
             if button is not None:
                 button.setVisible(not single)
+
+    def _refresh_surgery_team_layout(self) -> None:
+        for index, (widget, _combo) in enumerate(self._surgeon_rows):
+            row_index = index + 1
+            button = getattr(widget, "_remove_button", None)
+            self.surgery_team_layout.addWidget(widget, row_index, 0)
+            if button is not None:
+                self.surgery_team_layout.addWidget(button, row_index, 2, Qt.AlignTop)
+        self.surgery_team_layout.addWidget(self.operating_nurse_combo, 1, 1, Qt.AlignTop)
+        self.surgery_team_layout.addWidget(self.add_surgeon_button, len(self._surgeon_rows) + 1, 0, 1, 2)
+        self._refresh_surgeon_remove_buttons()
 
     @staticmethod
     def _fixed_option_combo(options: tuple[str, ...]) -> QComboBox:
@@ -8121,7 +8204,11 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
 
     def _replace_surgeons(self, surgeons: list[str]) -> None:
         for widget, _combo in list(self._surgeon_rows):
-            self.surgeons_layout.removeWidget(widget)
+            button = getattr(widget, "_remove_button", None)
+            self.surgery_team_layout.removeWidget(widget)
+            if button is not None:
+                self.surgery_team_layout.removeWidget(button)
+                button.deleteLater()
             widget.deleteLater()
         self._surgeon_rows.clear()
         for surgeon in surgeons or [""]:
@@ -8256,6 +8343,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             normalize_operblock_blood_rh,
         )
         self._replace_surgeons([normalize_operblock_team_text(item) for item in (data or {}).get("surgeons") or []])
+        self._set_combo_text(self.operating_nurse_combo, str((data or {}).get("operating_nurse") or ""))
         self._set_combo_text(self.anesthesiologist_combo, str((data or {}).get("anesthesiologist") or ""))
         self._set_combo_text(self.anesthetist_combo, str((data or {}).get("anesthetist") or ""))
         department_profile = normalize_profile_department(
@@ -8271,8 +8359,6 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         ):
             value = (data or {}).get(key)
             edit.setText("" if value in (None, "") else str(value))
-        self.save_initial_vitals_checkbox.setChecked(bool((data or {}).get("save_initial_vitals", True)))
-
     def _on_mkb_code_text_edited(self, text: str):
         normalized = normalize_operblock_mkb_code(text)
         self.diagnosis_code_input.blockSignals(True)
@@ -8449,13 +8535,13 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "blood_group": normalize_operblock_blood_group(self.blood_group_combo.currentData()),
             "blood_rh": normalize_operblock_blood_rh(self.blood_rh_combo.currentData()),
             "surgeons": self.selected_surgeons(),
+            "operating_nurse": normalize_operblock_team_text(self.operating_nurse_combo.currentText()),
             "anesthesiologist": normalize_operblock_team_text(self.anesthesiologist_combo.currentText()),
             "anesthetist": normalize_operblock_team_text(self.anesthetist_combo.currentText()),
             "preop_sys": preop_sys,
             "preop_dia": preop_dia,
             "preop_pulse": preop_pulse,
             "preop_spo2": preop_spo2,
-            "save_initial_vitals": bool(self.save_initial_vitals_checkbox.isChecked()),
         }
 
 

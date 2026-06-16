@@ -70,6 +70,7 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "revision",
         "planned_operation_name",
         "planned_surgeons_json",
+        "planned_operating_nurse",
         "planned_anesthesiologist",
         "planned_anesthetist",
         "height_cm",
@@ -168,6 +169,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             future_rao_admission_id INTEGER,
             planned_operation_name TEXT,
             planned_surgeons_json TEXT,
+            planned_operating_nurse TEXT,
             planned_anesthesiologist TEXT,
             planned_anesthetist TEXT,
             height_cm INTEGER,
@@ -203,6 +205,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     )
     _ensure_column(conn, "operation_cases", "planned_operation_name", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "planned_surgeons_json", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "planned_operating_nurse", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "planned_anesthesiologist", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "planned_anesthetist", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "height_cm", "INTEGER", logger)

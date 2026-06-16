@@ -717,6 +717,7 @@ class OperBlockStatisticsReportBuilder:
                 oc.ended_at,
                 oc.planned_operation_name,
                 oc.planned_surgeons_json,
+                oc.planned_operating_nurse,
                 oc.planned_anesthesiologist,
                 oc.planned_anesthetist,
                 oc.height_cm,
@@ -944,7 +945,8 @@ class OperBlockStatisticsReportBuilder:
                     or self._clean_text(raw.get("planned_anesthesiologist"), fallback=""),
                     "anesthetist": stage_state["anesthetist"]
                     or self._clean_text(raw.get("planned_anesthetist"), fallback=""),
-                    "operating_nurse": stage_state["operating_nurse"],
+                    "operating_nurse": stage_state["operating_nurse"]
+                    or self._clean_text(raw.get("planned_operating_nurse"), fallback=""),
                     "anesthesia_type": stage_state["anesthesia_type"] or "Не указан",
                     "transfer_target": self._clean_text(
                         raw.get("transfer_department") or stage_state["transfer_department"],

@@ -124,7 +124,6 @@ def _case_payload(table_code: str, suffix: str = "1") -> dict[str, Any]:
         "preop_dia": 70,
         "preop_pulse": 80,
         "preop_spo2": 98,
-        "save_initial_vitals": True,
     }
 
 

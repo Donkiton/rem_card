@@ -118,6 +118,7 @@ class OperBlockPatientInput:
     department_profile: str = ""
     operation_name: str = ""
     surgeons: tuple[str, ...] = ()
+    operating_nurse: str = ""
     anesthesiologist: str = ""
     anesthetist: str = ""
     height_cm: Optional[int] = None
@@ -129,7 +130,6 @@ class OperBlockPatientInput:
     preop_dia: Optional[int] = None
     preop_pulse: Optional[int] = None
     preop_spo2: Optional[int] = None
-    save_initial_vitals: bool = True
 
 
 def normalize_operblock_history_number(value: str) -> str:
@@ -746,6 +746,7 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         department_profile=normalize_profile_department(payload.get("department_profile")),
         operation_name=_normalize_case_text(payload.get("operation_name")),
         surgeons=_normalize_case_surgeons(payload.get("surgeons")),
+        operating_nurse=_normalize_case_text(payload.get("operating_nurse")),
         anesthesiologist=_normalize_case_text(payload.get("anesthesiologist")),
         anesthetist=_normalize_case_text(payload.get("anesthetist")),
         height_cm=_normalize_optional_int(payload.get("height_cm"), "Рост", 1, 260),
@@ -757,7 +758,6 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         preop_dia=_normalize_optional_int(payload.get("preop_dia"), "АД диастолическое", 0, 300),
         preop_pulse=_normalize_optional_int(payload.get("preop_pulse"), "ЧСС", 0, 300),
         preop_spo2=_normalize_optional_int(payload.get("preop_spo2"), "SpO₂", 0, 100),
-        save_initial_vitals=bool(payload.get("save_initial_vitals", True)),
     )
 
 
@@ -1120,6 +1120,7 @@ class OperBlockService:
                 COALESCE(oc.revision, 0) AS case_revision,
                 oc.planned_operation_name,
                 oc.planned_surgeons_json,
+                oc.planned_operating_nurse,
                 oc.planned_anesthesiologist,
                 oc.planned_anesthetist,
                 oc.height_cm,
@@ -1270,6 +1271,7 @@ class OperBlockService:
                     "department_profile": row.get("department_profile") or "",
                     "operation_name": row.get("planned_operation_name") or "",
                     "surgeons": _surgeons_from_json(row.get("planned_surgeons_json")),
+                    "operating_nurse": row.get("planned_operating_nurse") or "",
                     "anesthesiologist": row.get("planned_anesthesiologist") or "",
                     "anesthetist": row.get("planned_anesthetist") or "",
                     "height_cm": row.get("height_cm"),
@@ -1654,6 +1656,7 @@ class OperBlockService:
             ),
             "operation_name": case.get("planned_operation_name") or "",
             "surgeons": _surgeons_from_json(case.get("planned_surgeons_json")),
+            "operating_nurse": case.get("planned_operating_nurse") or "",
             "anesthesiologist": case.get("planned_anesthesiologist") or "",
             "anesthetist": case.get("planned_anesthetist") or "",
             "transfer_department": case.get("transfer_department") or "",
@@ -1949,7 +1952,7 @@ class OperBlockService:
                 "anesthesia_type": self._report_anesthesia_type(stage_state),
                 "anesthesiologist": self._report_anesthesiologist(case, stage_state),
                 "anesthetist": self._report_anesthetist(case, stage_state),
-                "operating_nurse": self._report_operating_nurse(stage_state),
+                "operating_nurse": self._report_operating_nurse(case, stage_state),
                 "surgery_start": surgery_interval.get("start"),
                 "surgery_end": surgery_interval.get("end"),
                 "surgery_duration_minutes": self._duration_minutes(surgery_interval.get("start"), surgery_interval.get("end")),
@@ -2067,10 +2070,11 @@ class OperBlockService:
         )
 
     @staticmethod
-    def _report_operating_nurse(stage_state: dict[str, Any]) -> str:
+    def _report_operating_nurse(case: dict[str, Any], stage_state: dict[str, Any]) -> str:
         return _normalize_case_text(
             stage_state.get("last_operating_nurse")
             or stage_state.get("first_operating_nurse")
+            or case.get("planned_operating_nurse")
             or ""
         )
 
@@ -2334,6 +2338,7 @@ class OperBlockService:
         *,
         operation_name: str | None = None,
         surgeons: tuple[str, ...] | list[str] | None = None,
+        operating_nurse: str | None = None,
         anesthesiologist: str | None = None,
         anesthetist: str | None = None,
     ) -> int:
@@ -2381,7 +2386,7 @@ class OperBlockService:
             return True
 
         updated = 0
-        if operation_name is not None or surgeons is not None:
+        if operation_name is not None or surgeons is not None or operating_nurse is not None:
             surgery_row = latest_stage_row("surgery_start")
             if surgery_row is not None:
                 payload = _parse_json_dict(surgery_row.get("payload_json"))
@@ -2395,6 +2400,8 @@ class OperBlockService:
                     else:
                         payload.pop("surgeons", None)
                         payload.pop("surgeon", None)
+                if operating_nurse is not None:
+                    self._set_stage_payload_text(payload, "operating_nurse", _normalize_case_text(operating_nurse))
                 if update_payload(surgery_row, payload):
                     updated += 1
 
@@ -2488,12 +2495,13 @@ class OperBlockService:
                 INSERT INTO operation_cases (
                     patient_id, admission_id, table_code, status, created_at, started_at,
                     created_by_role, created_by_client_id, last_modified_by,
-                    planned_operation_name, planned_surgeons_json, planned_anesthesiologist, planned_anesthetist,
+                    planned_operation_name, planned_surgeons_json, planned_operating_nurse,
+                    planned_anesthesiologist, planned_anesthetist,
                     height_cm, weight_kg, allergies, blood_group, blood_rh,
                     preop_sys, preop_dia, preop_pulse, preop_spo2, preop_save_initial_vitals,
                     offline_case_uuid, offline_session_id, migration_status
                 ) VALUES (?, ?, ?, 'active', ?, ?, 'operblock', ?, 'operblock',
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     patient_id,
@@ -2504,6 +2512,7 @@ class OperBlockService:
                     self.client_id,
                     data.operation_name or None,
                     _surgeons_json(data.surgeons),
+                    data.operating_nurse or None,
                     data.anesthesiologist or None,
                     data.anesthetist or None,
                     data.height_cm,
@@ -2515,7 +2524,7 @@ class OperBlockService:
                     data.preop_dia,
                     data.preop_pulse,
                     data.preop_spo2,
-                    1 if data.save_initial_vitals else 0,
+                    1,
                     offline_case_uuid,
                     offline_session_id,
                     "active" if self._is_opblock_offline_runtime() else None,
@@ -2550,7 +2559,7 @@ class OperBlockService:
                 """,
                 (admission_id, now),
             )
-            if data.save_initial_vitals and _has_case_vitals(data):
+            if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, {
                     "operation_case_id": operation_case_id,
                     "admission_id": admission_id,
@@ -2593,6 +2602,7 @@ class OperBlockService:
                     a.department_profile,
                     oc.planned_operation_name,
                     oc.planned_surgeons_json,
+                    oc.planned_operating_nurse,
                     oc.planned_anesthesiologist,
                     oc.planned_anesthetist,
                     oc.height_cm,
@@ -2603,8 +2613,7 @@ class OperBlockService:
                     oc.preop_sys,
                     oc.preop_dia,
                     oc.preop_pulse,
-                    oc.preop_spo2,
-                    COALESCE(oc.preop_save_initial_vitals, 1) AS preop_save_initial_vitals
+                    oc.preop_spo2
                 FROM operation_cases oc
                 JOIN operating_tables t ON t.code = oc.table_code
                 JOIN admissions a ON a.id = oc.admission_id
@@ -2631,6 +2640,12 @@ class OperBlockService:
                 or _surgeons_from_json(data.get("planned_surgeons_json")),
                 split_commas=True,
             )
+            operating_nurse = _normalize_case_text(
+                stage_state.get("current_operating_nurse")
+                or stage_state.get("last_operating_nurse")
+                or stage_state.get("first_operating_nurse")
+                or data.get("planned_operating_nurse")
+            )
             anesthesiologist = _normalize_case_text(
                 stage_state.get("current_anesthesiologist")
                 or stage_state.get("last_anesthesiologist")
@@ -2650,14 +2665,12 @@ class OperBlockService:
                 preop_pulse = first_vital.get("pulse")
                 preop_spo2 = first_vital.get("spo2")
                 vitals_source = "vitals"
-                save_initial_vitals = bool(data.get("preop_save_initial_vitals", 1))
             else:
                 preop_sys = data.get("preop_sys")
                 preop_dia = data.get("preop_dia")
                 preop_pulse = data.get("preop_pulse")
                 preop_spo2 = data.get("preop_spo2")
                 vitals_source = "case"
-                save_initial_vitals = bool(data.get("preop_save_initial_vitals", 1))
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
                 "table_code": data.get("table_code") or "",
@@ -2671,6 +2684,7 @@ class OperBlockService:
                 "department_profile": data.get("department_profile") or "",
                 "operation_name": operation_name,
                 "surgeons": surgeons,
+                "operating_nurse": operating_nurse,
                 "anesthesiologist": anesthesiologist,
                 "anesthetist": anesthetist,
                 "height_cm": data.get("height_cm"),
@@ -2682,7 +2696,6 @@ class OperBlockService:
                 "preop_dia": preop_dia,
                 "preop_pulse": preop_pulse,
                 "preop_spo2": preop_spo2,
-                "save_initial_vitals": save_initial_vitals,
                 "vitals_source": vitals_source,
             }
 
@@ -2762,6 +2775,7 @@ class OperBlockService:
                 UPDATE operation_cases
                 SET planned_operation_name = ?,
                     planned_surgeons_json = ?,
+                    planned_operating_nurse = ?,
                     planned_anesthesiologist = ?,
                     planned_anesthetist = ?,
                     height_cm = ?,
@@ -2782,6 +2796,7 @@ class OperBlockService:
                 (
                     data.operation_name or None,
                     _surgeons_json(data.surgeons),
+                    data.operating_nurse or None,
                     data.anesthesiologist or None,
                     data.anesthetist or None,
                     data.height_cm,
@@ -2793,7 +2808,7 @@ class OperBlockService:
                     data.preop_dia,
                     data.preop_pulse,
                     data.preop_spo2,
-                    1 if data.save_initial_vitals else 0,
+                    1,
                     int(operation_case_id),
                 ),
             )
@@ -2802,13 +2817,14 @@ class OperBlockService:
             case_for_vitals = dict(case)
             case_for_vitals["started_at"] = case.get("started_at")
             case_for_vitals["ended_at"] = case.get("ended_at")
-            if data.save_initial_vitals and _has_case_vitals(data):
+            if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, case_for_vitals, data)
             synced = self._sync_case_metadata_to_stage_payloads(
                 cursor,
                 int(operation_case_id),
                 operation_name=data.operation_name,
                 surgeons=data.surgeons,
+                operating_nurse=data.operating_nurse,
                 anesthesiologist=data.anesthesiologist,
                 anesthetist=data.anesthetist,
             )
@@ -3231,16 +3247,24 @@ class OperBlockService:
                     set_text(payload, "operating_nurse", clean_operating_nurse)
                 if update_payload(cursor, surgery_row, payload):
                     updated += 1
-                if surgeons is not None:
+                if surgeons is not None or operating_nurse is not None:
+                    case_updates: list[str] = []
+                    case_params: list[Any] = []
+                    if surgeons is not None:
+                        case_updates.append("planned_surgeons_json = ?")
+                        case_params.append(_surgeons_json(clean_surgeons))
+                    if operating_nurse is not None:
+                        case_updates.append("planned_operating_nurse = ?")
+                        case_params.append(clean_operating_nurse or None)
                     cursor.execute(
-                        """
+                        f"""
                         UPDATE operation_cases
-                        SET planned_surgeons_json = ?,
+                        SET {", ".join(case_updates)},
                             last_modified_by = 'operblock',
                             revision = COALESCE(revision, 0) + 1
                         WHERE id = ?
                         """,
-                        (_surgeons_json(clean_surgeons), int(operation_case_id)),
+                        (*case_params, int(operation_case_id)),
                     )
 
             if anesthesiologist is not None or anesthetist is not None:
@@ -3536,6 +3560,7 @@ class OperBlockService:
                 UPDATE operation_cases
                 SET planned_operation_name = ?,
                     planned_surgeons_json = ?,
+                    planned_operating_nurse = ?,
                     last_modified_by = 'operblock',
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ?
@@ -3543,6 +3568,7 @@ class OperBlockService:
                 (
                     clean_operation_name or None,
                     _surgeons_json(clean_surgeons),
+                    clean_operating_nurse or None,
                     int(case["operation_case_id"]),
                 ),
             )
@@ -3871,6 +3897,7 @@ class OperBlockService:
                 {future_expr} AS future_rao_admission_id,
                 oc.planned_operation_name,
                 oc.planned_surgeons_json,
+                oc.planned_operating_nurse,
                 oc.planned_anesthesiologist,
                 oc.planned_anesthetist,
                 oc.height_cm,
@@ -3910,6 +3937,12 @@ class OperBlockService:
             or stage_state.get("first_surgeons")
             or _surgeons_from_json(data.get("planned_surgeons_json")),
             split_commas=True,
+        )
+        data["operating_nurse"] = _normalize_case_text(
+            stage_state.get("current_operating_nurse")
+            or stage_state.get("last_operating_nurse")
+            or stage_state.get("first_operating_nurse")
+            or data.get("planned_operating_nurse")
         )
         data["anesthesiologist"] = _normalize_case_text(
             stage_state.get("current_anesthesiologist")
@@ -5953,6 +5986,7 @@ class OperBlockService:
                 a.diagnosis_text,
                 oc.planned_operation_name,
                 oc.planned_surgeons_json,
+                oc.planned_operating_nurse,
                 oc.planned_anesthesiologist,
                 oc.planned_anesthetist,
                 oc.height_cm,

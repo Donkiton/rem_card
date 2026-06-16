@@ -20537,7 +20537,6 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
                 "preop_dia": 71,
                 "preop_pulse": 81,
                 "preop_spo2": 97,
-                "save_initial_vitals": True,
             }
         )
         admission_id = int(case["admission_id"])
@@ -20788,10 +20787,8 @@ def _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups(temp_root:
                 return False, f"occupy dialog field group is not transparent: {object_name}"
 
         checkbox = dialog.findChild(QCheckBox, "OperBlockSaveInitialVitalsCheckbox")
-        if checkbox is None:
-            return False, "occupy dialog initial vitals checkbox was not named"
-        if "background: transparent" not in checkbox.styleSheet() or "border: none" not in checkbox.styleSheet():
-            return False, "occupy dialog initial vitals checkbox still has a framed background"
+        if checkbox is not None:
+            return False, "occupy dialog still shows initial vitals save checkbox"
 
         dialog._add_surgeon_row("Второй хирург")
         app.processEvents()
@@ -22348,6 +22345,7 @@ def _create_operblock_cycle_fixture(
                 ended_at TEXT,
                 planned_operation_name TEXT,
                 planned_surgeons_json TEXT,
+                planned_operating_nurse TEXT,
                 planned_anesthesiologist TEXT,
                 planned_anesthetist TEXT,
                 height_cm INTEGER,
@@ -22436,12 +22434,13 @@ def _create_operblock_cycle_fixture(
             """
             INSERT INTO operation_cases (
                 id, patient_id, admission_id, table_code, status, created_at, started_at, ended_at,
-                planned_operation_name, planned_surgeons_json, planned_anesthesiologist, planned_anesthetist,
+                planned_operation_name, planned_surgeons_json, planned_operating_nurse,
+                planned_anesthesiologist, planned_anesthetist,
                 height_cm, weight_kg, allergies, blood_group, blood_rh, preop_sys, preop_dia, preop_pulse,
                 preop_spo2, anesthesia_protocol_number, anesthesia_protocol_date, transfer_department
             ) VALUES (
                 1, 1, 1, ?, 'closed', ?, ?, DATETIME(?, '+1 hour'),
-                'Операция', '["Хирург"]', 'Анестезиолог', 'Анестезистка',
+                'Операция', '["Хирург"]', 'Оперсестра', 'Анестезиолог', 'Анестезистка',
                 175, 70, '', 'O(I) первая', 'Rh(+) положительный', 120, 80, 80,
                 99, 1, DATE(?), 'РАО'
             )
