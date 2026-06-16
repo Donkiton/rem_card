@@ -474,7 +474,7 @@ class ElectrolyteCalculatorDialog(BaseStyledDialog):
         weight_kg = context.get("weight_kg")
         if weight_kg not in (None, "") and not self.weight_edit.text().strip():
             self.weight_edit.setText(_fmt_input_number(float(weight_kg)))
-        sex = str(context.get("sex") or "").strip()
+        sex = _normalize_context_sex(context.get("sex"))
         if sex:
             index = self.sex_combo.findData(sex)
             if index >= 0:
@@ -870,6 +870,17 @@ def _fmt_input_number(value: float | None) -> str:
     if float(value).is_integer():
         return str(int(value))
     return f"{value:.1f}".replace(".", ",")
+
+
+def _normalize_context_sex(value) -> str:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return ""
+    if text in {"female", "woman", "f", "ж"} or text.startswith("жен"):
+        return "female"
+    if text in {"male", "man", "m", "м"} or text.startswith("муж"):
+        return "male"
+    return ""
 
 
 def _fmt_ml(value: float | None) -> str:

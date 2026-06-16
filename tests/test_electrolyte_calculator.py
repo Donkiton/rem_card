@@ -20,6 +20,7 @@ from rem_card.services.electrolyte_calculator import (  # noqa: E402
     classify_egfr_kidney_state,
     build_electrolyte_recommendation,
 )
+from rem_card.ui.shared.components.electrolyte_calculator import _normalize_context_sex  # noqa: E402
 
 
 class ElectrolyteCalculatorTest(unittest.TestCase):
@@ -75,6 +76,11 @@ class ElectrolyteCalculatorTest(unittest.TestCase):
         state, label = classify_egfr_kidney_state(28)
         self.assertEqual(state, "ckd_c4")
         self.assertIn("C4", label)
+
+    def test_context_sex_accepts_patient_card_gender_text(self):
+        self.assertEqual(_normalize_context_sex("Женский"), "female")
+        self.assertEqual(_normalize_context_sex("женщина"), "female")
+        self.assertEqual(_normalize_context_sex("Мужской"), "male")
 
     def test_chloride_deficit_is_reduced_by_kcl(self):
         result = build_electrolyte_recommendation(

@@ -3299,7 +3299,7 @@ class DoctorRemCardWidget(QWidget):
     def _electrolyte_context_sex(self, patient) -> str | None:
         if patient is None:
             return None
-        value = str(getattr(patient, "patient_gender", "") or "").strip().casefold()
+        value = str(self._electrolyte_patient_value(patient, "patient_gender") or "").strip().casefold()
         if not value:
             return None
         if value.startswith("жен") or value in {"ж", "female", "woman", "f"}:
@@ -3307,6 +3307,14 @@ class DoctorRemCardWidget(QWidget):
         if value.startswith("муж") or value in {"м", "male", "man", "m"}:
             return "male"
         return None
+
+    @staticmethod
+    def _electrolyte_patient_value(patient, key: str):
+        if patient is None:
+            return None
+        if isinstance(patient, dict):
+            return patient.get(key)
+        return getattr(patient, key, None)
 
     def _electrolyte_context_weight_kg(self, admission_id: int) -> float | None:
         db = getattr(getattr(self.service, "patient_dao", None), "db", None)
