@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import time
@@ -1979,6 +1980,7 @@ class DoctorRemCardWidget(QWidget):
         self.sector8_panel.archive_clicked.connect(self.on_global_archive_clicked)
         self.sector8_panel.refresh_clicked.connect(self.on_refresh_beds_clicked)
         self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
+        self.sector8_panel.electrolytes_calc_clicked.connect(self.on_electrolyte_calculator_clicked)
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
         self.sector8_panel.bars_clicked.connect(self.on_bars_clicked)
@@ -3232,6 +3234,188 @@ class DoctorRemCardWidget(QWidget):
         # Чистый запуск без передачи веса пациента (калькулятор стартует с 0)
         dialog = InfusionCalculatorDialog(parent=self)
         dialog.exec()
+
+    def on_electrolyte_calculator_clicked(self):
+        from .components.electrolyte_calculator import ElectrolyteCalculatorDialog
+
+        dialog = ElectrolyteCalculatorDialog(
+            parent=self,
+            patient_context=self._build_electrolyte_calculator_context(),
+        )
+        dialog.exec()
+
+    def _build_electrolyte_calculator_context(self) -> dict:
+        admission_id = getattr(self, "admission_id", None)
+        if not admission_id:
+            return {}
+
+        snapshot = self._card_snapshot_cache or {}
+        patient = snapshot.get("patient")
+        if patient is None and hasattr(self.service, "get_patient"):
+            try:
+                patient = self.service.get_patient(int(admission_id))
+            except Exception as exc:
+                logger.warning("Electrolyte calculator: failed to load patient context: %s", exc)
+                patient = None
+
+        context: dict = {}
+        age_years = self._electrolyte_context_age_years(patient)
+        if age_years is not None:
+            context["age_years"] = age_years
+
+        sex = self._electrolyte_context_sex(patient)
+        if sex:
+            context["sex"] = sex
+
+        weight_kg = self._electrolyte_context_weight_kg(int(admission_id))
+        if weight_kg is not None:
+            context["weight_kg"] = weight_kg
+
+        urine_ml_day = self._electrolyte_context_last_24h_diuresis(patient, int(admission_id))
+        if urine_ml_day is not None:
+            context["urine_ml_day"] = urine_ml_day
+        return context
+
+    def _electrolyte_context_age_years(self, patient) -> int | None:
+        if patient is None:
+            return None
+        try:
+            from rem_card.app.patient_age import calculate_age_components
+
+            components = calculate_age_components(getattr(patient, "birth_date", None), datetime.now())
+            if components is not None:
+                return int(components.years)
+        except Exception:
+            pass
+        unit = str(getattr(patient, "age_unit", "") or "").lower()
+        age = getattr(patient, "age", None)
+        if age in (None, "") or "меся" in unit:
+            return None
+        try:
+            return int(age)
+        except Exception:
+            return None
+
+    def _electrolyte_context_sex(self, patient) -> str | None:
+        if patient is None:
+            return None
+        value = str(getattr(patient, "patient_gender", "") or "").strip().casefold()
+        if not value:
+            return None
+        if value.startswith("жен") or value in {"ж", "female", "woman", "f"}:
+            return "female"
+        if value.startswith("муж") or value in {"м", "male", "man", "m"}:
+            return "male"
+        return None
+
+    def _electrolyte_context_weight_kg(self, admission_id: int) -> float | None:
+        db = getattr(getattr(self.service, "patient_dao", None), "db", None)
+        if db is None:
+            db = getattr(getattr(self.service, "orders_dao", None), "db", None)
+        if db is None or not hasattr(db, "fetch_one_remcard"):
+            return None
+
+        try:
+            row = db.fetch_one_remcard(
+                "SELECT intake_extra_json FROM admissions WHERE id = ?",
+                (int(admission_id),),
+            )
+            payload = self._electrolyte_json_from_row(row, "intake_extra_json")
+            weight = self._electrolyte_positive_float((payload or {}).get("weight_kg"))
+            if weight is not None:
+                return weight
+        except Exception as exc:
+            logger.warning("Electrolyte calculator: failed to read RAO transfer weight: %s", exc)
+
+        try:
+            row = db.fetch_one_remcard(
+                """
+                SELECT weight_kg
+                FROM operation_cases
+                WHERE future_rao_admission_id = ?
+                  AND weight_kg IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(admission_id),),
+            )
+            weight = self._electrolyte_positive_float(self._electrolyte_row_value(row, "weight_kg"))
+            if weight is not None:
+                return weight
+        except Exception:
+            pass
+
+        try:
+            row = db.fetch_one_remcard(
+                """
+                SELECT weight_kg
+                FROM operation_cases
+                WHERE admission_id = ?
+                  AND weight_kg IS NOT NULL
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(admission_id),),
+            )
+            return self._electrolyte_positive_float(self._electrolyte_row_value(row, "weight_kg"))
+        except Exception as exc:
+            logger.warning("Electrolyte calculator: failed to read operation weight: %s", exc)
+            return None
+
+    @staticmethod
+    def _electrolyte_json_from_row(row, key: str) -> dict:
+        raw = DoctorRemCardWidget._electrolyte_row_value(row, key)
+        if not raw:
+            return {}
+        try:
+            value = json.loads(str(raw))
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _electrolyte_row_value(row, key: str):
+        if row is None:
+            return None
+        if isinstance(row, dict):
+            return row.get(key)
+        try:
+            return row[key]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _electrolyte_positive_float(value) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            number = float(str(value).replace(",", "."))
+        except Exception:
+            return None
+        return number if number > 0 else None
+
+    def _electrolyte_context_last_24h_diuresis(self, patient, admission_id: int) -> float | None:
+        admission_dt = getattr(patient, "admission_datetime", None) if patient is not None else None
+        if admission_dt is None:
+            return None
+        now = datetime.now()
+        try:
+            if (now - admission_dt).total_seconds() < 24 * 3600:
+                return None
+        except Exception:
+            return None
+
+        fluid_service = getattr(self.service, "fluid_service", None)
+        if fluid_service is None or not hasattr(fluid_service, "get_fluids_in_bounds"):
+            return None
+        try:
+            from datetime import timedelta
+
+            fluids = fluid_service.get_fluids_in_bounds(admission_id, now - timedelta(hours=24), now)
+            return round(sum(float(getattr(fluid, "urine", 0.0) or 0.0) for fluid in fluids or []), 1)
+        except Exception as exc:
+            logger.warning("Electrolyte calculator: failed to load 24h diuresis: %s", exc)
+            return None
 
     def on_bonus_clicked(self):
         try:

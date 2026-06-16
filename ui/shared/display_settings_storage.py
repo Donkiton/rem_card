@@ -26,6 +26,7 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
         {"id": "bars", "label": "БАРС", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
+        {"id": "electrolytes_calc", "label": "Электролиты", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": True, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
@@ -164,7 +165,13 @@ def _normalize_order(raw_order: Any, ids: list[str], fallback_order: Any = None)
                 result.append(item_id)
     for item_id in ids:
         if item_id not in result:
-            result.append(item_id)
+            default_index = ids.index(item_id)
+            insert_index = len(result)
+            for anchor_id in reversed(ids[:default_index]):
+                if anchor_id in result:
+                    insert_index = result.index(anchor_id) + 1
+                    break
+            result.insert(insert_index, item_id)
     return result
 
 

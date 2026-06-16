@@ -12,6 +12,7 @@ class Sector8Panel(QWidget):
     archive_clicked = Signal()
     refresh_clicked = Signal()
     calc_clicked = Signal()
+    electrolytes_calc_clicked = Signal()
     add_patient_clicked = Signal()
     bonus_clicked = Signal()
     bars_clicked = Signal()
@@ -74,6 +75,15 @@ class Sector8Panel(QWidget):
         self.btn_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_calc.clicked.connect(self.calc_clicked.emit)
 
+        # Кнопка Электролиты
+        self.btn_electrolytes_calc = QPushButton(" Электролиты", self)
+        electrolytes_icon = os.path.join(self.icon_dir, "microelements.png")
+        self.btn_electrolytes_calc.setIcon(QIcon(electrolytes_icon))
+        self.btn_electrolytes_calc.setIconSize(QSize(18, 18))
+        self.btn_electrolytes_calc.setMinimumHeight(32)
+        self.btn_electrolytes_calc.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_electrolytes_calc.clicked.connect(self.electrolytes_calc_clicked.emit)
+
         # Кнопка Бонус
         self.btn_bonus = QPushButton(" Бонус", self)
         bonus_icon = os.path.join(self.icon_dir, "bonus.png")
@@ -115,6 +125,7 @@ class Sector8Panel(QWidget):
             "add_patient": self.btn_add_patient,
             "bars": self.btn_bars,
             "calc": self.btn_calc,
+            "electrolytes_calc": self.btn_electrolytes_calc,
             "bonus": self.btn_bonus,
             "settings": self.btn_settings,
             "back": self.btn_back,

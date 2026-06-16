@@ -92,6 +92,7 @@ class PatientDTO:
     age: Optional[int] = None
     age_months: Optional[int] = None
     age_unit: Optional[str] = "л"
+    patient_gender: Optional[str] = None
     birth_date: Optional[date] = None
     mkb_code: Optional[str] = None
     operation_info: Optional[str] = None
