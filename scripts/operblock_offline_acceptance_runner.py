@@ -239,6 +239,37 @@ def _scenario_migration(network_manager, local_manager, _network_root: Path, off
     _require(os.path.isfile(result.local_backup_path), "local backup must exist", backup=result.local_backup_path)
 
 
+def _scenario_migration_non_rao_department(network_manager, local_manager, _network_root: Path, offline_root: Path) -> None:
+    from rem_card.app.operblock_offline_migration import run_pending_operblock_offline_migration
+
+    _create_closed_case(local_manager, suffix="22", transfer="Травматология")
+    result = run_pending_operblock_offline_migration(network_manager, root=str(offline_root))
+    _require(result.ok and result.migrated_cases == 1, "non-RAO migration must import one completed case", result=result)
+    row = _query_one(
+        network_manager.db_path,
+        """
+        SELECT status, transfer_department, future_rao_admission_id
+        FROM operation_cases
+        LIMIT 1
+        """,
+    )
+    _require(
+        row and row[0] == "closed" and row[1] == "Травматология" and row[2] is None,
+        "non-RAO offline migration must remain archived without recovery admission",
+        row=row,
+    )
+    active_rao = _query_one(
+        network_manager.db_path,
+        """
+        SELECT COUNT(*)
+        FROM admissions
+        WHERE is_active = 1
+          AND COALESCE(unit_scope, '') <> 'operblock'
+        """,
+    )
+    _require(active_rao and int(active_rao[0] or 0) == 0, "non-RAO migration must not occupy recovery bed")
+
+
 def _scenario_active_blocks_migration(network_manager, local_manager, _network_root: Path, offline_root: Path) -> None:
     from rem_card.app.operblock_offline_migration import run_pending_operblock_offline_migration
 
@@ -477,6 +508,7 @@ def main() -> int:
         scenarios = [
             lambda root: _scenario_initial_offline(root),
             lambda root: _run_with_managers(root, "migration", _scenario_migration),
+            lambda root: _run_with_managers(root, "migration_non_rao_department", _scenario_migration_non_rao_department),
             lambda root: _run_with_managers(root, "active_blocks_migration", _scenario_active_blocks_migration),
             lambda root: _run_with_managers(root, "table_conflict", _scenario_table_conflict),
             lambda root: _run_with_managers(root, "protocol_conflict", _scenario_protocol_conflict),
