@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.ui.rem_card_sectors.lab_analysis_dialog import AddLabAnalysisDialog, EditLabOrderDialog
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
@@ -300,6 +301,8 @@ class SectorAnal(BaseSectorWidget):
         self._status_filter = "all"
         self._rendering_table = False
         self._delete_pending = False
+        self._load_yesterday_pending = False
+        self._load_yesterday_worker = None
         self._restoring_header = False
         self._constraining_header = False
         self._save_header_timer = QTimer(self)
@@ -988,6 +991,153 @@ class SectorAnal(BaseSectorWidget):
             self._last_content_hash = None
             self.refresh()
 
+    def load_yesterday_lab_orders(self):
+        if self.is_nurse:
+            return
+        self._resolve_runtime_context()
+        if not self.remcard_service or not self.admission_id or self.card_date is None:
+            CustomMessageBox.warning(self, "Анализы", "Сначала выберите пациента и текущую карту.")
+            return
+        if (
+            not hasattr(self.remcard_service, "find_recent_lab_orders_source")
+            or not hasattr(self.remcard_service, "replace_lab_orders_from_date")
+        ):
+            CustomMessageBox.warning(self, "Анализы", "Загрузка вчерашних анализов сейчас недоступна.")
+            return
+        if self._load_yesterday_pending:
+            return
+        if self._load_yesterday_worker and self._load_yesterday_worker.isRunning():
+            return
+
+        reply = CustomMessageBox.question(
+            self,
+            "Подтверждение",
+            "Вы уверены, что хотите загрузить вчерашние анализы?\n"
+            "Текущие анализы за выбранную карту будут заменены.",
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+
+        admission_id = int(self.admission_id)
+        shift_date = self._effective_card_datetime()
+        service = self.remcard_service
+        self._set_load_yesterday_pending(True)
+
+        def job():
+            orders, found_date = service.find_recent_lab_orders_source(
+                admission_id,
+                shift_date,
+                max_days_back=3,
+            )
+            return {
+                "admission_id": admission_id,
+                "shift_date": shift_date,
+                "orders": orders,
+                "found_date": found_date,
+                "service": service,
+            }
+
+        self._load_yesterday_worker = AsyncCallThread(job)
+        self._load_yesterday_worker.succeeded.connect(self._on_load_yesterday_lab_orders_ready)
+        self._load_yesterday_worker.failed.connect(self._on_load_yesterday_lab_orders_failed)
+        self._load_yesterday_worker.finished.connect(self._on_load_yesterday_lab_orders_finished)
+        self._load_yesterday_worker.start()
+
+    def _on_load_yesterday_lab_orders_ready(self, payload):
+        if not isinstance(payload, dict):
+            self._set_load_yesterday_pending(False)
+            return
+        if (
+            int(payload.get("admission_id") or 0) != int(self.admission_id or 0)
+            or payload.get("shift_date") != self._effective_card_datetime()
+        ):
+            self._set_load_yesterday_pending(False)
+            return
+
+        yesterday_orders = payload.get("orders") or []
+        found_date = payload.get("found_date")
+        if not yesterday_orders or not found_date:
+            self._set_load_yesterday_pending(False)
+            CustomMessageBox.information(self, "Анализы", "За последние 3 дня анализов не найдено.")
+            return
+
+        target_admission_id = int(self.admission_id)
+        target_shift_date = self._effective_card_datetime()
+        service = payload.get("service") or self.remcard_service
+        if found_date.date() < (target_shift_date - timedelta(days=1)).date():
+            reply = CustomMessageBox.question(
+                self,
+                "Подтверждение",
+                f"Найдены анализы за {found_date.strftime('%d.%m.%Y')}. Загрузить?",
+            )
+            if reply == CustomMessageBox.No:
+                self._set_load_yesterday_pending(False)
+                return
+
+        def operation():
+            return service.replace_lab_orders_from_date(
+                admission_id=target_admission_id,
+                target_shift_date=target_shift_date,
+                source_shift_date=found_date,
+                source_orders=yesterday_orders,
+                created_by_role="doctor",
+            )
+
+        def on_success(result=None):
+            self._set_load_yesterday_pending(False)
+            self._last_content_hash = None
+            same_context = (
+                int(self.admission_id or 0) == target_admission_id
+                and self._effective_card_datetime() == target_shift_date
+            )
+            if same_context:
+                self.refresh()
+                count = len(result or [])
+                CustomMessageBox.information(self, "Анализы", f"Загружено анализов: {count}.")
+
+        def on_error(exc):
+            self._set_load_yesterday_pending(False)
+            self._last_content_hash = None
+            same_context = (
+                int(self.admission_id or 0) == target_admission_id
+                and self._effective_card_datetime() == target_shift_date
+            )
+            if same_context:
+                self.refresh()
+                CustomMessageBox.warning(self, "Ошибка загрузки", f"Не удалось загрузить вчерашние анализы: {exc}")
+
+        if hasattr(service, "enqueue_write"):
+            service.enqueue_write(
+                description=f"lab_orders_load_yesterday_ui:{target_admission_id}",
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+            return
+
+        try:
+            on_success(operation())
+        except Exception as exc:
+            on_error(exc)
+
+    def _on_load_yesterday_lab_orders_failed(self, exc):
+        self._set_load_yesterday_pending(False)
+        CustomMessageBox.warning(self, "Предупреждение", f"Не удалось найти анализы за предыдущие дни: {exc}")
+
+    def _on_load_yesterday_lab_orders_finished(self):
+        self._load_yesterday_worker = None
+
+    def _set_load_yesterday_pending(self, pending: bool):
+        self._load_yesterday_pending = bool(pending)
+        enabled = not self._load_yesterday_pending
+        self.table.setEnabled(enabled)
+        self.search_input.setEnabled(enabled)
+        if hasattr(self, "filter_button"):
+            self.filter_button.setEnabled(enabled)
+        if hasattr(self, "assign_button"):
+            self.assign_button.setEnabled(enabled)
+        self._update_delete_button_state()
+
     def _open_edit_dialog_for_table_row(self, row_index: int, column_index: int):
         if self.is_nurse:
             return
@@ -1095,7 +1245,11 @@ class SectorAnal(BaseSectorWidget):
 
     def _update_delete_button_state(self):
         if hasattr(self, "delete_button"):
-            self.delete_button.setEnabled(bool(self._checked_lab_order_ids()) and not self._delete_pending)
+            self.delete_button.setEnabled(
+                bool(self._checked_lab_order_ids())
+                and not self._delete_pending
+                and not self._load_yesterday_pending
+            )
 
     def _set_delete_pending(self, pending: bool):
         self._delete_pending = bool(pending)

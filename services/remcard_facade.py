@@ -564,6 +564,24 @@ class RemCardService(QObject):
         )
         return snapshot.get("rows") or []
 
+    def find_recent_lab_orders_source(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        max_days_back: int = 3,
+    ):
+        for days_back in range(1, max_days_back + 1):
+            check_date = shift_date - timedelta(days=days_back)
+            snapshot = self.build_lab_orders_snapshot(
+                int(admission_id),
+                shift_date=check_date,
+                include_change_cursor=False,
+            )
+            rows = snapshot.get("rows") or []
+            if rows:
+                return rows, check_date
+        return [], None
+
     def build_full_card_snapshot(
         self,
         admission_id: int,
@@ -2200,6 +2218,30 @@ class RemCardService(QObject):
             admission_id=int(admission_id),
             card_day_id=card_day_id,
             orders=orders,
+            created_by_role=created_by_role,
+            created_by_user=created_by_user,
+        )
+
+    def replace_lab_orders_from_date(
+        self,
+        admission_id: int,
+        target_shift_date: datetime,
+        source_shift_date: datetime,
+        source_orders: Sequence[Any],
+        *,
+        created_by_role: str = "doctor",
+        created_by_user: Optional[str] = None,
+    ):
+        target_start, target_end = self.get_day_period(target_shift_date)
+        source_start, _ = self.get_day_period(source_shift_date)
+        target_card_day_id = self._lab_orders.card_day_id_from_shift_start(target_start)
+        return self._lab_orders.replace_with_orders_from_date(
+            admission_id=int(admission_id),
+            target_card_day_id=target_card_day_id,
+            target_start=target_start,
+            target_end=target_end,
+            source_start=source_start,
+            source_orders=source_orders,
             created_by_role=created_by_role,
             created_by_user=created_by_user,
         )

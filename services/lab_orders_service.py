@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Optional, Sequence
 
 from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
@@ -158,6 +158,69 @@ class LabOrdersService:
 
         return list(self._run_write(f"lab_orders_create:{admission_id}", operation))
 
+    def replace_with_orders_from_date(
+        self,
+        *,
+        admission_id: int,
+        target_card_day_id: str,
+        target_start: datetime,
+        target_end: datetime,
+        source_start: datetime,
+        source_orders: Sequence[Any],
+        created_by_role: str = "doctor",
+        created_by_user: Optional[str] = None,
+    ) -> list[int]:
+        patient_id = self.dao.get_admission_patient_id(int(admission_id))
+        if patient_id is None:
+            raise ValueError("Госпитализация пациента не найдена.")
+
+        now = datetime.now().replace(microsecond=0)
+        dtos: list[LabOrderDTO] = []
+        for raw in source_orders or []:
+            analysis_name = str(self._raw_value(raw, "analysis_name", "analysis", "lab_name", "name") or "").strip()
+            if not analysis_name:
+                continue
+            scheduled_at = self._parse_datetime(self._raw_value(raw, "scheduled_at", "planned_at", "planned_for"))
+            dtos.append(
+                LabOrderDTO(
+                    patient_id=patient_id,
+                    admission_id=int(admission_id),
+                    card_day_id=str(target_card_day_id or ""),
+                    analysis_code=str(self._raw_value(raw, "analysis_code", "code") or "").strip(),
+                    analysis_name=analysis_name,
+                    material=self._normalize_material(self._raw_value(raw, "material", "material_label", "sample_material")),
+                    status=LabOrderStatus.ASSIGNED.value,
+                    created_at=now,
+                    scheduled_at=self._shift_scheduled_at(
+                        scheduled_at,
+                        source_start=source_start,
+                        target_start=target_start,
+                        target_end=target_end,
+                    ),
+                    completed_at=None,
+                    comment=str(self._raw_value(raw, "comment") or "").strip(),
+                    created_by_role=created_by_role or "doctor",
+                    created_by_user=created_by_user,
+                    completed_by_role=None,
+                    completed_by_user=None,
+                )
+            )
+
+        if not dtos:
+            raise ValueError("В найденном дне нет анализов для загрузки.")
+
+        def operation(cursor):
+            self.dao.delete_for_card_day(
+                cursor,
+                int(admission_id),
+                card_day_id=str(target_card_day_id or ""),
+                start_dt=target_start,
+                end_dt=target_end,
+            )
+            return [self.dao.save_lab_order(cursor, dto) for dto in dtos]
+
+        return list(self._run_write(f"lab_orders_load_yesterday:{admission_id}", operation))
+
     def list_analysis_templates(self) -> list[dict[str, Any]]:
         return self.catalog_service.list_templates()
 
@@ -224,6 +287,45 @@ class LabOrdersService:
         if self.data_service:
             return self.data_service.run_write(description, operation)
         return self.dao.db.run_write_operation(operation, source=description)
+
+    @staticmethod
+    def _raw_value(row: Any, *names: str, default: Any = None) -> Any:
+        if row is None:
+            return default
+        if isinstance(row, dict):
+            for name in names:
+                if name in row:
+                    return row.get(name)
+            return default
+        for name in names:
+            if hasattr(row, name):
+                return getattr(row, name)
+        return default
+
+    @staticmethod
+    def _shift_scheduled_at(
+        value: Optional[datetime],
+        *,
+        source_start: datetime,
+        target_start: datetime,
+        target_end: datetime,
+    ) -> datetime:
+        if value is None:
+            return target_start
+
+        candidate = value + (target_start - source_start)
+        if target_start <= candidate < target_end:
+            return candidate.replace(microsecond=0)
+
+        target_date = target_start.date()
+        if value.hour < target_start.hour:
+            target_date += timedelta(days=1)
+        candidate = datetime.combine(target_date, value.time()).replace(microsecond=0)
+        if candidate < target_start:
+            candidate += timedelta(days=1)
+        if candidate >= target_end:
+            candidate = target_end - timedelta(minutes=1)
+        return candidate.replace(microsecond=0)
 
     @staticmethod
     def _parse_datetime(value: Any) -> Optional[datetime]:

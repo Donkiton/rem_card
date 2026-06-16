@@ -1594,6 +1594,7 @@ class DoctorRemCardWidget(QWidget):
                 self.controls.btn_rollback.setEnabled(False)
                 self.controls.btn_templates.setEnabled(False)
                 self.controls.btn_pokaz.setEnabled(False)
+                self._set_lab_yesterday_button_active(False)
             else:
                 has_drafts = ow.has_drafts() if ow else False
                 has_admins = ow.has_administrations() if ow else False
@@ -2059,6 +2060,9 @@ class DoctorRemCardWidget(QWidget):
             and hasattr(layout.sector_7na_b, 'data_layout')
         ):
             layout.sector_7na_b.data_layout.addWidget(self.controls)
+
+        if hasattr(layout, 'sector_7anal_b') and hasattr(layout.sector_7anal_b, 'yesterday_labs_requested'):
+            layout.sector_7anal_b.yesterday_labs_requested.connect(self.on_yesterday_lab_orders_clicked)
 
         if hasattr(layout, 'sector_2b'):
             layout.sector_2b.tab_changed.connect(self.on_tab_changed)
@@ -2786,11 +2790,37 @@ class DoctorRemCardWidget(QWidget):
         self._update_yesterday_button_state()
 
     def _update_yesterday_button_state(self):
-        if not hasattr(self, 'controls'): return
+        if not self.service or self._current_date is None:
+            return
         now = datetime.now()
         current_start, current_end = self.service.get_day_period(now)
         is_today = current_start <= self._current_date < current_end
-        self.controls.set_yesterday_active(is_today)
+        active = bool(is_today and not self._archive_read_only_mode)
+        if hasattr(self, 'controls'):
+            self.controls.set_yesterday_active(active)
+        self._set_lab_yesterday_button_active(active)
+
+    def _set_lab_yesterday_button_active(self, active: bool):
+        sector_7anal_b = getattr(getattr(self, "layout_manager", None), "sector_7anal_b", None)
+        if sector_7anal_b is not None and hasattr(sector_7anal_b, "set_yesterday_active"):
+            sector_7anal_b.set_yesterday_active(bool(active))
+
+    def on_yesterday_lab_orders_clicked(self):
+        if self._archive_read_only_mode:
+            self._show_read_only_hint()
+            return
+        layout = getattr(self, "layout_manager", None)
+        if layout is None:
+            return
+        if hasattr(layout, "_ensure_anal_tab_initialized"):
+            layout._ensure_anal_tab_initialized()
+        sector_anal = getattr(layout, "sector_anal", None)
+        if sector_anal is None or not hasattr(sector_anal, "load_yesterday_lab_orders"):
+            CustomMessageBox.warning(self, "Анализы", "Сектор анализов сейчас недоступен.")
+            return
+        if hasattr(sector_anal, "set_context"):
+            sector_anal.set_context(self.service, self.admission_id, self._current_date)
+        sector_anal.load_yesterday_lab_orders()
 
     def on_out_values_changed(self, new_total_out):
         self.update_balance_data()
