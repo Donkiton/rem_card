@@ -8,6 +8,9 @@ from rem_card.app.emergency_metadata import EmergencyMetadataError
 from rem_card.app.emergency_paths import active_dir, active_session_metadata_path
 from rem_card.app.emergency_store import EmergencyLocalStore
 
+LEGACY_FILE_REPLACEMENT_STRATEGY = "legacy_file_replacement_manual_fallback"
+ROW_LEVEL_MERGE_STRATEGY = "row_level"
+
 
 @dataclass(frozen=True)
 class PendingEmergencyMergeResult:
@@ -80,8 +83,14 @@ def run_pending_emergency_merge(
         )
 
     from rem_card.app.emergency_merge_dry_run import EmergencyMergeDryRunService
-    from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
     from rem_card.app.emergency_restore_probe import merge_ready_marker_path
+
+    strategy = str(os.environ.get("REMCARD_EMERGENCY_MERGE_STRATEGY") or ROW_LEVEL_MERGE_STRATEGY).strip().lower()
+    use_legacy_replacement = strategy == LEGACY_FILE_REPLACEMENT_STRATEGY
+    if use_legacy_replacement:
+        from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService as MergeService
+    else:
+        from rem_card.app.emergency_row_level_merge import EmergencyRowLevelMergeService as MergeService
 
     marker_path = merge_ready_marker_path(store.resolve_root(), session_id)
     runtime_context = store.build_active_runtime_context(session_id)
@@ -105,7 +114,7 @@ def run_pending_emergency_merge(
                 error="dry_run_failed",
                 details=dry_run.to_dict(),
             )
-        merge = EmergencyModeAMergeService(
+        merge = MergeService(
             role="nurse",
             runtime_context=runtime_context,
             store=store,

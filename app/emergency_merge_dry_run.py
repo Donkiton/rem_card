@@ -46,9 +46,9 @@ READY_MODE_A_MESSAGE = (
 )
 REMOTE_CHANGED_AUTHORITATIVE_MESSAGE = (
     "Сетевая база изменилась после создания аварийной копии.\n"
-    "Проверка разрешила emergency-authoritative объединение: локальная аварийная медицинская БД "
-    "будет главной и заменит сетевую медицинскую БД после резервных копий и проверок.\n"
-    "Сетевая БД настроек заменяться не будет."
+    "Проверка разрешила emergency-authoritative row-level объединение: локальные аварийные изменения "
+    "будут перенесены в сетевую медицинскую БД после резервных копий и проверок.\n"
+    "При конфликте RemCard-строк победит локальная аварийная версия. Сетевая БД настроек заменяться не будет."
 )
 
 
@@ -883,7 +883,8 @@ def _local_summary_possible(session: EmergencySessionMetadata) -> bool:
 def _warnings_for_result(result_status: str) -> list[str]:
     warnings = ["change_log is index only, not full replay log"]
     if result_status == "ready_emergency_authoritative":
-        warnings.append("remote medical DB changed after emergency base; local emergency medical DB is authoritative")
+        warnings.append("remote medical DB changed after emergency base; row-level merge will preserve remote-only rows")
+        warnings.append("local emergency rows win RemCard conflicts")
         warnings.append("remote settings DB will not be replaced")
     return warnings
 
@@ -898,8 +899,8 @@ def _user_message(result_status: str) -> str:
 
 def _next_action(result_status: str) -> str:
     mapping = {
-        "ready_mode_a": "run_real_merge_mode_a",
-        "ready_emergency_authoritative": "run_real_merge_emergency_authoritative",
+        "ready_mode_a": "run_real_merge_row_level",
+        "ready_emergency_authoritative": "run_real_merge_row_level_emergency_authoritative",
         "blocked_marker_required": "continue_emergency",
         "blocked_marker_invalid": "manual_support_required",
         "blocked_inconsistent": "manual_support_required",
