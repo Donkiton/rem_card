@@ -300,6 +300,85 @@ def _apply_remote_change_after_base(db_path: str) -> int:
         conn.close()
 
 
+def _apply_local_new_patient_emergency_write(db_path: str) -> dict[str, int]:
+    conn = _sqlite_connect(db_path)
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO patients(full_name, admission_uid, birth_date, last_name, first_name)
+            VALUES ('Local Emergency New Patient', ?, '1970-02-02', 'Local', 'Emergency')
+            """,
+            (f"LOCAL-{time.time_ns()}",),
+        )
+        patient_id = int(cursor.lastrowid)
+        cursor = conn.execute(
+            """
+            INSERT INTO admissions(
+                patient_id, bed_number, history_number, admission_datetime,
+                patient_age, patient_gender, diagnosis_text, is_active
+            )
+            VALUES (?, 2, ?, '2026-05-30T11:00:00', 56, 'unknown', 'Local emergency diagnosis', 1)
+            """,
+            (patient_id, f"LOCAL-{time.time_ns()}"),
+        )
+        admission_id = int(cursor.lastrowid)
+        cursor = conn.execute(
+            """
+            INSERT INTO vitals(admission_id, datetime, sys, dia, pulse, temp, spo2, rr, last_modified_by)
+            VALUES (?, '2026-05-30T11:05:00', 121, 79, 77, 36.7, 99, 17, ?)
+            """,
+            (admission_id, ACCEPTANCE_CHANGED_BY),
+        )
+        vital_id = int(cursor.lastrowid)
+        conn.commit()
+        return {"patient_id": patient_id, "admission_id": admission_id, "vital_id": vital_id}
+    finally:
+        conn.close()
+
+
+def _apply_remote_protected_opblock_case_after_base(db_path: str) -> dict[str, int]:
+    from rem_card.app.operblock_schema import _apply_operblock_schema
+
+    conn = _sqlite_connect(db_path)
+    try:
+        _apply_operblock_schema(conn.cursor())
+        cursor = conn.execute(
+            """
+            INSERT INTO patients(full_name, admission_uid, birth_date, last_name, first_name)
+            VALUES ('Remote OperBlock Protected Patient', ?, '1965-03-03', 'Remote', 'OperBlock')
+            """,
+            (f"REMOTE-OP-{time.time_ns()}",),
+        )
+        patient_id = int(cursor.lastrowid)
+        cursor = conn.execute(
+            """
+            INSERT INTO admissions(
+                patient_id, bed_number, history_number, admission_datetime,
+                patient_age, patient_gender, diagnosis_text, is_active, unit_scope, admission_type
+            )
+            VALUES (?, 10, ?, '2026-05-30T11:00:00', 61, 'unknown', 'Remote opblock diagnosis', 1, 'operblock', 'operblock')
+            """,
+            (patient_id, f"REMOTE-OP-{time.time_ns()}"),
+        )
+        admission_id = int(cursor.lastrowid)
+        cursor = conn.execute(
+            """
+            INSERT INTO operation_cases(
+                patient_id, admission_id, table_code, status, started_at,
+                planned_operation_name, last_modified_by
+            )
+            VALUES (?, ?, 'emergency', 'active', '2026-05-30T11:00:00', 'Remote protected operation', 'acceptance')
+            """,
+            (patient_id, admission_id),
+        )
+        case_id = int(cursor.lastrowid)
+        conn.execute("DELETE FROM schema_migrations WHERE version >= 1000")
+        conn.commit()
+        return {"patient_id": patient_id, "admission_id": admission_id, "case_id": case_id}
+    finally:
+        conn.close()
+
+
 def _count_change_log_by(db_path: str, changed_by: str) -> int:
     conn = _open_readonly(db_path)
     try:
@@ -407,9 +486,12 @@ def _run_mode_a_merge(
     role: str = "nurse",
     service_mutator: Callable[[Any], None] | None = None,
 ):
-    from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
+    if os.environ.get("REMCARD_EMERGENCY_MERGE_STRATEGY") == "legacy_file_replacement_manual_fallback":
+        from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService as MergeService
+    else:
+        from rem_card.app.emergency_row_level_merge import EmergencyRowLevelMergeService as MergeService
 
-    service = EmergencyModeAMergeService(
+    service = MergeService(
         role=role,
         runtime_context=store.build_active_runtime_context(session_id),
         store=store,
@@ -520,9 +602,9 @@ def scenario_remote_changed_authoritative(temp_root: Path) -> ScenarioResult:
         marker_path,
     )
     _require(merge_result.ok, f"authoritative merge failed: {merge_result.to_dict()}")
-    _require(_file_hash(paths["medical_path"]) != remote_hash_after_change, "remote DB was not replaced by emergency DB")
+    _require(_file_hash(paths["medical_path"]) != remote_hash_after_change, "remote DB was not updated by row-level merge")
     _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) > 0, "emergency rows were not applied")
-    _require(_count_table_rows_by(paths["medical_path"], "vitals", REMOTE_CHANGED_BY) == 0, "remote-only row survived")
+    _require(_count_table_rows_by(paths["medical_path"], "vitals", REMOTE_CHANGED_BY) == 1, "remote-only row was lost")
     _assert_settings_untouched(paths["settings_path"], settings_hash_before)
     _require(os.path.isfile(merge_result.remote_backup_path), "remote pre-merge backup missing")
     _require(os.path.isfile(merge_result.local_backup_path), "local emergency backup missing")
@@ -531,11 +613,84 @@ def scenario_remote_changed_authoritative(temp_root: Path) -> ScenarioResult:
     report = _read_json(dry_run_report_path)
     report_text = json.dumps(report, ensure_ascii=False)
     _require("remote_changed_emergency_authoritative" in report_text, "dry-run report does not mention authoritative mode")
+    merge_report = _read_json(merge_result.report_path)
+    _require(
+        merge_report.get("mode") == "emergency_authoritative_row_level_merge",
+        "merge report does not use row-level mode",
+        merge_report=merge_result.report_path,
+    )
     return ScenarioResult(
         name="remote_changed_authoritative",
         ok=True,
-        details=f"remote_changed authoritative merge applied over change_id={changed_last}",
+        details=f"remote_changed row-level merge preserved remote-only change_id={changed_last}",
         artifacts={"dry_run_report": dry_run_report_path, "merge_report": merge_result.report_path},
+    )
+
+
+def scenario_row_merge_preserves_protected_opblock_common_rows(temp_root: Path) -> ScenarioResult:
+    paths = _build_network_fixture(temp_root, "row_merge_preserves_protected_opblock_common_rows")
+    settings_hash_before = _file_hash(paths["settings_path"])
+    store, _standby, startup_session = _start_nurse_emergency(paths, simulate_unavailable=True)
+    local_ids = _apply_local_new_patient_emergency_write(startup_session.metadata.local_db_path)
+    protected_ids = _apply_remote_protected_opblock_case_after_base(paths["medical_path"])
+
+    probe_payload = _run_restore_probe(paths, store, startup_session)
+    status = probe_payload["status"]
+    _require(status.get("status") == "remote_changed_conflict_pending", f"restore probe did not report remote_changed: {status}")
+    marker_path = probe_payload["probe"].mark_merge_ready()
+    dry_run = _run_dry_run(paths, store, startup_session.metadata.emergency_session_id, marker_path)
+    _require(dry_run.result_status == "ready_emergency_authoritative", f"dry-run not row-merge ready: {dry_run.to_dict()}")
+    merge_result = _run_mode_a_merge(
+        paths,
+        store,
+        startup_session.metadata.emergency_session_id,
+        dry_run.report_path,
+        marker_path,
+    )
+    _require(merge_result.ok, f"protected opblock row-level merge failed: {merge_result.to_dict()}")
+
+    conn = _open_readonly(paths["medical_path"])
+    try:
+        protected_patient = conn.execute(
+            "SELECT full_name FROM patients WHERE id = ?",
+            (protected_ids["patient_id"],),
+        ).fetchone()
+        protected_case = conn.execute(
+            "SELECT patient_id, admission_id FROM operation_cases WHERE id = ?",
+            (protected_ids["case_id"],),
+        ).fetchone()
+        local_patient = conn.execute(
+            "SELECT id FROM patients WHERE full_name = 'Local Emergency New Patient'"
+        ).fetchone()
+        local_vital = conn.execute(
+            "SELECT admission_id FROM vitals WHERE last_modified_by = ? AND sys = 121",
+            (ACCEPTANCE_CHANGED_BY,),
+        ).fetchone()
+    finally:
+        conn.close()
+    _require(
+        protected_patient and protected_patient[0] == "Remote OperBlock Protected Patient",
+        "protected opblock patient row was overwritten",
+        merge_report=merge_result.report_path,
+    )
+    _require(
+        protected_case
+        and int(protected_case[0]) == protected_ids["patient_id"]
+        and int(protected_case[1]) == protected_ids["admission_id"],
+        "operation_case stopped pointing to protected common rows",
+        merge_report=merge_result.report_path,
+    )
+    _require(local_patient and int(local_patient[0]) != local_ids["patient_id"], "local colliding patient id was not remapped")
+    _require(
+        local_vital and int(local_vital[0]) != protected_ids["admission_id"],
+        "local vital was attached to protected opblock admission",
+    )
+    _assert_settings_untouched(paths["settings_path"], settings_hash_before)
+    return ScenarioResult(
+        name="row_merge_preserves_protected_opblock_common_rows",
+        ok=True,
+        details="protected opblock common rows survived local-id collision",
+        artifacts={"merge_report": merge_result.report_path},
     )
 
 
@@ -631,7 +786,6 @@ def scenario_failure_rollback(temp_root: Path) -> ScenarioResult:
     marker_path = probe_payload["probe"].mark_merge_ready()
     dry_run = _run_dry_run(paths, store, startup_session.metadata.emergency_session_id, marker_path)
     _require(dry_run.result_status == "ready_mode_a", f"dry-run was not ready: {dry_run.to_dict()}")
-    remote_hash_before = _file_hash(paths["medical_path"])
 
     def force_final_validation_failure(service: Any) -> None:
         service.validate_final_remote_db = lambda *_args, **_kwargs: {
@@ -649,7 +803,8 @@ def scenario_failure_rollback(temp_root: Path) -> ScenarioResult:
     )
     _require(merge_result.result_status == "rolled_back", f"merge did not roll back: {merge_result.to_dict()}")
     _require(merge_result.rollback_status == "restored", f"remote rollback was not restored: {merge_result.to_dict()}")
-    _require(_file_hash(paths["medical_path"]) == remote_hash_before, "remote DB hash changed after rollback")
+    _require(_count_change_log_by(paths["medical_path"], ACCEPTANCE_CHANGED_BY) == 0, "local emergency rows survived rollback")
+    _require(_validate_medical(paths["medical_path"]).ok, "remote DB is invalid after rollback")
     _require(os.path.isfile(startup_session.metadata.local_db_path), "local emergency DB was not preserved after rollback")
     loaded = store.read_active_session(startup_session.metadata.emergency_session_id)
     _require(loaded.status == "merge_failed", f"session not marked merge_failed: {loaded.status}")
@@ -783,6 +938,7 @@ def scenario_unconfirmed_write(temp_root: Path) -> ScenarioResult:
 SCENARIOS: tuple[tuple[str, Callable[[Path], ScenarioResult]], ...] = (
     ("full_mode_a_path", scenario_full_mode_a_path),
     ("remote_changed_authoritative", scenario_remote_changed_authoritative),
+    ("row_merge_preserves_protected_opblock_common_rows", scenario_row_merge_preserves_protected_opblock_common_rows),
     ("active_session_network_startup_switch", scenario_active_session_network_startup_switch),
     ("failure_rollback", scenario_failure_rollback),
     ("no_standby_empty_fallback_and_missing_settings_block", scenario_no_standby_empty_fallback_and_missing_settings_block),

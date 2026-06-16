@@ -13900,6 +13900,45 @@ def _append_emergency_medical_change(db_path: str, entity_id: int = 1) -> int:
         conn.close()
 
 
+def _append_real_emergency_vital_change(db_path: str) -> dict[str, int]:
+    from rem_card.app.sqlite_shared import configure_connection
+
+    conn = sqlite3.connect(db_path)
+    try:
+        configure_connection(conn, profile="network")
+        cursor = conn.execute(
+            "INSERT INTO patients(full_name, admission_uid, last_name, first_name) VALUES (?, ?, ?, ?)",
+            ("Regression Pending Patient", f"REG-PENDING-{uuid.uuid4().hex[:8]}", "Regression", "Pending"),
+        )
+        patient_id = int(cursor.lastrowid)
+        cursor = conn.execute(
+            """
+            INSERT INTO admissions(patient_id, bed_number, history_number, admission_datetime, is_active)
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (patient_id, 1, f"REG-{uuid.uuid4().hex[:6]}", "2026-06-01T08:00:00"),
+        )
+        admission_id = int(cursor.lastrowid)
+        cursor = conn.execute(
+            """
+            INSERT INTO vitals(admission_id, datetime, sys, dia, pulse, temp, spo2, rr, last_modified_by)
+            VALUES (?, '2026-06-01T08:10:00', 120, 80, 76, 36.6, 98, 16, 'regression_pending')
+            """,
+            (admission_id,),
+        )
+        vital_id = int(cursor.lastrowid)
+        conn.commit()
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()
+        return {
+            "patient_id": patient_id,
+            "admission_id": admission_id,
+            "vital_id": vital_id,
+            "last_change_id": int(row[0] or 0),
+        }
+    finally:
+        conn.close()
+
+
 def _count_emergency_medical_change(db_path: str, entity_id: int) -> int:
     from rem_card.app.sqlite_shared import configure_connection
 
@@ -16618,7 +16657,9 @@ def _check_merge_dry_run_remote_changed_ready_authoritative(temp_root: str) -> t
         return False, f"remote changed was not ready authoritative: {result.to_dict()}"
     if _file_hash(fixture["medical_path"]) != changed_hash or changed_hash == before_hash:
         return False, "remote changed dry-run unexpectedly modified remote DB"
-    if not any("local emergency medical DB is authoritative" in item for item in result.warnings):
+    if not any("row-level merge will preserve remote-only rows" in item for item in result.warnings):
+        return False, f"row-level preserve warning missing: {result.warnings}"
+    if not any("local emergency rows win RemCard conflicts" in item for item in result.warnings):
         return False, f"authoritative warning missing: {result.warnings}"
     return True, "ok"
 
@@ -17234,6 +17275,31 @@ def _check_mode_a_merge_no_doctor_path(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_pending_emergency_merge_defaults_to_row_level(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = (PROJECT_ROOT / "app" / "emergency_pending_merge.py").read_text(encoding="utf-8")
+    required = (
+        "ROW_LEVEL_MERGE_STRATEGY",
+        "EmergencyRowLevelMergeService",
+        "legacy_file_replacement_manual_fallback",
+    )
+    missing = [token for token in required if token not in text]
+    if missing:
+        return False, f"pending merge default row-level tokens missing: {missing}"
+    if "strategy = str(os.environ.get(\"REMCARD_EMERGENCY_MERGE_STRATEGY\") or ROW_LEVEL_MERGE_STRATEGY)" not in text:
+        return False, "pending merge does not default to row-level strategy"
+    return True, "ok"
+
+
+def _check_recovery_bed_transfer_order_10_11_12(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.services.patient_bed_management.recovery_beds import RECOVERY_BED_TRANSFER_ORDER
+
+    if tuple(RECOVERY_BED_TRANSFER_ORDER) != (10, 11, 12):
+        return False, f"wrong recovery bed order: {RECOVERY_BED_TRANSFER_ORDER}"
+    return True, "ok"
+
+
 def _check_mode_a_merge_report_written(temp_root: str) -> tuple[bool, str]:
     fixture = _prepare_mode_a_merge_fixture(temp_root)
     result = _run_mode_a_merge_fixture(fixture)
@@ -17294,8 +17360,8 @@ def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: 
     from rem_card.app.emergency_validation import validate_medical_db_snapshot
 
     fixture = _prepare_restore_probe_fixture(temp_root, success_rounds_required=1)
-    _append_emergency_medical_change(fixture["session"].local_db_path, entity_id=3401)
-    local_last = validate_medical_db_snapshot(fixture["session"].local_db_path).last_change_id
+    local_change = _append_real_emergency_vital_change(fixture["session"].local_db_path)
+    local_last = int(validate_medical_db_snapshot(fixture["session"].local_db_path).last_change_id or 0)
     before_settings = _file_hash(fixture["settings_path"])
     fixture["probe"].run_probe_once()
     marker_path = fixture["probe"].mark_merge_ready()
@@ -17313,8 +17379,18 @@ def _check_pending_emergency_merge_runner_runs_merge_pending_session(temp_root: 
     remote_last = validate_medical_db_snapshot(fixture["medical_path"]).last_change_id
     if not result.attempted or not result.ok:
         return False, f"pending merge did not complete: {result}"
-    if int(remote_last or 0) != int(local_last or 0):
-        return False, f"pending merge remote last_change mismatch: local={local_last} remote={remote_last}"
+    if int(remote_last or 0) <= int(fixture["session"].base_last_change_id or 0):
+        return False, f"pending merge did not advance remote change id: local={local_last} remote={remote_last}"
+    conn = sqlite3.connect(fixture["medical_path"])
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM vitals WHERE last_modified_by = ? AND sys = ?",
+            ("regression_pending", 120),
+        ).fetchone()
+    finally:
+        conn.close()
+    if int(row[0] or 0) != 1:
+        return False, f"pending merge did not apply local vital row: {local_change}"
     if _file_hash(fixture["settings_path"]) != before_settings:
         return False, "pending merge modified remote settings DB"
     own_active_dir = os.path.join(
@@ -17822,6 +17898,7 @@ def _check_emergency_acceptance_runner_has_remote_changed_authoritative_scenario
     text = _emergency_acceptance_runner_text()
     required = (
         "scenario_remote_changed_authoritative",
+        "row_merge_preserves_protected_opblock_common_rows",
         "remote_changed_conflict_pending",
         "ready_emergency_authoritative",
         "remote_changed_authoritative",
@@ -20619,9 +20696,9 @@ def _check_operblock_rao_auto_transfer_recovery_beds_and_vitals(temp_root: str) 
             manager.close()
 
     scenarios = [
-        ("free_all", (), 11),
-        ("bed_11_busy", (11,), 12),
-        ("bed_12_busy", (12,), 11),
+        ("free_all", (), 10),
+        ("bed_11_busy", (11,), 10),
+        ("bed_12_busy", (12,), 10),
         ("bed_10_busy", (10,), 11),
         ("beds_11_12_busy", (11, 12), 10),
         ("beds_10_12_busy", (10, 12), 11),
@@ -22966,6 +23043,7 @@ def _check_operblock_offline_acceptance_runner_rc_scenarios(temp_root: str) -> t
     required = (
         "initial_network_missing",
         "migration",
+        "migration_non_rao_department",
         "active_blocks_migration",
         "table_conflict",
         "protocol_conflict",
@@ -23402,6 +23480,7 @@ def main(argv: list[str] | None = None):
         ("mode_a_merge_no_change_log_replay", _check_mode_a_merge_no_change_log_replay),
         ("mode_a_merge_no_sqlite_profile_changes", _check_mode_a_merge_no_sqlite_profile_changes),
         ("mode_a_merge_no_doctor_path", _check_mode_a_merge_no_doctor_path),
+        ("pending_emergency_merge_defaults_to_row_level", _check_pending_emergency_merge_defaults_to_row_level),
         ("mode_a_merge_report_written", _check_mode_a_merge_report_written),
         ("mode_a_merge_preserves_reports_and_backups_in_archive", _check_mode_a_merge_preserves_reports_and_backups_in_archive),
         (
@@ -23495,6 +23574,7 @@ def main(argv: list[str] | None = None):
         ("operblock_medication_aliases_quick_search", _check_operblock_medication_aliases_quick_search),
         ("operblock_operation_stages_custom_events", _check_operblock_operation_stages_custom_events),
         ("operblock_rao_auto_transfer_recovery_beds_and_vitals", _check_operblock_rao_auto_transfer_recovery_beds_and_vitals),
+        ("recovery_bed_transfer_order_10_11_12", _check_recovery_bed_transfer_order_10_11_12),
         ("operblock_occupy_dialog_manual_birth_date_and_plain_groups", _check_operblock_occupy_dialog_manual_birth_date_and_plain_groups),
         ("operblock_operation_stage_chart_grouping", _check_operblock_operation_stage_chart_grouping),
         ("operblock_empty_table_card_layout", _check_operblock_empty_table_card_layout),
