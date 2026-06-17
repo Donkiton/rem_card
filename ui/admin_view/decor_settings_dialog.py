@@ -51,7 +51,7 @@ from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 class DecorSettingsDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def __init__(self, parent=None):
         super().__init__("Настройка декора", parent)
-        self._init_saved_frameless_dialog("admin/decor_settings_dialog_geometry", drag_area_height=64)
+        self._init_saved_frameless_dialog("admin/decor_settings_dialog_geometry", drag_area_height=32)
         self.storage = DecorSettingsStorage()
         self._loading = False
         self._current_index = -1
