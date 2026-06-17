@@ -7,6 +7,7 @@ from rem_card.app.logger import logger, log_execution_time
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.ui.shared.async_call import AsyncCallThread
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.orders_balance_adapter import (
     apply_current_order_mark_overrides,
     build_balance_orders_from_orders_widget,
@@ -561,6 +562,17 @@ class NurseMainWidget(QWidget):
         worker.succeeded.connect(self._apply_card_snapshot)
         worker.failed.connect(self._on_card_snapshot_failed)
         worker.finished.connect(self._on_card_snapshot_finished)
+        message = (
+            "Загрузка карты пациента..."
+            if str(load_scope or "").startswith("patient_open")
+            else "Обновление данных карты..."
+        )
+        show_app_loading(
+            self,
+            message,
+            key=f"nurse-card-snapshot:{id(self)}",
+            auto_hide_ms=20000,
+        )
         worker.start()
 
         data_service = self._get_data_service()
@@ -786,9 +798,12 @@ class NurseMainWidget(QWidget):
             return
         if self._is_closing:
             self._snapshot_pending = None
+            hide_app_loading(self, f"nurse-card-snapshot:{id(self)}", delay_ms=350)
             return
         if self._snapshot_pending:
             QTimer.singleShot(0, self._request_pending_card_snapshot)
+            return
+        hide_app_loading(self, f"nurse-card-snapshot:{id(self)}", delay_ms=350)
 
     def _reset_balance_view_state(self):
         if hasattr(self, "balance_controller") and self.balance_controller:
@@ -1831,9 +1846,18 @@ class NurseMainWidget(QWidget):
     def load_patient_card(self, admission_id, date):
         if self._is_closing:
             return
+        open_loading_key = show_app_loading(
+            self,
+            "Открытие карты пациента...",
+            key=f"nurse-card-open:{id(self)}",
+            auto_hide_ms=10000,
+            process_events=True,
+        )
         self._patient_open_generation += 1
         patient_open_generation = self._patient_open_generation
         if not self._ensure_full_layout(reason="patient_open"):
+            if open_loading_key:
+                hide_app_loading(self, open_loading_key, delay_ms=350)
             return
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
@@ -1940,11 +1964,13 @@ class NurseMainWidget(QWidget):
                 ensure_initial_status=should_ensure_initial_status,
             )
         if hasattr(self, 'layout_manager'):
-            active_tab = self.layout_manager.set_active_tab("Витальные функции") or "Витальные функции"
+            active_tab = self.layout_manager.set_active_tab("Витальные функции", source="refresh") or "Витальные функции"
             if hasattr(self.layout_manager, 'sector_2b'):
                 self.layout_manager.sector_2b.select_tab(active_tab, emit=False)
             if active_tab != "Витальные функции":
                 self.on_tab_changed(active_tab)
+        if open_loading_key:
+            hide_app_loading(self, open_loading_key, delay_ms=600)
 
     def _set_nurse_orders_context_if_current(self, mgr, admission_id, date, generation: int):
         if self._is_closing or generation != self._patient_open_generation:

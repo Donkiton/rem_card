@@ -307,48 +307,55 @@ class DecorSettingsDialog(SavedFramelessDialogMixin, BaseStyledDialog):
                 subcontrol-origin: border;
                 subcontrol-position: top right;
                 width: 24px;
-                border-left: 1px solid #d6e0e8;
+                border-left: 1px solid #8aa7bf;
                 border-top-right-radius: 6px;
                 border-bottom-right-radius: 6px;
-                background: #eef5fb;
+                background: #d8e9f6;
+            }
+            QComboBox::drop-down:hover, QDateEdit::drop-down:hover {
+                background: #c2dced;
+                border-left-color: #5d86a6;
             }
             QComboBox::down-arrow, QDateEdit::down-arrow {
                 image: url("__COMBO_ICON__");
-                width: 10px;
-                height: 10px;
+                width: 12px;
+                height: 12px;
             }
             QAbstractSpinBox::up-button {
                 subcontrol-origin: border;
                 subcontrol-position: top right;
                 width: 22px;
-                border-left: 1px solid #d6e0e8;
-                border-bottom: 1px solid #d6e0e8;
+                border-left: 1px solid #8aa7bf;
+                border-bottom: 1px solid #8aa7bf;
                 border-top-right-radius: 6px;
-                background: #eef5fb;
+                background: #d8e9f6;
             }
             QAbstractSpinBox::up-button:hover {
-                background: #dceaf7;
+                background: #c2dced;
+                border-left-color: #5d86a6;
+                border-bottom-color: #5d86a6;
             }
             QAbstractSpinBox::down-button {
                 subcontrol-origin: border;
                 subcontrol-position: bottom right;
                 width: 22px;
-                border-left: 1px solid #d6e0e8;
+                border-left: 1px solid #8aa7bf;
                 border-bottom-right-radius: 6px;
-                background: #eef5fb;
+                background: #d8e9f6;
             }
             QAbstractSpinBox::down-button:hover {
-                background: #dceaf7;
+                background: #c2dced;
+                border-left-color: #5d86a6;
             }
             QAbstractSpinBox::up-arrow {
                 image: url("__UP_ICON__");
-                width: 8px;
-                height: 8px;
+                width: 10px;
+                height: 10px;
             }
             QAbstractSpinBox::down-arrow {
                 image: url("__DOWN_ICON__");
-                width: 8px;
-                height: 8px;
+                width: 10px;
+                height: 10px;
             }
             QCheckBox {
                 color: #26394d;

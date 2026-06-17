@@ -8,6 +8,7 @@ from rem_card.ui.shared.display_settings_storage import (
     w1b_lower_sector_enabled,
 )
 from rem_card.ui.shared.layout_components import CurrentPageStack, SplitterManager
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 
 
 PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
@@ -195,29 +196,62 @@ class LightweightW1Shell(QWidget):
             self.selection_mode_changed.emit("beds")
             return
         if normalized == "archive":
-            if self._ensure_archive_widget() is None:
-                return
-            self.selection_stack.setCurrentIndex(2)
-            self._refresh_archive_if_needed(force=self._archive_last_change_id < 0)
-            self.current_mode = "archive"
-            self.selection_mode_changed.emit("archive")
+            loading_key = show_app_loading(
+                self,
+                "Загрузка архива...",
+                key=f"w1-shell:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self._ensure_archive_widget() is None:
+                    return
+                self.selection_stack.setCurrentIndex(2)
+                self._refresh_archive_if_needed(force=self._archive_last_change_id < 0)
+                self.current_mode = "archive"
+                self.selection_mode_changed.emit("archive")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
             return
         if normalized == "admin":
-            if self._ensure_admin_widget() is None:
-                return
-            self.selection_stack.setCurrentIndex(3)
-            self.current_mode = "admin"
-            self.selection_mode_changed.emit("admin")
+            loading_key = show_app_loading(
+                self,
+                "Открытие настроек...",
+                key=f"w1-shell:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self._ensure_admin_widget() is None:
+                    return
+                self.selection_stack.setCurrentIndex(3)
+                self.current_mode = "admin"
+                self.selection_mode_changed.emit("admin")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
             return
         if normalized == PATIENT_BED_MANAGEMENT_MODE:
-            if self._ensure_journal_widget() is None:
-                return
-            self.selection_stack.setCurrentIndex(4)
-            self._apply_w1_beds_sector_visibility()
-            if hasattr(self.journal_widget, "refresh_bed_statuses"):
-                QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
-            self.current_mode = PATIENT_BED_MANAGEMENT_MODE
-            self.selection_mode_changed.emit(PATIENT_BED_MANAGEMENT_MODE)
+            loading_key = show_app_loading(
+                self,
+                "Открытие журнала пациентов...",
+                key=f"w1-shell:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self._ensure_journal_widget() is None:
+                    return
+                self.selection_stack.setCurrentIndex(4)
+                self._apply_w1_beds_sector_visibility()
+                if hasattr(self.journal_widget, "refresh_bed_statuses"):
+                    QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
+                self.current_mode = PATIENT_BED_MANAGEMENT_MODE
+                self.selection_mode_changed.emit(PATIENT_BED_MANAGEMENT_MODE)
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
             return
         logger.debug("LightweightW1Shell ignores mode %s before full card layout exists", mode)
 

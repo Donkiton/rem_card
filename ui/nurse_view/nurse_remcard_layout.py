@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.display_settings_storage import (
     DisplaySettingsStorage,
     w1a_upcoming_orders_enabled,
@@ -669,42 +670,84 @@ class NurseRemCardLayoutManager(QWidget):
             self.current_mode = "beds"
             self.selection_mode_changed.emit("beds")
         elif mode == "archive":
-            if self.archive_widget is None and self.patient_service:
-                from ..doctor_view.archive_widget import ArchiveWidget
+            loading_key = show_app_loading(
+                self,
+                "Загрузка архива...",
+                key=f"nurse-mode:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self.archive_widget is None and self.patient_service:
+                    from ..doctor_view.archive_widget import ArchiveWidget
 
-                self.archive_widget = ArchiveWidget(self.patient_service, remcard_service=self.remcard_service)
-                self._archive_layout.addWidget(self.archive_widget)
-            self.selection_stack.setCurrentIndex(2)
-            self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)
-            self.sector_1b.setEnabled(False)
-            self.current_mode = "archive"
-            self.selection_mode_changed.emit("archive")
+                    self.archive_widget = ArchiveWidget(self.patient_service, remcard_service=self.remcard_service)
+                    self._archive_layout.addWidget(self.archive_widget)
+                self.selection_stack.setCurrentIndex(2)
+                self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)
+                self.sector_1b.setEnabled(False)
+                self.current_mode = "archive"
+                self.selection_mode_changed.emit("archive")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
         elif mode == "admin":
-            if self.admin_widget is None:
-                from ..admin_view.admin_main_widget import AdminMainWidget
+            loading_key = show_app_loading(
+                self,
+                "Открытие настроек...",
+                key=f"nurse-mode:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self.admin_widget is None:
+                    from ..admin_view.admin_main_widget import AdminMainWidget
 
-                self.admin_widget = AdminMainWidget(service=self.remcard_service, role="nurse")
-                self._admin_layout.addWidget(self.admin_widget)
-            self.selection_stack.setCurrentIndex(3)
-            self.sector_1b.setEnabled(False)
-            self.current_mode = "admin"
-            self.selection_mode_changed.emit("admin")
+                    self.admin_widget = AdminMainWidget(service=self.remcard_service, role="nurse")
+                    self._admin_layout.addWidget(self.admin_widget)
+                self.selection_stack.setCurrentIndex(3)
+                self.sector_1b.setEnabled(False)
+                self.current_mode = "admin"
+                self.selection_mode_changed.emit("admin")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
         elif mode in ("patient_bed_management", "journal"):
-            if self._ensure_journal_widget() is None:
-                return
-            self.selection_stack.setCurrentIndex(4)
+            loading_key = show_app_loading(
+                self,
+                "Открытие журнала пациентов...",
+                key=f"nurse-mode:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self._ensure_journal_widget() is None:
+                    return
+                self.selection_stack.setCurrentIndex(4)
 
-            if hasattr(self, 'l_layout'):
-                self.l_layout.setContentsMargins(0, 0, 0, 0)
-            self._apply_w1_beds_sector_visibility()
-            self.sector_1b.setEnabled(False)
+                if hasattr(self, 'l_layout'):
+                    self.l_layout.setContentsMargins(0, 0, 0, 0)
+                self._apply_w1_beds_sector_visibility()
+                self.sector_1b.setEnabled(False)
 
-            if hasattr(self.journal_widget, "refresh_bed_statuses"):
-                QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
+                if hasattr(self.journal_widget, "refresh_bed_statuses"):
+                    QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
 
-            self.current_mode = "patient_bed_management"
-            self.selection_mode_changed.emit("patient_bed_management")
+                self.current_mode = "patient_bed_management"
+                self.selection_mode_changed.emit("patient_bed_management")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
         else: # card
+            loading_key = None
+            if not self._first_card_mode_switch_done:
+                loading_key = show_app_loading(
+                    self,
+                    "Открытие карты пациента...",
+                    key=f"nurse-mode:{id(self)}",
+                    auto_hide_ms=8000,
+                    process_events=True,
+                )
             # Безмерцательное переключение в карту:
             # первый вход выполняем полностью до включения перерисовки.
             is_first_card_switch = not self._first_card_mode_switch_done
@@ -726,6 +769,8 @@ class NurseRemCardLayoutManager(QWidget):
                 self.setUpdatesEnabled(True)
                 self.updateGeometry()
                 self.update()
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
                 raise
 
             if is_first_card_switch:
@@ -747,6 +792,8 @@ class NurseRemCardLayoutManager(QWidget):
                 QTimer.singleShot(0, self._post_restore_fix)
             self.current_mode = "card"
             self.selection_mode_changed.emit("card")
+            if loading_key:
+                hide_app_loading(self, loading_key, delay_ms=450)
 
     def refresh_current_status(self):
         if not hasattr(self, 'patient_status_service') or not hasattr(self, 'sector_4b'): return
@@ -767,7 +814,16 @@ class NurseRemCardLayoutManager(QWidget):
         dlg = NurseStatisticsDialog(self.patient_service, self.remcard_service, self)
         dlg.exec()
 
-    def set_active_tab(self, tab_name):
+    def set_active_tab(self, tab_name, *, source: str = "click"):
+        loading_key = None
+        if str(source or "click").strip().lower() == "click":
+            loading_key = show_app_loading(
+                self,
+                f"Открытие вкладки: {tab_name}",
+                key=f"nurse-tab:{id(self)}",
+                auto_hide_ms=5000,
+                process_events=True,
+            )
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
             if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
@@ -850,3 +906,6 @@ class NurseRemCardLayoutManager(QWidget):
         except Exception as exc:
             logger.warning("Не удалось переключить вкладку РЕМ карты медсестры на %s: %s", tab_name, exc, exc_info=True)
             return tab_name
+        finally:
+            if loading_key:
+                hide_app_loading(self, loading_key, delay_ms=350)

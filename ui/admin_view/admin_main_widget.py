@@ -1,6 +1,8 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+
 
 class AdminMainWidget(QWidget):
     """
@@ -199,16 +201,27 @@ class AdminMainWidget(QWidget):
 
     def _show_page(self, widget):
         if widget is not None:
+            loading_key = show_app_loading(
+                self,
+                "Загрузка раздела...",
+                key=f"admin-page:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
             try:
-                from rem_card.services.prescription_engine import engine
+                try:
+                    from rem_card.services.prescription_engine import engine
 
-                engine.reload_if_changed(force_check=True)
-            except Exception:
-                pass
-            load_data = getattr(widget, "load_data", None)
-            if callable(load_data):
-                load_data()
-            self.stack.setCurrentWidget(widget)
+                    engine.reload_if_changed(force_check=True)
+                except Exception:
+                    pass
+                load_data = getattr(widget, "load_data", None)
+                if callable(load_data):
+                    load_data()
+                self.stack.setCurrentWidget(widget)
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
 
     def _connect_back(self, widget):
         if hasattr(widget, "btn_back"):

@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFr
 from PySide6.QtCore import Qt, QTimer, Signal
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.display_settings_storage import (
     DisplaySettingsStorage,
     w1a_upcoming_orders_enabled,
@@ -750,49 +751,91 @@ class RemCardLayoutManager(QWidget):
             self.current_mode = "beds"
             self.selection_mode_changed.emit("beds")
         elif mode == "archive":
-            if self.archive_widget is None and self.patient_service:
-                from ..doctor_view.archive_widget import ArchiveWidget
+            loading_key = show_app_loading(
+                self,
+                "Загрузка архива...",
+                key=f"doctor-mode:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self.archive_widget is None and self.patient_service:
+                    from ..doctor_view.archive_widget import ArchiveWidget
 
-                role_text = str(getattr(self, "role", "") or "").lower()
-                allow_archive_edit = "врач" in role_text or "doctor" in role_text
-                self.archive_widget = ArchiveWidget(
-                    self.patient_service,
-                    remcard_service=self.remcard_service,
-                    allow_edit=allow_archive_edit,
-                    operblock_service=self.operblock_service if allow_archive_edit else None,
-                )
-                self._archive_layout.addWidget(self.archive_widget)
-            self.selection_stack.setCurrentIndex(2)
-            self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)
-            self.sector_1b.setEnabled(False)
-            self.current_mode = "archive"
-            self.selection_mode_changed.emit("archive")
+                    role_text = str(getattr(self, "role", "") or "").lower()
+                    allow_archive_edit = "врач" in role_text or "doctor" in role_text
+                    self.archive_widget = ArchiveWidget(
+                        self.patient_service,
+                        remcard_service=self.remcard_service,
+                        allow_edit=allow_archive_edit,
+                        operblock_service=self.operblock_service if allow_archive_edit else None,
+                    )
+                    self._archive_layout.addWidget(self.archive_widget)
+                self.selection_stack.setCurrentIndex(2)
+                self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)
+                self.sector_1b.setEnabled(False)
+                self.current_mode = "archive"
+                self.selection_mode_changed.emit("archive")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
         elif mode == "admin":
-            if self.admin_widget is None:
-                from ..admin_view.admin_main_widget import AdminMainWidget
+            loading_key = show_app_loading(
+                self,
+                "Открытие настроек...",
+                key=f"doctor-mode:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self.admin_widget is None:
+                    from ..admin_view.admin_main_widget import AdminMainWidget
 
-                self.admin_widget = AdminMainWidget(service=self.remcard_service, role="doctor")
-                self._admin_layout.addWidget(self.admin_widget)
-            self.selection_stack.setCurrentIndex(3)
-            self.sector_1b.setEnabled(False)
-            self.current_mode = "admin"
-            self.selection_mode_changed.emit("admin")
+                    self.admin_widget = AdminMainWidget(service=self.remcard_service, role="doctor")
+                    self._admin_layout.addWidget(self.admin_widget)
+                self.selection_stack.setCurrentIndex(3)
+                self.sector_1b.setEnabled(False)
+                self.current_mode = "admin"
+                self.selection_mode_changed.emit("admin")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
         elif mode in ("patient_bed_management", "journal"):
-            if self._ensure_journal_widget() is None:
-                return
-            self.selection_stack.setCurrentIndex(4)
+            loading_key = show_app_loading(
+                self,
+                "Открытие журнала пациентов...",
+                key=f"doctor-mode:{id(self)}",
+                auto_hide_ms=8000,
+                process_events=True,
+            )
+            try:
+                if self._ensure_journal_widget() is None:
+                    return
+                self.selection_stack.setCurrentIndex(4)
 
-            if hasattr(self, 'l_layout'):
-                self.l_layout.setContentsMargins(0, 0, 0, 0)
-            self._apply_w1_beds_sector_visibility()
-            self.sector_1b.setEnabled(False)
+                if hasattr(self, 'l_layout'):
+                    self.l_layout.setContentsMargins(0, 0, 0, 0)
+                self._apply_w1_beds_sector_visibility()
+                self.sector_1b.setEnabled(False)
 
-            if hasattr(self.journal_widget, "refresh_bed_statuses"):
-                QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
+                if hasattr(self.journal_widget, "refresh_bed_statuses"):
+                    QTimer.singleShot(0, self.journal_widget.refresh_bed_statuses)
 
-            self.current_mode = "patient_bed_management"
-            self.selection_mode_changed.emit("patient_bed_management")
+                self.current_mode = "patient_bed_management"
+                self.selection_mode_changed.emit("patient_bed_management")
+            finally:
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
         else: # card
+            loading_key = None
+            if not self._first_card_mode_switch_done:
+                loading_key = show_app_loading(
+                    self,
+                    "Открытие карты пациента...",
+                    key=f"doctor-mode:{id(self)}",
+                    auto_hide_ms=8000,
+                    process_events=True,
+                )
             # Безмерцательное переключение в карту:
             # первый вход выполняем полностью "под капотом", включая отложенный fix,
             # и только после этого включаем перерисовку.
@@ -819,6 +862,8 @@ class RemCardLayoutManager(QWidget):
                 self.setUpdatesEnabled(True)
                 self.updateGeometry()
                 self.update()
+                if loading_key:
+                    hide_app_loading(self, loading_key, delay_ms=350)
                 raise
 
             if is_first_card_switch:
@@ -840,6 +885,8 @@ class RemCardLayoutManager(QWidget):
                 QTimer.singleShot(0, self._post_restore_fix)
             self.current_mode = "card"
             self.selection_mode_changed.emit("card")
+            if loading_key:
+                hide_app_loading(self, loading_key, delay_ms=450)
 
     def refresh_current_status(self):
         """Обновляет отображение текущего статуса во всех связанных виджетах."""
@@ -908,6 +955,15 @@ class RemCardLayoutManager(QWidget):
         if not hasattr(self, 'vitals_stack'):
             _record_set_active_tab_end("missing_stack", tab_name)
             return tab_name
+        loading_key = None
+        if normalized_source == "click":
+            loading_key = show_app_loading(
+                self,
+                f"Открытие вкладки: {tab_name}",
+                key=f"doctor-tab:{id(self)}",
+                auto_hide_ms=5000,
+                process_events=True,
+            )
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
             if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
@@ -991,3 +1047,6 @@ class RemCardLayoutManager(QWidget):
             _record_set_active_tab_end("error", tab_name)
             logger.warning("Не удалось переключить вкладку РЕМ карты врача на %s: %s", tab_name, exc, exc_info=True)
             return tab_name
+        finally:
+            if loading_key:
+                hide_app_loading(self, loading_key, delay_ms=350)

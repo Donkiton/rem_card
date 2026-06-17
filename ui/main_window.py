@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel, QWidget
-from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot
+from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot, Signal, QEventLoop
 
 from .shared.navigation_widgets import WelcomeWidget
 from .shared.custom_title_bar import CustomTitleBar
@@ -116,6 +116,8 @@ def _apply_role_icon(role):
 
 
 class MainWindow(QMainWindow):
+    maintenance_finished = Signal(str)
+
     def __init__(self, container, role=None, role_session_lock=None, role_key=None):
         super().__init__()
         self.container = container
@@ -134,6 +136,7 @@ class MainWindow(QMainWindow):
         self._pending_emergency_discard = None
         self._exit_role_key = None
         self._last_active_role_key = role if role in ROLE_KEYS else None
+        self.maintenance_finished.connect(self._on_maintenance_finished)
         
         self.setup_base_ui()
         self._connect_runtime_outage_signal()
@@ -257,6 +260,11 @@ class MainWindow(QMainWindow):
         self.welcome = None
         self._maintenance_scheduled = False
         self._maintenance_timer = None
+        self._loading_overlay = None
+        self._loading_tokens = set()
+        self._loading_messages = {}
+        self._loading_generations = {}
+        self._loading_order = []
         self._is_closing = False
         self._event_loop_watchdog_timer = None
         self._event_loop_watchdog_last_ts = 0.0
@@ -270,6 +278,107 @@ class MainWindow(QMainWindow):
         self._focus_refresh_timer.timeout.connect(self._run_focus_refresh)
         self._install_decor_overlay()
         self._start_event_loop_watchdog()
+
+    def _ensure_loading_overlay(self):
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is None:
+            from rem_card.ui.shared.loading_overlay import LoadingOverlay
+
+            overlay = LoadingOverlay(
+                self.main_container,
+                gif_path=os.path.join(get_icon_dir(), "loading.gif"),
+            )
+            self._loading_overlay = overlay
+        self._position_loading_overlay()
+        return overlay
+
+    def _position_loading_overlay(self):
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay.setGeometry(self.main_container.rect())
+            overlay.raise_()
+        except RuntimeError:
+            pass
+
+    def show_loading_indicator(
+        self,
+        message: str = "Загрузка...",
+        *,
+        key: str | None = None,
+        auto_hide_ms: int | None = None,
+        process_events: bool = False,
+    ) -> str:
+        if self._is_closing:
+            return str(key or "")
+        token = str(key or f"loading:{time.monotonic_ns()}")
+        generation = int(self._loading_generations.get(token, 0) or 0) + 1
+        self._loading_generations[token] = generation
+        self._loading_tokens.add(token)
+        self._loading_messages[token] = str(message or "Загрузка...")
+        self._loading_order.append(token)
+
+        overlay = self._ensure_loading_overlay()
+        overlay.show_loading(self._loading_messages[token])
+        if auto_hide_ms is not None and int(auto_hide_ms) > 0:
+            QTimer.singleShot(
+                int(auto_hide_ms),
+                lambda token=token, generation=generation: self._hide_loading_if_generation(token, generation),
+            )
+        if process_events:
+            app = QApplication.instance()
+            if app is not None:
+                app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        return token
+
+    def _hide_loading_if_generation(self, token: str, generation: int):
+        if int(self._loading_generations.get(token, 0) or 0) != int(generation):
+            return
+        self.hide_loading_indicator(token)
+
+    def hide_loading_indicator(self, key: str | None = None, *, delay_ms: int = 0):
+        if delay_ms and int(delay_ms) > 0:
+            if key is None:
+                generations = dict(self._loading_generations)
+                QTimer.singleShot(int(delay_ms), lambda: self._hide_all_loading_if_generations(generations))
+            else:
+                generation = int(self._loading_generations.get(str(key), 0) or 0)
+                QTimer.singleShot(
+                    int(delay_ms),
+                    lambda token=str(key), generation=generation: self._hide_loading_if_generation(token, generation),
+                )
+            return
+
+        if key is None:
+            self._loading_tokens.clear()
+            self._loading_messages.clear()
+            self._loading_order.clear()
+        else:
+            token = str(key)
+            self._loading_tokens.discard(token)
+            self._loading_messages.pop(token, None)
+            self._loading_order = [item for item in self._loading_order if item != token]
+
+        overlay = getattr(self, "_loading_overlay", None)
+        if overlay is None:
+            return
+        if not self._loading_tokens:
+            overlay.hide_loading()
+            return
+
+        while self._loading_order and self._loading_order[-1] not in self._loading_tokens:
+            self._loading_order.pop()
+        active_token = self._loading_order[-1] if self._loading_order else next(iter(self._loading_tokens))
+        overlay.show_loading(self._loading_messages.get(active_token, "Загрузка..."))
+
+    def _hide_all_loading_if_generations(self, generations: dict):
+        if set(self._loading_tokens) - set(generations):
+            return
+        for token, generation in generations.items():
+            if int(self._loading_generations.get(token, 0) or 0) != int(generation or 0):
+                return
+        self.hide_loading_indicator()
 
     def _current_role_key(self) -> str:
         current_widget = self.stack.currentWidget()
@@ -1464,6 +1573,12 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(int(start_delay_sec * 1000), self._run_maintenance_async)
 
     def _run_maintenance_async(self):
+        token = self.show_loading_indicator(
+            "Обслуживание базы: проверка и резервное копирование...",
+            key="maintenance",
+            auto_hide_ms=300000,
+        )
+
         def _worker():
             try:
                 from rem_card.app.backup_and_cleanup import perform_daily_backup_and_cleanup
@@ -1471,9 +1586,18 @@ class MainWindow(QMainWindow):
                 perform_daily_backup_and_cleanup()
             except Exception:
                 pass
+            finally:
+                try:
+                    self.maintenance_finished.emit(token)
+                except Exception:
+                    pass
 
         thread = threading.Thread(target=_worker, name="RemCardDailyMaintenance", daemon=True)
         thread.start()
+
+    @Slot(str)
+    def _on_maintenance_finished(self, token: str):
+        self.hide_loading_indicator(token or "maintenance", delay_ms=350)
 
     def show_roles(self):
         self.release_role_lock()
@@ -1554,6 +1678,10 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.WindowActivate:
             self._schedule_focus_refresh()
         return super().event(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_loading_overlay()
 
     def _schedule_focus_refresh(self):
         if self._is_closing or self._focus_refresh_pending:

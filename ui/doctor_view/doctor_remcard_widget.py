@@ -4,6 +4,7 @@ import socket
 import time
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QDialog, QStackedWidget
 from PySide6.QtCore import Signal, Qt, QTimer
 from datetime import datetime
@@ -672,6 +673,17 @@ class DoctorRemCardWidget(QWidget):
         worker.succeeded.connect(self._apply_card_snapshot)
         worker.failed.connect(self._on_card_snapshot_failed)
         worker.finished.connect(self._on_card_snapshot_finished)
+        message = (
+            "Загрузка карты пациента..."
+            if str(load_scope or "").startswith("patient_open")
+            else "Обновление данных карты..."
+        )
+        show_app_loading(
+            self,
+            message,
+            key=f"doctor-card-snapshot:{id(self)}",
+            auto_hide_ms=20000,
+        )
         worker.start()
 
         data_service = self._get_data_service()
@@ -881,10 +893,13 @@ class DoctorRemCardWidget(QWidget):
         if self._create_card_after_snapshot:
             self._create_card_after_snapshot = False
             self._snapshot_pending = None
+            hide_app_loading(self, f"doctor-card-snapshot:{id(self)}", delay_ms=350)
             QTimer.singleShot(0, self.on_create_card_clicked)
             return
         if self._snapshot_pending:
             QTimer.singleShot(0, self._request_pending_card_snapshot)
+            return
+        hide_app_loading(self, f"doctor-card-snapshot:{id(self)}", delay_ms=350)
 
     def _reset_balance_view_state(self):
         if hasattr(self, "balance_controller") and self.balance_controller:
@@ -1669,9 +1684,18 @@ class DoctorRemCardWidget(QWidget):
         """Обновляет данные карты для нового пациента/даты."""
         if self._is_closing:
             return
+        open_loading_key = show_app_loading(
+            self,
+            "Открытие карты пациента...",
+            key=f"doctor-card-open:{id(self)}",
+            auto_hide_ms=10000,
+            process_events=True,
+        )
         self._patient_open_generation += 1
         patient_open_generation = self._patient_open_generation
         if not self._ensure_full_layout(reason="patient_open"):
+            if open_loading_key:
+                hide_app_loading(self, open_loading_key, delay_ms=350)
             return
         self._schedule_card_ui_prewarm()
         self._ensure_card_widgets_initialized()
@@ -1819,6 +1843,8 @@ class DoctorRemCardWidget(QWidget):
         
         # Запуск фонового обновления
         QTimer.singleShot(0, self.start_polling)
+        if open_loading_key:
+            hide_app_loading(self, open_loading_key, delay_ms=600)
 
     def _set_nurse_orders_context_if_current(self, mgr, admission_id, date, generation: int):
         if self._is_closing or generation != self._patient_open_generation:
