@@ -70,6 +70,7 @@ APP_SETTING_CATALOG_KEYS: dict[str, str] = {
     "print_config": "print_settings",
     "display_settings": "display_settings",
     "lab_orders_columns": "display_settings",
+    "decor_settings": "display_settings",
     "style_settings": "style_settings",
     "emergency_password": "emergency_password",
     "background_settings": "background_settings",

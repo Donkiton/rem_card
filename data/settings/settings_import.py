@@ -66,6 +66,7 @@ APP_SETTING_LABELS: dict[str, str] = {
     "print_config": "Параметры печати",
     "display_settings": "Отображение",
     "lab_orders_columns": "Колонки анализов",
+    "decor_settings": "Настройка декора",
     "style_settings": "Цветовая схема",
     "emergency_password": "Аварийный пароль",
     "background_settings": "Настройки фона",

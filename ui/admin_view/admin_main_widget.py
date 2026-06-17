@@ -38,6 +38,7 @@ class AdminMainWidget(QWidget):
         self.emergency_password_dialog = None
         self.db_rotation_dialog = None
         self.settings_import_dialog = None
+        self.decor_settings_dialog = None
 
         self.setup_ui()
 
@@ -71,6 +72,7 @@ class AdminMainWidget(QWidget):
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
         self.btn_background_settings = QPushButton("Изменение фона")
+        self.btn_decor_settings = QPushButton("Настройка декора")
         self.btn_remcard_icon_settings = QPushButton("Настройка иконок рем карты")
         self.btn_operblock_icon_settings = QPushButton("Настройка иконок оперблока")
         self.btn_operblock_medications = QPushButton("Настройки препаратов")
@@ -108,6 +110,7 @@ class AdminMainWidget(QWidget):
             self.btn_print,
             self.btn_display_settings,
             self.btn_background_settings,
+            self.btn_decor_settings,
             self.btn_remcard_icon_settings,
         ]
         try:
@@ -116,8 +119,9 @@ class AdminMainWidget(QWidget):
             is_dev_version = not is_compiled()
         except Exception:
             is_dev_version = False
+        global_admin_buttons = []
         if is_dev_version:
-            program_buttons.append(self.btn_import_settings)
+            global_admin_buttons.append(self.btn_import_settings)
         if self.role == "doctor":
             program_buttons.append(self.btn_emergency_password)
             program_buttons.append(self.btn_db_rotation)
@@ -149,6 +153,8 @@ class AdminMainWidget(QWidget):
         add_column("Препараты", drug_buttons)
         add_column("Шаблоны", template_buttons)
         add_column("Настройка программы", program_buttons)
+        if global_admin_buttons:
+            add_column("Глобальный администратор", global_admin_buttons)
         if self.role != "nurse":
             add_column("Оперблок", operblock_buttons)
         columns_layout.addStretch()
@@ -179,6 +185,7 @@ class AdminMainWidget(QWidget):
         self.btn_print.clicked.connect(self.open_print)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
+        self.btn_decor_settings.clicked.connect(self.open_decor_settings)
         self.btn_remcard_icon_settings.clicked.connect(self.open_remcard_icon_settings)
         self.btn_operblock_icon_settings.clicked.connect(self.open_operblock_icon_settings)
         self.btn_operblock_medications.clicked.connect(self.open_operblock_medications_settings)
@@ -364,6 +371,12 @@ class AdminMainWidget(QWidget):
         dialog = BackgroundSettingsDialog(parent=self)
         dialog.exec()
 
+    def open_decor_settings(self):
+        from .decor_settings_dialog import DecorSettingsDialog
+
+        self.decor_settings_dialog = DecorSettingsDialog(parent=self)
+        self.decor_settings_dialog.exec()
+
     def open_remcard_icon_settings(self):
         from .remcard_icon_settings_dialog import RemCardIconSettingsDialog
 
@@ -530,6 +543,12 @@ class AdminMainWidget(QWidget):
             from rem_card.ui.shared.remcard_icon_settings import invalidate_remcard_icon_cache
 
             invalidate_remcard_icon_cache()
+        except Exception:
+            pass
+        try:
+            from rem_card.ui.shared.decor_settings import ensure_decor_asset_dirs
+
+            ensure_decor_asset_dirs()
         except Exception:
             pass
         try:

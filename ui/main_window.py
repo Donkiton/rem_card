@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel
+from PySide6.QtWidgets import QMainWindow, QStackedWidget, QApplication, QVBoxLayout, QFrame, QMessageBox, QLabel, QWidget
 from PySide6.QtCore import QSettings, Qt, QPoint, QEvent, QTimer, Slot
 
 from .shared.navigation_widgets import WelcomeWidget
@@ -268,6 +268,7 @@ class MainWindow(QMainWindow):
         self._focus_refresh_timer.setSingleShot(True)
         self._focus_refresh_timer.setInterval(0)
         self._focus_refresh_timer.timeout.connect(self._run_focus_refresh)
+        self._install_decor_overlay()
         self._start_event_loop_watchdog()
 
     def _current_role_key(self) -> str:
@@ -281,6 +282,69 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() == self.admin_main:
             return "admin"
         return str(self._role_lock_key or self._initial_role or "unknown")
+
+    def _install_decor_overlay(self) -> None:
+        try:
+            from rem_card.ui.shared.decor_overlay import DecorOverlayWidget
+
+            self.decor_overlay = DecorOverlayWidget(
+                self.stack,
+                context_provider=self._decor_context,
+                target_provider=self._decor_target_widget,
+            )
+            self.decor_overlay.setGeometry(self.stack.rect())
+            self.decor_overlay.raise_()
+            self.stack.currentChanged.connect(self._on_decor_stack_changed)
+        except Exception as exc:
+            self.decor_overlay = None
+            logger.warning("Failed to initialize decor overlay: %s", exc, exc_info=True)
+
+    def _on_decor_stack_changed(self, *_args) -> None:
+        overlay = getattr(self, "decor_overlay", None)
+        if overlay is None:
+            return
+        try:
+            overlay.setGeometry(self.stack.rect())
+            overlay.raise_()
+            overlay.reload_settings()
+        except Exception as exc:
+            logger.warning("Failed to refresh decor overlay after stack change: %s", exc)
+
+    def _decor_context(self) -> dict:
+        try:
+            role = self._current_role_key()
+        except Exception:
+            role = "unknown"
+        current_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        mode = ""
+        if current_widget == getattr(self, "doctor_main", None):
+            remcard_widget = getattr(self.doctor_main, "remcard_widget", None)
+            layout = getattr(remcard_widget, "layout_manager", None)
+            mode = str(getattr(layout, "current_mode", "") or "")
+        elif current_widget == getattr(self, "nurse_main", None):
+            layout = getattr(self.nurse_main, "layout_manager", None)
+            mode = str(getattr(layout, "current_mode", "") or getattr(self.nurse_main, "_selection_mode", "") or "")
+        elif current_widget == getattr(self, "admin_main", None):
+            mode = "admin"
+        elif current_widget == getattr(self, "welcome", None):
+            mode = "welcome"
+            role = "welcome"
+        elif role.startswith("operblock"):
+            mode = "operblock"
+        return {"role": role, "mode": mode}
+
+    def _decor_target_widget(self, event: dict) -> QWidget | None:
+        zone = str((event or {}).get("zone") or "all")
+        current_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        if zone == "w1":
+            if current_widget == getattr(self, "doctor_main", None):
+                remcard_widget = getattr(self.doctor_main, "remcard_widget", None)
+                layout = getattr(remcard_widget, "layout_manager", None)
+                return getattr(layout, "beds_selection_widget", None)
+            if current_widget == getattr(self, "nurse_main", None):
+                layout = getattr(self.nurse_main, "layout_manager", None)
+                return getattr(layout, "beds_selection_widget", None)
+        return current_widget
 
     def _connect_runtime_outage_signal(self):
         data_service = getattr(getattr(self.container, "data_service", None), "network_outage_detected", None)

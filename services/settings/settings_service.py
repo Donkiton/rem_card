@@ -37,6 +37,7 @@ DIET_TEMPLATES_KEY = "diet_templates"
 DOCTORS_KEY = "doctors"
 PRINT_SETTINGS_KEY = "print_settings"
 DISPLAY_SETTINGS_KEY = "display_settings"
+DECOR_SETTINGS_APP_KEY = "decor_settings"
 BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
 EMERGENCY_PASSWORD_KEY = "emergency_password"
@@ -151,7 +152,7 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
 APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
     LAB_ANALYSIS_KEY: ("lab_materials",),
     PRINT_SETTINGS_KEY: ("print_config",),
-    DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns"),
+    DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns", DECOR_SETTINGS_APP_KEY),
     BACKGROUND_SETTINGS_KEY: ("background_settings",),
     STYLE_SETTINGS_KEY: ("style_settings",),
     EMERGENCY_PASSWORD_CATALOG_KEY: (EMERGENCY_PASSWORD_KEY,),
@@ -379,6 +380,7 @@ class SettingsService:
             background_repair_report = self._repair_background_settings_from_rows()
             if background_repair_report:
                 info = {**info, "background_settings_repair": background_repair_report}
+            self._ensure_default_decor_settings()
             self._ensure_default_operblock_icons()
             self._ready = True
             self._ready_info = dict(info)
@@ -728,6 +730,41 @@ class SettingsService:
             "restored_rows": len(restored_entries),
             "restored_ids": [str(item.get("id") or "") for item in restored_entries],
         }
+
+    def _ensure_default_decor_settings(self) -> None:
+        try:
+            from rem_card.ui.shared.decor_settings import default_decor_settings_payload, normalize_decor_settings_payload
+        except Exception:
+            return
+
+        with self.db.read_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM app_settings WHERE scope = 'shared' AND key = ?",
+                (DECOR_SETTINGS_APP_KEY,),
+            ).fetchone()
+        if row:
+            return
+
+        payload = normalize_decor_settings_payload(default_decor_settings_payload())
+        with self.db.transaction("settings_default_decor_settings") as cursor:
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                DECOR_SETTINGS_APP_KEY,
+                payload,
+                changed_by_role="system",
+                catalog_key=DISPLAY_SETTINGS_KEY,
+                log_change=False,
+            )
+            self._bump_catalog_version(
+                cursor,
+                DISPLAY_SETTINGS_KEY,
+                "decor_settings",
+                f"shared:{DECOR_SETTINGS_APP_KEY}",
+                "insert",
+                changed_by_role="system",
+                after=payload,
+            )
 
     def _import_legacy_sources(self, cursor) -> dict[str, Any]:
         started = time.perf_counter()

@@ -7,6 +7,7 @@ SETTINGS_DIR_NAME = "settings"
 SETTINGS_DB_FILE_NAME = "remcard_settings.db"
 SETTINGS_LOCK_FILE_NAME = "settings.db.lock"
 SETTINGS_BACKGROUNDS_DIR_NAME = "backgrounds"
+SETTINGS_DECOR_ELEMENTS_DIR_NAME = "decor_elements"
 
 
 def get_settings_dir(baza_dir: str | None = None) -> str:
@@ -28,3 +29,7 @@ def get_settings_backup_dir(baza_dir: str | None = None) -> str:
 
 def get_settings_backgrounds_dir(baza_dir: str | None = None) -> str:
     return os.path.join(get_settings_dir(baza_dir), SETTINGS_BACKGROUNDS_DIR_NAME)
+
+
+def get_settings_decor_elements_dir(baza_dir: str | None = None) -> str:
+    return os.path.join(get_settings_dir(baza_dir), SETTINGS_DECOR_ELEMENTS_DIR_NAME)
