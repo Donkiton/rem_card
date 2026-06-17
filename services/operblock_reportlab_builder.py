@@ -10,10 +10,21 @@ from typing import Any
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4, A5, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import Flowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Flowable,
+    Frame,
+    NextPageTemplate,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from rem_card.ui.rem_card_sectors.s_print.reportlab_builder import ReportLabReportBuilder
 
@@ -276,31 +287,85 @@ class OperBlockReportLabBuilder:
         ReportLabReportBuilder._ensure_fonts_registered()
         output_path = pathlib.Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        page_size = landscape(A4)
-        margins = (8 * mm, 8 * mm, 8 * mm, 8 * mm)
-        doc = SimpleDocTemplate(
+        report_page_size = landscape(A4)
+        report_margins = (8 * mm, 8 * mm, 8 * mm, 8 * mm)
+        controlled_page_size = report_page_size
+        controlled_block_size = A5
+        controlled_margins = (4 * mm, 6 * mm, 4 * mm, 5 * mm)
+        doc = BaseDocTemplate(
             str(output_path),
-            pagesize=page_size,
-            leftMargin=margins[0],
-            rightMargin=margins[2],
-            topMargin=margins[1],
-            bottomMargin=margins[3],
+            pagesize=report_page_size,
+            leftMargin=report_margins[0],
+            rightMargin=report_margins[2],
+            topMargin=report_margins[1],
+            bottomMargin=report_margins[3],
             pageCompression=1,
         )
-        width = page_size[0] - margins[0] - margins[2]
+        report_frame = Frame(
+            report_margins[0],
+            report_margins[3],
+            report_page_size[0] - report_margins[0] - report_margins[2],
+            report_page_size[1] - report_margins[1] - report_margins[3],
+            id="operation_report_frame",
+        )
+        controlled_frame = Frame(
+            controlled_margins[0],
+            controlled_page_size[1] - controlled_block_size[1] + controlled_margins[3],
+            controlled_block_size[0] - controlled_margins[0] - controlled_margins[2],
+            controlled_block_size[1] - controlled_margins[1] - controlled_margins[3],
+            id="controlled_prescriptions_frame",
+        )
+        doc.addPageTemplates(
+            [
+                PageTemplate(
+                    id="operation_report",
+                    pagesize=report_page_size,
+                    frames=[report_frame],
+                    onPage=cls._draw_report_page_background,
+                ),
+                PageTemplate(
+                    id="controlled_prescriptions",
+                    pagesize=controlled_page_size,
+                    frames=[controlled_frame],
+                    onPage=cls._draw_controlled_page_background,
+                ),
+            ]
+        )
+        width = report_page_size[0] - report_margins[0] - report_margins[2]
         story = cls._story(context or {}, width)
-        doc.build(story, onFirstPage=cls._draw_page_background, onLaterPages=cls._draw_page_background)
+        controlled_rows = cls._controlled_prescription_rows(context or {})
+        if controlled_rows:
+            controlled_width = controlled_block_size[0] - controlled_margins[0] - controlled_margins[2]
+            story.extend(
+                [
+                    NextPageTemplate("controlled_prescriptions"),
+                    PageBreak(),
+                    *cls._controlled_prescription_story(context or {}, controlled_width),
+                ]
+            )
+        doc.build(story)
         if not output_path.exists() or output_path.stat().st_size <= 0:
             raise OSError(f"PDF file was not created: {output_path}")
 
     @staticmethod
     def _draw_page_background(canvas, doc) -> None:
+        OperBlockReportLabBuilder._draw_report_page_background(canvas, doc)
+
+    @staticmethod
+    def _draw_report_page_background(canvas, doc) -> None:
         canvas.saveState()
         canvas.setFillColor(colors.white)
         canvas.rect(0, 0, doc.pagesize[0], doc.pagesize[1], stroke=0, fill=1)
         canvas.setFont(ReportLabReportBuilder.FONT_REGULAR, 7)
         canvas.setFillColor(colors.HexColor("#64748B"))
         canvas.drawRightString(doc.pagesize[0] - 8 * mm, 5 * mm, f"Страница {doc.page}")
+        canvas.restoreState()
+
+    @staticmethod
+    def _draw_controlled_page_background(canvas, doc) -> None:
+        canvas.saveState()
+        canvas.setFillColor(colors.white)
+        canvas.rect(0, 0, doc.pagesize[0], doc.pagesize[1], stroke=0, fill=1)
         canvas.restoreState()
 
     @classmethod
@@ -314,6 +379,11 @@ class OperBlockReportLabBuilder:
             "small": ParagraphStyle("OperBlockSmall", fontName=regular, fontSize=7, leading=8.2, alignment=TA_LEFT),
             "small_bold": ParagraphStyle("OperBlockSmallBold", fontName=bold, fontSize=7, leading=8.2, alignment=TA_LEFT),
             "medication": ParagraphStyle("OperBlockMedication", fontName=regular, fontSize=6.7, leading=7.8, alignment=TA_LEFT),
+            "controlled_title": ParagraphStyle("ControlledTitle", fontName=bold, fontSize=8.5, leading=9.5, alignment=TA_CENTER, spaceAfter=3),
+            "controlled": ParagraphStyle("Controlled", fontName=regular, fontSize=6.8, leading=7.5, alignment=TA_LEFT),
+            "controlled_center": ParagraphStyle("ControlledCenter", fontName=regular, fontSize=6.8, leading=7.5, alignment=TA_CENTER),
+            "controlled_bold": ParagraphStyle("ControlledBold", fontName=bold, fontSize=6.9, leading=7.7, alignment=TA_CENTER),
+            "controlled_label": ParagraphStyle("ControlledLabel", fontName=bold, fontSize=7.1, leading=8, alignment=TA_LEFT),
         }
 
     @classmethod
@@ -1227,6 +1297,120 @@ class OperBlockReportLabBuilder:
         if end is None or end == start:
             return start.strftime("%H:%M")
         return f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}"
+
+    @staticmethod
+    def _controlled_prescription_rows(context: dict[str, Any]) -> list[dict[str, Any]]:
+        rows = context.get("controlled_medications") if isinstance(context.get("controlled_medications"), list) else []
+        return [dict(row or {}) for row in rows if isinstance(row, dict)]
+
+    @classmethod
+    def _controlled_prescription_story(cls, context: dict[str, Any], width: float) -> list:
+        return [
+            cls._p(
+                "ЛИСТ НАЗНАЧЕНИЯ НАРКОТИЧЕСКИХ, ПСИХОТРОПНЫХ,\n"
+                "СИЛЬНОДЕЙСТВУЮЩИХ ЛЕКАРСТВЕННЫХ СРЕДСТВ",
+                "controlled_title",
+            ),
+            cls._controlled_patient_table(context, width),
+            Spacer(1, 3),
+            cls._controlled_prescription_table(context, width),
+        ]
+
+    @classmethod
+    def _controlled_patient_table(cls, context: dict[str, Any], width: float) -> Table:
+        patient = context.get("patient") if isinstance(context.get("patient"), dict) else {}
+        data = [
+            [cls._p("№ истории", "controlled_label"), cls._p(patient.get("history_number") or "", "controlled")],
+            [cls._p("ФИО", "controlled_label"), cls._p(patient.get("full_name") or "", "controlled")],
+        ]
+        table = Table(data, colWidths=[22 * mm, max(1.0, width - 22 * mm)], rowHeights=[10, 10])
+        table.setStyle(
+            TableStyle(
+                [
+                    ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                    ("TOPPADDING", (0, 0), (-1, -1), 0),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+                    ("LINEBELOW", (1, 0), (1, 0), 0.45, colors.black),
+                    ("LINEBELOW", (1, 1), (1, 1), 0.45, colors.black),
+                ]
+            )
+        )
+        return table
+
+    @classmethod
+    def _controlled_prescription_table(cls, context: dict[str, Any], width: float) -> Table:
+        rows = cls._controlled_prescription_rows(context)
+        case = context.get("case") if isinstance(context.get("case"), dict) else {}
+        place = cls._controlled_place_text((case or {}).get("table_code"))
+        min_body_rows = max(24, len(rows))
+        body = []
+        for index in range(min_body_rows):
+            row = rows[index] if index < len(rows) else {}
+            event_dt = cls._parse_dt(row.get("datetime"))
+            body.append(
+                [
+                    cls._p(event_dt.strftime("%d.%m") if event_dt else "", "controlled_center"),
+                    cls._p(event_dt.strftime("%H:%M") if event_dt else "", "controlled_center"),
+                    cls._p(place if row else "", "controlled_center"),
+                    cls._p(row.get("name") or "", "controlled"),
+                    "",
+                    "",
+                ]
+            )
+
+        data = [
+            [
+                cls._p("Дата", "controlled_bold"),
+                cls._p("Время", "controlled_bold"),
+                cls._p("Место", "controlled_bold"),
+                cls._p("Наименование", "controlled_bold"),
+                cls._p("Роспись", "controlled_bold"),
+                "",
+            ],
+            ["", "", "", "", cls._p("врач", "controlled_bold"), cls._p("м/с", "controlled_bold")],
+            *body,
+        ]
+        fixed_width = 14 * mm + 18 * mm + 17 * mm + 17 * mm + 17 * mm
+        name_width = max(1.0, width - fixed_width)
+        col_widths = [14 * mm, 18 * mm, 17 * mm, name_width, 17 * mm, 17 * mm]
+        table = Table(
+            data,
+            colWidths=col_widths,
+            rowHeights=[14, 12] + [18] * min_body_rows,
+            repeatRows=2,
+            splitByRow=1,
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("GRID", (0, 0), (-1, -1), 0.45, colors.black),
+                    ("SPAN", (0, 0), (0, 1)),
+                    ("SPAN", (1, 0), (1, 1)),
+                    ("SPAN", (2, 0), (2, 1)),
+                    ("SPAN", (3, 0), (3, 1)),
+                    ("SPAN", (4, 0), (5, 0)),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("ALIGN", (0, 0), (-1, 1), "CENTER"),
+                    ("ALIGN", (0, 2), (2, -1), "CENTER"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 1),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+                ]
+            )
+        )
+        return table
+
+    @staticmethod
+    def _controlled_place_text(table_code: Any) -> str:
+        code = str(table_code or "").strip().casefold()
+        if code == "emergency":
+            return "Экстр. опер"
+        if code == "planned":
+            return "План. опер"
+        return ""
 
     @classmethod
     def _signature_table(cls, context: dict[str, Any], width: float) -> Table:

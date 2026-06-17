@@ -37,6 +37,7 @@ class AdminMainWidget(QWidget):
         self.operblock_team_dialog = None
         self.emergency_password_dialog = None
         self.db_rotation_dialog = None
+        self.settings_import_dialog = None
 
         self.setup_ui()
 
@@ -79,6 +80,7 @@ class AdminMainWidget(QWidget):
         self.btn_operblock_team = QPushButton("Опер. бригада")
         self.btn_emergency_password = QPushButton("Аварийный пароль")
         self.btn_db_rotation = QPushButton("Ручная ротация БД")
+        self.btn_import_settings = QPushButton("Загрузить настройки")
 
         def prepare_button(btn: QPushButton):
             btn.setObjectName("DialogOkBtn")
@@ -108,6 +110,14 @@ class AdminMainWidget(QWidget):
             self.btn_background_settings,
             self.btn_remcard_icon_settings,
         ]
+        try:
+            from rem_card.app.runtime_paths import is_compiled
+
+            is_dev_version = not is_compiled()
+        except Exception:
+            is_dev_version = False
+        if is_dev_version:
+            program_buttons.append(self.btn_import_settings)
         if self.role == "doctor":
             program_buttons.append(self.btn_emergency_password)
             program_buttons.append(self.btn_db_rotation)
@@ -178,6 +188,7 @@ class AdminMainWidget(QWidget):
         self.btn_operblock_team.clicked.connect(self.open_operblock_team_settings)
         self.btn_emergency_password.clicked.connect(self.open_emergency_password)
         self.btn_db_rotation.clicked.connect(self.open_db_rotation)
+        self.btn_import_settings.clicked.connect(self.open_settings_import)
 
     def _show_page(self, widget):
         if widget is not None:
@@ -451,6 +462,82 @@ class AdminMainWidget(QWidget):
             on_rotated=self._on_db_rotated,
         )
         self.db_rotation_dialog.exec()
+
+    def open_settings_import(self):
+        from rem_card.services.settings.settings_service import get_settings_service
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from .settings_import_dialog import SettingsImportPathDialog, SettingsImportPreviewDialog
+
+        answer = CustomMessageBox.question(
+            self,
+            "Загрузить настройки",
+            "Загрузить настройки из сетевой базы в dev-версию?\n\n"
+            "Изменения будут применены только для отмеченных строк.",
+        )
+        if answer != CustomMessageBox.Yes:
+            return
+
+        path_dialog = SettingsImportPathDialog(parent=self)
+        if path_dialog.exec() != QDialog.Accepted:
+            return
+
+        settings_service = get_settings_service()
+        try:
+            preview = settings_service.preview_external_settings_import(path_dialog.selected_path)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Загрузить настройки", f"Не удалось загрузить настройки:\n{exc}")
+            return
+
+        if not preview.changes:
+            CustomMessageBox.information(self, "Загрузить настройки", "Отличий между dev и выбранной БД не найдено.")
+            return
+
+        self.settings_import_dialog = SettingsImportPreviewDialog(preview, parent=self)
+        if self.settings_import_dialog.exec() != QDialog.Accepted:
+            return
+        selected_ids = self.settings_import_dialog.selected_change_ids()
+        try:
+            report = settings_service.apply_external_settings_import(preview.source_db_path, selected_ids)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Загрузить настройки", f"Не удалось применить настройки:\n{exc}")
+            return
+
+        self._refresh_after_settings_import()
+        counts = report.get("counts") or {}
+        CustomMessageBox.information(
+            self,
+            "Загрузить настройки",
+            "Настройки загружены.\n\n"
+            f"Добавлено: {int(counts.get('insert') or 0)}\n"
+            f"Обновлено: {int(counts.get('update') or 0)}\n"
+            f"Удалено из dev: {int(counts.get('delete') or 0)}",
+        )
+
+    def _refresh_after_settings_import(self):
+        try:
+            from rem_card.ui.shared.background_settings import invalidate_background_settings_cache
+
+            invalidate_background_settings_cache()
+        except Exception:
+            pass
+        try:
+            from rem_card.ui.shared.operblock_icon_settings import invalidate_operblock_icon_cache
+
+            invalidate_operblock_icon_cache()
+        except Exception:
+            pass
+        try:
+            from rem_card.ui.shared.remcard_icon_settings import invalidate_remcard_icon_cache
+
+            invalidate_remcard_icon_cache()
+        except Exception:
+            pass
+        try:
+            from rem_card.ui.styles.theme_manager import get_theme_manager
+
+            get_theme_manager().load()
+        except Exception:
+            pass
 
     def _resolve_db_manager(self):
         candidates = [

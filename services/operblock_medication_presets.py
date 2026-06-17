@@ -140,6 +140,10 @@ KNOWN_PRESET_FIELDS = {
     "additional_quick_types",
     "additional_types",
     "uses_line",
+    "requires_narcotic_sheet",
+    "narcotic_sheet",
+    "controlled_substance",
+    "requires_controlled_sheet",
     "enabled",
     "favorite",
     "is_favorite",
@@ -174,6 +178,7 @@ class OperBlockMedicationPreset:
     card_color: str | None = None
     extra_quick_types: list[str] = field(default_factory=list)
     uses_line: bool = False
+    requires_narcotic_sheet: bool = False
     enabled: bool = False
     favorite: bool = False
     sort_order: int | None = None
@@ -241,6 +246,28 @@ def operblock_medication_preset_display_name(preset: Mapping[str, Any]) -> str:
         or preset.get("drug_name")
         or preset.get("drug")
         or preset.get("latin")
+    )
+
+
+def _first_present_value(data: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return None
+
+
+def operblock_medication_preset_requires_narcotic_sheet(preset: Mapping[str, Any]) -> bool:
+    return _as_bool(
+        _first_present_value(
+            preset or {},
+            (
+                "requires_narcotic_sheet",
+                "narcotic_sheet",
+                "controlled_substance",
+                "requires_controlled_sheet",
+            ),
+        ),
+        default=False,
     )
 
 
@@ -462,6 +489,7 @@ def _normalize_preset(
             include_unknown=True,
         ),
         uses_line=_as_bool(data.get("uses_line")),
+        requires_narcotic_sheet=operblock_medication_preset_requires_narcotic_sheet(data),
         enabled=_as_bool(data.get("enabled"), default=False),
         favorite=_as_bool(data.get("favorite") or data.get("is_favorite") or data.get("pinned"), default=False),
         sort_order=_as_int(data.get("sort_order")),
@@ -916,6 +944,7 @@ def build_operblock_preset_payload(preset: Mapping[str, Any]) -> dict[str, Any]:
         "solvent_volume_ml",
         "duration_min",
         "card_color",
+        "requires_narcotic_sheet",
     ):
         value = preset.get(key)
         if value not in (None, "", []):

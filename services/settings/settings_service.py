@@ -3138,6 +3138,32 @@ class SettingsService:
         value = self.get_app_setting(scope, key, default=None)
         return _hash_value(value)
 
+    def preview_external_settings_import(self, source_path: str):
+        from rem_card.app.runtime_paths import is_compiled
+        from rem_card.data.settings.settings_import import preview_settings_import
+
+        if is_compiled():
+            raise RuntimeError("Загрузка настроек из внешней БД доступна только в dev-версии.")
+        self.ensure_ready()
+        return preview_settings_import(self.db, source_path)
+
+    def apply_external_settings_import(self, source_path: str, selected_change_ids):
+        from rem_card.app.runtime_paths import is_compiled
+        from rem_card.data.settings.settings_import import apply_settings_import
+
+        if is_compiled():
+            raise RuntimeError("Загрузка настроек из внешней БД доступна только в dev-версии.")
+        self.ensure_ready()
+        report = apply_settings_import(
+            self.db,
+            source_path,
+            selected_change_ids,
+            bump_catalog_version=self._bump_catalog_version,
+        )
+        if report.get("applied"):
+            self.invalidate_cache()
+        return report
+
 
 _DEFAULT_SERVICE: SettingsService | None = None
 

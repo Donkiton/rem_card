@@ -4753,22 +4753,24 @@ class OperBlockExtraQuickTypesDialog(OperBlockStyledDialog):
 
 class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     COL_ENABLED = 0
-    COL_LABEL = 1
-    COL_DISPLAY = 2
-    COL_ALIASES = 3
-    COL_KIND = 4
-    COL_EXTRA_TYPES = 5
-    COL_GROUP = 6
-    COL_DRUG_GROUP = 7
-    COL_DOSES = 8
-    COL_RATES = 9
-    COL_CONCENTRATION = 10
-    COL_SOLVENT = 11
-    COL_VOLUME = 12
-    COL_COLOR = 13
-    COL_FAVORITE = 14
+    COL_NARCOTIC_SHEET = 1
+    COL_LABEL = 2
+    COL_DISPLAY = 3
+    COL_ALIASES = 4
+    COL_KIND = 5
+    COL_EXTRA_TYPES = 6
+    COL_GROUP = 7
+    COL_DRUG_GROUP = 8
+    COL_DOSES = 9
+    COL_RATES = 10
+    COL_CONCENTRATION = 11
+    COL_SOLVENT = 12
+    COL_VOLUME = 13
+    COL_COLOR = 14
+    COL_FAVORITE = 15
     TABLE_HEADERS = (
         "Вкл",
+        "Лист НС",
         "Истинное название",
         "Отображаемое",
         "Алиасы",
@@ -4786,7 +4788,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     )
 
     def __init__(self, presets: list[dict], parent=None, *, save_handler=None):
-        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v6"
+        self._table_header_settings_key = "operblock/medication_presets_settings_table_header_v7"
         self._restoring_table_header = False
         self._fitting_table_header = False
         self._working_templates: list[dict | None] = [dict(preset or {}) for preset in (presets or [])]
@@ -4931,6 +4933,9 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self.table.setObjectName("medicationPresetSettingsTable")
         self.table.setColumnCount(len(self.TABLE_HEADERS))
         self.table.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        narcotic_header = self.table.horizontalHeaderItem(self.COL_NARCOTIC_SHEET)
+        if narcotic_header is not None:
+            narcotic_header.setToolTip("Печатать каждое введение препарата во втором листе НС")
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -5039,6 +5044,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
     def _apply_default_table_column_widths(self):
         defaults = {
             self.COL_ENABLED: 48,
+            self.COL_NARCOTIC_SHEET: 68,
             self.COL_LABEL: 210,
             self.COL_DISPLAY: 180,
             self.COL_ALIASES: 150,
@@ -5063,6 +5069,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
             return
         self.table.setColumnHidden(self.COL_GROUP, True)
         self.table.setColumnHidden(self.COL_DRUG_GROUP, False)
+        self.table.horizontalHeader().resizeSection(self.COL_NARCOTIC_SHEET, 68)
         self.table.horizontalHeader().resizeSection(self.COL_FAVORITE, 58)
 
     def _restore_table_header_state(self):
@@ -5405,6 +5412,11 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self.table.setItem(row, self.COL_ENABLED, self._enabled_item(template_index, bool(preset.get("enabled"))))
         self.table.setItem(
             row,
+            self.COL_NARCOTIC_SHEET,
+            self._narcotic_sheet_item(template_index, bool(preset.get("requires_narcotic_sheet"))),
+        )
+        self.table.setItem(
+            row,
             self.COL_LABEL,
             self._text_item(
                 str(preset.get("label") or preset.get("drug_name") or ""),
@@ -5467,6 +5479,20 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         return item
 
     @staticmethod
+    def _narcotic_sheet_item(template_index: int, checked: bool) -> QTableWidgetItem:
+        item = QTableWidgetItem("")
+        item.setData(Qt.ItemDataRole.UserRole, template_index)
+        item.setFlags(
+            Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsUserCheckable
+        )
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item.setToolTip("Печатать каждое введение препарата во втором листе НС")
+        return item
+
+    @staticmethod
     def _text_item(text: str, template_index: int, *, editable: bool = True) -> QTableWidgetItem:
         item = QTableWidgetItem(str(text or ""))
         item.setData(Qt.ItemDataRole.UserRole, template_index)
@@ -5518,6 +5544,10 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 template["favorite"] = False
             self._mark_dirty()
             QTimer.singleShot(0, self._render_table)
+            return
+        if column == self.COL_NARCOTIC_SHEET:
+            template["requires_narcotic_sheet"] = item.checkState() == Qt.CheckState.Checked
+            self._mark_dirty()
             return
         if column == self.COL_LABEL and not self._is_seed_preset(template):
             template["label"] = item.text().strip()
@@ -5764,6 +5794,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
                 "solvent_volume_ml": str(item.get("solvent_volume_ml") or "").strip() or None,
                 "duration_min": _safe_int(item.get("duration_min")),
                 "card_color": card_color,
+                "requires_narcotic_sheet": bool(item.get("requires_narcotic_sheet")),
                 "enabled": bool(item.get("enabled")),
                 "favorite": bool(item.get("favorite")) and bool(item.get("enabled")),
             }
@@ -7760,6 +7791,15 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         layout.addLayout(form)
         return frame, form
 
+    @staticmethod
+    def _composite_form_label(text: str, object_name: str, *, top_offset: int = 27) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName(object_name)
+        label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        label.setContentsMargins(0, int(top_offset), 0, 0)
+        label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        return label
+
     def _init_ui(self):
         apply_custom_dialog_style(self)
 
@@ -8025,11 +8065,28 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         anesthesia_team_layout.setColumnStretch(0, 1)
         anesthesia_team_layout.setColumnStretch(1, 1)
         operation_form.addRow("Название операции:", self.operation_name_input)
-        operation_form.addRow("Рост / вес:", height_weight_widget)
+        self.height_weight_row_label = self._composite_form_label(
+            "Рост / вес:",
+            "OperBlockOccupyHeightWeightRowLabel",
+        )
+        operation_form.addRow(self.height_weight_row_label, height_weight_widget)
         operation_form.addRow("Аллергии:", self.allergies_input)
-        operation_form.addRow("Кровь:", blood_widget)
-        operation_form.addRow("Хирургия:", surgery_team_widget)
-        operation_form.addRow("Анестезия:", anesthesia_team_widget)
+        self.blood_row_label = self._composite_form_label(
+            "Кровь:",
+            "OperBlockOccupyBloodRowLabel",
+        )
+        operation_form.addRow(self.blood_row_label, blood_widget)
+        self.surgery_team_row_label = self._composite_form_label(
+            "Хирургия:",
+            "OperBlockOccupySurgeryRowLabel",
+            top_offset=30,
+        )
+        operation_form.addRow(self.surgery_team_row_label, surgery_team_widget)
+        self.anesthesia_team_row_label = self._composite_form_label(
+            "Анестезия:",
+            "OperBlockOccupyAnesthesiaRowLabel",
+        )
+        operation_form.addRow(self.anesthesia_team_row_label, anesthesia_team_widget)
         page_layout.addWidget(operation)
 
         vitals, vitals_form = self._section("4. ИСХОДНЫЕ ВИТАЛЬНЫЕ ПОКАЗАТЕЛИ")
