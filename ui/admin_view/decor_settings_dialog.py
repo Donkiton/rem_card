@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizeGrip,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -44,18 +45,22 @@ from rem_card.ui.shared.decor_settings import (
     normalize_decor_settings_payload,
     normalize_month_day,
 )
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 
 
-class DecorSettingsDialog(BaseStyledDialog):
+class DecorSettingsDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     def __init__(self, parent=None):
         super().__init__("Настройка декора", parent)
+        self._init_saved_frameless_dialog("admin/decor_settings_dialog_geometry", drag_area_height=64)
         self.storage = DecorSettingsStorage()
         self._loading = False
         self._current_index = -1
         self._events: list[dict[str, Any]] = []
         self.resize(940, 600)
         self.setMinimumSize(820, 520)
+        self.setSizeGripEnabled(True)
         self._setup_ui()
+        self._restore_saved_geometry()
         self._load_settings()
 
     def _setup_ui(self):
@@ -260,6 +265,11 @@ class DecorSettingsDialog(BaseStyledDialog):
         self.btn_save.clicked.connect(self._save)
         footer.addWidget(self.btn_cancel)
         footer.addWidget(self.btn_save)
+        self.resize_grip = QSizeGrip(self)
+        self.resize_grip.setObjectName("DecorResizeGrip")
+        self.resize_grip.setFixedSize(18, 18)
+        self.resize_grip.setToolTip("Изменить размер окна")
+        footer.addWidget(self.resize_grip, 0, Qt.AlignRight | Qt.AlignBottom)
         root.addLayout(footer)
 
         self._apply_style()
