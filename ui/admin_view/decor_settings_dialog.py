@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from PySide6.QtCore import QDate, Qt, QTime
@@ -18,14 +19,17 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from rem_card.app.paths import get_icon_dir
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.decor_overlay import DecorPreviewFrame
@@ -49,7 +53,8 @@ class DecorSettingsDialog(BaseStyledDialog):
         self._loading = False
         self._current_index = -1
         self._events: list[dict[str, Any]] = []
-        self.resize(1180, 760)
+        self.resize(940, 600)
+        self.setMinimumSize(820, 520)
         self._setup_ui()
         self._load_settings()
 
@@ -69,9 +74,9 @@ class DecorSettingsDialog(BaseStyledDialog):
         left_title.setObjectName("DecorSectionTitle")
         left.addWidget(left_title)
 
-        self.events_table = QTableWidget(0, 4)
+        self.events_table = QTableWidget(0, 3)
         self.events_table.setObjectName("DecorEventsTable")
-        self.events_table.setHorizontalHeaderLabels(["Название", "Период", "Зона", "Вкл"])
+        self.events_table.setHorizontalHeaderLabels(["Название", "Период", "Вкл"])
         self.events_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.events_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.events_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -79,8 +84,9 @@ class DecorSettingsDialog(BaseStyledDialog):
         self.events_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.events_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.events_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.events_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        self.events_table.setMinimumWidth(430)
+        self.events_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.events_table.setMinimumWidth(320)
+        self.events_table.setMaximumWidth(360)
         self.events_table.itemSelectionChanged.connect(self._on_event_selection_changed)
         left.addWidget(self.events_table, 1)
 
@@ -97,15 +103,31 @@ class DecorSettingsDialog(BaseStyledDialog):
         self.btn_delete_event.clicked.connect(self._delete_event)
 
         right = QVBoxLayout()
-        right.setSpacing(10)
+        right.setSpacing(0)
         body.addLayout(right, 1)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("DecorSettingsTabs")
+        right.addWidget(self.tabs, 1)
+
+        event_tab = QWidget()
+        event_tab_layout = QVBoxLayout(event_tab)
+        event_tab_layout.setContentsMargins(0, 0, 0, 0)
+        event_tab_layout.setSpacing(0)
+
+        event_scroll = QScrollArea()
+        event_scroll.setObjectName("DecorScrollArea")
+        event_scroll.setWidgetResizable(True)
+        event_scroll.setFrameShape(QFrame.NoFrame)
+        event_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        event_tab_layout.addWidget(event_scroll)
 
         form_frame = QFrame()
         form_frame.setObjectName("DecorFormFrame")
         form_layout = QVBoxLayout(form_frame)
         form_layout.setContentsMargins(14, 12, 14, 12)
         form_layout.setSpacing(10)
-        right.addWidget(form_frame, 0)
+        event_scroll.setWidget(form_frame)
 
         form_title = QLabel("Параметры события")
         form_title.setObjectName("DecorSectionTitle")
@@ -174,10 +196,15 @@ class DecorSettingsDialog(BaseStyledDialog):
         form.addRow("Макс. сугробы:", self.max_drift_spin)
         form.addRow("Накопление:", self.accumulation_spin)
         form.addRow("На поверхностях:", self.surface_spin)
+        self.tabs.addTab(event_tab, "Событие")
 
+        particles_tab = QWidget()
+        particles_layout = QVBoxLayout(particles_tab)
+        particles_layout.setContentsMargins(10, 10, 10, 10)
+        particles_layout.setSpacing(10)
         particles_title = QLabel("Падающие изображения")
         particles_title.setObjectName("DecorSectionTitle")
-        right.addWidget(particles_title)
+        particles_layout.addWidget(particles_title)
 
         self.particles_table = QTableWidget(0, 3)
         self.particles_table.setObjectName("DecorParticlesTable")
@@ -188,27 +215,40 @@ class DecorSettingsDialog(BaseStyledDialog):
         self.particles_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.particles_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.particles_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.particles_table.setMinimumHeight(145)
-        right.addWidget(self.particles_table)
+        self.particles_table.setMinimumHeight(250)
+        particles_layout.addWidget(self.particles_table, 1)
 
         particle_buttons = QHBoxLayout()
         self.btn_add_particle = QPushButton("Загрузить картинки")
         self.btn_remove_particle = QPushButton("Удалить картинку")
-        self.btn_preview = QPushButton("Обновить предпросмотр")
-        for button in (self.btn_add_particle, self.btn_remove_particle, self.btn_preview):
+        for button in (self.btn_add_particle, self.btn_remove_particle):
             button.setObjectName("DialogOkBtn")
             particle_buttons.addWidget(button)
         particle_buttons.addStretch()
-        right.addLayout(particle_buttons)
+        particles_layout.addLayout(particle_buttons)
         self.btn_add_particle.clicked.connect(self._add_particles)
         self.btn_remove_particle.clicked.connect(self._remove_particle)
-        self.btn_preview.clicked.connect(self._refresh_preview)
+        self.tabs.addTab(particles_tab, "Картинки")
 
+        preview_tab = QWidget()
+        preview_layout = QVBoxLayout(preview_tab)
+        preview_layout.setContentsMargins(10, 10, 10, 10)
+        preview_layout.setSpacing(10)
         preview_title = QLabel("Предпросмотр")
         preview_title.setObjectName("DecorSectionTitle")
-        right.addWidget(preview_title)
+        preview_layout.addWidget(preview_title)
         self.preview_frame = DecorPreviewFrame()
-        right.addWidget(self.preview_frame, 1)
+        self.preview_frame.setMinimumHeight(330)
+        preview_layout.addWidget(self.preview_frame, 1)
+        preview_footer = QHBoxLayout()
+        preview_footer.addStretch()
+        self.btn_preview = QPushButton("Обновить предпросмотр")
+        self.btn_preview.setObjectName("DialogOkBtn")
+        self.btn_preview.clicked.connect(self._refresh_preview)
+        preview_footer.addWidget(self.btn_preview)
+        preview_layout.addLayout(preview_footer)
+        self.tabs.addTab(preview_tab, "Просмотр")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         footer = QHBoxLayout()
         footer.addStretch()
@@ -225,6 +265,9 @@ class DecorSettingsDialog(BaseStyledDialog):
         self._apply_style()
 
     def _apply_style(self):
+        up_icon = _icon_qss_url("decor_arrow_up.svg")
+        down_icon = _icon_qss_url("decor_arrow_down.svg")
+        combo_icon = _icon_qss_url("combo_arrow_down.svg")
         self.setStyleSheet(
             self.styleSheet()
             + """
@@ -243,16 +286,94 @@ class DecorSettingsDialog(BaseStyledDialog):
                 border: 1px solid #c7d1da;
                 border-radius: 6px;
                 color: #26394d;
-                padding: 6px 8px;
+                padding: 6px 26px 6px 8px;
                 min-height: 28px;
             }
             QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus,
             QSpinBox:focus, QDoubleSpinBox:focus {
                 border-color: #7f9fbd;
             }
+            QComboBox::drop-down, QDateEdit::drop-down {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #d6e0e8;
+                border-top-right-radius: 6px;
+                border-bottom-right-radius: 6px;
+                background: #eef5fb;
+            }
+            QComboBox::down-arrow, QDateEdit::down-arrow {
+                image: url("__COMBO_ICON__");
+                width: 10px;
+                height: 10px;
+            }
+            QAbstractSpinBox::up-button {
+                subcontrol-origin: border;
+                subcontrol-position: top right;
+                width: 22px;
+                border-left: 1px solid #d6e0e8;
+                border-bottom: 1px solid #d6e0e8;
+                border-top-right-radius: 6px;
+                background: #eef5fb;
+            }
+            QAbstractSpinBox::up-button:hover {
+                background: #dceaf7;
+            }
+            QAbstractSpinBox::down-button {
+                subcontrol-origin: border;
+                subcontrol-position: bottom right;
+                width: 22px;
+                border-left: 1px solid #d6e0e8;
+                border-bottom-right-radius: 6px;
+                background: #eef5fb;
+            }
+            QAbstractSpinBox::down-button:hover {
+                background: #dceaf7;
+            }
+            QAbstractSpinBox::up-arrow {
+                image: url("__UP_ICON__");
+                width: 8px;
+                height: 8px;
+            }
+            QAbstractSpinBox::down-arrow {
+                image: url("__DOWN_ICON__");
+                width: 8px;
+                height: 8px;
+            }
             QCheckBox {
                 color: #26394d;
                 spacing: 8px;
+            }
+            QTabWidget#DecorSettingsTabs::pane {
+                background: #f6f9fc;
+                border: 1px solid #c7d1da;
+                border-radius: 8px;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: #edf3f8;
+                color: #31475c;
+                border: 1px solid #c7d1da;
+                border-bottom: none;
+                padding: 8px 14px;
+                min-width: 76px;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+                margin-right: 4px;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #17324d;
+            }
+            QTabBar::tab:hover:!selected {
+                background: #e2edf6;
+            }
+            QScrollArea#DecorScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#DecorScrollArea > QWidget > QWidget {
+                background: transparent;
             }
             QTableWidget#DecorEventsTable, QTableWidget#DecorParticlesTable {
                 background: #ffffff;
@@ -277,7 +398,77 @@ class DecorSettingsDialog(BaseStyledDialog):
                 padding: 7px;
                 font-weight: 700;
             }
+            QScrollBar:vertical {
+                background: #eef3f7;
+                border: 1px solid #d4dde6;
+                border-radius: 7px;
+                width: 14px;
+                margin: 16px 0 16px 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #89a9c4;
+                border-radius: 6px;
+                min-height: 34px;
+                margin: 1px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #6f95b7;
+            }
+            QScrollBar::sub-line:vertical, QScrollBar::add-line:vertical {
+                background: #ddeaf4;
+                border: none;
+                height: 16px;
+                subcontrol-origin: margin;
+            }
+            QScrollBar::sub-line:vertical {
+                subcontrol-position: top;
+                border-top-left-radius: 7px;
+                border-top-right-radius: 7px;
+            }
+            QScrollBar::add-line:vertical {
+                subcontrol-position: bottom;
+                border-bottom-left-radius: 7px;
+                border-bottom-right-radius: 7px;
+            }
+            QScrollBar::up-arrow:vertical {
+                image: url("__UP_ICON__");
+                width: 8px;
+                height: 8px;
+            }
+            QScrollBar::down-arrow:vertical {
+                image: url("__DOWN_ICON__");
+                width: 8px;
+                height: 8px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
+            QScrollBar:horizontal {
+                background: #eef3f7;
+                border: 1px solid #d4dde6;
+                border-radius: 7px;
+                height: 14px;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #89a9c4;
+                border-radius: 6px;
+                min-width: 34px;
+                margin: 1px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #6f95b7;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: transparent;
+                border: none;
+                width: 0;
+            }
             """
+            .replace("__UP_ICON__", up_icon)
+            .replace("__DOWN_ICON__", down_icon)
+            .replace("__COMBO_ICON__", combo_icon)
         )
 
     def _load_settings(self):
@@ -306,7 +497,6 @@ class DecorSettingsDialog(BaseStyledDialog):
         values = [
             str(normalized.get("name") or ""),
             event_period_label(normalized),
-            DECOR_ZONES.get(str(normalized.get("zone") or "all"), "Вся РЕМ карта и оперблок"),
             "Да" if normalized.get("enabled") else "Нет",
         ]
         for column, value in enumerate(values):
@@ -512,6 +702,10 @@ class DecorSettingsDialog(BaseStyledDialog):
         event = self._event_from_form(self._events[self._current_index] if 0 <= self._current_index < len(self._events) else {})
         self.preview_frame.set_event(event)
 
+    def _on_tab_changed(self, index: int):
+        if self.tabs.tabText(index) == "Просмотр":
+            self._refresh_preview()
+
     def _save(self):
         self._store_current_event()
         payload = normalize_decor_settings_payload({"events": self._events})
@@ -544,3 +738,8 @@ class DecorSettingsDialog(BaseStyledDialog):
     def _date_edit_value(widget: QDateEdit) -> str:
         date = widget.date()
         return f"{date.month():02d}-{date.day():02d}"
+
+
+def _icon_qss_url(file_name: str) -> str:
+    path = os.path.abspath(os.path.join(get_icon_dir(), file_name))
+    return path.replace("\\", "/")
