@@ -8,6 +8,9 @@ from PySide6.QtGui import QIcon, QFont
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from rem_card.ui.styles.theme import COLOR_PRIMARY_DARK
 
+RECOVERY_TIME_STEP_MINUTES = 10
+RECOVERY_TIMER_GRACE_MS = 250
+
 class VitalBadge(QFrame):
     """Виджет плашки для вывода витального показателя."""
     def __init__(self, label_text, value_text, bg_color, border_color, parent=None):
@@ -63,9 +66,13 @@ class Sector4b(BaseSectorWidget):
         self._outcome_timer_status_dto = None
         self._outcome_timer_delay_minutes = 30
         self._recovery_mode = False
+        self._recovery_elapsed_admission_datetime = None
         self._outcome_tick_timer = QTimer(self)
         self._outcome_tick_timer.setInterval(1000)
         self._outcome_tick_timer.timeout.connect(self._refresh_outcome_timer_label)
+        self._recovery_elapsed_timer = QTimer(self)
+        self._recovery_elapsed_timer.setSingleShot(True)
+        self._recovery_elapsed_timer.timeout.connect(self._refresh_recovery_elapsed_label)
         
         self.init_ui()
 
@@ -254,7 +261,14 @@ class Sector4b(BaseSectorWidget):
     def set_recovery_mode(self, enabled: bool):
         self._recovery_mode = bool(enabled)
 
-    def update_patient_info(self, patient, current_date, *, is_recovery: bool | None = None):
+    def update_patient_info(
+        self,
+        patient,
+        current_date,
+        *,
+        is_recovery: bool | None = None,
+        auto_update_recovery_time: bool = False,
+    ):
         if not patient: return
         recovery_mode = self._resolve_recovery_mode(patient, is_recovery)
         self._recovery_mode = recovery_mode
@@ -264,12 +278,17 @@ class Sector4b(BaseSectorWidget):
         self.lbl_age.setText(f"Возраст: {age_str}")
         if patient.admission_datetime:
             if recovery_mode:
-                value = self._format_department_time(patient.admission_datetime, current_date)
-                self.lbl_days.setText(f"Время в отделении: {value}")
+                self._recovery_elapsed_admission_datetime = patient.admission_datetime
+                self._refresh_recovery_elapsed_label(
+                    current_date,
+                    schedule=auto_update_recovery_time,
+                )
             else:
+                self._stop_recovery_elapsed_timer()
                 value = self._format_icu_day(patient.admission_datetime, current_date)
                 self.lbl_days.setText(f"Сутки: {value}")
         else:
+            self._stop_recovery_elapsed_timer()
             self.lbl_days.setText("Время в отделении: -" if recovery_mode else "Сутки: -")
         
         diag = patient.diagnosis_text if patient.diagnosis_text else "-"
@@ -294,9 +313,38 @@ class Sector4b(BaseSectorWidget):
     @staticmethod
     def _format_department_time(admission_datetime, current_date) -> str:
         elapsed_seconds = max(0, int((current_date - admission_datetime).total_seconds()))
-        total_minutes = (elapsed_seconds // 60 // 10) * 10
+        total_minutes = (elapsed_seconds // 60 // RECOVERY_TIME_STEP_MINUTES) * RECOVERY_TIME_STEP_MINUTES
         hours, minutes = divmod(total_minutes, 60)
         return f"{hours}ч {minutes:02d}м"
+
+    @staticmethod
+    def _milliseconds_until_next_department_tick(admission_datetime, current_date) -> int:
+        elapsed_seconds = max(0, int((current_date - admission_datetime).total_seconds()))
+        step_seconds = RECOVERY_TIME_STEP_MINUTES * 60
+        remainder = elapsed_seconds % step_seconds
+        seconds_until_next = step_seconds - remainder if remainder else step_seconds
+        return max(1000, seconds_until_next * 1000 + RECOVERY_TIMER_GRACE_MS)
+
+    def _refresh_recovery_elapsed_label(self, current_date=None, *, schedule: bool = True):
+        admission_datetime = self._recovery_elapsed_admission_datetime
+        if not self._recovery_mode or not admission_datetime:
+            self._stop_recovery_elapsed_timer()
+            return
+
+        current_date = current_date or datetime.now()
+        value = self._format_department_time(admission_datetime, current_date)
+        self.lbl_days.setText(f"Время в отделении: {value}")
+
+        if schedule:
+            interval_ms = self._milliseconds_until_next_department_tick(admission_datetime, current_date)
+            self._recovery_elapsed_timer.start(interval_ms)
+        elif self._recovery_elapsed_timer.isActive():
+            self._recovery_elapsed_timer.stop()
+
+    def _stop_recovery_elapsed_timer(self):
+        self._recovery_elapsed_admission_datetime = None
+        if self._recovery_elapsed_timer.isActive():
+            self._recovery_elapsed_timer.stop()
 
 class Sector4v(BaseSectorWidget):
     """Нижняя часть объединенного блока (4в)"""

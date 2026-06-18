@@ -31,6 +31,7 @@ class NursePatientBedRow(QWidget):
             self.patient,
             now or datetime.now(),
             is_recovery=is_recovery_bed(getattr(self.patient, "bed_number", None)),
+            auto_update_recovery_time=True,
         )
 
     def init_ui(self):
@@ -64,6 +65,7 @@ class NursePatientBedRow(QWidget):
             self.patient,
             now,
             is_recovery=is_recovery_bed(getattr(self.patient, "bed_number", None)),
+            auto_update_recovery_time=True,
         )
         
         # Настройка сигналов
