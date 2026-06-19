@@ -154,6 +154,7 @@ class OrdersModel(QAbstractTableModel):
             actual_time=actual_dt,
             performer_id=rd.get('performer_id'),
             status=rd['status'],
+            version=rd.get('version', 0) or 0,
             is_committed=rd.get('is_committed', 0),
             comment=rd.get('comment') or "",
             volume_ml=rd.get('volume_ml', 0.0),

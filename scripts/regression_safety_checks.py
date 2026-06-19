@@ -7504,7 +7504,10 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
             "orders_forced_reload_requested",
             "orders_forced_reload_suppressed",
             "orders_stale_block_guard_active",
+            "order_action_pending_blocked",
+            "_admin_mark_requires_committed_row",
         ],
+        "services/order_domain_service.py": ["order_action_pending_blocked", "admin_not_committed"],
     }
     for rel_path, tokens in required_tokens.items():
         text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")

@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple, Dict
 from ..data.dto.remcard_dto import OrderDTO, AdministrationDTO, OrderType, OrderStatus
 from ..data.dao.db_manager import DatabaseManager
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 
 # Метки выполнения медсестрой (хранятся в поле comment)
@@ -613,6 +614,19 @@ class OrderDomainService:
             reason=reason,
             immediate=True,
         )
+        if reason == "admin_not_committed":
+            record_metric(
+                "order_action_pending_blocked",
+                1,
+                role="service",
+                source="service_guard",
+                reason=reason,
+                admission_id=admission_id_int,
+                admin_id=resolved_admin_id,
+                version=row.get("version"),
+                is_committed=row.get("is_committed"),
+                latest_id=row.get("latest_id"),
+            )
         raise RuntimeError(message)
 
     def _assert_nurse_admin_current(self, cursor, row: Optional[dict]) -> int:
@@ -634,7 +648,7 @@ class OrderDomainService:
         if int(row.get("is_committed") or 0) != 1:
             self._raise_nurse_optimistic_conflict(
                 "admin_not_committed",
-                "Назначение еще не сохранено врачом. Обновите карточку.",
+                "Назначение еще сохраняется. Дождитесь подтверждения и обновите карточку.",
                 row=row,
             )
 

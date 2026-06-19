@@ -3529,6 +3529,13 @@ class OrdersWidget(QWidget):
     def on_cell_right_clicked(self, index):
         self._handle_doctor_order_mark(index)
 
+    @staticmethod
+    def _admin_mark_requires_committed_row(admin) -> bool:
+        try:
+            return int(getattr(admin, "is_committed", 0) or 0) != 1
+        except Exception:
+            return True
+
     def _handle_doctor_order_mark(self, index):
         if self._is_read_only():
             return
@@ -3551,6 +3558,31 @@ class OrdersWidget(QWidget):
             admin_id = None
         if not admin_id or admin_id < 0:
             self._show_warning("Сначала сохраните карту назначений, затем поставьте отметку выполнения.")
+            return
+        if self._admin_mark_requires_committed_row(admin):
+            logger.info(
+                "[OrdersClick] click_skip role=doctor_mark reason=admin_not_committed admission_id=%s row=%s col=%s "
+                "admin_id=%s version=%s is_committed=%s",
+                self.admission_id,
+                index.row(),
+                index.column(),
+                admin_id,
+                getattr(admin, "version", None),
+                getattr(admin, "is_committed", None),
+            )
+            record_metric(
+                "order_action_pending_blocked",
+                1,
+                role="doctor",
+                source="ui_guard",
+                reason="admin_not_committed",
+                admission_id=self.admission_id,
+                admin_id=admin_id,
+                version=getattr(admin, "version", None),
+                is_committed=getattr(admin, "is_committed", None),
+            )
+            self._show_warning("Назначение еще сохраняется. Дождитесь подтверждения.")
+            self.request_refresh(force=True, source="doctor_order_mark_uncommitted", priority="HIGH")
             return
 
         mark = str(getattr(admin, "comment", "") or "")

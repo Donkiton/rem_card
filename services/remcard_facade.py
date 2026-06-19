@@ -942,6 +942,7 @@ class RemCardService(QObject):
                     ),
                     performer_id=mapped.get("performer_id"),
                     status=mapped["status"],
+                    version=mapped.get("version", 0) or 0,
                     is_committed=mapped.get("is_committed", 0),
                     comment=mapped.get("comment", ""),
                     volume_ml=mapped.get("volume_ml", 0.0),
