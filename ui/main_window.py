@@ -15,6 +15,8 @@ import time
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.foreground_activity import foreground_activity_snapshot, should_defer_background_io
+from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.app.roles import (
@@ -391,6 +393,43 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() == self.admin_main:
             return "admin"
         return str(self._role_lock_key or self._initial_role or "unknown")
+
+    def _current_visible_remcard_context(self) -> dict:
+        current_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        layout = None
+        if current_widget == getattr(self, "doctor_main", None):
+            remcard_widget = getattr(self.doctor_main, "remcard_widget", None)
+            layout = getattr(remcard_widget, "layout_manager", None)
+        elif current_widget == getattr(self, "nurse_main", None):
+            layout = getattr(self.nurse_main, "layout_manager", None)
+        if layout is None:
+            return {}
+
+        tab_name = ""
+        sector_2b = getattr(layout, "sector_2b", None)
+        current_tab_name = getattr(sector_2b, "current_tab_name", None)
+        if callable(current_tab_name):
+            try:
+                tab_name = str(current_tab_name() or "")
+            except Exception:
+                tab_name = ""
+        return {
+            "admission_id": getattr(layout, "current_admission_id", None),
+            "tab_name": tab_name,
+            "mode": str(getattr(layout, "current_mode", "") or ""),
+        }
+
+    @staticmethod
+    def _watchdog_snapshot_names(snapshot: dict, key: str) -> str:
+        items = snapshot.get(key) if isinstance(snapshot, dict) else None
+        if not isinstance(items, list):
+            return ""
+        names = [
+            str(item.get("task_type") or item.get("name") or "")
+            for item in items
+            if isinstance(item, dict) and str(item.get("task_type") or item.get("name") or "")
+        ]
+        return ",".join(names[:4])
 
     def _install_decor_overlay(self) -> None:
         try:
@@ -1101,12 +1140,24 @@ class MainWindow(QMainWindow):
             return
         self._event_loop_watchdog_last_log_ts = now
         role = self._current_role_key()
+        visible_context = self._current_visible_remcard_context()
+        maintenance_snapshot = active_maintenance_snapshot(limit=4)
+        foreground_snapshot = foreground_activity_snapshot(limit=4)
+        active_maintenance = self._watchdog_snapshot_names(maintenance_snapshot, "active")
+        foreground_active = self._watchdog_snapshot_names(foreground_snapshot, "active")
+        foreground_recent = self._watchdog_snapshot_names(foreground_snapshot, "recent")
         logger.warning(
-            "[UIWatchdog] event_loop_pause_ms=%.1f threshold_ms=%.1f role=%s interval_ms=%s",
+            "[UIWatchdog] event_loop_pause_ms=%.1f threshold_ms=%.1f role=%s interval_ms=%s "
+            "tab=%s admission_id=%s active_maintenance=%s foreground_active=%s foreground_recent=%s",
             pause_ms,
             float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)),
             role,
             int(expected_interval_ms or 0),
+            visible_context.get("tab_name", ""),
+            visible_context.get("admission_id"),
+            active_maintenance,
+            foreground_active,
+            foreground_recent,
         )
         record_metric(
             "event_loop_pause_ms",
@@ -1114,6 +1165,13 @@ class MainWindow(QMainWindow):
             threshold_ms=round(float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)), 3),
             interval_ms=int(expected_interval_ms or 0),
             role=role,
+            tab_name=visible_context.get("tab_name", ""),
+            admission_id=visible_context.get("admission_id"),
+            active_maintenance_count=int(maintenance_snapshot.get("active_count") or 0),
+            active_maintenance=active_maintenance,
+            foreground_active_count=int(foreground_snapshot.get("active_count") or 0),
+            foreground_active=foreground_active,
+            foreground_recent=foreground_recent,
             source="refresh",
         )
         operblock_startup_metrics.record_event_loop_pause(
@@ -1572,7 +1630,45 @@ class MainWindow(QMainWindow):
         )
         QTimer.singleShot(int(start_delay_sec * 1000), self._run_maintenance_async)
 
+    def _defer_ui_maintenance_if_foreground(self) -> bool:
+        if getattr(self, "_is_closing", False):
+            return True
+        idle_window_sec = max(
+            30.0,
+            float(os.environ.get("REMCARD_UI_MAINTENANCE_FOREGROUND_IDLE_SEC", "120")),
+        )
+        retry_sec = max(
+            10.0,
+            float(os.environ.get("REMCARD_UI_MAINTENANCE_DEFER_RETRY_SEC", "60")),
+        )
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=idle_window_sec,
+            names=None,
+        )
+        if not should_defer:
+            return False
+        logger.info(
+            "UI maintenance deferred: foreground activity is active/recent (reason=%s age_sec=%s retry_sec=%.1f)",
+            reason,
+            None if age_sec is None else round(age_sec, 3),
+            retry_sec,
+        )
+        record_metric(
+            "maintenance_task_deferred",
+            1,
+            task_type="daily_backup_cleanup",
+            source="main_window",
+            reason=f"foreground_activity:{reason}",
+            age_sec=None if age_sec is None else round(age_sec, 3),
+            idle_window_sec=round(idle_window_sec, 3),
+            retry_sec=round(retry_sec, 3),
+        )
+        QTimer.singleShot(int(retry_sec * 1000), self._run_maintenance_async)
+        return True
+
     def _run_maintenance_async(self):
+        if self._defer_ui_maintenance_if_foreground():
+            return
         token = self.show_loading_indicator(
             "Обслуживание базы: проверка и резервное копирование...",
             key="maintenance",
@@ -1583,7 +1679,8 @@ class MainWindow(QMainWindow):
             try:
                 from rem_card.app.backup_and_cleanup import perform_daily_backup_and_cleanup
 
-                perform_daily_backup_and_cleanup()
+                with maintenance_task("daily_backup_cleanup", source="main_window"):
+                    perform_daily_backup_and_cleanup()
             except Exception:
                 pass
             finally:

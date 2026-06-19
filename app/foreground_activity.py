@@ -272,6 +272,40 @@ def should_defer_background_io(
     return False, "idle", age_sec
 
 
+def foreground_activity_snapshot(*, limit: int = 8) -> dict[str, object]:
+    now = time.monotonic()
+    max_items = max(1, int(limit or 1))
+    with _LOCK:
+        active_payloads = [
+            dict(payload)
+            for active_reads in _ACTIVE_READS.values()
+            for payload in active_reads.values()
+        ]
+        recent_payloads = [dict(payload) for payload in _LAST_ACTIVITY.values()]
+
+    def _compact(payload: dict[str, object]) -> dict[str, object]:
+        latest_ts = float(payload.get("monotonic") or now)
+        active_until = float(payload.get("active_until") or latest_ts)
+        return {
+            "name": str(payload.get("name") or ""),
+            "source": str(payload.get("source") or ""),
+            "status": str(payload.get("status") or ""),
+            "admission_id": payload.get("admission_id"),
+            "request_id": str(payload.get("request_id") or ""),
+            "age_sec": round(max(0.0, now - latest_ts), 3),
+            "active_for_sec": round(max(0.0, active_until - now), 3),
+        }
+
+    active_payloads.sort(key=lambda payload: float(payload.get("monotonic") or 0.0), reverse=True)
+    recent_payloads.sort(key=lambda payload: float(payload.get("monotonic") or 0.0), reverse=True)
+    return {
+        "active_count": len(active_payloads),
+        "recent_count": len(recent_payloads),
+        "active": [_compact(payload) for payload in active_payloads[:max_items]],
+        "recent": [_compact(payload) for payload in recent_payloads[:max_items]],
+    }
+
+
 def _reset_foreground_activity_for_tests() -> None:
     with _LOCK:
         _ACTIVE_COUNTS.clear()

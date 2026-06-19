@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QStackedWidget, QApplication, QSizePolicy, QLabel)
 from PySide6.QtCore import Qt, QTimer, Signal
+from rem_card.app.foreground_activity import mark_foreground_activity
 from rem_card.app.logger import logger
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.display_settings_storage import (
@@ -15,6 +16,22 @@ from ..rem_card_sectors.sector_w1a import SectorW1a
 # Нижний ряд 5/6/7a оставлен в дереве виджетов для быстрого восстановления.
 # Чтобы вернуть его на вкладку, добавьте название вкладки в этот набор.
 BOTTOM_ROW_VISIBLE_TABS = frozenset({"Баланс жидкости"})
+TAB_FOREGROUND_ACTIVITY_TTL_SEC = 5.0
+
+
+def _tab_foreground_activity_name(tab_name: str) -> str:
+    normalized = str(tab_name or "").strip().lower()
+    mapping = {
+        "витальные функции": "tab_vitals",
+        "назначения": "tab_orders",
+        "баланс жидкости": "tab_balance",
+        "движение": "tab_movement",
+        "события": "tab_movement",
+        "процедуры": "tab_procedures",
+        "анализы": "tab_labs",
+        "печать": "tab_print",
+    }
+    return mapping.get(normalized, "tab_open")
 
 
 class NurseRemCardLayoutManager(QWidget):
@@ -816,7 +833,18 @@ class NurseRemCardLayoutManager(QWidget):
 
     def set_active_tab(self, tab_name, *, source: str = "click"):
         loading_key = None
-        if str(source or "click").strip().lower() == "click":
+        normalized_source = str(source or "click").strip().lower() or "click"
+        if normalized_source not in {"click", "cache", "refresh"}:
+            normalized_source = "refresh"
+        mark_foreground_activity(
+            _tab_foreground_activity_name(tab_name),
+            admission_id=getattr(self, "current_admission_id", None),
+            source=normalized_source,
+            ttl_sec=TAB_FOREGROUND_ACTIVITY_TTL_SEC,
+            tab_name=str(tab_name or ""),
+            role="nurse",
+        )
+        if normalized_source == "click":
             loading_key = show_app_loading(
                 self,
                 f"Открытие вкладки: {tab_name}",

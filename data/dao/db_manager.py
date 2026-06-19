@@ -31,10 +31,11 @@ from rem_card.app.db_availability import (
     is_database_unavailable_error,
     notify_database_unavailable,
 )
-from rem_card.app.foreground_activity import should_defer_background_io
+from rem_card.app.foreground_activity import foreground_activity_snapshot, should_defer_background_io
 from rem_card.app.logger import logger
 from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.paths import (
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
@@ -89,8 +90,28 @@ PERIODIC_BACKUP_FOREGROUND_IDLE_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_PERIODIC_BACKUP_FOREGROUND_IDLE_SEC", "5")),
 )
+HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC = max(
+    PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+    float(os.environ.get("REMCARD_HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC", "120")),
+)
+HEAVY_MAINTENANCE_STARTUP_GRACE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_HEAVY_MAINTENANCE_STARTUP_GRACE_SEC", "900")),
+)
+MAINTENANCE_DEFER_WARN_SEC = max(
+    60.0,
+    float(os.environ.get("REMCARD_MAINTENANCE_DEFER_WARN_SEC", "1800")),
+)
+CENTRAL_IO_LOCK_WAIT_WARN_MS = max(
+    0.0,
+    float(os.environ.get("REMCARD_CENTRAL_IO_LOCK_WAIT_WARN_MS", "250")),
+)
 INTEGRITY_CHECK_INTERVAL_SEC = 30 * 60
 INTEGRITY_START_DELAY_SEC = 45
+INTEGRITY_DEFER_RETRY_SEC = max(
+    5.0,
+    float(os.environ.get("REMCARD_INTEGRITY_DEFER_RETRY_SEC", "60")),
+)
 LOCAL_READ_AFTER_WRITE_GRACE_SEC = 1.5
 OUTBOX_REPLAY_INTERVAL_SEC = 3.0
 OUTBOX_MAX_ATTEMPTS = 80
@@ -227,6 +248,7 @@ class DatabaseManager:
         self.baza_dir = self.runtime_context.baza_dir
         self._periodic_backup_interval_sec = PERIODIC_BACKUP_INTERVAL_SEC
         self._last_backup_ts = time.time()
+        self._startup_ts = time.time()
         self._integrity_stop_evt = threading.Event()
         self._integrity_thread: Optional[threading.Thread] = None
         self._startup_quickcheck_stop_evt = threading.Event()
@@ -270,6 +292,7 @@ class DatabaseManager:
         self._startup_quickcheck_next_allowed_ts = 0.0
         self._last_heavy_maintenance_ts = 0.0
         self._last_heavy_maintenance_source = ""
+        self._maintenance_deferred_since: dict[str, float] = {}
 
         owner_id = f"{socket.gethostname()}:{os.getpid()}:rem_card"
         self.write_controller = SQLiteWriteController(
@@ -384,22 +407,29 @@ class DatabaseManager:
                 logger.debug("Startup quick_check idle probe failed: %s", exc)
                 return False
         should_defer, reason, age_sec = should_defer_background_io(
-            idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
-            names={"orders", "orders_show"},
+            idle_window_sec=max(STARTUP_QUICKCHECK_IDLE_GRACE_SEC, PERIODIC_BACKUP_FOREGROUND_IDLE_SEC),
+            names=None,
         )
         if should_defer:
             logger.info(
                 "Background startup quick_check deferred: foreground read is active/recent (reason=%s age_sec=%s idle_window_sec=%.1f)",
                 reason,
                 None if age_sec is None else round(age_sec, 3),
-                PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+                max(STARTUP_QUICKCHECK_IDLE_GRACE_SEC, PERIODIC_BACKUP_FOREGROUND_IDLE_SEC),
+            )
+            self._record_maintenance_deferred(
+                "startup_quick_check",
+                f"foreground_activity:{reason}",
+                source="startup_quick_check",
+                age_sec=None if age_sec is None else round(age_sec, 3),
+                idle_window_sec=max(STARTUP_QUICKCHECK_IDLE_GRACE_SEC, PERIODIC_BACKUP_FOREGROUND_IDLE_SEC),
             )
             record_metric(
                 "startup_quick_check_deferred_foreground_read",
                 1,
                 reason=reason,
                 age_sec=None if age_sec is None else round(age_sec, 3),
-                idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+                idle_window_sec=max(STARTUP_QUICKCHECK_IDLE_GRACE_SEC, PERIODIC_BACKUP_FOREGROUND_IDLE_SEC),
             )
             return False
         return True
@@ -420,6 +450,188 @@ class DatabaseManager:
     def _mark_heavy_maintenance_io(self, source: str) -> None:
         self._last_heavy_maintenance_ts = time.time()
         self._last_heavy_maintenance_source = str(source or "maintenance")
+
+    def _write_activity_defer_reason(self, *, idle_grace_sec: float = LOCAL_READ_AFTER_WRITE_GRACE_SEC) -> str | None:
+        lock = getattr(self, "_write_activity_lock", None)
+        if lock is not None:
+            with lock:
+                if int(getattr(self, "_active_write_count", 0) or 0) > 0:
+                    return "active_write"
+                last_write_ts = float(getattr(self, "_last_write_activity_ts", 0.0) or 0.0)
+            if last_write_ts and (time.time() - last_write_ts) < max(0.0, float(idle_grace_sec or 0.0)):
+                return "recent_write"
+
+        probe = getattr(self, "_write_queue_idle_probe", None)
+        if probe is not None:
+            try:
+                if not bool(probe()):
+                    return "write_queue_busy"
+            except Exception as exc:
+                logger.debug("Maintenance write queue idle probe failed: %s", exc)
+                return "write_queue_probe_error"
+        return None
+
+    def _write_queue_depth_hint(self) -> int:
+        depth = 0
+        lock = getattr(self, "_write_activity_lock", None)
+        if lock is not None:
+            try:
+                with lock:
+                    depth = max(depth, int(getattr(self, "_active_write_count", 0) or 0))
+            except Exception:
+                depth = max(depth, 1)
+        probe = getattr(self, "_write_queue_idle_probe", None)
+        if probe is not None:
+            try:
+                if not bool(probe()):
+                    depth = max(depth, 1)
+            except Exception:
+                depth = max(depth, 1)
+        return depth
+
+    def _maintenance_defer_reason(
+        self,
+        task_type: str,
+        *,
+        source: str,
+        idle_window_sec: float,
+        startup_grace: bool = False,
+        check_writes: bool = True,
+        cooldown_source: str | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> tuple[str | None, dict[str, Any]]:
+        if getattr(self, "_closed", False):
+            return "closed", {}
+        if stop_event is not None and stop_event.is_set():
+            return "stopping", {}
+
+        now_ts = time.time()
+        if startup_grace:
+            started_ts = float(getattr(self, "_startup_ts", now_ts) or now_ts)
+            elapsed_sec = max(0.0, now_ts - started_ts)
+            if elapsed_sec < HEAVY_MAINTENANCE_STARTUP_GRACE_SEC:
+                return "startup_grace", {
+                    "remaining_sec": round(HEAVY_MAINTENANCE_STARTUP_GRACE_SEC - elapsed_sec, 3),
+                    "startup_grace_sec": round(HEAVY_MAINTENANCE_STARTUP_GRACE_SEC, 3),
+                }
+
+        cooldown_remaining = self._maintenance_io_cooldown_remaining(cooldown_source or task_type)
+        if cooldown_remaining > 0:
+            return "maintenance_cooldown", {
+                "remaining_sec": round(cooldown_remaining, 3),
+                "last_source": getattr(self, "_last_heavy_maintenance_source", ""),
+            }
+
+        if check_writes:
+            write_reason = self._write_activity_defer_reason()
+            if write_reason:
+                return "write_queue_not_idle", {
+                    "write_queue_reason": write_reason,
+                    "write_queue_depth": self._write_queue_depth_hint(),
+                }
+
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=idle_window_sec,
+            names=None,
+        )
+        if should_defer:
+            return f"foreground_activity:{reason}", {
+                "age_sec": None if age_sec is None else round(age_sec, 3),
+                "idle_window_sec": round(max(0.0, float(idle_window_sec or 0.0)), 3),
+            }
+        return None, {}
+
+    def _record_maintenance_deferred(
+        self,
+        task_type: str,
+        reason: str,
+        *,
+        source: str,
+        retry_sec: float | None = None,
+        **fields: Any,
+    ) -> None:
+        task = str(task_type or "maintenance")
+        now_ts = time.time()
+        deferred_since = getattr(self, "_maintenance_deferred_since", None)
+        if deferred_since is None:
+            deferred_since = {}
+            self._maintenance_deferred_since = deferred_since
+        first_ts = float(deferred_since.setdefault(task, now_ts) or now_ts)
+        deferred_for_sec = max(0.0, now_ts - first_ts)
+        payload = {
+            "task_type": task,
+            "source": str(source or "background"),
+            "reason": str(reason or "unknown"),
+            "deferred_for_sec": round(deferred_for_sec, 3),
+        }
+        try:
+            foreground_snapshot = foreground_activity_snapshot(limit=4)
+            foreground_names = [
+                str(item.get("name") or "")
+                for item in (foreground_snapshot.get("active") or []) + (foreground_snapshot.get("recent") or [])
+                if isinstance(item, dict) and str(item.get("name") or "")
+            ]
+            if foreground_names:
+                payload["foreground_activity"] = ",".join(dict.fromkeys(foreground_names))
+        except Exception:
+            pass
+        payload.update(fields)
+        if retry_sec is not None:
+            payload["retry_sec"] = round(max(0.0, float(retry_sec or 0.0)), 3)
+        record_metric("maintenance_task_deferred", 1, **payload)
+        if deferred_for_sec >= MAINTENANCE_DEFER_WARN_SEC:
+            logger.warning(
+                "Background maintenance still deferred task=%s source=%s reason=%s deferred_for_sec=%.1f",
+                task,
+                source,
+                reason,
+                deferred_for_sec,
+            )
+            record_metric("maintenance_task_defer_warn", 1, **payload)
+            record_metric(
+                "maintenance_deferral_max_age",
+                round(deferred_for_sec, 3),
+                **payload,
+            )
+            deferred_since[task] = now_ts
+
+    def _clear_maintenance_deferred(self, task_type: str) -> None:
+        deferred_since = getattr(self, "_maintenance_deferred_since", None)
+        if isinstance(deferred_since, dict):
+            deferred_since.pop(str(task_type or "maintenance"), None)
+
+    @contextmanager
+    def _central_io_lock_scope(self, operation: str, *, source: str = "db"):
+        started = time.perf_counter()
+        lock = self._central_io_lock
+        lock.acquire()
+        wait_ms = (time.perf_counter() - started) * 1000.0
+        if wait_ms >= CENTRAL_IO_LOCK_WAIT_WARN_MS:
+            snapshot = active_maintenance_snapshot(limit=4)
+            active_tasks = ",".join(
+                str(item.get("task_type") or "")
+                for item in (snapshot.get("active") or [])
+                if isinstance(item, dict)
+            )
+            logger.warning(
+                "[DBReadWait] central_io_lock_wait_ms=%.1f operation=%s source=%s active_maintenance=%s",
+                wait_ms,
+                operation,
+                source,
+                active_tasks,
+            )
+            record_metric(
+                "central_io_lock_wait_ms",
+                round(wait_ms, 3),
+                operation=str(operation or ""),
+                source=str(source or ""),
+                active_maintenance_count=int(snapshot.get("active_count") or 0),
+                active_maintenance=active_tasks,
+            )
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _rotation_blocking_role_lock_paths(self) -> dict[str, str]:
         session_locks_dir = os.path.join(str(getattr(self, "baza_dir", BAZA_DIR)), "session_locks")
@@ -1185,27 +1397,28 @@ class DatabaseManager:
             return 1
 
         try:
-            with self._central_io_lock:
-                if not self._is_startup_quickcheck_idle():
-                    return False
-                conn = sqlite3.connect(
-                    self._readonly_db_uri(),
-                    uri=True,
-                    check_same_thread=True,
-                    isolation_level=None,
-                    timeout=5.0,
-                )
-                configure_connection(conn, readonly=True, profile="network")
-                try:
-                    conn.set_progress_handler(cancel_if_not_idle, 1000)
-                    quick_started = time.perf_counter()
-                    ok, result = run_quick_check(conn)
-                finally:
+            with maintenance_task("startup_quick_check", source="startup_quick_check", db_path=self.db_path):
+                with self._central_io_lock_scope("startup_quick_check", source="startup_quick_check"):
+                    if not self._is_startup_quickcheck_idle():
+                        return False
+                    conn = sqlite3.connect(
+                        self._readonly_db_uri(),
+                        uri=True,
+                        check_same_thread=True,
+                        isolation_level=None,
+                        timeout=5.0,
+                    )
+                    configure_connection(conn, readonly=True, profile="network")
                     try:
-                        conn.set_progress_handler(None, 0)
-                        conn.close()
+                        conn.set_progress_handler(cancel_if_not_idle, 1000)
+                        quick_started = time.perf_counter()
+                        ok, result = run_quick_check(conn)
                     finally:
-                        conn = None
+                        try:
+                            conn.set_progress_handler(None, 0)
+                            conn.close()
+                        finally:
+                            conn = None
             elapsed_ms = (time.perf_counter() - quick_started) * 1000.0
             if elapsed_ms >= STARTUP_QUICKCHECK_SLOW_MS:
                 self._startup_quickcheck_next_allowed_ts = time.time() + STARTUP_QUICKCHECK_SLOW_BACKOFF_SEC
@@ -1723,7 +1936,7 @@ class DatabaseManager:
         # позже закрывается/переиспользуется уже из другого потока, что на Windows
         # может завершиться native access violation без Python-исключения.
         try:
-            with self._central_io_lock:
+            with self._central_io_lock_scope("remcard_read_all", source="fetch_all"):
                 if use_write_connection or self._in_current_thread_remcard_transaction():
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
                     with self.write_controller.connection_guard(conn):
@@ -1743,7 +1956,7 @@ class DatabaseManager:
 
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
         try:
-            with self._central_io_lock:
+            with self._central_io_lock_scope("remcard_read_one", source="fetch_one"):
                 if use_write_connection or self._in_current_thread_remcard_transaction():
                     conn = self._get_central_write_connection_for_read("remcard_read_one")
                     with self.write_controller.connection_guard(conn):
@@ -1816,16 +2029,43 @@ class DatabaseManager:
             return
 
         while not self._integrity_stop_evt.is_set():
-            self._run_integrity_check_background_once()
-            if self._integrity_stop_evt.wait(INTEGRITY_CHECK_INTERVAL_SEC):
+            ran = self._run_integrity_check_background_once()
+            wait_sec = INTEGRITY_CHECK_INTERVAL_SEC if ran else INTEGRITY_DEFER_RETRY_SEC
+            if self._integrity_stop_evt.wait(wait_sec):
                 return
 
-    def _run_integrity_check_background_once(self):
+    def _run_integrity_check_background_once(self) -> bool:
+        reason, fields = self._maintenance_defer_reason(
+            "integrity_check",
+            source="integrity_monitor",
+            idle_window_sec=HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC,
+            startup_grace=True,
+            check_writes=True,
+            cooldown_source="integrity_check",
+            stop_event=getattr(self, "_integrity_stop_evt", None),
+        )
+        if reason:
+            self._record_maintenance_deferred(
+                "integrity_check",
+                reason,
+                source="integrity_monitor",
+                retry_sec=INTEGRITY_DEFER_RETRY_SEC,
+                **fields,
+            )
+            logger.info(
+                "Background integrity_check deferred for %s: reason=%s retry_sec=%.1f",
+                self.db_path,
+                reason,
+                INTEGRITY_DEFER_RETRY_SEC,
+            )
+            return False
+
         conn = None
         try:
-            with self._central_io_lock:
+            with maintenance_task("integrity_check", source="integrity_monitor", db_path=self.db_path):
                 conn = sqlite3.connect(
-                    self.db_path,
+                    self._readonly_db_uri(),
+                    uri=True,
                     check_same_thread=True,
                     isolation_level=None,
                     timeout=5.0,
@@ -1837,9 +2077,13 @@ class DatabaseManager:
                     conn.close()
                     conn = None
             if ok:
+                self._clear_maintenance_deferred("integrity_check")
+                self._mark_heavy_maintenance_io("integrity_check")
                 logger.info("Background integrity_check passed for %s", self.db_path)
-                return
+                return True
 
+            self._clear_maintenance_deferred("integrity_check")
+            self._mark_heavy_maintenance_io("integrity_check")
             latest_backup = find_latest_backup(getattr(self, "medical_backups_root_dir", BACKUPS_RC_DIR))
             logger.critical(
                 "Background integrity_check failed for %s: %s. Latest backup: %s",
@@ -1847,8 +2091,10 @@ class DatabaseManager:
                 result,
                 latest_backup or "not found",
             )
+            return True
         except Exception as exc:
             logger.error("Background integrity_check failed to run: %s", exc, exc_info=True)
+            return True
         finally:
             try:
                 if conn:
@@ -1868,19 +2114,21 @@ class DatabaseManager:
         backup_name = f"{prefix}_{db_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = os.path.join(backup_dir, backup_name)
         try:
-            with self._central_io_lock:
-                with self.write_controller.connection_guard(self._remcard_conn):
-                    backup_connection(
-                        self._remcard_conn,
-                        backup_path,
-                        invalid_dir=invalid_dir,
-                        logger=logger,
-                        lock_path=lock_path,
-                        source=f"{prefix}_backup",
-                    )
+            with maintenance_task(f"{prefix}_backup", source=str(source or "backup"), db_path=self.db_path):
+                with self._central_io_lock_scope(f"{prefix}_backup", source=str(source or "backup")):
+                    with self.write_controller.connection_guard(self._remcard_conn):
+                        backup_connection(
+                            self._remcard_conn,
+                            backup_path,
+                            invalid_dir=invalid_dir,
+                            logger=logger,
+                            lock_path=lock_path,
+                            source=f"{prefix}_backup",
+                        )
             self._rotate_backups()
             self._last_backup_ts = time.time()
             self._mark_heavy_maintenance_io(f"{prefix}_backup")
+            self._clear_maintenance_deferred(f"{prefix}_backup")
             logger.info("%s backup created (%s): %s", prefix.capitalize(), source, backup_path)
             return backup_path
         except Exception as exc:
@@ -1909,36 +2157,53 @@ class DatabaseManager:
         now = time.time()
         if now - self._last_backup_ts < self._periodic_backup_interval_sec:
             return
-        cooldown_remaining = self._maintenance_io_cooldown_remaining("periodic_backup")
-        if cooldown_remaining > 0:
-            record_metric(
-                "periodic_backup_deferred_maintenance_cooldown",
-                1,
-                source=str(source or "write"),
-                remaining_sec=round(cooldown_remaining, 3),
-                last_source=getattr(self, "_last_heavy_maintenance_source", ""),
-            )
-            return
-        should_defer, reason, age_sec = should_defer_background_io(
-            idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
-            names={"orders", "orders_show"},
+        reason, fields = self._maintenance_defer_reason(
+            "periodic_backup",
+            source=str(source or "write"),
+            idle_window_sec=HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC,
+            startup_grace=False,
+            check_writes=True,
+            cooldown_source="periodic_backup",
         )
-        if should_defer:
-            logger.info(
-                "Skipping periodic backup: foreground read is active/recent (source=%s reason=%s age_sec=%s idle_window_sec=%.1f)",
-                source,
+        if reason:
+            self._record_maintenance_deferred(
+                "periodic_backup",
                 reason,
-                None if age_sec is None else round(age_sec, 3),
-                PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
-            )
-            record_metric(
-                "periodic_backup_deferred_foreground_read",
-                1,
                 source=str(source or "write"),
-                reason=reason,
-                age_sec=None if age_sec is None else round(age_sec, 3),
-                idle_window_sec=PERIODIC_BACKUP_FOREGROUND_IDLE_SEC,
+                **fields,
             )
+            if reason == "maintenance_cooldown":
+                record_metric(
+                    "periodic_backup_deferred_maintenance_cooldown",
+                    1,
+                    source=str(source or "write"),
+                    remaining_sec=fields.get("remaining_sec"),
+                    last_source=fields.get("last_source", ""),
+                )
+            elif reason.startswith("foreground_activity:"):
+                foreground_reason = reason.split(":", 1)[1]
+                logger.info(
+                    "Skipping periodic backup: foreground activity is active/recent (source=%s reason=%s age_sec=%s idle_window_sec=%.1f)",
+                    source,
+                    foreground_reason,
+                    fields.get("age_sec"),
+                    HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC,
+                )
+                record_metric(
+                    "periodic_backup_deferred_foreground_read",
+                    1,
+                    source=str(source or "write"),
+                    reason=foreground_reason,
+                    age_sec=fields.get("age_sec"),
+                    idle_window_sec=HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC,
+                )
+            else:
+                record_metric(
+                    "periodic_backup_deferred",
+                    1,
+                    source=str(source or "write"),
+                    reason=reason,
+                )
             return
         self._create_named_backup(prefix="periodic", source=source)
 

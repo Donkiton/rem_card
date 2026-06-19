@@ -7464,14 +7464,23 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
 
     _ = temp_root
     required_tokens = {
+        "app/foreground_activity.py": ["foreground_activity_snapshot"],
+        "app/maintenance_activity.py": ["maintenance_task", "active_maintenance_snapshot"],
         "ui/rem_card_sectors/sector_2b.py": ["tab_click_received"],
-        "ui/shared/remcard_layout.py": ["set_active_tab_start", "set_active_tab_end"],
+        "ui/shared/remcard_layout.py": ["set_active_tab_start", "set_active_tab_end", "tab_movement"],
+        "ui/nurse_view/nurse_remcard_layout.py": ["mark_foreground_activity", "tab_movement"],
         "ui/doctor_view/doctor_remcard_widget.py": [
             "orders_show_start",
             "orders_show_end",
             "card_hydration_deferred_for_foreground",
         ],
-        "ui/main_window.py": ["event_loop_pause_ms", "REMCARD_UI_WATCHDOG_THRESHOLD_MS"],
+        "ui/main_window.py": [
+            "event_loop_pause_ms",
+            "REMCARD_UI_WATCHDOG_THRESHOLD_MS",
+            "active_maintenance_snapshot",
+            "foreground_activity_snapshot",
+            "daily_backup_cleanup",
+        ],
         "services/read_coordinator.py": [
             "foreground_read",
             "orders_load_time_ms",
@@ -7482,6 +7491,12 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
         "data/dao/db_manager.py": [
             "periodic_backup_deferred_foreground_read",
             "PERIODIC_BACKUP_FOREGROUND_IDLE_SEC",
+            "HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC",
+            "INTEGRITY_DEFER_RETRY_SEC",
+            "maintenance_task_deferred",
+            "maintenance_deferral_max_age",
+            "write_queue_not_idle",
+            "foreground_activity",
             "startup_quick_check_deferred_maintenance_cooldown",
         ],
         "ui/doctor_view/orders_widget.py": [
@@ -7554,6 +7569,34 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
         if int(first.get("version") or 0) != 42:
             return False, f"unexpected first orders version: {first.get('version')}"
 
+        foreground_activity._reset_foreground_activity_for_tests()
+        foreground_activity.mark_foreground_activity(
+            "tab_movement",
+            admission_id=123,
+            source="click",
+            ttl_sec=1.0,
+        )
+        manager._maybe_create_periodic_backup(source="movement_tab")
+        if created_backups:
+            return False, f"periodic backup started during Movement tab foreground lease: {created_backups}"
+
+        manager._closed = False
+        manager._startup_ts = time.time() - dbm.HEAVY_MAINTENANCE_STARTUP_GRACE_SEC - 1.0
+        manager._integrity_stop_evt = threading.Event()
+        manager._write_activity_lock = None
+        manager._write_queue_idle_probe = None
+        reason, _fields = manager._maintenance_defer_reason(
+            "integrity_check",
+            source="regression",
+            idle_window_sec=dbm.HEAVY_MAINTENANCE_FOREGROUND_IDLE_SEC,
+            startup_grace=True,
+            check_writes=True,
+            cooldown_source="integrity_check",
+            stop_event=manager._integrity_stop_evt,
+        )
+        if not reason or "tab_movement" not in reason:
+            return False, f"integrity_check was not deferred by Movement tab foreground lease: {reason}"
+
         second = coordinator.load_orders_tab(context, source="user", priority="HIGH")
         if int(second.get("version") or 0) != 42:
             return False, f"unexpected cached orders version: {second.get('version')}"
@@ -7561,9 +7604,19 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
             return False, f"repeat orders open rebuilt snapshot instead of using cache, calls={service.calls}"
 
         foreground_activity._reset_foreground_activity_for_tests()
+        manager._write_queue_idle_probe = lambda: False
+        manager._maybe_create_periodic_backup(source="write_busy")
+        if created_backups:
+            return False, f"periodic backup started while write queue was busy: {created_backups}"
+        manager._write_queue_idle_probe = lambda: True
         manager._maybe_create_periodic_backup(source="after_idle")
         if created_backups != [("periodic", "after_idle")]:
             return False, f"periodic backup did not resume after foreground idle: {created_backups}"
+
+        db_manager_source = (PROJECT_ROOT / "data/dao/db_manager.py").read_text(encoding="utf-8")
+        integrity_body = db_manager_source.split("def _run_integrity_check_background_once", 1)[1].split("def _create_named_backup", 1)[0]
+        if "with self._central_io_lock" in integrity_body:
+            return False, "background integrity_check must not hold _central_io_lock while running"
         return True, "ok"
     finally:
         foreground_activity._reset_foreground_activity_for_tests()
