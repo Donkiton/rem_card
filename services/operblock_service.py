@@ -118,6 +118,7 @@ class OperBlockPatientInput:
     diagnosis_text: str
     department_profile: str = ""
     operation_name: str = ""
+    anesthesia_assistance_type: str = ""
     surgeons: tuple[str, ...] = ()
     operating_nurse: str = ""
     anesthesiologist: str = ""
@@ -746,6 +747,9 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         diagnosis_text=str(payload.get("diagnosis_text") or ""),
         department_profile=normalize_profile_department(payload.get("department_profile")),
         operation_name=_normalize_case_text(payload.get("operation_name")),
+        anesthesia_assistance_type=normalize_operblock_anesthesia_type_label(
+            payload.get("anesthesia_assistance_type")
+        ),
         surgeons=_normalize_case_surgeons(payload.get("surgeons")),
         operating_nurse=_normalize_case_text(payload.get("operating_nurse")),
         anesthesiologist=_normalize_case_text(payload.get("anesthesiologist")),
@@ -1656,6 +1660,9 @@ class OperBlockService:
                 case.get("anesthesia_protocol_date"),
             ),
             "operation_name": case.get("planned_operation_name") or "",
+            "anesthesia_assistance_type": normalize_operblock_anesthesia_type_label(
+                case.get("planned_anesthesia_assistance_type")
+            ),
             "surgeons": _surgeons_from_json(case.get("planned_surgeons_json")),
             "operating_nurse": case.get("planned_operating_nurse") or "",
             "anesthesiologist": case.get("planned_anesthesiologist") or "",
@@ -1689,6 +1696,9 @@ class OperBlockService:
         state["case_active"] = str(case.get("case_status") or "") == "active"
         state["case_started_at"] = case.get("started_at")
         state["case_ended_at"] = case.get("ended_at")
+        state["planned_anesthesia_assistance_type"] = normalize_operblock_anesthesia_type_label(
+            case.get("planned_anesthesia_assistance_type")
+        )
         return state
 
     def build_operblock_vitals_snapshot(
@@ -1951,7 +1961,7 @@ class OperBlockService:
                 "protocol_display": header.get("protocol_display") or "",
                 "operation_name": self._report_operation_name(case, stage_state),
                 "surgeons": self._report_surgeons(case, stage_state),
-                "anesthesia_type": self._report_anesthesia_type(stage_state),
+                "anesthesia_type": self._report_anesthesia_type(case, stage_state),
                 "anesthesiologist": self._report_anesthesiologist(case, stage_state),
                 "anesthetist": self._report_anesthetist(case, stage_state),
                 "operating_nurse": self._report_operating_nurse(case, stage_state),
@@ -2046,11 +2056,12 @@ class OperBlockService:
         return _surgeons_from_json(case.get("planned_surgeons_json"))
 
     @staticmethod
-    def _report_anesthesia_type(stage_state: dict[str, Any]) -> str:
+    def _report_anesthesia_type(case: dict[str, Any], stage_state: dict[str, Any]) -> str:
         return normalize_operblock_anesthesia_type_label(
             stage_state.get("last_anesthesia_assistance_type")
             or stage_state.get("first_anesthesia_assistance_type")
             or stage_state.get("current_anesthesia_assistance_type")
+            or case.get("planned_anesthesia_assistance_type")
             or ""
         )
 
@@ -2641,6 +2652,7 @@ class OperBlockService:
         operation_case_id: int,
         *,
         operation_name: str | None = None,
+        anesthesia_assistance_type: str | None = None,
         surgeons: tuple[str, ...] | list[str] | None = None,
         operating_nurse: str | None = None,
         anesthesiologist: str | None = None,
@@ -2709,10 +2721,16 @@ class OperBlockService:
                 if update_payload(surgery_row, payload):
                     updated += 1
 
-        if anesthesiologist is not None or anesthetist is not None:
+        if anesthesia_assistance_type is not None or anesthesiologist is not None or anesthetist is not None:
             anesthesia_row = latest_stage_row("anesthesia_start")
             if anesthesia_row is not None:
                 payload = _parse_json_dict(anesthesia_row.get("payload_json"))
+                if anesthesia_assistance_type is not None:
+                    self._set_stage_payload_text(
+                        payload,
+                        "anesthesia_assistance_type",
+                        normalize_operblock_anesthesia_type_label(anesthesia_assistance_type),
+                    )
                 if anesthesiologist is not None:
                     self._set_stage_payload_text(payload, "anesthesiologist", _normalize_case_text(anesthesiologist))
                 if anesthetist is not None:
@@ -2799,13 +2817,14 @@ class OperBlockService:
                 INSERT INTO operation_cases (
                     patient_id, admission_id, table_code, status, created_at, started_at,
                     created_by_role, created_by_client_id, last_modified_by,
-                    planned_operation_name, planned_surgeons_json, planned_operating_nurse,
+                    planned_operation_name, planned_anesthesia_assistance_type,
+                    planned_surgeons_json, planned_operating_nurse,
                     planned_anesthesiologist, planned_anesthetist,
                     height_cm, weight_kg, allergies, blood_group, blood_rh,
                     preop_sys, preop_dia, preop_pulse, preop_spo2, preop_save_initial_vitals,
                     offline_case_uuid, offline_session_id, migration_status
                 ) VALUES (?, ?, ?, 'active', ?, ?, 'operblock', ?, 'operblock',
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     patient_id,
@@ -2815,6 +2834,7 @@ class OperBlockService:
                     now,
                     self.client_id,
                     data.operation_name or None,
+                    data.anesthesia_assistance_type or None,
                     _surgeons_json(data.surgeons),
                     data.operating_nurse or None,
                     data.anesthesiologist or None,
@@ -2905,6 +2925,7 @@ class OperBlockService:
                     a.diagnosis_text,
                     a.department_profile,
                     oc.planned_operation_name,
+                    oc.planned_anesthesia_assistance_type,
                     oc.planned_surgeons_json,
                     oc.planned_operating_nurse,
                     oc.planned_anesthesiologist,
@@ -2936,6 +2957,12 @@ class OperBlockService:
                 or stage_state.get("last_operation_name")
                 or stage_state.get("first_operation_name")
                 or data.get("planned_operation_name")
+            )
+            anesthesia_assistance_type = normalize_operblock_anesthesia_type_label(
+                stage_state.get("current_anesthesia_assistance_type")
+                or stage_state.get("last_anesthesia_assistance_type")
+                or stage_state.get("first_anesthesia_assistance_type")
+                or data.get("planned_anesthesia_assistance_type")
             )
             surgeons = _normalize_stage_text_list(
                 stage_state.get("current_surgeons")
@@ -2987,6 +3014,7 @@ class OperBlockService:
                 "diagnosis_text": data.get("diagnosis_text") or "",
                 "department_profile": data.get("department_profile") or "",
                 "operation_name": operation_name,
+                "anesthesia_assistance_type": anesthesia_assistance_type,
                 "surgeons": surgeons,
                 "operating_nurse": operating_nurse,
                 "anesthesiologist": anesthesiologist,
@@ -3078,6 +3106,7 @@ class OperBlockService:
                 """
                 UPDATE operation_cases
                 SET planned_operation_name = ?,
+                    planned_anesthesia_assistance_type = ?,
                     planned_surgeons_json = ?,
                     planned_operating_nurse = ?,
                     planned_anesthesiologist = ?,
@@ -3099,6 +3128,7 @@ class OperBlockService:
                 """,
                 (
                     data.operation_name or None,
+                    data.anesthesia_assistance_type or None,
                     _surgeons_json(data.surgeons),
                     data.operating_nurse or None,
                     data.anesthesiologist or None,
@@ -3127,6 +3157,7 @@ class OperBlockService:
                 cursor,
                 int(operation_case_id),
                 operation_name=data.operation_name,
+                anesthesia_assistance_type=data.anesthesia_assistance_type,
                 surgeons=data.surgeons,
                 operating_nurse=data.operating_nurse,
                 anesthesiologist=data.anesthesiologist,
@@ -3880,13 +3911,19 @@ class OperBlockService:
             cursor.execute(
                 """
                 UPDATE operation_cases
-                SET planned_anesthesiologist = ?,
+                SET planned_anesthesia_assistance_type = ?,
+                    planned_anesthesiologist = ?,
                     planned_anesthetist = ?,
                     last_modified_by = 'operblock',
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ?
                 """,
-                (clean_anesthesiologist or None, clean_anesthetist or None, int(case["operation_case_id"])),
+                (
+                    clean_assistance_type or None,
+                    clean_anesthesiologist or None,
+                    clean_anesthetist or None,
+                    int(case["operation_case_id"]),
+                ),
             )
         elif stage_kind == "anesthesia_end":
             cursor.execute(
@@ -4061,6 +4098,9 @@ class OperBlockService:
                 "operation_finished_at": _minute_floor(event_dt).isoformat(timespec="seconds"),
                 "transfer_department": "РАО",
                 "operation_name": operation_name,
+                "anesthesia_assistance_type": normalize_operblock_anesthesia_type_label(
+                    source.get("anesthesia_assistance_type")
+                ),
                 "surgeons": source.get("surgeons") or [],
                 "anesthesiologist": source.get("anesthesiologist") or "",
                 "anesthetist": source.get("anesthetist") or "",
@@ -4200,6 +4240,7 @@ class OperBlockService:
                 oc.ended_at,
                 {future_expr} AS future_rao_admission_id,
                 oc.planned_operation_name,
+                oc.planned_anesthesia_assistance_type,
                 oc.planned_surgeons_json,
                 oc.planned_operating_nurse,
                 oc.planned_anesthesiologist,
@@ -4234,6 +4275,12 @@ class OperBlockService:
             or stage_state.get("last_operation_name")
             or stage_state.get("first_operation_name")
             or data.get("planned_operation_name")
+        )
+        data["anesthesia_assistance_type"] = normalize_operblock_anesthesia_type_label(
+            stage_state.get("current_anesthesia_assistance_type")
+            or stage_state.get("last_anesthesia_assistance_type")
+            or stage_state.get("first_anesthesia_assistance_type")
+            or data.get("planned_anesthesia_assistance_type")
         )
         data["surgeons"] = _normalize_stage_text_list(
             stage_state.get("current_surgeons")
@@ -6266,10 +6313,24 @@ class OperBlockService:
         if cursor.rowcount != 1:
             raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
+    def _operation_case_column_expr(self, column_name: str, *, alias: str | None = None) -> str:
+        clean_column = re.sub(r"[^0-9A-Za-z_]+", "", str(column_name or ""))
+        clean_alias = re.sub(r"[^0-9A-Za-z_]+", "", str(alias or clean_column))
+        if not clean_column or not clean_alias:
+            return "NULL"
+        conn = getattr(self.db, "_remcard_conn", None)
+        try:
+            if conn is not None and clean_column in _sqlite_columns(conn, "operation_cases"):
+                return f"oc.{clean_column}"
+        except Exception:
+            pass
+        return f"NULL AS {clean_alias}"
+
     def _get_case_row(self, operation_case_id: int) -> dict[str, Any]:
         validate_operblock_runtime_path(self.db)
+        planned_assistance_expr = self._operation_case_column_expr("planned_anesthesia_assistance_type")
         row = self.db.fetch_one_remcard(
-            """
+            f"""
             SELECT
                 oc.id AS operation_case_id,
                 oc.patient_id,
@@ -6289,6 +6350,7 @@ class OperBlockService:
                 a.diagnosis_code,
                 a.diagnosis_text,
                 oc.planned_operation_name,
+                {planned_assistance_expr},
                 oc.planned_surgeons_json,
                 oc.planned_operating_nurse,
                 oc.planned_anesthesiologist,

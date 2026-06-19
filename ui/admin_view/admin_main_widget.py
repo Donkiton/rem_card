@@ -199,6 +199,25 @@ class AdminMainWidget(QWidget):
         self.btn_db_rotation.clicked.connect(self.open_db_rotation)
         self.btn_import_settings.clicked.connect(self.open_settings_import)
 
+    def _show_settings_loading(
+        self,
+        message: str,
+        *,
+        key: str,
+        auto_hide_ms: int = 15000,
+    ) -> str | None:
+        return show_app_loading(
+            self,
+            message,
+            key=f"admin-settings-{key}:{id(self)}",
+            auto_hide_ms=auto_hide_ms,
+            process_events=True,
+        )
+
+    def _hide_settings_loading(self, loading_key: str | None, *, delay_ms: int = 0) -> None:
+        if loading_key:
+            hide_app_loading(self, loading_key, delay_ms=delay_ms)
+
     def _show_page(self, widget):
         if widget is not None:
             loading_key = show_app_loading(
@@ -345,10 +364,14 @@ class AdminMainWidget(QWidget):
         self._show_page(self._ensure_lab_analysis_catalog_widget())
 
     def open_doctor_list(self):
-        if self.doctor_list_dialog is None:
-            from .doctor_list_dialog import DoctorListDialog
+        loading_key = self._show_settings_loading("Загрузка списка врачей...", key="doctor-list")
+        try:
+            if self.doctor_list_dialog is None:
+                from .doctor_list_dialog import DoctorListDialog
 
-            self.doctor_list_dialog = DoctorListDialog(parent=self)
+                self.doctor_list_dialog = DoctorListDialog(parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         self.doctor_list_dialog.show()
         self.doctor_list_dialog.raise_()
         self.doctor_list_dialog.activateWindow()
@@ -357,49 +380,77 @@ class AdminMainWidget(QWidget):
         self._show_page(self._ensure_diet_templates_widget())
 
     def open_print(self):
-        dialog = self._ensure_print_dialog()
-        if self._pending_print_context is not None:
-            dialog.set_context(*self._pending_print_context)
-        dialog.load_settings()
+        loading_key = self._show_settings_loading("Загрузка настроек печати...", key="print")
+        try:
+            dialog = self._ensure_print_dialog()
+            if self._pending_print_context is not None:
+                dialog.set_context(*self._pending_print_context)
+            dialog.load_settings()
+        finally:
+            self._hide_settings_loading(loading_key)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
 
     def open_style(self):
-        from rem_card.ui.styles.theme_settings_dialog import ThemeSettingsDialog
+        loading_key = self._show_settings_loading("Загрузка цветовой схемы...", key="style")
+        try:
+            from rem_card.ui.styles.theme_settings_dialog import ThemeSettingsDialog
 
-        role = self.role if self.role in ("doctor", "nurse") else "doctor"
-        dialog = ThemeSettingsDialog(role=role, parent=self)
+            role = self.role if self.role in ("doctor", "nurse") else "doctor"
+            dialog = ThemeSettingsDialog(role=role, parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         dialog.exec()
 
     def open_display_settings(self):
-        from .display_settings_dialog import DisplaySettingsDialog
+        loading_key = self._show_settings_loading("Загрузка настроек отображения...", key="display")
+        try:
+            from .display_settings_dialog import DisplaySettingsDialog
 
-        dialog = DisplaySettingsDialog(initial_role=self.role, parent=self)
+            dialog = DisplaySettingsDialog(initial_role=self.role, parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         dialog.exec()
 
     def open_background_settings(self):
-        from .background_settings_dialog import BackgroundSettingsDialog
+        loading_key = self._show_settings_loading("Загрузка настроек фона...", key="background")
+        try:
+            from .background_settings_dialog import BackgroundSettingsDialog
 
-        dialog = BackgroundSettingsDialog(parent=self)
+            dialog = BackgroundSettingsDialog(parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         dialog.exec()
 
     def open_decor_settings(self):
-        from .decor_settings_dialog import DecorSettingsDialog
+        loading_key = self._show_settings_loading("Загрузка настроек декора...", key="decor")
+        try:
+            from .decor_settings_dialog import DecorSettingsDialog
 
-        self.decor_settings_dialog = DecorSettingsDialog(parent=self)
+            self.decor_settings_dialog = DecorSettingsDialog(parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         self.decor_settings_dialog.exec()
 
     def open_remcard_icon_settings(self):
-        from .remcard_icon_settings_dialog import RemCardIconSettingsDialog
+        loading_key = self._show_settings_loading("Загрузка настроек иконок рем карты...", key="remcard-icons")
+        try:
+            from .remcard_icon_settings_dialog import RemCardIconSettingsDialog
 
-        self.remcard_icon_settings_dialog = RemCardIconSettingsDialog(parent=self)
+            self.remcard_icon_settings_dialog = RemCardIconSettingsDialog(parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         self.remcard_icon_settings_dialog.exec()
 
     def open_operblock_icon_settings(self):
-        from .operblock_icon_settings_dialog import OperBlockIconSettingsDialog
+        loading_key = self._show_settings_loading("Загрузка настроек иконок оперблока...", key="operblock-icons")
+        try:
+            from .operblock_icon_settings_dialog import OperBlockIconSettingsDialog
 
-        self.operblock_icon_settings_dialog = OperBlockIconSettingsDialog(parent=self)
+            self.operblock_icon_settings_dialog = OperBlockIconSettingsDialog(parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         self.operblock_icon_settings_dialog.exec()
 
     def open_operblock_medications_settings(self):
@@ -410,16 +461,20 @@ class AdminMainWidget(QWidget):
         from rem_card.ui.operblock_view.operblock_main_widget import OperBlockMedicationPresetsDialog
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
+        loading_key = self._show_settings_loading("Загрузка настроек препаратов...", key="operblock-medications")
         try:
-            presets = load_operblock_medication_presets(include_disabled=True)
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Настройки препаратов", f"Не удалось загрузить препараты оперблока: {exc}")
-            return
-        self.operblock_medications_dialog = OperBlockMedicationPresetsDialog(
-            presets,
-            parent=self,
-            save_handler=save_operblock_medication_presets,
-        )
+            try:
+                presets = load_operblock_medication_presets(include_disabled=True)
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Настройки препаратов", f"Не удалось загрузить препараты оперблока: {exc}")
+                return
+            self.operblock_medications_dialog = OperBlockMedicationPresetsDialog(
+                presets,
+                parent=self,
+                save_handler=save_operblock_medication_presets,
+            )
+        finally:
+            self._hide_settings_loading(loading_key)
         self.operblock_medications_dialog.exec()
 
     def open_operblock_route_settings(self):
@@ -436,12 +491,16 @@ class AdminMainWidget(QWidget):
         from rem_card.ui.operblock_view.operblock_main_widget import OperBlockAnesthesiaTypesDialog
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
+        loading_key = self._show_settings_loading("Загрузка видов пособия...", key="anesthesia-types")
         try:
-            items = load_operblock_anesthesia_types()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Виды пособия", f"Не удалось загрузить виды пособия: {exc}")
-            return
-        self.operblock_anesthesia_types_dialog = OperBlockAnesthesiaTypesDialog(items, parent=self)
+            try:
+                items = load_operblock_anesthesia_types()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Виды пособия", f"Не удалось загрузить виды пособия: {exc}")
+                return
+            self.operblock_anesthesia_types_dialog = OperBlockAnesthesiaTypesDialog(items, parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         if self.operblock_anesthesia_types_dialog.exec() != QDialog.Accepted:
             return
         try:
@@ -454,12 +513,16 @@ class AdminMainWidget(QWidget):
         from rem_card.ui.operblock_view.operblock_main_widget import OperBlockTeamDialog
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
+        loading_key = self._show_settings_loading("Загрузка опер. бригады...", key="operblock-team")
         try:
-            items = load_operblock_team()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось загрузить опер. бригаду: {exc}")
-            return
-        self.operblock_team_dialog = OperBlockTeamDialog(items, parent=self)
+            try:
+                items = load_operblock_team()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось загрузить опер. бригаду: {exc}")
+                return
+            self.operblock_team_dialog = OperBlockTeamDialog(items, parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         if self.operblock_team_dialog.exec() != QDialog.Accepted:
             return
         try:
@@ -468,25 +531,33 @@ class AdminMainWidget(QWidget):
             CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось сохранить опер. бригаду: {exc}")
 
     def open_emergency_password(self):
-        from .emergency_password_dialog import EmergencyPasswordSettingsDialog
+        loading_key = self._show_settings_loading("Загрузка аварийного пароля...", key="emergency-password")
+        try:
+            from .emergency_password_dialog import EmergencyPasswordSettingsDialog
 
-        self.emergency_password_dialog = EmergencyPasswordSettingsDialog(parent=self)
+            self.emergency_password_dialog = EmergencyPasswordSettingsDialog(parent=self)
+        finally:
+            self._hide_settings_loading(loading_key)
         self.emergency_password_dialog.exec()
 
     def open_db_rotation(self):
-        from .db_rotation_dialog import DbRotationDialog
-        from rem_card.ui.shared.custom_message_box import CustomMessageBox
-
+        loading_key = self._show_settings_loading("Загрузка управления БД...", key="db-rotation")
         try:
-            db_manager = self._resolve_db_manager()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Ротация БД", f"Не удалось открыть управление БД:\n{exc}")
-            return
-        self.db_rotation_dialog = DbRotationDialog(
-            db_manager,
-            parent=self,
-            on_rotated=self._on_db_rotated,
-        )
+            from .db_rotation_dialog import DbRotationDialog
+            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+            try:
+                db_manager = self._resolve_db_manager()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Ротация БД", f"Не удалось открыть управление БД:\n{exc}")
+                return
+            self.db_rotation_dialog = DbRotationDialog(
+                db_manager,
+                parent=self,
+                on_rotated=self._on_db_rotated,
+            )
+        finally:
+            self._hide_settings_loading(loading_key)
         self.db_rotation_dialog.exec()
 
     def open_settings_import(self):
@@ -508,11 +579,14 @@ class AdminMainWidget(QWidget):
             return
 
         settings_service = get_settings_service()
+        loading_key = self._show_settings_loading("Загрузка настроек из базы...", key="settings-import-preview", auto_hide_ms=60000)
         try:
             preview = settings_service.preview_external_settings_import(path_dialog.selected_path)
         except Exception as exc:
             CustomMessageBox.warning(self, "Загрузить настройки", f"Не удалось загрузить настройки:\n{exc}")
             return
+        finally:
+            self._hide_settings_loading(loading_key)
 
         if not preview.changes:
             CustomMessageBox.information(self, "Загрузить настройки", "Отличий между dev и выбранной БД не найдено.")
@@ -522,13 +596,18 @@ class AdminMainWidget(QWidget):
         if self.settings_import_dialog.exec() != QDialog.Accepted:
             return
         selected_ids = self.settings_import_dialog.selected_change_ids()
+        loading_key = self._show_settings_loading("Применение настроек...", key="settings-import-apply", auto_hide_ms=60000)
         try:
             report = settings_service.apply_external_settings_import(preview.source_db_path, selected_ids)
         except Exception as exc:
             CustomMessageBox.warning(self, "Загрузить настройки", f"Не удалось применить настройки:\n{exc}")
             return
+        finally:
+            self._hide_settings_loading(loading_key)
 
+        loading_key = self._show_settings_loading("Обновление настроек интерфейса...", key="settings-import-refresh", auto_hide_ms=30000)
         self._refresh_after_settings_import()
+        self._hide_settings_loading(loading_key, delay_ms=250)
         counts = report.get("counts") or {}
         CustomMessageBox.information(
             self,

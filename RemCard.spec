@@ -16,8 +16,15 @@ DICTIONARIES_TARGET = os.path.join("rem_card", "data", "dictionaries")
 SETTINGS_TARGET = os.path.join("rem_card", "settings")
 SETTINGS_RELEASE_TARGET = os.path.join("rem_card", "settings_release")
 PACKAGE_DIRS = ("app", "data", "services", "standalone", "ui")
+ALIAS_RESOURCE_DIRS = ("icon",)
 ALIAS_ROOT = os.path.join(APP_ROOT, "build", "pyinstaller_package_alias")
 ALIAS_PACKAGE_ROOT = os.path.join(ALIAS_ROOT, "rem_card")
+PYINSTALLER_HOOKS_DIR = os.path.join(APP_ROOT, "scripts", "pyinstaller_hooks")
+
+# PyInstaller imports application modules during analysis. That can initialize a
+# temporary settings DB under build/pyinstaller_package_alias; keep its backup
+# cleanup gate from logging a warning without changing packaged runtime behavior.
+os.environ["REMCARD_SETTINGS_BACKUP_MIN_VALID_RECENT"] = "1"
 
 
 def _ignore_non_python_package_files(current_dir, names):
@@ -45,6 +52,13 @@ def _prepare_package_alias():
                 source_dir,
                 os.path.join(ALIAS_PACKAGE_ROOT, package_dir),
                 ignore=_ignore_non_python_package_files,
+            )
+    for resource_dir in ALIAS_RESOURCE_DIRS:
+        source_dir = os.path.join(APP_ROOT, resource_dir)
+        if os.path.isdir(source_dir):
+            shutil.copytree(
+                source_dir,
+                os.path.join(ALIAS_PACKAGE_ROOT, resource_dir),
             )
     for current_dir, _dir_names, _file_names in os.walk(ALIAS_PACKAGE_ROOT):
         init_path = os.path.join(current_dir, "__init__.py")
@@ -255,7 +269,7 @@ a = Analysis(
 		*collect_data_files('reportlab'),
 ],
     hiddenimports=HIDDEN_IMPORTS,
-    hookspath=[],
+    hookspath=[PYINSTALLER_HOOKS_DIR],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[],

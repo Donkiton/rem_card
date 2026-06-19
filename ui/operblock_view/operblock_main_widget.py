@@ -148,6 +148,7 @@ from rem_card.ui.rem_card_sectors.sector_2v import Sector2v
 from rem_card.ui.rem_card_sectors.sector_8 import Sector8
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.operblock_icon_settings import load_operblock_icon_pixmap
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.vitals_widget import VitalsWidget
@@ -2866,6 +2867,7 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
         anesthetists: list[str] | None = None,
         parent=None,
         *,
+        initial_assistance_type: str = "",
         initial_anesthesiologist: str = "",
         initial_anesthetist: str = "",
         initial_start_datetime: datetime | None = None,
@@ -2885,6 +2887,8 @@ class StartAnesthesiaDialog(OperBlockStyledDialog):
             initial_size=(660, 380),
         )
         self._init_ui(anesthesia_types, anesthesiologists or [], anesthetists or [])
+        if initial_assistance_type:
+            self.assistance_combo.setEditText(normalize_operblock_anesthesia_type_label(initial_assistance_type))
         if initial_anesthesiologist:
             self.anesthesiologist_combo.setEditText(normalize_operblock_team_text(initial_anesthesiologist))
         if initial_anesthetist:
@@ -7725,6 +7729,11 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.mkb_service = MKBService()
         self._surgeon_rows: list[tuple[QWidget, QComboBox]] = []
         try:
+            self._anesthesia_type_options = load_operblock_anesthesia_types()
+        except Exception as exc:
+            logger.error("operblock anesthesia types load failed: %s", exc, exc_info=True)
+            self._anesthesia_type_options = []
+        try:
             self._surgeon_options = load_operblock_surgeons()
         except Exception as exc:
             logger.error("operblock surgeons load failed: %s", exc, exc_info=True)
@@ -7930,6 +7939,25 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         operation, operation_form = self._section("3. ОПЕРАЦИОННАЯ ИНФОРМАЦИЯ")
         self.operation_name_input = _line_edit()
         self.operation_name_input.setPlaceholderText("Название операции")
+        self.anesthesia_assistance_type_combo = QComboBox()
+        self.anesthesia_assistance_type_combo.setEditable(True)
+        self.anesthesia_assistance_type_combo.setFixedHeight(34)
+        self.anesthesia_assistance_type_combo.setMinimumWidth(430)
+        self.anesthesia_assistance_type_combo.setMinimumContentsLength(38)
+        self.anesthesia_assistance_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.anesthesia_assistance_type_combo.setStyleSheet(_operblock_combo_box_style())
+        assistance_line_edit = self.anesthesia_assistance_type_combo.lineEdit()
+        if assistance_line_edit is not None:
+            assistance_line_edit.setPlaceholderText("Вид пособия")
+        seen_assistance_types: set[str] = set()
+        for item in self._anesthesia_type_options or []:
+            label = normalize_operblock_anesthesia_type_label((item or {}).get("label"))
+            key = label.casefold()
+            if label and key not in seen_assistance_types:
+                seen_assistance_types.add(key)
+                self.anesthesia_assistance_type_combo.addItem(label, label)
+        self.anesthesia_assistance_type_combo.setCurrentIndex(-1)
+        self.anesthesia_assistance_type_combo.setEditText("")
         self.height_input = _line_edit()
         self.height_input.setPlaceholderText("см")
         self.height_input.setValidator(QIntValidator(1, 260, self.height_input))
@@ -8065,6 +8093,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         anesthesia_team_layout.setColumnStretch(0, 1)
         anesthesia_team_layout.setColumnStretch(1, 1)
         operation_form.addRow("Название операции:", self.operation_name_input)
+        operation_form.addRow("Вид анест. пособия:", self.anesthesia_assistance_type_combo)
         self.height_weight_row_label = self._composite_form_label(
             "Рост / вес:",
             "OperBlockOccupyHeightWeightRowLabel",
@@ -8385,6 +8414,9 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         elif diagnosis_text and not self.diagnosis_text_input.isReadOnly():
             self.diagnosis_text_input.setText(diagnosis_text)
         self.operation_name_input.setText(str((data or {}).get("operation_name") or ""))
+        self.anesthesia_assistance_type_combo.setEditText(
+            normalize_operblock_anesthesia_type_label((data or {}).get("anesthesia_assistance_type"))
+        )
         self.height_input.setText("" if (data or {}).get("height_cm") in (None, "") else str((data or {}).get("height_cm")))
         weight = (data or {}).get("weight_kg")
         self.weight_input.setText("" if weight in (None, "") else str(weight).replace(".", ","))
@@ -8586,6 +8618,9 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "diagnosis_text": diagnosis_text,
             "department_profile": normalize_profile_department(self.department_profile_combo.currentText()),
             "operation_name": normalize_operblock_team_text(self.operation_name_input.text()),
+            "anesthesia_assistance_type": normalize_operblock_anesthesia_type_label(
+                self.anesthesia_assistance_type_combo.currentText()
+            ),
             "height_cm": self._optional_int(self.height_input.text(), "Рост", 1, 260),
             "weight_kg": self._optional_weight(self.weight_input.text()),
             "allergies": normalize_operblock_team_text(self.allergies_input.text()),
@@ -8730,6 +8765,28 @@ class OperBlockMainWidget(QWidget):
 
     def is_view_only_mode(self) -> bool:
         return bool(getattr(self, "_view_only_mode", False))
+
+    def _show_operblock_loading(
+        self,
+        message: str | None,
+        *,
+        key: str,
+        auto_hide_ms: int = 20000,
+        process_events: bool = True,
+    ) -> str | None:
+        if not message:
+            return None
+        return show_app_loading(
+            self,
+            message,
+            key=f"operblock-{key}:{id(self)}",
+            auto_hide_ms=auto_hide_ms,
+            process_events=process_events,
+        )
+
+    def _hide_operblock_loading(self, loading_key: str | None, *, delay_ms: int = 350) -> None:
+        if loading_key:
+            hide_app_loading(self, loading_key, delay_ms=delay_ms)
 
     def _apply_view_only_chrome_state(self):
         if not self.is_view_only_mode():
@@ -8895,7 +8952,12 @@ class OperBlockMainWidget(QWidget):
         self.archive_refresh_button = QPushButton("Обновить")
         self.archive_refresh_button.setMinimumHeight(34)
         self.archive_refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
-        self.archive_refresh_button.clicked.connect(lambda: self.refresh_operblock_archive(force=True))
+        self.archive_refresh_button.clicked.connect(
+            lambda: self.refresh_operblock_archive(
+                force=True,
+                loading_message="Обновление архива оперблока...",
+            )
+        )
         header.addWidget(title, 0)
         header.addWidget(self.archive_search_input, 1)
         header.addWidget(self.archive_refresh_button, 0)
@@ -9592,14 +9654,22 @@ class OperBlockMainWidget(QWidget):
             self.refresh_protocol(force=True)
             return
 
+        loading_key = self._show_operblock_loading(
+            "Загрузка состава бригады...",
+            key="staff-editor",
+            auto_hide_ms=20000,
+        )
         try:
-            surgeon_options = load_operblock_surgeons()
-            operating_nurse_options = load_operblock_operating_nurses()
-            anesthesiologist_options = load_operblock_anesthesiologists()
-            anesthetist_options = load_operblock_anesthetists()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Изменить состав", f"Не удалось загрузить сотрудников: {exc}")
-            return
+            try:
+                surgeon_options = load_operblock_surgeons()
+                operating_nurse_options = load_operblock_operating_nurses()
+                anesthesiologist_options = load_operblock_anesthesiologists()
+                anesthetist_options = load_operblock_anesthetists()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Изменить состав", f"Не удалось загрузить сотрудников: {exc}")
+                return
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
 
         current_surgeons = self._normal_staff_name_list(state.get("current_surgeons"), split_commas=True)
         if not current_surgeons:
@@ -10225,7 +10295,11 @@ class OperBlockMainWidget(QWidget):
         try:
             if self.data_service and hasattr(self.data_service, "set_change_monitor_enabled"):
                 self.data_service.set_change_monitor_enabled(False)
-            self.refresh_board(force=True, refresh_reason="start_auto_refresh")
+            self.refresh_board(
+                force=True,
+                refresh_reason="start_auto_refresh",
+                loading_message="Загрузка операционной...",
+            )
             if self.data_service and wake_monitor:
                 self.data_service.request_immediate_refresh(force_emit=False, source="operblock_start")
         finally:
@@ -10242,11 +10316,21 @@ class OperBlockMainWidget(QWidget):
             return
         current_widget = self.stack.currentWidget()
         if self.protocol_page is not None and current_widget == self.protocol_page and self._current_operation_case_id:
-            self.refresh_protocol(force=force)
+            self.refresh_protocol(
+                force=force,
+                loading_message="Обновление протокола операции..." if force else None,
+            )
         elif self.archive_page is not None and current_widget == self.archive_page:
-            self.refresh_operblock_archive(force=force)
+            self.refresh_operblock_archive(
+                force=force,
+                loading_message="Обновление архива оперблока..." if force else None,
+            )
         else:
-            self.refresh_board(force=force, refresh_reason="auto_refresh")
+            self.refresh_board(
+                force=force,
+                refresh_reason="auto_refresh",
+                loading_message="Обновление операционной..." if force else None,
+            )
 
     def apply_operblock_icon_settings(self):
         self._orders_render_signature = ""
@@ -10268,129 +10352,159 @@ class OperBlockMainWidget(QWidget):
         else:
             self.refresh_board(force=True, refresh_reason="operblock_icon_settings")
 
-    def refresh_board(self, *, force: bool = False, refresh_reason: str = "refresh_board"):
+    def refresh_board(
+        self,
+        *,
+        force: bool = False,
+        refresh_reason: str = "refresh_board",
+        loading_message: str | None = None,
+    ):
         if self._is_closing:
             return
-        enter_started = operblock_startup_metrics.timer_start()
-        self._board_refresh_seq += 1
-        refresh_seq = self._board_refresh_seq
-        self._board_refresh_count_before_ready += 1
-        is_first_refresh = not getattr(self, "_operblock_startup_first_refresh_recorded", False)
-        refresh_fields = {
-            "refresh_seq": refresh_seq,
-            "refresh_reason": str(refresh_reason or "refresh_board"),
-            "force": bool(force),
-            "is_first": bool(is_first_refresh),
-            "is_first_refresh": bool(is_first_refresh),
-        }
-        operblock_startup_metrics.record_value("refresh_seq", refresh_seq, source="operblock_widget", **refresh_fields)
-        operblock_startup_metrics.record_value(
-            "refresh_count_before_ready",
-            self._board_refresh_count_before_ready,
-            source="operblock_widget",
-            **refresh_fields,
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="board-refresh",
+            auto_hide_ms=30000,
         )
-        operblock_startup_metrics.record_value(
-            "refresh_reason",
-            refresh_fields["refresh_reason"],
-            source="operblock_widget",
-            **refresh_fields,
-        )
-        operblock_startup_metrics.record_value("refresh_force", bool(force), source="operblock_widget", **refresh_fields)
-        operblock_startup_metrics.record_value(
-            "refresh_is_first_refresh",
-            bool(is_first_refresh),
-            source="operblock_widget",
-            **refresh_fields,
-        )
-        operblock_startup_metrics.record_value(
-            "refresh_is_first",
-            bool(is_first_refresh),
-            source="operblock_widget",
-            **refresh_fields,
-        )
-        operblock_startup_metrics.record_since("refresh_board_enter_ms", enter_started, source="operblock_widget", **refresh_fields)
-        first_refresh_started = None
-        if not getattr(self, "_operblock_startup_first_refresh_recorded", False):
-            first_refresh_started = operblock_startup_metrics.timer_start()
-            self._operblock_startup_first_refresh_recorded = True
         try:
+            enter_started = operblock_startup_metrics.timer_start()
+            self._board_refresh_seq += 1
+            refresh_seq = self._board_refresh_seq
+            self._board_refresh_count_before_ready += 1
+            is_first_refresh = not getattr(self, "_operblock_startup_first_refresh_recorded", False)
+            refresh_fields = {
+                "refresh_seq": refresh_seq,
+                "refresh_reason": str(refresh_reason or "refresh_board"),
+                "force": bool(force),
+                "is_first": bool(is_first_refresh),
+                "is_first_refresh": bool(is_first_refresh),
+            }
+            operblock_startup_metrics.record_value("refresh_seq", refresh_seq, source="operblock_widget", **refresh_fields)
+            operblock_startup_metrics.record_value(
+                "refresh_count_before_ready",
+                self._board_refresh_count_before_ready,
+                source="operblock_widget",
+                **refresh_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "refresh_reason",
+                refresh_fields["refresh_reason"],
+                source="operblock_widget",
+                **refresh_fields,
+            )
+            operblock_startup_metrics.record_value("refresh_force", bool(force), source="operblock_widget", **refresh_fields)
+            operblock_startup_metrics.record_value(
+                "refresh_is_first_refresh",
+                bool(is_first_refresh),
+                source="operblock_widget",
+                **refresh_fields,
+            )
+            operblock_startup_metrics.record_value(
+                "refresh_is_first",
+                bool(is_first_refresh),
+                source="operblock_widget",
+                **refresh_fields,
+            )
+            operblock_startup_metrics.record_since("refresh_board_enter_ms", enter_started, source="operblock_widget", **refresh_fields)
+            first_refresh_started = None
+            if not getattr(self, "_operblock_startup_first_refresh_recorded", False):
+                first_refresh_started = operblock_startup_metrics.timer_start()
+                self._operblock_startup_first_refresh_recorded = True
             try:
-                snapshot_started = operblock_startup_metrics.timer_start()
-                snapshot = self.operblock_service.build_operblock_board_snapshot()
-                snapshot = self._filter_board_snapshot(snapshot)
-            except Exception as exc:
-                logger.error("operblock board refresh failed: %s", exc, exc_info=True)
-                CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
-                return
-            finally:
+                try:
+                    snapshot_started = operblock_startup_metrics.timer_start()
+                    snapshot = self.operblock_service.build_operblock_board_snapshot()
+                    snapshot = self._filter_board_snapshot(snapshot)
+                except Exception as exc:
+                    logger.error("operblock board refresh failed: %s", exc, exc_info=True)
+                    CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
+                    return
+                finally:
+                    operblock_startup_metrics.record_since(
+                        "refresh_board_snapshot_ms",
+                        snapshot_started if "snapshot_started" in locals() else 0.0,
+                        source="operblock_widget",
+                        nested_role="child",
+                        parent_phase="first_refresh_board_ms",
+                        **refresh_fields,
+                    )
+                if not force and snapshot.get("content_hash") == self._board_hash:
+                    return
+                self._board_hash = snapshot.get("content_hash") or ""
+                apply_started = operblock_startup_metrics.timer_start()
+                self._apply_board_snapshot(snapshot, refresh_context=refresh_fields)
                 operblock_startup_metrics.record_since(
-                    "refresh_board_snapshot_ms",
-                    snapshot_started if "snapshot_started" in locals() else 0.0,
+                    "refresh_board_apply_total_ms",
+                    apply_started,
                     source="operblock_widget",
                     nested_role="child",
                     parent_phase="first_refresh_board_ms",
                     **refresh_fields,
                 )
-            if not force and snapshot.get("content_hash") == self._board_hash:
-                return
-            self._board_hash = snapshot.get("content_hash") or ""
-            apply_started = operblock_startup_metrics.timer_start()
-            self._apply_board_snapshot(snapshot, refresh_context=refresh_fields)
-            operblock_startup_metrics.record_since(
-                "refresh_board_apply_total_ms",
-                apply_started,
-                source="operblock_widget",
-                nested_role="child",
-                parent_phase="first_refresh_board_ms",
-                **refresh_fields,
-            )
+            finally:
+                operblock_startup_metrics.record_since(
+                    "first_refresh_board_ms",
+                    first_refresh_started,
+                    source="operblock_widget",
+                    nested_role="child",
+                    parent_phase="start_auto_refresh_ms",
+                    **refresh_fields,
+                )
         finally:
-            operblock_startup_metrics.record_since(
-                "first_refresh_board_ms",
-                first_refresh_started,
-                source="operblock_widget",
-                nested_role="child",
-                parent_phase="start_auto_refresh_ms",
-                **refresh_fields,
-            )
+            self._hide_operblock_loading(loading_key)
 
-    def refresh_operblock_archive(self, *, force: bool = False):
+    def refresh_operblock_archive(self, *, force: bool = False, loading_message: str | None = None):
         if self._is_closing:
             return
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="archive-refresh",
+            auto_hide_ms=30000,
+        )
         try:
-            cases = self._filter_archive_cases_by_table(self.operblock_service.list_archived_operation_cases())
-        except Exception as exc:
-            logger.error("operblock archive refresh failed: %s", exc, exc_info=True)
-            CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось обновить архив:\n{exc}")
-            return
-        source_hash = _stable_ui_hash(cases)
-        if not force and source_hash == getattr(self, "_archive_cases_hash", ""):
-            return
-        self._archive_cases_hash = source_hash
-        self._archive_cases = [dict(item or {}) for item in cases]
-        self._apply_operblock_archive_cases()
+            try:
+                cases = self._filter_archive_cases_by_table(self.operblock_service.list_archived_operation_cases())
+            except Exception as exc:
+                logger.error("operblock archive refresh failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось обновить архив:\n{exc}")
+                return
+            source_hash = _stable_ui_hash(cases)
+            if not force and source_hash == getattr(self, "_archive_cases_hash", ""):
+                return
+            self._archive_cases_hash = source_hash
+            self._archive_cases = [dict(item or {}) for item in cases]
+            self._apply_operblock_archive_cases()
+        finally:
+            self._hide_operblock_loading(loading_key)
 
-    def refresh_protocol(self, *, force: bool = False):
+    def refresh_protocol(self, *, force: bool = False, loading_message: str | None = None):
         if self._is_closing or not self._current_operation_case_id:
             return
-        generation = self._refresh_generation = self._refresh_generation + 1
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="protocol-refresh",
+            auto_hide_ms=30000,
+        )
         try:
-            snapshot = self.operblock_service.build_operblock_protocol_snapshot(self._current_operation_case_id)
-        except OperBlockConflictError as exc:
-            CustomMessageBox.warning(self, "Оперблок", str(exc))
-            self._show_board()
-            return
-        except Exception as exc:
-            logger.error("operblock protocol refresh failed: %s", exc, exc_info=True)
-            CustomMessageBox.warning(self, "Ошибка", f"Не удалось обновить протокол:\n{exc}")
-            return
-        if self._is_closing or generation != self._refresh_generation:
-            return
-        if not force and snapshot.get("content_hash") == self._protocol_hash:
-            return
-        self._protocol_hash = snapshot.get("content_hash") or ""
-        self._apply_protocol_snapshot(snapshot)
+            generation = self._refresh_generation = self._refresh_generation + 1
+            try:
+                snapshot = self.operblock_service.build_operblock_protocol_snapshot(self._current_operation_case_id)
+            except OperBlockConflictError as exc:
+                CustomMessageBox.warning(self, "Оперблок", str(exc))
+                self._show_board()
+                return
+            except Exception as exc:
+                logger.error("operblock protocol refresh failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка", f"Не удалось обновить протокол:\n{exc}")
+                return
+            if self._is_closing or generation != self._refresh_generation:
+                return
+            if not force and snapshot.get("content_hash") == self._protocol_hash:
+                return
+            self._protocol_hash = snapshot.get("content_hash") or ""
+            self._apply_protocol_snapshot(snapshot)
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     @staticmethod
     def _empty_board_table_payload(table: dict) -> dict:
@@ -10658,38 +10772,46 @@ class OperBlockMainWidget(QWidget):
     def _show_operblock_archive(self):
         if self._is_closing or self._write_pending:
             return
-        current_widget = self.stack.currentWidget()
-        if current_widget == self.protocol_page and self._current_operation_case_id:
-            self._archive_return_operation_case_id = int(self._current_operation_case_id)
-        elif current_widget != self.archive_page:
-            self._archive_return_operation_case_id = None
-        first_open = self.archive_page is None
-        first_open_started = operblock_startup_metrics.timer_start() if first_open else None
-        if not self._ensure_archive_page_created():
-            return
-        self._set_protocol_chrome(True)
-        self.stack.setCurrentWidget(self.archive_page)
-        self._current_operation_case_id = None
-        self._current_admission_id = None
-        self._current_operation_start = None
-        self._current_operation_end = None
-        self._current_case_active = False
-        self._current_operation_has_vitals = False
-        self._current_stage_state = {}
-        self._current_anesthesia_active = False
-        self._current_surgery_active = False
-        self._current_anesthesia_assistance_type = ""
-        self._current_operation_name = ""
-        self._current_protocol_display = ""
-        self._update_protocol_title_label()
-        self._update_operblock_staff_legend()
-        self.refresh_operblock_archive(force=True)
-        if first_open:
-            operblock_startup_metrics.record_since(
-                "first_open_archive_ms",
-                first_open_started,
-                source="operblock_widget",
-            )
+        loading_key = self._show_operblock_loading(
+            "Открытие архива оперблока...",
+            key="open-archive",
+            auto_hide_ms=30000,
+        )
+        try:
+            current_widget = self.stack.currentWidget()
+            if current_widget == self.protocol_page and self._current_operation_case_id:
+                self._archive_return_operation_case_id = int(self._current_operation_case_id)
+            elif current_widget != self.archive_page:
+                self._archive_return_operation_case_id = None
+            first_open = self.archive_page is None
+            first_open_started = operblock_startup_metrics.timer_start() if first_open else None
+            if not self._ensure_archive_page_created():
+                return
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(self.archive_page)
+            self._current_operation_case_id = None
+            self._current_admission_id = None
+            self._current_operation_start = None
+            self._current_operation_end = None
+            self._current_case_active = False
+            self._current_operation_has_vitals = False
+            self._current_stage_state = {}
+            self._current_anesthesia_active = False
+            self._current_surgery_active = False
+            self._current_anesthesia_assistance_type = ""
+            self._current_operation_name = ""
+            self._current_protocol_display = ""
+            self._update_protocol_title_label()
+            self._update_operblock_staff_legend()
+            self.refresh_operblock_archive(force=True)
+            if first_open:
+                operblock_startup_metrics.record_since(
+                    "first_open_archive_ms",
+                    first_open_started,
+                    source="operblock_widget",
+                )
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     def _filtered_archive_cases(self) -> list[dict]:
         query = str(getattr(self, "archive_search_input", None).text() if hasattr(self, "archive_search_input") else "").strip().casefold()
@@ -10814,10 +10936,18 @@ class OperBlockMainWidget(QWidget):
         self._external_archive_db_manager = None
 
     def _return_from_external_archive_viewer(self):
-        if getattr(self, "archive_page", None) is not None:
-            self.stack.setCurrentWidget(self.archive_page)
-        self._close_external_archive_viewer()
-        self.refresh_operblock_archive(force=True)
+        loading_key = self._show_operblock_loading(
+            "Возврат в архив оперблока...",
+            key="return-external-archive",
+            auto_hide_ms=30000,
+        )
+        try:
+            if getattr(self, "archive_page", None) is not None:
+                self.stack.setCurrentWidget(self.archive_page)
+            self._close_external_archive_viewer()
+            self.refresh_operblock_archive(force=True)
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     def _open_external_archive_case(self, selected: dict):
         source_db_path = str((selected or {}).get("source_db_path") or "").strip()
@@ -10825,36 +10955,44 @@ class OperBlockMainWidget(QWidget):
         if not source_db_path or not case_id:
             CustomMessageBox.warning(self, "Архив оперблока", "Не удалось определить архивную БД или запись оперблока.")
             return
-        self._close_external_archive_viewer()
-        ro_db_manager = None
+        loading_key = self._show_operblock_loading(
+            "Открытие архивной операции...",
+            key="open-external-archive",
+            auto_hide_ms=30000,
+        )
         try:
-            from rem_card.services.archive_readonly_service import create_archive_readonly_service
+            self._close_external_archive_viewer()
+            ro_db_manager = None
+            try:
+                from rem_card.services.archive_readonly_service import create_archive_readonly_service
 
-            ro_remcard_service, ro_db_manager = create_archive_readonly_service(source_db_path)
-            ro_operblock_service = OperBlockService(ro_db_manager)
-            ro_patient_service = getattr(ro_remcard_service, "_patients", self.patient_service)
-            viewer = OperBlockMainWidget(
-                ro_patient_service,
-                ro_remcard_service,
-                ro_operblock_service,
-                parent=self.stack,
-                table_code=self._table_filter_code,
-                view_only=True,
-            )
-        except Exception as exc:
-            if ro_db_manager is not None:
-                try:
-                    ro_db_manager.close()
-                except Exception:
-                    pass
-            CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть архивную БД:\n{exc}")
-            return
-        self._external_archive_viewer = viewer
-        self._external_archive_db_manager = ro_db_manager
-        viewer.view_back_requested.connect(self._return_from_external_archive_viewer)
-        self.stack.addWidget(viewer)
-        self.stack.setCurrentWidget(viewer)
-        viewer.open_archive_protocol(case_id)
+                ro_remcard_service, ro_db_manager = create_archive_readonly_service(source_db_path)
+                ro_operblock_service = OperBlockService(ro_db_manager)
+                ro_patient_service = getattr(ro_remcard_service, "_patients", self.patient_service)
+                viewer = OperBlockMainWidget(
+                    ro_patient_service,
+                    ro_remcard_service,
+                    ro_operblock_service,
+                    parent=self.stack,
+                    table_code=self._table_filter_code,
+                    view_only=True,
+                )
+            except Exception as exc:
+                if ro_db_manager is not None:
+                    try:
+                        ro_db_manager.close()
+                    except Exception:
+                        pass
+                CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось открыть архивную БД:\n{exc}")
+                return
+            self._external_archive_viewer = viewer
+            self._external_archive_db_manager = ro_db_manager
+            viewer.view_back_requested.connect(self._return_from_external_archive_viewer)
+            self.stack.addWidget(viewer)
+            self.stack.setCurrentWidget(viewer)
+            viewer.open_archive_protocol(case_id)
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     def _restore_selected_archive_case(self):
         selected = self._selected_archive_case()
@@ -12265,49 +12403,57 @@ class OperBlockMainWidget(QWidget):
     def _open_protocol(self, operation_case_id: int):
         if self._is_closing:
             return
-        first_open = self.protocol_page is None
-        first_open_started = operblock_startup_metrics.timer_start() if first_open else None
-        if not self._ensure_protocol_page_created():
-            return
-        self._current_operation_case_id = int(operation_case_id)
-        self._current_operation_start = None
-        self._current_operation_end = None
-        self._current_case_active = False
-        self._current_operation_has_vitals = False
-        self._current_stage_state = {}
-        self._current_anesthesia_start = None
-        self._current_anesthesia_end = None
-        self._current_surgery_start = None
-        self._current_surgery_end = None
-        self._current_anesthesia_active = False
-        self._current_surgery_active = False
-        self._current_anesthesia_assistance_type = ""
-        self._current_operation_name = ""
-        self._current_protocol_display = ""
-        self._update_protocol_title_label()
-        self._update_operblock_staff_legend()
-        self._current_protocol_date = datetime.now()
-        self._vitals_context_key = None
-        self._current_orders_rows = []
-        self._current_timeline_snapshot = None
-        if getattr(self, "vitals_chart", None) and hasattr(self.vitals_chart, "set_timeline_snapshot"):
-            self.vitals_chart.set_timeline_snapshot(None, None, force=True)
-        self._protocol_hash = ""
-        self.operblock_vitals_service.set_operation_context(
-            operation_case_id=self._current_operation_case_id,
-            admission_id=None,
-            started_at=None,
-            ended_at=None,
+        loading_key = self._show_operblock_loading(
+            "Открытие протокола операции...",
+            key="open-protocol",
+            auto_hide_ms=30000,
         )
-        self._set_protocol_chrome(True)
-        self.stack.setCurrentWidget(self.protocol_page)
-        self.refresh_protocol(force=True)
-        if first_open:
-            operblock_startup_metrics.record_since(
-                "first_open_protocol_ms",
-                first_open_started,
-                source="operblock_widget",
+        try:
+            first_open = self.protocol_page is None
+            first_open_started = operblock_startup_metrics.timer_start() if first_open else None
+            if not self._ensure_protocol_page_created():
+                return
+            self._current_operation_case_id = int(operation_case_id)
+            self._current_operation_start = None
+            self._current_operation_end = None
+            self._current_case_active = False
+            self._current_operation_has_vitals = False
+            self._current_stage_state = {}
+            self._current_anesthesia_start = None
+            self._current_anesthesia_end = None
+            self._current_surgery_start = None
+            self._current_surgery_end = None
+            self._current_anesthesia_active = False
+            self._current_surgery_active = False
+            self._current_anesthesia_assistance_type = ""
+            self._current_operation_name = ""
+            self._current_protocol_display = ""
+            self._update_protocol_title_label()
+            self._update_operblock_staff_legend()
+            self._current_protocol_date = datetime.now()
+            self._vitals_context_key = None
+            self._current_orders_rows = []
+            self._current_timeline_snapshot = None
+            if getattr(self, "vitals_chart", None) and hasattr(self.vitals_chart, "set_timeline_snapshot"):
+                self.vitals_chart.set_timeline_snapshot(None, None, force=True)
+            self._protocol_hash = ""
+            self.operblock_vitals_service.set_operation_context(
+                operation_case_id=self._current_operation_case_id,
+                admission_id=None,
+                started_at=None,
+                ended_at=None,
             )
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(self.protocol_page)
+            self.refresh_protocol(force=True)
+            if first_open:
+                operblock_startup_metrics.record_since(
+                    "first_open_protocol_ms",
+                    first_open_started,
+                    source="operblock_widget",
+                )
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     def _apply_protocol_snapshot(self, snapshot: dict):
         header = snapshot.get("header") or {}
@@ -12382,6 +12528,7 @@ class OperBlockMainWidget(QWidget):
             self._current_stage_state.get("current_anesthesia_assistance_type")
             or self._current_stage_state.get("last_anesthesia_assistance_type")
             or self._current_stage_state.get("first_anesthesia_assistance_type")
+            or self._current_stage_state.get("planned_anesthesia_assistance_type")
         )
         self._current_operation_name = normalize_operblock_team_text(
             self._current_stage_state.get("current_operation_name")
@@ -13524,18 +13671,26 @@ class OperBlockMainWidget(QWidget):
             return
         if self.is_view_only_mode():
             return
-        self._remember_settings_return_page()
-        if not self._ensure_settings_page_created():
-            return
-        page = self.settings_page
-        if page is None:
-            return
-        if hasattr(page, "set_print_context"):
-            page.set_print_context(self.remcard_service, self._current_admission_id, datetime.now())
-        if hasattr(page, "show_menu"):
-            page.show_menu()
-        self._set_protocol_chrome(True)
-        self.stack.setCurrentWidget(page)
+        loading_key = self._show_operblock_loading(
+            "Открытие настроек...",
+            key="open-settings",
+            auto_hide_ms=20000,
+        )
+        try:
+            self._remember_settings_return_page()
+            if not self._ensure_settings_page_created():
+                return
+            page = self.settings_page
+            if page is None:
+                return
+            if hasattr(page, "set_print_context"):
+                page.set_print_context(self.remcard_service, self._current_admission_id, datetime.now())
+            if hasattr(page, "show_menu"):
+                page.show_menu()
+            self._set_protocol_chrome(True)
+            self.stack.setCurrentWidget(page)
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     def _remember_settings_return_page(self):
         current_widget = self.stack.currentWidget()
@@ -13566,7 +13721,10 @@ class OperBlockMainWidget(QWidget):
             if self.protocol_page is not None and self._current_operation_case_id == return_case_id:
                 self._set_protocol_chrome(True)
                 self.stack.setCurrentWidget(self.protocol_page)
-                self.refresh_protocol(force=True)
+                self.refresh_protocol(
+                    force=True,
+                    loading_message="Возврат к протоколу операции...",
+                )
                 return
             self._open_protocol(return_case_id)
             return
@@ -13574,9 +13732,12 @@ class OperBlockMainWidget(QWidget):
             self._archive_return_operation_case_id = return_case_id or None
             self._set_protocol_chrome(True)
             self.stack.setCurrentWidget(self.archive_page)
-            self.refresh_operblock_archive(force=True)
+            self.refresh_operblock_archive(
+                force=True,
+                loading_message="Возврат в архив оперблока...",
+            )
             return
-        self._show_board()
+        self._show_board(loading_message="Возврат к операционной...")
 
     def _open_operblock_settings(self):
         if self._is_closing:
@@ -13592,11 +13753,19 @@ class OperBlockMainWidget(QWidget):
     def _open_anesthesia_types_settings(self, dialog_parent: QWidget | None = None):
         if self.is_view_only_mode():
             return
+        loading_key = self._show_operblock_loading(
+            "Загрузка видов пособия...",
+            key="anesthesia-types-settings",
+            auto_hide_ms=20000,
+        )
         try:
-            items = load_operblock_anesthesia_types()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Виды пособия", f"Не удалось загрузить виды пособия: {exc}")
-            return
+            try:
+                items = load_operblock_anesthesia_types()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Виды пособия", f"Не удалось загрузить виды пособия: {exc}")
+                return
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
         parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
         dialog = OperBlockAnesthesiaTypesDialog(items, parent)
         if dialog.exec() != QDialog.Accepted:
@@ -13612,11 +13781,19 @@ class OperBlockMainWidget(QWidget):
             return
         if self.is_view_only_mode():
             return
+        loading_key = self._show_operblock_loading(
+            "Загрузка опер. бригады...",
+            key="team-settings",
+            auto_hide_ms=20000,
+        )
         try:
-            items = load_operblock_team()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось загрузить опер. бригаду: {exc}")
-            return
+            try:
+                items = load_operblock_team()
+            except Exception as exc:
+                CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось загрузить опер. бригаду: {exc}")
+                return
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
         parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
         dialog = OperBlockTeamDialog(items, parent)
         if dialog.exec() != QDialog.Accepted:
@@ -13632,7 +13809,15 @@ class OperBlockMainWidget(QWidget):
             return
         if self.is_view_only_mode():
             return
-        self._load_quick_orders_data()
+        loading_key = self._show_operblock_loading(
+            "Загрузка настроек препаратов...",
+            key="quick-orders-settings",
+            auto_hide_ms=20000,
+        )
+        try:
+            self._load_quick_orders_data()
+        finally:
+            self._hide_operblock_loading(loading_key, delay_ms=0)
         parent = dialog_parent if isinstance(dialog_parent, QWidget) else self
         dialog = OperBlockMedicationPresetsDialog(
             self._medication_presets,
@@ -17972,6 +18157,7 @@ class OperBlockMainWidget(QWidget):
             anesthesiologists,
             anesthetists,
             self,
+            initial_assistance_type=str(defaults.get("anesthesia_assistance_type") or ""),
             initial_anesthesiologist=str(defaults.get("anesthesiologist") or ""),
             initial_anesthetist=str(defaults.get("anesthetist") or ""),
             initial_start_datetime=initial_start_dt,
@@ -18698,45 +18884,53 @@ class OperBlockMainWidget(QWidget):
         self._restore_operation_report_buttons()
         self._operation_report_pdf_worker = None
 
-    def _show_board(self):
-        self._set_protocol_chrome(False)
-        self.stack.setCurrentWidget(self.board_page)
-        self._archive_return_operation_case_id = None
-        self._current_operation_case_id = None
-        self._current_admission_id = None
-        self._current_operation_start = None
-        self._current_operation_end = None
-        self._current_case_active = False
-        self._current_operation_has_vitals = False
-        self._current_stage_state = {}
-        self._current_anesthesia_start = None
-        self._current_anesthesia_end = None
-        self._current_surgery_start = None
-        self._current_surgery_end = None
-        self._current_anesthesia_active = False
-        self._current_surgery_active = False
-        self._current_anesthesia_assistance_type = ""
-        self._current_operation_name = ""
-        self._current_protocol_display = ""
-        self._update_protocol_title_label()
-        self._update_operblock_staff_legend()
-        self._vitals_context_key = None
-        self._current_orders_rows = []
-        self._current_timeline_snapshot = None
-        self._apply_active_infusions()
-        self.operblock_vitals_service.set_operation_context(
-            operation_case_id=None,
-            admission_id=None,
-            started_at=None,
-            ended_at=None,
+    def _show_board(self, *, loading_message: str | None = None):
+        loading_key = self._show_operblock_loading(
+            loading_message,
+            key="show-board",
+            auto_hide_ms=30000,
         )
-        if getattr(self, "vitals_chart", None):
-            self.vitals_chart.set_visible_hours(OPERBLOCK_INITIAL_CHART_HOURS)
-            if hasattr(self.vitals_chart, "set_timeline_snapshot"):
-                self.vitals_chart.set_timeline_snapshot(None, None, force=True)
-            elif hasattr(self.vitals_chart, "set_operation_orders"):
-                self.vitals_chart.set_operation_orders([], None)
-        self.refresh_board(force=True)
+        try:
+            self._set_protocol_chrome(False)
+            self.stack.setCurrentWidget(self.board_page)
+            self._archive_return_operation_case_id = None
+            self._current_operation_case_id = None
+            self._current_admission_id = None
+            self._current_operation_start = None
+            self._current_operation_end = None
+            self._current_case_active = False
+            self._current_operation_has_vitals = False
+            self._current_stage_state = {}
+            self._current_anesthesia_start = None
+            self._current_anesthesia_end = None
+            self._current_surgery_start = None
+            self._current_surgery_end = None
+            self._current_anesthesia_active = False
+            self._current_surgery_active = False
+            self._current_anesthesia_assistance_type = ""
+            self._current_operation_name = ""
+            self._current_protocol_display = ""
+            self._update_protocol_title_label()
+            self._update_operblock_staff_legend()
+            self._vitals_context_key = None
+            self._current_orders_rows = []
+            self._current_timeline_snapshot = None
+            self._apply_active_infusions()
+            self.operblock_vitals_service.set_operation_context(
+                operation_case_id=None,
+                admission_id=None,
+                started_at=None,
+                ended_at=None,
+            )
+            if getattr(self, "vitals_chart", None):
+                self.vitals_chart.set_visible_hours(OPERBLOCK_INITIAL_CHART_HOURS)
+                if hasattr(self.vitals_chart, "set_timeline_snapshot"):
+                    self.vitals_chart.set_timeline_snapshot(None, None, force=True)
+                elif hasattr(self.vitals_chart, "set_operation_orders"):
+                    self.vitals_chart.set_operation_orders([], None)
+            self.refresh_board(force=True)
+        finally:
+            self._hide_operblock_loading(loading_key)
 
     def _set_protocol_chrome(self, enabled: bool):
         self.sector_8_panel.set_protocol_mode(

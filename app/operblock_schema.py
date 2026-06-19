@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1008
+OPERBLOCK_SCHEMA_VERSION = 1009
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -69,6 +69,7 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "created_by_client_id",
         "revision",
         "planned_operation_name",
+        "planned_anesthesia_assistance_type",
         "planned_surgeons_json",
         "planned_operating_nurse",
         "planned_anesthesiologist",
@@ -168,6 +169,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             last_modified_by TEXT,
             future_rao_admission_id INTEGER,
             planned_operation_name TEXT,
+            planned_anesthesia_assistance_type TEXT,
             planned_surgeons_json TEXT,
             planned_operating_nurse TEXT,
             planned_anesthesiologist TEXT,
@@ -204,6 +206,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         """
     )
     _ensure_column(conn, "operation_cases", "planned_operation_name", "TEXT", logger)
+    _ensure_column(conn, "operation_cases", "planned_anesthesia_assistance_type", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "planned_surgeons_json", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "planned_operating_nurse", "TEXT", logger)
     _ensure_column(conn, "operation_cases", "planned_anesthesiologist", "TEXT", logger)
@@ -443,7 +446,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         """
     )
     _create_updated_at_trigger(conn, "opblock_offline_case_map")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock offline metadata and idempotency")
+    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock planned anesthesia assistance type")
 
 
 def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:
