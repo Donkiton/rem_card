@@ -15122,6 +15122,137 @@ def _check_emergency_standby_scheduler_no_direct_file_copy_live_db(temp_root: st
                 return False, f"direct file copy token in {relative}: {token}"
     return True, "ok"
 
+def _check_emergency_settings_snapshot_schema_drift_detected(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_validation import validate_settings_db_snapshot
+
+    settings_path = _create_valid_emergency_settings_db(os.path.join(temp_root, "settings_schema_drift"))
+    conn = sqlite3.connect(settings_path)
+    try:
+        conn.execute("DROP TABLE operblock_icons")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = validate_settings_db_snapshot(settings_path)
+    if result.ok:
+        return False, "settings snapshot missing operblock_icons was accepted as valid"
+    if "invalid_snapshot_schema_drift" not in result.reason:
+        return False, f"schema drift was not reported as controlled drift: {result.reason}"
+    missing = set(result.details.get("missing_tables") or [])
+    if "operblock_icons" not in missing:
+        return False, f"missing table details do not include operblock_icons: {result.details}"
+    return True, "ok"
+
+
+def _check_emergency_settings_snapshot_rebuild_after_schema_change(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.emergency_startup import find_resumable_active_session, validate_active_session_for_startup
+    from rem_card.app.emergency_validation import validate_settings_db_snapshot
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    session = store.create_active_session_from_standby(standby, session_id="schema_drift_rebuild")
+    conn = sqlite3.connect(str(session.settings_snapshot_path))
+    try:
+        conn.execute("DROP TABLE operblock_icons")
+        conn.commit()
+    finally:
+        conn.close()
+
+    ok_before, reason_before = validate_active_session_for_startup(session)
+    if ok_before or "invalid_snapshot_schema_drift" not in reason_before:
+        return False, f"active settings drift was not detected before rebuild: ok={ok_before} reason={reason_before}"
+
+    resumed, reason = find_resumable_active_session(store)
+    if resumed is None or reason != "ok":
+        return False, f"active settings snapshot was not rebuilt: resumed={resumed} reason={reason}"
+
+    validation = validate_settings_db_snapshot(str(session.settings_snapshot_path))
+    if not validation.ok:
+        return False, f"rebuilt active settings snapshot is invalid: {validation.reason}"
+    conn = sqlite3.connect(str(session.settings_snapshot_path))
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='operblock_icons'"
+        ).fetchone()
+        if int(row[0] or 0) != 1:
+            return False, "rebuilt active settings snapshot still misses operblock_icons"
+    finally:
+        conn.close()
+    return True, "ok"
+
+
+def _check_emergency_standby_refresh_deferred_rate_limited(temp_root: str) -> tuple[bool, str]:
+    import rem_card.app.emergency_standby_scheduler as scheduler_module
+    from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
+
+    store, standby = _prepare_emergency_store_fixture(temp_root)
+    store.create_active_session_from_standby(standby, session_id="deferred_spam_active")
+    manager = _FakeEmergencyStandbyManager(store.resolve_root())
+    captured: list[tuple[str, object, dict]] = []
+    original_metric = scheduler_module.record_metric
+    try:
+        scheduler_module.record_metric = lambda name, value=None, **fields: captured.append((name, value, fields))
+        scheduler = EmergencyStandbyScheduler(role="nurse", mode="network", manager=manager, cooldown_sec=0)
+        scheduler._deferred_summary_interval_sec = 9999.0
+        scheduler.start()
+        for idx in range(25):
+            scheduler.request_refresh(f"active_session_{idx}")
+        scheduler.stop(timeout=2.0)
+    finally:
+        scheduler_module.record_metric = original_metric
+
+    direct = [item for item in captured if item[0] == "emergency_standby_refresh_deferred"]
+    summaries = [item for item in captured if item[0] == "emergency_standby_refresh_deferred_summary"]
+    if len(direct) != 1:
+        return False, f"deferred refresh should emit only the first direct metric, got {len(direct)}: {captured[:5]}"
+    if len(summaries) != 1:
+        return False, f"deferred refresh summary was not emitted once on shutdown: {summaries}"
+    summary_count = int(summaries[0][2].get("count") or summaries[0][1] or 0)
+    if summary_count < 25:
+        return False, f"deferred summary count is too low: {summaries[0]}"
+    if summaries[0][2].get("reason") != "active_emergency_session":
+        return False, f"deferred summary reason mismatch: {summaries[0]}"
+    if summaries[0][2].get("emergency_session_id") != "deferred_spam_active":
+        return False, f"deferred summary lost emergency_session_id: {summaries[0]}"
+    if manager.refresh_calls:
+        return False, "scheduler refreshed while active emergency session should block standby refresh"
+
+    captured.clear()
+    state = {"write_idle": False, "foreground_busy": False}
+    original_metric = scheduler_module.record_metric
+    try:
+        scheduler_module.record_metric = lambda name, value=None, **fields: captured.append((name, value, fields))
+        scheduler = EmergencyStandbyScheduler(
+            role="nurse",
+            mode="network",
+            manager=_FakeEmergencyStandbyManager(os.path.join(temp_root, "no_active_er")),
+            is_write_queue_idle=lambda: state["write_idle"],
+            is_foreground_busy=lambda: state["foreground_busy"],
+            cooldown_sec=0,
+        )
+        scheduler._deferred_summary_interval_sec = 9999.0
+        scheduler.start()
+        for idx in range(3):
+            scheduler.request_refresh(f"write_busy_{idx}")
+        state["write_idle"] = True
+        state["foreground_busy"] = True
+        scheduler.request_refresh("foreground_busy")
+        scheduler.stop(timeout=2.0)
+    finally:
+        scheduler_module.record_metric = original_metric
+
+    reason_changed = [
+        item
+        for item in captured
+        if item[0] == "emergency_standby_refresh_deferred_summary"
+        and item[2].get("flush_reason") == "reason_changed"
+    ]
+    if not reason_changed:
+        return False, f"deferred summary was not flushed when reason changed: {captured}"
+    if int(reason_changed[0][2].get("count") or reason_changed[0][1] or 0) < 3:
+        return False, f"reason-change summary count is too low: {reason_changed[0]}"
+    return True, "ok"
+
+
 
 def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
@@ -23326,6 +23457,8 @@ def main(argv: list[str] | None = None):
         ("emergency_metadata_corruption_is_controlled_error", _check_emergency_metadata_corruption_is_controlled_error),
         ("emergency_active_session_requires_valid_standby_medical_db", _check_emergency_active_session_requires_valid_standby_medical_db),
         ("emergency_active_session_requires_valid_settings_snapshot", _check_emergency_active_session_requires_valid_settings_snapshot),
+        ("emergency_settings_snapshot_schema_drift_detected", _check_emergency_settings_snapshot_schema_drift_detected),
+        ("emergency_settings_snapshot_rebuild_after_schema_change", _check_emergency_settings_snapshot_rebuild_after_schema_change),
         ("emergency_active_session_creates_base_and_local_copies", _check_emergency_active_session_creates_base_and_local_copies),
         ("emergency_base_snapshot_is_frozen", _check_emergency_base_snapshot_is_frozen),
         ("emergency_active_runtime_context_paths_are_local", _check_emergency_active_runtime_context_paths_are_local),
@@ -23380,6 +23513,7 @@ def main(argv: list[str] | None = None):
         ("emergency_standby_scheduler_no_recovery_on_unavailable", _check_emergency_standby_scheduler_no_recovery_on_unavailable),
         ("emergency_standby_scheduler_no_sqlite_profile_changes", _check_emergency_standby_scheduler_no_sqlite_profile_changes),
         ("emergency_standby_scheduler_no_direct_file_copy_live_db", _check_emergency_standby_scheduler_no_direct_file_copy_live_db),
+        ("emergency_standby_refresh_deferred_rate_limited", _check_emergency_standby_refresh_deferred_rate_limited),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),

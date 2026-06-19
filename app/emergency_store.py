@@ -42,6 +42,7 @@ from rem_card.app.emergency_validation import (
     validate_medical_db_snapshot,
     validate_settings_db_snapshot,
 )
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.version import APP_VERSION
 
 
@@ -436,6 +437,67 @@ class EmergencyLocalStore:
             )
         )
         service.ensure_ready()
+
+    def rebuild_active_settings_snapshot_from_source(
+        self,
+        metadata: EmergencySessionMetadata,
+        source_path: str,
+        *,
+        reason: str = "schema_drift",
+    ) -> bool:
+        target_path = str(metadata.settings_snapshot_path or "").strip()
+        if not target_path:
+            raise EmergencyStoreError("active settings snapshot path is missing")
+        source = str(source_path or "").strip()
+        source_validation = validate_settings_db_snapshot(source)
+        if not source_validation.ok:
+            raise EmergencyStoreError(f"Source settings snapshot is not valid: {source_validation.reason}")
+        target_dir = os.path.dirname(target_path)
+        os.makedirs(target_dir, exist_ok=True)
+        tmp_path = os.path.join(target_dir, f".{os.path.basename(target_path)}.rebuild.{os.getpid()}.tmp")
+        record_metric(
+            "emergency_settings_snapshot_rebuild_started",
+            1,
+            reason=str(reason or "schema_drift"),
+            emergency_session_id=metadata.emergency_session_id,
+            expected_schema_version=source_validation.schema_version,
+            source_settings_db_path=os.path.abspath(source),
+            target_settings_db_path=os.path.abspath(target_path),
+        )
+        try:
+            shutil.copy2(source, tmp_path)
+            tmp_validation = validate_settings_db_snapshot(tmp_path)
+            if not tmp_validation.ok:
+                raise EmergencyStoreError(f"Rebuilt settings snapshot validation failed: {tmp_validation.reason}")
+            os.replace(tmp_path, target_path)
+            final_validation = validate_settings_db_snapshot(target_path)
+            if not final_validation.ok:
+                raise EmergencyStoreError(f"Final settings snapshot validation failed: {final_validation.reason}")
+            record_metric(
+                "emergency_settings_snapshot_rebuild_finished",
+                1,
+                reason=str(reason or "schema_drift"),
+                emergency_session_id=metadata.emergency_session_id,
+                expected_schema_version=source_validation.schema_version,
+                actual_schema_version=final_validation.schema_version,
+                settings_db_hash=final_validation.file_hash,
+            )
+            return True
+        except Exception as exc:
+            record_metric(
+                "emergency_settings_snapshot_rebuild_failed",
+                1,
+                reason=str(reason or "schema_drift"),
+                emergency_session_id=metadata.emergency_session_id,
+                error=str(exc),
+            )
+            raise
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def read_active_session(self, session_id: str) -> EmergencySessionMetadata:
         payload = read_json_file(active_session_metadata_path(self.root, session_id))

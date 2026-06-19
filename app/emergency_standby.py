@@ -33,7 +33,9 @@ from rem_card.app.emergency_validation import (
     validate_medical_db_snapshot,
     validate_settings_db_snapshot,
 )
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_shared import backup_connection, configure_connection
+from rem_card.data.settings import settings_schema
 from rem_card.app.version import APP_VERSION
 
 
@@ -367,6 +369,15 @@ class EmergencyStandbyManager:
 
             settings_validation = None
             if self.settings_required:
+                record_metric(
+                    "emergency_settings_snapshot_rebuild_started",
+                    1,
+                    reason="standby_refresh",
+                    expected_schema_version=settings_schema.SCHEMA_VERSION,
+                    source_settings_db_path=self.source_settings_db_path,
+                    target_settings_db_path=str(staging_settings_path),
+                    generation_id=generation_id,
+                )
                 self._backup_sqlite_to_temp(
                     self.source_settings_db_path,
                     str(staging_settings_path),
@@ -374,6 +385,15 @@ class EmergencyStandbyManager:
                 )
                 settings_validation = validate_settings_db_snapshot(str(staging_settings_path))
                 if not settings_validation.ok:
+                    record_metric(
+                        "emergency_settings_snapshot_rebuild_failed",
+                        1,
+                        reason="standby_refresh_validation_failed",
+                        expected_schema_version=settings_schema.SCHEMA_VERSION,
+                        actual_schema_version=settings_validation.schema_version,
+                        detail=settings_validation.reason,
+                        generation_id=generation_id,
+                    )
                     return EmergencyStandbyRefreshResult(
                         ok=False,
                         status="validation_failed",
@@ -401,6 +421,16 @@ class EmergencyStandbyManager:
             final_settings_validation = validate_settings_db_snapshot(final_settings_path) if final_settings_path else None
             final_error = self._final_generation_error(metadata, final_medical_validation, final_settings_validation)
             if final_error:
+                if self.settings_required:
+                    record_metric(
+                        "emergency_settings_snapshot_rebuild_failed",
+                        1,
+                        reason="standby_refresh_final_validation_failed",
+                        expected_schema_version=settings_schema.SCHEMA_VERSION,
+                        actual_schema_version=0 if final_settings_validation is None else final_settings_validation.schema_version,
+                        detail=final_error,
+                        generation_id=generation_id,
+                    )
                 return EmergencyStandbyRefreshResult(
                     ok=False,
                     status="validation_failed",
@@ -411,6 +441,16 @@ class EmergencyStandbyManager:
 
             self.store.write_standby_metadata(metadata)
             committed = True
+            if self.settings_required and final_settings_validation is not None:
+                record_metric(
+                    "emergency_settings_snapshot_rebuild_finished",
+                    1,
+                    reason="standby_refresh",
+                    expected_schema_version=settings_schema.SCHEMA_VERSION,
+                    actual_schema_version=final_settings_validation.schema_version,
+                    settings_db_hash=final_settings_validation.file_hash,
+                    generation_id=generation_id,
+                )
             return EmergencyStandbyRefreshResult(
                 ok=True,
                 status="valid",
@@ -420,6 +460,15 @@ class EmergencyStandbyManager:
                 settings_validation=final_settings_validation,
             )
         except Exception as exc:
+            if self.settings_required:
+                record_metric(
+                    "emergency_settings_snapshot_rebuild_failed",
+                    1,
+                    reason="standby_refresh_exception",
+                    expected_schema_version=settings_schema.SCHEMA_VERSION,
+                    detail=str(exc),
+                    generation_id=generation_id,
+                )
             return EmergencyStandbyRefreshResult(ok=False, status="error", reason=str(exc))
         finally:
             if os.path.isdir(staging_dir):

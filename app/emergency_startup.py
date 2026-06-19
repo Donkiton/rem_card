@@ -225,6 +225,37 @@ def validate_active_session_for_startup(metadata: EmergencySessionMetadata) -> t
     return True, "ok"
 
 
+def _settings_schema_drift_reason(reason: str) -> bool:
+    text = str(reason or "").lower()
+    return (
+        "invalid_snapshot_schema_drift" in text
+        or "missing settings tables" in text
+        or "settings schema not ready" in text
+    )
+
+
+def _try_rebuild_active_settings_snapshot(
+    store: EmergencyLocalStore,
+    metadata: EmergencySessionMetadata,
+    reason: str,
+) -> tuple[bool, str]:
+    source_path = standby_settings_db_path(store.resolve_root())
+    if not source_path or not os.path.isfile(source_path):
+        return False, "valid standby settings snapshot is not available for rebuild"
+    source_validation = validate_settings_db_snapshot(source_path)
+    if not source_validation.ok:
+        return False, f"standby settings snapshot is not valid for rebuild: {source_validation.reason}"
+    try:
+        store.rebuild_active_settings_snapshot_from_source(
+            metadata,
+            source_path,
+            reason=reason or "active_session_settings_schema_drift",
+        )
+    except Exception as exc:
+        return False, str(exc)
+    return validate_active_session_for_startup(metadata)
+
+
 def _iter_active_session_ids(root: str) -> list[str]:
     directory = active_dir(root)
     if not os.path.isdir(directory):
@@ -254,6 +285,19 @@ def find_resumable_active_session(store: EmergencyLocalStore) -> tuple[Emergency
         if metadata.status not in {"active", "merge_failed"}:
             continue
         ok, reason = validate_active_session_for_startup(metadata)
+        if not ok and _settings_schema_drift_reason(reason):
+            rebuilt_ok, rebuilt_reason = _try_rebuild_active_settings_snapshot(store, metadata, reason)
+            record_emergency_startup_metric(
+                "emergency_settings_snapshot_schema_drift",
+                status="active_session_rebuild_attempted",
+                reason=reason,
+                rebuild_status="ok" if rebuilt_ok else "failed",
+                rebuild_reason=rebuilt_reason,
+                session_id=metadata.emergency_session_id,
+            )
+            if rebuilt_ok:
+                return metadata, "ok"
+            reason = f"{reason}; settings snapshot rebuild failed: {rebuilt_reason}"
         if not ok:
             return None, reason
         return metadata, "ok"
