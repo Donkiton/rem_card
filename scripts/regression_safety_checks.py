@@ -7508,6 +7508,14 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
             "_admin_mark_requires_committed_row",
         ],
         "services/order_domain_service.py": ["order_action_pending_blocked", "admin_not_committed"],
+        "scripts/analyze_ui_stall_logs.py": [
+            "event_loop_pause_ms",
+            "maintenance_contention_backup",
+            "maintenance_contention_integrity_check",
+            "settings_snapshot_schema_drift",
+            "emergency_deferred_metric_spam",
+            "central_io_lock_wait_ms",
+        ],
     }
     for rel_path, tokens in required_tokens.items():
         text = (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
@@ -15122,6 +15130,7 @@ def _check_emergency_standby_scheduler_no_direct_file_copy_live_db(temp_root: st
                 return False, f"direct file copy token in {relative}: {token}"
     return True, "ok"
 
+
 def _check_emergency_settings_snapshot_schema_drift_detected(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_validation import validate_settings_db_snapshot
 
@@ -15252,6 +15261,92 @@ def _check_emergency_standby_refresh_deferred_rate_limited(temp_root: str) -> tu
         return False, f"reason-change summary count is too low: {reason_changed[0]}"
     return True, "ok"
 
+
+def _check_analyze_ui_stall_logs_classifies_nurse_backup_contention(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "nurse_log", "logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260619.jsonl"
+    rows = [
+        {"ts": "2026-06-19T07:56:07+10:00", "metric": "backup_duration_ms", "value": 22700, "role": "nurse"},
+        {"ts": "2026-06-19T07:56:08+10:00", "metric": "patient_vitals_elapsed_ms", "value": 24085, "role": "nurse"},
+        {"ts": "2026-06-19T07:56:09+10:00", "metric": "event_loop_pause_ms", "value": 25252, "role": "nurse"},
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_ui_stall_logs.py"),
+            "--logs",
+            str(logs_dir),
+            "--date",
+            "2026-06-19",
+            "--role",
+            "nurse",
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"analyze_ui_stall_logs failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    pauses = summary.get("ui_pauses") or []
+    if not pauses:
+        return False, f"analyzer did not report UI pause: {summary}"
+    if pauses[0].get("classification") != "maintenance_contention_backup":
+        return False, f"nurse backup contention was not classified: {pauses[0]}"
+    return True, "ok"
+
+
+def _check_analyze_ui_stall_logs_reports_operblock_icons_schema_drift(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "nurse_log", "logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260619.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-19T08:37:01+10:00",
+            "metric": "emergency_startup_failed",
+            "value": 1,
+            "role": "nurse",
+            "reason": "settings snapshot validation failed: missing settings tables: operblock_icons",
+        },
+        {"ts": "2026-06-19 08:37:02", "metric": "event_loop_pause_ms", "value": 760, "role": "nurse"},
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_ui_stall_logs.py"),
+            "--logs",
+            str(logs_dir),
+            "--date",
+            "2026-06-19",
+            "--role",
+            "nurse",
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"analyze_ui_stall_logs failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    if int(summary.get("settings_snapshot_schema_drift_count") or 0) < 1:
+        return False, f"schema drift summary missing: {summary}"
+    classifications = summary.get("classifications") or {}
+    if int(classifications.get("settings_snapshot_schema_drift") or 0) < 1:
+        return False, f"schema drift classification missing: {summary}"
+    return True, "ok"
 
 
 def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
@@ -23514,6 +23609,8 @@ def main(argv: list[str] | None = None):
         ("emergency_standby_scheduler_no_sqlite_profile_changes", _check_emergency_standby_scheduler_no_sqlite_profile_changes),
         ("emergency_standby_scheduler_no_direct_file_copy_live_db", _check_emergency_standby_scheduler_no_direct_file_copy_live_db),
         ("emergency_standby_refresh_deferred_rate_limited", _check_emergency_standby_refresh_deferred_rate_limited),
+        ("analyze_ui_stall_logs_classifies_nurse_backup_contention", _check_analyze_ui_stall_logs_classifies_nurse_backup_contention),
+        ("analyze_ui_stall_logs_reports_operblock_icons_schema_drift", _check_analyze_ui_stall_logs_reports_operblock_icons_schema_drift),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),
