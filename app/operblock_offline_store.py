@@ -26,6 +26,9 @@ OPERBLOCK_MIGRATION_TITLE = "Перенос данных оперблока"
 OPERBLOCK_MIGRATION_MESSAGE = "Не выключайте ПК. Идёт перенос данных оперблока."
 OPERBLOCK_OFFLINE_ROOT_ENV = "REMCARD_OPERBLOCK_OFFLINE_ROOT"
 RETENTION_DAYS = 30
+SHADOW_MIRROR_MIGRATION_STATUS = "shadow"
+_OPBLOCK_SHADOW_CASE_TABLES = ("operation_table_assignments", "operblock_timeline_events")
+_OPBLOCK_SHADOW_ADMISSION_TABLES = ("vitals", "orders", "patient_status_events")
 
 
 @dataclass
@@ -352,19 +355,28 @@ def has_active_local_operblock_case(root: str | None = None) -> bool:
     conn = None
     try:
         conn = _connect_local_readonly(db_path)
-        row = conn.execute(
+        rows = conn.execute(
             """
-            SELECT offline_case_uuid
+            SELECT id, admission_id, offline_case_uuid, migration_status
             FROM operation_cases
             WHERE status = 'active'
-            LIMIT 1
+            ORDER BY id
             """
-        ).fetchone()
-        if row and metadata is not None:
-            metadata.active_case_uuid = str(row[0] or "") or None
-            metadata.migration_status = "active"
+        ).fetchall()
+        for row in rows:
+            if not _active_case_blocks_network_start(conn, row):
+                continue
+            if metadata is not None:
+                metadata.active_case_uuid = str(row[2] or "") or None
+                metadata.migration_status = "active"
+                write_operblock_offline_metadata(metadata, root)
+            return True
+        if rows and metadata is not None:
+            metadata.active_case_uuid = None
+            if _pending_completed_local_cases_count_on_conn(conn) <= 0:
+                metadata.migration_status = SHADOW_MIRROR_MIGRATION_STATUS
             write_operblock_offline_metadata(metadata, root)
-        return bool(row)
+        return False
     except Exception:
         return False
     finally:
@@ -380,17 +392,7 @@ def pending_completed_local_cases_count(root: str | None = None) -> int:
     conn = None
     try:
         conn = _connect_local_readonly(db_path)
-        row = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM operation_cases
-            WHERE status = 'closed'
-              AND COALESCE(migration_status, '') NOT IN ('verified', 'discarded')
-              AND migrated_at IS NULL
-              AND COALESCE(excluded_from_migration, 0) = 0
-            """
-        ).fetchone()
-        return int(row[0] or 0) if row else 0
+        return _pending_completed_local_cases_count_on_conn(conn)
     except Exception:
         return 0
     finally:
@@ -599,6 +601,188 @@ def _remember_mapping(
     )
 
 
+def _operation_case_shadow_mapping(conn: sqlite3.Connection, offline_case_uuid: str, local_case_id: int):
+    if not _table_exists(conn, "opblock_offline_shadow_map"):
+        return None
+    return conn.execute(
+        """
+        SELECT remote_id, updated_at
+        FROM opblock_offline_shadow_map
+        WHERE offline_case_uuid = ?
+          AND entity_name = 'operation_cases'
+          AND local_id = ?
+        LIMIT 1
+        """,
+        (str(offline_case_uuid or ""), int(local_case_id)),
+    ).fetchone()
+
+
+def _has_unmapped_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    table_name: str,
+    owner_column: str,
+    owner_id: int,
+    offline_case_uuid: str,
+) -> bool:
+    if not _table_exists(conn, table_name) or not _table_exists(conn, "opblock_offline_shadow_map"):
+        return False
+    row = conn.execute(
+        f"""
+        SELECT 1
+        FROM "{table_name}" item
+        WHERE item."{owner_column}" = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM opblock_offline_shadow_map map
+              WHERE map.offline_case_uuid = ?
+                AND map.entity_name = ?
+                AND map.local_id = item.id
+          )
+        LIMIT 1
+        """,
+        (int(owner_id), str(offline_case_uuid or ""), table_name),
+    ).fetchone()
+    return bool(row)
+
+
+def _shadow_case_has_local_only_rows(
+    conn: sqlite3.Connection,
+    *,
+    operation_case_id: int,
+    admission_id: int,
+    offline_case_uuid: str,
+) -> bool:
+    for table_name in _OPBLOCK_SHADOW_CASE_TABLES:
+        if _has_unmapped_shadow_rows(
+            conn,
+            table_name=table_name,
+            owner_column="operation_case_id",
+            owner_id=int(operation_case_id),
+            offline_case_uuid=offline_case_uuid,
+        ):
+            return True
+    for table_name in _OPBLOCK_SHADOW_ADMISSION_TABLES:
+        if _has_unmapped_shadow_rows(
+            conn,
+            table_name=table_name,
+            owner_column="admission_id",
+            owner_id=int(admission_id),
+            offline_case_uuid=offline_case_uuid,
+        ):
+            return True
+    return False
+
+
+def _active_case_blocks_network_start(conn: sqlite3.Connection, row) -> bool:
+    operation_case_id = int(row[0] or 0)
+    admission_id = int(row[1] or 0)
+    offline_case_uuid = str(row[2] or "")
+    if not operation_case_id:
+        return False
+    if not offline_case_uuid:
+        return True
+    if _operation_case_shadow_mapping(conn, offline_case_uuid, operation_case_id) is None:
+        return True
+    return _shadow_case_has_local_only_rows(
+        conn,
+        operation_case_id=operation_case_id,
+        admission_id=admission_id,
+        offline_case_uuid=offline_case_uuid,
+    )
+
+
+def _pending_completed_local_cases_count_on_conn(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM operation_cases
+        WHERE status = 'closed'
+          AND COALESCE(migration_status, '') NOT IN ('verified', 'discarded', ?)
+          AND migrated_at IS NULL
+          AND COALESCE(excluded_from_migration, 0) = 0
+        """,
+        (SHADOW_MIRROR_MIGRATION_STATUS,),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _discard_stale_shadow_active_cases(conn: sqlite3.Connection, active_case_uuids: set[str]) -> int:
+    if not _table_exists(conn, "operation_cases") or not _table_exists(conn, "opblock_offline_shadow_map"):
+        return 0
+    rows = conn.execute(
+        """
+        SELECT id, admission_id, offline_case_uuid
+        FROM operation_cases
+        WHERE status = 'active'
+          AND COALESCE(migration_status, '') IN (?, 'active')
+          AND COALESCE(offline_case_uuid, '') <> ''
+        """,
+        (SHADOW_MIRROR_MIGRATION_STATUS,),
+    ).fetchall()
+    discarded = 0
+    for row in rows:
+        operation_case_id = int(row[0] or 0)
+        admission_id = int(row[1] or 0)
+        offline_case_uuid = str(row[2] or "")
+        if not offline_case_uuid or offline_case_uuid in active_case_uuids:
+            continue
+        if _operation_case_shadow_mapping(conn, offline_case_uuid, operation_case_id) is None:
+            continue
+        if _shadow_case_has_local_only_rows(
+            conn,
+            operation_case_id=operation_case_id,
+            admission_id=admission_id,
+            offline_case_uuid=offline_case_uuid,
+        ):
+            continue
+        cursor = conn.execute(
+            """
+            UPDATE operation_cases
+            SET status = 'cancelled',
+                migration_status = 'discarded',
+                excluded_from_migration = 1,
+                last_modified_by = 'operblock'
+            WHERE id = ?
+              AND status = 'active'
+              AND COALESCE(migration_status, '') IN (?, 'active')
+            """,
+            (operation_case_id, SHADOW_MIRROR_MIGRATION_STATUS),
+        )
+        discarded += int(cursor.rowcount == 1)
+    return discarded
+
+
+def _discard_stale_shadow_active_cases_if_possible(root: str | None, active_case_uuids: set[str]) -> int:
+    metadata = read_operblock_offline_metadata(root)
+    db_path = str(getattr(metadata, "local_db_path", "") or os.path.join(get_operblock_offline_active_dir(root), "operblock_local.db"))
+    if not os.path.isfile(db_path):
+        return 0
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, isolation_level=None, timeout=5.0)
+        configure_connection(conn, profile="network")
+        conn.execute("BEGIN IMMEDIATE")
+        discarded = _discard_stale_shadow_active_cases(conn, active_case_uuids)
+        conn.execute("COMMIT")
+        if discarded and metadata is not None:
+            metadata.active_case_uuid = None
+            if _pending_completed_local_cases_count_on_conn(conn) <= 0:
+                metadata.migration_status = SHADOW_MIRROR_MIGRATION_STATUS
+            write_operblock_offline_metadata(metadata, root)
+        return discarded
+    except Exception:
+        try:
+            if conn is not None and conn.in_transaction:
+                conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        return 0
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _insert_or_update_mapped_row(
     conn: sqlite3.Connection,
     *,
@@ -622,6 +806,7 @@ def _insert_or_update_mapped_row(
                 f'UPDATE "{table_name}" SET {", ".join(assignments)} WHERE id = ?',
                 [payload[key] for key in payload] + [local_id],
             )
+        _remember_mapping(conn, offline_case_uuid, entity_name, remote_id, int(local_id))
         return int(local_id)
     insert_columns = list(payload)
     placeholders = ", ".join("?" for _ in insert_columns)
@@ -723,7 +908,7 @@ def _mirror_active_case(
             "admission_id": local_admission_id,
             "offline_case_uuid": offline_case_uuid,
             "offline_session_id": offline_session_id,
-            "migration_status": "active",
+            "migration_status": SHADOW_MIRROR_MIGRATION_STATUS,
             "original_local_id": None,
             "migrated_at": None,
             "migrated_remote_id": None,
@@ -825,6 +1010,7 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
         """,
     )
     if not active_cases:
+        _discard_stale_shadow_active_cases_if_possible(root, set())
         return 0
 
     local_context = _ensure_local_runtime_schema_ready(root)
@@ -836,6 +1022,7 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
     try:
         _ensure_shadow_map_table(local_conn)
         local_conn.execute("BEGIN IMMEDIATE")
+        active_case_uuids: set[str] = set()
         for case in active_cases:
             case_uuid = _mirror_active_case(
                 local_conn,
@@ -844,10 +1031,13 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
                 case=case,
                 offline_session_id=getattr(metadata, "offline_session_id", "active") if metadata else "active",
             )
+            active_case_uuids.add(case_uuid)
             if metadata is not None:
                 metadata.active_case_uuid = case_uuid
-                metadata.migration_status = "active"
+                if _pending_completed_local_cases_count_on_conn(local_conn) <= 0:
+                    metadata.migration_status = SHADOW_MIRROR_MIGRATION_STATUS
             mirrored += 1
+        discarded = _discard_stale_shadow_active_cases(local_conn, active_case_uuids)
         local_conn.execute("COMMIT")
         if metadata is not None:
             write_operblock_offline_metadata(metadata, root)
@@ -856,6 +1046,7 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
                 "event": "active_cases_mirrored",
                 "reason": str(reason or ""),
                 "count": mirrored,
+                "discarded_stale_shadow_count": discarded,
                 "remote_db_path": os.path.abspath(remote_db_path),
             },
             root=root,
