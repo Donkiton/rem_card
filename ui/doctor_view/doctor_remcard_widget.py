@@ -1704,6 +1704,51 @@ class DoctorRemCardWidget(QWidget):
 
         self._balance_update_timer.stop()
 
+        orders_context_unchanged = self._prepare_patient_card_orders_context(admission_id, date)
+        (
+            card_start_dt,
+            card_end_dt,
+            cached_card_snapshot,
+            cached_vitals_snapshot,
+        ) = self._reset_patient_card_context_state(
+            admission_id,
+            date,
+            balance_patient_period_manual_mode,
+        )
+        self._sync_patient_card_layout_context(
+            admission_id,
+            date,
+            card_start_dt,
+            card_end_dt,
+            orders_context_unchanged,
+        )
+        self._last_change_id = 0
+        self._apply_archive_read_only_state()
+        if not cached_card_snapshot:
+            self._reset_balance_view_state()
+        if cached_vitals_snapshot:
+            self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
+        self._schedule_patient_card_snapshots(
+            admission_id,
+            date,
+            request_snapshot=request_snapshot,
+            ensure_initial_status=ensure_initial_status,
+            cached_vitals_snapshot=cached_vitals_snapshot,
+        )
+        self._activate_patient_card_vitals_tab()
+        self._sync_patient_card_auxiliary_contexts(admission_id, date)
+        self._schedule_nurse_orders_context_for_patient_open(
+            admission_id,
+            date,
+            patient_open_generation,
+        )
+
+        # Запуск фонового обновления
+        QTimer.singleShot(0, self.start_polling)
+        if open_loading_key:
+            hide_app_loading(self, open_loading_key, delay_ms=600)
+
+    def _prepare_patient_card_orders_context(self, admission_id, date) -> bool:
         orders_widget = self._ensure_orders_widget()
         orders_context_unchanged = False
         if orders_widget is not None:
@@ -1716,7 +1761,9 @@ class DoctorRemCardWidget(QWidget):
                 orders_context_unchanged = False
         if orders_widget is not None and not self._archive_read_only_mode and not orders_context_unchanged:
             orders_widget.clear_drafts()
-        
+        return orders_context_unchanged
+
+    def _reset_patient_card_context_state(self, admission_id, date, balance_patient_period_manual_mode):
         self.admission_id = admission_id
         self.current_date = date
         self._balance_patient_period_manual_mode = bool(balance_patient_period_manual_mode)
@@ -1728,12 +1775,40 @@ class DoctorRemCardWidget(QWidget):
             card_start_dt, card_end_dt = date, None
         cached_card_snapshot = self._get_cached_patient_card_snapshot(admission_id, date)
         cached_vitals_snapshot = cached_card_snapshot or self._get_cached_patient_vitals_snapshot(admission_id, date)
+        return card_start_dt, card_end_dt, cached_card_snapshot, cached_vitals_snapshot
 
+    def _sync_patient_card_layout_context(
+        self,
+        admission_id,
+        date,
+        card_start_dt,
+        card_end_dt,
+        orders_context_unchanged: bool,
+    ):
         # Интеграция событий статуса
         self.layout_manager.current_admission_id = admission_id
         self.layout_manager.current_date = date
         self._sync_lab_orders_context()
         self._update_emergency_notice_sector()
+        self._update_chart_context_for_patient_open(admission_id, card_start_dt)
+
+        if hasattr(self.layout_manager, "set_events_context"):
+            self.layout_manager.set_events_context(
+                admission_id=admission_id,
+                status_service=self.service.status_service,
+                shift_date=date,
+                shift_start=card_start_dt,
+                shift_end=card_end_dt,
+            )
+
+        if hasattr(self, 'vitals_input'):
+            self.vitals_input.admission_id = admission_id
+            self.vitals_input.shift_date = date
+            self.vitals_input.mark_dirty()
+
+        self._sync_orders_widget_context_for_patient_open(admission_id, date, orders_context_unchanged)
+
+    def _update_chart_context_for_patient_open(self, admission_id, card_start_dt):
         chart_matches_target = False
         if hasattr(self, 'chart'):
             chart_matches_target = self._chart_matches_context(admission_id, card_start_dt)
@@ -1749,20 +1824,7 @@ class DoctorRemCardWidget(QWidget):
         elif not chart_matches_target:
             self._last_applied_chart_signature = None
 
-        if hasattr(self.layout_manager, "set_events_context"):
-            self.layout_manager.set_events_context(
-                admission_id=admission_id,
-                status_service=self.service.status_service,
-                shift_date=date,
-                shift_start=card_start_dt,
-                shift_end=card_end_dt,
-            )
-        
-        if hasattr(self, 'vitals_input'):
-            self.vitals_input.admission_id = admission_id
-            self.vitals_input.shift_date = date
-            self.vitals_input.mark_dirty()
-            
+    def _sync_orders_widget_context_for_patient_open(self, admission_id, date, orders_context_unchanged: bool):
         if hasattr(self.layout_manager, 'orders_widget'):
             ow = self.layout_manager.orders_widget
             if hasattr(ow, "set_context"):
@@ -1778,36 +1840,41 @@ class DoctorRemCardWidget(QWidget):
             if not self._archive_read_only_mode and not orders_context_unchanged:
                 ow.clear_drafts()
 
-        self._last_change_id = 0
-        self._apply_archive_read_only_state()
-        if not cached_card_snapshot:
-            self._reset_balance_view_state()
+    def _schedule_patient_card_snapshots(
+        self,
+        admission_id,
+        date,
+        *,
+        request_snapshot: bool,
+        ensure_initial_status,
+        cached_vitals_snapshot,
+    ):
+        if not request_snapshot:
+            return
+        should_ensure_initial_status = (
+            self._should_ensure_initial_status_for_date(date)
+            if ensure_initial_status is None
+            else bool(ensure_initial_status)
+        )
         if cached_vitals_snapshot:
-            self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)
-        if request_snapshot:
-            should_ensure_initial_status = (
-                self._should_ensure_initial_status_for_date(date)
-                if ensure_initial_status is None
-                else bool(ensure_initial_status)
+            self._schedule_card_hydration_snapshot(
+                admission_id,
+                date,
+                ensure_initial_status=should_ensure_initial_status,
             )
-            if cached_vitals_snapshot:
-                self._schedule_card_hydration_snapshot(
-                    admission_id,
-                    date,
-                    ensure_initial_status=should_ensure_initial_status,
-                )
-            else:
-                self._request_card_snapshot(
-                    ensure_initial_status=should_ensure_initial_status,
-                    show_empty_message=False,
-                    load_scope="patient_open_vitals",
-                )
-                self._schedule_card_hydration_snapshot(
-                    admission_id,
-                    date,
-                    ensure_initial_status=should_ensure_initial_status,
-                )
-        
+        else:
+            self._request_card_snapshot(
+                ensure_initial_status=should_ensure_initial_status,
+                show_empty_message=False,
+                load_scope="patient_open_vitals",
+            )
+            self._schedule_card_hydration_snapshot(
+                admission_id,
+                date,
+                ensure_initial_status=should_ensure_initial_status,
+            )
+
+    def _activate_patient_card_vitals_tab(self):
         if hasattr(self, 'layout_manager'):
             active_tab = self.layout_manager.set_active_tab("Витальные функции", source="refresh") or "Витальные функции"
             if hasattr(self.layout_manager, 'sector_2b'):
@@ -1815,6 +1882,7 @@ class DoctorRemCardWidget(QWidget):
             if active_tab != "Витальные функции":
                 self.on_tab_changed(active_tab)
 
+    def _sync_patient_card_auxiliary_contexts(self, admission_id, date):
         if hasattr(self, 'balance_controller'):
             self.balance_controller.admission_id = admission_id
             self.balance_controller.shift_date = date
@@ -1825,6 +1893,7 @@ class DoctorRemCardWidget(QWidget):
         if diet_widget:
             diet_widget.set_context(admission_id, date)
 
+    def _schedule_nurse_orders_context_for_patient_open(self, admission_id, date, patient_open_generation: int):
         # Обновляем контекст 1а/5 явно: это нужно и при ПЕРВОМ открытии карты.
         # Важно: manager может еще не существовать, если мы пришли из списка коек.
         nurse_orders_mgr = None
@@ -1840,11 +1909,6 @@ class DoctorRemCardWidget(QWidget):
                     self._set_nurse_orders_context_if_current(mgr, aid, d, gen)
                 ),
             )
-        
-        # Запуск фонового обновления
-        QTimer.singleShot(0, self.start_polling)
-        if open_loading_key:
-            hide_app_loading(self, open_loading_key, delay_ms=600)
 
     def _set_nurse_orders_context_if_current(self, mgr, admission_id, date, generation: int):
         if self._is_closing or generation != self._patient_open_generation:

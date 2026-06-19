@@ -9959,7 +9959,11 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     if load_method is None:
         return False, "load_patient_card not found"
     load_source = ast.get_source_segment(source_text, load_method) or ""
-    if "ow.set_context" not in load_source:
+    orders_context_source = ast.get_source_segment(
+        source_text,
+        methods.get("_sync_orders_widget_context_for_patient_open"),
+    ) or ""
+    if "ow.set_context" not in f"{load_source}\n{orders_context_source}":
         return False, "load_patient_card must update OrdersWidget through set_context"
     request_snapshot_kw = [
         (arg, default)
@@ -9999,6 +10003,117 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     create_source = ast.get_source_segment(source_text, create_method) or ""
     if "_create_card_after_snapshot" not in create_source or "_snapshot_worker is not None" not in create_source:
         return False, "create-card write is not deferred while snapshot worker is pending"
+
+    return True, "ok"
+
+
+def _check_doctor_load_patient_card_refactor_path(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source_path = PROJECT_ROOT / "ui" / "doctor_view" / "doctor_remcard_widget.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source_text)
+    class_defs = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DoctorRemCardWidget"]
+    if not class_defs:
+        return False, "DoctorRemCardWidget class not found"
+    methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
+    load_source = ast.get_source_segment(source_text, methods.get("load_patient_card")) or ""
+    if not load_source:
+        return False, "load_patient_card not found"
+
+    ordered_markers = (
+        "orders_context_unchanged = self._prepare_patient_card_orders_context(admission_id, date)",
+        ") = self._reset_patient_card_context_state(",
+        "self._sync_patient_card_layout_context(",
+        "self._last_change_id = 0",
+        "self._apply_archive_read_only_state()",
+        "if not cached_card_snapshot:",
+        "self._reset_balance_view_state()",
+        "if cached_vitals_snapshot:",
+        "self._apply_patient_open_cache(admission_id, date, cached_vitals_snapshot)",
+        "self._schedule_patient_card_snapshots(",
+        "self._activate_patient_card_vitals_tab()",
+        "self._sync_patient_card_auxiliary_contexts(admission_id, date)",
+        "self._schedule_nurse_orders_context_for_patient_open(",
+        "QTimer.singleShot(0, self.start_polling)",
+        "hide_app_loading(self, open_loading_key, delay_ms=600)",
+    )
+    marker_positions = [load_source.find(marker) for marker in ordered_markers]
+    if any(position < 0 for position in marker_positions):
+        missing = [marker for marker, position in zip(ordered_markers, marker_positions) if position < 0]
+        return False, f"load_patient_card refactor path markers missing: {missing}"
+    if marker_positions != sorted(marker_positions):
+        return False, "load_patient_card refactor path order changed"
+
+    helper_tokens = {
+        "_prepare_patient_card_orders_context": (
+            "_ensure_orders_widget()",
+            "orders_context_unchanged = False",
+            "orders_widget.clear_drafts()",
+            "return orders_context_unchanged",
+        ),
+        "_reset_patient_card_context_state": (
+            "self.admission_id = admission_id",
+            "self.current_date = date",
+            "self._card_snapshot_cache = None",
+            "_get_cached_patient_card_snapshot(admission_id, date)",
+            "_get_cached_patient_vitals_snapshot(admission_id, date)",
+        ),
+        "_sync_patient_card_layout_context": (
+            "self.layout_manager.current_admission_id = admission_id",
+            "self.layout_manager.current_date = date",
+            "self._sync_lab_orders_context()",
+            "self._update_emergency_notice_sector()",
+            "self._update_chart_context_for_patient_open(admission_id, card_start_dt)",
+            "self.layout_manager.set_events_context(",
+            "self.vitals_input.mark_dirty()",
+            "self._sync_orders_widget_context_for_patient_open(admission_id, date, orders_context_unchanged)",
+        ),
+        "_sync_orders_widget_context_for_patient_open": (
+            "ow.set_context(",
+            "ow.service = self.service",
+            "if not self._archive_read_only_mode and not orders_context_unchanged:",
+            "ow.clear_drafts()",
+        ),
+        "_schedule_patient_card_snapshots": (
+            "if not request_snapshot:",
+            "self._should_ensure_initial_status_for_date(date)",
+            "self._request_card_snapshot(",
+            'load_scope="patient_open_vitals"',
+            "self._schedule_card_hydration_snapshot(",
+        ),
+        "_activate_patient_card_vitals_tab": (
+            'set_active_tab("Витальные функции", source="refresh")',
+            "select_tab(active_tab, emit=False)",
+            "self.on_tab_changed(active_tab)",
+        ),
+        "_sync_patient_card_auxiliary_contexts": (
+            "self.balance_controller.admission_id = admission_id",
+            "self.balance_controller.shift_date = date",
+            "set_patient_period_manual_mode",
+            "_ensure_diet_widget()",
+            "diet_widget.set_context(admission_id, date)",
+        ),
+        "_schedule_nurse_orders_context_for_patient_open": (
+            "ensure_nurse_orders_manager",
+            "_bind_nurse_orders_balance_signals()",
+            "QTimer.singleShot(",
+            "_set_nurse_orders_context_if_current(mgr, aid, d, gen)",
+        ),
+    }
+    for helper_name, tokens in helper_tokens.items():
+        helper_source = ast.get_source_segment(source_text, methods.get(helper_name)) or ""
+        if not helper_source:
+            return False, f"{helper_name} helper not found"
+        missing = [token for token in tokens if token not in helper_source]
+        if missing:
+            return False, f"{helper_name} lost patient-open side effects: {missing}"
+
+    chart_source = ast.get_source_segment(source_text, methods.get("_update_chart_context_for_patient_open")) or ""
+    match_pos = chart_source.find("chart_matches_target = self._chart_matches_context")
+    clear_pos = chart_source.find("self.chart.clear_for_context")
+    assign_pos = chart_source.find("self.chart.admission_id = admission_id")
+    if min(match_pos, clear_pos, assign_pos) < 0 or not (match_pos < clear_pos and match_pos < assign_pos):
+        return False, "chart context must still be checked before clear/assign side effects"
 
     return True, "ok"
 
@@ -10446,11 +10561,22 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     if load_patient_card is None:
         return False, "DoctorRemCardWidget.load_patient_card not found"
     load_patient_source = ast.get_source_segment(doctor_text, load_patient_card) or ""
-    if "orders_context_unchanged" not in load_patient_source:
+    prepare_orders_source = _method_source(
+        doctor_text,
+        doctor_methods,
+        "_prepare_patient_card_orders_context",
+    )
+    sync_orders_source = _method_source(
+        doctor_text,
+        doctor_methods,
+        "_sync_orders_widget_context_for_patient_open",
+    )
+    patient_open_orders_source = "\n".join((load_patient_source, prepare_orders_source, sync_orders_source))
+    if "orders_context_unchanged" not in patient_open_orders_source:
         return False, "doctor patient open must track unchanged orders context"
-    if "if not self._archive_read_only_mode:\n                ow.clear_drafts()" in load_patient_source:
+    if "if not self._archive_read_only_mode:\n                ow.clear_drafts()" in patient_open_orders_source:
         return False, "doctor patient reopen must not clear drafts again for unchanged orders context"
-    if "if not self._archive_read_only_mode and not orders_context_unchanged:" not in load_patient_source:
+    if "if not self._archive_read_only_mode and not orders_context_unchanged:" not in patient_open_orders_source:
         return False, "doctor patient open clear_drafts must be guarded by orders_context_unchanged"
 
     orders_path = root / "ui/doctor_view/orders_widget.py"
@@ -10838,11 +10964,22 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
         if load_method is None:
             return False, f"{role}: load_patient_card not found"
         load_source = ast.get_source_segment(source_text, load_method) or ""
-        if "clear_for_context" not in load_source:
+        chart_context_source = load_source
+        if role == "doctor":
+            chart_context_source = "\n".join(
+                (
+                    load_source,
+                    ast.get_source_segment(
+                        source_text,
+                        methods.get("_update_chart_context_for_patient_open"),
+                    ) or "",
+                )
+            )
+        if "clear_for_context" not in chart_context_source:
             return False, f"{role}: chart must be cleared immediately on patient card switch"
         if role == "doctor":
-            match_pos = load_source.find("chart_matches_target = self._chart_matches_context")
-            assign_pos = load_source.find("self.chart.admission_id = admission_id")
+            match_pos = chart_context_source.find("chart_matches_target = self._chart_matches_context")
+            assign_pos = chart_context_source.find("self.chart.admission_id = admission_id")
             if match_pos < 0 or assign_pos < 0 or match_pos > assign_pos:
                 return False, "doctor: chart context must be checked before assigning the new admission_id"
 
@@ -23485,6 +23622,7 @@ def main(argv: list[str] | None = None):
         ("medical_audit_log_triggers", _check_medical_audit_log_triggers),
         ("lab_orders_are_scoped_to_card_day", _check_lab_orders_are_scoped_to_card_day),
         ("doctor_create_card_avoids_open_snapshot_race", _check_doctor_create_card_avoids_open_snapshot_race),
+        ("doctor_load_patient_card_refactor_path", _check_doctor_load_patient_card_refactor_path),
         (
             "orders_widgets_defer_snapshot_reload_thread_creation",
             _check_orders_widgets_defer_snapshot_reload_thread_creation,
