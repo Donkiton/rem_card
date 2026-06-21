@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rem_card.app.paths import get_icon_dir
 from rem_card.data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabMaterial
 from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService, normalize_lab_times
 from rem_card.services.shift_service import ShiftService
@@ -88,6 +90,105 @@ def _material_label(material: Any, material_options: tuple[tuple[str, str], ...]
     return labels.get(key, key or "Материал не указан")
 
 
+def _icon_qss_url(file_name: str) -> str:
+    path = os.path.abspath(os.path.join(get_icon_dir(), file_name))
+    return path.replace("\\", "/")
+
+
+LAB_COMBO_ARROW_ICON = _icon_qss_url("combo_arrow_down.svg")
+LAB_TIME_UP_ICON = _icon_qss_url("decor_arrow_up.svg")
+LAB_TIME_DOWN_ICON = _icon_qss_url("decor_arrow_down.svg")
+
+LAB_COMBO_VIEW_STYLE = """
+QAbstractItemView {
+    background-color: #ffffff;
+    color: #172033;
+    border: 1px solid #b9c5d3;
+    selection-background-color: #dbeafe;
+    selection-color: #172033;
+    outline: 0;
+}
+QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+    background-color: #ffffff;
+}
+QAbstractItemView::item:hover {
+    background-color: #eef6ff;
+}
+QAbstractItemView::item:selected {
+    background-color: #dbeafe;
+    color: #172033;
+}
+"""
+
+
+def _lab_popup_time_control_style(radius: int) -> str:
+    return f"""
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #d7dee8;
+                background-color: #f4f7fb;
+                border-top-right-radius: {radius}px;
+                border-bottom-right-radius: {radius}px;
+            }}
+            QComboBox::drop-down:hover {{
+                background-color: #e8f1fb;
+                border-left-color: #7aa6d8;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{LAB_COMBO_ARROW_ICON}");
+                width: 12px;
+                height: 12px;
+            }}
+            QTimeEdit::up-button {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #d7dee8;
+                border-bottom: 1px solid #d7dee8;
+                background-color: #f4f7fb;
+                border-top-right-radius: {radius}px;
+            }}
+            QTimeEdit::up-button:hover {{
+                background-color: #e8f1fb;
+                border-left-color: #7aa6d8;
+                border-bottom-color: #7aa6d8;
+            }}
+            QTimeEdit::down-button {{
+                subcontrol-origin: padding;
+                subcontrol-position: bottom right;
+                width: 24px;
+                border-left: 1px solid #d7dee8;
+                background-color: #f4f7fb;
+                border-bottom-right-radius: {radius}px;
+            }}
+            QTimeEdit::down-button:hover {{
+                background-color: #e8f1fb;
+                border-left-color: #7aa6d8;
+            }}
+            QTimeEdit::up-arrow {{
+                image: url("{LAB_TIME_UP_ICON}");
+                width: 10px;
+                height: 10px;
+            }}
+            QTimeEdit::down-arrow {{
+                image: url("{LAB_TIME_DOWN_ICON}");
+                width: 10px;
+                height: 10px;
+            }}
+"""
+
+
+def _apply_lab_combo_view_style(combo: QComboBox) -> None:
+    try:
+        combo.view().setStyleSheet(LAB_COMBO_VIEW_STYLE)
+    except Exception:
+        pass
+
+
 class OneTimeLabAnalysisDialog(BaseStyledDialog):
     def __init__(self, parent=None, material_options: tuple[tuple[str, str], ...] | None = None):
         super().__init__("Добавить анализ", parent)
@@ -99,11 +200,18 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
     def _build_ui(self):
         self.content_widget.setStyleSheet(
             """
-            QLineEdit, QComboBox, QTimeEdit, QPlainTextEdit {
+            QLineEdit, QPlainTextEdit {
                 background: #ffffff;
                 border: 1px solid #c8d2dc;
                 border-radius: 6px;
                 padding: 6px 8px;
+            }
+            QComboBox, QTimeEdit {
+                background: #ffffff;
+                border: 1px solid #c8d2dc;
+                border-radius: 6px;
+                padding: 6px 30px 6px 8px;
+                min-height: 24px;
             }
             QPlainTextEdit {
                 min-height: 58px;
@@ -119,6 +227,7 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
                 padding-bottom: 6px;
             }
             """
+            + _lab_popup_time_control_style(6)
         )
         self.name_input = QLineEdit()
         self.name_input.setPlaceholderText("Название анализа")
@@ -126,6 +235,7 @@ class OneTimeLabAnalysisDialog(BaseStyledDialog):
         self.material_combo = QComboBox()
         for key, label in self._material_options:
             self.material_combo.addItem(label, key)
+        _apply_lab_combo_view_style(self.material_combo)
 
         self.time_edit = QTimeEdit()
         self.time_edit.setDisplayFormat("HH:mm")
@@ -196,11 +306,18 @@ class EditLabOrderDialog(BaseStyledDialog):
                 border-radius: 7px;
                 padding: 9px 10px;
             }
-            QComboBox, QTimeEdit, QPlainTextEdit {
+            QPlainTextEdit {
                 background: #ffffff;
                 border: 1px solid #c8d2dc;
                 border-radius: 6px;
                 padding: 6px 8px;
+            }
+            QComboBox, QTimeEdit {
+                background: #ffffff;
+                border: 1px solid #c8d2dc;
+                border-radius: 6px;
+                padding: 6px 30px 6px 8px;
+                min-height: 24px;
             }
             QPlainTextEdit {
                 min-height: 72px;
@@ -216,6 +333,7 @@ class EditLabOrderDialog(BaseStyledDialog):
                 padding-bottom: 6px;
             }
             """
+            + _lab_popup_time_control_style(6)
         )
         self.analysis_label = QLabel("Анализ")
         self.analysis_label.setObjectName("lab_edit_analysis_name")
@@ -224,6 +342,7 @@ class EditLabOrderDialog(BaseStyledDialog):
         self.material_combo = QComboBox()
         for key, label in self._material_options:
             self.material_combo.addItem(label, key)
+        _apply_lab_combo_view_style(self.material_combo)
 
         self.time_edit = QTimeEdit()
         self.time_edit.setDisplayFormat("HH:mm")
@@ -322,11 +441,18 @@ class AddLabAnalysisDialog(BaseStyledDialog):
             QLabel#lab_dialog_status {
                 color: #6b7785;
             }
-            QLineEdit, QComboBox, QTimeEdit, QPlainTextEdit {
+            QLineEdit, QPlainTextEdit {
                 background-color: #ffffff;
                 border: 1px solid #c8d2dc;
                 border-radius: 7px;
                 padding: 7px 9px;
+            }
+            QComboBox, QTimeEdit {
+                background-color: #ffffff;
+                border: 1px solid #c8d2dc;
+                border-radius: 7px;
+                padding: 7px 31px 7px 9px;
+                min-height: 26px;
             }
             QLineEdit:focus, QComboBox:focus, QTimeEdit:focus, QPlainTextEdit:focus {
                 border-color: #7aa6d8;
@@ -388,6 +514,7 @@ class AddLabAnalysisDialog(BaseStyledDialog):
                 border-color: #d4dde6;
             }
             """
+            + _lab_popup_time_control_style(7)
         )
 
         panels = QHBoxLayout()
@@ -447,6 +574,7 @@ class AddLabAnalysisDialog(BaseStyledDialog):
         self.material_combo = QComboBox()
         for key, label in self._material_options:
             self.material_combo.addItem(label, key)
+        _apply_lab_combo_view_style(self.material_combo)
         self.material_combo.currentIndexChanged.connect(self._update_current_material)
         layout.addWidget(self.material_combo)
 

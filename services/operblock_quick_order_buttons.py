@@ -211,6 +211,12 @@ def operblock_extra_quick_type_buttons(buttons: list[dict[str, Any]] | None = No
     return [dict(item or {}) for item in source if not bool((item or {}).get("built_in"))]
 
 
+def load_operblock_extra_quick_type_buttons(*, user_dict_dir: str | None = None) -> list[dict[str, Any]]:
+    return operblock_extra_quick_type_buttons(
+        load_operblock_quick_order_buttons(user_dict_dir=user_dict_dir)
+    )
+
+
 def operblock_quick_order_button_label_map(buttons: list[dict[str, Any]] | None = None) -> dict[str, str]:
     source = buttons if buttons is not None else load_operblock_quick_order_buttons()
     result: dict[str, str] = {}

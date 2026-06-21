@@ -116,6 +116,7 @@ class OperBlockPatientInput:
     birth_date: date
     diagnosis_code: Optional[str]
     diagnosis_text: str
+    started_at: Optional[datetime] = None
     department_profile: str = ""
     operation_name: str = ""
     anesthesia_assistance_type: str = ""
@@ -745,6 +746,7 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         birth_date=_to_birth_date(payload.get("birth_date")),
         diagnosis_code=payload.get("diagnosis_code"),
         diagnosis_text=str(payload.get("diagnosis_text") or ""),
+        started_at=_parse_dt(payload.get("started_at")),
         department_profile=normalize_profile_department(payload.get("department_profile")),
         operation_name=_normalize_case_text(payload.get("operation_name")),
         anesthesia_assistance_type=normalize_operblock_anesthesia_type_label(
@@ -2640,6 +2642,104 @@ class OperBlockService:
         return int(cursor.lastrowid)
 
     @staticmethod
+    def _same_minute(left: datetime | None, right: datetime | None) -> bool:
+        if left is None or right is None:
+            return False
+        return _minute_floor(left) == _minute_floor(right)
+
+    def _started_at_edit_vital_rows(
+        self,
+        cursor: sqlite3.Cursor,
+        admission_id: int,
+    ) -> list[dict[str, Any]]:
+        rows = cursor.execute(
+            """
+            SELECT id, admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp,
+                   COALESCE(revision, 0) AS revision
+            FROM vitals
+            WHERE admission_id = ?
+            ORDER BY datetime("datetime") ASC, id ASC
+            LIMIT 2
+            """,
+            (int(admission_id),),
+        ).fetchall()
+        return [_row_to_dict(row) for row in rows]
+
+    def _editable_initial_vital_row_for_started_at(
+        self,
+        cursor: sqlite3.Cursor,
+        case: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        rows = self._started_at_edit_vital_rows(cursor, int(case["admission_id"]))
+        if not rows:
+            return None
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        started_at = _parse_dt(case.get("started_at"))
+        vital_dt = _parse_dt(row.get("datetime"))
+        if not self._same_minute(started_at, vital_dt):
+            return None
+        if any(row.get(field) is not None for field in ("temp", "rr", "cvp")):
+            return None
+        return row
+
+    def _operation_started_at_edit_lock_reason(
+        self,
+        cursor: sqlite3.Cursor,
+        case: Mapping[str, Any],
+    ) -> str:
+        operation_case_id = int(case["operation_case_id"])
+        admission_id = int(case["admission_id"])
+        event = cursor.execute(
+            """
+            SELECT id
+            FROM operblock_timeline_events
+            WHERE operation_case_id = ?
+              AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+            LIMIT 1
+            """,
+            (operation_case_id,),
+        ).fetchone()
+        if event:
+            return "В карте уже есть этапы, пособие, операция или события введения препаратов."
+
+        order = cursor.execute(
+            """
+            SELECT id
+            FROM orders
+            WHERE admission_id = ?
+              AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+            LIMIT 1
+            """,
+            (admission_id,),
+        ).fetchone()
+        if order:
+            return "В карте уже есть назначения."
+
+        vital_rows = self._started_at_edit_vital_rows(cursor, admission_id)
+        if not vital_rows:
+            return ""
+        if len(vital_rows) > 1:
+            return "В карте уже есть витальные показатели."
+        if self._editable_initial_vital_row_for_started_at(cursor, case) is None:
+            return "В карте уже есть витальные показатели."
+        return ""
+
+    def _assert_started_at_can_be_changed(
+        self,
+        cursor: sqlite3.Cursor,
+        case: Mapping[str, Any],
+    ) -> None:
+        reason = self._operation_started_at_edit_lock_reason(cursor, case)
+        if reason:
+            raise ValueError(
+                "Время поступления в оперблок можно изменить только до внесения данных в карту. "
+                "Отмените внесённые изменения и повторите попытку. "
+                f"Причина: {reason}"
+            )
+
+    @staticmethod
     def _set_stage_payload_text(payload: dict[str, Any], key: str, value: str) -> None:
         if value:
             payload[key] = value
@@ -2759,7 +2859,12 @@ class OperBlockService:
 
         birth_date = _to_birth_date(data.birth_date)
         now = _now_text()
-        age = storage_age_from_birth_date(birth_date, datetime.now())
+        started_dt = _minute_floor(data.started_at or datetime.now())
+        current_minute = _minute_floor(datetime.now())
+        if started_dt > current_minute + timedelta(minutes=1):
+            raise ValueError("Время поступления в оперблок не может быть позже текущего времени.")
+        started_text = started_dt.isoformat(timespec="seconds")
+        age = storage_age_from_birth_date(birth_date, started_dt)
         last_name, first_name, middle_name = _split_name(full_name)
         admission_uid = str(uuid.uuid4())
         bed_number = 0
@@ -2796,7 +2901,7 @@ class OperBlockService:
                     patient_id,
                     bed_number,
                     history_number,
-                    now,
+                    started_text,
                     age["patient_age"],
                     age["patient_months"],
                     age["patient_age_unit"],
@@ -2831,7 +2936,7 @@ class OperBlockService:
                     admission_id,
                     table_code,
                     now,
-                    now,
+                    started_text,
                     self.client_id,
                     data.operation_name or None,
                     data.anesthesia_assistance_type or None,
@@ -2872,7 +2977,7 @@ class OperBlockService:
                     created_by_role, created_by_client_id, last_modified_by
                 ) VALUES (?, ?, ?, 'active', 'operblock', ?, 'operblock')
                 """,
-                (operation_case_id, table_code, now, self.client_id),
+                (operation_case_id, table_code, started_text, self.client_id),
             )
             cursor.execute(
                 """
@@ -2881,13 +2986,13 @@ class OperBlockService:
                     created_by, last_modified_by
                 ) VALUES (?, 'OR', 'operblock', 'В операционной', ?, 'operblock', 'operblock')
                 """,
-                (admission_id, now),
+                (admission_id, started_text),
             )
             if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, {
                     "operation_case_id": operation_case_id,
                     "admission_id": admission_id,
-                    "started_at": now,
+                    "started_at": started_text,
                     "ended_at": None,
                 }, data)
             return {
@@ -3002,10 +3107,14 @@ class OperBlockService:
                 preop_pulse = data.get("preop_pulse")
                 preop_spo2 = data.get("preop_spo2")
                 vitals_source = "case"
+            started_at_edit_lock_reason = self._operation_started_at_edit_lock_reason(cursor, data)
             return {
                 "operation_case_id": int(data.get("operation_case_id") or 0),
                 "table_code": data.get("table_code") or "",
                 "table_name": data.get("table_display_name") or "",
+                "started_at": data.get("started_at"),
+                "can_edit_started_at": not bool(started_at_edit_lock_reason),
+                "started_at_edit_lock_reason": started_at_edit_lock_reason,
                 "history_number": data.get("history_number") or "",
                 "full_name": data.get("full_name") or "",
                 "gender": data.get("patient_gender") or "",
@@ -3054,14 +3163,27 @@ class OperBlockService:
             raise ValueError("Диагноз не заполнен.")
         department_profile = normalize_profile_department(data.department_profile)
         birth_date = _to_birth_date(data.birth_date)
-        age = storage_age_from_birth_date(birth_date, datetime.now())
         last_name, first_name, middle_name = _split_name(full_name)
         now = _now_text()
+        requested_started_at = _minute_floor(data.started_at) if data.started_at is not None else None
+        if requested_started_at is not None and requested_started_at > _minute_floor(datetime.now()) + timedelta(minutes=1):
+            raise ValueError("Время поступления в оперблок не может быть позже текущего времени.")
 
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
             patient_id = int(case["patient_id"])
             admission_id = int(case["admission_id"])
+            old_started_at = _parse_dt(case.get("started_at"))
+            if old_started_at is None:
+                raise OperBlockConflictError("У операции не задано время поступления. Обновите список оперблока.")
+            effective_started_at = requested_started_at or _minute_floor(old_started_at)
+            started_at_changed = _minute_floor(old_started_at) != effective_started_at
+            initial_vital_to_move = None
+            if started_at_changed:
+                self._assert_started_at_can_be_changed(cursor, case)
+                initial_vital_to_move = self._editable_initial_vital_row_for_started_at(cursor, case)
+            started_text = effective_started_at.isoformat(timespec="seconds")
+            age = storage_age_from_birth_date(birth_date, effective_started_at)
             cursor.execute(
                 """
                 UPDATE patients
@@ -3078,6 +3200,7 @@ class OperBlockService:
                 """
                 UPDATE admissions
                 SET history_number = ?,
+                    admission_datetime = ?,
                     patient_age = ?,
                     patient_months = ?,
                     patient_age_unit = ?,
@@ -3091,6 +3214,7 @@ class OperBlockService:
                 """,
                 (
                     history_number,
+                    started_text,
                     age["patient_age"],
                     age["patient_months"],
                     age["patient_age_unit"],
@@ -3105,7 +3229,8 @@ class OperBlockService:
             cursor.execute(
                 """
                 UPDATE operation_cases
-                SET planned_operation_name = ?,
+                SET started_at = ?,
+                    planned_operation_name = ?,
                     planned_anesthesia_assistance_type = ?,
                     planned_surgeons_json = ?,
                     planned_operating_nurse = ?,
@@ -3127,6 +3252,7 @@ class OperBlockService:
                   AND status = 'active'
                 """,
                 (
+                    started_text,
                     data.operation_name or None,
                     data.anesthesia_assistance_type or None,
                     _surgeons_json(data.surgeons),
@@ -3148,8 +3274,49 @@ class OperBlockService:
             )
             if cursor.rowcount != 1:
                 raise OperBlockConflictError("Случай уже изменён другим рабочим местом. Обновите список оперблока.")
+            if started_at_changed:
+                cursor.execute(
+                    """
+                    UPDATE operation_table_assignments
+                    SET assigned_at = ?,
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1,
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                    WHERE operation_case_id = ?
+                      AND table_code = ?
+                      AND status = 'active'
+                      AND released_at IS NULL
+                    """,
+                    (started_text, int(operation_case_id), case.get("table_code")),
+                )
+                cursor.execute(
+                    """
+                    UPDATE patient_status_events
+                    SET start_time = ?,
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1,
+                        updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                    WHERE admission_id = ?
+                      AND status = 'OR'
+                      AND reason_type = 'operblock'
+                      AND end_time IS NULL
+                    """,
+                    (started_text, admission_id),
+                )
+                if initial_vital_to_move is not None:
+                    cursor.execute(
+                        """
+                        UPDATE vitals
+                        SET datetime = ?,
+                            last_modified_by = 'operblock',
+                            revision = COALESCE(revision, 0) + 1,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                        WHERE id = ?
+                        """,
+                        (started_text, int(initial_vital_to_move["id"])),
+                    )
             case_for_vitals = dict(case)
-            case_for_vitals["started_at"] = case.get("started_at")
+            case_for_vitals["started_at"] = started_text
             case_for_vitals["ended_at"] = case.get("ended_at")
             if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, case_for_vitals, data)

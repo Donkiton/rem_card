@@ -91,9 +91,9 @@ from rem_card.services.operblock_quick_orders import (
     save_operblock_quick_orders,
 )
 from rem_card.services.operblock_quick_order_buttons import (
+    load_operblock_extra_quick_type_buttons,
     load_operblock_quick_order_buttons,
     normalize_operblock_extra_quick_type_keys,
-    operblock_extra_quick_type_buttons,
     operblock_quick_order_button_label_map,
 )
 from rem_card.services.operblock_medication_presets import (
@@ -686,6 +686,64 @@ def _parse_datetime_value(value) -> datetime | None:
 
 def _minute_floor_dt(value: datetime | None) -> datetime | None:
     return value.replace(second=0, microsecond=0) if isinstance(value, datetime) else None
+
+
+def _operblock_time_minutes_from_text(value: str) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    colon_match = re.fullmatch(r"\s*(\d{1,2})\s*:\s*(\d{0,2})\s*", raw)
+    if colon_match:
+        hour = int(colon_match.group(1))
+        minute = int(colon_match.group(2) or "0")
+    else:
+        digits = re.sub(r"\D", "", raw)
+        if not digits:
+            return None
+        if len(digits) <= 2:
+            hour = int(digits)
+            minute = 0
+        elif len(digits) == 3:
+            hour = int(digits[:1])
+            minute = int(digits[1:])
+        else:
+            hour = int(digits[:2])
+            minute = int(digits[2:4])
+    if hour == 24 and minute == 0:
+        return 0
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour * 60 + minute
+    return None
+
+
+def _operblock_format_time_edit_text(value: str) -> str:
+    raw = str(value or "")
+    digits = re.sub(r"\D", "", raw)[:4]
+    if not digits:
+        return ""
+    if ":" in raw:
+        parts = raw.split(":", 1)
+        hour_digits = re.sub(r"\D", "", parts[0])[:2]
+        minute_digits = re.sub(r"\D", "", parts[1])[:2]
+        return f"{hour_digits}:{minute_digits}" if minute_digits else f"{hour_digits}:"
+    if len(digits) == 1:
+        if int(digits) > 2:
+            return f"0{digits}:"
+        return digits
+    if len(digits) == 2:
+        if int(digits) <= 23:
+            return f"{digits}:"
+        return f"0{digits[0]}:{digits[1]}"
+    if len(digits) == 3:
+        if int(digits[:2]) <= 23:
+            return f"{digits[:2]}:{digits[2]}"
+        return f"0{digits[0]}:{digits[1:]}"
+    return f"{digits[:2]}:{digits[2:4]}"
+
+
+def _operblock_time_text_from_minutes(minutes: int) -> str:
+    normalized = int(minutes) % (24 * 60)
+    return f"{normalized // 60:02d}:{normalized % 60:02d}"
 
 
 def _format_protocol_started_at(value) -> str:
@@ -4846,7 +4904,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
 
     def _load_extra_quick_type_options(self) -> list[dict]:
         try:
-            return operblock_extra_quick_type_buttons(load_operblock_quick_order_buttons())
+            return load_operblock_extra_quick_type_buttons()
         except Exception:
             logger.exception("Не удалось загрузить дополнительные типы быстрых назначений")
             return []
@@ -5260,6 +5318,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         template = self._working_templates[template_index]
         if template is None:
             return
+        self._extra_quick_type_options = self._load_extra_quick_type_options()
         if not self._extra_quick_type_options:
             CustomMessageBox.information(
                 self,
@@ -7708,6 +7767,285 @@ class OperBlockVitalsServiceAdapter:
         return self._remcard_service.enqueue_write(*args, **kwargs)
 
 
+OPERBLOCK_STARTED_AT_LOCK_TOOLTIP = (
+    "Есть изменения в карте. Отмените их, чтобы изменить время поступления пациента в оперблок."
+)
+
+
+class OperBlockAdmissionTimeInput(QFrame):
+    def __init__(self, initial_datetime: datetime | None = None, parent=None):
+        super().__init__(parent)
+        initial = _minute_floor_dt(initial_datetime) or datetime.now().replace(second=0, microsecond=0)
+        self._base_datetime = initial
+        self._max_datetime = datetime.now().replace(second=0, microsecond=0)
+        self._time_text_updating = False
+        self._locked = False
+        self._lock_reason = ""
+        self._init_ui()
+        self.set_datetime(initial)
+
+    def _init_ui(self) -> None:
+        self.setObjectName("OperBlockAdmissionTimeInput")
+        self.setStyleSheet(
+            f"""
+            QFrame#OperBlockAdmissionTimeInput {{
+                background: transparent;
+                border: none;
+            }}
+            QFrame#OperBlockAdmissionTimeFrame {{
+                background-color: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 8px;
+            }}
+            QFrame#OperBlockAdmissionTimeFrame[focused="true"] {{
+                border: 1px solid #6366F1;
+            }}
+            QFrame#OperBlockAdmissionTimeFrame[locked="true"] {{
+                background-color: #F8FAFC;
+                border: 1px solid #CBD5E1;
+            }}
+            QLineEdit#OperBlockAdmissionTimeLineEdit {{
+                background: transparent;
+                border: none;
+                color: #111827;
+                font-size: 17px;
+                font-weight: 700;
+                padding: 0 12px;
+                selection-background-color: #C7D2FE;
+            }}
+            QLineEdit#OperBlockAdmissionTimeLineEdit[locked="true"] {{
+                color: #64748B;
+            }}
+            QFrame#OperBlockAdmissionTimeStepper {{
+                background: transparent;
+                border: none;
+            }}
+            QPushButton#OperBlockAdmissionTimeInfoButton {{
+                background-color: #FFF7ED;
+                border: 1px solid #FDBA74;
+                border-radius: 10px;
+                color: #C2410C;
+                font-size: 13px;
+                font-weight: 900;
+                padding: 0;
+            }}
+            QLabel#OperBlockAdmissionTimeNote {{
+                color: {TEXT_SECONDARY};
+                font-size: 11px;
+                line-height: 14px;
+                background: transparent;
+                border: none;
+            }}
+            QLabel#OperBlockAdmissionTimeNote[locked="true"] {{
+                color: #B45309;
+            }}
+            """
+            + operblock_arrow_button_style("QPushButton#OperBlockAdmissionTimeStepButton")
+        )
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self.time_frame = QFrame()
+        self.time_frame.setObjectName("OperBlockAdmissionTimeFrame")
+        self.time_frame.setFixedHeight(40)
+        self.time_frame.setMinimumWidth(170)
+        self.time_frame.setMaximumWidth(240)
+        self.time_frame.setProperty("focused", False)
+        self.time_frame.setProperty("locked", False)
+        frame_layout = QHBoxLayout(self.time_frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setSpacing(0)
+
+        self.time_input = QLineEdit()
+        self.time_input.setObjectName("OperBlockAdmissionTimeLineEdit")
+        self.time_input.setPlaceholderText("06:40")
+        self.time_input.setMaxLength(5)
+        self.time_input.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.time_input.textEdited.connect(self._on_time_text_edited)
+        self.time_input.editingFinished.connect(self._commit_time_text)
+        self.time_input.installEventFilter(self)
+        frame_layout.addWidget(self.time_input, 1)
+
+        stepper = QFrame()
+        stepper.setObjectName("OperBlockAdmissionTimeStepper")
+        stepper.setFixedWidth(42)
+        stepper_layout = QVBoxLayout(stepper)
+        stepper_layout.setContentsMargins(6, 4, 6, 4)
+        stepper_layout.setSpacing(4)
+
+        self.up_button = QPushButton()
+        self.up_button.setObjectName("OperBlockAdmissionTimeStepButton")
+        self.up_button.setFixedSize(30, 14)
+        self.up_button.setIcon(operblock_arrow_icon(up=True))
+        self.up_button.setIconSize(QSize(12, 12))
+        self.up_button.setCursor(Qt.PointingHandCursor)
+        self.up_button.clicked.connect(lambda _=False: self._step_time(1))
+
+        self.down_button = QPushButton()
+        self.down_button.setObjectName("OperBlockAdmissionTimeStepButton")
+        self.down_button.setFixedSize(30, 14)
+        self.down_button.setIcon(operblock_arrow_icon(up=False))
+        self.down_button.setIconSize(QSize(12, 12))
+        self.down_button.setCursor(Qt.PointingHandCursor)
+        self.down_button.clicked.connect(lambda _=False: self._step_time(-1))
+
+        stepper_layout.addWidget(self.up_button)
+        stepper_layout.addWidget(self.down_button)
+        frame_layout.addWidget(stepper, 0)
+        row.addWidget(self.time_frame, 0)
+
+        self.info_button = QPushButton("!")
+        self.info_button.setObjectName("OperBlockAdmissionTimeInfoButton")
+        self.info_button.setFixedSize(20, 20)
+        self.info_button.setCursor(Qt.PointingHandCursor)
+        self.info_button.setToolTip(OPERBLOCK_STARTED_AT_LOCK_TOOLTIP)
+        self.info_button.clicked.connect(self._show_lock_tooltip)
+        self.info_button.hide()
+        row.addWidget(self.info_button, 0, Qt.AlignVCenter)
+        root.addLayout(row, 0)
+
+        self.note_label = QLabel(
+            "Время можно изменить до внесения данных в карту. После начала пособия, операции, назначений "
+            "или дополнительных витальных показателей сначала отмените эти изменения."
+        )
+        self.note_label.setObjectName("OperBlockAdmissionTimeNote")
+        self.note_label.setWordWrap(True)
+        self.note_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.note_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        root.addWidget(self.note_label, 1)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "time_input", None):
+            if event.type() == QEvent.FocusIn:
+                self._set_time_focus(True)
+            elif event.type() == QEvent.FocusOut:
+                self._set_time_focus(False)
+        return super().eventFilter(obj, event)
+
+    def _set_time_focus(self, focused: bool) -> None:
+        self.time_frame.setProperty("focused", bool(focused))
+        self._refresh_widget_style(self.time_frame)
+
+    @staticmethod
+    def _refresh_widget_style(widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _on_time_text_edited(self, text: str) -> None:
+        if self._time_text_updating:
+            return
+        formatted = _operblock_format_time_edit_text(text)
+        self._set_time_input_text(formatted, select_all=False)
+
+    def _commit_time_text(self) -> str:
+        minutes = _operblock_time_minutes_from_text(self.time_input.text())
+        if minutes is None:
+            minutes = self._base_datetime.hour * 60 + self._base_datetime.minute
+        selected_dt = self._coerce_datetime(self._datetime_from_minutes(minutes))
+        self._base_datetime = selected_dt
+        normalized = _operblock_time_text_from_minutes(selected_dt.hour * 60 + selected_dt.minute)
+        self._set_time_input_text(normalized, select_all=False)
+        return normalized
+
+    def _datetime_from_minutes(self, minutes: int) -> datetime:
+        hour = int(minutes) // 60
+        minute = int(minutes) % 60
+        base = self._base_datetime or datetime.now().replace(second=0, microsecond=0)
+        candidates = [
+            datetime.combine(base.date() + timedelta(days=offset), datetime.min.time()).replace(hour=hour, minute=minute)
+            for offset in (-1, 0, 1)
+        ]
+        bounded = [item for item in candidates if self._max_datetime is None or item <= self._max_datetime]
+        source = bounded or candidates
+        return min(source, key=lambda item: abs((item - base).total_seconds()))
+
+    def _coerce_datetime(self, value: datetime) -> datetime:
+        selected = _minute_floor_dt(value) or datetime.now().replace(second=0, microsecond=0)
+        current_minute = datetime.now().replace(second=0, microsecond=0)
+        if self._max_datetime is None or current_minute > self._max_datetime:
+            self._max_datetime = current_minute
+        if self._max_datetime is not None and selected > self._max_datetime:
+            return self._max_datetime
+        return selected
+
+    def _step_time(self, delta_minutes: int) -> None:
+        if self._locked:
+            return
+        minutes = _operblock_time_minutes_from_text(self.time_input.text())
+        current_dt = self._datetime_from_minutes(minutes) if minutes is not None else self._base_datetime
+        selected_dt = self._coerce_datetime(current_dt + timedelta(minutes=int(delta_minutes)))
+        self._base_datetime = selected_dt
+        self._set_time_input_text(selected_dt.strftime("%H:%M"), select_all=True)
+
+    def _set_time_input_text(self, text: str, *, select_all: bool) -> None:
+        self._time_text_updating = True
+        try:
+            self.time_input.setText(str(text or "")[:5])
+            if select_all:
+                self.time_input.setFocus(Qt.OtherFocusReason)
+                self.time_input.selectAll()
+            else:
+                self.time_input.setCursorPosition(len(self.time_input.text()))
+        finally:
+            self._time_text_updating = False
+
+    def set_datetime(self, value: datetime | str | None) -> None:
+        parsed = _minute_floor_dt(_parse_datetime_value(value)) if not isinstance(value, datetime) else _minute_floor_dt(value)
+        selected = parsed or datetime.now().replace(second=0, microsecond=0)
+        self._base_datetime = selected
+        self._set_time_input_text(selected.strftime("%H:%M"), select_all=False)
+
+    def set_locked(self, locked: bool, reason: str = "") -> None:
+        self._locked = bool(locked)
+        self._lock_reason = str(reason or "").strip()
+        tooltip = (
+            f"{OPERBLOCK_STARTED_AT_LOCK_TOOLTIP}\nПричина: {self._lock_reason}"
+            if self._lock_reason
+            else OPERBLOCK_STARTED_AT_LOCK_TOOLTIP
+        )
+        self.time_input.setReadOnly(self._locked)
+        self.time_input.setProperty("locked", self._locked)
+        self.time_frame.setProperty("locked", self._locked)
+        self.up_button.setEnabled(not self._locked)
+        self.down_button.setEnabled(not self._locked)
+        self.info_button.setVisible(self._locked)
+        self.info_button.setToolTip(tooltip)
+        self.note_label.setProperty("locked", self._locked)
+        if self._locked:
+            self.note_label.setText(
+                "Время поступления заблокировано. Отмените внесённые изменения в карте, чтобы снова изменить это время."
+            )
+        else:
+            self.note_label.setText(
+                "Время можно изменить до внесения данных в карту. После начала пособия, операции, назначений "
+                "или дополнительных витальных показателей сначала отмените эти изменения."
+            )
+        self._refresh_widget_style(self.time_input)
+        self._refresh_widget_style(self.time_frame)
+        self._refresh_widget_style(self.note_label)
+
+    def _show_lock_tooltip(self) -> None:
+        QToolTip.showText(
+            self.info_button.mapToGlobal(self.info_button.rect().bottomRight()),
+            self.info_button.toolTip() or OPERBLOCK_STARTED_AT_LOCK_TOOLTIP,
+            self.info_button,
+            self.info_button.rect(),
+            9000,
+        )
+
+    def datetime_value(self) -> datetime:
+        self._commit_time_text()
+        return self._base_datetime
+
+    def datetime_text(self) -> str:
+        return self.datetime_value().isoformat(timespec="seconds")
+
+
 class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
     EMPTY_BIRTH_DATE = QDate(1900, 1, 1)
 
@@ -7939,10 +8277,14 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         operation, operation_form = self._section("3. ОПЕРАЦИОННАЯ ИНФОРМАЦИЯ")
         self.operation_name_input = _line_edit()
         self.operation_name_input.setPlaceholderText("Название операции")
+        self.operation_name_input.setMinimumWidth(430)
+        self.operation_name_input.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.admission_time_input = OperBlockAdmissionTimeInput(datetime.now(), self)
         self.anesthesia_assistance_type_combo = QComboBox()
         self.anesthesia_assistance_type_combo.setEditable(True)
         self.anesthesia_assistance_type_combo.setFixedHeight(34)
         self.anesthesia_assistance_type_combo.setMinimumWidth(430)
+        self.anesthesia_assistance_type_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.anesthesia_assistance_type_combo.setMinimumContentsLength(38)
         self.anesthesia_assistance_type_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.anesthesia_assistance_type_combo.setStyleSheet(_operblock_combo_box_style())
@@ -8092,6 +8434,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         anesthesia_team_layout.addWidget(self.anesthetist_combo, 1, 1)
         anesthesia_team_layout.setColumnStretch(0, 1)
         anesthesia_team_layout.setColumnStretch(1, 1)
+        operation_form.addRow("Время поступления в оперблок:", self.admission_time_input)
         operation_form.addRow("Название операции:", self.operation_name_input)
         operation_form.addRow("Вид анест. пособия:", self.anesthesia_assistance_type_combo)
         self.height_weight_row_label = self._composite_form_label(
@@ -8414,6 +8757,14 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         elif diagnosis_text and not self.diagnosis_text_input.isReadOnly():
             self.diagnosis_text_input.setText(diagnosis_text)
         self.operation_name_input.setText(str((data or {}).get("operation_name") or ""))
+        started_at = _parse_datetime_value((data or {}).get("started_at"))
+        if started_at is not None:
+            self.admission_time_input.set_datetime(started_at)
+        can_edit_started_at = bool((data or {}).get("can_edit_started_at", True))
+        self.admission_time_input.set_locked(
+            not can_edit_started_at,
+            str((data or {}).get("started_at_edit_lock_reason") or OPERBLOCK_STARTED_AT_LOCK_TOOLTIP),
+        )
         self.anesthesia_assistance_type_combo.setEditText(
             normalize_operblock_anesthesia_type_label((data or {}).get("anesthesia_assistance_type"))
         )
@@ -8614,6 +8965,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "full_name": full_name,
             "gender": self.gender_combo.currentText(),
             "birth_date": birth_date,
+            "started_at": self.admission_time_input.datetime_text(),
             "diagnosis_code": diagnosis_code or None,
             "diagnosis_text": diagnosis_text,
             "department_profile": normalize_profile_department(self.department_profile_combo.currentText()),
