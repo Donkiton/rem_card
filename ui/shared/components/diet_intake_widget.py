@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from rem_card.app.paths import get_icon_dir
 from rem_card.app.logger import logger
 from rem_card.services import persistent_snapshot_cache
 from rem_card.services.diet_service import schedule_items
@@ -28,6 +30,16 @@ from rem_card.ui.styles.theme import COLOR_SECONDARY
 
 DIET_ENTITIES = {"diet_templates", "diet_plan", "oral_intake_events"}
 DIET_CACHE_LIMIT = 10
+
+
+def _diet_combo_arrow_image() -> str:
+    arrow_path = os.path.join(get_icon_dir(), "combo_arrow_down.svg")
+    if not os.path.exists(arrow_path):
+        return "none"
+    return f"url({arrow_path.replace(os.sep, '/')})"
+
+
+DIET_COMBO_ARROW_IMAGE = _diet_combo_arrow_image()
 
 
 class NoWheelComboBox(QComboBox):
@@ -207,8 +219,28 @@ class DietIntakeWidget(QWidget):
                 color: #111111;
                 border: 1px solid #bdc3c7;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 2px 28px 2px 6px;
                 min-height: 22px;
+            }
+            QComboBox#template_combo:hover {
+                border-color: #7aa6d8;
+            }
+            QComboBox#template_combo:focus {
+                border: 1px solid #3b82c4;
+            }
+            QComboBox#template_combo::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #d7dee8;
+                background-color: #f4f7fb;
+                border-top-right-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QComboBox#template_combo::down-arrow {
+                image: __DIET_COMBO_ARROW_IMAGE__;
+                width: 12px;
+                height: 12px;
             }
             QComboBox#template_combo QAbstractItemView {
                 background: #ffffff;
@@ -265,6 +297,7 @@ class DietIntakeWidget(QWidget):
                 background: #f8f9fa;
             }
             """
+            .replace("__DIET_COMBO_ARROW_IMAGE__", DIET_COMBO_ARROW_IMAGE)
         )
 
     def set_external_sector_header(self, enabled: bool):
