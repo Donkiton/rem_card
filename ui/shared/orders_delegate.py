@@ -9,6 +9,7 @@ from ...services.order_domain_service import (
     NURSE_MARK_EXECUTED,
     NURSE_MARK_NOT_EXECUTED,
 )
+from ...services.order_service import CVP_QUICK_ORDER_KEY, CVP_QUICK_ORDER_TEXT
 from ..styles.theme import BG_ALT_ROW
 
 class OrdersDelegate(QStyledItemDelegate):
@@ -119,8 +120,9 @@ class OrdersDelegate(QStyledItemDelegate):
         dose_unit = order.dose_unit if hasattr(order, 'dose_unit') and order.dose_unit else ""
         order_type = order.type if hasattr(order, 'type') else OrderType.PROCEDURE
         drug_key = str(getattr(order, 'drug_key', '') or '').strip().lower()
+        is_quick_cvp = self._is_quick_cvp_order(order)
 
-        if drug_key in ('ruchnoivvod', 'plasma', 'blood') or re.match(r'^[A-Za-z]+\. ', latin.strip()):
+        if drug_key in ('ruchnoivvod', 'plasma', 'blood', CVP_QUICK_ORDER_KEY) or re.match(r'^[A-Za-z]+\. ', latin.strip()):
             prefix = ""
         else:
             prefix = "S. " if order_type != OrderType.PROCEDURE else ""
@@ -142,11 +144,33 @@ class OrdersDelegate(QStyledItemDelegate):
         return {
             "line1": f"{prefix}{latin} {dose_str}".strip(),
             "line2": line2,
+            "single_line_centered": bool(is_quick_cvp and not line2),
             "show_savecard": bool(
                 getattr(order, 'is_finalized', False)
                 and not getattr(model, 'has_any_draft', False)
             ),
         }
+
+    @staticmethod
+    def _normalize_cvp_order_text(value: object) -> str:
+        text = str(value or "").strip().lower().replace("ё", "е")
+        return re.sub(r"[^0-9a-zа-я]+", "", text)
+
+    @classmethod
+    def _is_quick_cvp_order(cls, order) -> bool:
+        drug_key = str(getattr(order, 'drug_key', '') or '').strip().lower()
+        if drug_key == CVP_QUICK_ORDER_KEY:
+            return True
+        if drug_key != 'ruchnoivvod':
+            return False
+
+        order_text = getattr(order, "_order_text", "")
+        if not order_text:
+            return False
+        return (
+            cls._normalize_cvp_order_text(order_text)
+            == cls._normalize_cvp_order_text(CVP_QUICK_ORDER_TEXT)
+        )
 
     def _parse_order_comment(self, comment_text: str, fallback_duration) -> str:
         line2_parts = []
@@ -226,7 +250,10 @@ class OrdersDelegate(QStyledItemDelegate):
         painter.drawRect(option.rect)
 
         display = self._build_order_display(order, model)
-        self._draw_order_text(painter, option.rect, display["line1"], display["line2"])
+        if display.get("single_line_centered"):
+            self._draw_single_line_order_text(painter, option.rect, display["line1"])
+        else:
+            self._draw_order_text(painter, option.rect, display["line1"], display["line2"])
 
         if display["show_savecard"]:
             pixmap = self._get_scaled_savecard_pixmap(16)
@@ -249,6 +276,13 @@ class OrdersDelegate(QStyledItemDelegate):
             rect2 = QRect(rect.left() + 5, rect.top() + 25, rect.width() - 10, 15)
             elided_line2 = font_metrics.elidedText(line2_text, Qt.ElideRight, rect2.width())
             painter.drawText(rect2, Qt.AlignLeft | Qt.AlignVCenter, elided_line2)
+
+    def _draw_single_line_order_text(self, painter: QPainter, rect: QRect, line_text: str):
+        painter.setPen(Qt.black)
+        text_rect = QRect(rect.left() + 5, rect.top(), rect.width() - 10, rect.height())
+        font_metrics = painter.fontMetrics()
+        elided_line = font_metrics.elidedText(line_text, Qt.ElideRight, text_rect.width())
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, elided_line)
 
     def _paint_time_cell(self, painter: QPainter, option: QStyleOptionViewItem, admin, hour_dt, now: datetime):
         painter.save()

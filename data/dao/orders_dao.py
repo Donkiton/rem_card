@@ -255,6 +255,9 @@ class OrdersDAO:
         raw_datetime = rd.get("datetime")
         if raw_datetime:
             setattr(order, "_print_order_datetime", datetime.fromisoformat(str(raw_datetime).replace(" ", "T")))
+        raw_text = rd.get("text")
+        if raw_text is not None:
+            setattr(order, "_order_text", str(raw_text))
         return order
 
     def get_order_ids(self, admission_id: int, date: Optional[datetime] = None, only_committed: bool = False) -> List[int]:
@@ -297,7 +300,7 @@ class OrdersDAO:
                 row_id = int(rd.get('id') or 0)
                 if is_cursor_newer(row_updated_at, row_id, new_sync_cursor["updated_at"], new_sync_cursor["id"]):
                     new_sync_cursor = make_sync_cursor(row_updated_at, row_id)
-                orders.append(OrderDTO(
+                order = OrderDTO(
                     id=rd['id'],
                     admission_id=rd['admission_id'],
                     drug_key=rd['drug_key'],
@@ -321,7 +324,11 @@ class OrdersDAO:
                     comment=rd['comment'],
                     last_modified_by=rd.get('last_modified_by'),
                     updated_at=rd.get('updated_at')
-                ))
+                )
+                raw_text = rd.get("text")
+                if raw_text is not None:
+                    setattr(order, "_order_text", str(raw_text))
+                orders.append(order)
         if isinstance(last_sync_time, dict):
             return orders, new_sync_cursor
         return orders, new_sync_cursor["updated_at"]

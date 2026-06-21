@@ -1420,6 +1420,9 @@ class RemCardService(QObject):
     def add_order(self, dto: OrderDTO):
         return self._orders.add_order(dto)
 
+    def add_cvp_order_if_missing(self, admission_id: int, shift_date: datetime):
+        return self._orders.add_cvp_order_if_missing(admission_id, shift_date)
+
     def update_order(self, order_id: int, dto: OrderDTO, expected_revision: Optional[int] = None):
         return self._orders.update_order(order_id, dto, expected_revision=expected_revision)
 

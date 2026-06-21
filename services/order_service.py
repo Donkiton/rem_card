@@ -1,18 +1,20 @@
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import List, Mapping, Optional, Sequence
 
 from rem_card.data.dao.sync_cursor import normalize_sync_cursor
-from rem_card.data.dto.remcard_dto import OrderStatus
 from rem_card.services.order_domain_service import OrderDomainService
 from rem_card.services.shift_service import ShiftService
 
-from ..data.dto.remcard_dto import OrderDTO
+from ..data.dto.remcard_dto import OrderDTO, OrderType, OrderStatus
 from ..data.dao.orders_dao import OrdersDAO
 
 
 ORDER_CONFLICT_MESSAGE = "Данные изменены другим рабочим местом. Обновите карточку."
+CVP_QUICK_ORDER_TEXT = "ЦВД (см.вод.ст.)"
+CVP_QUICK_ORDER_KEY = "quick_cvp"
 
 
 class OrderConflictError(RuntimeError):
@@ -218,6 +220,82 @@ class OrderService:
                     dto.sort_order = next_sort_order_by_context[context_key]
                     next_sort_order_by_context[context_key] += 1
                 self.dao.add_order(dto)
+
+    @staticmethod
+    def _normalize_cvp_order_text(value: object) -> str:
+        text = str(value or "").strip().lower().replace("ё", "е")
+        return re.sub(r"[^0-9a-zа-я]+", "", text)
+
+    @classmethod
+    def _is_cvp_order_text(cls, value: object) -> bool:
+        normalized = cls._normalize_cvp_order_text(value)
+        target = cls._normalize_cvp_order_text(CVP_QUICK_ORDER_TEXT)
+        return normalized == target or normalized == f"{target}0"
+
+    @classmethod
+    def _row_is_cvp_order(cls, row) -> bool:
+        if row is None:
+            return False
+        return cls._is_cvp_order_text(row["latin"]) or cls._is_cvp_order_text(row["text"])
+
+    def add_cvp_order_if_missing(self, admission_id: int, shift_date: datetime) -> tuple[Optional[OrderDTO], bool]:
+        start, end = self._shifts.get_day_period(shift_date)
+        now = datetime.now()
+        created_at = now if start <= now < end else start
+
+        with self.dao.db.remcard_transaction(source="orders_add_cvp_if_missing") as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM orders
+                WHERE admission_id = ?
+                  AND datetime >= ? AND datetime < ?
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, created_at ASC, id ASC
+                """,
+                (int(admission_id), start.isoformat(), end.isoformat()),
+            )
+            for row in cursor.fetchall():
+                if self._row_is_cvp_order(row):
+                    return self.dao._map_order_row(row), False
+
+            sort_order = self.dao.get_next_sort_order(int(admission_id), created_at)
+            cursor.execute(
+                """
+                INSERT INTO orders (
+                    admission_id, datetime, text, drug_key, latin, type, status,
+                    dose_value, dose_unit, is_per_kg, frequency, specific_times,
+                    rate_ml_h, volume_total, duration_min, sort_order, is_committed,
+                    created_at, comment, last_modified_by, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                """,
+                (
+                    int(admission_id),
+                    created_at.isoformat(),
+                    CVP_QUICK_ORDER_TEXT,
+                    CVP_QUICK_ORDER_KEY,
+                    CVP_QUICK_ORDER_TEXT,
+                    OrderType.MEDICATION.value,
+                    OrderStatus.ACTIVE.value,
+                    0.0,
+                    "",
+                    0,
+                    1,
+                    "[]",
+                    None,
+                    None,
+                    0,
+                    sort_order,
+                    0,
+                    created_at.isoformat(),
+                    "",
+                    "doctor",
+                ),
+            )
+            order_id = cursor.lastrowid
+            cursor.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+            row = cursor.fetchone()
+            return self.dao._map_order_row(row) if row else None, True
 
     def update_order_status(self, order_id: int, status: str, expected_revision: Optional[int] = None):
         if expected_revision is None:

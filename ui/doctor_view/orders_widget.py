@@ -56,6 +56,7 @@ class OrdersWidget(QWidget):
     localBalanceChanged = Signal()
     _LOCAL_SILENT_FORCE_PREFIXES = (
         "orders_add_input:",
+        "orders_add_cvp:",
         "orders_edit_input:",
         "orders_left_click:",
         "orders_middle_click:",
@@ -3229,6 +3230,43 @@ class OrdersWidget(QWidget):
                 if self._is_current_context(target_admission_id, target_shift_date)
                 else None
             ),
+        )
+
+    def add_cvp_order_if_missing(self):
+        if self._is_read_only() or not self.service or not self.admission_id or not self.shift_date:
+            return
+        if not hasattr(self.service, "add_cvp_order_if_missing"):
+            self._show_warning("Сервис быстрого назначения ЦВД недоступен.")
+            return
+
+        target_admission_id = self.admission_id
+        target_shift_date = self.shift_date
+        result_holder = {}
+
+        def operation():
+            result_holder["result"] = self.service.add_cvp_order_if_missing(
+                target_admission_id,
+                target_shift_date,
+            )
+
+        def after_success():
+            if not self._is_current_context(target_admission_id, target_shift_date):
+                return
+            order, created = result_holder.get("result") or (None, False)
+            if created and order is not None:
+                self._insert_local_order_after_add(order)
+                return
+            if order is not None and self.model is not None:
+                order_id = getattr(order, "id", None)
+                if any(getattr(existing, "id", None) == order_id for existing in self.model.orders):
+                    self.check_drafts()
+                    return
+            self.request_refresh(force=True, source="orders_add_cvp", priority="HIGH")
+
+        self._enqueue_write(
+            f"orders_add_cvp:{target_admission_id}",
+            operation=operation,
+            on_success=after_success,
         )
 
     def _build_order_edit_dialog(self, order: OrderDTO):
