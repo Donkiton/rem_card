@@ -15,6 +15,7 @@ from rem_card.ui.shared.recovery_bed_status_actions import (
     cancel_recovery_transfer,
     open_recovery_transfer_dialog,
 )
+from rem_card.services.shift_service import ShiftService
 from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.data.dto.remcard_dto import PatientStatus
 import pathlib
@@ -117,6 +118,7 @@ class BedsSelectionWidget(QWidget):
         self._last_ordered_row_signatures = ()
         self.init_ui()
         self._last_shift_start = self._current_shift_start()
+        self._last_plan_card_window_active = self._current_plan_card_window_active()
         self._shift_boundary_timer = QTimer(self)
         self._shift_boundary_timer.timeout.connect(self._refresh_on_shift_boundary)
         self._shift_boundary_timer.start(30000)
@@ -135,13 +137,31 @@ class BedsSelectionWidget(QWidget):
             start -= datetime.timedelta(days=1)
         return start
 
+    def _current_plan_card_window_active(self):
+        now = datetime.datetime.now()
+        if self.remcard_service and hasattr(self.remcard_service, "get_day_period"):
+            try:
+                _start, end = self.remcard_service.get_day_period(now)
+                remaining = end - now
+                return datetime.timedelta(0) < remaining <= datetime.timedelta(
+                    minutes=ShiftService.PLAN_CARD_WINDOW_MINUTES
+                )
+            except Exception:
+                pass
+        return ShiftService.is_plan_card_window(now)
+
     def _refresh_on_shift_boundary(self):
         if self._is_closing:
             return
         shift_start = self._current_shift_start()
-        if self._last_shift_start == shift_start:
+        plan_card_window_active = self._current_plan_card_window_active()
+        if (
+            self._last_shift_start == shift_start
+            and self._last_plan_card_window_active == plan_card_window_active
+        ):
             return
         self._last_shift_start = shift_start
+        self._last_plan_card_window_active = plan_card_window_active
         self.refresh(queue_if_running=True)
 
     def init_ui(self):
@@ -389,6 +409,7 @@ class BedsSelectionWidget(QWidget):
         row = PatientBedRow(patient)
         row.show_card_requested.connect(lambda p, a: self.patient_selected.emit(p, a))
         row.create_card_requested.connect(lambda p: self.patient_selected.emit(p, "create"))
+        row.plan_card_requested.connect(lambda p: self.patient_selected.emit(p, "plan"))
         row.archive_requested.connect(lambda p: self.patient_selected.emit(p, "archive"))
         row.full_report_requested.connect(self.on_full_report_requested)
         row.daily_report_requested.connect(self.on_daily_report_requested)
@@ -432,6 +453,7 @@ class BedsSelectionWidget(QWidget):
 
         card_exists = bool(runtime_snapshot.get("card_exists", False))
         yest_exists = bool(runtime_snapshot.get("yest_exists", False))
+        plan_card_available = bool(runtime_snapshot.get("plan_card_available", False))
         status_value = getattr(status_dto, "status", None)
         has_outcome = bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
         is_recovery = is_recovery_bed(getattr(patient, "bed_number", None))
@@ -445,6 +467,7 @@ class BedsSelectionWidget(QWidget):
         )
         row.sector_4v.btn_show_card.setEnabled(card_exists)
         row.sector_4v.btn_new_card.setEnabled(not card_exists and not has_outcome)
+        row.sector_4v.btn_plan_card.setEnabled(plan_card_available and not has_outcome)
         row.sector_4v.btn_yest_card.setEnabled(yest_exists)
 
         latest_values = runtime_snapshot.get("latest_values") or {

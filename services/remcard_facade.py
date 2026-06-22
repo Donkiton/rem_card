@@ -259,6 +259,31 @@ class RemCardService(QObject):
             result[int(row["admission_id"])] = bool(row["has_card"])
         return result
 
+    def build_plan_card_state(
+        self,
+        admission_id: int,
+        now: Optional[datetime] = None,
+        *,
+        current_card_exists: Optional[bool] = None,
+        planned_card_exists: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        reference_dt = now or datetime.now()
+        _current_start, current_end = self.get_day_period(reference_dt)
+        target_date = current_end
+        window_active = self._shifts.is_plan_card_window(reference_dt)
+
+        if current_card_exists is None:
+            current_card_exists = self.has_card(int(admission_id), reference_dt)
+        if planned_card_exists is None:
+            planned_card_exists = self.has_card(int(admission_id), target_date)
+
+        return {
+            "plan_card_available": bool(window_active and current_card_exists),
+            "plan_card_window_active": bool(window_active),
+            "plan_card_exists": bool(planned_card_exists),
+            "plan_card_target_date": target_date,
+        }
+
     def get_beds_runtime_snapshot(
         self,
         admission_ids: Sequence[int],
@@ -279,6 +304,9 @@ class RemCardService(QObject):
 
         card_now_map = self.has_cards_bulk(ids, now)
         card_yest_map = self.has_cards_bulk(ids, yesterday)
+        plan_window_active = self._shifts.is_plan_card_window(now)
+        plan_target_date = self._shifts.get_next_shift_start(now)
+        plan_card_map = self.has_cards_bulk(ids, plan_target_date) if plan_window_active else {}
         latest_values_map = self._vitals.get_latest_vital_values_bulk(ids)
         settings_map = self._vitals.get_vital_settings_cached_bulk(ids, now)
 
@@ -299,6 +327,10 @@ class RemCardService(QObject):
                 "status": status_map.get(adm_id),
                 "card_exists": bool(card_now_map.get(adm_id, False)),
                 "yest_exists": bool(card_yest_map.get(adm_id, False)),
+                "plan_card_available": bool(plan_window_active and card_now_map.get(adm_id, False)),
+                "plan_card_window_active": bool(plan_window_active),
+                "plan_card_exists": bool(plan_card_map.get(adm_id, False)),
+                "plan_card_target_date": plan_target_date,
                 "latest_values": dict(latest_values_map.get(adm_id, default_values)),
                 "settings": dict(settings_map.get(adm_id, default_settings)),
             }
@@ -372,6 +404,7 @@ class RemCardService(QObject):
         )
         yest_date = date - timedelta(days=1)
         card_exists = True if vitals else self.has_card(admission_id, date)
+        plan_card_state = self.build_plan_card_state(admission_id)
 
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
@@ -389,6 +422,7 @@ class RemCardService(QObject):
             "card_exists": card_exists,
             "yest_exists": self.has_card(admission_id, yest_date),
             "has_vitals": bool(vitals),
+            **plan_card_state,
         }
         if include_change_cursor:
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
@@ -405,6 +439,8 @@ class RemCardService(QObject):
         patient = self.get_patient(admission_id)
         current_status = self.get_current_status(admission_id)
         yest_date = date - timedelta(days=1)
+        card_exists = self.has_card(admission_id, date)
+        plan_card_state = self.build_plan_card_state(admission_id)
         snapshot: Dict[str, Any] = {
             "admission_id": admission_id,
             "shift_date": date,
@@ -414,8 +450,9 @@ class RemCardService(QObject):
             "status": current_status,
             "latest_values": self.get_latest_vital_values(admission_id),
             "settings": self.get_vital_settings_cached(admission_id, date),
-            "card_exists": self.has_card(admission_id, date),
+            "card_exists": card_exists,
             "yest_exists": self.has_card(admission_id, yest_date),
+            **plan_card_state,
         }
         if include_change_cursor:
             snapshot["change_id"] = self.get_latest_change_id(admission_id)

@@ -7,6 +7,7 @@ class ShiftService:
     SHIFT_START_HOUR = 8
     MINUTES_PER_SHIFT = 24 * 60
     OUTCOME_ROLLOVER_WINDOW_MINUTES = 4 * 60
+    PLAN_CARD_WINDOW_MINUTES = 60
 
     @staticmethod
     def _shift_start(date: datetime) -> datetime:
@@ -175,6 +176,19 @@ class ShiftService:
         start = ShiftService._shift_start(date)
         end = start + timedelta(days=1)
         return start, end
+
+    @staticmethod
+    def get_next_shift_start(date: datetime) -> datetime:
+        """Возвращает начало следующих реанимационных суток."""
+        _start, end = ShiftService.get_day_period(date)
+        return end
+
+    @staticmethod
+    def is_plan_card_window(date: datetime, window_minutes: int = PLAN_CARD_WINDOW_MINUTES) -> bool:
+        """Плановая карта доступна только в последние window_minutes текущей смены."""
+        _start, end = ShiftService.get_day_period(date)
+        remaining = end - date
+        return timedelta(0) < remaining <= timedelta(minutes=max(0, int(window_minutes)))
 
     @staticmethod
     def calculate_icu_day(admission_datetime: Optional[datetime], card_date: datetime) -> Optional[int]:

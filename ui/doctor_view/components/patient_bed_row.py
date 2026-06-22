@@ -10,6 +10,7 @@ class PatientBedRow(QWidget):
     # Сигнал теперь принимает (patient, action_type)
     show_card_requested = Signal(object, str)
     create_card_requested = Signal(object)
+    plan_card_requested = Signal(object)
     archive_requested = Signal(object)
     full_report_requested = Signal(object)
     daily_report_requested = Signal(object)
@@ -89,6 +90,7 @@ class PatientBedRow(QWidget):
         # Перехватываем сигналы кнопок
         self.sector_4v.show_card_requested.connect(lambda: self.show_card_requested.emit(self.patient, "show"))
         self.sector_4v.create_card_requested.connect(lambda: self.create_card_requested.emit(self.patient))
+        self.sector_4v.plan_card_requested.connect(lambda: self.plan_card_requested.emit(self.patient))
         self.sector_4v.archive_requested.connect(lambda: self.archive_requested.emit(self.patient))
         self.sector_4v.full_report_requested.connect(lambda: self.full_report_requested.emit(self.patient))
         self.sector_4v.daily_report_requested.connect(lambda: self.daily_report_requested.emit(self.patient))

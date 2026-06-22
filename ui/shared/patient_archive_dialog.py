@@ -58,6 +58,7 @@ class CardListWidget(QWidget):
             return
 
         self.list_widget.clear()
+        dates = self._visible_card_dates(dates)
         if not dates:
             item = QListWidgetItem("Нет сохраненных карт")
             item.setFlags(Qt.NoItemFlags)
@@ -69,6 +70,17 @@ class CardListWidget(QWidget):
             item = QListWidgetItem(f"Карта №{i} — {date_str}")
             item.setData(Qt.UserRole, dt)
             self.list_widget.addItem(item)
+
+    def _visible_card_dates(self, dates):
+        try:
+            current_start, _ = self.remcard_service.get_day_period(datetime.now())
+        except Exception:
+            current_start = datetime.now()
+        visible = []
+        for dt in dates or []:
+            if dt <= current_start:
+                visible.append(dt)
+        return visible
 
     def _on_load_failed(self, exc: Exception):
         logger.warning("Не удалось загрузить список карт пациента: %s", exc, exc_info=True)

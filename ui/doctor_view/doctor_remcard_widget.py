@@ -892,11 +892,15 @@ class DoctorRemCardWidget(QWidget):
             self._snapshot_pending = None
             self._create_card_after_snapshot = False
             return
-        if self._create_card_after_snapshot:
+        pending_create = self._create_card_after_snapshot
+        if pending_create:
             self._create_card_after_snapshot = False
             self._snapshot_pending = None
             hide_app_loading(self, f"doctor-card-snapshot:{id(self)}", delay_ms=350)
-            QTimer.singleShot(0, self.on_create_card_clicked)
+            if isinstance(pending_create, dict):
+                QTimer.singleShot(0, lambda data=pending_create: self.on_create_card_clicked(**data))
+            else:
+                QTimer.singleShot(0, self.on_create_card_clicked)
             return
         if self._snapshot_pending:
             QTimer.singleShot(0, self._request_pending_card_snapshot)
@@ -1632,11 +1636,14 @@ class DoctorRemCardWidget(QWidget):
             snapshot = self._card_snapshot_cache or {}
             card_exists = bool(snapshot.get("card_exists"))
             yest_exists = bool(snapshot.get("yest_exists"))
+            plan_card_available = bool(snapshot.get("plan_card_available"))
 
             # Сохраняем бизнес-логику 4в (наличие карт), добавляя только ограничение read-only.
-            s4v.set_buttons_state(card_exists, yest_exists)
+            s4v.set_buttons_state(card_exists, yest_exists, plan_card_available)
             if read_only or self._current_status_is_outcome():
                 s4v.btn_new_card.setEnabled(False)
+                if hasattr(s4v, "btn_plan_card"):
+                    s4v.btn_plan_card.setEnabled(False)
             s4v.btn_card_list.setEnabled(True)
             s4v.btn_daily_print.setEnabled(True)
             s4v.btn_all_print.setEnabled(True)
@@ -1969,6 +1976,7 @@ class DoctorRemCardWidget(QWidget):
                     layout.sector_4v.set_buttons_state(
                         bool(runtime.get("card_exists")),
                         bool(runtime.get("yest_exists")),
+                        bool(runtime.get("plan_card_available")),
                     )
 
             logger.info(
@@ -2180,6 +2188,7 @@ class DoctorRemCardWidget(QWidget):
             s4v.archive_requested.connect(self.show_archive)
             s4v.show_card_requested.connect(self.on_show_card_clicked)
             s4v.create_card_requested.connect(self.on_create_card_clicked)
+            s4v.plan_card_requested.connect(self.on_plan_card_clicked)
             s4v.yest_card_requested.connect(self.on_yest_card_clicked)
             s4v.full_report_requested.connect(self.on_full_report_clicked)
             s4v.daily_report_requested.connect(self.on_daily_report_clicked)
@@ -2659,7 +2668,80 @@ class DoctorRemCardWidget(QWidget):
         else:
             self.refresh_data(show_empty_message=True)
 
-    def on_create_card_clicked(self):
+    def _plan_card_state_for_admission(self, admission_id: int):
+        if not self.service or not hasattr(self.service, "build_plan_card_state"):
+            return {}
+        try:
+            return dict(self.service.build_plan_card_state(int(admission_id)))
+        except Exception as exc:
+            logger.warning("Failed to resolve planned card state admission_id=%s: %s", admission_id, exc)
+            return {}
+
+    def _admission_status_is_outcome(self, admission_id: int) -> bool:
+        if self.admission_id and int(self.admission_id) == int(admission_id) and self._current_status_is_outcome():
+            return True
+        if not self.service or not hasattr(self.service, "get_current_status"):
+            return False
+        try:
+            status_dto = self.service.get_current_status(int(admission_id))
+        except Exception:
+            status_dto = None
+        status_value = getattr(status_dto, "status", None)
+        return bool(status_dto and getattr(status_value, "is_outcome", lambda: False)())
+
+    def on_plan_card_clicked(self):
+        if not self.admission_id:
+            return
+        self._open_or_create_plan_card(int(self.admission_id))
+
+    def _open_or_create_plan_card(self, admission_id: int, patient=None) -> bool:
+        if self._archive_read_only_mode:
+            self._show_read_only_hint()
+            return False
+        if self._admission_status_is_outcome(admission_id):
+            CustomMessageBox.information(
+                self,
+                "Плановая карта",
+                "Плановая карта недоступна, пока у пациента не отменен исход.",
+            )
+            return False
+
+        state = self._plan_card_state_for_admission(admission_id)
+        if not state.get("plan_card_available"):
+            CustomMessageBox.information(
+                self,
+                "Плановая карта",
+                "Плановая карта доступна только при созданной текущей карте в последний час смены.",
+            )
+            return False
+
+        target_date = state.get("plan_card_target_date")
+        if target_date is None:
+            target_date = self.service.get_day_period(datetime.now())[1]
+
+        plan_exists = bool(state.get("plan_card_exists"))
+        if not plan_exists:
+            try:
+                plan_exists = bool(self.service.has_card(admission_id, target_date))
+            except Exception:
+                plan_exists = False
+
+        self.load_patient_card(
+            admission_id,
+            target_date,
+            request_snapshot=plan_exists,
+            ensure_initial_status=False,
+        )
+        if patient is not None:
+            self._prime_patient_header_from_w1(patient, target_date)
+        if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "set_patient_selection_mode"):
+            self.layout_manager.set_patient_selection_mode("card")
+
+        if not plan_exists:
+            self.on_create_card_clicked(target_date=target_date, planned=True)
+        return True
+
+    def on_create_card_clicked(self, target_date=None, planned: bool = False):
         if self._archive_read_only_mode:
             self._show_read_only_hint()
             return
@@ -2679,11 +2761,15 @@ class DoctorRemCardWidget(QWidget):
                     "DoctorRemCardWidget defers create-card write until snapshot load finishes admission_id=%s",
                     self.admission_id,
                 )
-            self._create_card_after_snapshot = True
+            self._create_card_after_snapshot = {
+                "target_date": target_date,
+                "planned": bool(planned),
+            }
             self._snapshot_pending = None
             return
-        now = datetime.now()
-        start, _ = self.service.get_day_period(now)
+
+        target_date = target_date or datetime.now()
+        start, _ = self.service.get_day_period(target_date)
         patient = self.service.get_patient(self.admission_id)
         adm_dt = patient.admission_datetime if patient else None
         vital_time = start
@@ -2695,11 +2781,13 @@ class DoctorRemCardWidget(QWidget):
                        sys=None, dia=None, pulse=None, temp=None, spo2=None, rr=None, cvp=None)
         admission_id = self.admission_id
         service = self.service
+        ensure_guard = getattr(self, "_should_ensure_initial_status_for_date", None)
+        should_ensure_initial_status = bool(ensure_guard(target_date)) if callable(ensure_guard) else True
 
         def operation():
-            if admission_id and service.status_service:
+            if admission_id and service.status_service and should_ensure_initial_status:
                 service.status_service.ensure_initial_status(admission_id, start, adm_dt)
-            service.add_vital(dto, shift_date=now, force=True)
+            service.add_vital(dto, shift_date=target_date, force=True)
             return True
 
         def on_success(_result):
@@ -2712,7 +2800,12 @@ class DoctorRemCardWidget(QWidget):
                 self.vitals_input.update_undo_button_state()
                 self.vitals_input.data_changed.emit()
             self.update_patient_info()
-            CustomMessageBox.information(self, "Создание карты", "Карта успешно создана. Вы можете приступить к её заполнению.")
+            message = (
+                "Плановая карта успешно создана. Вы можете заполнить её заранее."
+                if planned
+                else "Карта успешно создана. Вы можете приступить к её заполнению."
+            )
+            CustomMessageBox.information(self, "Создание карты", message)
 
         def on_error(exc):
             self._finish_create_card_pending()
@@ -2727,7 +2820,7 @@ class DoctorRemCardWidget(QWidget):
         try:
             if hasattr(service, "enqueue_write"):
                 service.enqueue_write(
-                    f"doctor_create_empty_card:{admission_id}",
+                    f"doctor_create_empty_card:{'plan:' if planned else ''}{admission_id}",
                     operation,
                     on_success=on_success,
                     on_error=on_error,
@@ -2749,9 +2842,14 @@ class DoctorRemCardWidget(QWidget):
 
     def _set_create_card_controls_enabled(self, enabled: bool):
         sector = getattr(getattr(self, "layout_manager", None), "sector_4v", None)
+        snapshot = self._card_snapshot_cache or {}
+        can_edit = bool(enabled) and not self._current_status_is_outcome()
         button = getattr(sector, "btn_new_card", None)
         if button is not None:
-            button.setEnabled(bool(enabled) and not self._current_status_is_outcome())
+            button.setEnabled(can_edit and not bool(snapshot.get("card_exists")))
+        plan_button = getattr(sector, "btn_plan_card", None)
+        if plan_button is not None:
+            plan_button.setEnabled(can_edit and bool(snapshot.get("plan_card_available")))
 
     def on_yest_card_clicked(self):
         from datetime import timedelta
@@ -3706,6 +3804,8 @@ class DoctorRemCardWidget(QWidget):
             self._prime_patient_header_from_w1(patient, target_date)
             self.layout_manager.set_patient_selection_mode("card")
             self.on_create_card_clicked()
+        elif action_type == "plan":
+            self._open_or_create_plan_card(patient.id, patient=patient)
         elif action_type == "yest":
             from datetime import timedelta
             yest = datetime.now() - timedelta(days=1)
@@ -3782,7 +3882,12 @@ class DoctorRemCardWidget(QWidget):
             if hasattr(self.layout_manager, 'sector_4v'):
                 card_exists = bool(snapshot.get("card_exists"))
                 yest_exists = bool(snapshot.get("yest_exists"))
-                self.layout_manager.sector_4v.set_buttons_state(card_exists, yest_exists)
+                plan_card_available = bool(snapshot.get("plan_card_available"))
+                self.layout_manager.sector_4v.set_buttons_state(
+                    card_exists,
+                    yest_exists,
+                    plan_card_available,
+                )
                 self.update_latest_indicators()
                 self._apply_archive_read_only_state()
             if hasattr(self.layout_manager, "set_current_status_dto"):

@@ -351,6 +351,7 @@ class Sector4v(BaseSectorWidget):
     archive_requested = Signal()
     show_card_requested = Signal()
     create_card_requested = Signal()
+    plan_card_requested = Signal()
     yest_card_requested = Signal()
     full_report_requested = Signal()
     daily_report_requested = Signal()
@@ -442,6 +443,16 @@ class Sector4v(BaseSectorWidget):
         self.btn_new_card.setStyleSheet(button_style)
         self.btn_new_card.clicked.connect(self.create_card_requested.emit)
 
+        # Кнопка "План. карта"
+        self.btn_plan_card = QPushButton(" План. карта")
+        plan_icon_path = os.path.join(self.icon_dir, "nextcard.png")
+        self.btn_plan_card.setIcon(QIcon(plan_icon_path))
+        self.btn_plan_card.setIconSize(QSize(20, 20))
+        self.btn_plan_card.setMinimumHeight(32)
+        self.btn_plan_card.setStyleSheet(button_style)
+        self.btn_plan_card.setEnabled(False)
+        self.btn_plan_card.clicked.connect(self.plan_card_requested.emit)
+
         # Кнопка "Список карт"
         self.btn_card_list = QPushButton(" Список карт")
         icon_path = os.path.join(self.icon_dir, "medical-chart.png")
@@ -489,6 +500,7 @@ class Sector4v(BaseSectorWidget):
         self.content_layout.addWidget(self.btn_show_card)
         self.content_layout.addWidget(self.btn_yest_card)
         self.content_layout.addWidget(self.btn_new_card)
+        self.content_layout.addWidget(self.btn_plan_card)
         self.content_layout.addWidget(self.btn_card_list)
         self.content_layout.addWidget(self.btn_daily_print)
         self.content_layout.addWidget(self.btn_all_print)
@@ -567,16 +579,23 @@ class Sector4v(BaseSectorWidget):
             if item.widget(): item.widget().setParent(None)
         if widget: self.content_layout.addWidget(widget)
 
-    def set_buttons_state(self, card_exists: bool, yest_card_exists: bool = True):
+    def set_buttons_state(
+        self,
+        card_exists: bool,
+        yest_card_exists: bool = True,
+        plan_card_available: bool = False,
+    ):
         self.btn_new_card.setEnabled(not card_exists)
         self.btn_show_card.setEnabled(card_exists)
         self.btn_yest_card.setEnabled(yest_card_exists)
+        self.btn_plan_card.setEnabled(bool(plan_card_available))
 
     def set_recovery_mode(self, enabled: bool, *, can_transfer: bool = True, can_cancel_transfer: bool = False):
         standard_buttons = (
             self.btn_show_card,
             self.btn_yest_card,
             self.btn_new_card,
+            self.btn_plan_card,
             self.btn_card_list,
             self.btn_daily_print,
             self.btn_all_print,
