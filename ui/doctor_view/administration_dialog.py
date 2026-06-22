@@ -11,6 +11,29 @@ from ...data.dto.remcard_dto import AdministrationDTO
 from ...services.prescription_engine import engine
 import re
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.procedures.procedure_styles import apply_procedure_combo_style
+
+
+def _apply_medication_combo_style(root):
+    apply_procedure_combo_style(root)
+    combos = []
+    if isinstance(root, QComboBox):
+        combos.append(root)
+    combos.extend(root.findChildren(QComboBox))
+    for combo in combos:
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setStyleSheet(
+                """
+                QLineEdit {
+                    background: transparent;
+                    border: none;
+                    padding: 0;
+                    color: #172033;
+                }
+                """
+            )
+
 
 class ManualEntryDialog(BaseStyledDialog):
 
@@ -108,6 +131,7 @@ class ManualEntryDialog(BaseStyledDialog):
         form.addRow("Растворитель:", self.diluent_combo)
 
         layout.addLayout(form)
+        _apply_medication_combo_style(self.content_widget)
         self.on_form_changed()
 
         # Кнопки
@@ -494,9 +518,10 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
                 if isinstance(d_str, str) and str(d_vol) in d_str and self.diluent_combo.itemText(i).startswith(engine.dilutions.get(d_base, {}).get("display", "")):
                     self.diluent_combo.setCurrentIndex(i)
                     break
-                    
+
         form.addRow("Растворитель:", self.diluent_combo)
         layout.addLayout(form)
+        _apply_medication_combo_style(self.content_widget)
 
         # Кнопки
         btns = QHBoxLayout()
