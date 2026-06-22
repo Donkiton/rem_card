@@ -16,6 +16,7 @@ ORDER_CARD_MIN_HEIGHT = 48
 _ICON_PIXMAP_CACHE = {}
 _MULTICOMP_SEPARATOR_RE = re.compile(r"\s+\+\s+")
 _IU_TOKEN_RE = re.compile(r"(?<![A-Za-zА-Яа-яЁё])IU(?![A-Za-zА-Яа-яЁё])", re.IGNORECASE)
+_QUICK_CVP_ORDER_KEY = "quick_cvp"
 
 
 def _cached_icon_pixmap(icon_name: str) -> QPixmap:
@@ -219,7 +220,7 @@ class NurseOrderCard(QFrame):
 
         latin = str(latin or "")
         prefix = ""
-        if drug_key not in ('ruchnoivvod', 'plasma', 'blood') and not re.match(r'^[A-Za-z]+\. ', latin.strip()):
+        if drug_key not in ('ruchnoivvod', 'plasma', 'blood', _QUICK_CVP_ORDER_KEY) and not re.match(r'^[A-Za-z]+\. ', latin.strip()):
             prefix = "S. " if order_type_val != "procedure" else ""
 
         dose_str = self._format_dose(dose, unit)
