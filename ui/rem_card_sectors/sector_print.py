@@ -660,7 +660,9 @@ class SectorPrint(BaseSectorWidget):
         p = self.parent()
         while p:
             if hasattr(p, 'admission_id') and hasattr(p, 'current_date') and hasattr(p, 'service'):
-                return p.service, p.admission_id, p.current_date
+                report_date_getter = getattr(p, "daily_report_reference_date", None)
+                report_date = report_date_getter() if callable(report_date_getter) else p.current_date
+                return p.service, p.admission_id, report_date
             p = p.parent()
         return None, None, None
 

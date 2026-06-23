@@ -72,6 +72,7 @@ class Sector2b(BaseSectorWidget):
             "print": "Печать",
         }
         self._visible_tabs = {tab_id: True for tab_id in self._tab_widgets}
+        self._enabled_tabs = {tab_id: True for tab_id in self._tab_widgets}
         self.apply_display_settings()
         
         self.set_content(self.tabs_container)
@@ -104,17 +105,35 @@ class Sector2b(BaseSectorWidget):
         tab_id = self._tab_id_by_name(tab_name)
         return bool(tab_id and self._visible_tabs.get(tab_id, False))
 
+    def is_tab_available(self, tab_name: str) -> bool:
+        tab_id = self._tab_id_by_name(tab_name)
+        return bool(
+            tab_id
+            and self._visible_tabs.get(tab_id, False)
+            and self._enabled_tabs.get(tab_id, True)
+        )
+
     def first_visible_tab_name(self) -> str:
         for tab_id in getattr(self, "_tab_order", list(self._tab_widgets)):
             if self._visible_tabs.get(tab_id, False):
                 return self._tab_labels[tab_id]
         return ""
 
-    def current_tab_name(self) -> str:
-        for tab_id, button in self._tab_widgets.items():
-            if button.isChecked() and self._visible_tabs.get(tab_id, True):
+    def first_available_tab_name(self) -> str:
+        for tab_id in getattr(self, "_tab_order", list(self._tab_widgets)):
+            if self._visible_tabs.get(tab_id, False) and self._enabled_tabs.get(tab_id, True):
                 return self._tab_labels[tab_id]
         return self.first_visible_tab_name()
+
+    def current_tab_name(self) -> str:
+        for tab_id, button in self._tab_widgets.items():
+            if (
+                button.isChecked()
+                and self._visible_tabs.get(tab_id, True)
+                and self._enabled_tabs.get(tab_id, True)
+            ):
+                return self._tab_labels[tab_id]
+        return self.first_available_tab_name()
 
     def apply_display_settings(self):
         previous_tab = self.current_tab_name() if hasattr(self, "_tab_widgets") else "Витальные функции"
@@ -142,7 +161,7 @@ class Sector2b(BaseSectorWidget):
                 continue
             button = self._tab_widgets[tab_id]
             button.setVisible(True)
-            button.setEnabled(True)
+            button.setEnabled(self._enabled_tabs.get(tab_id, True))
             self.tabs_layout.addWidget(button)
             if tab_id == "orders":
                 orders_visible = True
@@ -159,8 +178,8 @@ class Sector2b(BaseSectorWidget):
         self.select_tab(resolved_tab, emit=resolved_tab != previous_tab)
 
     def select_tab(self, tab_name: str, *, emit: bool = False):
-        if not self.is_tab_visible(tab_name):
-            tab_name = self.first_visible_tab_name()
+        if not self.is_tab_available(tab_name):
+            tab_name = self.first_available_tab_name()
         if not tab_name:
             for button in self._tab_widgets.values():
                 button.setChecked(False)
@@ -169,6 +188,17 @@ class Sector2b(BaseSectorWidget):
             button.setChecked(button.text() == tab_name)
         if emit:
             self.tab_changed.emit(tab_name)
+
+    def set_tab_available(self, tab_name: str, available: bool):
+        tab_id = self._tab_id_by_name(tab_name)
+        if not tab_id:
+            return
+        self._enabled_tabs[tab_id] = bool(available)
+        button = self._tab_widgets.get(tab_id)
+        if button is not None:
+            button.setEnabled(bool(available) and self._visible_tabs.get(tab_id, False))
+        if not available and button is not None and button.isChecked():
+            self.select_tab(self.first_available_tab_name(), emit=True)
 
     def _current_admission_id_from_ui_tree(self):
         widget = self.parentWidget()

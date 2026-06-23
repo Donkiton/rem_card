@@ -156,11 +156,13 @@ class FullReportDataCollector:
         self.unknown_patient_name = unknown_patient_name
         self.unknown_icu_day = unknown_icu_day
         self.missing_admission_icu_day = missing_admission_icu_day or unknown_icu_day
+        self._plan_report_shift_start: Optional[datetime] = None
 
     def collect(self) -> list[dict]:
         periods = [(dt, *self.remcard_service.get_day_period(dt)) for dt in self.dates]
         if not periods:
             return []
+        self._plan_report_shift_start = self._resolve_plan_report_shift_start()
 
         report_start = min(start for _dt, start, _end in periods)
         report_end = max(end for _dt, _start, end in periods)
@@ -224,6 +226,24 @@ class FullReportDataCollector:
             results.append(self.transform_data(day_data, cached_service, self.config))
         return results
 
+    def _resolve_plan_report_shift_start(self) -> Optional[datetime]:
+        if not hasattr(self.remcard_service, "build_plan_card_state"):
+            return None
+        try:
+            state = self.remcard_service.build_plan_card_state(self.admission_id)
+        except Exception:
+            return None
+        if not state.get("plan_card_window_active") or not state.get("plan_card_exists"):
+            return None
+        target_date = state.get("plan_card_target_date")
+        if not target_date:
+            return None
+        try:
+            target_start, _target_end = self.remcard_service.get_day_period(target_date)
+            return target_start
+        except Exception:
+            return None
+
     def _base_day_data(self, patient, start_dt: datetime, end_dt: datetime) -> dict:
         if patient:
             patient_name = f"{patient.last_name or ''} {patient.first_name or ''} {patient.middle_name or ''}".strip()
@@ -238,6 +258,7 @@ class FullReportDataCollector:
             diagnosis = "—"
             icu_day = self.unknown_icu_day
 
+        is_plan_card = bool(self._plan_report_shift_start and start_dt == self._plan_report_shift_start)
         data = {
             "admission_id": self.admission_id,
             "patient_name": patient_name,
@@ -245,6 +266,12 @@ class FullReportDataCollector:
             "icu_day": icu_day,
             "start_dt": start_dt,
             "end_dt": end_dt,
+            "is_plan_card": is_plan_card,
+            "report_title": (
+                "ПЛАНИРУЕМАЯ РЕАНИМАЦИОННАЯ КАРТА"
+                if is_plan_card
+                else "РЕАНИМАЦИОННАЯ КАРТА"
+            ),
             "vitals": [],
             "prescriptions": [],
             "events": [],

@@ -53,6 +53,7 @@ class RemCardLayoutManager(QWidget):
         self._events_patient_context = None
         self._events_shift_context = None
         self._current_status_dto = None
+        self._plan_card_mode = False
         
         # Единый таймер для стабилизации размеров (предотвращает вылеты)
         self._fix_timer = QTimer(self)
@@ -410,6 +411,23 @@ class RemCardLayoutManager(QWidget):
                 h = self.right_splitter.handle(2)
                 if h: h.setVisible(False)
         except: pass
+
+    def set_plan_card_mode(self, enabled: bool):
+        self._plan_card_mode = bool(enabled)
+        sector_2b = getattr(self, "sector_2b", None)
+        if sector_2b is None or not hasattr(sector_2b, "set_tab_available"):
+            return
+        sector_2b.set_tab_available("Движение", not self._plan_card_mode)
+        if not self._plan_card_mode:
+            return
+        if hasattr(sector_2b, "current_tab_name") and sector_2b.current_tab_name() == "Движение":
+            fallback_tab = (
+                sector_2b.first_available_tab_name()
+                if hasattr(sector_2b, "first_available_tab_name")
+                else "Витальные функции"
+            )
+            if fallback_tab and fallback_tab != "Движение":
+                self.set_active_tab(fallback_tab, source="refresh")
 
     def _doctor_7b_target_height(self):
         min_h = int(getattr(self, "_doctor_7b_min_height", 160))
@@ -992,9 +1010,22 @@ class RemCardLayoutManager(QWidget):
             )
         try:
             tab_name = "Движение" if tab_name == "События" else tab_name
-            if hasattr(self, "sector_2b") and hasattr(self.sector_2b, "is_tab_visible"):
-                if not self.sector_2b.is_tab_visible(tab_name):
-                    tab_name = self.sector_2b.first_visible_tab_name()
+            if hasattr(self, "sector_2b"):
+                if hasattr(self.sector_2b, "is_tab_available"):
+                    tab_available = self.sector_2b.is_tab_available(tab_name)
+                    fallback_tab = (
+                        self.sector_2b.first_available_tab_name()
+                        if hasattr(self.sector_2b, "first_available_tab_name")
+                        else ""
+                    )
+                elif hasattr(self.sector_2b, "is_tab_visible"):
+                    tab_available = self.sector_2b.is_tab_visible(tab_name)
+                    fallback_tab = self.sector_2b.first_visible_tab_name()
+                else:
+                    tab_available = True
+                    fallback_tab = ""
+                if not tab_available:
+                    tab_name = fallback_tab
                 if hasattr(self.sector_2b, "select_tab"):
                     self.sector_2b.select_tab(tab_name, emit=False)
 

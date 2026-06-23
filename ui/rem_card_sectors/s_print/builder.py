@@ -235,7 +235,7 @@ class ReportBuilder:
                 text-align: center;
                 font-size: 13px;
                 font-weight: bold;
-                white-space: nowrap;
+                line-height: 1.1;
             }
 
             .day-container {

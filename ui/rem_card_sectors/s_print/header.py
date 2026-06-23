@@ -7,6 +7,7 @@ def render_header(data, start_str, end_str, show_hydrobalance=True):
     patient_name = escape(str(data.get("patient_name", "—")))
     diagnosis = escape(str(data.get("diagnosis", "—")))
     icu_day = escape(str(data.get("icu_day", "—")))
+    report_title = escape(str(data.get("report_title") or "РЕАНИМАЦИОННАЯ КАРТА"))
     start_label = escape(str(start_str))
     end_label = escape(str(end_str))
     hydrobalance_html = ""
@@ -29,7 +30,7 @@ def render_header(data, start_str, end_str, show_hydrobalance=True):
                 <div><strong>Пациент:</strong> {patient_name} &nbsp;&nbsp; <strong>Диагноз:</strong> {diagnosis}</div>
                 <div><strong>Сутки в РАО:</strong> {icu_day} &nbsp;&nbsp; <strong>Период:</strong> {start_label} - {end_label}{hydrobalance_html}{notice_html}</div>
             </td>
-            <td class="print-header-title">РЕАНИМАЦИОННАЯ КАРТА</td>
+            <td class="print-header-title">{report_title}</td>
         </tr>
     </table>
     """

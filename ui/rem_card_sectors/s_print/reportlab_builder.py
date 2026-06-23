@@ -728,6 +728,7 @@ class ReportLabReportBuilder:
         patient_name = html.escape(str(data.get("patient_name", "—")))
         diagnosis = html.escape(str(data.get("diagnosis", "—")))
         icu_day = html.escape(str(data.get("icu_day", "—")))
+        report_title = str(data.get("report_title") or "РЕАНИМАЦИОННАЯ КАРТА")
         hydrobalance = ""
         if show_hydrobalance:
             totals = get_current_balance_totals(data)
@@ -747,7 +748,7 @@ class ReportLabReportBuilder:
             [
                 [
                     cls._p(details, font_size=8.5, alignment=TA_LEFT, leading=10, allow_markup=True),
-                    cls._p("РЕАНИМАЦИОННАЯ КАРТА", font_size=10, bold=True, leading=11),
+                    cls._p(report_title, font_size=10, bold=True, leading=11),
                 ]
             ],
             colWidths=[table_width * 0.68, table_width * 0.32],
