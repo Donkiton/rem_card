@@ -160,6 +160,7 @@ class _OutcomeDialogBase(BaseStyledDialog):
         self.admission_context = dict(admission_context or {})
         self.base_comment = str(base_comment or "").strip()
         self.result_data: Dict[str, Any] = {}
+        self._submit_handler = None
         self.content_widget.setObjectName("outcome_content")
         self.content_widget.setAttribute(Qt.WA_StyledBackground, True)
         self.setModal(True)
@@ -283,6 +284,24 @@ class _OutcomeDialogBase(BaseStyledDialog):
         except Exception:
             pass
 
+    def set_submit_handler(self, handler) -> None:
+        self._submit_handler = handler
+
+    def _submit_or_accept(self) -> None:
+        handler = self._submit_handler
+        if callable(handler):
+            result = handler(dict(self.result_data), self)
+            if result is True:
+                self.accept()
+            return
+        self.accept()
+
+    def set_submit_pending(self, pending: bool) -> None:
+        for button_name in ("ok_btn", "cancel_btn"):
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.setEnabled(not pending)
+
     def _section(self, title: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("outcome_section")
@@ -299,16 +318,16 @@ class _OutcomeDialogBase(BaseStyledDialog):
         buttons = QHBoxLayout()
         buttons.addStretch()
 
-        ok_btn = QPushButton("ОК")
-        ok_btn.setObjectName("DialogOkBtn")
-        ok_btn.clicked.connect(self._on_accept)
+        self.ok_btn = QPushButton("ОК")
+        self.ok_btn.setObjectName("DialogOkBtn")
+        self.ok_btn.clicked.connect(self._on_accept)
 
-        cancel_btn = QPushButton("Нет")
-        cancel_btn.setObjectName("DialogCancelBtn")
-        cancel_btn.clicked.connect(self.reject)
+        self.cancel_btn = QPushButton("Нет")
+        self.cancel_btn.setObjectName("DialogCancelBtn")
+        self.cancel_btn.clicked.connect(self.reject)
 
-        buttons.addWidget(ok_btn)
-        buttons.addWidget(cancel_btn)
+        buttons.addWidget(self.ok_btn)
+        buttons.addWidget(self.cancel_btn)
         return buttons
 
     def _make_time_picker(self) -> HybridShiftTimePicker:
@@ -538,7 +557,7 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
                 "transfer_lpu_other": lpu_other,
             },
         }
-        self.accept()
+        self._submit_or_accept()
 
 
 class DeathOutcomeDialog(_OutcomeDialogBase):
@@ -1070,4 +1089,4 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
                     "cardiac_arrest_measures_json": json.dumps(payload, ensure_ascii=False),
                 },
             }
-        self.accept()
+        self._submit_or_accept()

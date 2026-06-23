@@ -763,36 +763,36 @@ class SectorEvents(BaseSectorWidget):
         else:
             dialog = DeathOutcomeDialog(context, self.shift_date or datetime.now(), base_comment, dialog_parent)
 
-        if dialog.exec() != QDialog.Accepted:
-            self.refresh(force=True)
-            return
+        def submit_payload(payload, outcome_dialog):
+            payload = dict(payload or {})
+            event_time = payload.get("event_time")
+            reason_text = payload.get("reason_text")
+            if reason_text is None:
+                reason_text = base_comment
+            admission_details = payload.get("admission_details") or {}
+            is_cpr_recovery = payload.get("record_kind") == DEATH_OUTCOME_RECOVERY
+            clinical_time = payload.get("clinical_time")
+            recovery_time = payload.get("recovery_time") or event_time
+            current_event = (
+                self.status_service.get_current_status(self.admission_id)
+                if hasattr(self.status_service, "get_current_status")
+                else None
+            )
+            expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
+            expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
+            expected_admission_revision = int(context.get("revision") or 0) if context else None
 
-        payload = dict(dialog.result_data or {})
-        event_time = payload.get("event_time")
-        reason_text = payload.get("reason_text")
-        if reason_text is None:
-            reason_text = base_comment
-        admission_details = payload.get("admission_details") or {}
-        is_cpr_recovery = payload.get("record_kind") == DEATH_OUTCOME_RECOVERY
-        clinical_time = payload.get("clinical_time")
-        recovery_time = payload.get("recovery_time") or event_time
-        current_event = (
-            self.status_service.get_current_status(self.admission_id)
-            if hasattr(self.status_service, "get_current_status")
-            else None
-        )
-        expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
-        expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
-        expected_admission_revision = int(context.get("revision") or 0) if context else None
+            def on_success(result):
+                self._set_status_write_pending(False)
+                outcome_dialog.set_submit_pending(False)
+                if result:
+                    self.edit_reason_text.clear()
+                    outcome_dialog.accept()
+                    self._schedule_post_status_refresh()
+                    if not is_cpr_recovery:
+                        self._show_outcome_report_reminder(event_time)
+                    return
 
-        def on_success(result):
-            self._set_status_write_pending(False)
-            if result:
-                self.edit_reason_text.clear()
-                self._schedule_post_status_refresh()
-                if not is_cpr_recovery:
-                    self._show_outcome_report_reminder(event_time)
-            else:
                 self.refresh(force=True)
                 if is_cpr_recovery:
                     message = (
@@ -806,26 +806,69 @@ class SectorEvents(BaseSectorWidget):
                         "раньше начала текущего статуса, последних записей пациента или "
                         "пересекаться со случаем СЛР."
                     )
-                CustomMessageBox.warning(self, "Ошибка", message)
+                CustomMessageBox.warning(outcome_dialog, "Ошибка", message)
 
-        def on_error(exc):
-            self._set_status_write_pending(False)
-            self.refresh(force=True)
-            action_name = "СЛР" if is_cpr_recovery else "исхода"
-            CustomMessageBox.warning(self, "Ошибка", f"Ошибка фиксации {action_name}: {exc}")
+            def on_error(exc):
+                self._set_status_write_pending(False)
+                outcome_dialog.set_submit_pending(False)
+                self.refresh(force=True)
+                action_name = "СЛР" if is_cpr_recovery else "исхода"
+                CustomMessageBox.warning(outcome_dialog, "Ошибка", f"Ошибка фиксации {action_name}: {exc}")
 
-        self._set_status_write_pending(True)
-        if is_cpr_recovery:
-            if hasattr(self.status_service, "enqueue_record_cpr_recovery"):
-                self.status_service.enqueue_record_cpr_recovery(
+            self._set_status_write_pending(True)
+            outcome_dialog.set_submit_pending(True)
+            if is_cpr_recovery:
+                if hasattr(self.status_service, "enqueue_record_cpr_recovery"):
+                    self.status_service.enqueue_record_cpr_recovery(
+                        self.admission_id,
+                        clinical_time,
+                        recovery_time,
+                        reason_text=reason_text,
+                        user_id=self.user_id,
+                        admission_details=admission_details,
+                        **self._supported_kwargs(
+                            self.status_service.enqueue_record_cpr_recovery,
+                            {
+                                "expected_active_event_id": expected_active_event_id,
+                                "expected_active_revision": expected_active_revision,
+                                "expected_admission_revision": expected_admission_revision,
+                                "on_success": on_success,
+                                "on_error": on_error,
+                            },
+                        ),
+                    )
+                    return None
+
+                try:
+                    if not hasattr(self.status_service, "record_cpr_recovery"):
+                        raise RuntimeError("Сервис фиксации СЛР недоступен")
+                    result = self.status_service.record_cpr_recovery(
+                        self.admission_id,
+                        clinical_time,
+                        recovery_time,
+                        reason_text=reason_text,
+                        user_id=self.user_id,
+                        admission_details=admission_details,
+                        expected_active_event_id=expected_active_event_id,
+                        expected_active_revision=expected_active_revision,
+                        expected_admission_revision=expected_admission_revision,
+                    )
+                    on_success(result)
+                except Exception as exc:
+                    on_error(exc)
+                return None
+
+            if hasattr(self.status_service, "enqueue_change_status_with_outcome_details"):
+                self.status_service.enqueue_change_status_with_outcome_details(
                     self.admission_id,
-                    clinical_time,
-                    recovery_time,
+                    status,
+                    event_time,
+                    reason_type=None,
                     reason_text=reason_text,
                     user_id=self.user_id,
                     admission_details=admission_details,
                     **self._supported_kwargs(
-                        self.status_service.enqueue_record_cpr_recovery,
+                        self.status_service.enqueue_change_status_with_outcome_details,
                         {
                             "expected_active_event_id": expected_active_event_id,
                             "expected_active_revision": expected_active_revision,
@@ -835,76 +878,40 @@ class SectorEvents(BaseSectorWidget):
                         },
                     ),
                 )
-                return
+                return None
 
             try:
-                if not hasattr(self.status_service, "record_cpr_recovery"):
-                    raise RuntimeError("Сервис фиксации СЛР недоступен")
-                result = self.status_service.record_cpr_recovery(
-                    self.admission_id,
-                    clinical_time,
-                    recovery_time,
-                    reason_text=reason_text,
-                    user_id=self.user_id,
-                    admission_details=admission_details,
-                    expected_active_event_id=expected_active_event_id,
-                    expected_active_revision=expected_active_revision,
-                    expected_admission_revision=expected_admission_revision,
-                )
+                if hasattr(self.status_service, "change_status_with_outcome_details"):
+                    result = self.status_service.change_status_with_outcome_details(
+                        self.admission_id,
+                        status,
+                        event_time,
+                        None,
+                        reason_text,
+                        self.user_id,
+                        admission_details,
+                        expected_active_event_id=expected_active_event_id,
+                        expected_active_revision=expected_active_revision,
+                        expected_admission_revision=expected_admission_revision,
+                    )
+                else:
+                    result = self.status_service.change_status(
+                        self.admission_id,
+                        status,
+                        None,
+                        reason_text,
+                        self.user_id,
+                        expected_active_event_id=expected_active_event_id,
+                        expected_active_revision=expected_active_revision,
+                    )
                 on_success(result)
             except Exception as exc:
                 on_error(exc)
-            return
+            return None
 
-        if hasattr(self.status_service, "enqueue_change_status_with_outcome_details"):
-            self.status_service.enqueue_change_status_with_outcome_details(
-                self.admission_id,
-                status,
-                event_time,
-                reason_type=None,
-                reason_text=reason_text,
-                user_id=self.user_id,
-                admission_details=admission_details,
-                **self._supported_kwargs(
-                    self.status_service.enqueue_change_status_with_outcome_details,
-                    {
-                        "expected_active_event_id": expected_active_event_id,
-                        "expected_active_revision": expected_active_revision,
-                        "expected_admission_revision": expected_admission_revision,
-                        "on_success": on_success,
-                        "on_error": on_error,
-                    },
-                ),
-            )
-            return
-
-        try:
-            if hasattr(self.status_service, "change_status_with_outcome_details"):
-                result = self.status_service.change_status_with_outcome_details(
-                    self.admission_id,
-                    status,
-                    event_time,
-                    None,
-                    reason_text,
-                    self.user_id,
-                    admission_details,
-                    expected_active_event_id=expected_active_event_id,
-                    expected_active_revision=expected_active_revision,
-                    expected_admission_revision=expected_admission_revision,
-                )
-            else:
-                result = self.status_service.change_status(
-                    self.admission_id,
-                    status,
-                    None,
-                    reason_text,
-                    self.user_id,
-                    expected_active_event_id=expected_active_event_id,
-                    expected_active_revision=expected_active_revision,
-                )
-            on_success(result)
-        except Exception as exc:
-            on_error(exc)
+        dialog.set_submit_handler(submit_payload)
+        if dialog.exec() != QDialog.Accepted:
+            self.refresh(force=True)
 
     def _outcome_report_reminder_enabled(self) -> bool:
         try:

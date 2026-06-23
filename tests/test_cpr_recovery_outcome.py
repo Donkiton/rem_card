@@ -17,7 +17,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from rem_card.data.dao.patient_status_dao import PatientStatusDAO  # noqa: E402
 from rem_card.data.dto.remcard_dto import PatientStatus  # noqa: E402
@@ -455,6 +455,20 @@ class CprRecoveryOutcomeTest(unittest.TestCase):
         payload = json.loads(dialog.result_data["admission_details"]["cardiac_arrest_measures_json"])
         self.assertEqual(payload["outcome_type"], DEATH_OUTCOME_RECOVERY)
         self.assertNotIn("death_protocol", payload)
+
+    def test_dialog_submit_failure_does_not_accept_or_drop_payload(self):
+        dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 12, 0))
+        dialog.clinical_time_picker.set_time("09:45")
+        dialog.biological_time_picker.set_time("09:50")
+        captured = []
+        dialog.set_submit_handler(lambda payload, _dialog: captured.append(payload) or False)
+
+        dialog._on_accept()
+
+        self.assertEqual(len(captured), 1)
+        self.assertNotEqual(dialog.result(), QDialog.Accepted)
+        self.assertEqual(dialog.result_data["event_time"], datetime(2025, 1, 1, 9, 50))
+        self.assertIn("cardiac_arrest_measures_json", dialog.result_data["admission_details"])
 
 
 if __name__ == "__main__":
