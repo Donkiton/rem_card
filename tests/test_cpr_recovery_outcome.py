@@ -323,6 +323,7 @@ class CprRecoveryOutcomeTest(unittest.TestCase):
 
         self.assertEqual([item["outcome_kind"] for item in struct["items"]], ["recovery", "death"])
         self.assertEqual(struct["items"][0]["clinical_time"], "01.01.2025 09:45")
+        self.assertEqual(struct["items"][1]["title"], "ОСТАНОВКА СЕРДЕЧНОЙ ДЕЯТЕЛЬНОСТИ. ИСХОД: СМЕРТЬ.")
         self.assertEqual(struct["items"][1]["biological_time"], "01.01.2025 10:45")
         self.assertIn("doctor", struct["items"][1]["protocol"])
 

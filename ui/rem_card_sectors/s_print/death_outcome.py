@@ -18,6 +18,7 @@ from .table_layout import (
 DEFAULT_DEATH_PROTOCOL_POSITION = "врач анестезиолог-реаниматолог"
 DEFAULT_DEATH_PROTOCOL_WORKPLACE = 'КГБУЗ "Городская больница" им М.И. Шевчук МЗХК'
 DEFAULT_DEATH_PROTOCOL_CPR_STOP_REASON = "Неэффективности реанимационных мероприятий в течение 30 минут"
+DEATH_OUTCOME_TITLE = "ОСТАНОВКА СЕРДЕЧНОЙ ДЕЯТЕЛЬНОСТИ. ИСХОД: СМЕРТЬ."
 
 
 def _parse_dt(value: Any) -> Optional[datetime]:
@@ -237,7 +238,7 @@ def _death_item(payload: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, A
     protocol = _normalize_protocol(payload.get("death_protocol"), context, biological_dt)
     return {
         "outcome_kind": "death",
-        "title": "ИСХОД: СМЕРТЬ",
+        "title": DEATH_OUTCOME_TITLE,
         "clinical_time": _format_dt(clinical_dt),
         "biological_time": _format_dt(biological_dt),
         "cause": str(cause or "").strip(),
@@ -407,7 +408,7 @@ def render_death_outcome(data, table_width_pt, include_outcome=True, include_pro
             html += f'<table class="report-table data-table death-table" {table_attrs}>'
             html += render_colgroup(col_widths)
             html += "<tbody>"
-            html += f'<tr class="table-title-row"><th colspan="2" {colspan_cell_attrs()}>{_html_text(details_item.get("title") or "ИСХОД: СМЕРТЬ")}</th></tr>'
+            html += f'<tr class="table-title-row"><th colspan="2" {colspan_cell_attrs()}>{_html_text(details_item.get("title") or DEATH_OUTCOME_TITLE)}</th></tr>'
             html += row("Время клинической смерти", _html_text(details_item.get("clinical_time")))
             html += row("Причина остановки сердца", _html_text(details_item.get("cause")))
             html += row("Мероприятия", _render_measures(details_item.get("measures") or []))

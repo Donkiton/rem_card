@@ -1113,7 +1113,7 @@ class ReportLabReportBuilder:
     def _death_outcome_table(cls, details: dict, table_width: float):
         widths = cls._weighted_widths(table_width, [0.24, 0.76])
         outcome_kind = str(details.get("outcome_kind") or "death")
-        rows = [[details.get("title") or "ИСХОД: СМЕРТЬ", ""]]
+        rows = [[details.get("title") or "ОСТАНОВКА СЕРДЕЧНОЙ ДЕЯТЕЛЬНОСТИ. ИСХОД: СМЕРТЬ.", ""]]
 
         def row(label, value):
             rows.append(
