@@ -17,7 +17,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 from rem_card.services.report_balance import build_print_balance_final
-from rem_card.services.report_vitals_slotting import select_latest_vitals_by_report_hour
+from rem_card.services.report_vitals_slotting import build_vitals_report_matrix
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
@@ -219,21 +219,23 @@ class DataCollectorWorker(QThread):
         return current_time
 
     @staticmethod
-    def _build_vitals_matrix(vitals, start_dt, end_dt):
-        vitals_matrix = {}
-        selected_by_hour = select_latest_vitals_by_report_hour(vitals, start_dt, end_dt)
-        for i, chosen_v in selected_by_hour.items():
-            vitals_matrix[i] = {}
-            for k, attr in [('hr', 'pulse'), ('sys', 'sys'), ('dia', 'dia'), ('spo2', 'spo2'), ('temp', 'temp'), ('rr', 'rr'), ('cvp', 'cvp')]:
-                val = getattr(chosen_v, attr, None)
-                if val is not None:
-                    vitals_matrix[i][k] = val
-        return vitals_matrix
+    def _build_vitals_matrix(vitals, start_dt, end_dt, active_intervals=None):
+        return build_vitals_report_matrix(
+            vitals,
+            start_dt,
+            end_dt,
+            active_intervals=active_intervals,
+        )
 
     @staticmethod
     def _attach_vitals_section(data: dict, remcard_service, start_dt, end_dt):
         vitals = data.get("vitals", [])
-        data["vitals_matrix"] = DataCollectorWorker._build_vitals_matrix(vitals, start_dt, end_dt)
+        data["vitals_matrix"] = DataCollectorWorker._build_vitals_matrix(
+            vitals,
+            start_dt,
+            end_dt,
+            data.get("vitals_active_intervals"),
+        )
         data["vital_settings"] = remcard_service.get_vital_settings_cached(data.get("admission_id", 0) or data.get("id", 0), start_dt)
 
     @staticmethod
@@ -499,6 +501,13 @@ class DataCollectorWorker(QThread):
 
             if self.config.get("vitals", True):
                 data["vitals"] = self.remcard_service.get_vitals(self.admission_id, self.date)
+                status_service = getattr(self.remcard_service, "status_service", None)
+                if status_service and hasattr(status_service, "get_active_intervals"):
+                    data["vitals_active_intervals"] = status_service.get_active_intervals(
+                        self.admission_id,
+                        start_dt,
+                        end_dt,
+                    )
             
             data["prescriptions"] = self.remcard_service.get_orders(self.admission_id, self.date, only_committed=True)
 

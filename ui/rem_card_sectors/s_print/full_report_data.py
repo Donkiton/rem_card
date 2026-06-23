@@ -181,6 +181,7 @@ class FullReportDataCollector:
         )
 
         vital_bounds_by_shift = self._build_vital_bounds(periods, patient)
+        active_intervals_by_shift = self._build_active_intervals(periods)
         balance_bounds_by_shift = (
             self._build_balance_bounds(periods, patient, current_status)
             if include_balance
@@ -208,14 +209,16 @@ class FullReportDataCollector:
 
         results = []
         for dt, start_dt, end_dt in periods:
+            shift_key = start_dt.strftime("%Y-%m-%d %H:%M")
             day_data = self._base_day_data(patient, start_dt, end_dt)
             if self.config.get("vitals", True):
-                day_data["vitals"] = self._filter_vitals(all_vitals, vital_bounds_by_shift[start_dt.strftime("%Y-%m-%d %H:%M")])
+                day_data["vitals"] = self._filter_vitals(all_vitals, vital_bounds_by_shift[shift_key])
+                day_data["vitals_active_intervals"] = active_intervals_by_shift.get(shift_key, [])
 
             day_data["prescriptions"] = self._filter_orders(all_orders, start_dt, end_dt)
 
             if self.config.get("balance", True):
-                day_data["fluids_raw"] = self._filter_fluids(all_fluids, balance_bounds_by_shift[start_dt.strftime("%Y-%m-%d %H:%M")])
+                day_data["fluids_raw"] = self._filter_fluids(all_fluids, balance_bounds_by_shift[shift_key])
 
             if self.config.get("events", True):
                 self._attach_movement(day_data, dt, start_dt, end_dt, movement_summary_date, movement_struct, movement_events)
@@ -311,6 +314,24 @@ class FullReportDataCollector:
             else:
                 bounds[key] = (start_dt, end_dt)
         return bounds
+
+    def _build_active_intervals(self, periods) -> dict[str, list[tuple[datetime, datetime]]]:
+        status_service = getattr(self.remcard_service, "status_service", None)
+        intervals_by_shift = {}
+        for _dt, start_dt, end_dt in periods:
+            key = start_dt.strftime("%Y-%m-%d %H:%M")
+            if status_service and hasattr(status_service, "get_active_intervals"):
+                try:
+                    intervals_by_shift[key] = status_service.get_active_intervals(
+                        self.admission_id,
+                        start_dt,
+                        end_dt,
+                    )
+                except Exception:
+                    intervals_by_shift[key] = []
+            else:
+                intervals_by_shift[key] = []
+        return intervals_by_shift
 
     def _build_balance_bounds(self, periods, patient, current_status) -> dict[str, tuple[datetime, datetime]]:
         fluid_service = getattr(self.remcard_service, "fluid_service", None)

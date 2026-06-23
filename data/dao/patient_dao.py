@@ -55,7 +55,12 @@ class PatientDAO:
             try:
                 abs_path = os.path.abspath(archived_db_path)
                 if current_key and os.path.normcase(abs_path) == current_key:
+                    tables = self._get_current_table_names()
                     query, params = self._build_archived_patients_query(
+                        patient_columns=self._get_current_table_columns("patients"),
+                        admission_columns=self._get_current_table_columns("admissions"),
+                        has_operations_table="operations" in tables,
+                        has_operation_cases_table="operation_cases" in tables,
                         start_dt=start_dt,
                         end_dt=end_dt,
                     )
@@ -79,6 +84,44 @@ class PatientDAO:
         patients = self._map_patients(rows)
         patients.sort(key=lambda p: p.admission_datetime or datetime.min, reverse=True)
         return patients
+
+    def _get_current_table_names(self) -> set[str]:
+        try:
+            rows = self.db.fetch_all_remcard("SELECT name FROM sqlite_master WHERE type='table'")
+        except Exception:
+            return set()
+        tables: set[str] = set()
+        for row in rows or []:
+            try:
+                name = row["name"]
+            except Exception:
+                try:
+                    name = row[0]
+                except Exception:
+                    name = None
+            if name:
+                tables.add(str(name))
+        return tables
+
+    def _get_current_table_columns(self, table_name: str) -> Optional[set[str]]:
+        if table_name not in {"patients", "admissions"}:
+            return None
+        try:
+            rows = self.db.fetch_all_remcard(f"PRAGMA table_info({table_name})")
+        except Exception:
+            return None
+        columns: set[str] = set()
+        for row in rows or []:
+            try:
+                name = row["name"]
+            except Exception:
+                try:
+                    name = row[1]
+                except Exception:
+                    name = None
+            if name:
+                columns.add(str(name))
+        return columns or None
 
     def get_patient_by_id(self, admission_id: int) -> Optional[PatientDTO]:
         def build_query(*, include_operations: bool = True, include_emergency_notice: bool = True) -> str:
@@ -359,6 +402,7 @@ class PatientDAO:
         patient_columns: Optional[set[str]] = None,
         admission_columns: Optional[set[str]] = None,
         has_operations_table: bool = True,
+        has_operation_cases_table: bool = False,
         start_dt: str | None = None,
         end_dt: str | None = None,
     ) -> tuple[str, tuple]:
@@ -378,6 +422,8 @@ class PatientDAO:
             "operation_description",
             "emergency_notice_number",
             "emergency_notice_entered_at",
+            "unit_scope",
+            "admission_type",
         }
 
         def p_col(name: str) -> str:
@@ -408,11 +454,22 @@ class PatientDAO:
             operation_expr = operation_subquery
 
         order_expr = "a.admission_datetime DESC" if "admission_datetime" in admission_columns else "a.id DESC"
-        where_sql = ""
-        params: tuple = ()
+        where_parts: list[str] = []
+        params: list = []
         if start_dt and end_dt and "admission_datetime" in admission_columns:
-            where_sql = "WHERE a.admission_datetime BETWEEN ? AND ?"
-            params = (start_dt, end_dt)
+            where_parts.append("a.admission_datetime BETWEEN ? AND ?")
+            params.extend((start_dt, end_dt))
+
+        if "unit_scope" in admission_columns:
+            where_parts.append("LOWER(TRIM(COALESCE(a.unit_scope, ''))) <> 'operblock'")
+        if "admission_type" in admission_columns:
+            where_parts.append("LOWER(TRIM(COALESCE(a.admission_type, ''))) <> 'operblock'")
+        if has_operation_cases_table:
+            where_parts.append(
+                "NOT EXISTS (SELECT 1 FROM operation_cases oc WHERE oc.admission_id = a.id)"
+            )
+
+        where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
         query = f"""
             SELECT
@@ -440,7 +497,7 @@ class PatientDAO:
             {where_sql}
             ORDER BY {order_expr}
         """
-        return query, params
+        return query, tuple(params)
 
     @staticmethod
     def _iter_archived_db_paths(current_db_path: str, *, include_current: bool = False) -> list[str]:
@@ -477,11 +534,13 @@ class PatientDAO:
                 for row in conn.execute("PRAGMA table_info(admissions)").fetchall()
             }
             has_operations = "operations" in tables
+            has_operation_cases = "operation_cases" in tables
 
             query, params = self._build_archived_patients_query(
                 patient_columns=patient_columns,
                 admission_columns=admission_columns,
                 has_operations_table=has_operations,
+                has_operation_cases_table=has_operation_cases,
                 start_dt=start_dt,
                 end_dt=end_dt,
             )

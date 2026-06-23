@@ -2613,7 +2613,12 @@ class DoctorRemCardWidget(QWidget):
         from rem_card.ui.shared.vitals_widget import VitalsWidget
         from .components.balance_controller import BalanceController
 
-        self.vitals_input = VitalsWidget(self.service, self.admission_id, self._current_date)
+        self.vitals_input = VitalsWidget(
+            self.service,
+            self.admission_id,
+            self._current_date,
+            allow_future_input=True,
+        )
         self.vitals_input.save_btn.clicked.connect(self.refresh_data)
         self.vitals_input.data_changed.connect(self.refresh_data)
         self.layout_manager.sector_1b.set_content(self.vitals_input)

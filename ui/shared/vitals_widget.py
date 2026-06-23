@@ -35,6 +35,7 @@ class VitalsWidget(QWidget):
         allow_inactive_status_input: bool = False,
         force_vital_status: bool = False,
         allow_future_input: bool = False,
+        future_input_limit_minutes: int | None = 15,
         time_quick_actions=None,
     ):
         super().__init__(parent)
@@ -45,6 +46,7 @@ class VitalsWidget(QWidget):
         self._allow_inactive_status_input = bool(allow_inactive_status_input)
         self._force_vital_status = bool(force_vital_status)
         self._allow_future_input = bool(allow_future_input)
+        self._future_input_limit_minutes = self._normalize_future_input_limit(future_input_limit_minutes)
         self._time_quick_actions = list(time_quick_actions or [])
         self._time_manually_edited = False
         self._programmatic_time_change = False
@@ -199,6 +201,20 @@ class VitalsWidget(QWidget):
             self.time_edit.set_time(time_value)
         finally:
             self._programmatic_time_change = False
+
+    @staticmethod
+    def _normalize_future_input_limit(value) -> int | None:
+        if value is None:
+            return None
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 15
+
+    def _future_input_limit(self) -> datetime | None:
+        if self._allow_future_input or self._future_input_limit_minutes is None:
+            return None
+        return datetime.now() + timedelta(minutes=self._future_input_limit_minutes)
 
     def mark_dirty(self):
         """Помечает кеш данных грязным, заставляя обновить границы времени и настройки из БД."""
@@ -477,14 +493,20 @@ class VitalsWidget(QWidget):
             CustomMessageBox.warning(self, "Внимание", "Пациент в операционной или вне отделения. Ввод витальных функций невозможен.")
             next_start = status_service.get_next_active_event_start(self.admission_id, current_dt) if status_service else None
             if next_start:
-                real_now_limit = datetime.now() + timedelta(minutes=15)
-                if next_start > real_now_limit: next_start = real_now_limit
+                real_now_limit = self._future_input_limit()
+                if real_now_limit is not None and next_start > real_now_limit:
+                    next_start = real_now_limit
                 self._set_time_from_service(self.service.now_time(next_start, self.shift_date))
             return
 
-        now_limit = datetime.now() + timedelta(minutes=15)
-        if not self._allow_future_input and current_dt > now_limit:
-            CustomMessageBox.warning(self, "Внимание", f"Нельзя вносить показатели более чем на 15 минут в будущее.\nЛимит: {now_limit.strftime('%H:%M')}")
+        now_limit = self._future_input_limit()
+        if now_limit is not None and current_dt > now_limit:
+            CustomMessageBox.warning(
+                self,
+                "Внимание",
+                f"Нельзя вносить показатели более чем на {self._future_input_limit_minutes} минут в будущее.\n"
+                f"Лимит: {now_limit.strftime('%H:%M')}",
+            )
             return
 
         try:

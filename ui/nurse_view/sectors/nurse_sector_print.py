@@ -16,7 +16,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.report_guard import ensure_daily_card_exists
 from rem_card.services.report_balance import build_print_balance_final
-from rem_card.services.report_vitals_slotting import select_latest_vitals_by_report_hour
+from rem_card.services.report_vitals_slotting import build_vitals_report_matrix
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
@@ -105,17 +105,14 @@ class DataCollectorWorker(QThread):
         current_time = datetime.datetime.now()
         if current_time > end_dt: current_time = end_dt
 
-        # 1. Виталы (30-мин окна без "дыр", с корректными границами суток)
+        # 1. Виталы (30-мин окна + расчетные значения между реальными точками)
         vitals = data.get("vitals", [])
-        vitals_matrix = {}
-
-        selected_by_hour = select_latest_vitals_by_report_hour(vitals, start_dt, end_dt)
-        for i, chosen_v in selected_by_hour.items():
-            vitals_matrix[i] = {}
-            for k, attr in [('hr', 'pulse'), ('sys', 'sys'), ('dia', 'dia'), ('spo2', 'spo2'), ('temp', 'temp')]:
-                val = getattr(chosen_v, attr, None)
-                if val is not None: vitals_matrix[i][k] = val
-        data["vitals_matrix"] = vitals_matrix
+        data["vitals_matrix"] = build_vitals_report_matrix(
+            vitals,
+            start_dt,
+            end_dt,
+            active_intervals=data.get("vitals_active_intervals"),
+        )
 
         # 2. Назначения
         orders = data.get("prescriptions", [])
@@ -242,7 +239,15 @@ class DataCollectorWorker(QThread):
                 "start_dt": start_dt, "end_dt": end_dt, "vitals": [], "prescriptions": [], "events": [], "fluids_raw": []
             }
             attach_notice_for_period(data, patient, start_dt, end_dt)
-            if self.config.get("vitals", True): data["vitals"] = self.remcard_service.get_vitals(self.admission_id, self.date)
+            if self.config.get("vitals", True):
+                data["vitals"] = self.remcard_service.get_vitals(self.admission_id, self.date)
+                status_service = getattr(self.remcard_service, "status_service", None)
+                if status_service and hasattr(status_service, "get_active_intervals"):
+                    data["vitals_active_intervals"] = status_service.get_active_intervals(
+                        self.admission_id,
+                        start_dt,
+                        end_dt,
+                    )
             data["prescriptions"] = self.remcard_service.get_orders(self.admission_id, self.date, only_committed=True)
             if self.config.get("balance", True) and hasattr(self.remcard_service, 'get_fluids'): data["fluids_raw"] = self.remcard_service.get_fluids(self.admission_id, self.date)
             if self.config.get("events", True) and hasattr(self.remcard_service, 'status_service'): data["events"] = self.remcard_service.status_service.get_events_in_range(self.admission_id, start_dt, end_dt)

@@ -52,7 +52,11 @@ class NurseRemCardWidget(QWidget):
         content_layout = QHBoxLayout()
         
         # Левая часть - ввод
-        self.vitals_input = VitalsWidget(self.service, self.admission_id)
+        self.vitals_input = VitalsWidget(
+            self.service,
+            self.admission_id,
+            future_input_limit_minutes=20,
+        )
         self.vitals_input.save_btn.clicked.connect(self.refresh_data)
         
         content_layout.addWidget(self.vitals_input, 1)

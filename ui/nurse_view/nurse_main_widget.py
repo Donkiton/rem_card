@@ -1735,7 +1735,12 @@ class NurseMainWidget(QWidget):
         from ..shared.vitals_widget import VitalsWidget
         from ..shared.components.balance_controller import BalanceController
 
-        self.vitals_input = VitalsWidget(self.remcard_service, None, datetime.now())
+        self.vitals_input = VitalsWidget(
+            self.remcard_service,
+            None,
+            datetime.now(),
+            future_input_limit_minutes=20,
+        )
         self.vitals_input.save_btn.clicked.connect(self.refresh_data)
         self.vitals_input.data_changed.connect(self.refresh_data)
         self.layout_manager.sector_1b.set_content(self.vitals_input)
