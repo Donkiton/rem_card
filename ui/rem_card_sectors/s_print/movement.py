@@ -1,13 +1,17 @@
 from dataclasses import dataclass
 from datetime import datetime
+import json
 from typing import Any, Iterable, Optional
 
 
 TERMINAL_STATUSES = {"TRANSFERRED", "DEAD"}
+NON_MOVEMENT_STATUSES = {"CPR"}
+NON_MOVEMENT_REASON_TYPES = {"cpr"}
 STATUS_LABELS = {
     "ACTIVE": "В отделении",
     "OUT": "Вне отд.",
     "OR": "Оперблок",
+    "CPR": "СЛР",
     "TRANSFERRED": "Переведен",
     "DEAD": "Умер",
 }
@@ -23,8 +27,16 @@ class MovementInterval:
 
 
 def movement_comment_text(status_value: Any, reason_text: Any) -> str:
+    status_text = str(getattr(status_value, "value", status_value) or "")
     text = str(reason_text or "").strip()
-    if str(status_value) == "DEAD" and text.startswith("Биологическая смерть:"):
+    if status_text == "CPR" or text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            text = str(payload.get("comment") or "").strip()
+    if status_text == "DEAD" and text.startswith("Биологическая смерть:"):
         return ""
     return text
 
@@ -42,9 +54,17 @@ def _event_id(event: Any) -> int:
         return 0
 
 
+def is_non_movement_event(event: Any) -> bool:
+    status = _status_value(event)
+    reason_type = str(getattr(event, "reason_type", "") or "")
+    return status in NON_MOVEMENT_STATUSES or reason_type in NON_MOVEMENT_REASON_TYPES
+
+
 def _raw_intervals(events: Iterable[Any]) -> list[MovementInterval]:
     intervals: list[MovementInterval] = []
     for event in events or []:
+        if is_non_movement_event(event):
+            continue
         start_time = getattr(event, "start_time", None)
         if not start_time:
             continue

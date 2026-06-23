@@ -22,7 +22,7 @@ from rem_card.data.dto.remcard_dto import AdministrationDTO
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct
 from rem_card.ui.rem_card_sectors.s_print.emergency_notice import attach_notice_for_period
 from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_full_report_data
-from rem_card.ui.rem_card_sectors.s_print.movement import movement_comment_text
+from rem_card.ui.rem_card_sectors.s_print.movement import is_non_movement_event, movement_comment_text
 
 
 def _movement_comment_text(status_value, reason_text):
@@ -204,6 +204,8 @@ class DataCollectorWorker(QThread):
         status_map = {"ACTIVE": "В отделении", "OUT": "Вне отд.", "OR": "Оперблок", "TRANSFERRED": "Переведен", "DEAD": "Умер"}
         events_struct = []
         for ev in data.get("events", []):
+            if is_non_movement_event(ev):
+                continue
             st_time = getattr(ev, 'start_time', None)
             en_time = getattr(ev, 'end_time', None)
             status_val = str(getattr(ev.status, 'value', ev.status))

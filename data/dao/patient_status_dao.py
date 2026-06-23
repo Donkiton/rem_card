@@ -10,6 +10,7 @@ CVC_OUTCOME_STATUS_BY_PATIENT_STATUS = {
     PatientStatus.TRANSFERRED.value: ("catheter_transferred", "transferred_with_catheter"),
     PatientStatus.DEAD.value: ("catheter_dead", "dead_with_catheter"),
 }
+CPR_REASON_TYPE = "cpr"
 
 class PatientStatusDAO:
     def __init__(self, db_manager):
@@ -733,6 +734,7 @@ class PatientStatusDAO:
             clinical_death = clinical_death.replace(second=0, microsecond=0).isoformat()
         elif clinical_death is not None:
             clinical_death = str(clinical_death)
+        clinical_death_dt = self._parse_sqlite_dt(clinical_death) if clinical_death else None
 
         measures_json = details.get("cardiac_arrest_measures_json")
         cardiac_arrest_cause = details.get("cardiac_arrest_cause")
@@ -793,6 +795,15 @@ class PatientStatusDAO:
                         )
                         return False
 
+                    death_interval_start = clinical_death_dt or event_dt
+                    if new_status == PatientStatus.DEAD and self._death_conflicts_with_cpr(cursor, admission_id, death_interval_start):
+                        logger.warning(
+                            "[StatusDAO] Death outcome interval starting %s overlaps CPR event for admission %s",
+                            death_interval_start,
+                            admission_id,
+                        )
+                        return False
+
                     cursor.execute(
                         """
                         UPDATE patient_status_events
@@ -821,6 +832,15 @@ class PatientStatusDAO:
                         new_status.value,
                         event_time_str,
                     )
+
+                death_interval_start = clinical_death_dt or event_dt
+                if new_status == PatientStatus.DEAD and self._death_conflicts_with_cpr(cursor, admission_id, death_interval_start):
+                    logger.warning(
+                        "[StatusDAO] Death outcome interval starting %s overlaps CPR event for admission %s",
+                        death_interval_start,
+                        admission_id,
+                    )
+                    return False
 
                 cursor.execute(
                     """
@@ -924,6 +944,354 @@ class PatientStatusDAO:
             )
             return False
 
+    @staticmethod
+    def _cpr_duration_minutes(start_dt: datetime, end_dt: datetime) -> int:
+        return max(0, int((end_dt - start_dt).total_seconds() // 60))
+
+    def _cpr_event_text(self, payload: Dict[str, Any], comment: Optional[str] = None) -> str:
+        data = dict(payload or {})
+        data["outcome_type"] = "cpr_recovery"
+        data["comment"] = str(comment if comment is not None else data.get("comment") or "").strip()
+        return json.dumps(data, ensure_ascii=False)
+
+    def _cpr_payload_from_event_text(self, value: Any) -> Dict[str, Any]:
+        payload = self._safe_json_dict(value)
+        if payload:
+            return payload
+        text = str(value or "").strip()
+        return {"outcome_type": "cpr_recovery", "comment": text} if text else {"outcome_type": "cpr_recovery"}
+
+    @staticmethod
+    def _is_cpr_event_row(row) -> bool:
+        if not row:
+            return False
+        return str(row["status"] or "") == PatientStatus.CPR.value or str(row["reason_type"] or "") == CPR_REASON_TYPE
+
+    @staticmethod
+    def _intervals_overlap(left_start: datetime, left_end: datetime, right_start: datetime, right_end: datetime) -> bool:
+        return left_start < right_end and left_end > right_start
+
+    def _cpr_interval_conflicts(
+        self,
+        cursor,
+        admission_id: int,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        exclude_event_id: Optional[int] = None,
+    ) -> bool:
+        params: list[Any] = [admission_id, PatientStatus.CPR.value, CPR_REASON_TYPE]
+        exclude_sql = ""
+        if exclude_event_id is not None:
+            exclude_sql = "AND id != ?"
+            params.append(int(exclude_event_id))
+        cursor.execute(
+            f"""
+            SELECT id, start_time, end_time
+            FROM patient_status_events
+            WHERE admission_id = ?
+              AND (status = ? OR COALESCE(reason_type, '') = ?)
+              {exclude_sql}
+            """,
+            tuple(params),
+        )
+        for row in cursor.fetchall():
+            other_start = self._parse_sqlite_dt(row["start_time"])
+            other_end = self._parse_sqlite_dt(row["end_time"])
+            if other_start and other_end and self._intervals_overlap(start_dt, end_dt, other_start, other_end):
+                return True
+
+        death_start = self._death_interval_start(cursor, admission_id, exclude_event_id=exclude_event_id)
+        return bool(death_start and end_dt > death_start)
+
+    def _death_event_start(
+        self,
+        cursor,
+        admission_id: int,
+        *,
+        exclude_event_id: Optional[int] = None,
+    ) -> Optional[datetime]:
+        params: list[Any] = [admission_id, PatientStatus.DEAD.value]
+        exclude_sql = ""
+        if exclude_event_id is not None:
+            exclude_sql = "AND id != ?"
+            params.append(int(exclude_event_id))
+        cursor.execute(
+            f"""
+            SELECT start_time
+            FROM patient_status_events
+            WHERE admission_id = ?
+              AND status = ?
+              {exclude_sql}
+            ORDER BY datetime(start_time) ASC, id ASC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+        row = cursor.fetchone()
+        return self._parse_sqlite_dt(row["start_time"]) if row and row["start_time"] else None
+
+    def _death_interval_start(
+        self,
+        cursor,
+        admission_id: int,
+        *,
+        exclude_event_id: Optional[int] = None,
+        fallback_dt: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        death_dt = fallback_dt or self._death_event_start(cursor, admission_id, exclude_event_id=exclude_event_id)
+        if death_dt is None:
+            return None
+        cursor.execute(
+            """
+            SELECT clinical_death_datetime, cardiac_arrest_measures_json
+            FROM admissions
+            WHERE id = ?
+            """,
+            (admission_id,),
+        )
+        row = cursor.fetchone()
+        clinical_dt = None
+        if row:
+            clinical_dt = self._parse_sqlite_dt(row["clinical_death_datetime"])
+            if clinical_dt is None:
+                payload = self._safe_json_dict(row["cardiac_arrest_measures_json"])
+                clinical_dt = self._parse_sqlite_dt(payload.get("clinical_death_datetime"))
+        if clinical_dt is not None and (death_dt is None or clinical_dt <= death_dt):
+            return clinical_dt.replace(second=0, microsecond=0)
+        return death_dt.replace(second=0, microsecond=0) if death_dt else None
+
+    def _death_conflicts_with_cpr(
+        self,
+        cursor,
+        admission_id: int,
+        death_start_dt: datetime,
+        *,
+        exclude_event_id: Optional[int] = None,
+    ) -> bool:
+        params: list[Any] = [admission_id, PatientStatus.CPR.value, CPR_REASON_TYPE]
+        exclude_sql = ""
+        if exclude_event_id is not None:
+            exclude_sql = "AND id != ?"
+            params.append(int(exclude_event_id))
+        cursor.execute(
+            f"""
+            SELECT start_time, end_time
+            FROM patient_status_events
+            WHERE admission_id = ?
+              AND (status = ? OR COALESCE(reason_type, '') = ?)
+              {exclude_sql}
+            """,
+            tuple(params),
+        )
+        for row in cursor.fetchall():
+            cpr_end = self._parse_sqlite_dt(row["end_time"])
+            if cpr_end and cpr_end > death_start_dt:
+                return True
+        return False
+
+    def record_cpr_recovery(
+        self,
+        admission_id: int,
+        clinical_time: datetime,
+        recovery_time: datetime,
+        reason_text: Optional[str] = None,
+        user_id: Optional[str] = None,
+        admission_details: Optional[Dict[str, Any]] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
+    ) -> bool:
+        """Фиксирует успешную СЛР как отдельное закрытое событие без финального исхода."""
+        details = dict(admission_details or {})
+        clinical_dt = (clinical_time or datetime.now()).replace(second=0, microsecond=0)
+        recovery_dt = (recovery_time or clinical_dt).replace(second=0, microsecond=0)
+        if recovery_dt < clinical_dt:
+            logger.warning("[StatusDAO] CPR recovery rejected: recovery time is earlier than clinical death")
+            return False
+
+        clinical_time_str = clinical_dt.isoformat()
+        recovery_time_str = recovery_dt.isoformat()
+        now_str = datetime.now().replace(microsecond=0).isoformat()
+        payload = self._safe_json_dict(details.get("cardiac_arrest_measures_json"))
+        payload.setdefault("outcome_type", "cpr_recovery")
+        payload["clinical_death_datetime"] = clinical_time_str
+        payload["recovery_datetime"] = recovery_time_str
+        payload["comment"] = str(reason_text or payload.get("comment") or "").strip()
+        payload["cpr_duration_minutes"] = self._cpr_duration_minutes(clinical_dt, recovery_dt)
+
+        cardiac_arrest_cause = details.get("cardiac_arrest_cause") or payload.get("cardiac_arrest_cause")
+
+        try:
+            with self.db.remcard_transaction(source="status_cpr_recovery") as cursor:
+                cursor.execute(
+                    """
+                    SELECT admission_datetime, outcome, transfer_datetime, death_datetime, COALESCE(revision, 0) AS revision
+                    FROM admissions
+                    WHERE id = ?
+                    """,
+                    (admission_id,),
+                )
+                admission = cursor.fetchone()
+                if not admission:
+                    logger.warning("[StatusDAO] CPR recovery rejected: admission %s not found", admission_id)
+                    return False
+                assert_revision_matches(admission["revision"], expected_admission_revision)
+
+                outcome = str(admission["outcome"] or "").strip().lower()
+                if outcome or admission["death_datetime"] or admission["transfer_datetime"]:
+                    logger.warning("[StatusDAO] CPR recovery rejected: admission %s already has final outcome", admission_id)
+                    return False
+
+                admission_dt = self._parse_sqlite_dt(admission["admission_datetime"])
+                if admission_dt and clinical_dt < admission_dt.replace(second=0, microsecond=0):
+                    logger.warning(
+                        "[StatusDAO] CPR recovery rejected: clinical time %s before admission %s",
+                        clinical_dt,
+                        admission_dt,
+                    )
+                    return False
+
+                cursor.execute(
+                    """
+                    SELECT id, status, COALESCE(revision, 0) AS revision
+                    FROM patient_status_events
+                    WHERE admission_id = ? AND end_time IS NULL
+                    LIMIT 1
+                    """,
+                    (admission_id,),
+                )
+                current_active = cursor.fetchone()
+                if current_active:
+                    if expected_active_event_id is not None and int(current_active["id"]) != int(expected_active_event_id):
+                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                    assert_revision_matches(current_active["revision"], expected_active_revision)
+                    if str(current_active["status"] or "") in (PatientStatus.TRANSFERRED.value, PatientStatus.DEAD.value):
+                        logger.warning("[StatusDAO] CPR recovery rejected: current status is final")
+                        return False
+                elif expected_active_event_id is not None:
+                    raise DataConflictError(DATA_CONFLICT_MESSAGE)
+
+                if self._cpr_interval_conflicts(cursor, admission_id, clinical_dt, recovery_dt):
+                    logger.warning(
+                        "[StatusDAO] CPR recovery rejected: interval %s - %s overlaps another CPR/death event",
+                        clinical_dt,
+                        recovery_dt,
+                    )
+                    return False
+
+                cursor.execute(
+                    """
+                    INSERT INTO patient_status_events
+                    (admission_id, status, reason_type, reason_text, start_time, end_time,
+                     created_by, created_at, updated_at, last_modified_by)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        admission_id,
+                        PatientStatus.CPR.value,
+                        CPR_REASON_TYPE,
+                        self._cpr_event_text(payload, reason_text),
+                        clinical_time_str,
+                        recovery_time_str,
+                        user_id,
+                        now_str,
+                        now_str,
+                        user_id,
+                    ),
+                )
+
+                cursor.execute(
+                    """
+                    UPDATE admissions
+                    SET death_datetime = NULL,
+                        clinical_death_datetime = ?,
+                        cardiac_arrest_cause = ?,
+                        cardiac_arrest_measures_json = ?,
+                        updated_at = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                      AND (? IS NULL OR COALESCE(revision, 0) = ?)
+                    """,
+                    (
+                        clinical_time_str,
+                        cardiac_arrest_cause,
+                        json.dumps(payload, ensure_ascii=False),
+                        now_str,
+                        admission_id,
+                        expected_admission_revision,
+                        expected_admission_revision,
+                    ),
+                )
+                if expected_admission_revision is not None and cursor.rowcount != 1:
+                    raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                return True
+        except DataConflictError:
+            raise
+        except Exception as e:
+            logger.error("[StatusDAO] Error recording CPR recovery for admission %s: %s", admission_id, e, exc_info=True)
+            return False
+
+    def _sync_cpr_recovery_admission_from_event_update(
+        self,
+        cursor,
+        admission_id: int,
+        clinical_dt: datetime,
+        recovery_dt: datetime,
+        comment: str,
+        now_str: str,
+    ) -> None:
+        cursor.execute(
+            "SELECT cardiac_arrest_measures_json FROM admissions WHERE id = ?",
+            (admission_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+        existing_payload = self._safe_json_dict(row["cardiac_arrest_measures_json"])
+        existing_type = str(existing_payload.get("outcome_type") or "")
+        if existing_payload and existing_type not in {"", "cpr_recovery"}:
+            return
+        payload = self._cpr_payload_from_event_text(comment)
+        payload["outcome_type"] = "cpr_recovery"
+        payload["clinical_death_datetime"] = clinical_dt.isoformat()
+        payload["recovery_datetime"] = recovery_dt.isoformat()
+        payload["comment"] = str(payload.get("comment") or comment or "").strip()
+        payload["cpr_duration_minutes"] = self._cpr_duration_minutes(clinical_dt, recovery_dt)
+        cursor.execute(
+            """
+            UPDATE admissions
+            SET clinical_death_datetime = ?,
+                cardiac_arrest_measures_json = ?,
+                updated_at = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (clinical_dt.isoformat(), json.dumps(payload, ensure_ascii=False), now_str, admission_id),
+        )
+
+    def _clear_cpr_recovery_admission(self, cursor, admission_id: int, now_str: str) -> None:
+        cursor.execute(
+            "SELECT cardiac_arrest_measures_json FROM admissions WHERE id = ?",
+            (admission_id,),
+        )
+        row = cursor.fetchone()
+        payload = self._safe_json_dict(row["cardiac_arrest_measures_json"]) if row else {}
+        if str(payload.get("outcome_type") or "") != "cpr_recovery":
+            return
+        cursor.execute(
+            """
+            UPDATE admissions
+            SET clinical_death_datetime = NULL,
+                cardiac_arrest_cause = NULL,
+                cardiac_arrest_measures_json = NULL,
+                updated_at = ?,
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+            """,
+            (now_str, admission_id),
+        )
+
     def _repair_future_initial_status_before_outcome(
         self,
         cursor,
@@ -983,10 +1351,33 @@ class PatientStatusDAO:
                 assert_revision_matches(current["revision"], expected_active_revision)
                 current_status = current["status"]
 
+                cursor.execute(
+                    """
+                    SELECT id, status, reason_type
+                    FROM patient_status_events
+                    WHERE admission_id = ?
+                    ORDER BY start_time DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (admission_id,),
+                )
+                latest = cursor.fetchone()
+                if latest and self._is_cpr_event_row(latest):
+                    cursor.execute("DELETE FROM patient_status_events WHERE id = ?", (latest["id"],))
+                    self._clear_cpr_recovery_admission(cursor, admission_id, now_str)
+                    logger.info("[StatusDAO] Admission %s: rolled back CPR recovery event %s", admission_id, latest["id"])
+                    return True
+
                 # 2. Проверяем, сколько всего событий. Нельзя удалять единственное (начальное).
                 cursor.execute(
-                    "SELECT count(*) as cnt FROM patient_status_events WHERE admission_id = ?",
-                    (admission_id,)
+                    """
+                    SELECT count(*) as cnt
+                    FROM patient_status_events
+                    WHERE admission_id = ?
+                      AND status != ?
+                      AND COALESCE(reason_type, '') != ?
+                    """,
+                    (admission_id, PatientStatus.CPR.value, CPR_REASON_TYPE),
                 )
                 if cursor.fetchone()['cnt'] <= 1:
                     logger.warning(f"[StatusDAO] Cannot rollback: only one status exists for admission {admission_id}")
@@ -997,8 +1388,10 @@ class PatientStatusDAO:
                     SELECT id, status FROM patient_status_events 
                     WHERE admission_id = ?
                       AND id != ?
+                      AND status != ?
+                      AND COALESCE(reason_type, '') != ?
                     ORDER BY start_time DESC, id DESC LIMIT 1
-                """, (admission_id, current['id']))
+                """, (admission_id, current['id'], PatientStatus.CPR.value, CPR_REASON_TYPE))
                 prev = cursor.fetchone()
                 if prev:
                     current_is_outcome = current_status in (
@@ -1279,14 +1672,95 @@ class PatientStatusDAO:
         try:
             with self.db.remcard_transaction() as cursor:
                 # 1. Получаем текущее событие
-                cursor.execute("SELECT admission_id, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE id = ?", (event_id,))
+                cursor.execute(
+                    """
+                    SELECT admission_id, status, reason_type, reason_text, COALESCE(revision, 0) AS revision
+                    FROM patient_status_events
+                    WHERE id = ?
+                    """,
+                    (event_id,),
+                )
                 curr_adm = cursor.fetchone()
                 if not curr_adm: return False
                 assert_revision_matches(curr_adm["revision"], expected_revision)
                 admission_id = curr_adm['admission_id']
 
+                if self._is_cpr_event_row(curr_adm):
+                    if new_end is None or new_end <= new_start:
+                        logger.warning("[StatusDAO] CPR event update rejected: invalid bounds %s - %s", new_start, new_end)
+                        return False
+                    if self._cpr_interval_conflicts(
+                        cursor,
+                        admission_id,
+                        new_start.replace(second=0, microsecond=0),
+                        new_end.replace(second=0, microsecond=0),
+                        exclude_event_id=event_id,
+                    ):
+                        logger.warning("[StatusDAO] CPR event update rejected: interval overlaps another CPR/death event")
+                        return False
+                    current_payload = self._cpr_payload_from_event_text(curr_adm["reason_text"])
+                    if new_reason is not None:
+                        current_payload["comment"] = str(new_reason or "").strip()
+                    current_payload["clinical_death_datetime"] = new_start.replace(second=0, microsecond=0).isoformat()
+                    current_payload["recovery_datetime"] = new_end.replace(second=0, microsecond=0).isoformat()
+                    current_payload["cpr_duration_minutes"] = self._cpr_duration_minutes(
+                        new_start.replace(second=0, microsecond=0),
+                        new_end.replace(second=0, microsecond=0),
+                    )
+                    final_reason = self._cpr_event_text(current_payload)
+                    cursor.execute(
+                        """
+                        UPDATE patient_status_events
+                        SET start_time = ?,
+                            end_time = ?,
+                            reason_text = ?,
+                            updated_at = ?,
+                            last_modified_by = COALESCE(last_modified_by, created_by),
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
+                        (new_start.isoformat(), new_end.isoformat(), final_reason, now_str, event_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise DataConflictError(DATA_CONFLICT_MESSAGE)
+                    self._sync_cpr_recovery_admission_from_event_update(
+                        cursor,
+                        admission_id,
+                        new_start.replace(second=0, microsecond=0),
+                        new_end.replace(second=0, microsecond=0),
+                        final_reason,
+                        now_str,
+                    )
+                    logger.info("[StatusDAO] CPR event %s bounds updated: %s - %s", event_id, new_start, new_end)
+                    return True
+
+                death_start_for_update = self._death_interval_start(
+                    cursor,
+                    admission_id,
+                    exclude_event_id=event_id,
+                    fallback_dt=new_start.replace(second=0, microsecond=0),
+                )
+                if str(curr_adm["status"] or "") == PatientStatus.DEAD.value and death_start_for_update and self._death_conflicts_with_cpr(
+                    cursor,
+                    admission_id,
+                    death_start_for_update,
+                    exclude_event_id=event_id,
+                ):
+                    logger.warning("[StatusDAO] Death event update rejected: start overlaps CPR event")
+                    return False
+
                 # 2. Получаем ВСЕ события пациента в хронологическом порядке (с нужными полями)
-                cursor.execute("SELECT id, start_time, end_time FROM patient_status_events WHERE admission_id = ? ORDER BY start_time ASC", (admission_id,))
+                cursor.execute(
+                    """
+                    SELECT id, start_time, end_time
+                    FROM patient_status_events
+                    WHERE admission_id = ?
+                      AND status != ?
+                      AND COALESCE(reason_type, '') != ?
+                    ORDER BY start_time ASC
+                    """,
+                    (admission_id, PatientStatus.CPR.value, CPR_REASON_TYPE),
+                )
                 all_events = cursor.fetchall()
                 
                 # Находим индекс редактируемого события

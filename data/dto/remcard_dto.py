@@ -23,6 +23,7 @@ class PatientStatus(Enum):
     ACTIVE = "ACTIVE"           # В отделении
     OUT = "OUT"                 # Вне отделения (КТ, перевязка и т.д.)
     OR = "OR"                   # Операционная
+    CPR = "CPR"                 # СЛР, клиническое событие без перемещения
     TRANSFERRED = "TRANSFERRED" # Переведен (ИСХОД)
     DEAD = "DEAD"               # Умер (ИСХОД)
 

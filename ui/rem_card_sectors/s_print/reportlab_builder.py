@@ -1093,19 +1093,27 @@ class ReportLabReportBuilder:
         details = data.get("death_outcome") or {}
         if not details or not (include_outcome or include_protocol):
             return []
+        items = details.get("items") if isinstance(details.get("items"), list) else [details]
         flowables = []
-        if include_outcome:
-            flowables.append(cls._death_outcome_table(details, table_width))
-        if include_protocol:
-            if flowables:
-                flowables.append(Spacer(1, cls.SECTION_GAP_PT))
-            flowables.append(cls._death_protocol_table(details, table_width))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            outcome_kind = str(item.get("outcome_kind") or "death")
+            if include_outcome:
+                if flowables:
+                    flowables.append(Spacer(1, cls.SECTION_GAP_PT))
+                flowables.append(cls._death_outcome_table(item, table_width))
+            if include_protocol and outcome_kind != "recovery":
+                if flowables:
+                    flowables.append(Spacer(1, cls.SECTION_GAP_PT))
+                flowables.append(cls._death_protocol_table(item, table_width))
         return flowables
 
     @classmethod
     def _death_outcome_table(cls, details: dict, table_width: float):
         widths = cls._weighted_widths(table_width, [0.24, 0.76])
-        rows = [["ИСХОД: СМЕРТЬ", ""]]
+        outcome_kind = str(details.get("outcome_kind") or "death")
+        rows = [[details.get("title") or "ИСХОД: СМЕРТЬ", ""]]
 
         def row(label, value):
             rows.append(
@@ -1119,7 +1127,11 @@ class ReportLabReportBuilder:
         row("Причина остановки сердца", details.get("cause") or "—")
         row("Мероприятия", cls._measures_text(details.get("measures") or []))
         row("Комментарий к причине остановки сердца", details.get("comment") or "—")
-        row("Время биологической смерти", details.get("biological_time") or "—")
+        if outcome_kind == "recovery":
+            row("Время восстановления кровообращения", details.get("recovery_time") or "—")
+            row("Длительность СЛР", details.get("cpr_duration") or "—")
+        else:
+            row("Время биологической смерти", details.get("biological_time") or "—")
         row("Врач", f"{details.get('doctor') or '____________________________________________'}    Подпись ______________________________")
 
         style = cls._base_table_style(title_row=True, body_font_size=7.5, header_font_size=7.5, left_columns=(0, 1))

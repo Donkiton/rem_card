@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.patient_age import format_patient_age, format_patient_age_from_birth_date
+from rem_card.app.paths import get_icon_dir
 from rem_card.services.shift_service import ShiftService
 from rem_card.services.doctor_list_service import DoctorListStore
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
@@ -51,6 +53,38 @@ DEATH_TIME_SECTION_WIDTH = 400
 DEATH_WIDE_SECTION_WIDTH = (DEATH_TIME_SECTION_WIDTH * 2) + 14
 FORM_FIELD_MAX_WIDTH = 520
 PROTOCOL_FIELD_MAX_WIDTH = 680
+DEATH_OUTCOME_BIOLOGICAL = "biological_death"
+DEATH_OUTCOME_RECOVERY = "cpr_recovery"
+
+
+def _icon_qss_url(file_name: str) -> str:
+    path = os.path.abspath(os.path.join(get_icon_dir(), file_name))
+    return path.replace("\\", "/")
+
+
+OUTCOME_COMBO_ARROW_ICON = _icon_qss_url("combo_arrow_down.svg")
+OUTCOME_COMBO_VIEW_STYLE = """
+QAbstractItemView {
+    background-color: #ffffff;
+    color: #172033;
+    border: 1px solid #b9c5d3;
+    selection-background-color: #dbeafe;
+    selection-color: #172033;
+    outline: 0;
+}
+QAbstractItemView::item {
+    min-height: 24px;
+    padding: 4px 8px;
+    background-color: #ffffff;
+}
+QAbstractItemView::item:hover {
+    background-color: #eef6ff;
+}
+QAbstractItemView::item:selected {
+    background-color: #dbeafe;
+    color: #172033;
+}
+"""
 
 DEFAULT_DEATH_PROTOCOL_POSITION = "врач анестезиолог-реаниматолог"
 DEFAULT_DEATH_PROTOCOL_WORKPLACE = 'КГБУЗ "Городская больница" им М.И. Шевчук МЗХК'
@@ -178,7 +212,7 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 border: 1.5px solid #bdc3c7;
                 border-radius: 5px;
             }
-            QLineEdit, QComboBox, QPlainTextEdit {
+            QLineEdit, QPlainTextEdit {
                 background: #ffffff;
                 border: 1px solid #ced4da;
                 border-radius: 4px;
@@ -186,8 +220,35 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 color: #2c3e50;
                 font-size: 13px;
             }
+            QComboBox {
+                background-color: #ffffff;
+                border: 1px solid #c8d2dc;
+                border-radius: 7px;
+                padding: 7px 31px 7px 9px;
+                min-height: 26px;
+                color: #2c3e50;
+                font-size: 13px;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 24px;
+                border-left: 1px solid #d7dee8;
+                background-color: #f4f7fb;
+                border-top-right-radius: 7px;
+                border-bottom-right-radius: 7px;
+            }
+            QComboBox::drop-down:hover {
+                background-color: #e8f1fb;
+                border-left-color: #7aa6d8;
+            }
+            QComboBox::down-arrow {
+                image: url("__OUTCOME_COMBO_ARROW_ICON__");
+                width: 12px;
+                height: 12px;
+            }
             QLineEdit:focus, QComboBox:focus, QPlainTextEdit:focus {
-                border: 2px solid #8aa4b8;
+                border-color: #7aa6d8;
             }
             QPushButton#DialogOkBtn {
                 min-width: 110px;
@@ -210,10 +271,17 @@ class _OutcomeDialogBase(BaseStyledDialog):
                 background: transparent;
             }
             """
+            .replace("__OUTCOME_COMBO_ARROW_ICON__", OUTCOME_COMBO_ARROW_ICON)
         )
 
     def _apply_content_style(self):
         self.content_widget.setStyleSheet(self._content_style_sheet())
+
+    def _apply_combo_view_style(self, combo: QComboBox) -> None:
+        try:
+            combo.view().setStyleSheet(OUTCOME_COMBO_VIEW_STYLE)
+        except Exception:
+            pass
 
     def _section(self, title: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
@@ -386,6 +454,7 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         self.department_combo = QComboBox()
         self.department_combo.addItems(TRANSFER_DEPARTMENTS)
         self.department_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
+        self._apply_combo_view_style(self.department_combo)
         profile = str(self.admission_context.get("department_profile") or "").strip()
         if profile:
             idx = self.department_combo.findText(profile)
@@ -396,6 +465,7 @@ class TransferOutcomeDialog(_OutcomeDialogBase):
         self.lpu_combo = QComboBox()
         self.lpu_combo.addItems(TRANSFER_LPUS)
         self.lpu_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
+        self._apply_combo_view_style(self.lpu_combo)
         self.lpu_combo.currentTextChanged.connect(self._sync_lpu_visibility)
 
         self.lpu_other = QLineEdit()
@@ -548,12 +618,13 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         clinical_layout.addWidget(self.clinical_time_picker, 0, Qt.AlignLeft)
         time_row.addWidget(clinical_frame, 1)
 
-        biological_frame, biological_layout = self._section("Биологическая смерть")
-        self._make_death_section_expanding(biological_frame, DEATH_TIME_SECTION_WIDTH)
+        self.biological_frame, biological_layout = self._section("Биологическая смерть")
+        self.biological_title_label = biological_layout.itemAt(0).widget()
+        self._make_death_section_expanding(self.biological_frame, DEATH_TIME_SECTION_WIDTH)
         self.biological_time_picker = self._make_time_picker()
         self.biological_time_picker.set_time(biological_default_time)
         biological_layout.addWidget(self.biological_time_picker, 0, Qt.AlignLeft)
-        time_row.addWidget(biological_frame, 1)
+        time_row.addWidget(self.biological_frame, 1)
         body_layout.addLayout(time_row)
         self.clinical_time_picker.timeChanged.connect(self._update_auto_comment)
         self.biological_time_picker.timeChanged.connect(self._update_auto_comment)
@@ -568,7 +639,15 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         for cause in CARDIAC_ARREST_TEMPLATES:
             self.cause_combo.addItem(cause, cause)
         self.cause_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
+        self._apply_combo_view_style(self.cause_combo)
         self.cause_combo.currentIndexChanged.connect(self._rebuild_measures)
+
+        self.outcome_combo = QComboBox()
+        self.outcome_combo.addItem("Биологическая смерть", DEATH_OUTCOME_BIOLOGICAL)
+        self.outcome_combo.addItem("Восстановление спонтанной сердечной деятельности", DEATH_OUTCOME_RECOVERY)
+        self.outcome_combo.setMaximumWidth(FORM_FIELD_MAX_WIDTH)
+        self._apply_combo_view_style(self.outcome_combo)
+        self.outcome_combo.currentIndexChanged.connect(self._sync_outcome_mode)
 
         self.comment_edit = QLineEdit()
         self.comment_edit.setPlaceholderText("Комментарий к причине остановки сердца")
@@ -577,8 +656,10 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
 
         cause_grid.addWidget(QLabel("Причина:"), 0, 0)
         cause_grid.addWidget(self.cause_combo, 0, 1)
-        cause_grid.addWidget(QLabel("Комментарий:"), 1, 0)
-        cause_grid.addWidget(self.comment_edit, 1, 1)
+        cause_grid.addWidget(QLabel("Итог:"), 1, 0)
+        cause_grid.addWidget(self.outcome_combo, 1, 1)
+        cause_grid.addWidget(QLabel("Комментарий:"), 2, 0)
+        cause_grid.addWidget(self.comment_edit, 2, 1)
         cause_grid.setColumnStretch(0, 0)
         cause_grid.setColumnStretch(1, 1)
         cause_layout.addLayout(cause_grid)
@@ -597,7 +678,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         scroll.setWidget(body)
         self.content_layout.addWidget(scroll, 1)
         self.content_layout.addLayout(self._buttons())
-        self._update_auto_comment()
+        self._sync_outcome_mode()
         self._restore_last_position()
 
     def _make_death_section_expanding(self, frame: QFrame, minimum_width: int):
@@ -705,6 +786,7 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         self.protocol_doctor_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.protocol_doctor_combo.setMaximumWidth(PROTOCOL_FIELD_MAX_WIDTH)
         self.protocol_doctor_combo.addItems(self.doctor_names)
+        self._apply_combo_view_style(self.protocol_doctor_combo)
         if self.doctor_names:
             self.protocol_doctor_combo.setCurrentIndex(0)
         else:
@@ -739,6 +821,26 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
         if key not in self.doctor_positions:
             return
         self.protocol_position_edit.setText(self.doctor_positions.get(key) or DEFAULT_DEATH_PROTOCOL_POSITION)
+
+    def _outcome_type(self) -> str:
+        if not hasattr(self, "outcome_combo"):
+            return DEATH_OUTCOME_BIOLOGICAL
+        return str(self.outcome_combo.currentData() or DEATH_OUTCOME_BIOLOGICAL)
+
+    def _is_recovery_outcome(self) -> bool:
+        return self._outcome_type() == DEATH_OUTCOME_RECOVERY
+
+    def _sync_outcome_mode(self, *_args):
+        recovery = self._is_recovery_outcome()
+        if hasattr(self, "biological_title_label"):
+            self.biological_title_label.setText(
+                "Восстановление спонтанной сердечной деятельности"
+                if recovery
+                else "Биологическая смерть"
+            )
+        if hasattr(self, "protocol_frame"):
+            self.protocol_frame.setVisible(not recovery)
+        self._update_auto_comment()
 
     def _protocol_payload(self) -> Dict[str, str]:
         biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
@@ -837,13 +939,26 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
     def _on_comment_edited(self, text: str):
         self._comment_manually_changed = text.strip() != self._last_auto_comment.strip()
 
+    @staticmethod
+    def _ceil_even_minutes(minutes: int) -> int:
+        value = max(0, int(minutes))
+        if value % 2:
+            value += 1
+        return value
+
     def _auto_comment_text(self) -> str:
         clinical_dt = self._resolve_picker_datetime(
             self.clinical_time_picker,
             enforce_latest_activity=False,
         )
-        biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
-        minutes = max(0, int((biological_dt - clinical_dt).total_seconds() // 60))
+        outcome_dt = self._resolve_picker_datetime(self.biological_time_picker)
+        minutes = max(0, int((outcome_dt - clinical_dt).total_seconds() // 60))
+        if self._is_recovery_outcome():
+            rounded_minutes = self._ceil_even_minutes(minutes)
+            return (
+                f"Спустя {rounded_minutes} минут проведения СЛР, "
+                "произошло восстановление спонтанной сердечной деятельности."
+            )
         return (
             f"Несмотря на проводимую терапию, спустя {minutes} минут, "
             "зафиксирована биологическая смерть. Реанимационные мероприятия остановлены."
@@ -871,12 +986,17 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             self.clinical_time_picker,
             enforce_latest_activity=False,
         )
-        biological_dt = self._resolve_picker_datetime(self.biological_time_picker)
-        if clinical_dt > biological_dt:
+        outcome_dt = self._resolve_picker_datetime(self.biological_time_picker)
+        if clinical_dt > outcome_dt:
+            end_label = (
+                "временем восстановления кровообращения"
+                if self._is_recovery_outcome()
+                else "временем биологической смерти"
+            )
             CustomMessageBox.warning(
                 self,
                 "Проверьте время",
-                "Время клинической смерти не может быть позже времени биологической смерти.",
+                f"Время клинической смерти не может быть позже {end_label}.",
             )
             return
 
@@ -903,23 +1023,51 @@ class DeathOutcomeDialog(_OutcomeDialogBase):
             if edit.toPlainText().strip()
         ]
         comment = self.comment_edit.text().strip()
-        payload = {
-            "clinical_death_datetime": clinical_dt.isoformat(),
-            "biological_death_datetime": biological_dt.isoformat(),
-            "cardiac_arrest_cause": cause,
-            "measures": measures,
-            "comment": comment,
-            "death_protocol": self._protocol_payload(),
-        }
-
-        self.result_data = {
-            "event_time": biological_dt,
-            "reason_text": self.base_comment,
-            "admission_details": {
-                "death_datetime": biological_dt,
-                "clinical_death_datetime": clinical_dt,
+        if self._is_recovery_outcome():
+            duration_minutes = max(0, int((outcome_dt - clinical_dt).total_seconds() // 60))
+            doctor = self.protocol_doctor_combo.currentText().strip() if hasattr(self, "protocol_doctor_combo") else ""
+            payload = {
+                "outcome_type": DEATH_OUTCOME_RECOVERY,
+                "clinical_death_datetime": clinical_dt.isoformat(),
+                "recovery_datetime": outcome_dt.isoformat(),
                 "cardiac_arrest_cause": cause,
-                "cardiac_arrest_measures_json": json.dumps(payload, ensure_ascii=False),
-            },
-        }
+                "measures": measures,
+                "comment": comment,
+                "cpr_duration_minutes": duration_minutes,
+                "doctor": doctor,
+            }
+            self.result_data = {
+                "record_kind": DEATH_OUTCOME_RECOVERY,
+                "event_time": outcome_dt,
+                "clinical_time": clinical_dt,
+                "recovery_time": outcome_dt,
+                "reason_text": comment,
+                "admission_details": {
+                    "clinical_death_datetime": clinical_dt,
+                    "cardiac_arrest_cause": cause,
+                    "cardiac_arrest_measures_json": json.dumps(payload, ensure_ascii=False),
+                },
+            }
+        else:
+            payload = {
+                "outcome_type": DEATH_OUTCOME_BIOLOGICAL,
+                "clinical_death_datetime": clinical_dt.isoformat(),
+                "biological_death_datetime": outcome_dt.isoformat(),
+                "cardiac_arrest_cause": cause,
+                "measures": measures,
+                "comment": comment,
+                "death_protocol": self._protocol_payload(),
+            }
+
+            self.result_data = {
+                "record_kind": DEATH_OUTCOME_BIOLOGICAL,
+                "event_time": outcome_dt,
+                "reason_text": self.base_comment,
+                "admission_details": {
+                    "death_datetime": outcome_dt,
+                    "clinical_death_datetime": clinical_dt,
+                    "cardiac_arrest_cause": cause,
+                    "cardiac_arrest_measures_json": json.dumps(payload, ensure_ascii=False),
+                },
+            }
         self.accept()

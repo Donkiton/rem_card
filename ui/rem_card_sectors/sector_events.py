@@ -9,7 +9,12 @@ from PySide6.QtCore import Qt, Signal, QDateTime, QTimer
 from PySide6.QtGui import QColor, QIcon
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.data.dto.remcard_dto import PatientStatus
-from rem_card.ui.rem_card_sectors.outcome_dialogs import DeathOutcomeDialog, TransferOutcomeDialog
+from rem_card.ui.rem_card_sectors.s_print.movement import movement_comment_text
+from rem_card.ui.rem_card_sectors.outcome_dialogs import (
+    DEATH_OUTCOME_RECOVERY,
+    DeathOutcomeDialog,
+    TransferOutcomeDialog,
+)
 from rem_card.ui.styles.theme import BG_LIGHT, BORDER_COLOR, COLOR_INFO, TEXT_MUTED, TEXT_ON_DARK
 
 
@@ -19,11 +24,8 @@ OUTCOME_REPORT_SKIP = 103
 
 
 def _movement_comment_text(status, reason_text):
-    text = str(reason_text or "").strip()
     status_value = getattr(status, "value", status)
-    if str(status_value) == PatientStatus.DEAD.value and text.startswith("Биологическая смерть:"):
-        return ""
-    return text
+    return movement_comment_text(status_value, reason_text)
 
 class SectorEvents(BaseSectorWidget):
     status_changed = Signal()
@@ -525,6 +527,7 @@ class SectorEvents(BaseSectorWidget):
             PatientStatus.ACTIVE: ("В отделении", "#2ecc71"),
             PatientStatus.OUT: ("Вне отд.", "#f39c12"),
             PatientStatus.OR: ("Операционная", "#e74c3c"),
+            PatientStatus.CPR: ("СЛР", "#8e44ad"),
             PatientStatus.TRANSFERRED: ("Переведен", "#968c8c"),
             PatientStatus.DEAD: ("Умер", "#968c8c")
         }
@@ -770,6 +773,9 @@ class SectorEvents(BaseSectorWidget):
         if reason_text is None:
             reason_text = base_comment
         admission_details = payload.get("admission_details") or {}
+        is_cpr_recovery = payload.get("record_kind") == DEATH_OUTCOME_RECOVERY
+        clinical_time = payload.get("clinical_time")
+        recovery_time = payload.get("recovery_time") or event_time
         current_event = (
             self.status_service.get_current_status(self.admission_id)
             if hasattr(self.status_service, "get_current_status")
@@ -784,21 +790,72 @@ class SectorEvents(BaseSectorWidget):
             if result:
                 self.edit_reason_text.clear()
                 self._schedule_post_status_refresh()
-                self._show_outcome_report_reminder(event_time)
+                if not is_cpr_recovery:
+                    self._show_outcome_report_reminder(event_time)
             else:
                 self.refresh(force=True)
-                CustomMessageBox.warning(
-                    self,
-                    "Ошибка",
-                    "Не удалось зафиксировать исход. Проверьте время: оно не должно быть раньше начала текущего статуса или последних записей пациента.",
-                )
+                if is_cpr_recovery:
+                    message = (
+                        "Не удалось зафиксировать СЛР. Проверьте время клинической смерти "
+                        "и восстановления кровообращения: интервал не должен пересекаться "
+                        "с другими случаями СЛР или исходом смерти."
+                    )
+                else:
+                    message = (
+                        "Не удалось зафиксировать исход. Проверьте время: оно не должно быть "
+                        "раньше начала текущего статуса, последних записей пациента или "
+                        "пересекаться со случаем СЛР."
+                    )
+                CustomMessageBox.warning(self, "Ошибка", message)
 
         def on_error(exc):
             self._set_status_write_pending(False)
             self.refresh(force=True)
-            CustomMessageBox.warning(self, "Ошибка", f"Ошибка фиксации исхода: {exc}")
+            action_name = "СЛР" if is_cpr_recovery else "исхода"
+            CustomMessageBox.warning(self, "Ошибка", f"Ошибка фиксации {action_name}: {exc}")
 
         self._set_status_write_pending(True)
+        if is_cpr_recovery:
+            if hasattr(self.status_service, "enqueue_record_cpr_recovery"):
+                self.status_service.enqueue_record_cpr_recovery(
+                    self.admission_id,
+                    clinical_time,
+                    recovery_time,
+                    reason_text=reason_text,
+                    user_id=self.user_id,
+                    admission_details=admission_details,
+                    **self._supported_kwargs(
+                        self.status_service.enqueue_record_cpr_recovery,
+                        {
+                            "expected_active_event_id": expected_active_event_id,
+                            "expected_active_revision": expected_active_revision,
+                            "expected_admission_revision": expected_admission_revision,
+                            "on_success": on_success,
+                            "on_error": on_error,
+                        },
+                    ),
+                )
+                return
+
+            try:
+                if not hasattr(self.status_service, "record_cpr_recovery"):
+                    raise RuntimeError("Сервис фиксации СЛР недоступен")
+                result = self.status_service.record_cpr_recovery(
+                    self.admission_id,
+                    clinical_time,
+                    recovery_time,
+                    reason_text=reason_text,
+                    user_id=self.user_id,
+                    admission_details=admission_details,
+                    expected_active_event_id=expected_active_event_id,
+                    expected_active_revision=expected_active_revision,
+                    expected_admission_revision=expected_admission_revision,
+                )
+                on_success(result)
+            except Exception as exc:
+                on_error(exc)
+            return
+
         if hasattr(self.status_service, "enqueue_change_status_with_outcome_details"):
             self.status_service.enqueue_change_status_with_outcome_details(
                 self.admission_id,
@@ -966,7 +1023,7 @@ class SectorEvents(BaseSectorWidget):
                 if result:
                     self.status_changed.emit()
                 else:
-                    CustomMessageBox.warning(self, "Ошибка линейности времени", "Невозможно изменить время: это приведет к наложению событий.\n\nВремя начала события не может быть раньше начала предыдущего.\nСначала сдвиньте соседние события.")
+                    CustomMessageBox.warning(self, "Ошибка линейности времени", "Невозможно изменить время: это приведет к наложению событий.\n\nПроверьте линейность движения и пересечения с другими случаями СЛР или исходом смерти.")
 
             def on_error(exc):
                 self.content_area.setEnabled(True)
@@ -1005,7 +1062,7 @@ class SectorEvents(BaseSectorWidget):
             self._is_editing_time = False 
             self.refresh(force=True)
             
-            CustomMessageBox.warning(self, "Ошибка линейности времени", "Невозможно изменить время: это приведет к наложению событий.\n\nВремя начала события не может быть раньше начала предыдущего.\nСначала сдвиньте соседние события.")
+            CustomMessageBox.warning(self, "Ошибка линейности времени", "Невозможно изменить время: это приведет к наложению событий.\n\nПроверьте линейность движения и пересечения с другими случаями СЛР или исходом смерти.")
 
     def on_rollback_clicked(self):
         if not self.admission_id or not self.status_service: return

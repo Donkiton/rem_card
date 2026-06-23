@@ -72,6 +72,31 @@ class PatientStatusService:
             self._sync_ventilation_for_admission(admission_id)
         return ok
 
+    def record_cpr_recovery(
+        self,
+        admission_id: int,
+        clinical_time: datetime,
+        recovery_time: datetime,
+        reason_text: Optional[str] = None,
+        user_id: Optional[str] = None,
+        admission_details: Optional[Dict[str, Any]] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
+    ) -> bool:
+        """Фиксирует успешную СЛР без перевода пациента в финальный исход."""
+        return self.status_dao.record_cpr_recovery(
+            admission_id,
+            clinical_time,
+            recovery_time,
+            reason_text=reason_text,
+            user_id=user_id,
+            admission_details=admission_details,
+            expected_active_event_id=expected_active_event_id,
+            expected_active_revision=expected_active_revision,
+            expected_admission_revision=expected_admission_revision,
+        )
+
     def get_admission_outcome_context(self, admission_id: int) -> Dict[str, Any]:
         return self.status_dao.get_admission_outcome_context(admission_id)
 
@@ -130,7 +155,7 @@ class PatientStatusService:
             return event.status == PatientStatus.ACTIVE
         return False
 
-    def get_event_at(self, admission_id: int, timestamp: datetime) -> Optional[PatientStatusEventDTO]:
+    def get_event_at(self, admission_id: int, timestamp: datetime, *, include_cpr: bool = False) -> Optional[PatientStatusEventDTO]:
         """
         Р’РѕР·РІСЂР°С‰Р°РµС‚ СЃРѕР±С‹С‚РёРµ, РєРѕС‚РѕСЂРѕРµ РїРѕРєСЂС‹РІР°РµС‚ СѓРєР°Р·Р°РЅРЅС‹Р№ РјРѕРјРµРЅС‚ РІСЂРµРјРµРЅРё.
         РћР±СЂРµР·Р°РµС‚ СЃРµРєСѓРЅРґС‹ Рё РјРёРєСЂРѕСЃРµРєСѓРЅРґС‹ РґР»СЏ СЃСЂР°РІРЅРµРЅРёСЏ РјРёРЅСѓС‚ РІ РјРёРЅСѓС‚Сѓ,
@@ -151,6 +176,8 @@ class PatientStatusService:
         
         for r in rows:
             event = self.status_dao._map_row(r)
+            if not include_cpr and event.status == PatientStatus.CPR:
+                continue
             # РћР±СЂРµР·Р°РµРј СЃРµРєСѓРЅРґС‹ Рё РјРёРєСЂРѕСЃРµРєСѓРЅРґС‹ Сѓ РіСЂР°РЅРёС† СЃРѕР±С‹С‚РёСЏ
             start_dt = event.start_time.replace(second=0, microsecond=0)
             end_dt = event.end_time.replace(second=0, microsecond=0) if event.end_time else None
@@ -384,6 +411,37 @@ class PatientStatusService:
             on_error=on_error,
         )
 
+    def enqueue_record_cpr_recovery(
+        self,
+        admission_id: int,
+        clinical_time: datetime,
+        recovery_time: datetime,
+        reason_text: Optional[str] = None,
+        user_id: Optional[str] = None,
+        admission_details: Optional[Dict[str, Any]] = None,
+        expected_active_event_id: Optional[int] = None,
+        expected_active_revision: Optional[int] = None,
+        expected_admission_revision: Optional[int] = None,
+        on_success: Optional[Callable[[bool], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+    ):
+        self.enqueue_write(
+            description=f"status_cpr_recovery:{admission_id}",
+            operation=lambda: self.record_cpr_recovery(
+                admission_id,
+                clinical_time,
+                recovery_time,
+                reason_text=reason_text,
+                user_id=user_id,
+                admission_details=admission_details,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+                expected_admission_revision=expected_admission_revision,
+            ),
+            on_success=on_success,
+            on_error=on_error,
+        )
+
     def enqueue_rollback_last_status(
         self,
         admission_id: int,
@@ -437,7 +495,9 @@ class PatientStatusService:
         for ev in events:
             if ev.status == PatientStatus.ACTIVE:
                 continue
-                
+            if ev.status == PatientStatus.CPR:
+                continue
+
             int_start = ev.start_time
             int_end = ev.end_time if ev.end_time else datetime.now()
             
