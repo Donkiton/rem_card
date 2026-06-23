@@ -106,16 +106,6 @@ class ControlPanel(QWidget):
             self.btn_pokaz.setIcon(QIcon(pokaz_icon))
         self.btn_pokaz.clicked.connect(self.open_vital_settings)
 
-        # 8. Быстрое назначение ЦВД
-        self.btn_cvp = QPushButton(" ЦВД")
-        self.btn_cvp.setIconSize(QSize(18, 18))
-        self.btn_cvp.setMinimumHeight(button_min_h)
-        self.btn_cvp.setStyleSheet(button_style)
-        self.btn_cvp.setToolTip("Добавить назначение ЦВД")
-        cvp_icon = os.path.join(self.icon_dir, "presh.png")
-        if os.path.exists(cvp_icon):
-            self.btn_cvp.setIcon(QIcon(cvp_icon))
-
         self.layout.addWidget(self.btn_save)
         self.layout.addWidget(self.btn_clean_sheet)
         self.layout.addWidget(self.btn_clear)
@@ -123,7 +113,6 @@ class ControlPanel(QWidget):
         self.layout.addWidget(self.btn_rollback)
         self.layout.addWidget(self.btn_templates)
         self.layout.addWidget(self.btn_pokaz)
-        self.layout.addWidget(self.btn_cvp)
         if self.orientation == Qt.Vertical:
             self.layout.addStretch(1)
         
@@ -132,7 +121,6 @@ class ControlPanel(QWidget):
         self.set_clean_active(False)
         self.set_rollback_active(False)
         self.btn_templates.setEnabled(True)
-        self.set_cvp_active(False)
 
     def set_save_active(self, active: bool):
         """Меняет состояние и иконку кнопки сохранения."""
@@ -161,10 +149,6 @@ class ControlPanel(QWidget):
         """Меняет активность кнопки Шаблоны."""
         self.btn_templates.setEnabled(active)
 
-    def set_cvp_active(self, active: bool):
-        """Меняет активность быстрой кнопки ЦВД."""
-        self.btn_cvp.setEnabled(active)
-
     def open_vital_settings(self):
         """Открывает окно настроек показателей."""
         # Нам нужен доступ к сервису и текущему admission_id и date
@@ -186,8 +170,7 @@ class ControlPanel(QWidget):
                 )
                 if hasattr(parent, 'refresh_data'):
                     dialog.settings_saved.connect(parent.refresh_data)
+                    dialog.cvp_order_changed.connect(parent.refresh_data)
                 dialog.exec()
-                if hasattr(parent, '_update_cvp_button_state'):
-                    parent._update_cvp_button_state()
                 break
             parent = parent.parent()

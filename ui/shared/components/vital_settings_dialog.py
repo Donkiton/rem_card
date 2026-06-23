@@ -1,8 +1,8 @@
 import os
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QPushButton, QCheckBox, QWidget, QGridLayout, QFrame)
+                             QPushButton, QCheckBox, QWidget, QGridLayout, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt, Signal, Property, QPropertyAnimation, QEasingCurve, QRect, QPoint, QEvent
-from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPixmap
+from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QPixmap, QIcon
 
 from rem_card.ui.styles.theme import STYLE_CUSTOM_DIALOG, BG_LIGHT, TEXT_PRIMARY, CUSTOM_DIALOG_BORDER, CUSTOM_DIALOG_RADIUS
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
@@ -64,6 +64,7 @@ class ToggleSwitch(QCheckBox):
 
 class VitalSettingsDialog(QDialog):
     settings_saved = Signal()
+    cvp_order_changed = Signal()
 
     def __init__(self, remcard_service, admission_id, date_str, parent=None):
         super().__init__(parent)
@@ -71,6 +72,8 @@ class VitalSettingsDialog(QDialog):
         self.admission_id = admission_id
         self.date_str = date_str
         self._loaded_settings = {}
+        self._cvp_order_exists = False
+        self._cvp_write_in_progress = False
         
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -154,11 +157,24 @@ class VitalSettingsDialog(QDialog):
             lbl.setStyleSheet("font-size: 13px; color: #2c3e50; font-weight: 500;")
             switch = ToggleSwitch()
             switch.stateChanged.connect(self.check_validity)
+            if key == "cvp":
+                switch.stateChanged.connect(self._update_cvp_button_state)
             
             grid.addWidget(lbl, row, 0)
             grid.addWidget(switch, row, 1, Qt.AlignRight)
             self.switches[key] = switch
             row += 1
+
+        self.btn_cvp_order = QPushButton(" ЦВД")
+        self.btn_cvp_order.setObjectName("DialogOkBtn")
+        self.btn_cvp_order.setMinimumHeight(30)
+        self.btn_cvp_order.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.btn_cvp_order.setToolTip("Добавить назначение ЦВД")
+        cvp_icon_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon", "presh.png"))
+        if os.path.exists(cvp_icon_path):
+            self.btn_cvp_order.setIcon(QIcon(cvp_icon_path))
+        self.btn_cvp_order.clicked.connect(self._on_cvp_order_clicked)
+        grid.addWidget(self.btn_cvp_order, row, 0, 1, 2)
 
         content_layout.addLayout(grid)
         content_layout.addStretch()
@@ -219,11 +235,88 @@ class VitalSettingsDialog(QDialog):
         except Exception as e:
             print(f"Error loading vital settings: {e}")
         
+        self._refresh_cvp_order_state()
         self.check_validity()
 
     def check_validity(self):
         any_checked = any(switch.isChecked() for switch in self.switches.values())
         self.btn_ok.setEnabled(any_checked)
+        self._update_cvp_button_state()
+
+    def _shift_date(self):
+        from datetime import datetime
+        return datetime.strptime(self.date_str, "%Y-%m-%d").replace(hour=8)
+
+    def _is_cvp_switch_checked(self) -> bool:
+        switch = self.switches.get("cvp")
+        return bool(switch and switch.isChecked())
+
+    def _refresh_cvp_order_state(self):
+        try:
+            checker = getattr(self.service, "has_cvp_order", None)
+            self._cvp_order_exists = bool(checker(self.admission_id, self._shift_date())) if callable(checker) else False
+        except Exception as exc:
+            print(f"Error checking CVP order: {exc}")
+            self._cvp_order_exists = False
+        self._update_cvp_button_state()
+
+    def _update_cvp_button_state(self, *_):
+        if not hasattr(self, "btn_cvp_order"):
+            return
+        cvp_enabled = self._is_cvp_switch_checked()
+        can_add = cvp_enabled and not self._cvp_order_exists and not self._cvp_write_in_progress
+        self.btn_cvp_order.setEnabled(can_add)
+        if self._cvp_write_in_progress:
+            tooltip = "Назначение ЦВД добавляется"
+        elif not cvp_enabled:
+            tooltip = "Включите показатель ЦВД"
+        elif self._cvp_order_exists:
+            tooltip = "ЦВД уже есть в листе назначений"
+        else:
+            tooltip = "Добавить назначение ЦВД"
+        self.btn_cvp_order.setToolTip(tooltip)
+
+    def _on_cvp_order_clicked(self):
+        if not self._is_cvp_switch_checked() or self._cvp_order_exists or self._cvp_write_in_progress:
+            self._update_cvp_button_state()
+            return
+        adder = getattr(self.service, "add_cvp_order_if_missing", None)
+        if not callable(adder):
+            CustomMessageBox.warning(self, "Предупреждение", "Сервис быстрого назначения ЦВД недоступен.")
+            return
+
+        self._cvp_write_in_progress = True
+        self._update_cvp_button_state()
+
+        def operation():
+            return adder(self.admission_id, self._shift_date())
+
+        def on_success(result):
+            self._cvp_write_in_progress = False
+            order, _created = result or (None, False)
+            self._cvp_order_exists = bool(order)
+            self._update_cvp_button_state()
+            if order is not None:
+                self.cvp_order_changed.emit()
+
+        def on_error(exc):
+            self._cvp_write_in_progress = False
+            self._refresh_cvp_order_state()
+            CustomMessageBox.critical(self, "Ошибка", f"Не удалось добавить назначение ЦВД: {exc}")
+
+        enqueue = getattr(self.service, "enqueue_write", None)
+        if callable(enqueue):
+            enqueue(
+                description=f"orders_add_cvp:{self.admission_id}",
+                operation=operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+        else:
+            try:
+                on_success(operation())
+            except Exception as exc:
+                on_error(exc)
 
     def save_settings(self):
         new_settings = {}

@@ -97,6 +97,8 @@ class CvpQuickOrderTest(unittest.TestCase):
     def test_add_cvp_order_creates_draft_without_times_and_without_duplicates(self):
         shift_date = datetime(2025, 1, 1, 12, 0)
 
+        self.assertFalse(self.service.has_cvp_order(1, shift_date))
+
         order, created = self.service.add_cvp_order_if_missing(1, shift_date)
 
         self.assertTrue(created)
@@ -111,6 +113,7 @@ class CvpQuickOrderTest(unittest.TestCase):
 
         row = self.db.fetch_one_remcard("SELECT COUNT(*) AS count FROM orders")
         self.assertEqual(row["count"], 1)
+        self.assertTrue(self.service.has_cvp_order(1, shift_date))
 
     def test_existing_manual_cvp_order_is_reused(self):
         shift_date = datetime(2025, 1, 1, 12, 0)
@@ -143,6 +146,8 @@ class CvpQuickOrderTest(unittest.TestCase):
             ),
         )
         self.db.conn.commit()
+
+        self.assertTrue(self.service.has_cvp_order(1, shift_date))
 
         order, created = self.service.add_cvp_order_if_missing(1, shift_date)
 

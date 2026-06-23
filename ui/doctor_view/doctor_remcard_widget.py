@@ -855,7 +855,6 @@ class DoctorRemCardWidget(QWidget):
         self.update_patient_info()
         self._update_emergency_notice_sector(snapshot)
         self.update_latest_indicators()
-        self._update_cvp_button_state()
         self.update_balance_data()
 
         if hasattr(self.layout_manager, "set_current_status_dto"):
@@ -1616,7 +1615,6 @@ class DoctorRemCardWidget(QWidget):
                 self.controls.btn_rollback.setEnabled(False)
                 self.controls.btn_templates.setEnabled(False)
                 self.controls.btn_pokaz.setEnabled(False)
-                self.controls.set_cvp_active(False)
                 self._set_lab_yesterday_button_active(False)
             else:
                 has_drafts = ow.has_drafts() if ow else False
@@ -1628,7 +1626,6 @@ class DoctorRemCardWidget(QWidget):
                 self.controls.set_clear_active(has_orders)
                 self.controls.set_templates_active(True)
                 self.controls.btn_pokaz.setEnabled(True)
-                self._update_cvp_button_state()
                 self._update_yesterday_button_state()
 
         if hasattr(self, "layout_manager") and hasattr(self.layout_manager, "sector_4v"):
@@ -1850,7 +1847,6 @@ class DoctorRemCardWidget(QWidget):
                 ow.shift_date = date
             if not self._archive_read_only_mode and not orders_context_unchanged:
                 ow.clear_drafts()
-        self._update_cvp_button_state()
 
     def _schedule_patient_card_snapshots(
         self,
@@ -2026,7 +2022,6 @@ class DoctorRemCardWidget(QWidget):
             self.vitals_input.admission_id = self.admission_id
             self.vitals_input.shift_date = self._current_date
             self.vitals_input.mark_dirty()
-        self._update_cvp_button_state()
         if hasattr(self.layout_manager, "set_events_context"):
             s_start, s_end = self.service.get_day_period(value)
             self.layout_manager.set_events_context(
@@ -2089,8 +2084,6 @@ class DoctorRemCardWidget(QWidget):
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
         self.sector8_panel.bars_clicked.connect(self.on_bars_clicked)
         self.sector8_panel.set_bars_auth_state(False)
-        self.controls.btn_cvp.clicked.connect(self.on_cvp_quick_order_clicked)
-        self._update_cvp_button_state()
         logger.info("[StartupDiag] phase=bars_auth_autocheck_disabled")
 
         if hasattr(self.layout_manager, 'beds_selection_widget'):
@@ -2391,44 +2384,6 @@ class DoctorRemCardWidget(QWidget):
         self.controls.set_clean_active(ow.has_administrations())
         self.controls.set_clear_active(ow.has_orders())
         self._orders_widget_signals_bound = True
-
-    def _cvp_vital_enabled(self) -> bool:
-        if self._archive_read_only_mode or not self.service or not self.admission_id or self._current_date is None:
-            return False
-        try:
-            settings = self.service.get_vital_settings_cached(self.admission_id, self._current_date)
-            return bool(int((settings or {}).get("cvp", 0) or 0))
-        except Exception as exc:
-            logger.warning("Failed to load CVP vital setting for quick order button: %s", exc)
-            return False
-
-    def _update_cvp_button_state(self):
-        if not hasattr(self, "controls") or not hasattr(self.controls, "set_cvp_active"):
-            return
-        self.controls.set_cvp_active(self._cvp_vital_enabled())
-
-    def on_cvp_quick_order_clicked(self):
-        if self._archive_read_only_mode:
-            self._show_read_only_hint()
-            return
-        if not self._cvp_vital_enabled():
-            self._update_cvp_button_state()
-            return
-        ow = self._ensure_orders_widget()
-        if ow is None:
-            CustomMessageBox.warning(self, "Предупреждение", "Не удалось открыть лист назначений.")
-            return
-        if hasattr(ow, "set_context"):
-            ow.set_context(
-                service=self.service,
-                admission_id=self.admission_id,
-                shift_date=self._current_date,
-            )
-        else:
-            ow.service = self.service
-            ow.admission_id = self.admission_id
-            ow.shift_date = self._current_date
-        ow.add_cvp_order_if_missing()
 
     def _on_selection_mode_changed(self, mode: str):
         if (
@@ -3928,7 +3883,6 @@ class DoctorRemCardWidget(QWidget):
         if self._is_closing:
             return
         self.admission_id = None
-        self._update_cvp_button_state()
         layout = getattr(self, "layout_manager", None)
         if layout is not None and hasattr(layout, "set_patient_selection_mode"):
             layout.current_admission_id = None

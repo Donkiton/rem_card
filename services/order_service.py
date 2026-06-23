@@ -238,6 +238,20 @@ class OrderService:
             return False
         return cls._is_cvp_order_text(row["latin"]) or cls._is_cvp_order_text(row["text"])
 
+    def has_cvp_order(self, admission_id: int, shift_date: datetime) -> bool:
+        start, end = self._shifts.get_day_period(shift_date)
+        rows = self.dao.db.fetch_all_remcard(
+            """
+            SELECT latin, text
+            FROM orders
+            WHERE admission_id = ?
+              AND datetime >= ? AND datetime < ?
+              AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+            """,
+            (int(admission_id), start.isoformat(), end.isoformat()),
+        )
+        return any(self._row_is_cvp_order(row) for row in rows)
+
     def add_cvp_order_if_missing(self, admission_id: int, shift_date: datetime) -> tuple[Optional[OrderDTO], bool]:
         start, end = self._shifts.get_day_period(shift_date)
         now = datetime.now()
