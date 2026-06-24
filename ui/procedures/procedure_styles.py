@@ -428,10 +428,6 @@ def apply_procedure_combo_style(root: QWidget) -> None:
             view = combo.view()
             view.setAlternatingRowColors(True)
             view.setStyleSheet(PROCEDURE_COMBO_VIEW_STYLE)
-            _disable_combo_wheel(view, combo)
-            _disable_combo_wheel(view.viewport(), combo)
-            _disable_combo_wheel(view.verticalScrollBar(), combo)
-            _disable_combo_wheel(view.horizontalScrollBar(), combo)
         except Exception:
             pass
 
