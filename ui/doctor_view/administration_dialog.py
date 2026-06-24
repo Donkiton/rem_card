@@ -11,6 +11,12 @@ from ...data.dto.remcard_dto import AdministrationDTO
 from ...services.prescription_engine import engine
 import re
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.shared.duration_combo import (
+    END_OF_DAY_DURATION_TEXT,
+    apply_compact_duration_combo_style,
+    configure_duration_combo,
+    set_end_of_day_duration_text,
+)
 from rem_card.ui.procedures.procedure_styles import apply_procedure_combo_style
 
 
@@ -104,9 +110,10 @@ class ManualEntryDialog(BaseStyledDialog):
         for d in durations:
             self.duration_combo.addItem(f"{d} мин" if d > 0 else "Болюс", d)
         self.duration_combo.setEditable(True)
+        configure_duration_combo(self.duration_combo)
         self.duration_combo.setCurrentIndex(0)
             
-        duration_layout.addWidget(self.duration_combo)
+        duration_layout.addWidget(self.duration_combo, 1)
         
         self.end_of_day_cb = QCheckBox("до конца суток")
         self.end_of_day_cb.toggled.connect(self.on_end_of_day_toggled)
@@ -132,6 +139,7 @@ class ManualEntryDialog(BaseStyledDialog):
 
         layout.addLayout(form)
         _apply_medication_combo_style(self.content_widget)
+        apply_compact_duration_combo_style(self.duration_combo)
         self.on_form_changed()
 
         # Кнопки
@@ -185,7 +193,7 @@ class ManualEntryDialog(BaseStyledDialog):
             self.duration_combo.setEnabled(not checked)
             
         if checked:
-            self.duration_combo.setEditText("До конца суток")
+            set_end_of_day_duration_text(self.duration_combo)
 
     @staticmethod
     def _normalize_combo_text(value):
@@ -273,7 +281,7 @@ class ManualEntryDialog(BaseStyledDialog):
 
         if duration_value == -1:
             self.end_of_day_cb.setChecked(True)
-            self.duration_combo.setEditText("До конца суток")
+            set_end_of_day_duration_text(self.duration_combo)
             return
 
         self.end_of_day_cb.setChecked(False)
@@ -392,7 +400,7 @@ class ManualEntryDialog(BaseStyledDialog):
             
         if can_dilute:
             duration_text = self.duration_combo.currentText()
-            if self.end_of_day_cb.isChecked() or duration_text == "До конца суток":
+            if self.end_of_day_cb.isChecked() or duration_text == END_OF_DAY_DURATION_TEXT:
                 main_line += " [DUR:-1]"
             else:
                 duration_written = False
@@ -488,13 +496,14 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
         for d in durations:
             self.duration_combo.addItem(f"{d} мин" if d > 0 else "Болюс", d)
         self.duration_combo.setEditable(True)
+        configure_duration_combo(self.duration_combo)
         
         def_dur = self.drug_data.get("duration_min", 0)
         idx = self.duration_combo.findData(def_dur)
         if idx >= 0: self.duration_combo.setCurrentIndex(idx)
         else: self.duration_combo.setCurrentText(str(def_dur))
         
-        duration_layout.addWidget(self.duration_combo)
+        duration_layout.addWidget(self.duration_combo, 1)
         self.end_of_day_cb = QCheckBox("до конца суток")
         duration_layout.addWidget(self.end_of_day_cb)
         form.addRow("Длительность:", duration_layout)
@@ -522,6 +531,7 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
         form.addRow("Растворитель:", self.diluent_combo)
         layout.addLayout(form)
         _apply_medication_combo_style(self.content_widget)
+        apply_compact_duration_combo_style(self.duration_combo)
 
         # Кнопки
         btns = QHBoxLayout()
@@ -559,7 +569,7 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
 
         if duration_value == -1:
             self.end_of_day_cb.setChecked(True)
-            self.duration_combo.setEditText("До конца суток")
+            set_end_of_day_duration_text(self.duration_combo)
             return
 
         self.end_of_day_cb.setChecked(False)
@@ -669,7 +679,7 @@ class MultiCompCharacteristicsDialog(BaseStyledDialog):
         if route_name and route_name != "— Не выбран —":
             main_line += f" [ROUTE:{route_name}]"
             
-        if self.end_of_day_cb.isChecked() or self.duration_combo.currentText() == "До конца суток":
+        if self.end_of_day_cb.isChecked() or self.duration_combo.currentText() == END_OF_DAY_DURATION_TEXT:
             main_line += " [DUR:-1]"
         else:
             duration_text = self.duration_combo.currentText()

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, Signal, QEvent, QPoint, QTimer
 from rem_card.services.prescription_engine import engine
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
+from rem_card.ui.shared.duration_combo import configure_duration_combo, set_end_of_day_duration_text
 
 class TemplateDrugCharacteristicsDialog(BaseStyledDialog):
     """Диалог для выбора характеристик препарата для шаблона."""
@@ -67,9 +68,10 @@ class TemplateDrugCharacteristicsDialog(BaseStyledDialog):
         for d in durations:
             self.duration_combo.addItem(f"{d} мин" if d > 0 else "Болюс", d)
         self.duration_combo.setEditable(True)
+        configure_duration_combo(self.duration_combo)
         self.duration_combo.setCurrentIndex(0)
             
-        duration_layout.addWidget(self.duration_combo)
+        duration_layout.addWidget(self.duration_combo, 1)
         
         self.end_of_day_cb = QCheckBox("до конца суток")
         self.end_of_day_cb.toggled.connect(self.on_end_of_day_toggled)
@@ -218,7 +220,7 @@ class TemplateDrugCharacteristicsDialog(BaseStyledDialog):
             self.duration_combo.setEnabled(not checked)
             
         if checked:
-            self.duration_combo.setEditText("До конца суток")
+            set_end_of_day_duration_text(self.duration_combo)
 
     def on_add(self):
         form_key = self.form_combo.currentData()
