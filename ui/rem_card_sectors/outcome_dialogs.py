@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPoint, QSettings, Qt
-from PySide6.QtGui import QTextCursor
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -17,6 +17,9 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
     QWidget,
 )
@@ -53,6 +56,8 @@ DEATH_TIME_SECTION_WIDTH = 400
 DEATH_WIDE_SECTION_WIDTH = (DEATH_TIME_SECTION_WIDTH * 2) + 14
 FORM_FIELD_MAX_WIDTH = 520
 PROTOCOL_FIELD_MAX_WIDTH = 680
+OUTCOME_COMBO_POPUP_ROW_HEIGHT = 32
+OUTCOME_COMBO_MAX_VISIBLE_ITEMS = 12
 DEATH_OUTCOME_BIOLOGICAL = "biological_death"
 DEATH_OUTCOME_RECOVERY = "cpr_recovery"
 
@@ -67,24 +72,43 @@ OUTCOME_COMBO_VIEW_STYLE = """
 QAbstractItemView {
     background-color: #ffffff;
     color: #172033;
+    font-size: 13px;
     border: 1px solid #b9c5d3;
     selection-background-color: #dbeafe;
     selection-color: #172033;
     outline: 0;
 }
 QAbstractItemView::item {
-    min-height: 24px;
-    padding: 4px 8px;
     background-color: #ffffff;
 }
-QAbstractItemView::item:hover {
-    background-color: #eef6ff;
-}
-QAbstractItemView::item:selected {
-    background-color: #dbeafe;
-    color: #172033;
-}
 """
+
+
+class _OutcomeComboItemDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        if size.height() < OUTCOME_COMBO_POPUP_ROW_HEIGHT:
+            size.setHeight(OUTCOME_COMBO_POPUP_ROW_HEIGHT)
+        return size
+
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        row_rect = opt.rect
+        text_rect = row_rect.adjusted(8, 0, -8, 0)
+
+        if opt.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(row_rect, QColor("#dbeafe"))
+        elif opt.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(row_rect, QColor("#eef6ff"))
+        else:
+            painter.fillRect(row_rect, QColor("#ffffff"))
+
+        painter.save()
+        painter.setFont(opt.font)
+        painter.setPen(QColor("#172033"))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, opt.text)
+        painter.restore()
 
 DEFAULT_DEATH_PROTOCOL_POSITION = "врач анестезиолог-реаниматолог"
 DEFAULT_DEATH_PROTOCOL_WORKPLACE = 'КГБУЗ "Городская больница" им М.И. Шевчук МЗХК'
@@ -280,7 +304,10 @@ class _OutcomeDialogBase(BaseStyledDialog):
 
     def _apply_combo_view_style(self, combo: QComboBox) -> None:
         try:
-            combo.view().setStyleSheet(OUTCOME_COMBO_VIEW_STYLE)
+            view = combo.view()
+            view.setStyleSheet(OUTCOME_COMBO_VIEW_STYLE)
+            view.setItemDelegate(_OutcomeComboItemDelegate(view))
+            combo.setMaxVisibleItems(min(max(1, combo.count()), OUTCOME_COMBO_MAX_VISIBLE_ITEMS))
         except Exception:
             pass
 
