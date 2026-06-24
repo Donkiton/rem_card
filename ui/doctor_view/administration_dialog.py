@@ -248,6 +248,32 @@ class ManualEntryDialog(BaseStyledDialog):
     def _strip_latin_prefix(name):
         return re.sub(r"^[A-Za-z]+\.\s+", "", str(name or "").strip()).strip()
 
+    @staticmethod
+    def _normalize_form_prefix(value):
+        return str(value or "").strip().rstrip(".").lower()
+
+    @classmethod
+    def _form_key_from_latin_prefix(cls, latin):
+        prefix_match = re.match(r"^([A-Za-z]+\.)\s+", str(latin or "").strip())
+        if not prefix_match:
+            return None
+
+        prefix = cls._normalize_form_prefix(prefix_match.group(1))
+        if not prefix:
+            return None
+
+        for key, info in engine.forms.items():
+            if cls._normalize_form_prefix(info.get("latin_abbr")) == prefix:
+                return key
+        return None
+
+    @classmethod
+    def _form_key_from_order(cls, order):
+        form_key = cls._extract_tag(getattr(order, "comment", "") or "", "FORM")
+        if form_key and form_key in engine.forms:
+            return form_key
+        return cls._form_key_from_latin_prefix(getattr(order, "latin", "") or "")
+
     def _set_combo_by_data(self, combo, value):
         target = str(value or "").strip()
         if not target:
@@ -320,18 +346,9 @@ class ManualEntryDialog(BaseStyledDialog):
         else:
             self.name_input.setText(self._strip_latin_prefix(getattr(order, "latin", "") or ""))
 
-        form_key = drug_data.get("form_key")
+        form_key = self._form_key_from_order(order) or drug_data.get("form_key")
         if form_key:
             self._set_combo_by_data(self.form_combo, form_key)
-        else:
-            latin = str(getattr(order, "latin", "") or "")
-            prefix_match = re.match(r"^([A-Za-z]+\.)\s+", latin.strip())
-            if prefix_match:
-                prefix = prefix_match.group(1).rstrip(".")
-                for key, info in engine.forms.items():
-                    if str(info.get("latin_abbr", "") or "").rstrip(".") == prefix:
-                        self._set_combo_by_data(self.form_combo, key)
-                        break
         self.on_form_changed()
 
         route_text = self._extract_route_text(getattr(order, "comment", "") or "")
