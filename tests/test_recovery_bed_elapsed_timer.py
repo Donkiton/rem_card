@@ -20,6 +20,10 @@ from rem_card.ui.rem_card_sectors.sector_4_sub import (  # noqa: E402
     RECOVERY_TIMER_GRACE_MS,
     Sector4b,
 )
+from rem_card.ui.shared.recovery_elapsed_time import (  # noqa: E402
+    recovery_elapsed_reference_date,
+    should_auto_update_recovery_elapsed_time,
+)
 
 
 class _Patient:
@@ -35,6 +39,15 @@ class _Patient:
 
     def get_display_age(self, current_date):
         return "40 лет"
+
+
+class _ShiftService:
+    @staticmethod
+    def get_day_period(value: datetime):
+        start = value.replace(hour=8, minute=0, second=0, microsecond=0)
+        if value.hour < 8:
+            start -= timedelta(days=1)
+        return start, start + timedelta(days=1)
 
 
 class RecoveryBedElapsedTimerTest(unittest.TestCase):
@@ -102,6 +115,55 @@ class RecoveryBedElapsedTimerTest(unittest.TestCase):
             self.assertFalse(widget._recovery_elapsed_timer.isActive())
         finally:
             widget.deleteLater()
+
+    def test_current_recovery_card_uses_realtime_elapsed_reference(self):
+        admission = datetime(2026, 6, 18, 8, 0)
+        now = admission + timedelta(minutes=40)
+        patient = _Patient(admission)
+
+        auto_update = should_auto_update_recovery_elapsed_time(
+            patient,
+            admission,
+            _ShiftService(),
+            now=now,
+        )
+        display_date = recovery_elapsed_reference_date(
+            admission,
+            auto_update=auto_update,
+            now=now,
+        )
+
+        widget = Sector4b()
+        try:
+            widget.update_patient_info(
+                patient,
+                display_date,
+                is_recovery=True,
+                auto_update_recovery_time=auto_update,
+            )
+
+            self.assertEqual(widget.lbl_days.text(), "Время в отделении: 0ч 40м")
+            self.assertTrue(widget._recovery_elapsed_timer.isActive())
+        finally:
+            widget.deleteLater()
+
+    def test_yesterday_recovery_card_does_not_start_realtime_elapsed_timer(self):
+        admission = datetime(2026, 6, 17, 8, 0)
+        reference = admission + timedelta(minutes=40)
+        now = datetime(2026, 6, 18, 8, 40)
+
+        auto_update = should_auto_update_recovery_elapsed_time(
+            _Patient(admission),
+            reference,
+            _ShiftService(),
+            now=now,
+        )
+
+        self.assertFalse(auto_update)
+        self.assertEqual(
+            recovery_elapsed_reference_date(reference, auto_update=auto_update, now=now),
+            reference,
+        )
 
 
 if __name__ == "__main__":

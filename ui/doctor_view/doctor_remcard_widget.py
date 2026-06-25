@@ -5,6 +5,10 @@ import time
 from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+from rem_card.ui.shared.recovery_elapsed_time import (
+    recovery_elapsed_reference_date,
+    should_auto_update_recovery_elapsed_time,
+)
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QDialog, QStackedWidget
 from PySide6.QtCore import Signal, Qt, QTimer
 from datetime import datetime, timedelta
@@ -1757,6 +1761,23 @@ class DoctorRemCardWidget(QWidget):
             logger.warning("Failed to resolve current medical day for initial status guard: %s", exc)
             return False
 
+    def _update_sector_4b_patient_info(self, patient, reference_date):
+        layout = getattr(self, "layout_manager", None)
+        if not patient or not hasattr(layout, "sector_4b"):
+            return
+        auto_update = should_auto_update_recovery_elapsed_time(
+            patient,
+            reference_date,
+            self.service,
+            read_only=getattr(self, "_archive_read_only_mode", False),
+        )
+        display_date = recovery_elapsed_reference_date(reference_date, auto_update=auto_update)
+        layout.sector_4b.update_patient_info(
+            patient,
+            display_date,
+            auto_update_recovery_time=auto_update,
+        )
+
     def load_patient_card(
         self,
         admission_id,
@@ -2016,7 +2037,7 @@ class DoctorRemCardWidget(QWidget):
         runtime = dict(getattr(patient, "_w1_runtime_snapshot", None) or {})
         try:
             if hasattr(layout, "sector_4b"):
-                layout.sector_4b.update_patient_info(patient, target_date)
+                self._update_sector_4b_patient_info(patient, target_date)
 
                 if "status" in runtime:
                     status_dto = runtime.get("status")
@@ -3936,7 +3957,7 @@ class DoctorRemCardWidget(QWidget):
             snapshot = self._card_snapshot_cache or {}
             patient = snapshot.get("patient")
             if patient and hasattr(self.layout_manager, 'sector_4b'):
-                self.layout_manager.sector_4b.update_patient_info(patient, self._current_date)
+                self._update_sector_4b_patient_info(patient, self._current_date)
             if hasattr(self.layout_manager, 'sector_4v'):
                 card_exists, yest_exists, plan_card_available = self._sector_4v_button_state(snapshot)
                 self.layout_manager.sector_4v.set_buttons_state(

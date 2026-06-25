@@ -13,6 +13,10 @@ from rem_card.ui.shared.orders_balance_adapter import (
     build_balance_orders_from_orders_widget,
     oral_totals_from_runtime,
 )
+from rem_card.ui.shared.recovery_elapsed_time import (
+    recovery_elapsed_reference_date,
+    should_auto_update_recovery_elapsed_time,
+)
 
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
@@ -1810,6 +1814,22 @@ class NurseMainWidget(QWidget):
             logger.warning("Failed to resolve current medical day for nurse initial status guard: %s", exc)
             return False
 
+    def _update_sector_4b_patient_info(self, patient, reference_date):
+        layout = getattr(self, "layout_manager", None)
+        if not patient or not hasattr(layout, "sector_4b"):
+            return
+        auto_update = should_auto_update_recovery_elapsed_time(
+            patient,
+            reference_date,
+            self.remcard_service,
+        )
+        display_date = recovery_elapsed_reference_date(reference_date, auto_update=auto_update)
+        layout.sector_4b.update_patient_info(
+            patient,
+            display_date,
+            auto_update_recovery_time=auto_update,
+        )
+
     @property
     def current_date(self):
         return self._current_date
@@ -1998,7 +2018,7 @@ class NurseMainWidget(QWidget):
         runtime = dict(getattr(patient, "_w1_runtime_snapshot", None) or {})
         try:
             if hasattr(layout, "sector_4b"):
-                layout.sector_4b.update_patient_info(patient, target_date)
+                self._update_sector_4b_patient_info(patient, target_date)
 
                 if "status" in runtime:
                     status_dto = runtime.get("status")
@@ -2050,7 +2070,7 @@ class NurseMainWidget(QWidget):
         if hasattr(self, 'layout_manager') and hasattr(self.layout_manager, 'sector_4b'):
             patient = snapshot.get("patient")
             if patient:
-                self.layout_manager.sector_4b.update_patient_info(patient, self.current_date)
+                self._update_sector_4b_patient_info(patient, self.current_date)
         if hasattr(self.layout_manager, 'sector_4v'):
             latest_values = snapshot.get("latest_values") or {}
             settings = snapshot.get("settings") or {}
