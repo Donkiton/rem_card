@@ -1,3 +1,4 @@
+from copy import deepcopy
 import re
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from PySide6.QtWidgets import (
@@ -9,8 +10,381 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal, QEvent, QPoint, QTimer
 from rem_card.services.prescription_engine import engine
+from rem_card.ui.admin_view.drugs_dict_widget import _admin_drugs_table_style
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.duration_combo import configure_duration_combo, set_end_of_day_duration_text
+
+
+def _template_volume_value(value):
+    try:
+        number = float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return None
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def _template_same_dilution(left, right):
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    return (
+        left.get("base") == right.get("base")
+        and _template_volume_value(left.get("volume")) == _template_volume_value(right.get("volume"))
+    )
+
+
+def _template_format_dilution(dilution):
+    if not isinstance(dilution, dict):
+        return "Без растворителя"
+    base = dilution.get("base")
+    volume = _template_volume_value(dilution.get("volume"))
+    diluent_info = engine.dilutions.get(base, {})
+    display = diluent_info.get("display", base or "")
+    if volume is None:
+        return str(display or "Без растворителя")
+    return f"{display} {volume:g} мл"
+
+
+def _template_format_raw_dilution(dilution):
+    if not isinstance(dilution, dict):
+        return ""
+    base = dilution.get("base")
+    volume = _template_volume_value(dilution.get("volume"))
+    diluent_info = engine.dilutions.get(base, {})
+    display = diluent_info.get("display", base or "")
+    short = str(diluent_info.get("short") or "S.").strip() or "S."
+    if volume is None:
+        return f"{short} {display}".strip()
+    return f"{short} {display} - {volume:g} мл".strip()
+
+
+def _add_template_dilution_items(combo):
+    for d_key, d_info in sorted(engine.dilutions.items(), key=lambda x: x[1].get("display", x[0])):
+        if d_key == "none" or d_info.get("display") == "Без растворителя":
+            continue
+
+        display_base = d_info.get("display", d_key)
+        for vol in d_info.get("default_volumes", [100]):
+            volume = _template_volume_value(vol)
+            if volume is None:
+                continue
+            combo.addItem(f"{display_base} {volume:g} мл", {"base": d_key, "volume": volume})
+
+
+def _raw_text_dilution(raw_text):
+    match = re.search(r"\[DIL:(.*?)\]", str(raw_text or ""))
+    if not match:
+        return None
+
+    text = match.group(1).strip()
+    volume_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*(?:мл|ml)\b", text, flags=re.IGNORECASE)
+    volume = _template_volume_value(volume_match.group(1)) if volume_match else None
+    text_lower = text.lower()
+
+    for d_key, d_info in engine.dilutions.items():
+        variants = [
+            str(d_info.get("display") or ""),
+            str(d_info.get("latin") or ""),
+            str(d_key or ""),
+        ]
+        if any(variant and variant.lower() in text_lower for variant in variants):
+            return {"base": d_key, "volume": volume}
+
+    return None
+
+
+def _replace_raw_text_dilution(raw_text, target_dilution):
+    replacement = f"[DIL:{_template_format_raw_dilution(target_dilution)}]"
+    return re.sub(r"\[DIL:.*?\]", replacement, str(raw_text or ""), count=1)
+
+
+def _template_drug_display(item):
+    if item.get("is_multicomp"):
+        return re.sub(r"\[.*?\]", "", str(item.get("raw_text") or "")).strip() or "Многокомпонентный препарат"
+    drug_key = item.get("drug", "")
+    return engine.drugs.get(drug_key, {}).get("latin", drug_key) or drug_key
+
+
+class TemplateDilutionReplaceDialog(BaseStyledDialog):
+    def __init__(self, parent=None):
+        super().__init__("Изменение объемов растворов в шаблонах", parent)
+        self.setMinimumSize(860, 620)
+        self.matches = []
+        self._pending_changes = {}
+
+        self.setup_ui()
+        self._update_buttons()
+
+    def setup_ui(self):
+        form_layout = QFormLayout()
+
+        self.source_combo = QComboBox()
+        _add_template_dilution_items(self.source_combo)
+        form_layout.addRow("Найти растворитель:", self.source_combo)
+
+        search_layout = QHBoxLayout()
+        self.btn_find = QPushButton("Найти")
+        self.btn_find.setObjectName("DialogOkBtn")
+        self.btn_find.setFixedHeight(32)
+        search_layout.addStretch()
+        search_layout.addWidget(self.btn_find)
+        form_layout.addRow("", search_layout)
+
+        self.target_combo = QComboBox()
+        _add_template_dilution_items(self.target_combo)
+        form_layout.addRow("Заменить на:", self.target_combo)
+
+        self.content_layout.addLayout(form_layout)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Шаблон", "Препараты", "Совп.", "Было", "Станет", "Статус"])
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setStyleSheet(_admin_drugs_table_style())
+        self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.content_layout.addWidget(self.table, 1)
+
+        tools_layout = QHBoxLayout()
+        self.status_label = QLabel("Выберите растворитель и нажмите «Найти».")
+        self.status_label.setStyleSheet("border: none; background: transparent;")
+        tools_layout.addWidget(self.status_label, 1)
+
+        self.btn_remove = QPushButton("Убрать из замены")
+        self.btn_remove.setObjectName("DialogOkBtn")
+        self.btn_remove.setFixedHeight(32)
+        tools_layout.addWidget(self.btn_remove)
+        self.content_layout.addLayout(tools_layout)
+
+        buttons_layout = QHBoxLayout()
+        buttons_layout.addStretch()
+
+        self.btn_replace = QPushButton("Заменить")
+        self.btn_apply = QPushButton("Применить")
+        self.btn_save = QPushButton("Сохранить")
+        self.btn_cancel = QPushButton("Отмена")
+
+        for btn in [self.btn_replace, self.btn_apply, self.btn_save, self.btn_cancel]:
+            btn.setObjectName("DialogOkBtn")
+            btn.setFixedHeight(35)
+            buttons_layout.addWidget(btn)
+
+        self.content_layout.addLayout(buttons_layout)
+
+        self.btn_find.clicked.connect(self.find_matches)
+        self.btn_remove.clicked.connect(self.remove_selected_match)
+        self.btn_replace.clicked.connect(self.stage_replacement)
+        self.btn_apply.clicked.connect(self.apply_changes)
+        self.btn_save.clicked.connect(self.save_and_close)
+        self.btn_cancel.clicked.connect(self.reject)
+        self.source_combo.currentIndexChanged.connect(self._clear_results)
+        self.target_combo.currentIndexChanged.connect(self._on_target_changed)
+
+    def _selected_source(self):
+        return self.source_combo.currentData()
+
+    def _selected_target(self):
+        return self.target_combo.currentData()
+
+    def _has_pending_changes(self):
+        return bool(self._pending_changes)
+
+    def _replacement_is_valid(self):
+        source = self._selected_source()
+        target = self._selected_target()
+        return bool(self.matches) and bool(source) and bool(target) and not _template_same_dilution(source, target)
+
+    def _set_controls_locked(self, locked):
+        self.source_combo.setEnabled(not locked)
+        self.target_combo.setEnabled(not locked)
+        self.btn_find.setEnabled(not locked)
+        self.btn_remove.setEnabled(not locked and self.table.currentRow() >= 0)
+
+    def _update_buttons(self):
+        pending = self._has_pending_changes()
+        self._set_controls_locked(pending)
+        self.btn_remove.setEnabled(not pending and self.table.currentRow() >= 0)
+        self.btn_replace.setEnabled(not pending and self._replacement_is_valid())
+        self.btn_apply.setEnabled(pending)
+        self.btn_save.setEnabled(True)
+
+    def _clear_results(self):
+        if self._has_pending_changes():
+            return
+        self.matches = []
+        self.table.setRowCount(0)
+        self.status_label.setText("Выберите растворитель и нажмите «Найти».")
+        self._update_buttons()
+
+    def _on_target_changed(self):
+        if self._has_pending_changes():
+            self._update_buttons()
+            return
+        if self.matches:
+            self._refresh_table()
+            return
+        self._update_buttons()
+
+    def _matching_drug_indexes(self, template_data, source):
+        indexes = []
+        for index, item in enumerate(template_data.get("drugs", []) or []):
+            if not isinstance(item, dict):
+                continue
+            if _template_same_dilution(item.get("diluent"), source):
+                indexes.append(index)
+                continue
+            if item.get("is_multicomp") and _template_same_dilution(_raw_text_dilution(item.get("raw_text")), source):
+                indexes.append(index)
+        return indexes
+
+    def _refresh_table(self):
+        self.table.setRowCount(0)
+        target = self._selected_target()
+
+        for row, item in enumerate(self.matches):
+            self.table.insertRow(row)
+
+            key = item.get("key")
+            data = item.get("data", {})
+            name_item = QTableWidgetItem(data.get("name", key))
+            name_item.setData(Qt.UserRole, key)
+            self.table.setItem(row, 0, name_item)
+
+            drug_names = item.get("drug_names") or []
+            self.table.setItem(row, 1, QTableWidgetItem(", ".join(drug_names[:3]) + ("..." if len(drug_names) > 3 else "")))
+            self.table.setItem(row, 2, QTableWidgetItem(str(len(item.get("indexes") or []))))
+            self.table.setItem(row, 3, QTableWidgetItem(_template_format_dilution(item.get("old_dilution"))))
+
+            new_dilution = item.get("new_dilution")
+            self.table.setItem(row, 4, QTableWidgetItem(_template_format_dilution(new_dilution or target)))
+            status_text = "Будет заменено" if new_dilution else "Найдено"
+            self.table.setItem(row, 5, QTableWidgetItem(status_text))
+
+        self._update_buttons()
+
+    def find_matches(self):
+        if self._has_pending_changes():
+            return
+
+        source = self._selected_source()
+        if not source:
+            CustomMessageBox.warning(self, "Ошибка", "Выберите растворитель для поиска.")
+            return
+
+        engine.reload_if_changed(force_check=True)
+        self.matches = []
+        for key, data in engine.templates.items():
+            indexes = self._matching_drug_indexes(data, source)
+            if not indexes:
+                continue
+            drugs = data.get("drugs", []) or []
+            self.matches.append(
+                {
+                    "key": key,
+                    "data": deepcopy(data),
+                    "indexes": indexes,
+                    "drug_names": [_template_drug_display(drugs[index]) for index in indexes if index < len(drugs)],
+                    "old_dilution": deepcopy(source),
+                    "new_dilution": None,
+                }
+            )
+
+        self._refresh_table()
+        count = len(self.matches)
+        if count:
+            total = sum(len(item.get("indexes") or []) for item in self.matches)
+            self.status_label.setText(f"Найдено шаблонов: {count}, назначений: {total}. Лишние строки можно убрать из замены.")
+        else:
+            self.status_label.setText("Шаблоны с таким растворителем не найдены.")
+
+    def remove_selected_match(self):
+        if self._has_pending_changes():
+            return
+
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.matches):
+            return
+
+        del self.matches[row]
+        self._refresh_table()
+        if self.matches:
+            self.table.selectRow(min(row, len(self.matches) - 1))
+        self.status_label.setText(f"Осталось к замене: {len(self.matches)} шабл.")
+
+    def stage_replacement(self):
+        if not self._replacement_is_valid():
+            if self.matches and _template_same_dilution(self._selected_source(), self._selected_target()):
+                CustomMessageBox.warning(self, "Ошибка", "Растворитель для замены совпадает с исходным.")
+            return
+
+        source = self._selected_source()
+        target = self._selected_target()
+        template_count = len(self.matches)
+        drug_count = sum(len(item.get("indexes") or []) for item in self.matches)
+        reply = CustomMessageBox.question(
+            self,
+            "Подтверждение",
+            (
+                f"Заменить {_template_format_dilution(source)} на {_template_format_dilution(target)} "
+                f"в шаблонах: {template_count}, назначениях: {drug_count}?\n\n"
+                "Запись в справочник произойдет после «Применить» или «Сохранить»."
+            ),
+            CustomMessageBox.Yes | CustomMessageBox.No,
+            CustomMessageBox.No,
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+
+        self._pending_changes = {}
+        target_copy = deepcopy(target)
+        for match in self.matches:
+            key = match.get("key")
+            data = deepcopy(match.get("data", {}))
+            drugs = data.get("drugs", []) or []
+            for index in match.get("indexes", []):
+                if index < 0 or index >= len(drugs) or not isinstance(drugs[index], dict):
+                    continue
+                if _template_same_dilution(drugs[index].get("diluent"), source):
+                    drugs[index]["diluent"] = deepcopy(target_copy)
+                elif drugs[index].get("is_multicomp") and _template_same_dilution(
+                    _raw_text_dilution(drugs[index].get("raw_text")),
+                    source,
+                ):
+                    drugs[index]["raw_text"] = _replace_raw_text_dilution(drugs[index].get("raw_text"), target_copy)
+            data["drugs"] = drugs
+            match["new_dilution"] = deepcopy(target_copy)
+            self._pending_changes[key] = data
+
+        self._refresh_table()
+        self.status_label.setText("Замена подготовлена. Нажмите «Применить» или «Сохранить».")
+
+    def _save_pending_changes(self):
+        if not self._pending_changes:
+            return True
+
+        try:
+            engine.save_custom_templates(list(self._pending_changes.items()))
+        except Exception as exc:
+            CustomMessageBox.critical(self, "Ошибка", f"Не удалось сохранить изменения: {exc}")
+            return False
+
+        saved_count = len(self._pending_changes)
+        self._pending_changes = {}
+        self.find_matches()
+        self.status_label.setText(f"Сохранено шаблонов: {saved_count}.")
+        return True
+
+    def apply_changes(self):
+        self._save_pending_changes()
+
+    def save_and_close(self):
+        if self._save_pending_changes():
+            self.accept()
+
 
 class TemplateDrugCharacteristicsDialog(BaseStyledDialog):
     """Диалог для выбора характеристик препарата для шаблона."""
@@ -446,6 +820,12 @@ class TemplatesDictWidget(QWidget):
         self.btn_tpl_up.clicked.connect(self.move_selected_template_up)
         self.btn_tpl_down.clicked.connect(self.move_selected_template_down)
         left_layout.addLayout(btn_list_layout)
+
+        self.btn_replace_template_dilutions = QPushButton("Изменить обьемы шабл. растворов")
+        self.btn_replace_template_dilutions.setObjectName("DialogOkBtn")
+        self.btn_replace_template_dilutions.setFixedHeight(35)
+        self.btn_replace_template_dilutions.clicked.connect(self.replace_template_dilutions)
+        left_layout.addWidget(self.btn_replace_template_dilutions)
         
         # --- ПРАВАЯ ПАНЕЛЬ: Редактор ---
         right_widget = QWidget()
@@ -473,7 +853,7 @@ class TemplatesDictWidget(QWidget):
         
         # 2. Таблица
         self.table = QTableWidget()
-        self.table.setStyleSheet("background-color: white;")
+        self.table.setStyleSheet(_admin_drugs_table_style())
         self.table.setColumnCount(5) # Было 6, убрали Кратность
         self.table.setHorizontalHeaderLabels(["Препарат", "Доза", "Путь", "Длит.", "Растворитель"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -962,6 +1342,16 @@ class TemplatesDictWidget(QWidget):
         self.list_widget.clearSelection()
         self.clear_editor()
         self.key_input.setFocus()
+
+    def replace_template_dilutions(self):
+        current_key = None
+        current_item = self.list_widget.currentItem()
+        if current_item:
+            current_key = current_item.data(Qt.UserRole)
+
+        dialog = TemplateDilutionReplaceDialog(parent=self)
+        dialog.exec()
+        self.load_data(selected_key=current_key)
 
     def save_template(self):
         key = self.key_input.text().strip()

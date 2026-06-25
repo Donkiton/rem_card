@@ -175,6 +175,12 @@ class PrescriptionEngine:
     
     def save_custom_drug(self, key: str, data: Dict[str, Any]):
         self._save_and_update("drugs", "drugs", key, data)
+
+    def save_custom_drugs(self, items: List[Tuple[str, Dict[str, Any]]]):
+        with self._lock:
+            for key, data in items:
+                self._save_override_locked("drugs", key, data)
+            self._reload_locked(force=True)
         
     def delete_custom_drug(self, key: str):
         self._delete_and_reload("drugs", key)
@@ -193,6 +199,12 @@ class PrescriptionEngine:
         
     def save_custom_template(self, key: str, data: Dict[str, Any]):
         self._save_and_update("templates", "templates", key, data)
+
+    def save_custom_templates(self, items: List[Tuple[str, Dict[str, Any]]]):
+        with self._lock:
+            for key, data in items:
+                self._save_override_locked("templates", key, data)
+            self._reload_locked(force=True)
         
     def delete_custom_template(self, key: str):
         self._delete_and_reload("templates", key)
