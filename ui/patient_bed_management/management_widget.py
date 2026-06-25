@@ -173,8 +173,23 @@ class PatientBedManagementWidget(QWidget):
         if self._is_closing:
             self._opening_patient_form = False
             return
+        logger.info(
+            "patient_form_open_request role=%s bed=%s active_form=%s opening=%s",
+            _current_role(),
+            int(bed_number),
+            int(_qt_is_valid(self._active_patient_form)),
+            int(self._opening_patient_form),
+        )
         patient, admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
         admission_id = getattr(admission, "id", None)
+        logger.info(
+            "patient_form_open_context role=%s bed=%s admission_id=%s has_patient=%s has_admission=%s",
+            _current_role(),
+            int(bed_number),
+            admission_id,
+            int(patient is not None),
+            int(admission is not None),
+        )
         try:
             dialog = PatientForm(self.patient_bed_service, bed_number, patient, admission, self)
             self._active_patient_form = dialog
@@ -198,7 +213,14 @@ class PatientBedManagementWidget(QWidget):
                 )
             )
             dialog.open()
-        except Exception:
+        except Exception as exc:
+            logger.exception(
+                "patient_form_open_failed role=%s bed=%s admission_id=%s error=%s",
+                _current_role(),
+                int(bed_number),
+                admission_id,
+                exc,
+            )
             self._active_patient_form = None
             self._active_patient_form_context = None
             raise

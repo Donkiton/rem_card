@@ -1,4 +1,5 @@
 from datetime import datetime
+import hashlib
 import os
 import weakref
 
@@ -60,6 +61,35 @@ def _current_role() -> str:
     return str(os.environ.get("REMCARD_UI_ROLE") or "unknown")
 
 
+def _short_hash(value) -> str:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return "-"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
+
+
+def _days_from_today(value) -> int | None:
+    if not value:
+        return None
+    try:
+        return (value.date() - datetime.now().date()).days
+    except Exception:
+        return None
+
+
+def _format_log_fields(fields: dict) -> str:
+    parts = []
+    for key, value in fields.items():
+        if value is None:
+            value = "none"
+        elif value is True:
+            value = 1
+        elif value is False:
+            value = 0
+        parts.append(f"{key}={value}")
+    return " ".join(parts)
+
+
 def _invoke_form_later(form_ref, method_name: str, *args):
     form = form_ref()
     if not _qt_is_valid(form):
@@ -91,6 +121,8 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self._closing = False
         self._mkb_closed = False
         self._write_description = ""
+        self._form_log_id = f"{os.getpid()}:{id(self):x}"
+        self._reject_reason = "unknown"
         self.bed_label = format_patient_bed_label(self.bed_number)
         self.dialog_title_text = "Новая карточка пациента" if self.is_new_admission else "Карточка пациента"
 
@@ -109,6 +141,15 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self._init_ui()
         self._restore_saved_geometry()
         self._load_data()
+        logger.info(
+            "patient_form_ready role=%s form_id=%s bed=%s admission_id=%s is_new=%s state=%s",
+            _current_role(),
+            self._form_log_id,
+            self.bed_number,
+            getattr(self.admission, "id", None),
+            int(self.is_new_admission),
+            self._format_form_state(),
+        )
 
     def _init_ui(self):
         self.bg_container = QWidget(self)
@@ -176,7 +217,7 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             }
             """
         )
-        close_button.clicked.connect(self.reject)
+        close_button.clicked.connect(lambda checked=False: self._request_reject("close_button"))
         header_layout.addWidget(close_button)
         self.main_layout.addWidget(self.header_panel)
 
@@ -249,7 +290,7 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self.cancel_button.setIcon(line_icon("x", "#475569", 17))
         self.cancel_button.setIconSize(QSize(17, 17))
         self.cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
-        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.clicked.connect(lambda checked=False: self._request_reject("cancel_button"))
 
         self.save_button = QPushButton("Сохранить карточку")
         self.save_button.setCursor(Qt.PointingHandCursor)
@@ -269,33 +310,131 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             if self.admission:
                 self.diagnosis_tab.set_data(self.admission, [])
 
+    def _request_reject(self, reason: str):
+        self._reject_reason = str(reason or "unknown")
+        self.reject()
+
+    def _collect_form_state(self, gen_data=None, diag_data=None) -> dict:
+        try:
+            gen = gen_data if gen_data is not None else self.general_tab.get_data()
+        except Exception as exc:
+            logger.warning(
+                "patient_form_state_general_failed role=%s form_id=%s bed=%s admission_id=%s error=%s",
+                _current_role(),
+                getattr(self, "_form_log_id", "-"),
+                getattr(self, "bed_number", None),
+                getattr(getattr(self, "admission", None), "id", None),
+                exc,
+            )
+            gen = {}
+
+        try:
+            diag = diag_data if diag_data is not None else self.diagnosis_tab.get_data()
+        except Exception as exc:
+            logger.warning(
+                "patient_form_state_diagnosis_failed role=%s form_id=%s bed=%s admission_id=%s error=%s",
+                _current_role(),
+                getattr(self, "_form_log_id", "-"),
+                getattr(self, "bed_number", None),
+                getattr(getattr(self, "admission", None), "id", None),
+                exc,
+            )
+            diag = {}
+
+        history_number = str(gen.get("history_number") or "")
+        full_name = str(gen.get("full_name") or "")
+        birth_text = str(gen.get("birth_date_text") or "")
+        diagnosis_code = str(diag.get("diagnosis_code") or "")
+        diagnosis_text = str(diag.get("diagnosis_text") or "")
+        department_profile = str(gen.get("department_profile") or "")
+        source_department = str(gen.get("source_department") or "")
+        admission_datetime = gen.get("admission_datetime")
+
+        return {
+            "history_len": len(history_number),
+            "history_hash": _short_hash(history_number),
+            "full_name_len": len(full_name),
+            "full_name_hash": _short_hash(full_name),
+            "birth_text_len": len(birth_text),
+            "birth_valid": bool(gen.get("birth_date")),
+            "gender_set": bool(gen.get("gender")),
+            "admission_offset_days": _days_from_today(admission_datetime),
+            "diagnosis_code_len": len(diagnosis_code),
+            "diagnosis_text_len": len(diagnosis_text),
+            "department_profile_len": len(department_profile),
+            "source_department_len": len(source_department),
+        }
+
+    def _format_form_state(self, gen_data=None, diag_data=None) -> str:
+        return _format_log_fields(self._collect_form_state(gen_data, diag_data))
+
+    def _log_validation_failed(self, reason: str, gen_data: dict, diag_data: dict):
+        logger.info(
+            "patient_form_validation_failed role=%s form_id=%s bed=%s admission_id=%s reason=%s state=%s",
+            _current_role(),
+            self._form_log_id,
+            self.bed_number,
+            getattr(self.admission, "id", None),
+            reason,
+            self._format_form_state(gen_data, diag_data),
+        )
+
     def _validate_input(self) -> bool:
         gen = self.general_tab.get_data()
         diag = self.diagnosis_tab.get_data()
         if not gen["history_number"] or not gen["full_name"]:
+            self._log_validation_failed("missing_history_or_full_name", gen, diag)
             CustomMessageBox.warning(self, "Ошибка", "Заполните номер ИБ и ФИО пациента")
             return False
         if not gen.get("birth_date"):
+            self._log_validation_failed("missing_or_invalid_birth_date", gen, diag)
             message = "Укажите корректную дату рождения" if gen.get("birth_date_text") else "Укажите дату рождения пациента"
             CustomMessageBox.warning(self, "Ошибка", message)
             return False
         admission_datetime = gen.get("admission_datetime")
         if admission_datetime and gen["birth_date"] > admission_datetime.date():
+            self._log_validation_failed("birth_date_after_admission", gen, diag)
             CustomMessageBox.warning(self, "Ошибка", "Дата рождения не может быть позже даты поступления")
             return False
         if not diag["diagnosis_text"]:
+            self._log_validation_failed("missing_diagnosis_text", gen, diag)
             CustomMessageBox.warning(self, "Ошибка", "Необходимо указать диагноз")
             return False
         return True
 
     def _save_data(self):
+        logger.info(
+            "patient_form_save_clicked role=%s form_id=%s bed=%s admission_id=%s pending=%s state=%s",
+            _current_role(),
+            self._form_log_id,
+            self.bed_number,
+            getattr(self.admission, "id", None),
+            int(self._write_pending),
+            self._format_form_state(),
+        )
         if self._write_pending:
+            logger.info(
+                "patient_form_save_ignored_pending role=%s form_id=%s bed=%s admission_id=%s op=%s",
+                _current_role(),
+                self._form_log_id,
+                self.bed_number,
+                getattr(self.admission, "id", None),
+                self._write_description,
+            )
             return
         if not self._validate_input():
             return
         try:
             gen_data = self.general_tab.get_data()
             if not self._confirm_non_today_admission_date(gen_data["admission_datetime"]):
+                logger.info(
+                    "patient_form_save_cancelled_by_admission_date role=%s form_id=%s bed=%s admission_id=%s state=%s",
+                    _current_role(),
+                    self._form_log_id,
+                    self.bed_number,
+                    getattr(self.admission, "id", None),
+                    self._format_form_state(),
+                )
                 return
             diag_data = self.diagnosis_tab.get_data()
             age_data = storage_age_from_birth_date(gen_data["birth_date"], gen_data["admission_datetime"])
@@ -322,7 +461,16 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 description = f"patient_bed_create_admission:{self.bed_number}"
 
                 def operation():
-                    return self.patient_bed_service.create_patient_and_admission(patient_data, admission_data)
+                    result = self.patient_bed_service.create_patient_and_admission(patient_data, admission_data)
+                    logger.info(
+                        "patient_form_service_result role=%s form_id=%s bed=%s op=%s result=%s",
+                        _current_role(),
+                        self._form_log_id,
+                        self.bed_number,
+                        description,
+                        result,
+                    )
+                    return result
             else:
                 patient_id = int(self.patient.id)
                 admission_id = int(self.admission.id)
@@ -330,22 +478,35 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 description = f"patient_bed_update_admission:{admission_id}"
 
                 def operation():
-                    return self.patient_bed_service.update_patient_and_admission(
+                    result = self.patient_bed_service.update_patient_and_admission(
                         patient_id,
                         admission_id,
                         patient_data,
                         admission_data,
                         expected_admission_revision=expected_admission_revision,
                     )
+                    logger.info(
+                        "patient_form_service_result role=%s form_id=%s bed=%s admission_id=%s op=%s result=%s expected_revision=%s",
+                        _current_role(),
+                        self._form_log_id,
+                        self.bed_number,
+                        admission_id,
+                        description,
+                        result,
+                        expected_admission_revision,
+                    )
+                    return result
 
             self._begin_write_pending()
             self._write_description = description
             logger.info(
-                "patient_form_write_start role=%s bed=%s admission_id=%s op=%s",
+                "patient_form_write_start role=%s form_id=%s bed=%s admission_id=%s op=%s state=%s",
                 _current_role(),
+                self._form_log_id,
                 self.bed_number,
                 getattr(self.admission, "id", None),
                 description,
+                self._format_form_state(gen_data, diag_data),
             )
             self.patient_bed_service.enqueue_write(
                 description,
@@ -355,6 +516,16 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             )
         except Exception as exc:
             self._finish_write_pending()
+            logger.exception(
+                "patient_form_save_exception role=%s form_id=%s bed=%s admission_id=%s op=%s state=%s error=%s",
+                _current_role(),
+                self._form_log_id,
+                self.bed_number,
+                getattr(self.admission, "id", None),
+                self._write_description,
+                self._format_form_state(),
+                exc,
+            )
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
 
     def _confirm_non_today_admission_date(self, admission_datetime: datetime) -> bool:
@@ -367,6 +538,14 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
 
         action_text = "создание" if self.is_new_admission else "редактирование"
         continue_text = "Продолжить создание" if self.is_new_admission else "Продолжить редактирование"
+        logger.info(
+            "patient_form_admission_date_confirmation_show role=%s form_id=%s bed=%s admission_id=%s offset_days=%s",
+            _current_role(),
+            getattr(self, "_form_log_id", "-"),
+            getattr(self, "bed_number", None),
+            getattr(getattr(self, "admission", None), "id", None),
+            _days_from_today(admission_datetime),
+        )
         message = (
             f"Дата поступления {admission_date.strftime('%d.%m.%Y')} отличается от сегодняшней "
             f"даты {today.strftime('%d.%m.%Y')}.\n\n"
@@ -381,7 +560,16 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                 ("Изменить дату", CustomMessageBox.No),
             ],
         )
-        return result == CustomMessageBox.Yes
+        confirmed = result == CustomMessageBox.Yes
+        logger.info(
+            "patient_form_admission_date_confirmation_result role=%s form_id=%s bed=%s admission_id=%s confirmed=%s",
+            _current_role(),
+            getattr(self, "_form_log_id", "-"),
+            getattr(self, "bed_number", None),
+            getattr(getattr(self, "admission", None), "id", None),
+            int(confirmed),
+        )
+        return confirmed
 
     def _make_write_success_callback(self, description: str):
         form_ref = weakref.ref(self)
@@ -390,19 +578,22 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             form = form_ref()
             if not _qt_is_valid(form) or getattr(form, "_closing", False):
                 logger.info(
-                    "patient_form_write_success_skip role=%s op=%s reason=invalid_or_closing",
+                    "patient_form_write_success_skip role=%s op=%s result=%s reason=invalid_or_closing",
                     _current_role(),
                     description,
+                    _result,
                 )
                 return
             logger.info(
-                "patient_form_write_success_callback role=%s bed=%s admission_id=%s op=%s",
+                "patient_form_write_success_callback role=%s form_id=%s bed=%s admission_id=%s op=%s result=%s",
                 _current_role(),
+                form._form_log_id,
                 form.bed_number,
                 getattr(form.admission, "id", None),
                 description,
+                _result,
             )
-            QTimer.singleShot(0, lambda ref=form_ref: _invoke_form_later(ref, "_on_write_success", description))
+            QTimer.singleShot(0, lambda ref=form_ref, result=_result: _invoke_form_later(ref, "_on_write_success", description, result))
 
         return _callback
 
@@ -419,6 +610,18 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
                     exc,
                 )
                 return
+            exc_info = (type(exc), exc, exc.__traceback__) if getattr(exc, "__traceback__", None) else None
+            logger.warning(
+                "patient_form_write_error_callback role=%s form_id=%s bed=%s admission_id=%s op=%s error=%s state=%s",
+                _current_role(),
+                form._form_log_id,
+                form.bed_number,
+                getattr(form.admission, "id", None),
+                description,
+                exc,
+                form._format_form_state(),
+                exc_info=exc_info,
+            )
             QTimer.singleShot(
                 0,
                 lambda ref=form_ref, err=exc: _invoke_form_later(ref, "_on_write_error", err, description),
@@ -448,15 +651,17 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             if _qt_is_valid(widget):
                 widget.setEnabled(enabled)
 
-    def _on_write_success(self, description: str = ""):
+    def _on_write_success(self, description: str = "", result=None):
         if self._closing or not _qt_is_valid(self):
             return
         logger.info(
-            "patient_form_write_success role=%s bed=%s admission_id=%s op=%s",
+            "patient_form_write_success role=%s form_id=%s bed=%s admission_id=%s op=%s result=%s",
             _current_role(),
+            self._form_log_id,
             self.bed_number,
             getattr(self.admission, "id", None),
             description or self._write_description,
+            result,
         )
         self._finish_write_pending()
         self.accept()
@@ -464,13 +669,17 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
     def _on_write_error(self, exc, description: str = ""):
         if self._closing or not _qt_is_valid(self):
             return
+        exc_info = (type(exc), exc, exc.__traceback__) if getattr(exc, "__traceback__", None) else None
         logger.warning(
-            "patient_form_write_error role=%s bed=%s admission_id=%s op=%s error=%s",
+            "patient_form_write_error role=%s form_id=%s bed=%s admission_id=%s op=%s error=%s state=%s",
             _current_role(),
+            self._form_log_id,
             self.bed_number,
             getattr(self.admission, "id", None),
             description or self._write_description,
             exc,
+            self._format_form_state(),
+            exc_info=exc_info,
         )
         self._finish_write_pending()
         CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
@@ -493,20 +702,26 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
     def reject(self):
         if self._write_pending and not self._closing:
             logger.info(
-                "patient_form_reject_ignored_pending_write role=%s bed=%s admission_id=%s",
+                "patient_form_reject_ignored_pending_write role=%s form_id=%s bed=%s admission_id=%s reason=%s op=%s",
                 _current_role(),
+                self._form_log_id,
                 self.bed_number,
                 getattr(self.admission, "id", None),
+                self._reject_reason,
+                self._write_description,
             )
             return
         if self._closing:
             return
         self._closing = True
         logger.info(
-            "patient_form_reject role=%s bed=%s admission_id=%s",
+            "patient_form_reject role=%s form_id=%s bed=%s admission_id=%s reason=%s state=%s",
             _current_role(),
+            self._form_log_id,
             self.bed_number,
             getattr(self.admission, "id", None),
+            self._reject_reason,
+            self._format_form_state(),
         )
         self._close_mkb_service_once()
         super().reject()
@@ -516,10 +731,12 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             return
         self._closing = True
         logger.info(
-            "patient_form_force_close role=%s bed=%s admission_id=%s",
+            "patient_form_force_close role=%s form_id=%s bed=%s admission_id=%s state=%s",
             _current_role(),
+            self._form_log_id,
             self.bed_number,
             getattr(self.admission, "id", None),
+            self._format_form_state(),
         )
         self._close_mkb_service_once()
         super().reject()
@@ -529,14 +746,25 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             return
         self._closing = True
         logger.info(
-            "patient_form_accept role=%s bed=%s admission_id=%s",
+            "patient_form_accept role=%s form_id=%s bed=%s admission_id=%s state=%s",
             _current_role(),
+            self._form_log_id,
             self.bed_number,
             getattr(self.admission, "id", None),
+            self._format_form_state(),
         )
         self._close_mkb_service_once()
         super().accept()
 
     def closeEvent(self, event):
+        logger.info(
+            "patient_form_close_event role=%s form_id=%s bed=%s admission_id=%s closing=%s pending=%s",
+            _current_role(),
+            getattr(self, "_form_log_id", "-"),
+            getattr(self, "bed_number", None),
+            getattr(getattr(self, "admission", None), "id", None),
+            int(getattr(self, "_closing", False)),
+            int(getattr(self, "_write_pending", False)),
+        )
         self._close_mkb_service_once()
         super().closeEvent(event)
