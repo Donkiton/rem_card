@@ -2,6 +2,9 @@
 # Файл остается публичным входом для старых импортов. Значения ниже строятся из
 # новой семантической темы, чтобы UI не зависел от случайных hex-цветов в виджетах.
 
+import os
+
+from rem_card.app.paths import get_icon_dir
 from rem_card.ui.styles.chart_styles import analytics_chart_colors
 from rem_card.ui.styles.theme_manager import get_theme_manager
 from rem_card.ui.styles.tooltip_style import TOOLTIP_BG, TOOLTIP_BORDER, TOOLTIP_TEXT
@@ -17,6 +20,13 @@ _TOKENS = get_theme_manager().current_tokens()
 def _t(key: str, default: str = "") -> str:
     value = _TOKENS.get(key, default)
     return str(value if value is not None else default)
+
+
+def _icon_qss_url(icon_name: str) -> str:
+    icon_path = os.path.join(get_icon_dir(), icon_name)
+    if not os.path.exists(icon_path):
+        return "none"
+    return f"url({icon_path.replace(os.sep, '/')})"
 
 
 # --- ОБЩИЕ ЦВЕТА ФОНА ---
@@ -497,26 +507,79 @@ STYLE_PATIENT_FORM_SAVE_BUTTON = f"""
         border-color: {BORDER_LIGHT};
     }}
 """
+FORM_DROPDOWN_ARROW_IMAGE = _icon_qss_url("combo_arrow_down.svg")
+FORM_SPIN_UP_ARROW_IMAGE = _icon_qss_url("decor_arrow_up.svg")
+FORM_SPIN_DOWN_ARROW_IMAGE = _icon_qss_url("decor_arrow_down.svg")
+
 STYLE_FORM_DATETIME_EDIT = f"""
-    QDateTimeEdit {{
+    QDateTimeEdit, QDateEdit, QTimeEdit {{
         background-color: {BG_CARD};
         color: {TEXT_PRIMARY};
         border: 1px solid {BORDER_LIGHT};
+        border-radius: {CUSTOM_DIALOG_RADIUS};
+        padding: 8px 28px 8px 8px;
     }}
-    QDateTimeEdit::up-button {{ width: 0px; border: none; }}
-    QDateTimeEdit::down-button {{ width: 0px; border: none; }}
-    QDateTimeEdit::drop-down {{
-        subcontrol-origin: padding;
+    QDateTimeEdit:focus, QDateEdit:focus, QTimeEdit:focus {{
+        border: 1px solid {BORDER_COLOR};
+        background: {BG_CARD};
+    }}
+    QDateTimeEdit::up-button, QDateTimeEdit::down-button {{
+        width: 0px;
+        border: none;
+    }}
+    QDateTimeEdit::drop-down, QDateEdit::drop-down {{
+        subcontrol-origin: border;
         subcontrol-position: top right;
-        width: 20px;
-        border-left-width: 1px;
-        border-left-color: {BORDER_LIGHT};
-        border-left-style: solid;
-        border-top-right-radius: 3px;
-        border-bottom-right-radius: 3px;
+        width: 24px;
+        border-left: 1px solid {BORDER_LIGHT};
+        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+        border-bottom-right-radius: {CUSTOM_DIALOG_RADIUS};
+        background: {BG_LIGHT};
     }}
-    QDateTimeEdit::down-arrow {{
-        image: none;
+    QDateTimeEdit::drop-down:hover, QDateEdit::drop-down:hover {{
+        background: #d8dde2;
+        border-left-color: {BORDER_COLOR};
+    }}
+    QDateTimeEdit::down-arrow, QDateEdit::down-arrow {{
+        image: {FORM_DROPDOWN_ARROW_IMAGE};
+        width: 12px;
+        height: 12px;
+    }}
+    QTimeEdit::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 24px;
+        border-left: 1px solid {BORDER_LIGHT};
+        border-bottom: 1px solid {BORDER_LIGHT};
+        border-top-right-radius: {CUSTOM_DIALOG_RADIUS};
+        background: {BG_LIGHT};
+    }}
+    QTimeEdit::up-button:hover {{
+        background: #d8dde2;
+        border-left-color: {BORDER_COLOR};
+        border-bottom-color: {BORDER_COLOR};
+    }}
+    QTimeEdit::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 24px;
+        border-left: 1px solid {BORDER_LIGHT};
+        border-bottom-right-radius: {CUSTOM_DIALOG_RADIUS};
+        background: {BG_LIGHT};
+    }}
+    QTimeEdit::down-button:hover {{
+        background: #d8dde2;
+        border-left-color: {BORDER_COLOR};
+    }}
+    QTimeEdit::up-arrow {{
+        image: {FORM_SPIN_UP_ARROW_IMAGE};
+        width: 10px;
+        height: 10px;
+    }}
+    QTimeEdit::down-arrow {{
+        image: {FORM_SPIN_DOWN_ARROW_IMAGE};
+        width: 10px;
+        height: 10px;
     }}
     QCalendarWidget QWidget {{
         background-color: {BG_CARD};

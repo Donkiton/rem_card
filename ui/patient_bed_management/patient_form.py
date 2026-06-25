@@ -236,6 +236,8 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
             return
         try:
             gen_data = self.general_tab.get_data()
+            if not self._confirm_non_today_admission_date(gen_data["admission_datetime"]):
+                return
             diag_data = self.diagnosis_tab.get_data()
             age_data = storage_age_from_birth_date(gen_data["birth_date"], gen_data["admission_datetime"])
             patient_data = {
@@ -295,6 +297,32 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         except Exception as exc:
             self._finish_write_pending()
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось сохранить данные:\n{exc}")
+
+    def _confirm_non_today_admission_date(self, admission_datetime: datetime) -> bool:
+        if not admission_datetime:
+            return True
+        admission_date = admission_datetime.date()
+        today = datetime.now().date()
+        if admission_date == today:
+            return True
+
+        action_text = "создание" if self.is_new_admission else "редактирование"
+        continue_text = "Продолжить создание" if self.is_new_admission else "Продолжить редактирование"
+        message = (
+            f"Дата поступления {admission_date.strftime('%d.%m.%Y')} отличается от сегодняшней "
+            f"даты {today.strftime('%d.%m.%Y')}.\n\n"
+            f"Продолжить {action_text} карточки с указанной датой или изменить дату?"
+        )
+        result = CustomMessageBox.warning_with_actions(
+            self,
+            "Проверка даты поступления",
+            message,
+            [
+                (continue_text, CustomMessageBox.Yes),
+                ("Изменить дату", CustomMessageBox.No),
+            ],
+        )
+        return result == CustomMessageBox.Yes
 
     def _make_write_success_callback(self, description: str):
         form_ref = weakref.ref(self)

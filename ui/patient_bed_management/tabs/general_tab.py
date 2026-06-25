@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QHBoxLayout, QComboBox, QLabel, QDateTimeEdit
+from PySide6.QtWidgets import QWidget, QFormLayout, QLineEdit, QHBoxLayout, QComboBox, QLabel, QDateEdit, QDateTimeEdit, QTimeEdit
 from PySide6.QtCore import QRegularExpression, QDate, QDateTime, QTime, Qt
 from PySide6.QtGui import QRegularExpressionValidator
 from rem_card.app.patient_age import (
@@ -102,15 +102,26 @@ class GeneralTabWidget(QWidget):
         birth_layout.addStretch(1)
         self._add_row("Дата рождения:", birth_layout)
 
-        self.admission_datetime_input = QDateTimeEdit()
-        self.admission_datetime_input.setDateTime(QDateTime.currentDateTime())
-        self.admission_datetime_input.setDisplayFormat("dd.MM.yyyy HH:mm")
-        self.admission_datetime_input.setCalendarPopup(True)
-        self.admission_datetime_input.setFixedHeight(34)
-        self.admission_datetime_input.setFixedWidth(280)
-        self.admission_datetime_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
-        self.admission_datetime_input.dateTimeChanged.connect(self._update_age_preview)
-        self._add_row("Дата и время поступления:", self.admission_datetime_input)
+        current_dt = QDateTime.currentDateTime()
+
+        self.admission_date_input = QDateEdit()
+        self.admission_date_input.setDate(current_dt.date())
+        self.admission_date_input.setDisplayFormat("dd.MM.yyyy")
+        self.admission_date_input.setCalendarPopup(True)
+        self.admission_date_input.setFixedHeight(34)
+        self.admission_date_input.setFixedWidth(160)
+        self.admission_date_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
+        self.admission_date_input.dateChanged.connect(self._update_age_preview)
+        self._add_row("Дата поступления:", self.admission_date_input)
+
+        self.admission_time_input = QTimeEdit()
+        self.admission_time_input.setTime(current_dt.time())
+        self.admission_time_input.setDisplayFormat("HH:mm")
+        self.admission_time_input.setFixedHeight(34)
+        self.admission_time_input.setFixedWidth(120)
+        self.admission_time_input.setStyleSheet(STYLE_FORM_DATETIME_EDIT)
+        self.admission_time_input.timeChanged.connect(self._update_age_preview)
+        self._add_row("Время поступления:", self.admission_time_input)
 
         self.source_department_input = SingleClickComboBox()
         self.source_department_input.addItems(["Приемное отделение", "Профильное отделение"])
@@ -135,6 +146,8 @@ class GeneralTabWidget(QWidget):
         return parse_date_value(text) if text else None
 
     def _reference_datetime(self) -> datetime:
+        if hasattr(self, "admission_date_input") and hasattr(self, "admission_time_input"):
+            return self._admission_datetime().toPython()
         if hasattr(self, "admission_datetime_input"):
             return self.admission_datetime_input.dateTime().toPython()
         return datetime.now()
@@ -185,7 +198,7 @@ class GeneralTabWidget(QWidget):
         return "".join(result)[:10]
 
     def get_data(self):
-        admission_datetime = self.admission_datetime_input.dateTime().toPython()
+        admission_datetime = self._admission_datetime().toPython()
         birth_date = self._selected_birth_date()
         age_data = storage_age_from_birth_date(birth_date, admission_datetime)
         return {
@@ -225,6 +238,9 @@ class GeneralTabWidget(QWidget):
 
         return QDateTime.currentDateTime()
 
+    def _admission_datetime(self) -> QDateTime:
+        return QDateTime(self.admission_date_input.date(), self.admission_time_input.time())
+
     def set_data(self, patient, admission):
         if patient:
             self.full_name_input.setText(patient.full_name or "")
@@ -236,7 +252,9 @@ class GeneralTabWidget(QWidget):
 
         if admission:
             self.history_number_input.setText(admission.history_number or "")
-            self.admission_datetime_input.setDateTime(self._to_qdatetime(admission.admission_datetime))
+            admission_qdt = self._to_qdatetime(admission.admission_datetime)
+            self.admission_date_input.setDate(admission_qdt.date())
+            self.admission_time_input.setTime(admission_qdt.time())
 
             if admission.patient_gender:
                 self.gender_combo.setCurrentText(admission.patient_gender)
