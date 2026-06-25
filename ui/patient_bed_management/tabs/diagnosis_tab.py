@@ -1,13 +1,22 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QFormLayout, QLineEdit, QLabel, QGroupBox, QHBoxLayout, QDateTimeEdit, QSizePolicy
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import (
+    QDateTimeEdit,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 from PySide6.QtCore import QDateTime, Qt
 from rem_card.services.mkb import MKBService
+from rem_card.ui.patient_bed_management.form_widgets import IconBadge, line_icon
 from rem_card.ui.styles.theme import (
     STYLE_FORM_DATETIME_EDIT,
-    STYLE_PATIENT_DIAGNOSIS_TEXT_LABEL,
     STYLE_PATIENT_FORM_INVALID_FIELD,
-    STYLE_PATIENT_FORM_MANUAL_FIELD,
-    STYLE_PATIENT_FORM_READONLY_FIELD,
-    STYLE_PATIENT_FORM_ROW_LABEL,
     STYLE_PATIENT_FORM_VALID_FIELD,
     STYLE_PATIENT_OPERATION_FIELD,
     STYLE_PATIENT_OPERATION_LABEL,
@@ -26,65 +35,102 @@ class DiagnosisTabWidget(QWidget):
     def _init_ui(self):
         self.main_layout = QVBoxLayout(self)
         if self.show_operations:
-            self.main_layout.setContentsMargins(30, 10, 30, 30)
+            self.main_layout.setContentsMargins(0, 0, 0, 0)
         else:
-            self.main_layout.setContentsMargins(24, 0, 24, 12)
+            self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(10)
 
-        diag_form = QFormLayout()
-        diag_form.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        diag_form.setRowWrapPolicy(QFormLayout.DontWrapRows)
-        diag_form.setHorizontalSpacing(14)
-        diag_form.setVerticalSpacing(10)
-        diag_form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.diag_form = diag_form
-
-        code_name_layout = QHBoxLayout()
-        code_name_layout.setContentsMargins(0, 0, 0, 0)
-        code_name_layout.setSpacing(12)
-        code_name_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
         self.diagnosis_code_input = QLineEdit()
-        self.diagnosis_code_input.setFixedWidth(180)
         self.diagnosis_code_input.setFixedHeight(34)
-        self.diagnosis_code_input.setPlaceholderText("Код МКБ-10")
+        self.diagnosis_code_input.setPlaceholderText("Введите код или название")
         self.diagnosis_code_input.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.diagnosis_code_input.addAction(line_icon("search", "#8ea0ba", 17), QLineEdit.LeadingPosition)
         self.diagnosis_code_input.editingFinished.connect(self._on_diagnosis_code_validation)
         self.diagnosis_code_input.textChanged.connect(self._on_code_typing)
 
         self.diagnosis_text_label = QLabel("")
-        self.diagnosis_text_label.setWordWrap(True)
-        self.diagnosis_text_label.setStyleSheet(STYLE_PATIENT_DIAGNOSIS_TEXT_LABEL)
-        self.diagnosis_text_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.diagnosis_text_label.setMinimumHeight(34)
-        self.diagnosis_text_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.diagnosis_text_label.hide()
 
-        code_name_layout.addWidget(self.diagnosis_code_input)
-        code_name_layout.addWidget(self.diagnosis_text_label, 1)
-
-        code_label = QLabel("Код диагноза МКБ-10:")
-        code_label.setStyleSheet(STYLE_PATIENT_FORM_ROW_LABEL)
-        code_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        code_label.setMinimumHeight(34)
+        code_label = QLabel("Код диагноза МКБ-10")
+        code_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        code_label.setMinimumHeight(18)
         self.code_label = code_label
+        self.main_layout.addWidget(code_label)
+        self.main_layout.addWidget(self.diagnosis_code_input)
 
-        diag_form.addRow(code_label, code_name_layout)
+        manual_label_row = QWidget()
+        manual_label_row.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
+        manual_label_layout = QHBoxLayout(manual_label_row)
+        manual_label_layout.setContentsMargins(0, 4, 0, 0)
+        manual_label_layout.setSpacing(5)
+        manual_label_layout.addWidget(IconBadge("pen", "#f472d0", "transparent", side=13, icon_size=13))
 
-        self.manual_entry_label = QLabel("Ручной ввод диагноза:")
-        self.manual_entry_label.setStyleSheet(STYLE_PATIENT_FORM_ROW_LABEL)
-        self.manual_entry_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.manual_entry_label.setMinimumHeight(34)
+        self.manual_entry_label = QLabel("Ручной ввод диагноза")
+        self.manual_entry_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.manual_entry_label.setMinimumHeight(18)
+        manual_label_layout.addWidget(self.manual_entry_label)
+        manual_label_layout.addStretch()
+        self.main_layout.addWidget(manual_label_row)
 
-        self.diagnosis_text_input = QLineEdit()
-        self.diagnosis_text_input.setPlaceholderText("Введите диагноз вручную")
-        self.diagnosis_text_input.setMinimumWidth(430)
-        self.diagnosis_text_input.setFixedHeight(34)
-        self.diagnosis_text_input.setEnabled(False)
-        self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_READONLY_FIELD)
+        self.manual_text_frame = QFrame()
+        self.manual_text_frame.setMinimumHeight(113)
+        self.manual_text_frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.manual_text_frame.setStyleSheet(
+            """
+            QFrame {
+                background: #ffffff;
+                border: 1px solid #dbe5ef;
+                border-radius: 5px;
+            }
+            QTextEdit {
+                background: transparent;
+                border: none;
+                color: #253858;
+                font-size: 13px;
+                font-weight: 600;
+                padding: 0px;
+                selection-background-color: #0d6efd;
+                selection-color: #ffffff;
+            }
+            """
+        )
+        manual_text_layout = QVBoxLayout(self.manual_text_frame)
+        manual_text_layout.setContentsMargins(10, 9, 10, 7)
+        manual_text_layout.setSpacing(1)
 
-        diag_form.addRow(self.manual_entry_label, self.diagnosis_text_input)
+        self.diagnosis_text_input = QTextEdit()
+        self.diagnosis_text_input.setPlaceholderText("Введите диагноз вручную (при необходимости)")
+        self.diagnosis_text_input.setAcceptRichText(False)
+        self.diagnosis_text_input.setTabChangesFocus(True)
+        self.diagnosis_text_input.textChanged.connect(self._on_manual_text_changed)
+        manual_text_layout.addWidget(self.diagnosis_text_input, 1)
 
-        self.main_layout.addLayout(diag_form)
+        self.manual_counter_label = QLabel("0 / 500")
+        self.manual_counter_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.manual_counter_label.setStyleSheet("color: #7c8da7; font-size: 13px; font-weight: 700;")
+        manual_text_layout.addWidget(self.manual_counter_label)
+        self.main_layout.addWidget(self.manual_text_frame, 1)
+
+        self.info_frame = QFrame()
+        self.info_frame.setFixedHeight(56)
+        self.info_frame.setStyleSheet(
+            """
+            QFrame {
+                background: #f4f7ff;
+                border: none;
+                border-radius: 5px;
+            }
+            """
+        )
+        info_layout = QHBoxLayout(self.info_frame)
+        info_layout.setContentsMargins(13, 0, 13, 0)
+        info_layout.setSpacing(12)
+        info_layout.addWidget(IconBadge("info", "#3b82f6", "transparent", side=20, icon_size=18))
+        info_text = QLabel("Если код диагноза неизвестен, оставьте поле пустым\nи укажите диагноз вручную.")
+        info_text.setStyleSheet("color: #253858; font-size: 13px; font-weight: 400;")
+        info_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        info_layout.addWidget(info_text, 1)
+        self.main_layout.addWidget(self.info_frame)
 
         if self.show_operations:
             self.operations_group = QGroupBox("Список операций")
@@ -159,8 +205,6 @@ class DiagnosisTabWidget(QWidget):
         self.diagnosis_code_input.setCursorPosition(len(formatted))
         self.diagnosis_code_input.blockSignals(False)
 
-        self.diagnosis_text_input.setEnabled(False)
-        self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_READONLY_FIELD)
         self.diagnosis_code_input.setStyleSheet("")
         self.diagnosis_text_label.setText("")
 
@@ -168,19 +212,27 @@ class DiagnosisTabWidget(QWidget):
         code = self.diagnosis_code_input.text().strip()
         if not code:
             self._on_code_typing(code)
+            self.diagnosis_text_label.setText("")
+            self.diagnosis_code_input.setStyleSheet("")
             return
 
         diagnosis_name = self.mkb_service.get_diagnosis_by_code(code)
         if diagnosis_name:
             self.diagnosis_text_label.setText(diagnosis_name)
             self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
-            self.diagnosis_text_input.setEnabled(False)
-            self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_READONLY_FIELD)
         else:
             self.diagnosis_text_label.setText("Код не найден")
             self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
-            self.diagnosis_text_input.setEnabled(True)
-            self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_MANUAL_FIELD)
+
+    def _on_manual_text_changed(self):
+        text = self.diagnosis_text_input.toPlainText()
+        if len(text) > 500:
+            self.diagnosis_text_input.blockSignals(True)
+            self.diagnosis_text_input.setPlainText(text[:500])
+            self.diagnosis_text_input.moveCursor(QTextCursor.End)
+            self.diagnosis_text_input.blockSignals(False)
+            text = self.diagnosis_text_input.toPlainText()
+        self.manual_counter_label.setText(f"{len(text)} / 500")
 
     def _add_operation_row(self):
         num = len(self.op_widgets) + 1
@@ -217,14 +269,15 @@ class DiagnosisTabWidget(QWidget):
         })
 
     def get_data(self):
-        if self.diagnosis_text_input.isEnabled() and self.diagnosis_text_input.text().strip():
-            final_diagnosis_text = self.diagnosis_text_input.text().strip()
+        manual_text = self.diagnosis_text_input.toPlainText().strip()
+        if manual_text:
+            final_diagnosis_text = manual_text
         else:
             label_text = self.diagnosis_text_label.text()
             if label_text and "Код не найден" not in label_text:
                 final_diagnosis_text = label_text
             else:
-                final_diagnosis_text = self.diagnosis_text_input.text().strip()
+                final_diagnosis_text = ""
 
         return {
             "diagnosis_code": self.diagnosis_code_input.text().strip() or None,
@@ -254,9 +307,8 @@ class DiagnosisTabWidget(QWidget):
             diagnosis_from_code = self.mkb_service.get_diagnosis_by_code(admission.diagnosis_code) if admission.diagnosis_code else None
             if admission.diagnosis_text:
                 if not diagnosis_from_code or diagnosis_from_code != admission.diagnosis_text:
-                    self.diagnosis_text_input.setText(admission.diagnosis_text)
-                    self.diagnosis_text_input.setEnabled(True)
-                    self.diagnosis_text_input.setStyleSheet(STYLE_PATIENT_FORM_MANUAL_FIELD)
+                    self.diagnosis_text_input.setPlainText(admission.diagnosis_text)
+                    self._on_manual_text_changed()
 
         if not self.show_operations:
             return

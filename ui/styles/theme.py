@@ -442,21 +442,88 @@ STYLE_SIDE_PATIENT_ACTION_BUTTON = f"""
     }}
 """
 
-STYLE_PATIENT_FORM_CONTAINER = STYLE_ANALYTICS_DIALOG_CONTAINER
-STYLE_PATIENT_FORM_TITLE = STYLE_ANALYTICS_TITLE
+FORM_DROPDOWN_ARROW_IMAGE = _icon_qss_url("combo_arrow_down.svg")
+FORM_SPIN_UP_ARROW_IMAGE = _icon_qss_url("decor_arrow_up.svg")
+FORM_SPIN_DOWN_ARROW_IMAGE = _icon_qss_url("decor_arrow_down.svg")
+
+STYLE_PATIENT_FORM_CONTAINER = """
+    QWidget#bg_container {
+        background-color: #ffffff;
+        border: 1px solid #dbe5f0;
+        border-radius: 7px;
+    }
+"""
+STYLE_PATIENT_FORM_TITLE = (
+    "color: #17233f; font-size: 18px; font-weight: 800; "
+    "background: transparent; border: none;"
+)
+STYLE_PATIENT_FORM_BED_BADGE = """
+    QLabel {
+        color: #1677ff;
+        background: #dcecff;
+        border: none;
+        border-radius: 9px;
+        padding: 3px 10px;
+        font-size: 13px;
+        font-weight: 800;
+    }
+"""
+STYLE_PATIENT_FORM_CARD = """
+    QFrame#patientFormCard {
+        background: #ffffff;
+        border: 1px solid #dbe5f0;
+        border-radius: 7px;
+    }
+"""
 STYLE_PATIENT_FORM_TAB = f"""
-    QWidget {{ background-color: {BG_MAIN}; }}
-    QLabel {{ color: {TEXT_SECONDARY}; font-size: 13px; font-weight: 600; background: transparent; }}
+    QWidget {{ background-color: transparent; }}
+    QLabel {{
+        color: #17233f;
+        font-size: 13px;
+        font-weight: 800;
+        background: transparent;
+        border: none;
+    }}
     QLineEdit, QComboBox, QSpinBox, QDateTimeEdit {{
-        padding: 8px;
-        border: 1px solid {BORDER_LIGHT};
-        border-radius: {CUSTOM_DIALOG_RADIUS};
-        background: {BG_CARD};
-        color: {TEXT_PRIMARY};
+        padding: 0px 10px;
+        border: 1px solid #dbe5ef;
+        border-radius: 5px;
+        background: #ffffff;
+        color: #253858;
+        font-size: 13px;
+        font-weight: 600;
+        selection-background-color: #0d6efd;
+        selection-color: #ffffff;
     }}
     QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDateTimeEdit:focus {{
-        border: 1px solid {BORDER_COLOR};
-        background: {BG_CARD};
+        border: 1px solid #82b7ff;
+        background: #ffffff;
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 31px;
+        border: none;
+        background: transparent;
+    }}
+    QComboBox::down-arrow {{
+        image: {FORM_DROPDOWN_ARROW_IMAGE};
+        width: 12px;
+        height: 12px;
+    }}
+    QTextEdit {{
+        padding: 10px;
+        border: 1px solid #dbe5ef;
+        border-radius: 5px;
+        background: #ffffff;
+        color: #253858;
+        font-size: 13px;
+        font-weight: 600;
+        selection-background-color: #0d6efd;
+        selection-color: #ffffff;
+    }}
+    QTextEdit:focus {{
+        border: 1px solid #82b7ff;
     }}
 """
 STYLE_PATIENT_FORM_SCROLL = f"""
@@ -466,51 +533,49 @@ STYLE_PATIENT_FORM_SCROLL = f"""
         border-radius: {CUSTOM_DIALOG_RADIUS};
     }}
 """
-STYLE_PATIENT_FORM_PAGE = f"background-color: {BG_MAIN};"
+STYLE_PATIENT_FORM_PAGE = "background-color: transparent;"
 STYLE_PATIENT_FORM_SECTION_TITLE = (
-    f"color: {TEXT_PRIMARY}; font-size: 12px; font-weight: 800; "
-    "margin: 10px 24px 0 24px; background: transparent;"
+    "color: #1e6ff2; font-size: 13px; font-weight: 900; "
+    "background: transparent; border: none;"
 )
 STYLE_PATIENT_FORM_CANCEL_BUTTON = f"""
     QPushButton {{
-        background: {BG_LIGHT};
-        border: 1px solid {BORDER_COLOR};
-        border-radius: {CUSTOM_DIALOG_RADIUS};
-        color: {TEXT_SECONDARY};
-        font-weight: 700;
-        font-size: 12px;
+        background: #ffffff;
+        border: 1px solid #dbe5f0;
+        border-radius: 5px;
+        color: #263756;
+        font-weight: 800;
+        font-size: 13px;
+        padding: 0px;
     }}
     QPushButton:hover {{
-        background: #d8dde2;
-        color: {TEXT_PRIMARY};
+        background: #f7fbff;
+        border-color: #bdd8ff;
     }}
     QPushButton:disabled {{
-        background: {BG_MAIN};
-        color: {TEXT_MUTED};
+        background: #f8fafc;
+        color: #9aa8bd;
     }}
 """
 STYLE_PATIENT_FORM_SAVE_BUTTON = f"""
     QPushButton {{
-        background: {BG_LIGHT};
-        border: 1px solid {BORDER_COLOR};
-        border-radius: {CUSTOM_DIALOG_RADIUS};
-        color: {TEXT_PRIMARY};
+        background: #0d6efd;
+        border: 1px solid #0b63e5;
+        border-radius: 5px;
+        color: #ffffff;
         font-weight: 800;
-        font-size: 12px;
+        font-size: 13px;
+        padding: 0px;
     }}
     QPushButton:hover {{
-        background: #d8dde2;
+        background: #075fe8;
     }}
     QPushButton:disabled {{
-        background: {BG_MAIN};
-        color: {TEXT_MUTED};
-        border-color: {BORDER_LIGHT};
+        background: #eef4ff;
+        color: #9aa8bd;
+        border-color: #dbe5f0;
     }}
 """
-FORM_DROPDOWN_ARROW_IMAGE = _icon_qss_url("combo_arrow_down.svg")
-FORM_SPIN_UP_ARROW_IMAGE = _icon_qss_url("decor_arrow_up.svg")
-FORM_SPIN_DOWN_ARROW_IMAGE = _icon_qss_url("decor_arrow_down.svg")
-
 STYLE_FORM_DATETIME_EDIT = f"""
     QDateTimeEdit, QDateEdit, QTimeEdit {{
         background-color: {BG_CARD};
@@ -617,12 +682,22 @@ STYLE_PATIENT_FORM_ROW_LABEL = (
     f"background: transparent; color: {TEXT_SECONDARY}; "
     "font-size: 13px; font-weight: 600;"
 )
-STYLE_PATIENT_FORM_READONLY_FIELD = f"background-color: {BG_LIGHT}; color: {TEXT_MUTED};"
-STYLE_PATIENT_FORM_VALID_FIELD = f"background-color: #e1ffdc; border: 1px solid {COLOR_SUCCESS};"
-STYLE_PATIENT_FORM_INVALID_FIELD = f"background-color: #ffdcde; border: 1px solid {COLOR_DANGER};"
+STYLE_PATIENT_FORM_READONLY_FIELD = (
+    f"background-color: {BG_LIGHT}; color: {TEXT_MUTED}; "
+    "selection-background-color: #0d6efd; selection-color: #ffffff;"
+)
+STYLE_PATIENT_FORM_VALID_FIELD = (
+    f"background-color: #e1ffdc; border: 1px solid {COLOR_SUCCESS}; "
+    "selection-background-color: #0d6efd; selection-color: #ffffff;"
+)
+STYLE_PATIENT_FORM_INVALID_FIELD = (
+    f"background-color: #ffdcde; border: 1px solid {COLOR_DANGER}; "
+    "selection-background-color: #0d6efd; selection-color: #ffffff;"
+)
 STYLE_PATIENT_FORM_MANUAL_FIELD = (
     f"background-color: {BG_CARD}; color: {TEXT_PRIMARY}; "
-    f"border: 1px solid {BORDER_LIGHT};"
+    f"border: 1px solid {BORDER_LIGHT}; "
+    "selection-background-color: #0d6efd; selection-color: #ffffff;"
 )
 STYLE_PATIENT_OPERATIONS_GROUP = f"""
     QGroupBox {{

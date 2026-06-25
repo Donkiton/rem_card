@@ -2,15 +2,16 @@ from datetime import datetime
 import os
 import weakref
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QSize, QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog,
+    QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -20,18 +21,18 @@ from rem_card.app.patient_age import storage_age_from_birth_date
 from rem_card.services.mkb import MKBService
 from rem_card.services.patient_bed_management import AdmissionRecord, PatientBedManagementService, PatientRecord
 from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label
+from rem_card.ui.patient_bed_management.form_widgets import IconBadge, line_icon
 from rem_card.ui.patient_bed_management.tabs.diagnosis_tab import DiagnosisTabWidget
 from rem_card.ui.patient_bed_management.tabs.general_tab import GeneralTabWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 from rem_card.ui.styles.theme import (
-    STYLE_DIALOG_CLOSE_BUTTON,
+    STYLE_PATIENT_FORM_BED_BADGE,
+    STYLE_PATIENT_FORM_CARD,
     STYLE_PATIENT_FORM_CANCEL_BUTTON,
     STYLE_PATIENT_FORM_CONTAINER,
     STYLE_PATIENT_FORM_PAGE,
     STYLE_PATIENT_FORM_SAVE_BUTTON,
-    STYLE_PATIENT_FORM_SCROLL,
-    STYLE_PATIENT_FORM_SECTION_TITLE,
     STYLE_PATIENT_FORM_TAB,
     STYLE_PATIENT_FORM_TITLE,
     STYLE_TRANSPARENT_WIDGET,
@@ -91,14 +92,19 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self._mkb_closed = False
         self._write_description = ""
         self.bed_label = format_patient_bed_label(self.bed_number)
+        self.dialog_title_text = "Новая карточка пациента" if self.is_new_admission else "Карточка пациента"
 
-        self.setWindowTitle(f"Карта пациента - {self.bed_label}")
-        self.setMinimumSize(800, 600)
-        self.resize(980, 770)
+        self.setWindowTitle(f"{self.dialog_title_text} - {self.bed_label}")
+        self.setMinimumSize(1106, 506)
+        self.resize(1106, 506)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setMouseTracking(True)
-        self._init_saved_frameless_dialog("patient_bed_management/patient_form_geometry", drag_area_height=70)
+        self._init_saved_frameless_dialog(
+            "patient_bed_management/patient_form_geometry",
+            resize_margin=10,
+            drag_area_height=60,
+        )
 
         self._init_ui()
         self._restore_saved_geometry()
@@ -111,18 +117,18 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self.bg_container.setStyleSheet(STYLE_PATIENT_FORM_CONTAINER)
 
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(30)
-        shadow.setColor(QColor(0, 0, 0, 40))
-        shadow.setOffset(0, 5)
+        shadow.setBlurRadius(16)
+        shadow.setColor(QColor(15, 23, 42, 45))
+        shadow.setOffset(0, 4)
         self.bg_container.setGraphicsEffect(shadow)
 
         self.layout_container = QVBoxLayout(self)
-        self.layout_container.setContentsMargins(10, 10, 10, 10)
+        self.layout_container.setContentsMargins(3, 3, 3, 10)
         self.layout_container.addWidget(self.bg_container)
 
         self.main_layout = QVBoxLayout(self.bg_container)
-        self.main_layout.setContentsMargins(16, 8, 16, 16)
-        self.main_layout.setSpacing(10)
+        self.main_layout.setContentsMargins(16, 0, 25, 12)
+        self.main_layout.setSpacing(0)
 
         self._init_header()
         self._init_form()
@@ -130,21 +136,46 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
 
     def _init_header(self):
         self.header_panel = QWidget()
-        self.header_panel.setFixedHeight(40)
+        self.header_panel.setFixedHeight(60)
         self.header_panel.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
         header_layout = QHBoxLayout(self.header_panel)
-        header_layout.setContentsMargins(10, 0, 0, 0)
+        header_layout.setContentsMargins(3, 0, 0, 0)
+        header_layout.setSpacing(13)
 
-        title_label = QLabel(f"КАРТОЧКА ПАЦИЕНТА - {format_patient_bed_label(self.bed_number, uppercase=True)}")
+        header_layout.addWidget(IconBadge("folder", "#1d73f8", "#eaf3ff", side=33, icon_size=20))
+
+        title_label = QLabel(self.dialog_title_text)
         title_label.setStyleSheet(STYLE_PATIENT_FORM_TITLE)
         header_layout.addWidget(title_label)
+
+        bed_badge = QLabel(self.bed_label)
+        bed_badge.setStyleSheet(STYLE_PATIENT_FORM_BED_BADGE)
+        bed_badge.setFixedHeight(25)
+        header_layout.addWidget(bed_badge)
         header_layout.addStretch()
 
-        close_button = QPushButton("x")
+        close_button = QPushButton("×")
         self.close_button = close_button
-        close_button.setFixedSize(30, 30)
+        close_button.setFixedSize(36, 36)
         close_button.setCursor(Qt.PointingHandCursor)
-        close_button.setStyleSheet(STYLE_DIALOG_CLOSE_BUTTON)
+        close_button.setStyleSheet(
+            """
+            QPushButton {
+                background: transparent;
+                color: #17233f;
+                border: none;
+                border-radius: 5px;
+                font-size: 31px;
+                font-weight: 300;
+                padding: 0px 0px 3px 0px;
+                min-width: 0px;
+            }
+            QPushButton:hover {
+                background: #f1f5f9;
+                color: #0f172a;
+            }
+            """
+        )
         close_button.clicked.connect(self.reject)
         header_layout.addWidget(close_button)
         self.main_layout.addWidget(self.header_panel)
@@ -155,53 +186,81 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
 
         self.general_tab.setStyleSheet(STYLE_PATIENT_FORM_TAB)
         self.diagnosis_tab.setStyleSheet(STYLE_PATIENT_FORM_TAB)
-        label_column_width = 250
+        label_column_width = 208
         self.general_tab.set_label_column_width(label_column_width)
         self.diagnosis_tab.set_label_column_width(label_column_width)
 
-        self.form_scroll = QScrollArea()
-        self.form_scroll.setWidgetResizable(True)
-        self.form_scroll.setFrameShape(QScrollArea.NoFrame)
-        self.form_scroll.setStyleSheet(STYLE_PATIENT_FORM_SCROLL)
-
         self.form_page = QWidget()
         self.form_page.setStyleSheet(STYLE_PATIENT_FORM_PAGE)
-        form_page_layout = QVBoxLayout(self.form_page)
+        self.form_page.setMinimumHeight(356)
+        self.form_page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        form_page_layout = QHBoxLayout(self.form_page)
         form_page_layout.setContentsMargins(0, 0, 0, 0)
-        form_page_layout.setSpacing(2)
+        form_page_layout.setSpacing(13)
 
-        general_title = QLabel("ОБЩИЕ ДАННЫЕ")
-        general_title.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
-        diagnosis_title = QLabel("ДИАГНОЗ")
-        diagnosis_title.setStyleSheet(STYLE_PATIENT_FORM_SECTION_TITLE)
+        form_page_layout.addWidget(
+            self._build_section_card("ОБЩИЕ ДАННЫЕ", "user", "#1e6ff2", "#eef6ff", self.general_tab),
+            1,
+        )
+        form_page_layout.addWidget(
+            self._build_section_card("ДИАГНОЗ", "diagnosis", "#168f86", "#ecfdfb", self.diagnosis_tab),
+            1,
+        )
 
-        form_page_layout.addWidget(general_title)
-        form_page_layout.addWidget(self.general_tab)
-        form_page_layout.addWidget(diagnosis_title)
-        form_page_layout.addWidget(self.diagnosis_tab)
-        form_page_layout.addStretch(1)
+        self.main_layout.addWidget(self.form_page, 1)
 
-        self.form_scroll.setWidget(self.form_page)
-        self.main_layout.addWidget(self.form_scroll, 1)
+    def _build_section_card(self, title: str, icon_kind: str, accent: str, icon_bg: str, content: QWidget) -> QFrame:
+        card = QFrame()
+        card.setObjectName("patientFormCard")
+        card.setMinimumHeight(356)
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        card.setStyleSheet(STYLE_PATIENT_FORM_CARD)
+
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(18, 16, 18, 13)
+        card_layout.setSpacing(9)
+
+        title_row = QWidget()
+        title_row.setStyleSheet(STYLE_TRANSPARENT_WIDGET)
+        title_layout = QHBoxLayout(title_row)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(9)
+        title_layout.addWidget(IconBadge(icon_kind, accent, icon_bg, side=21, icon_size=16))
+
+        title_label = QLabel(title)
+        title_label.setStyleSheet(
+            f"color: {accent}; font-size: 13px; font-weight: 900; background: transparent; border: none;"
+        )
+        title_layout.addWidget(title_label)
+        title_layout.addStretch()
+
+        card_layout.addWidget(title_row)
+        card_layout.addWidget(content, 1)
+        return card
 
     def _init_buttons(self):
         buttons_layout = QHBoxLayout()
-        buttons_layout.setContentsMargins(0, 10, 0, 0)
+        buttons_layout.setContentsMargins(0, 16, 0, 0)
+        buttons_layout.setSpacing(13)
 
-        self.cancel_button = QPushButton("ОТМЕНИТЬ")
+        self.cancel_button = QPushButton("Отменить")
         self.cancel_button.setCursor(Qt.PointingHandCursor)
-        self.cancel_button.setFixedHeight(45)
+        self.cancel_button.setFixedHeight(38)
+        self.cancel_button.setIcon(line_icon("x", "#475569", 17))
+        self.cancel_button.setIconSize(QSize(17, 17))
         self.cancel_button.setStyleSheet(STYLE_PATIENT_FORM_CANCEL_BUTTON)
         self.cancel_button.clicked.connect(self.reject)
 
-        self.save_button = QPushButton("СОХРАНИТЬ КАРТОЧКУ")
+        self.save_button = QPushButton("Сохранить карточку")
         self.save_button.setCursor(Qt.PointingHandCursor)
-        self.save_button.setFixedHeight(45)
+        self.save_button.setFixedHeight(38)
+        self.save_button.setIcon(line_icon("save", "#ffffff", 17))
+        self.save_button.setIconSize(QSize(17, 17))
         self.save_button.setStyleSheet(STYLE_PATIENT_FORM_SAVE_BUTTON)
         self.save_button.clicked.connect(self._save_data)
 
         buttons_layout.addWidget(self.cancel_button, 1)
-        buttons_layout.addWidget(self.save_button, 2)
+        buttons_layout.addWidget(self.save_button, 1)
         self.main_layout.addLayout(buttons_layout)
 
     def _load_data(self):
@@ -371,13 +430,13 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self._write_pending = True
         self._set_write_controls_enabled(False)
         if _qt_is_valid(self.save_button):
-            self.save_button.setText("СОХРАНЕНИЕ...")
+            self.save_button.setText("Сохранение...")
 
     def _finish_write_pending(self):
         self._write_pending = False
         self._set_write_controls_enabled(True)
         if _qt_is_valid(self.save_button):
-            self.save_button.setText("СОХРАНИТЬ КАРТОЧКУ")
+            self.save_button.setText("Сохранить карточку")
 
     def _set_write_controls_enabled(self, enabled: bool):
         for widget in (
