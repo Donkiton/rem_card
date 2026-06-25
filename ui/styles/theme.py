@@ -448,7 +448,7 @@ FORM_SPIN_DOWN_ARROW_IMAGE = _icon_qss_url("decor_arrow_down.svg")
 
 STYLE_PATIENT_FORM_CONTAINER = """
     QWidget#bg_container {
-        background-color: #ffffff;
+        background-color: #f4f7fb;
         border: 1px solid #dbe5f0;
         border-radius: 7px;
     }
