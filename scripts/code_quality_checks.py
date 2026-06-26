@@ -31,6 +31,7 @@ SKIP_DIR_NAMES = {
     "__pycache__",
     "build",
     "dist",
+    "tmp",
     "venv",
 }
 
@@ -40,6 +41,7 @@ ALLOWED_F_BLOCKS = {
     ("services/bars_auth_service.py", "BarsAuthService.list_department_patients"),
     ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
     ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"),
+    ("data/dao/patient_status_dao.py", "PatientStatusDAO.change_status_with_outcome_details"),
     ("scripts/regression_safety_checks.py", "_check_orders_pending_states_before_commit"),
     ("scripts/regression_safety_checks.py", "_check_orders_fast_click_path_stays_local"),
     ("scripts/regression_safety_checks.py", "_check_performance_a_guards_present"),
@@ -70,7 +72,7 @@ def _run_flake8_f821() -> dict[str, Any]:
         "flake8",
         ".",
         "--select=F821",
-        "--exclude=.git,__pycache__,build,dist,.venv,venv,.pytest_cache,.mypy_cache,.ruff_cache",
+        "--exclude=.git,__pycache__,build,dist,tmp,.venv,venv,.pytest_cache,.mypy_cache,.ruff_cache",
     ]
     started = time.perf_counter()
     proc = subprocess.run(

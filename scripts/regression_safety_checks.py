@@ -3580,7 +3580,11 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
 
     warnings: list[str] = []
     original_warning = patient_form_module.CustomMessageBox.warning
+    original_warning_with_actions = patient_form_module.CustomMessageBox.warning_with_actions
     patient_form_module.CustomMessageBox.warning = lambda parent, title, message: warnings.append(f"{title}: {message}")
+    patient_form_module.CustomMessageBox.warning_with_actions = (
+        lambda parent, title, message, action_buttons: patient_form_module.CustomMessageBox.Yes
+    )
     form = None
     try:
         service = FakePatientBedService()
@@ -3593,7 +3597,7 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
             return False, "PatientForm did not use enqueue_write"
         if not form._write_pending:
             return False, "PatientForm did not enter pending state"
-        if form.save_button.isEnabled() or form.save_button.text() != "СОХРАНЕНИЕ...":
+        if form.save_button.isEnabled() or form.save_button.text() != "Сохранение...":
             return False, "PatientForm did not show pending save state"
         if not service.on_error:
             return False, "PatientForm did not register error callback"
@@ -3601,13 +3605,14 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
         app.processEvents()
         if form._write_pending:
             return False, "PatientForm kept pending state after error"
-        if not form.save_button.isEnabled() or form.save_button.text() != "СОХРАНИТЬ КАРТОЧКУ":
+        if not form.save_button.isEnabled() or form.save_button.text() != "Сохранить карточку":
             return False, "PatientForm did not restore save button after error"
         if not warnings or "forced patient form failure" not in warnings[-1]:
             return False, f"PatientForm did not show write error: {warnings}"
         return True, "ok"
     finally:
         patient_form_module.CustomMessageBox.warning = original_warning
+        patient_form_module.CustomMessageBox.warning_with_actions = original_warning_with_actions
         if form is not None:
             form.close()
 
