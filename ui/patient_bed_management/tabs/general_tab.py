@@ -4,7 +4,6 @@ from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QComboBox,
     QDateEdit,
-    QDateTimeEdit,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -23,6 +22,7 @@ from rem_card.app.patient_age import (
 )
 from rem_card.services.patient_departments import PROFILE_DEPARTMENTS, normalize_profile_department
 from rem_card.ui.patient_bed_management.form_widgets import GenderSegmentedControl, IconBadge, line_icon
+from rem_card.ui.shared.click_section_wheel_datetime_edit import ClickSectionWheelDateTimeEdit
 from rem_card.ui.styles.theme import STYLE_FORM_DATETIME_EDIT
 
 
@@ -145,7 +145,7 @@ class GeneralTabWidget(QWidget):
         admission_datetime_layout.setSpacing(9)
         admission_datetime_layout.addWidget(IconBadge("calendar", "#8ea0ba", "transparent", side=17, icon_size=16))
 
-        self.admission_datetime_input = QDateTimeEdit()
+        self.admission_datetime_input = ClickSectionWheelDateTimeEdit()
         self.admission_datetime_input.setDateTime(current_dt)
         self.admission_datetime_input.setDisplayFormat("dd.MM.yyyy HH:mm")
         self.admission_datetime_input.setButtonSymbols(QAbstractSpinBox.NoButtons)
