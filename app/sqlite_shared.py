@@ -19,6 +19,10 @@ from rem_card.app.db_availability import DatabaseClosedError
 
 NETWORK_SAFE_DB_PROFILE = "network_safe_v1"
 SQLITE_BUSY_TIMEOUT_MS = max(100, int(os.environ.get("REMCARD_SQLITE_BUSY_TIMEOUT_MS", "10000")))
+OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS = min(
+    8000,
+    max(5000, int(float(os.environ.get("REMCARD_OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS", "7000")))),
+)
 _SQLITE_ALLOWED_CONNECTION_PROFILES = {"network", "local_replica", "local_outbox"}
 _SQLITE_ALLOWED_JOURNAL_MODES = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
 _SQLITE_ALLOWED_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
@@ -106,6 +110,68 @@ def _lock_holder_metric_fields(holder: dict[str, Any] | None) -> dict[str, Any]:
         "lock_holder_source": data.get("holder_source"),
         "lock_holder_age_ms": data.get("holder_age_ms"),
     }
+
+
+def _sanitize_sqlite_error_message(exc: object, *, limit: int = 240) -> str:
+    text = " ".join(str(exc or "").split())
+    return text[:limit]
+
+
+def _bounded_opblock_interactive_timeout_ms(value: object = None) -> int:
+    try:
+        raw = int(float(value if value is not None else OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS))
+    except Exception:
+        raw = OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
+    return min(8000, max(5000, raw))
+
+
+class OpBlockInteractiveWriteBusyTimeout(RuntimeError):
+    def __init__(
+        self,
+        *,
+        operation_name: str,
+        source: str,
+        timeout_ms: int,
+        total_wait_ms: float,
+        phase: str,
+        holder: dict[str, Any] | None = None,
+        sqlite_error_class: str = "",
+        sqlite_error_message_sanitized: str = "",
+        request_id: str = "",
+        foreground_lease_id: str = "",
+    ):
+        self.operation_name = str(operation_name or "")
+        self.source = str(source or "")
+        self.timeout_ms = int(timeout_ms)
+        self.total_wait_ms = float(total_wait_ms or 0.0)
+        self.phase = str(phase or "")
+        self.holder = dict(holder or {})
+        self.sqlite_error_class = str(sqlite_error_class or "")
+        self.sqlite_error_message_sanitized = str(sqlite_error_message_sanitized or "")
+        self.request_id = str(request_id or "")
+        self.foreground_lease_id = str(foreground_lease_id or "")
+        super().__init__(self._build_message())
+
+    def _build_message(self) -> str:
+        holder_pid = self.holder.get("holder_pid")
+        holder_host = str(self.holder.get("holder_host") or "")
+        holder_source = str(self.holder.get("holder_source") or "")
+        if holder_pid or holder_host or holder_source:
+            return (
+                "База занята процессом"
+                f"{(' PID ' + str(holder_pid)) if holder_pid else ''}"
+                f"{(' на ' + holder_host) if holder_host else ''}.\n"
+                f"Операция: {holder_source or 'неизвестно'}.\n\n"
+                "Действие не выполнено.\n"
+                "Подождите несколько секунд и повторите.\n\n"
+                "Если сообщение повторяется — закройте лишние окна RemCard на этом рабочем месте."
+            )
+        return (
+            "База данных сейчас занята другой операцией.\n\n"
+            "Действие не выполнено.\n"
+            "Подождите несколько секунд и повторите.\n\n"
+            "Если сообщение повторяется — закройте лишние окна RemCard на этом рабочем месте."
+        )
 
 
 def _set_active_sqlite_operation(thread_id: int, payload: dict[str, Any]) -> None:
@@ -864,12 +930,90 @@ class SQLiteWriteController:
         with lock:
             yield
 
+    @staticmethod
+    def _write_metric_context(options: dict[str, Any], *, interactive: bool) -> dict[str, Any]:
+        return {
+            "request_id": str(options.get("request_id") or ""),
+            "role": str(options.get("role") or ""),
+            "idle_before_action_ms": options.get("idle_before_action_ms"),
+            "foreground_lease_id": str(options.get("foreground_lease_id") or ""),
+            "admission_id": options.get("admission_id"),
+            "operation_case_id": options.get("operation_case_id"),
+            "table_code": str(options.get("table_code") or ""),
+            "interactive": bool(interactive),
+        }
+
+    @staticmethod
+    def _remaining_ms(deadline: float | None) -> float:
+        if deadline is None:
+            return float("inf")
+        return max(0.0, (deadline - time.perf_counter()) * 1000.0)
+
+    def _sleep_before_retry(self, deadline: float | None) -> None:
+        if deadline is None:
+            time.sleep(self.retry_delay_sec)
+            return
+        delay_sec = min(self.retry_delay_sec, max(0.0, self._remaining_ms(deadline) / 1000.0))
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+
+    def _raise_interactive_timeout(
+        self,
+        *,
+        source: str,
+        timeout_ms: int,
+        lock_wait_started: float,
+        thread_id: int,
+        attempt: int,
+        phase: str,
+        holder: dict[str, Any] | None,
+        metric_context: dict[str, Any],
+        options: dict[str, Any],
+        exc: Exception | None = None,
+    ) -> None:
+        total_wait_ms = round((time.perf_counter() - lock_wait_started) * 1000.0, 3)
+        sqlite_error_class = type(exc).__name__ if exc is not None else ""
+        sqlite_error_message_sanitized = _sanitize_sqlite_error_message(exc)
+        record_metric(
+            "sqlite_write_lock_timeout",
+            1,
+            operation_name=source,
+            source=source,
+            db_path=self.db_path,
+            lock_path=self.lock_path,
+            pid=os.getpid(),
+            thread=thread_id,
+            attempt=attempt,
+            wait_ms=round(max(0.0, total_wait_ms), 3),
+            total_wait_ms=total_wait_ms,
+            timeout_ms=timeout_ms,
+            phase=phase,
+            sqlite_error_class=sqlite_error_class,
+            sqlite_error_message_sanitized=sqlite_error_message_sanitized,
+            timestamp_ms=_timestamp_ms(),
+            **metric_context,
+            **_lock_holder_metric_fields(holder),
+        )
+        raise OpBlockInteractiveWriteBusyTimeout(
+            operation_name=source,
+            source=source,
+            timeout_ms=timeout_ms,
+            total_wait_ms=total_wait_ms,
+            phase=phase,
+            holder=holder,
+            sqlite_error_class=sqlite_error_class,
+            sqlite_error_message_sanitized=sqlite_error_message_sanitized,
+            request_id=str(options.get("request_id") or ""),
+            foreground_lease_id=str(options.get("foreground_lease_id") or ""),
+        ) from exc
+
     @contextmanager
     def transaction(
         self,
         conn: sqlite3.Connection,
         source: str = "unknown",
         before_begin: Optional[Callable[[], None]] = None,
+        write_options: Optional[dict[str, Any]] = None,
     ):
         if conn is None:
             raise DatabaseClosedError(f"SQLite connection is closed for {source}")
@@ -898,8 +1042,46 @@ class SQLiteWriteController:
             lock_held_started: float | None = None
             committed = False
             thread_id = threading.get_ident()
+            options = dict(write_options or {})
+            is_interactive_opblock = bool(options.get("interactive")) and str(options.get("role") or "").lower().startswith("operblock")
+            timeout_ms = _bounded_opblock_interactive_timeout_ms(options.get("timeout_ms")) if is_interactive_opblock else SQLITE_BUSY_TIMEOUT_MS
+            deadline = lock_wait_started + (timeout_ms / 1000.0) if is_interactive_opblock else None
+            original_busy_timeout_ms = None
+            busy_timeout_overridden = False
+            metric_context = self._write_metric_context(options, interactive=is_interactive_opblock)
+
             try:
-                for attempt in range(1, self.max_retries + 1):
+                if is_interactive_opblock:
+                    try:
+                        row = conn.execute("PRAGMA busy_timeout").fetchone()
+                        original_busy_timeout_ms = int(row[0]) if row else SQLITE_BUSY_TIMEOUT_MS
+                    except Exception:
+                        original_busy_timeout_ms = SQLITE_BUSY_TIMEOUT_MS
+                    begin_busy_timeout_ms = min(max(100, int(self.retry_delay_sec * 1000.0)), timeout_ms)
+                    conn.execute(f"PRAGMA busy_timeout = {begin_busy_timeout_ms}")
+                    busy_timeout_overridden = True
+
+                attempt = 0
+                while True:
+                    attempt += 1
+                    if not is_interactive_opblock and attempt > self.max_retries:
+                        break
+                    if is_interactive_opblock and self._remaining_ms(deadline) <= 0:
+                        holder = describe_sqlite_lock_holder(self.lock_path)
+                        phase = "begin_immediate_timeout" if last_exc is not None and self._is_retryable(last_exc) else "file_lock_timeout"
+                        self._raise_interactive_timeout(
+                            source=source,
+                            timeout_ms=timeout_ms,
+                            lock_wait_started=lock_wait_started,
+                            thread_id=thread_id,
+                            attempt=attempt,
+                            phase=phase,
+                            holder=holder,
+                            metric_context=metric_context,
+                            options=options,
+                            exc=last_exc,
+                        )
+
                     total_wait_ms = round((time.perf_counter() - lock_wait_started) * 1000.0, 3)
                     active_payload = {
                         "operation_name": source,
@@ -910,6 +1092,7 @@ class SQLiteWriteController:
                         "attempt": attempt,
                         "started_monotonic": lock_wait_started,
                         "thread": thread_id,
+                        **metric_context,
                     }
                     _set_active_sqlite_operation(thread_id, active_payload)
                     record_metric(
@@ -922,8 +1105,9 @@ class SQLiteWriteController:
                         pid=os.getpid(),
                         thread=thread_id,
                         attempt=attempt,
-                        timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+                        timeout_ms=timeout_ms,
                         timestamp_ms=_timestamp_ms(),
+                        **metric_context,
                     )
                     holder = describe_sqlite_lock_holder(self.lock_path)
                     if holder.get("readable"):
@@ -941,13 +1125,13 @@ class SQLiteWriteController:
                             holder_age_ms=holder_age_ms,
                             current_pid=os.getpid(),
                             current_host=socket.gethostname(),
-                            decision="no_cleanup_in_stage1",
+                            decision="no_cleanup_in_stage3",
                         )
                     if not self.lock.acquire(self.owner_id, source):
                         holder = describe_sqlite_lock_holder(self.lock_path)
                         active_payload["lock_holder"] = holder
                         _set_active_sqlite_operation(thread_id, active_payload)
-                        retry_wait_ms = round(self.retry_delay_sec * 1000.0, 3)
+                        retry_wait_ms = round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_opblock else round(self.retry_delay_sec * 1000.0, 3)
                         record_metric(
                             "sqlite_write_lock_wait_retry",
                             1,
@@ -956,9 +1140,25 @@ class SQLiteWriteController:
                             attempt=attempt,
                             wait_ms=retry_wait_ms,
                             total_wait_ms=total_wait_ms,
+                            timeout_ms=timeout_ms,
+                            phase="file_lock",
+                            **metric_context,
                             **_lock_holder_metric_fields(holder),
                         )
-                        time.sleep(self.retry_delay_sec)
+                        if is_interactive_opblock and self._remaining_ms(deadline) <= 0:
+                            self._raise_interactive_timeout(
+                                source=source,
+                                timeout_ms=timeout_ms,
+                                lock_wait_started=lock_wait_started,
+                                thread_id=thread_id,
+                                attempt=attempt,
+                                phase="file_lock_timeout",
+                                holder=holder,
+                                metric_context=metric_context,
+                                options=options,
+                                exc=last_exc,
+                            )
+                        self._sleep_before_retry(deadline)
                         continue
 
                     lock_acquired = True
@@ -981,15 +1181,22 @@ class SQLiteWriteController:
                             1,
                             operation_name=source,
                             source=source,
+                            db_path=self.db_path,
+                            lock_path=self.lock_path,
+                            pid=os.getpid(),
+                            thread=thread_id,
                             total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
                             attempts=attempt,
+                            timeout_ms=timeout_ms,
+                            **metric_context,
                         )
                         active_payload["status"] = "transaction_active"
                         _set_active_sqlite_operation(thread_id, active_payload)
                         break
                     except sqlite3.OperationalError as exc:
                         last_exc = exc
-                        if self._is_retryable(exc):
+                        retryable = self._is_retryable(exc)
+                        if retryable:
                             record_metric("sqlite_locked_count", 1, source=source, phase="begin_immediate")
                         if conn.in_transaction:
                             conn.execute("ROLLBACK")
@@ -1004,24 +1211,58 @@ class SQLiteWriteController:
                                 else round((time.perf_counter() - lock_held_started) * 1000.0, 3)
                             ),
                             committed=False,
+                            timeout_ms=timeout_ms,
+                            **metric_context,
                         )
                         self.lock.release()
                         lock_acquired = False
                         lock_held_started = None
-                        if self._is_retryable(exc) and attempt < self.max_retries:
+                        if retryable and (is_interactive_opblock or attempt < self.max_retries):
+                            holder = describe_sqlite_lock_holder(self.lock_path)
                             record_metric(
                                 "sqlite_write_lock_wait_retry",
                                 1,
                                 operation_name=source,
                                 source=source,
                                 attempt=attempt,
-                                wait_ms=round(self.retry_delay_sec * 1000.0, 3),
+                                wait_ms=round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_opblock else round(self.retry_delay_sec * 1000.0, 3),
                                 total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
-                                sqlite_error=str(exc),
-                                **_lock_holder_metric_fields(None),
+                                timeout_ms=timeout_ms,
+                                phase="begin_immediate",
+                                sqlite_error_class=type(exc).__name__,
+                                sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
+                                **metric_context,
+                                **_lock_holder_metric_fields(holder),
                             )
-                            time.sleep(self.retry_delay_sec)
+                            if is_interactive_opblock and self._remaining_ms(deadline) <= 0:
+                                self._raise_interactive_timeout(
+                                    source=source,
+                                    timeout_ms=timeout_ms,
+                                    lock_wait_started=lock_wait_started,
+                                    thread_id=thread_id,
+                                    attempt=attempt,
+                                    phase="begin_immediate_timeout",
+                                    holder=holder,
+                                    metric_context=metric_context,
+                                    options=options,
+                                    exc=exc,
+                                )
+                            self._sleep_before_retry(deadline)
                             continue
+                        if is_interactive_opblock and retryable:
+                            holder = describe_sqlite_lock_holder(self.lock_path)
+                            self._raise_interactive_timeout(
+                                source=source,
+                                timeout_ms=timeout_ms,
+                                lock_wait_started=lock_wait_started,
+                                thread_id=thread_id,
+                                attempt=attempt,
+                                phase="begin_immediate_timeout",
+                                holder=holder,
+                                metric_context=metric_context,
+                                options=options,
+                                exc=exc,
+                            )
                         record_metric(
                             "sqlite_write_lock_timeout",
                             1,
@@ -1029,13 +1270,28 @@ class SQLiteWriteController:
                             source=source,
                             total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
                             timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
-                            sqlite_error=str(exc),
+                            sqlite_error_class=type(exc).__name__,
+                            sqlite_error_message_sanitized=_sanitize_sqlite_error_message(exc),
                             **_lock_holder_metric_fields(None),
                         )
                         raise
 
                 if cursor is None:
                     holder = describe_sqlite_lock_holder(self.lock_path)
+                    if is_interactive_opblock:
+                        phase = "begin_immediate_timeout" if last_exc is not None and self._is_retryable(last_exc) else "file_lock_timeout"
+                        self._raise_interactive_timeout(
+                            source=source,
+                            timeout_ms=timeout_ms,
+                            lock_wait_started=lock_wait_started,
+                            thread_id=thread_id,
+                            attempt=attempt,
+                            phase=phase,
+                            holder=holder,
+                            metric_context=metric_context,
+                            options=options,
+                            exc=last_exc,
+                        )
                     record_metric(
                         "sqlite_write_lock_timeout",
                         1,
@@ -1043,7 +1299,8 @@ class SQLiteWriteController:
                         source=source,
                         total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
                         timeout_ms=round(self.max_retries * self.retry_delay_sec * 1000.0, 3),
-                        sqlite_error=str(last_exc or "sequential write lock unavailable"),
+                        sqlite_error_class=type(last_exc).__name__ if last_exc else "",
+                        sqlite_error_message_sanitized=_sanitize_sqlite_error_message(last_exc or "sequential write lock unavailable"),
                         **_lock_holder_metric_fields(holder),
                     )
                     if last_exc:
@@ -1059,6 +1316,11 @@ class SQLiteWriteController:
                     conn.execute("ROLLBACK")
                 raise
             finally:
+                if busy_timeout_overridden and original_busy_timeout_ms is not None:
+                    try:
+                        conn.execute(f"PRAGMA busy_timeout = {int(original_busy_timeout_ms)}")
+                    except Exception:
+                        pass
                 record_metric(
                     "write_duration_ms",
                     round((time.perf_counter() - started) * 1000.0, 3),
@@ -1078,6 +1340,8 @@ class SQLiteWriteController:
                             else round((time.perf_counter() - lock_held_started) * 1000.0, 3)
                         ),
                         committed=bool(committed),
+                        timeout_ms=timeout_ms,
+                        **metric_context,
                     )
                     self.lock.release()
                 _clear_active_sqlite_operation(thread_id)

@@ -68,6 +68,7 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.patient_age import parse_date_value
 from rem_card.app.paths import get_icon_dir, get_patient_assets_dir
+from rem_card.app.sqlite_shared import OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS, OpBlockInteractiveWriteBusyTimeout
 from rem_card.services.mkb import MKBService
 from rem_card.services.operblock_service import (
     OPERBLOCK_BLOOD_GROUP_OPTIONS,
@@ -19184,12 +19185,21 @@ class OperBlockMainWidget(QWidget):
 
     @staticmethod
     def _diagnostic_result_for_error(exc: Exception) -> str:
+        if isinstance(exc, OpBlockInteractiveWriteBusyTimeout):
+            return "busy_timeout"
         text = str(exc or "").lower()
         if "timeout" in text or "timed out" in text:
             return "timeout"
         if "busy" in text or "locked" in text or "занят" in text:
             return "busy"
         return "error"
+
+    @staticmethod
+    def _is_interactive_busy_timeout(exc: Exception) -> bool:
+        if isinstance(exc, OpBlockInteractiveWriteBusyTimeout):
+            return True
+        text = f"{type(exc).__name__} {exc}".lower()
+        return "interactive" in text and "busy" in text and "timeout" in text
 
     def _finish_opblock_action_diagnostics(self, action_info: dict[str, Any] | None, result: str, exc: Exception | None = None):
         if not action_info:
@@ -19262,9 +19272,29 @@ class OperBlockMainWidget(QWidget):
                 self._finish_opblock_action_diagnostics(action_info, "success")
 
         def diagnostic_error(exc: Exception):
+            busy_timeout = self._is_interactive_busy_timeout(exc)
+            pending_before = bool(getattr(self, "_write_pending", False))
             try:
                 on_error(exc)
             finally:
+                pending_after_handler = bool(getattr(self, "_write_pending", False))
+                if busy_timeout and pending_after_handler:
+                    self._write_pending = False
+                    try:
+                        self._set_protocol_write_controls_enabled(True)
+                    except Exception:
+                        pass
+                if busy_timeout and (pending_before or pending_after_handler or not getattr(self, "_write_pending", False)):
+                    record_metric(
+                        "ui_pending_cleared_after_busy_timeout",
+                        1,
+                        action=str(action_info.get("action") or description),
+                        request_id=str(action_info.get("request_id") or ""),
+                        operation_case_id=action_info.get("operation_case_id"),
+                        admission_id=action_info.get("admission_id"),
+                        foreground_lease_id=str(action_info.get("foreground_lease_id") or ""),
+                        timeout_ms=getattr(exc, "timeout_ms", OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS),
+                    )
                 self._finish_opblock_action_diagnostics(
                     action_info,
                     self._diagnostic_result_for_error(exc),
@@ -19279,7 +19309,24 @@ class OperBlockMainWidget(QWidget):
             else:
                 diagnostic_success(result)
             return
-        self.data_service.enqueue_write(description, operation, on_success=diagnostic_success, on_error=diagnostic_error)
+        write_metadata = {
+            "interactive": True,
+            "role": self._diagnostic_role(),
+            "request_id": str(action_info.get("request_id") or ""),
+            "idle_before_action_ms": action_info.get("idle_before_action_ms"),
+            "foreground_lease_id": str(action_info.get("foreground_lease_id") or ""),
+            "admission_id": action_info.get("admission_id"),
+            "operation_case_id": action_info.get("operation_case_id"),
+            "table_code": str(action_info.get("table_code") or ""),
+            "timeout_ms": OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS,
+        }
+        self.data_service.enqueue_write(
+            description,
+            operation,
+            on_success=diagnostic_success,
+            on_error=diagnostic_error,
+            write_metadata=write_metadata,
+        )
 
     def _cleanup_route_only_write_suppressions(self) -> None:
         now = time.monotonic()

@@ -3031,7 +3031,7 @@ def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str
             self.enqueue_called = False
             self.summary_reads = 0
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             if on_error:
                 on_error(RuntimeError("forced ivl write failure"))
@@ -3155,7 +3155,7 @@ def _check_balance_controller_enqueue_error_refreshes(temp_root: str) -> tuple[b
             self.refresh_reads = 0
             self.on_error = None
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation
@@ -3224,7 +3224,7 @@ def _check_diet_intake_enqueue_error_refreshes(temp_root: str) -> tuple[bool, st
             self.on_error = None
             self.refresh_reads = 0
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation
@@ -3553,7 +3553,7 @@ def _check_patient_form_enqueue_error_keeps_dialog(temp_root: str) -> tuple[bool
             self.enqueue_called = False
             self.on_error = None
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation
@@ -3726,7 +3726,7 @@ def _check_patient_bed_move_enqueue_error_refreshes(temp_root: str) -> tuple[boo
                 return {"bed_number": 1, "status": "OCCUPIED", "current_admission_id": 10}
             return {"bed_number": int(bed_number), "status": "FREE", "current_admission_id": None}
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation
@@ -3810,7 +3810,7 @@ def _check_archive_delete_enqueue_error_refreshes(temp_root: str) -> tuple[bool,
             self.on_error = None
             self.on_success = None
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation
@@ -4061,7 +4061,7 @@ def _check_doctor_create_card_enqueue_error_refreshes(temp_root: str) -> tuple[b
         def get_patient(self, admission_id):
             return SimpleNamespace(admission_datetime=datetime(2026, 5, 3, 8, 0))
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.enqueue_called = True
             self.description = description
             self.operation = operation
@@ -4372,7 +4372,7 @@ def _assert_orders_same_cell_fast_click_guard(
             self.queued_writes = []
             self.left_click_calls = []
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             self.queued_writes.append(
                 {
                     "description": description,
@@ -4475,7 +4475,7 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
             start = shift_date.replace(hour=8, minute=0, second=0, microsecond=0)
             return start, start + timedelta(days=1)
 
-        def enqueue_write(self, description, operation, on_success=None, on_error=None):
+        def enqueue_write(self, description, operation, on_success=None, on_error=None, write_metadata=None):
             try:
                 result = operation()
             except Exception as exc:
@@ -15684,8 +15684,8 @@ def _check_opblock_idle_tracker_does_not_change_behavior(temp_root: str) -> tupl
     present = [token for token in forbidden if token in source]
     if present:
         return False, f"Stage 1 idle tracker introduced behavior/policy token(s): {present}"
-    if "self.data_service.enqueue_write(description, operation" not in source:
-        return False, "opblock write path no longer delegates through DataService.enqueue_write"
+    if "self.data_service.enqueue_write(" not in source or "write_metadata=write_metadata" not in source:
+        return False, "opblock write path no longer delegates through DataService.enqueue_write with write metadata"
     if "def diagnostic_snapshot" not in source or '"user_return_from_idle"' not in source:
         return False, "opblock idle tracker diagnostics are missing"
     return True, "ok"
@@ -16008,6 +16008,317 @@ def _check_analyzer_understands_foreground_resume(temp_root: str) -> tuple[bool,
 
 def _check_opblock_stage2_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
     return _check_opblock_stage1_no_sqlite_profile_changes(temp_root)
+
+
+def _check_opblock_interactive_write_timeout_constant_exists(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.sqlite_shared import OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS, OpBlockInteractiveWriteBusyTimeout
+
+    if not (5000 <= int(OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS) <= 8000):
+        return False, f"interactive opblock timeout outside 5-8s: {OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS}"
+    if not issubclass(OpBlockInteractiveWriteBusyTimeout, RuntimeError):
+        return False, "interactive busy timeout must be a controlled RuntimeError, not raw sqlite error"
+    return True, "ok"
+
+
+def _check_opblock_write_metadata_marks_interactive_operations(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    sources = "\n".join(
+        (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        for rel_path in (
+            "services/data_service.py",
+            "data/dao/db_manager.py",
+            "ui/operblock_view/operblock_main_widget.py",
+        )
+    )
+    required = (
+        "_opblock_interactive_write_metadata",
+        "write_metadata_context",
+        "write_metadata=write_metadata",
+        '"interactive": True',
+        '"request_id"',
+        '"foreground_lease_id"',
+        "OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS",
+    )
+    missing = [token for token in required if token not in sources]
+    if missing:
+        return False, f"interactive opblock write metadata path missing: {missing}"
+    return True, "ok"
+
+
+def _interactive_opblock_write_options(**extra) -> dict[str, Any]:
+    from rem_card.app.sqlite_shared import OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
+
+    payload = {
+        "interactive": True,
+        "role": "operblock",
+        "request_id": "regression-request",
+        "foreground_lease_id": "regression-lease",
+        "idle_before_action_ms": 360000,
+        "timeout_ms": OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _make_stage3_opblock_manager(temp_root: str, name: str):
+    from rem_card.app.db_runtime_context import build_operblock_offline_runtime_context
+    from rem_card.data.dao.db_manager import DatabaseManager
+
+    context = build_operblock_offline_runtime_context(os.path.join(temp_root, name))
+    return DatabaseManager(context.medical_db_path, context.medical_db_path, runtime_context=context)
+
+
+def _check_sqlite_begin_immediate_timeout_is_bounded_for_interactive_opblock(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS, OpBlockInteractiveWriteBusyTimeout
+
+    manager = _make_stage3_opblock_manager(temp_root, "opblock_interactive_begin_timeout")
+    db_path = manager.db_path
+    try:
+        Path(manager.medical_db_lock_path).unlink(missing_ok=True)
+    except Exception:
+        pass
+    blocker = sqlite3.connect(db_path, isolation_level=None, timeout=5.0)
+    try:
+        blocker.execute("BEGIN IMMEDIATE")
+        started = time.perf_counter()
+        try:
+            with manager.write_metadata_context(_interactive_opblock_write_options(operation_case_id=1)):
+                manager.run_write_operation(
+                    lambda cursor: cursor.execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES ('opblock_stage3_timeout_probe', 'blocked')"
+                    ),
+                    source="operblock_undo_last_action",
+                )
+            return False, "interactive opblock write unexpectedly succeeded while external BEGIN IMMEDIATE was held"
+        except OpBlockInteractiveWriteBusyTimeout as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            if elapsed_ms > 8500:
+                return False, f"interactive timeout exceeded bound: elapsed_ms={elapsed_ms:.1f}, exc={exc}"
+            if exc.phase != "begin_immediate_timeout":
+                return False, f"expected begin_immediate_timeout, got {exc.phase}"
+            if "database is locked" in str(exc).lower():
+                return False, f"user-facing message leaked raw sqlite text: {exc}"
+        finally:
+            blocker.execute("ROLLBACK")
+            blocker.close()
+
+        with manager.write_metadata_context(_interactive_opblock_write_options(operation_case_id=1)):
+            manager.run_write_operation(
+                lambda cursor: cursor.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES ('opblock_stage3_timeout_probe', 'retry_ok')"
+                ),
+                source="operblock_undo_last_action",
+            )
+        row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='opblock_stage3_timeout_probe'")
+        if not row or row[0] != "retry_ok":
+            return False, f"retry after releasing lock did not commit: {row}"
+        if OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS > 8000:
+            return False, "interactive timeout constant exceeds upper bound"
+        return True, "ok"
+    finally:
+        try:
+            blocker.close()
+        except Exception:
+            pass
+        manager.close()
+
+
+def _check_opblock_undo_last_action_busy_timeout(temp_root: str) -> tuple[bool, str]:
+    return _check_sqlite_begin_immediate_timeout_is_bounded_for_interactive_opblock(temp_root)
+
+
+def _check_busy_timeout_does_not_trigger_recovery(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.db_access_classifier import classify_database_access
+    from rem_card.app.runtime_outage import runtime_outage_transition_allowed
+    from rem_card.app.sqlite_shared import OpBlockInteractiveWriteBusyTimeout
+
+    exc = OpBlockInteractiveWriteBusyTimeout(
+        operation_name="operblock_undo_last_action",
+        source="operblock_undo_last_action",
+        timeout_ms=7000,
+        total_wait_ms=7003,
+        phase="begin_immediate_timeout",
+    )
+    classification = classify_database_access(exc)
+    if classification.category != "locked_busy":
+        return False, f"busy timeout was not classified as locked_busy: {classification}"
+    if runtime_outage_transition_allowed(classification.category):
+        return False, "controlled opblock busy timeout must not trigger runtime recovery/outage transition by default"
+    db_manager_source = (PROJECT_ROOT / "data/dao/db_manager.py").read_text(encoding="utf-8")
+    if "OpBlockInteractiveWriteBusyTimeout" in db_manager_source and "recover_shared_db" in db_manager_source:
+        return False, "controlled busy timeout is wired to recovery"
+    return True, "ok"
+
+
+def _check_file_lock_timeout_does_not_delete_lock(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import OpBlockInteractiveWriteBusyTimeout
+
+    manager = _make_stage3_opblock_manager(temp_root, "opblock_interactive_file_lock_timeout")
+    lock_path = Path(manager.medical_db_lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": time.time(),
+        "pid": 987654,
+        "host": "regression-host",
+        "user_id": "external-holder",
+        "source": "external_begin_immediate",
+        "thread_id": 1,
+    }
+    raw = json.dumps(payload, ensure_ascii=True)
+    lock_path.write_text(raw, encoding="utf-8")
+    try:
+        try:
+            with manager.write_metadata_context(_interactive_opblock_write_options(operation_case_id=2)):
+                manager.run_write_operation(
+                    lambda cursor: cursor.execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES ('opblock_stage3_file_lock_probe', 'blocked')"
+                    ),
+                    source="operblock_undo_last_action",
+                )
+            return False, "interactive opblock write unexpectedly acquired externally held file lock"
+        except OpBlockInteractiveWriteBusyTimeout as exc:
+            if exc.phase != "file_lock_timeout":
+                return False, f"expected file_lock_timeout, got {exc.phase}"
+        after = lock_path.read_text(encoding="utf-8") if lock_path.exists() else ""
+        if after != raw:
+            return False, "Stage 3 file lock timeout modified or deleted the existing lock file"
+        return True, "ok"
+    finally:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        manager.close()
+
+
+def _check_non_interactive_write_behavior_unchanged(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "app/sqlite_shared.py").read_text(encoding="utf-8")
+    if "is_interactive_opblock" not in source:
+        return False, "SQLite write controller no longer guards bounded timeout behind interactive opblock metadata"
+    if "PRAGMA busy_timeout = {begin_busy_timeout_ms}" not in source:
+        return False, "interactive begin timeout no longer uses temporary per-write busy_timeout"
+    if "PRAGMA busy_timeout = {int(original_busy_timeout_ms)}" not in source:
+        return False, "temporary interactive busy_timeout is not restored"
+    return True, "ok"
+
+
+def _check_ui_busy_timeout_message_is_controlled(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.sqlite_shared import OpBlockInteractiveWriteBusyTimeout
+
+    exc = OpBlockInteractiveWriteBusyTimeout(
+        operation_name="operblock_undo_last_action",
+        source="operblock_undo_last_action",
+        timeout_ms=7000,
+        total_wait_ms=7002,
+        phase="begin_immediate_timeout",
+        holder={"holder_pid": 5024, "holder_host": "operblok1", "holder_source": "periodic_backup"},
+        sqlite_error_message_sanitized="database is locked",
+    )
+    text = str(exc)
+    forbidden = ("Traceback", "sqlite3.", "database is locked", "BEGIN IMMEDIATE")
+    leaked = [token for token in forbidden if token in text]
+    if leaked:
+        return False, f"controlled busy timeout message leaks technical text: {leaked}: {text}"
+    if "Действие не выполнено" not in text or "PID 5024" not in text:
+        return False, f"controlled busy timeout message missing required guidance/holder: {text}"
+    return True, "ok"
+
+
+def _check_ui_pending_cleared_after_busy_timeout(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "ui/operblock_view/operblock_main_widget.py").read_text(encoding="utf-8")
+    required = (
+        "ui_pending_cleared_after_busy_timeout",
+        "_is_interactive_busy_timeout",
+        'self._finish_opblock_action_diagnostics(\n                    action_info,\n                    self._diagnostic_result_for_error(exc),',
+        '"busy_timeout"',
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        return False, f"UI busy timeout pending cleanup tokens missing: {missing}"
+    return True, "ok"
+
+
+def _check_opblock_stage3_sqlite_profile_unchanged(temp_root: str) -> tuple[bool, str]:
+    return _check_opblock_stage1_no_sqlite_profile_changes(temp_root)
+
+
+def _check_analyzer_understands_opblock_busy_timeout(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "opblock_busy_timeout_logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260626.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-26T11:11:30+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 521000,
+            "first_action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:11:30.100000+10:00",
+            "metric": "foreground_resume_lease_started",
+            "lease_id": "lease-regression",
+            "suppress_maintenance_for_ms": 90000,
+        },
+        {
+            "ts": "2026-06-26T11:11:31+10:00",
+            "metric": "opblock_action_started",
+            "action": "operblock_undo_last_action",
+            "request_id": "regression",
+            "foreground_lease_id": "lease-regression",
+        },
+        {
+            "ts": "2026-06-26T11:11:38+10:00",
+            "metric": "sqlite_write_lock_timeout",
+            "total_wait_ms": 7003,
+            "timeout_ms": 7000,
+            "phase": "begin_immediate_timeout",
+            "lock_holder_pid": 5024,
+            "lock_holder_host": "operblok1",
+            "lock_holder_source": "periodic_backup",
+        },
+        {
+            "ts": "2026-06-26T11:11:38.100000+10:00",
+            "metric": "opblock_action_finished",
+            "result": "busy_timeout",
+            "action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:11:38.200000+10:00",
+            "metric": "ui_pending_cleared_after_busy_timeout",
+            "action": "operblock_undo_last_action",
+        },
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"),
+            "--logs",
+            str(logs_dir),
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"busy timeout analyzer failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    incidents = summary.get("incidents") or []
+    if not incidents or incidents[0].get("classification") != "begin_immediate_timeout":
+        return False, f"busy timeout analyzer classification mismatch: {summary}"
+    if incidents[0].get("ui_result") != "busy_timeout":
+        return False, f"busy timeout analyzer UI result mismatch: {summary}"
+    return True, "ok"
 
 
 def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
@@ -24288,6 +24599,20 @@ def main(argv: list[str] | None = None):
         ("uiwatchdog_has_foreground_resume_context", _check_uiwatchdog_has_foreground_resume_context),
         ("analyzer_understands_foreground_resume", _check_analyzer_understands_foreground_resume),
         ("opblock_stage2_no_sqlite_profile_changes", _check_opblock_stage2_no_sqlite_profile_changes),
+        ("opblock_interactive_write_timeout_constant_exists", _check_opblock_interactive_write_timeout_constant_exists),
+        ("opblock_write_metadata_marks_interactive_operations", _check_opblock_write_metadata_marks_interactive_operations),
+        (
+            "sqlite_begin_immediate_timeout_is_bounded_for_interactive_opblock",
+            _check_sqlite_begin_immediate_timeout_is_bounded_for_interactive_opblock,
+        ),
+        ("opblock_undo_last_action_busy_timeout", _check_opblock_undo_last_action_busy_timeout),
+        ("busy_timeout_does_not_trigger_recovery", _check_busy_timeout_does_not_trigger_recovery),
+        ("file_lock_timeout_does_not_delete_lock", _check_file_lock_timeout_does_not_delete_lock),
+        ("non_interactive_write_behavior_unchanged", _check_non_interactive_write_behavior_unchanged),
+        ("ui_busy_timeout_message_is_controlled", _check_ui_busy_timeout_message_is_controlled),
+        ("ui_pending_cleared_after_busy_timeout", _check_ui_pending_cleared_after_busy_timeout),
+        ("opblock_stage3_sqlite_profile_unchanged", _check_opblock_stage3_sqlite_profile_unchanged),
+        ("analyzer_understands_opblock_busy_timeout", _check_analyzer_understands_opblock_busy_timeout),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),

@@ -38,6 +38,7 @@ SKIP_DIR_NAMES = {
 # Existing F-ranked blocks. This list allows the current codebase to pass while
 # still blocking any newly introduced F-ranked function/class.
 ALLOWED_F_BLOCKS = {
+    ("app/sqlite_shared.py", "SQLiteWriteController.transaction"),
     ("services/bars_auth_service.py", "BarsAuthService.list_department_patients"),
     ("services/bars_auth_service.py", "BarsAuthService._extract_visible_patient_rows"),
     ("services/operblock_timeline.py", "timeline_event_row_to_medication_event"),

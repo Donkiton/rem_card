@@ -37,6 +37,7 @@ OPBLOCK_EVENTS = {
     "maintenance_resumed_after_idle",
     "maintenance_overlap_observed",
     "ui_pending_state_observed",
+    "ui_pending_cleared_after_busy_timeout",
     "event_loop_pause_ms",
 }
 
@@ -157,7 +158,16 @@ def _first(events: list[Event], *kinds: str) -> Event | None:
 
 
 def _classify(related: list[Event]) -> str:
-    if _first(related, "sqlite_write_lock_timeout"):
+    timeout = _first(related, "sqlite_write_lock_timeout")
+    finished = _first(related, "opblock_action_finished")
+    if timeout:
+        phase = str(timeout.fields.get("phase") or "")
+        if phase in {"file_lock_timeout", "begin_immediate_timeout"}:
+            return phase
+        if finished and str(finished.fields.get("result") or "") == "busy_timeout":
+            return "opblock_busy_timeout"
+        if str(timeout.fields.get("sqlite_error_class") or "") or str(timeout.fields.get("sqlite_error_message_sanitized") or ""):
+            return "unknown_busy"
         return "sqlite_write_lock_timeout"
     if _first(related, "sqlite_write_lock_wait_retry", "sqlite_write_lock_wait_started"):
         return "sqlite_write_lock_wait"
@@ -185,6 +195,7 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
     finished = _first(related, "opblock_action_finished")
     lock_event = _first(related, "sqlite_write_lock_timeout", "sqlite_write_lock_wait_retry", "sqlite_write_lock_acquired")
     ui_pause = _first(related, "event_loop_pause_ms")
+    pending_cleared = _first(related, "ui_pending_cleared_after_busy_timeout")
     lease_started = _first(related, "foreground_resume_lease_started")
     lease_finished = _first(related, "foreground_resume_lease_finished")
     deferred_events = [item for item in related if item.kind == "maintenance_deferred_for_foreground_resume"]
@@ -206,10 +217,14 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
         "deferred_maintenance": [str(item.fields.get("task") or "") for item in deferred_events],
         "resumed_maintenance": [str(item.fields.get("task") or "") for item in resumed_events],
         "wait_ms": (lock_event.fields.get("total_wait_ms") if lock_event else None),
+        "sqlite_write_lock": ("timeout" if lock_event and lock_event.kind == "sqlite_write_lock_timeout" else ("wait" if lock_event else "none")),
+        "sqlite_lock_phase": (lock_event.fields.get("phase") if lock_event else ""),
         "lock_holder_pid": (lock_event.fields.get("lock_holder_pid") if lock_event else None),
         "lock_holder_host": (lock_event.fields.get("lock_holder_host") if lock_event else ""),
         "lock_holder_source": (lock_event.fields.get("lock_holder_source") if lock_event else ""),
         "ui_pause_ms": (ui_pause.value if ui_pause else None),
+        "ui_result": (finished.fields.get("result") if finished else ("controlled busy" if pending_cleared else "")),
+        "pending_cleared_after_busy_timeout": bool(pending_cleared),
         "maintenance_overlap": bool(_first(related, "maintenance_overlap_observed")),
         "shadow_mirror_overlap": bool(_first(related, "opblock_shadow_mirror_started", "opblock_shadow_mirror_failed")),
         "shadow_mirror_deferred": bool(shadow_deferred),
@@ -244,6 +259,13 @@ def _print_text(incidents: list[dict[str, Any]]) -> None:
         resumed = [task for task in incident.get("resumed_maintenance") or [] if task]
         print(f"Deferred maintenance: {', '.join(deferred) if deferred else 'none'}")
         print(f"Result: {incident.get('result') or 'unknown'}")
+        if incident.get("sqlite_write_lock") == "timeout":
+            phase = incident.get("sqlite_lock_phase") or "unknown"
+            print(f"SQLite write lock: timeout ({phase})")
+        elif incident.get("sqlite_write_lock") == "wait":
+            print("SQLite write lock: wait")
+        else:
+            print("SQLite write lock: none")
         print(f"SQLite lock wait: {_format_ms(incident.get('wait_ms')) if incident.get('wait_ms') is not None else 'none'}")
         print(
             "Lock holder: "
@@ -252,13 +274,17 @@ def _print_text(incidents: list[dict[str, Any]]) -> None:
             f"source={incident.get('lock_holder_source') or '?'}"
         )
         print(f"UI pause: {_format_ms(incident.get('ui_pause_ms')) if incident.get('ui_pause_ms') is not None else 'none'}")
+        print(f"UI result: {incident.get('ui_result') or 'unknown'}")
         print(f"Maintenance overlap: {'yes' if incident.get('maintenance_overlap') else 'none'}")
         if incident.get("shadow_mirror_deferred"):
             print("Shadow mirror: deferred")
         else:
             print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
         print(f"Maintenance resumed: {', '.join(resumed) if resumed else 'none'}")
-        print(f"Conclusion: {incident.get('classification')}")
+        conclusion = incident.get("classification")
+        if conclusion in {"file_lock_timeout", "begin_immediate_timeout", "opblock_busy_timeout", "sqlite_write_lock_timeout"}:
+            conclusion = "interactive opblock write timed out instead of hanging"
+        print(f"Conclusion: {conclusion}")
         print()
 
 

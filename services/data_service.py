@@ -2,6 +2,7 @@ from datetime import datetime
 import re
 import threading
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal, Qt, Slot
@@ -10,7 +11,7 @@ from rem_card.app.db_access_classifier import classify_database_access, classify
 from rem_card.app.foreground_activity import should_defer_for_foreground_resume
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
-from rem_card.app.sqlite_shared import LocalWriteQueue
+from rem_card.app.sqlite_shared import LocalWriteQueue, OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
 from rem_card.app.runtime_outage import (
     RuntimeNetworkOutageWriteBlockedError,
     runtime_outage_transition_allowed,
@@ -195,8 +196,10 @@ class DataService(QObject):
         if self._reject_write_if_outage(description):
             raise RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
         operation_uuid = self._record_operblock_write_intent(description)
+        metadata = self._opblock_interactive_write_metadata(description)
         try:
-            result = self.db.run_write_operation(operation, source=description)
+            with self._write_metadata_context(metadata):
+                result = self.db.run_write_operation(operation, source=description)
         except Exception as exc:
             self._mark_operblock_write_failed(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
@@ -232,6 +235,38 @@ class DataService(QObject):
             return False
         runtime_context = getattr(self.db, "runtime_context", None)
         return str(getattr(runtime_context, "mode", "") or "") == "network"
+
+    def _is_interactive_opblock_write(self, description: str) -> bool:
+        role = str(self._runtime_role or "").strip().lower()
+        return bool(role.startswith("operblock") and str(description or "").startswith("operblock_"))
+
+    def _opblock_interactive_write_metadata(
+        self,
+        description: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(metadata or {})
+        if not payload.get("interactive") and not self._is_interactive_opblock_write(description):
+            return payload
+        role = str(payload.get("role") or self._runtime_role or "").strip().lower()
+        payload.update(
+            {
+                "interactive": True,
+                "role": role or "operblock",
+                "source": str(description or ""),
+                "operation_name": str(description or ""),
+                "timeout_ms": int(payload.get("timeout_ms") or OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS),
+            }
+        )
+        return payload
+
+    @contextmanager
+    def _write_metadata_context(self, metadata: dict[str, Any] | None):
+        if metadata and hasattr(self.db, "write_metadata_context"):
+            with self.db.write_metadata_context(metadata):
+                yield
+            return
+        yield
 
     def _record_operblock_write_intent(self, description: str) -> str | None:
         if not self._is_operblock_network_write(description):
@@ -434,6 +469,7 @@ class DataService(QObject):
         operation: Callable[[], Any],
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
+        write_metadata: Optional[dict[str, Any]] = None,
     ):
         if self._network_outage_detected:
             exc = RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
@@ -463,6 +499,12 @@ class DataService(QObject):
                     logger.error("DataService shutdown rejection callback failed: %s", callback_exc, exc_info=True)
             return False
 
+        metadata = self._opblock_interactive_write_metadata(description, write_metadata)
+
+        def run_operation_with_metadata():
+            with self._write_metadata_context(metadata):
+                return operation()
+
         def handle_success(result):
             self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)
             if self._shutting_down:
@@ -483,7 +525,7 @@ class DataService(QObject):
             self._error_callback_requested.emit(on_error, exc)
 
         self._queue.submit(
-            func=operation,
+            func=run_operation_with_metadata,
             description=description,
             on_success=handle_success,
             on_error=handle_error,

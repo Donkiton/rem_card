@@ -1779,6 +1779,26 @@ class DatabaseManager:
             else:
                 self._thread_state.remcard_tx_depth = depth
 
+    @contextmanager
+    def write_metadata_context(self, metadata: dict[str, Any] | None):
+        previous = getattr(self._thread_state, "write_metadata", None)
+        if metadata:
+            self._thread_state.write_metadata = dict(metadata)
+        try:
+            yield
+        finally:
+            if previous is None:
+                try:
+                    delattr(self._thread_state, "write_metadata")
+                except AttributeError:
+                    pass
+            else:
+                self._thread_state.write_metadata = previous
+
+    def _current_thread_write_metadata(self) -> dict[str, Any]:
+        metadata = getattr(self._thread_state, "write_metadata", None)
+        return dict(metadata or {}) if isinstance(metadata, dict) else {}
+
     def _readonly_db_uri(self) -> str:
         db_path = str(self.db_path)
         if db_path.startswith("\\\\"):
@@ -2274,16 +2294,17 @@ class DatabaseManager:
             os.remove(meta_path)
 
     @contextmanager
-    def remcard_transaction(self, source: str = "remcard_tx"):
+    def remcard_transaction(self, source: str = "remcard_tx", write_options: Optional[dict[str, Any]] = None):
         statement_sink: list[tuple[str, tuple]] = []
         outer_transaction = not self._in_current_thread_remcard_transaction()
+        effective_write_options = dict(write_options or self._current_thread_write_metadata())
         try:
             with self._mark_write_activity():
                 with self._central_io_lock:
                     if self._closed or self._remcard_conn is None:
                         raise DatabaseClosedError(f"RemCard database connection is closed for {source}")
                     conn = self._remcard_conn
-                    with self.write_controller.transaction(conn, source=source) as cursor:
+                    with self.write_controller.transaction(conn, source=source, write_options=effective_write_options) as cursor:
                         with self._mark_current_thread_remcard_transaction():
                             wrapped_cursor = RecordingCursor(cursor, statement_sink) if outer_transaction else cursor
                             yield wrapped_cursor
@@ -2302,8 +2323,13 @@ class DatabaseManager:
                 return
             raise
 
-    def run_write_operation(self, operation: Callable[[sqlite3.Cursor], Any], source: str = "write_operation"):
-        with self.remcard_transaction(source=source) as cursor:
+    def run_write_operation(
+        self,
+        operation: Callable[[sqlite3.Cursor], Any],
+        source: str = "write_operation",
+        write_options: Optional[dict[str, Any]] = None,
+    ):
+        with self.remcard_transaction(source=source, write_options=write_options) as cursor:
             return operation(cursor)
 
     def execute_remcard(self, query, params=(), source: str = "execute_remcard"):
