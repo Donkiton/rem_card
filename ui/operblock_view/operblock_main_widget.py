@@ -59,6 +59,11 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.foreground_activity import (
+    finish_foreground_resume_lease,
+    mark_foreground_activity,
+    start_foreground_resume_lease,
+)
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.patient_age import parse_date_value
@@ -9048,6 +9053,7 @@ class OperBlockMainWidget(QWidget):
         self._opblock_idle_period_reported = False
         self._active_opblock_action: dict[str, Any] | None = None
         self._last_opblock_action: dict[str, Any] | None = None
+        self._active_foreground_resume_lease: dict[str, Any] | None = None
         self._table_cards: dict[str, QFrame] = {}
         self._board_card_hashes: dict[str, str] = {}
         self._board_card_states: dict[str, dict] = {}
@@ -10677,23 +10683,27 @@ class OperBlockMainWidget(QWidget):
     def auto_refresh(self, force: bool = False):
         if self._is_closing:
             return
+        action_info = self._start_opblock_action_diagnostics("operblock_user_refresh") if force else None
         current_widget = self.stack.currentWidget()
-        if self.protocol_page is not None and current_widget == self.protocol_page and self._current_operation_case_id:
-            self.refresh_protocol(
-                force=force,
-                loading_message="Обновление протокола операции..." if force else None,
-            )
-        elif self.archive_page is not None and current_widget == self.archive_page:
-            self.refresh_operblock_archive(
-                force=force,
-                loading_message="Обновление архива оперблока..." if force else None,
-            )
-        else:
-            self.refresh_board(
-                force=force,
-                refresh_reason="auto_refresh",
-                loading_message="Обновление операционной..." if force else None,
-            )
+        try:
+            if self.protocol_page is not None and current_widget == self.protocol_page and self._current_operation_case_id:
+                self.refresh_protocol(
+                    force=force,
+                    loading_message="Обновление протокола операции..." if force else None,
+                )
+            elif self.archive_page is not None and current_widget == self.archive_page:
+                self.refresh_operblock_archive(
+                    force=force,
+                    loading_message="Обновление архива оперблока..." if force else None,
+                )
+            else:
+                self.refresh_board(
+                    force=force,
+                    refresh_reason="auto_refresh",
+                    loading_message="Обновление операционной..." if force else None,
+                )
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
 
     def apply_operblock_icon_settings(self):
         self._orders_render_signature = ""
@@ -11135,6 +11145,7 @@ class OperBlockMainWidget(QWidget):
     def _show_operblock_archive(self):
         if self._is_closing or self._write_pending:
             return
+        action_info = self._start_opblock_action_diagnostics("operblock_open_archive")
         loading_key = self._show_operblock_loading(
             "Открытие архива оперблока...",
             key="open-archive",
@@ -11174,6 +11185,7 @@ class OperBlockMainWidget(QWidget):
                     source="operblock_widget",
                 )
         finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
             self._hide_operblock_loading(loading_key)
 
     def _filtered_archive_cases(self) -> list[dict]:
@@ -12766,6 +12778,7 @@ class OperBlockMainWidget(QWidget):
     def _open_protocol(self, operation_case_id: int):
         if self._is_closing:
             return
+        action_info = self._start_opblock_action_diagnostics(f"operblock_open_protocol:{int(operation_case_id)}")
         loading_key = self._show_operblock_loading(
             "Открытие протокола операции...",
             key="open-protocol",
@@ -12816,6 +12829,7 @@ class OperBlockMainWidget(QWidget):
                     source="operblock_widget",
                 )
         finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
             self._hide_operblock_loading(loading_key)
 
     def _apply_protocol_snapshot(self, snapshot: dict):
@@ -14034,6 +14048,7 @@ class OperBlockMainWidget(QWidget):
             return
         if self.is_view_only_mode():
             return
+        action_info = self._start_opblock_action_diagnostics("operblock_open_settings")
         loading_key = self._show_operblock_loading(
             "Открытие настроек...",
             key="open-settings",
@@ -14053,6 +14068,7 @@ class OperBlockMainWidget(QWidget):
             self._set_protocol_chrome(True)
             self.stack.setCurrentWidget(page)
         finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
             self._hide_operblock_loading(loading_key)
 
     def _remember_settings_return_page(self):
@@ -14070,10 +14086,14 @@ class OperBlockMainWidget(QWidget):
             self._settings_return_operation_case_id = return_case_id or None
 
     def _on_settings_back_clicked(self):
+        action_info = self._start_opblock_action_diagnostics("operblock_settings_back")
         page = self.settings_page
-        if page is not None and hasattr(page, "go_back") and page.go_back():
-            return
-        self._return_from_settings()
+        try:
+            if page is not None and hasattr(page, "go_back") and page.go_back():
+                return
+            self._return_from_settings()
+        finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
 
     def _return_from_settings(self):
         return_page = str(getattr(self, "_settings_return_page", "") or "board")
@@ -19047,11 +19067,12 @@ class OperBlockMainWidget(QWidget):
                     return table_code
         return ""
 
-    def _record_user_idle_diagnostics(self, action: str) -> float:
+    def _record_user_idle_diagnostics(self, action: str) -> dict[str, Any]:
         now = time.monotonic()
         previous = float(getattr(self, "_opblock_idle_last_activity_monotonic", now) or now)
         idle_ms = max(0.0, (now - previous) * 1000.0)
         threshold_ms = OPERBLOCK_IDLE_DIAGNOSTIC_THRESHOLD_SEC * 1000.0
+        returned_from_idle = False
         if idle_ms >= threshold_ms and not bool(getattr(self, "_opblock_idle_period_reported", False)):
             common = {
                 "role": self._diagnostic_role(),
@@ -19074,19 +19095,66 @@ class OperBlockMainWidget(QWidget):
                 timestamp_ms=common["timestamp_ms"],
             )
             self._opblock_idle_period_reported = True
+            returned_from_idle = True
         elif idle_ms < threshold_ms:
             self._opblock_idle_period_reported = False
         self._opblock_idle_last_activity_monotonic = now
-        return idle_ms
+        return {"idle_ms": idle_ms, "returned_from_idle": returned_from_idle}
+
+    def _finish_foreground_resume_lease_later(self, lease_id: str, result: str = "expired") -> None:
+        finished = finish_foreground_resume_lease(lease_id, result=result)
+        active = dict(getattr(self, "_active_foreground_resume_lease", None) or {})
+        if active.get("lease_id") == lease_id:
+            self._active_foreground_resume_lease = None
+        if finished:
+            last = dict(getattr(self, "_last_opblock_action", None) or {})
+            if last.get("foreground_lease_id") == lease_id:
+                last["foreground_lease_finished"] = True
+                self._last_opblock_action = last
+
+    def _maybe_start_foreground_resume_lease(self, action: str, idle_info: dict[str, Any]) -> dict[str, Any] | None:
+        if not bool((idle_info or {}).get("returned_from_idle")):
+            return None
+        idle_ms = float((idle_info or {}).get("idle_ms") or 0.0)
+        lease = start_foreground_resume_lease(
+            role=self._diagnostic_role(),
+            idle_ms=idle_ms,
+            first_action=str(action or ""),
+            current_screen=self._diagnostic_current_screen(),
+            admission_id=self._current_admission_id,
+            operation_case_id=self._current_operation_case_id,
+            table_code=self._diagnostic_table_code(),
+        )
+        if not lease:
+            return None
+        self._active_foreground_resume_lease = dict(lease)
+        mark_foreground_activity(
+            "opblock_resume",
+            admission_id=self._current_admission_id,
+            source="click",
+            ttl_sec=max(1.0, float(lease.get("remaining_ms") or 0.0) / 1000.0),
+            request_id=str(lease.get("lease_id") or ""),
+            operation_case_id=self._current_operation_case_id,
+        )
+        remaining_ms = int(max(1000.0, float(lease.get("remaining_ms") or 0.0)))
+        QTimer.singleShot(
+            remaining_ms,
+            lambda lease_id=str(lease.get("lease_id") or ""): self._finish_foreground_resume_lease_later(lease_id),
+        )
+        return dict(lease)
 
     def _start_opblock_action_diagnostics(self, description: str) -> dict[str, Any]:
         request_id = uuid.uuid4().hex
         action = str(description or "")
-        idle_ms = self._record_user_idle_diagnostics(action)
+        idle_info = self._record_user_idle_diagnostics(action)
+        idle_ms = float((idle_info or {}).get("idle_ms") or 0.0)
+        lease = self._maybe_start_foreground_resume_lease(action, idle_info)
         started = time.monotonic()
         payload = {
             "action": action,
-            "source": action,
+            "source": "foreground_resume" if lease else action,
+            "priority": "user_visible" if lease else "",
+            "foreground_lease_id": str((lease or {}).get("lease_id") or ""),
             "operation_case_id": self._current_operation_case_id,
             "admission_id": self._current_admission_id,
             "table_code": self._diagnostic_table_code(),
@@ -19096,6 +19164,7 @@ class OperBlockMainWidget(QWidget):
             "started_monotonic": started,
             "pending_since_monotonic": started if self._write_pending else None,
             "screen": self._diagnostic_current_screen(),
+            "first_action_after_idle": bool(lease),
         }
         self._active_opblock_action = dict(payload)
         self._last_opblock_action = dict(payload)
@@ -19145,18 +19214,29 @@ class OperBlockMainWidget(QWidget):
     def diagnostic_snapshot(self) -> dict[str, Any]:
         active = dict(getattr(self, "_active_opblock_action", None) or {})
         last = dict(getattr(self, "_last_opblock_action", None) or {})
+        lease = dict(getattr(self, "_active_foreground_resume_lease", None) or {})
         pending_since = active.get("pending_since_monotonic")
         pending_since_ms = None
         if isinstance(pending_since, (int, float)):
             pending_since_ms = round(max(0.0, (time.monotonic() - float(pending_since)) * 1000.0), 3)
+        lease_age_ms = None
+        if lease:
+            lease_age_ms = max(0.0, float(lease.get("age_ms") or 0.0))
+            started = active.get("started_monotonic") if active.get("foreground_lease_id") == lease.get("lease_id") else None
+            if isinstance(started, (int, float)):
+                lease_age_ms = round(max(lease_age_ms, (time.monotonic() - float(started)) * 1000.0), 3)
         return {
             "active_opblock_action": str(active.get("action") or ""),
             "active_opblock_request_id": str(active.get("request_id") or ""),
             "last_user_action": str(last.get("action") or ""),
+            "first_action_after_idle": str(lease.get("first_action") or last.get("action") or ""),
             "idle_before_action_ms": active.get("idle_before_action_ms") or last.get("idle_before_action_ms"),
             "current_operation_case_id": self._current_operation_case_id,
             "current_admission_id": self._current_admission_id,
             "current_table_code": self._diagnostic_table_code(),
+            "active_foreground_resume_lease": str(lease.get("lease_id") or ""),
+            "foreground_lease_age_ms": lease_age_ms,
+            "foreground_lease_reason": str(lease.get("reason") or ""),
             "ui_pending_action": str(active.get("action") or "") if self._write_pending else "",
             "ui_pending_since_ms": pending_since_ms if self._write_pending else None,
             "widget_alive": not bool(getattr(self, "_is_closing", False)),
@@ -19414,6 +19494,7 @@ class OperBlockMainWidget(QWidget):
         self._operation_report_pdf_worker = None
 
     def _show_board(self, *, loading_message: str | None = None):
+        action_info = self._start_opblock_action_diagnostics("operblock_show_board")
         loading_key = self._show_operblock_loading(
             loading_message,
             key="show-board",
@@ -19459,6 +19540,7 @@ class OperBlockMainWidget(QWidget):
                     self.vitals_chart.set_operation_orders([], None)
             self.refresh_board(force=True)
         finally:
+            self._finish_opblock_action_diagnostics(action_info, "success")
             self._hide_operblock_loading(loading_key)
 
     def _set_protocol_chrome(self, enabled: bool):

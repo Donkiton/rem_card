@@ -26,6 +26,15 @@ OPBLOCK_EVENTS = {
     "opblock_shadow_mirror_started",
     "opblock_shadow_mirror_finished",
     "opblock_shadow_mirror_failed",
+    "opblock_shadow_mirror_deferred_for_foreground_resume",
+    "foreground_resume_lease_started",
+    "foreground_resume_lease_finished",
+    "maintenance_deferred_for_foreground_resume",
+    "maintenance_resume_after_foreground",
+    "maintenance_deferral_count",
+    "maintenance_deferral_max_age_ms",
+    "maintenance_starvation_prevented",
+    "maintenance_resumed_after_idle",
     "maintenance_overlap_observed",
     "ui_pending_state_observed",
     "event_loop_pause_ms",
@@ -156,6 +165,12 @@ def _classify(related: list[Event]) -> str:
         return "maintenance_overlap"
     if _first(related, "opblock_shadow_mirror_failed"):
         return "shadow_mirror_failure"
+    if _first(related, "foreground_resume_lease_started") and _first(
+        related,
+        "maintenance_deferred_for_foreground_resume",
+        "opblock_shadow_mirror_deferred_for_foreground_resume",
+    ):
+        return "foreground_resume_protected"
     pending = [event for event in related if event.kind == "ui_pending_state_observed"]
     finished = _first(related, "opblock_action_finished")
     if pending and not finished:
@@ -170,12 +185,26 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
     finished = _first(related, "opblock_action_finished")
     lock_event = _first(related, "sqlite_write_lock_timeout", "sqlite_write_lock_wait_retry", "sqlite_write_lock_acquired")
     ui_pause = _first(related, "event_loop_pause_ms")
+    lease_started = _first(related, "foreground_resume_lease_started")
+    lease_finished = _first(related, "foreground_resume_lease_finished")
+    deferred_events = [item for item in related if item.kind == "maintenance_deferred_for_foreground_resume"]
+    resumed_events = [item for item in related if item.kind == "maintenance_resume_after_foreground"]
+    shadow_deferred = _first(related, "opblock_shadow_mirror_deferred_for_foreground_resume")
     return {
         "incident_at": (event.ts.isoformat(sep=" ") if event.ts else ""),
         "idle_ms": event.fields.get("idle_ms"),
         "first_action": event.fields.get("first_action") or action.fields.get("action"),
         "result": (finished.fields.get("result") if finished else _classify(related)),
         "classification": _classify(related),
+        "foreground_lease": bool(lease_started),
+        "foreground_lease_id": lease_started.fields.get("lease_id") if lease_started else "",
+        "foreground_lease_duration_ms": (
+            lease_finished.fields.get("duration_ms")
+            if lease_finished
+            else (lease_started.fields.get("suppress_maintenance_for_ms") if lease_started else None)
+        ),
+        "deferred_maintenance": [str(item.fields.get("task") or "") for item in deferred_events],
+        "resumed_maintenance": [str(item.fields.get("task") or "") for item in resumed_events],
         "wait_ms": (lock_event.fields.get("total_wait_ms") if lock_event else None),
         "lock_holder_pid": (lock_event.fields.get("lock_holder_pid") if lock_event else None),
         "lock_holder_host": (lock_event.fields.get("lock_holder_host") if lock_event else ""),
@@ -183,6 +212,7 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
         "ui_pause_ms": (ui_pause.value if ui_pause else None),
         "maintenance_overlap": bool(_first(related, "maintenance_overlap_observed")),
         "shadow_mirror_overlap": bool(_first(related, "opblock_shadow_mirror_started", "opblock_shadow_mirror_failed")),
+        "shadow_mirror_deferred": bool(shadow_deferred),
         "events": [item.kind for item in related],
     }
 
@@ -206,17 +236,28 @@ def _print_text(incidents: list[dict[str, Any]]) -> None:
         print(f"Incident: {incident['incident_at']}")
         print(f"Idle before action: {_format_ms(incident.get('idle_ms'))}")
         print(f"First action: {incident.get('first_action') or 'unknown'}")
+        if incident.get("foreground_lease"):
+            print(f"Foreground lease: started, duration={_format_ms(incident.get('foreground_lease_duration_ms'))}")
+        else:
+            print("Foreground lease: none")
+        deferred = [task for task in incident.get("deferred_maintenance") or [] if task]
+        resumed = [task for task in incident.get("resumed_maintenance") or [] if task]
+        print(f"Deferred maintenance: {', '.join(deferred) if deferred else 'none'}")
         print(f"Result: {incident.get('result') or 'unknown'}")
-        print(f"Wait: {_format_ms(incident.get('wait_ms'))}")
+        print(f"SQLite lock wait: {_format_ms(incident.get('wait_ms')) if incident.get('wait_ms') is not None else 'none'}")
         print(
             "Lock holder: "
             f"pid={incident.get('lock_holder_pid') or '?'} "
             f"host={incident.get('lock_holder_host') or '?'} "
             f"source={incident.get('lock_holder_source') or '?'}"
         )
-        print(f"UI pause: {_format_ms(incident.get('ui_pause_ms'))}")
+        print(f"UI pause: {_format_ms(incident.get('ui_pause_ms')) if incident.get('ui_pause_ms') is not None else 'none'}")
         print(f"Maintenance overlap: {'yes' if incident.get('maintenance_overlap') else 'none'}")
-        print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
+        if incident.get("shadow_mirror_deferred"):
+            print("Shadow mirror: deferred")
+        else:
+            print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
+        print(f"Maintenance resumed: {', '.join(resumed) if resumed else 'none'}")
         print(f"Conclusion: {incident.get('classification')}")
         print()
 

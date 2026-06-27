@@ -15,7 +15,12 @@ import time
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.app import operblock_startup_metrics
-from rem_card.app.foreground_activity import foreground_activity_snapshot, should_defer_background_io
+from rem_card.app.foreground_activity import (
+    foreground_activity_snapshot,
+    foreground_resume_snapshot,
+    should_defer_background_io,
+    should_defer_for_foreground_resume,
+)
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
@@ -435,9 +440,9 @@ class MainWindow(QMainWindow):
         if not isinstance(items, list):
             return ""
         names = [
-            str(item.get("task_type") or item.get("operation_name") or item.get("name") or "")
+            str(item.get("task_type") or item.get("task") or item.get("operation_name") or item.get("name") or "")
             for item in items
-            if isinstance(item, dict) and str(item.get("task_type") or item.get("operation_name") or item.get("name") or "")
+            if isinstance(item, dict) and str(item.get("task_type") or item.get("task") or item.get("operation_name") or item.get("name") or "")
         ]
         return ",".join(names[:4])
 
@@ -1172,11 +1177,15 @@ class MainWindow(QMainWindow):
         visible_context = self._current_visible_remcard_context()
         maintenance_snapshot = active_maintenance_snapshot(limit=4)
         foreground_snapshot = foreground_activity_snapshot(limit=4)
+        resume_snapshot = foreground_resume_snapshot(limit=4)
         sqlite_snapshot = active_sqlite_operation_snapshot(limit=4)
         opblock_snapshot = self._current_operblock_diagnostics_snapshot()
         active_maintenance = self._watchdog_snapshot_names(maintenance_snapshot, "active")
         foreground_active = self._watchdog_snapshot_names(foreground_snapshot, "active")
         foreground_recent = self._watchdog_snapshot_names(foreground_snapshot, "recent")
+        resume_lease = dict(resume_snapshot.get("lease") or {}) if isinstance(resume_snapshot, dict) else {}
+        deferred_tasks = self._watchdog_snapshot_names(resume_snapshot, "deferred")
+        waiting_task = self._watchdog_first_snapshot_item(resume_snapshot, "deferred")
         active_sqlite = self._watchdog_snapshot_names(sqlite_snapshot, "active")
         sqlite_item = self._watchdog_first_snapshot_item(sqlite_snapshot, "active")
         maintenance_item = self._watchdog_first_snapshot_item(maintenance_snapshot, "active")
@@ -1193,6 +1202,7 @@ class MainWindow(QMainWindow):
             "[UIWatchdog] event_loop_pause_ms=%.1f threshold_ms=%.1f role=%s interval_ms=%s "
             "tab=%s admission_id=%s operation_case_id=%s active_maintenance=%s foreground_active=%s "
             "foreground_recent=%s active_opblock_action=%s active_sqlite_operation=%s "
+            "foreground_resume_lease=%s foreground_lease_age_ms=%s deferred_maintenance=%s "
             "lock_holder=%s/%s/%s shadow_mirror_active=%s ui_pending_action=%s",
             pause_ms,
             float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)),
@@ -1206,6 +1216,9 @@ class MainWindow(QMainWindow):
             foreground_recent,
             opblock_snapshot.get("active_opblock_action", ""),
             active_sqlite,
+            resume_lease.get("lease_id", ""),
+            resume_lease.get("age_ms"),
+            deferred_tasks,
             sqlite_item.get("lock_holder_pid"),
             sqlite_item.get("lock_holder_host", ""),
             sqlite_item.get("lock_holder_source", ""),
@@ -1230,7 +1243,14 @@ class MainWindow(QMainWindow):
             foreground_recent=foreground_recent,
             active_opblock_action=opblock_snapshot.get("active_opblock_action", ""),
             active_sqlite_operation=active_sqlite,
-            active_foreground_lease="",
+            active_foreground_lease=resume_lease.get("lease_id", ""),
+            active_foreground_resume_lease=resume_lease.get("lease_id", ""),
+            foreground_lease_age_ms=resume_lease.get("age_ms"),
+            foreground_lease_reason=resume_lease.get("reason", ""),
+            deferred_maintenance_tasks=deferred_tasks,
+            first_action_after_idle=resume_lease.get("first_action") or opblock_snapshot.get("first_action_after_idle", ""),
+            maintenance_task_waiting_to_start=waiting_task.get("task", ""),
+            maintenance_task_deferred_count=waiting_task.get("defer_count"),
             last_user_action=opblock_snapshot.get("last_user_action", ""),
             idle_before_action_ms=opblock_snapshot.get("idle_before_action_ms"),
             lock_wait_operation=sqlite_item.get("operation_name", ""),
@@ -1723,13 +1743,42 @@ class MainWindow(QMainWindow):
     def _defer_ui_maintenance_if_foreground(self) -> bool:
         if getattr(self, "_is_closing", False):
             return True
-        idle_window_sec = max(
-            30.0,
-            float(os.environ.get("REMCARD_UI_MAINTENANCE_FOREGROUND_IDLE_SEC", "120")),
-        )
         retry_sec = max(
             10.0,
             float(os.environ.get("REMCARD_UI_MAINTENANCE_DEFER_RETRY_SEC", "60")),
+        )
+        opblock_snapshot = self._current_operblock_diagnostics_snapshot()
+        current_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        data_service = getattr(getattr(current_widget, "remcard_service", None), "data_service", None)
+        if data_service is None:
+            data_service = getattr(getattr(getattr(self, "container", None), "remcard_service", None), "data_service", None)
+        write_queue_idle = True
+        if data_service is not None and hasattr(data_service, "is_write_queue_idle"):
+            try:
+                write_queue_idle = bool(data_service.is_write_queue_idle())
+            except Exception:
+                write_queue_idle = True
+        resume_decision = should_defer_for_foreground_resume(
+            "daily_backup_cleanup",
+            source="main_window",
+            defer_ms=retry_sec * 1000.0,
+            write_queue_idle=write_queue_idle,
+            active_foreground_action=bool(opblock_snapshot.get("active_opblock_action")),
+            active_opblock_action=str(opblock_snapshot.get("active_opblock_action") or ""),
+            admission_id=opblock_snapshot.get("current_admission_id"),
+            operation_case_id=opblock_snapshot.get("current_operation_case_id"),
+        )
+        if resume_decision.get("defer"):
+            logger.info(
+                "UI maintenance deferred for opblock foreground resume lease=%s retry_sec=%.1f",
+                resume_decision.get("foreground_lease_id"),
+                retry_sec,
+            )
+            QTimer.singleShot(int(retry_sec * 1000), self._run_maintenance_async)
+            return True
+        idle_window_sec = max(
+            30.0,
+            float(os.environ.get("REMCARD_UI_MAINTENANCE_FOREGROUND_IDLE_SEC", "120")),
         )
         should_defer, reason, age_sec = should_defer_background_io(
             idle_window_sec=idle_window_sec,

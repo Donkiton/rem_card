@@ -11486,6 +11486,47 @@ def _check_lazy_full_card_layout_contract(temp_root: str) -> tuple[bool, str]:
 
 
 def _check_w1_days_label_scope_by_bed_type(temp_root: str) -> tuple[bool, str]:
+    probe = textwrap.dedent(
+        """
+        import os
+        import sys
+
+        from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+        bootstrap_local_rem_card()
+
+        from scripts.regression_safety_checks import (
+            _check_w1_days_label_scope_by_bed_type_runtime,
+            _prepare_import_environment,
+        )
+
+        temp_root = sys.argv[1]
+        _prepare_import_environment(temp_root)
+        ok, details = _check_w1_days_label_scope_by_bed_type_runtime(temp_root)
+        print(details)
+        raise SystemExit(0 if ok else 1)
+        """
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT)
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    result = subprocess.run(
+        [sys.executable, "-c", probe, temp_root],
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=45,
+    )
+    if result.returncode != 0:
+        return False, f"w1 days label runtime probe failed rc={result.returncode}: {(result.stderr or result.stdout)[-800:]}"
+    return True, (result.stdout or "ok").strip().splitlines()[-1]
+
+
+def _check_w1_days_label_scope_by_bed_type_runtime(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -15636,9 +15677,6 @@ def _check_opblock_idle_tracker_does_not_change_behavior(temp_root: str) -> tupl
     _ = temp_root
     source = (PROJECT_ROOT / "ui/operblock_view/operblock_main_widget.py").read_text(encoding="utf-8")
     forbidden = (
-        "foreground_resume_lease_started",
-        "maintenance_deferred_for_foreground_resume",
-        "mark_foreground_activity(",
         "should_defer_background_io",
         "sqlite3.connect",
         "recovery",
@@ -15728,6 +15766,248 @@ def _check_opblock_stage1_no_sqlite_profile_changes(temp_root: str) -> tuple[boo
     if mismatches:
         return False, f"SQLite network profile changed: {mismatches}"
     return True, "ok"
+
+
+def _check_opblock_foreground_resume_lease_events_exist(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    sources = "\n".join(
+        (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        for rel_path in (
+            "app/foreground_activity.py",
+            "services/data_service.py",
+            "ui/main_window.py",
+            "ui/operblock_view/operblock_main_widget.py",
+            "scripts/analyze_opblock_idle_stalls.py",
+        )
+    )
+    required = {
+        "foreground_resume_lease_started",
+        "foreground_resume_lease_finished",
+        "maintenance_deferred_for_foreground_resume",
+        "maintenance_resume_after_foreground",
+    }
+    missing = sorted(name for name in required if name not in sources)
+    if missing:
+        return False, f"foreground resume diagnostic events missing: {missing}"
+    return True, "ok"
+
+
+def _check_opblock_resume_lease_starts_after_idle(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.foreground_activity import (
+        _reset_foreground_activity_for_tests,
+        foreground_resume_snapshot,
+        start_foreground_resume_lease,
+    )
+
+    _reset_foreground_activity_for_tests()
+    lease = start_foreground_resume_lease(
+        role="operblock_planned",
+        idle_ms=301000,
+        first_action="operblock_undo_last_action",
+        current_screen="protocol",
+        admission_id=11,
+        operation_case_id=22,
+        table_code="planned",
+    )
+    snapshot = foreground_resume_snapshot()
+    _reset_foreground_activity_for_tests()
+    if not lease or not snapshot.get("active"):
+        return False, f"foreground resume lease was not created: lease={lease} snapshot={snapshot}"
+    if (snapshot.get("lease") or {}).get("first_action") != "operblock_undo_last_action":
+        return False, f"foreground resume lease first action mismatch: {snapshot}"
+    return True, "ok"
+
+
+def _check_opblock_resume_lease_does_not_start_without_idle(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.foreground_activity import (
+        _reset_foreground_activity_for_tests,
+        foreground_resume_snapshot,
+        start_foreground_resume_lease,
+    )
+
+    _reset_foreground_activity_for_tests()
+    lease = start_foreground_resume_lease(
+        role="operblock_planned",
+        idle_ms=299000,
+        first_action="operblock_undo_last_action",
+        current_screen="protocol",
+    )
+    snapshot = foreground_resume_snapshot()
+    _reset_foreground_activity_for_tests()
+    if lease or snapshot.get("active"):
+        return False, f"foreground resume lease started below idle threshold: lease={lease} snapshot={snapshot}"
+    return True, "ok"
+
+
+def _check_maintenance_deferred_during_opblock_resume_lease(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.foreground_activity import (
+        _reset_foreground_activity_for_tests,
+        should_defer_for_foreground_resume,
+        start_foreground_resume_lease,
+    )
+
+    _reset_foreground_activity_for_tests()
+    start_foreground_resume_lease(
+        role="operblock",
+        idle_ms=360000,
+        first_action="operblock_open_protocol:10",
+        current_screen="board",
+        operation_case_id=10,
+    )
+    decision = should_defer_for_foreground_resume(
+        "daily_backup_cleanup",
+        source="regression",
+        write_queue_idle=True,
+        active_foreground_action=True,
+        active_opblock_action="operblock_open_protocol:10",
+    )
+    _reset_foreground_activity_for_tests()
+    if not decision.get("defer") or decision.get("reason") != "foreground_resume_lease":
+        return False, f"maintenance was not deferred during foreground lease: {decision}"
+    return True, "ok"
+
+
+def _check_maintenance_not_deferred_forever(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.foreground_activity import (
+        _reset_foreground_activity_for_tests,
+        should_defer_for_foreground_resume,
+        start_foreground_resume_lease,
+    )
+
+    _reset_foreground_activity_for_tests()
+    start_foreground_resume_lease(
+        role="operblock",
+        idle_ms=360000,
+        first_action="operblock_user_refresh",
+        current_screen="board",
+    )
+    first = should_defer_for_foreground_resume(
+        "daily_backup_cleanup",
+        source="regression",
+        max_defer_ms=1,
+        write_queue_idle=True,
+        active_foreground_action=False,
+    )
+    time.sleep(0.05)
+    second = should_defer_for_foreground_resume(
+        "daily_backup_cleanup",
+        source="regression",
+        max_defer_ms=1,
+        write_queue_idle=True,
+        active_foreground_action=False,
+    )
+    _reset_foreground_activity_for_tests()
+    if not first.get("defer"):
+        return False, f"initial maintenance decision was not deferred: {first}"
+    if second.get("defer") or second.get("reason") != "max_defer_safe_window":
+        return False, f"maintenance did not escape deferral after max age: {second}"
+    return True, "ok"
+
+
+def _check_shadow_mirror_deferred_during_foreground_resume(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "services/data_service.py").read_text(encoding="utf-8")
+    required = (
+        "opblock_shadow_mirror_deferred_for_foreground_resume",
+        "_defer_opblock_shadow_mirror_if_needed",
+        "_drain_deferred_opblock_shadow_mirror",
+        "opblock_shadow_mirror_deferred_resume",
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        return False, f"shadow mirror foreground resume deferral missing: {missing}"
+    if "mirror_active_operblock_cases_from_network_db(self.db" not in source:
+        return False, "shadow mirror write logic no longer calls existing mirror implementation"
+    return True, "ok"
+
+
+def _check_uiwatchdog_has_foreground_resume_context(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "ui/main_window.py").read_text(encoding="utf-8")
+    required = (
+        "active_foreground_resume_lease",
+        "foreground_lease_age_ms",
+        "foreground_lease_reason",
+        "deferred_maintenance_tasks",
+        "first_action_after_idle",
+        "maintenance_task_waiting_to_start",
+        "maintenance_task_deferred_count",
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        return False, f"UIWatchdog foreground resume fields missing: {missing}"
+    return True, "ok"
+
+
+def _check_analyzer_understands_foreground_resume(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "opblock_foreground_resume_logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260626.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-26T11:11:30+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 521000,
+            "first_action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:11:30.100000+10:00",
+            "metric": "foreground_resume_lease_started",
+            "lease_id": "lease-regression",
+            "suppress_maintenance_for_ms": 90000,
+        },
+        {
+            "ts": "2026-06-26T11:11:31+10:00",
+            "metric": "maintenance_deferred_for_foreground_resume",
+            "task": "daily_backup_cleanup",
+            "foreground_lease_id": "lease-regression",
+        },
+        {
+            "ts": "2026-06-26T11:11:32+10:00",
+            "metric": "opblock_shadow_mirror_deferred_for_foreground_resume",
+            "foreground_lease_id": "lease-regression",
+        },
+        {
+            "ts": "2026-06-26T11:12:45+10:00",
+            "metric": "maintenance_resume_after_foreground",
+            "task": "daily_backup_cleanup",
+            "foreground_lease_id": "lease-regression",
+        },
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"),
+            "--logs",
+            str(logs_dir),
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"foreground resume analyzer failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    incidents = summary.get("incidents") or []
+    if not incidents or incidents[0].get("classification") != "foreground_resume_protected":
+        return False, f"foreground resume analyzer classification mismatch: {summary}"
+    if "daily_backup_cleanup" not in (incidents[0].get("deferred_maintenance") or []):
+        return False, f"foreground resume analyzer deferred task missing: {summary}"
+    return True, "ok"
+
+
+def _check_opblock_stage2_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    return _check_opblock_stage1_no_sqlite_profile_changes(temp_root)
 
 
 def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
@@ -23999,6 +24279,15 @@ def main(argv: list[str] | None = None):
         ("opblock_idle_tracker_does_not_change_behavior", _check_opblock_idle_tracker_does_not_change_behavior),
         ("analyze_opblock_idle_stalls_script_exists", _check_analyze_opblock_idle_stalls_script_exists),
         ("opblock_stage1_no_sqlite_profile_changes", _check_opblock_stage1_no_sqlite_profile_changes),
+        ("opblock_foreground_resume_lease_events_exist", _check_opblock_foreground_resume_lease_events_exist),
+        ("opblock_resume_lease_starts_after_idle", _check_opblock_resume_lease_starts_after_idle),
+        ("opblock_resume_lease_does_not_start_without_idle", _check_opblock_resume_lease_does_not_start_without_idle),
+        ("maintenance_deferred_during_opblock_resume_lease", _check_maintenance_deferred_during_opblock_resume_lease),
+        ("maintenance_not_deferred_forever", _check_maintenance_not_deferred_forever),
+        ("shadow_mirror_deferred_during_foreground_resume", _check_shadow_mirror_deferred_during_foreground_resume),
+        ("uiwatchdog_has_foreground_resume_context", _check_uiwatchdog_has_foreground_resume_context),
+        ("analyzer_understands_foreground_resume", _check_analyzer_understands_foreground_resume),
+        ("opblock_stage2_no_sqlite_profile_changes", _check_opblock_stage2_no_sqlite_profile_changes),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),

@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 from PySide6.QtCore import QObject, QTimer, Signal, Qt, Slot
 
 from rem_card.app.db_access_classifier import classify_database_access, classify_database_access_error
+from rem_card.app.foreground_activity import should_defer_for_foreground_resume
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_shared import LocalWriteQueue
@@ -64,6 +65,8 @@ class DataService(QObject):
         self._unknown_active_write = False
         self._opblock_shadow_mirror_lock = threading.Lock()
         self._opblock_shadow_mirror_active: dict[str, Any] | None = None
+        self._opblock_shadow_mirror_deferred_lock = threading.Lock()
+        self._opblock_shadow_mirror_deferred: list[dict[str, Any]] = []
         self._outage_signal_emitted = False
         self._last_runtime_outage_shutdown_result = ""
         self._last_runtime_outage_queue_settled = None
@@ -174,6 +177,15 @@ class DataService(QObject):
 
     def run_poll_maintenance_tasks(self):
         for task in list(self._poll_maintenance_tasks):
+            task_name = str(getattr(task, "__name__", "") or "poll_maintenance")
+            decision = should_defer_for_foreground_resume(
+                task_name,
+                source="data_service_poll",
+                write_queue_idle=self.is_write_queue_idle(),
+                active_foreground_action=False,
+            )
+            if decision.get("defer"):
+                continue
             try:
                 task()
             except Exception as exc:
@@ -255,11 +267,117 @@ class DataService(QObject):
         active["age_ms"] = round((time.perf_counter() - float(active.get("started_monotonic") or time.perf_counter())) * 1000.0, 3)
         return active
 
+    def _schedule_deferred_opblock_shadow_mirror(self, defer_ms: float) -> None:
+        delay_sec = max(1.0, float(defer_ms or 0.0) / 1000.0)
+
+        def submit_deferred():
+            if self._shutting_down:
+                return
+            try:
+                self._queue.submit(
+                    func=self._drain_deferred_opblock_shadow_mirror,
+                    description="opblock_shadow_mirror_deferred_resume",
+                    retryable=False,
+                )
+            except Exception as exc:
+                logger.warning("Failed to schedule deferred operblock shadow mirror: %s", exc, exc_info=True)
+
+        timer = threading.Timer(delay_sec, submit_deferred)
+        timer.daemon = True
+        timer.start()
+
+    def _defer_opblock_shadow_mirror_if_needed(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+    ) -> bool:
+        decision = should_defer_for_foreground_resume(
+            "opblock_shadow_mirror",
+            source="data_service",
+            write_queue_idle=self.is_write_queue_idle(),
+            active_foreground_action=False,
+            admission_id=context.get("admission_id"),
+            operation_case_id=context.get("operation_case_id"),
+        )
+        if not decision.get("defer"):
+            return False
+        item = {
+            "description": str(description or ""),
+            "operation_uuid": operation_uuid,
+            "deferred_at": time.perf_counter(),
+            "foreground_lease_id": str(decision.get("foreground_lease_id") or ""),
+            **context,
+        }
+        with self._opblock_shadow_mirror_deferred_lock:
+            self._opblock_shadow_mirror_deferred.append(item)
+        record_metric(
+            "opblock_shadow_mirror_deferred_for_foreground_resume",
+            1,
+            source=str(description or ""),
+            reason="foreground_resume_lease",
+            foreground_lease_id=str(decision.get("foreground_lease_id") or ""),
+            defer_ms=decision.get("defer_ms"),
+            **context,
+        )
+        self._schedule_deferred_opblock_shadow_mirror(float(decision.get("defer_ms") or 0.0))
+        return True
+
+    def _drain_deferred_opblock_shadow_mirror(self) -> None:
+        with self._opblock_shadow_mirror_deferred_lock:
+            items = list(self._opblock_shadow_mirror_deferred)
+            self._opblock_shadow_mirror_deferred.clear()
+        for item in items:
+            if self._shutting_down:
+                return
+            description = str(item.get("description") or "")
+            context = _operblock_description_context(description)
+            decision = should_defer_for_foreground_resume(
+                "opblock_shadow_mirror",
+                source="data_service",
+                write_queue_idle=self.is_write_queue_idle(),
+                active_foreground_action=False,
+                admission_id=context.get("admission_id"),
+                operation_case_id=context.get("operation_case_id"),
+            )
+            if decision.get("defer"):
+                with self._opblock_shadow_mirror_deferred_lock:
+                    self._opblock_shadow_mirror_deferred.append(item)
+                self._schedule_deferred_opblock_shadow_mirror(float(decision.get("defer_ms") or 0.0))
+                return
+            record_metric(
+                "maintenance_resume_after_foreground",
+                1,
+                task="opblock_shadow_mirror",
+                foreground_lease_id=str(item.get("foreground_lease_id") or ""),
+                deferred_for_ms=round(max(0.0, (time.perf_counter() - float(item.get("deferred_at") or time.perf_counter())) * 1000.0), 3),
+                reason="shadow_mirror_deferred_drain",
+                timestamp_ms=int(time.time() * 1000.0),
+            )
+            self._run_opblock_shadow_mirror_after_commit(
+                description,
+                operation_uuid=str(item.get("operation_uuid") or "") or None,
+                context=context,
+            )
+
     def _mirror_operblock_write_after_commit(self, description: str, *, operation_uuid: str | None = None) -> None:
         if not self._is_operblock_network_write(description):
             return
-        started = time.perf_counter()
         context = _operblock_description_context(description)
+        if self._defer_opblock_shadow_mirror_if_needed(description, operation_uuid=operation_uuid, context=context):
+            return
+        self._run_opblock_shadow_mirror_after_commit(description, operation_uuid=operation_uuid, context=context)
+
+    def _run_opblock_shadow_mirror_after_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        started = time.perf_counter()
+        context = dict(context or _operblock_description_context(description))
         with self._opblock_shadow_mirror_lock:
             self._opblock_shadow_mirror_active = {
                 "source": str(description or ""),
