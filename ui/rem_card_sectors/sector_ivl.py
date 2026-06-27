@@ -264,6 +264,13 @@ class SectorIvl(BaseSectorWidget):
             if view is not None:
                 view.setStyleSheet(IVL_COMBO_VIEW_STYLE)
 
+    def _fit_fixed_width_button(self, button: QPushButton):
+        font = QFont(button.font())
+        font.setPixelSize(10)
+        font.setBold(True)
+        button.setFont(font)
+        button.setFixedWidth(button.fontMetrics().horizontalAdvance(button.text()) + 22)
+
     def _make_card(self, title: str, icon_text: str = "", *, compact: bool = False):
         card = QFrame()
         card.setObjectName("ivl_card")
@@ -306,13 +313,21 @@ class SectorIvl(BaseSectorWidget):
         grid.addWidget(widget, row + 1, column, 1, column_span)
         return label
 
-    def _make_stat_block(self, icon_text: str, label_text: str, value_label: QLabel, sub_label: QLabel | None = None):
+    def _make_stat_block(
+        self,
+        icon_text: str,
+        label_text: str,
+        value_label: QLabel,
+        sub_label: QLabel | None = None,
+        *,
+        icon_size: int = 34,
+    ):
         block = QWidget()
         block.setObjectName("ivl_stat_block")
         layout = QHBoxLayout(block)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(self._make_icon_label(icon_text, "ivl_stat_icon", 38), 0, Qt.AlignVCenter)
+        layout.setSpacing(6)
+        layout.addWidget(self._make_icon_label(icon_text, "ivl_stat_icon", icon_size), 0, Qt.AlignVCenter)
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -345,19 +360,21 @@ class SectorIvl(BaseSectorWidget):
         block.setObjectName("ivl_stat_block")
         layout = QHBoxLayout(block)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        layout.addWidget(self._make_icon_label("sovitie_ivl.png", "ivl_stat_icon", 38), 0, Qt.AlignVCenter)
+        layout.setSpacing(6)
+        layout.addWidget(self._make_icon_label("sovitie_ivl.png", "ivl_stat_icon", 34), 0, Qt.AlignVCenter)
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(3)
         self.lbl_case_status.setObjectName("ivl_stat_title")
+        self.lbl_case_start.setObjectName("ivl_stat_datetime")
         self.lbl_case_duration.setObjectName("ivl_stat_subtitle")
-        for label in (self.lbl_case_status, self.lbl_case_duration):
+        for label in (self.lbl_case_status, self.lbl_case_start, self.lbl_case_duration):
             label.setWordWrap(True)
             label.setMinimumWidth(0)
             label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         text_layout.addWidget(self.lbl_case_status)
+        text_layout.addWidget(self.lbl_case_start)
         text_layout.addWidget(self.lbl_case_duration)
         text_layout.addStretch(1)
         layout.addLayout(text_layout, 1)
@@ -452,6 +469,13 @@ class SectorIvl(BaseSectorWidget):
                 color: #17213a;
                 font-size: 12px;
                 font-weight: 600;
+                background-color: transparent;
+                border: none;
+            }
+            QLabel#ivl_stat_datetime {
+                color: #142037;
+                font-size: 12px;
+                font-weight: 700;
                 background-color: transparent;
                 border: none;
             }
@@ -632,8 +656,9 @@ class SectorIvl(BaseSectorWidget):
                 color: #172033;
                 border: 1px solid #aebccd;
                 border-radius: 6px;
-                padding: 6px 12px;
+                padding: 6px 10px;
                 min-height: 34px;
+                font-size: 10px;
                 font-weight: 700;
             }
             QPushButton#ivl_btn_primary:hover,
@@ -740,27 +765,28 @@ class SectorIvl(BaseSectorWidget):
         self.btn_create_case.setObjectName("ivl_btn_primary")
         self.btn_create_case.clicked.connect(self._on_create_case_clicked)
         self.btn_create_case.setMinimumHeight(36)
-        self.btn_create_case.setFixedWidth(162)
+        self._fit_fixed_width_button(self.btn_create_case)
 
         self.btn_close_case = QPushButton("Экстубировать")
         self.btn_close_case.setObjectName("ivl_btn_action")
         self.btn_close_case.clicked.connect(self._on_close_case_clicked)
         self.btn_close_case.setMinimumHeight(36)
-        self.btn_close_case.setFixedWidth(112)
+        self._fit_fixed_width_button(self.btn_close_case)
 
         self.btn_replace_tube = QPushButton("Заменить трубку")
         self.btn_replace_tube.setObjectName("ivl_btn_action")
         self.btn_replace_tube.clicked.connect(self._on_replace_tube_clicked)
         self.btn_replace_tube.setMinimumHeight(36)
-        self.btn_replace_tube.setFixedWidth(122)
+        self._fit_fixed_width_button(self.btn_replace_tube)
 
         self.btn_undo = QPushButton("Отменить действие")
         self.btn_undo.setObjectName("ivl_btn_action")
         self.btn_undo.clicked.connect(self._on_undo_last_clicked)
         self.btn_undo.setMinimumHeight(36)
-        self.btn_undo.setFixedWidth(146)
+        self._fit_fixed_width_button(self.btn_undo)
 
         self.lbl_case_status = QLabel("Случай: не открыт")
+        self.lbl_case_start = QLabel("")
         self.lbl_case_duration = QLabel("Длительность случая: --")
         self.lbl_total_duration = QLabel("00:00")
         self.lbl_tube_duration = QLabel("--")
@@ -774,9 +800,9 @@ class SectorIvl(BaseSectorWidget):
         stats_card.setObjectName("ivl_stats_card")
         stats_card.setAttribute(Qt.WA_StyledBackground, True)
         stats_layout = QHBoxLayout(stats_card)
-        stats_layout.setContentsMargins(12, 8, 12, 8)
-        stats_layout.setSpacing(12)
-        stats_layout.addWidget(self._make_case_stat_block(), 1)
+        stats_layout.setContentsMargins(10, 8, 10, 8)
+        stats_layout.setSpacing(8)
+        stats_layout.addWidget(self._make_case_stat_block(), 2)
         stats_layout.addWidget(self._make_stat_separator())
         stats_layout.addWidget(self._make_stat_block("time_ivl.png", "Суммарное время ИВЛ", self.lbl_total_duration), 1)
         stats_layout.addWidget(self._make_stat_separator())
@@ -1037,6 +1063,7 @@ class SectorIvl(BaseSectorWidget):
     def set_loading_state(self, status_text: str = "Случай: загрузка..."):
         self.active_case_id = None
         self.lbl_case_status.setText(status_text)
+        self.lbl_case_start.setText("")
         self.lbl_case_duration.setText("Длительность случая: --")
         self.lbl_total_duration.setText("--")
         self._set_tube_duration_text("--", alert=False)
@@ -1124,9 +1151,8 @@ class SectorIvl(BaseSectorWidget):
                 self._latest_event_revision_by_case[int(case_id)] = int(getattr(event, "revision", 0) or 0)
 
         if active_case:
-            self.lbl_case_status.setText(
-                f"Случай #{active_case.episode_number}: активен с {active_case.start_time.strftime('%d.%m.%Y %H:%M')}"
-            )
+            self.lbl_case_status.setText(f"Случай #{active_case.episode_number}. Активен с:")
+            self.lbl_case_start.setText(active_case.start_time.strftime("%d.%m.%Y %H:%M"))
             self.lbl_case_duration.setText(
                 f"Длительность случая: {self._format_duration(summary.get('case_duration_seconds', 0.0))}"
             )
@@ -1136,11 +1162,11 @@ class SectorIvl(BaseSectorWidget):
             self._reload_history(timeline)
         else:
             if latest_case and latest_case.end_time:
-                self.lbl_case_status.setText(
-                    f"Последний случай #{latest_case.episode_number}: закрыт {latest_case.end_time.strftime('%d.%m.%Y %H:%M')}"
-                )
+                self.lbl_case_status.setText(f"Последний случай #{latest_case.episode_number}. Закрыт:")
+                self.lbl_case_start.setText(latest_case.end_time.strftime("%d.%m.%Y %H:%M"))
             else:
                 self.lbl_case_status.setText("Случай: не открыт")
+                self.lbl_case_start.setText("")
             self.lbl_case_duration.setText("Длительность случая: --")
             self._set_tube_duration_text("--", alert=False)
             self._set_actions_enabled(False, has_case_history=bool(timeline))
@@ -1198,6 +1224,7 @@ class SectorIvl(BaseSectorWidget):
     def _begin_ivl_write_pending(self, status_text: str):
         self._ivl_write_pending = True
         self.lbl_case_status.setText(status_text)
+        self.lbl_case_start.setText("")
         self._set_ivl_write_controls_enabled(False)
 
     def _finish_ivl_write_success(self, result, on_success=None):
