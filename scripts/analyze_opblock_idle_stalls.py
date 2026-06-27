@@ -30,6 +30,14 @@ OPBLOCK_EVENTS = {
     "opblock_shadow_mirror_started",
     "opblock_shadow_mirror_finished",
     "opblock_shadow_mirror_failed",
+    "opblock_shadow_mirror_post_commit_started",
+    "opblock_shadow_mirror_post_commit_succeeded",
+    "opblock_shadow_mirror_post_commit_failed",
+    "opblock_shadow_mirror_retry_scheduled",
+    "opblock_shadow_mirror_retry_succeeded",
+    "opblock_shadow_mirror_retry_exhausted",
+    "opblock_shadow_mirror_decoupled_from_write",
+    "opblock_shadow_mirror_failure_did_not_fail_network_write",
     "opblock_shadow_mirror_deferred_for_foreground_resume",
     "opblock_shadow_mirror_assignment_upserted",
     "opblock_shadow_mirror_assignment_stale_deactivated",
@@ -196,16 +204,24 @@ def _classify(related: list[Event]) -> str:
     if _first(related, "maintenance_overlap_observed"):
         return "maintenance_overlap"
     if _first(related, "opblock_shadow_mirror_duplicate_assignment_resolved"):
-        return "shadow_mirror_duplicate_assignment_resolved"
+        return "mirror_duplicate_resolved"
     if _first(related, "opblock_shadow_mirror_assignment_upserted"):
         return "shadow_mirror_assignment_upsert"
     if _first(related, "opblock_shadow_mirror_assignment_stale_removed", "opblock_shadow_mirror_assignment_stale_deactivated"):
         return "shadow_mirror_stale_assignment_removed"
-    shadow_failed = _first(related, "opblock_shadow_mirror_failed")
+    if _first(related, "opblock_shadow_mirror_retry_exhausted"):
+        return "mirror_retry_exhausted"
+    shadow_failed = _first(related, "opblock_shadow_mirror_post_commit_failed", "opblock_shadow_mirror_failed")
     if shadow_failed:
         error_text = str(shadow_failed.fields.get("error_message_sanitized") or shadow_failed.fields.get("error") or "")
         if "UNIQUE constraint failed: operation_table_assignments.table_code" in error_text:
             return "shadow_mirror_unique_constraint_failed"
+        if shadow_failed.kind == "opblock_shadow_mirror_post_commit_failed" or _first(
+            related,
+            "opblock_shadow_mirror_failure_did_not_fail_network_write",
+            "opblock_shadow_mirror_decoupled_from_write",
+        ):
+            return "mirror_failed_after_commit"
         return "shadow_mirror_failure"
     if _first(related, "foreground_resume_lease_started") and _first(
         related,
@@ -215,6 +231,8 @@ def _classify(related: list[Event]) -> str:
         return "foreground_resume_protected"
     pending = [event for event in related if event.kind == "ui_pending_state_observed"]
     finished = _first(related, "opblock_action_finished")
+    if finished and str(finished.fields.get("result") or "") not in {"", "success"}:
+        return "network_write_failed"
     if pending and not finished:
         return "ui_pending_stuck"
     if _first(related, "event_loop_pause_ms"):
@@ -273,6 +291,8 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
         "opblock_shadow_mirror_assignment_upserted",
         "opblock_shadow_mirror_assignment_stale_removed",
         "opblock_shadow_mirror_assignment_stale_deactivated",
+        "opblock_shadow_mirror_post_commit_failed",
+        "opblock_shadow_mirror_retry_exhausted",
         "opblock_shadow_mirror_failed",
     )
     return {
@@ -301,7 +321,16 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
         "ui_result": (finished.fields.get("result") if finished else ("controlled busy" if pending_cleared else "")),
         "pending_cleared_after_busy_timeout": bool(pending_cleared),
         "maintenance_overlap": bool(_first(related, "maintenance_overlap_observed")),
-        "shadow_mirror_overlap": bool(_first(related, "opblock_shadow_mirror_started", "opblock_shadow_mirror_failed")),
+        "shadow_mirror_overlap": bool(
+            _first(
+                related,
+                "opblock_shadow_mirror_started",
+                "opblock_shadow_mirror_post_commit_started",
+                "opblock_shadow_mirror_post_commit_failed",
+                "opblock_shadow_mirror_failed",
+                "opblock_shadow_mirror_retry_exhausted",
+            )
+        ),
         "shadow_mirror_deferred": bool(shadow_deferred),
         "shadow_mirror_table_code": (shadow_assignment.fields.get("table_code") if shadow_assignment else ""),
         "shadow_mirror_previous_case": (
@@ -345,6 +374,7 @@ def _print_shadow_mirror_text(incident: dict[str, Any]) -> None:
         print("Shadow mirror: deferred")
         return
     if classification in {
+        "mirror_duplicate_resolved",
         "shadow_mirror_duplicate_assignment_resolved",
         "shadow_mirror_assignment_upsert",
         "shadow_mirror_stale_assignment_removed",
@@ -359,6 +389,11 @@ def _print_shadow_mirror_text(incident: dict[str, Any]) -> None:
         print(f"Error: {incident.get('shadow_mirror_error') or 'UNIQUE constraint failed: operation_table_assignments.table_code'}")
         print(f"Table code: {incident.get('shadow_mirror_table_code') or 'unknown'}")
         return
+    if classification in {"mirror_failed_after_commit", "mirror_retry_exhausted"}:
+        print("Shadow mirror: failed after network commit")
+        if incident.get("shadow_mirror_error"):
+            print(f"Error: {incident.get('shadow_mirror_error')}")
+        return
     print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
 
 
@@ -370,12 +405,18 @@ def _conclusion_text(classification: Any) -> str:
         return "remote/unknown lock was not removed"
     if conclusion == "local_dead_pid_cleanup_failed":
         return "local dead-PID cleanup failed; lock was not removed"
-    if conclusion in {"shadow_mirror_duplicate_assignment_resolved", "shadow_mirror_assignment_upsert"}:
+    if conclusion in {"mirror_duplicate_resolved", "shadow_mirror_duplicate_assignment_resolved", "shadow_mirror_assignment_upsert"}:
         return "duplicate assignment handled idempotently"
     if conclusion == "shadow_mirror_stale_assignment_removed":
         return "stale shadow table assignment removed"
     if conclusion == "shadow_mirror_unique_constraint_failed":
         return "shadow mirror duplicate table assignment conflict"
+    if conclusion == "mirror_failed_after_commit":
+        return "shadow mirror failed after confirmed network commit"
+    if conclusion == "mirror_retry_exhausted":
+        return "shadow mirror retry exhausted after confirmed network commit"
+    if conclusion == "network_write_failed":
+        return "network write failed before confirmed commit"
     if conclusion in {"file_lock_timeout", "begin_immediate_timeout", "opblock_busy_timeout", "sqlite_write_lock_timeout"}:
         return "interactive opblock write timed out instead of hanging"
     return conclusion

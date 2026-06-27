@@ -20,21 +20,36 @@ from rem_card.services.data_update_monitor import DataUpdateMonitor
 from rem_card.services.sync_coordinator import SyncCoordinator
 
 
+OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS = 3
+OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = (1000, 5000)
+
+
 def _sanitize_diagnostic_message(exc: Exception, *, limit: int = 240) -> str:
     text = re.sub(r"\s+", " ", str(exc or "")).strip()
     return text[:limit]
 
 
-def _operblock_description_context(description: str) -> dict[str, Any]:
+def _operblock_description_context(description: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     text = str(description or "")
+    payload = dict(metadata or {})
     numbers = [int(match) for match in re.findall(r":(\d+)", text)]
-    operation_case_id = numbers[0] if numbers and "operation_case" in text else None
-    admission_id = numbers[0] if numbers and "admission" in text else None
+    operation_case_id = payload.get("operation_case_id")
+    admission_id = payload.get("admission_id")
+    if operation_case_id in ("", 0):
+        operation_case_id = None
+    if admission_id in ("", 0):
+        admission_id = None
+    if operation_case_id is None:
+        operation_case_id = numbers[0] if numbers and "operation_case" in text else None
+    if admission_id is None:
+        admission_id = numbers[0] if numbers and "admission" in text else None
     if operation_case_id is None and text.startswith(("operblock_undo_last:", "operblock_release_operation_table:")):
         operation_case_id = numbers[0] if numbers else None
     return {
         "operation_case_id": operation_case_id,
         "admission_id": admission_id,
+        "table_code": str(payload.get("table_code") or ""),
+        "request_id": str(payload.get("request_id") or ""),
     }
 
 
@@ -204,9 +219,13 @@ class DataService(QObject):
             self._mark_operblock_write_failed(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
             raise
-        self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)
         self.write_finished.emit(description)
         self.request_immediate_refresh(force_emit=True, source=description)
+        self._mirror_operblock_write_after_commit(
+            description,
+            operation_uuid=operation_uuid,
+            context=_operblock_description_context(description, metadata),
+        )
         return result
 
     def is_write_queue_idle(self) -> bool:
@@ -302,6 +321,38 @@ class DataService(QObject):
         active["age_ms"] = round((time.perf_counter() - float(active.get("started_monotonic") or time.perf_counter())) * 1000.0, 3)
         return active
 
+    def _opblock_shadow_mirror_metric_fields(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+        duration_ms: float | None = None,
+        retry_delay_ms: int | None = None,
+        exc: Exception | None = None,
+    ) -> dict[str, Any]:
+        fields = {
+            "source": str(description or ""),
+            "operation_name": str(description or ""),
+            "attempt": int(attempt or 1),
+            **dict(context or {}),
+        }
+        if operation_uuid:
+            fields["operation_uuid"] = str(operation_uuid)
+        if not fields.get("request_id") and operation_uuid:
+            fields["request_id"] = str(operation_uuid)
+        if "table_code" not in fields:
+            fields["table_code"] = ""
+        if duration_ms is not None:
+            fields["duration_ms"] = round(float(duration_ms), 3)
+        if retry_delay_ms is not None:
+            fields["retry_delay_ms"] = int(retry_delay_ms)
+        if exc is not None:
+            fields["error_class"] = type(exc).__name__
+            fields["error_message_sanitized"] = _sanitize_diagnostic_message(exc)
+        return fields
+
     def _schedule_deferred_opblock_shadow_mirror(self, defer_ms: float) -> None:
         delay_sec = max(1.0, float(defer_ms or 0.0) / 1000.0)
 
@@ -327,6 +378,7 @@ class DataService(QObject):
         *,
         operation_uuid: str | None,
         context: dict[str, Any],
+        attempt: int,
     ) -> bool:
         decision = should_defer_for_foreground_resume(
             "opblock_shadow_mirror",
@@ -341,6 +393,7 @@ class DataService(QObject):
         item = {
             "description": str(description or ""),
             "operation_uuid": operation_uuid,
+            "attempt": int(attempt or 1),
             "deferred_at": time.perf_counter(),
             "foreground_lease_id": str(decision.get("foreground_lease_id") or ""),
             **context,
@@ -367,7 +420,7 @@ class DataService(QObject):
             if self._shutting_down:
                 return
             description = str(item.get("description") or "")
-            context = _operblock_description_context(description)
+            context = _operblock_description_context(description, item)
             decision = should_defer_for_foreground_resume(
                 "opblock_shadow_mirror",
                 source="data_service",
@@ -394,15 +447,188 @@ class DataService(QObject):
                 description,
                 operation_uuid=str(item.get("operation_uuid") or "") or None,
                 context=context,
+                attempt=int(item.get("attempt") or 1),
             )
 
-    def _mirror_operblock_write_after_commit(self, description: str, *, operation_uuid: str | None = None) -> None:
+    def _mirror_operblock_write_after_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
         if not self._is_operblock_network_write(description):
             return
-        context = _operblock_description_context(description)
-        if self._defer_opblock_shadow_mirror_if_needed(description, operation_uuid=operation_uuid, context=context):
+        context = dict(context or _operblock_description_context(description))
+        record_metric(
+            "opblock_shadow_mirror_decoupled_from_write",
+            1,
+            **self._opblock_shadow_mirror_metric_fields(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=1,
+            ),
+        )
+        self._submit_opblock_shadow_mirror_post_commit(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=1,
+        )
+
+    def _submit_opblock_shadow_mirror_post_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+    ) -> None:
+        if self._shutting_down:
             return
-        self._run_opblock_shadow_mirror_after_commit(description, operation_uuid=operation_uuid, context=context)
+        attempt = max(1, int(attempt or 1))
+
+        def run_shadow_mirror() -> None:
+            self._execute_opblock_shadow_mirror_after_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+            )
+
+        try:
+            self._queue.submit(
+                func=run_shadow_mirror,
+                description="opblock_shadow_mirror_post_commit" if attempt <= 1 else "opblock_shadow_mirror_retry",
+                retryable=False,
+            )
+        except Exception as exc:
+            self._record_opblock_shadow_mirror_failure(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+                duration_ms=0.0,
+                exc=exc,
+                schedule_retry=not self._shutting_down,
+            )
+
+    def _execute_opblock_shadow_mirror_after_commit(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+    ) -> None:
+        if self._shutting_down:
+            return
+        context = dict(context or _operblock_description_context(description))
+        if self._defer_opblock_shadow_mirror_if_needed(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+        ):
+            return
+        self._run_opblock_shadow_mirror_after_commit(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+        )
+
+    def _schedule_opblock_shadow_mirror_retry(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        failed_attempt: int,
+        exc: Exception | None = None,
+    ) -> None:
+        if self._shutting_down:
+            return
+        next_attempt = int(failed_attempt or 1) + 1
+        if next_attempt > OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS:
+            record_metric(
+                "opblock_shadow_mirror_retry_exhausted",
+                1,
+                force_flush=True,
+                **self._opblock_shadow_mirror_metric_fields(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=context,
+                    attempt=int(failed_attempt or 1),
+                    exc=exc,
+                ),
+            )
+            return
+        delay_index = min(
+            max(0, next_attempt - 2),
+            max(0, len(OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS) - 1),
+        )
+        retry_delay_ms = int(OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS[delay_index])
+        record_metric(
+            "opblock_shadow_mirror_retry_scheduled",
+            1,
+            **self._opblock_shadow_mirror_metric_fields(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=next_attempt,
+                retry_delay_ms=retry_delay_ms,
+                exc=exc,
+            ),
+        )
+
+        def submit_retry() -> None:
+            self._submit_opblock_shadow_mirror_post_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=next_attempt,
+            )
+
+        timer = threading.Timer(max(0.0, retry_delay_ms / 1000.0), submit_retry)
+        timer.daemon = True
+        timer.start()
+
+    def _record_opblock_shadow_mirror_failure(
+        self,
+        description: str,
+        *,
+        operation_uuid: str | None,
+        context: dict[str, Any],
+        attempt: int,
+        duration_ms: float,
+        exc: Exception,
+        schedule_retry: bool,
+    ) -> None:
+        fields = self._opblock_shadow_mirror_metric_fields(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+            duration_ms=duration_ms,
+            exc=exc,
+        )
+        record_metric("opblock_shadow_mirror_failed", duration_ms, **fields)
+        record_metric("opblock_shadow_mirror_post_commit_failed", duration_ms, **fields)
+        record_metric("opblock_shadow_mirror_failure_did_not_fail_network_write", 1, **fields)
+        logger.warning("Operblock local shadow mirror failed after %s: %s", description, exc, exc_info=True)
+        if schedule_retry:
+            if int(attempt or 1) >= OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS:
+                record_metric("opblock_shadow_mirror_retry_exhausted", 1, force_flush=True, **fields)
+            else:
+                self._schedule_opblock_shadow_mirror_retry(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=context,
+                    failed_attempt=attempt,
+                    exc=exc,
+                )
 
     def _run_opblock_shadow_mirror_after_commit(
         self,
@@ -410,22 +636,36 @@ class DataService(QObject):
         *,
         operation_uuid: str | None = None,
         context: dict[str, Any] | None = None,
+        attempt: int = 1,
     ) -> None:
         started = time.perf_counter()
+        attempt = max(1, int(attempt or 1))
         context = dict(context or _operblock_description_context(description))
         with self._opblock_shadow_mirror_lock:
             self._opblock_shadow_mirror_active = {
                 "source": str(description or ""),
                 "reason": str(description or ""),
                 "started_monotonic": started,
+                "attempt": attempt,
                 **context,
             }
+        start_fields = self._opblock_shadow_mirror_metric_fields(
+            description,
+            operation_uuid=operation_uuid,
+            context=context,
+            attempt=attempt,
+        )
         record_metric(
             "opblock_shadow_mirror_started",
             1,
-            source=str(description or ""),
             reason=str(description or ""),
-            **context,
+            **start_fields,
+        )
+        record_metric(
+            "opblock_shadow_mirror_post_commit_started",
+            1,
+            reason=str(description or ""),
+            **start_fields,
         )
         try:
             from rem_card.app.operblock_offline_store import (
@@ -440,25 +680,44 @@ class DataService(QObject):
                     operation_uuid=operation_uuid,
                     description=str(description or ""),
                 )
+            duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            success_fields = self._opblock_shadow_mirror_metric_fields(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+                duration_ms=duration_ms,
+            )
             record_metric(
                 "opblock_shadow_mirror_finished",
-                round((time.perf_counter() - started) * 1000.0, 3),
-                source=str(description or ""),
-                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                duration_ms,
                 result="success",
-                **context,
+                **success_fields,
             )
-        except Exception as exc:
             record_metric(
-                "opblock_shadow_mirror_failed",
-                round((time.perf_counter() - started) * 1000.0, 3),
-                source=str(description or ""),
-                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
-                error_class=type(exc).__name__,
-                error_message_sanitized=_sanitize_diagnostic_message(exc),
-                **context,
+                "opblock_shadow_mirror_post_commit_succeeded",
+                duration_ms,
+                result="success",
+                **success_fields,
             )
-            logger.warning("Operblock local shadow mirror failed after %s: %s", description, exc, exc_info=True)
+            if attempt > 1:
+                record_metric(
+                    "opblock_shadow_mirror_retry_succeeded",
+                    duration_ms,
+                    result="success",
+                    **success_fields,
+                )
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
+            self._record_opblock_shadow_mirror_failure(
+                description,
+                operation_uuid=operation_uuid,
+                context=context,
+                attempt=attempt,
+                duration_ms=duration_ms,
+                exc=exc,
+                schedule_retry=True,
+            )
         finally:
             with self._opblock_shadow_mirror_lock:
                 self._opblock_shadow_mirror_active = None
@@ -506,16 +765,30 @@ class DataService(QObject):
                 return operation()
 
         def handle_success(result):
-            self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)
             if self._shutting_down:
                 logger.info("Queued write success callbacks skipped during shutdown for %s", description)
+                self._mirror_operblock_write_after_commit(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=_operblock_description_context(description, metadata),
+                )
                 return
             if self._network_outage_detected:
                 logger.info("Queued write success callbacks skipped after runtime outage for %s", description)
+                self._mirror_operblock_write_after_commit(
+                    description,
+                    operation_uuid=operation_uuid,
+                    context=_operblock_description_context(description, metadata),
+                )
                 return
             self.write_finished.emit(description)
             self.request_immediate_refresh(force_emit=True, source=description)
             self._success_callback_requested.emit(on_success, result)
+            self._mirror_operblock_write_after_commit(
+                description,
+                operation_uuid=operation_uuid,
+                context=_operblock_description_context(description, metadata),
+            )
 
         def handle_error(exc: Exception):
             logger.error("Queued write failed for %s: %s", description, exc)

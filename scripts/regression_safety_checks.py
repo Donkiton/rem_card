@@ -15611,6 +15611,14 @@ def _check_opblock_idle_metrics_events_exist(temp_root: str) -> tuple[bool, str]
         "opblock_shadow_mirror_started",
         "opblock_shadow_mirror_finished",
         "opblock_shadow_mirror_failed",
+        "opblock_shadow_mirror_post_commit_started",
+        "opblock_shadow_mirror_post_commit_succeeded",
+        "opblock_shadow_mirror_post_commit_failed",
+        "opblock_shadow_mirror_retry_scheduled",
+        "opblock_shadow_mirror_retry_succeeded",
+        "opblock_shadow_mirror_retry_exhausted",
+        "opblock_shadow_mirror_decoupled_from_write",
+        "opblock_shadow_mirror_failure_did_not_fail_network_write",
         "maintenance_overlap_observed",
         "ui_pending_state_observed",
     }
@@ -17011,8 +17019,504 @@ def _check_analyzer_understands_shadow_mirror_assignment_conflict(temp_root: str
     classifications = [incident.get("classification") for incident in (summary.get("incidents") or [])]
     if "shadow_mirror_unique_constraint_failed" not in classifications:
         return False, f"unique constraint classification missing: {summary}"
-    if "shadow_mirror_duplicate_assignment_resolved" not in classifications:
+    if "mirror_duplicate_resolved" not in classifications:
         return False, f"resolved duplicate classification missing: {summary}"
+    return True, "ok"
+
+
+class _Stage6OperblockRuntimeContext:
+    mode = "network"
+
+
+class _Stage6OperblockFakeDb:
+    def __init__(self):
+        self.runtime_context = _Stage6OperblockRuntimeContext()
+        self.db_path = os.path.abspath("stage6_network.db")
+        self.write_calls = 0
+
+    def run_write_operation(self, operation, source: str = ""):
+        self.write_calls += 1
+        return operation()
+
+    def fetch_all_remcard(self, query: str, params: tuple = ()):
+        return []
+
+    def get_data_version(self) -> int:
+        return 0
+
+    def get_latest_change_id(self, admission_id=None, include_global: bool = True) -> int:
+        return 0
+
+    def fetch_changes_since(self, last_change_id: int, admission_id=None, include_global: bool = True):
+        return []
+
+    def get_changed_entities_since(self, last_change_id: int, admission_id=None, include_global: bool = True):
+        return set()
+
+
+class _Stage6ImmediateQueue:
+    def __init__(self, events: list[tuple], *, auto_run_mirror: bool = False):
+        self.events = events
+        self.auto_run_mirror = bool(auto_run_mirror)
+        self.mirror_tasks: list[tuple] = []
+        self._active_count = 0
+        self._accepting = True
+
+    def submit(
+        self,
+        func,
+        description: str,
+        on_success=None,
+        on_error=None,
+        retryable: bool = True,
+        retries_left: int = 10,
+    ):
+        _ = retries_left
+        if not self._accepting:
+            raise RuntimeError("fake queue closed")
+        self.events.append(("queue_submit", str(description or ""), bool(retryable)))
+        if str(description or "").startswith("opblock_shadow_mirror"):
+            if not self.auto_run_mirror:
+                self.mirror_tasks.append((func, str(description or ""), bool(retryable)))
+                return
+            return self._run_task(func, description, on_success=on_success, on_error=on_error)
+        return self._run_task(func, description, on_success=on_success, on_error=on_error)
+
+    def _run_task(self, func, description: str, *, on_success=None, on_error=None):
+        self._active_count += 1
+        try:
+            result = func()
+        except Exception as exc:
+            if on_error:
+                on_error(exc)
+                return None
+            raise
+        finally:
+            self._active_count = max(0, self._active_count - 1)
+        if on_success:
+            on_success(result)
+        return result
+
+    def run_mirror_tasks(self):
+        while self.mirror_tasks:
+            func, description, _retryable = self.mirror_tasks.pop(0)
+            self._run_task(func, description)
+
+    def is_idle(self) -> bool:
+        return self._active_count <= 0 and not self.mirror_tasks
+
+    def pending_count(self) -> int:
+        return len(self.mirror_tasks)
+
+    def active_count(self) -> int:
+        return int(self._active_count)
+
+    def is_accepting(self) -> bool:
+        return bool(self._accepting)
+
+    def shutdown(self, timeout: float = 1.0) -> bool:
+        _ = timeout
+        self._accepting = False
+        return True
+
+
+def _make_stage6_data_service(events: list[tuple], *, auto_run_mirror: bool = False):
+    from rem_card.services.data_service import DataService
+
+    service = DataService(_Stage6OperblockFakeDb())
+    service.set_runtime_role("operblock")
+    service.stop_data_update_monitor(timeout=1.0)
+    service._queue.shutdown(timeout=1.0)
+    service._queue = _Stage6ImmediateQueue(events, auto_run_mirror=auto_run_mirror)
+    service._record_operblock_write_intent = lambda description: "stage6-operation-uuid"
+    service._mark_operblock_write_failed = lambda operation_uuid, description, exc: events.append(("mark_failed", str(exc)))
+    return service
+
+
+def _connect_stage6_data_service_events(service, events: list[tuple]) -> None:
+    from PySide6.QtCore import Qt
+
+    service.write_finished.connect(lambda description: events.append(("write_finished", str(description or ""))), Qt.DirectConnection)
+    service.write_failed.connect(lambda message: events.append(("write_failed", str(message or ""))), Qt.DirectConnection)
+    service._success_callback_requested.connect(
+        lambda callback, result: events.append(("success_signal", result)),
+        Qt.DirectConnection,
+    )
+    service._error_callback_requested.connect(
+        lambda callback, exc: events.append(("error_signal", type(exc).__name__, str(exc))),
+        Qt.DirectConnection,
+    )
+
+
+def _capture_stage6_data_service_metrics():
+    import rem_card.services.data_service as data_service_module
+
+    events: list[dict[str, Any]] = []
+    original_record_metric = data_service_module.record_metric
+
+    def fake_record_metric(name, value=None, **fields):
+        payload = {"metric": str(name), "value": value}
+        payload.update(fields)
+        events.append(payload)
+
+    data_service_module.record_metric = fake_record_metric
+    return data_service_module, events, original_record_metric
+
+
+def _restore_stage6_data_service_metrics(data_service_module, original_record_metric) -> None:
+    data_service_module.record_metric = original_record_metric
+
+
+def _patch_stage6_shadow_mirror(*, fail_count: int | None = None):
+    import rem_card.app.operblock_offline_store as store
+
+    attempts = {"count": 0}
+    original_mirror = store.mirror_active_operblock_cases_from_network_db
+    original_mark = store.mark_operblock_write_remote_committed
+
+    def fake_mirror(db_manager, reason: str = ""):
+        _ = db_manager, reason
+        attempts["count"] += 1
+        if fail_count is None or attempts["count"] <= int(fail_count):
+            raise RuntimeError(f"stage6 mirror failure {attempts['count']}")
+        return None
+
+    store.mirror_active_operblock_cases_from_network_db = fake_mirror
+    store.mark_operblock_write_remote_committed = lambda db_manager, **kwargs: None
+    return store, attempts, original_mirror, original_mark
+
+
+def _restore_stage6_shadow_mirror(store, original_mirror, original_mark) -> None:
+    store.mirror_active_operblock_cases_from_network_db = original_mirror
+    store.mark_operblock_write_remote_committed = original_mark
+
+
+def _check_shadow_mirror_failure_does_not_fail_committed_network_write(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    events: list[tuple] = []
+    service = _make_stage6_data_service(events, auto_run_mirror=False)
+    _connect_stage6_data_service_events(service, events)
+    metrics_module, metrics, original_metric = _capture_stage6_data_service_metrics()
+    store, _attempts, original_mirror, original_mark = _patch_stage6_shadow_mirror(fail_count=None)
+    try:
+        service._schedule_opblock_shadow_mirror_retry = lambda *args, **kwargs: events.append(("retry_scheduled",))
+        accepted = service.enqueue_write(
+            "operblock_update_operation_case_form_data:42",
+            lambda: events.append(("network_operation",)) or "committed",
+            on_success=lambda result: events.append(("ui_success", result)),
+            on_error=lambda exc: events.append(("ui_error", str(exc))),
+            write_metadata={"operation_case_id": 42, "table_code": "planned", "request_id": "stage6-request"},
+        )
+        if not accepted or ("network_operation",) not in events:
+            return False, f"network write was not accepted/committed: accepted={accepted}, events={events}"
+        queue = service._queue
+        if not queue.mirror_tasks:
+            return False, f"post-commit mirror task was not queued: {events}"
+        queue.run_mirror_tasks()
+        if any(event[0] in {"write_failed", "error_signal", "ui_error", "mark_failed"} for event in events):
+            return False, f"mirror failure leaked into write failure path: {events}"
+        if service.is_network_outage_detected():
+            return False, "mirror failure triggered runtime outage"
+        metric_names = {event.get("metric") for event in metrics}
+        required = {
+            "opblock_shadow_mirror_post_commit_failed",
+            "opblock_shadow_mirror_failure_did_not_fail_network_write",
+        }
+        missing = sorted(required - metric_names)
+        if missing:
+            return False, f"mirror failure metrics missing: {missing}; metrics={metrics}"
+        return True, "ok"
+    finally:
+        _restore_stage6_shadow_mirror(store, original_mirror, original_mark)
+        _restore_stage6_data_service_metrics(metrics_module, original_metric)
+        service.shutdown()
+
+
+def _check_shadow_mirror_runs_after_network_commit(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    events: list[tuple] = []
+    service = _make_stage6_data_service(events, auto_run_mirror=False)
+    _connect_stage6_data_service_events(service, events)
+    metrics_module, _metrics, original_metric = _capture_stage6_data_service_metrics()
+    try:
+        service.enqueue_write(
+            "operblock_update_operation_case_form_data:7",
+            lambda: events.append(("network_operation",)) or "committed",
+            on_success=lambda result: events.append(("ui_success", result)),
+            write_metadata={"operation_case_id": 7, "table_code": "emergency", "request_id": "stage6-order"},
+        )
+        names = [event[0] for event in events]
+        if "network_operation" not in names or "success_signal" not in names:
+            return False, f"network/success events missing: {events}"
+        mirror_submit_index = next(
+            (idx for idx, event in enumerate(events) if event[0] == "queue_submit" and event[1] == "opblock_shadow_mirror_post_commit"),
+            -1,
+        )
+        if mirror_submit_index < 0:
+            return False, f"mirror task was not queued: {events}"
+        if names.index("network_operation") > mirror_submit_index:
+            return False, f"mirror was queued before network operation completed: {events}"
+        if names.index("success_signal") > mirror_submit_index:
+            return False, f"user-visible success was not posted before mirror task: {events}"
+        return True, "ok"
+    finally:
+        _restore_stage6_data_service_metrics(metrics_module, original_metric)
+        service.shutdown()
+
+
+def _check_shadow_mirror_failure_does_not_trigger_recovery(temp_root: str) -> tuple[bool, str]:
+    ok, details = _check_shadow_mirror_failure_does_not_fail_committed_network_write(temp_root)
+    if not ok:
+        return ok, details
+    data_service_source = (PROJECT_ROOT / "services" / "data_service.py").read_text(encoding="utf-8")
+    failure_idx = data_service_source.find("def _record_opblock_shadow_mirror_failure(")
+    enqueue_idx = data_service_source.find("def enqueue_write(", failure_idx)
+    failure_source = data_service_source[failure_idx:enqueue_idx]
+    if "_handle_database_access_failure" in failure_source or "write_failed.emit" in failure_source or "_error_callback_requested.emit" in failure_source:
+        return False, "shadow mirror failure path is wired to recovery/write error callback"
+    return True, "ok"
+
+
+def _check_shadow_mirror_retry_is_bounded(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    events: list[tuple] = []
+    service = _make_stage6_data_service(events, auto_run_mirror=True)
+    metrics_module, metrics, original_metric = _capture_stage6_data_service_metrics()
+    store, attempts, original_mirror, original_mark = _patch_stage6_shadow_mirror(fail_count=None)
+    original_timer = metrics_module.threading.Timer
+    original_delays = metrics_module.OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS
+
+    class ImmediateTimer:
+        def __init__(self, delay, callback):
+            self.delay = delay
+            self.callback = callback
+            self.daemon = False
+
+        def start(self):
+            events.append(("timer", self.delay))
+            self.callback()
+
+    try:
+        metrics_module.threading.Timer = ImmediateTimer
+        metrics_module.OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = (1, 1)
+        service._mirror_operblock_write_after_commit(
+            "operblock_update_operation_case_form_data:9",
+            operation_uuid="stage6-bounded",
+            context={"operation_case_id": 9, "admission_id": None, "table_code": "planned", "request_id": "stage6-bounded"},
+        )
+        if attempts["count"] != 3:
+            return False, f"mirror retry attempts must be bounded at 3, got {attempts['count']}; events={events}"
+        metric_names = [event.get("metric") for event in metrics]
+        if metric_names.count("opblock_shadow_mirror_retry_scheduled") != 2:
+            return False, f"expected exactly two scheduled retries: {metrics}"
+        if "opblock_shadow_mirror_retry_exhausted" not in metric_names:
+            return False, f"retry exhausted metric missing: {metrics}"
+        if any(event[0] == "queue_submit" and event[1] != "opblock_shadow_mirror_post_commit" and event[1] != "opblock_shadow_mirror_retry" for event in events):
+            return False, f"unexpected queue task during mirror retry: {events}"
+        return True, "ok"
+    finally:
+        metrics_module.threading.Timer = original_timer
+        metrics_module.OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = original_delays
+        _restore_stage6_shadow_mirror(store, original_mirror, original_mark)
+        _restore_stage6_data_service_metrics(metrics_module, original_metric)
+        service.shutdown()
+
+
+def _check_shadow_mirror_success_after_retry(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    events: list[tuple] = []
+    service = _make_stage6_data_service(events, auto_run_mirror=True)
+    metrics_module, metrics, original_metric = _capture_stage6_data_service_metrics()
+    store, attempts, original_mirror, original_mark = _patch_stage6_shadow_mirror(fail_count=1)
+    original_timer = metrics_module.threading.Timer
+    original_delays = metrics_module.OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS
+
+    class ImmediateTimer:
+        def __init__(self, delay, callback):
+            self.delay = delay
+            self.callback = callback
+            self.daemon = False
+
+        def start(self):
+            events.append(("timer", self.delay))
+            self.callback()
+
+    try:
+        metrics_module.threading.Timer = ImmediateTimer
+        metrics_module.OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = (1, 1)
+        service._mirror_operblock_write_after_commit(
+            "operblock_update_operation_case_form_data:10",
+            operation_uuid="stage6-retry-success",
+            context={"operation_case_id": 10, "admission_id": None, "table_code": "emergency", "request_id": "stage6-retry-success"},
+        )
+        if attempts["count"] != 2:
+            return False, f"mirror should succeed on second attempt, attempts={attempts['count']}; events={events}"
+        metric_names = {event.get("metric") for event in metrics}
+        if "opblock_shadow_mirror_retry_succeeded" not in metric_names:
+            return False, f"retry success metric missing: {metrics}"
+        if "opblock_shadow_mirror_retry_exhausted" in metric_names:
+            return False, f"retry exhausted after successful retry: {metrics}"
+        return True, "ok"
+    finally:
+        metrics_module.threading.Timer = original_timer
+        metrics_module.OPBLOCK_SHADOW_MIRROR_RETRY_DELAYS_MS = original_delays
+        _restore_stage6_shadow_mirror(store, original_mirror, original_mark)
+        _restore_stage6_data_service_metrics(metrics_module, original_metric)
+        service.shutdown()
+
+
+def _check_user_pending_cleared_after_network_commit_even_if_mirror_failed(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    events: list[tuple] = []
+    service = _make_stage6_data_service(events, auto_run_mirror=False)
+    _connect_stage6_data_service_events(service, events)
+    metrics_module, _metrics, original_metric = _capture_stage6_data_service_metrics()
+    store, _attempts, original_mirror, original_mark = _patch_stage6_shadow_mirror(fail_count=None)
+    try:
+        service._schedule_opblock_shadow_mirror_retry = lambda *args, **kwargs: None
+        service.enqueue_write(
+            "operblock_release_operation_table:11",
+            lambda: events.append(("network_operation",)) or "committed",
+            on_success=lambda result: events.append(("ui_success", result)),
+            on_error=lambda exc: events.append(("ui_error", str(exc))),
+            write_metadata={"operation_case_id": 11, "table_code": "planned", "request_id": "stage6-pending"},
+        )
+        names = [event[0] for event in events]
+        if "success_signal" not in names:
+            return False, f"success signal was not posted after network commit: {events}"
+        queue = service._queue
+        queue.run_mirror_tasks()
+        if any(event[0] in {"error_signal", "ui_error", "write_failed"} for event in events):
+            return False, f"mirror failure changed user-visible pending/error state: {events}"
+        mirror_submit_index = next(
+            (idx for idx, event in enumerate(events) if event[0] == "queue_submit" and event[1] == "opblock_shadow_mirror_post_commit"),
+            -1,
+        )
+        if names.index("success_signal") > mirror_submit_index:
+            return False, f"success was not posted before mirror task: {events}"
+        return True, "ok"
+    finally:
+        _restore_stage6_shadow_mirror(store, original_mirror, original_mark)
+        _restore_stage6_data_service_metrics(metrics_module, original_metric)
+        service.shutdown()
+
+
+def _check_stage5_idempotency_still_holds(temp_root: str) -> tuple[bool, str]:
+    checks = (
+        _check_opblock_shadow_mirror_duplicate_table_code_idempotent,
+        _check_opblock_shadow_mirror_table_code_reassignment_updates_row,
+        _check_opblock_shadow_mirror_repeat_run_is_noop,
+    )
+    for check in checks:
+        ok, details = check(temp_root)
+        if not ok:
+            return False, f"{check.__name__}: {details}"
+    return True, "ok"
+
+
+def _check_stage6_shadow_mirror_safety_invariants(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    data_service_source = (PROJECT_ROOT / "services" / "data_service.py").read_text(encoding="utf-8")
+    required = {
+        "opblock_shadow_mirror_post_commit_started",
+        "opblock_shadow_mirror_post_commit_succeeded",
+        "opblock_shadow_mirror_post_commit_failed",
+        "opblock_shadow_mirror_retry_scheduled",
+        "opblock_shadow_mirror_retry_succeeded",
+        "opblock_shadow_mirror_retry_exhausted",
+        "opblock_shadow_mirror_decoupled_from_write",
+        "opblock_shadow_mirror_failure_did_not_fail_network_write",
+        "retryable=False",
+        "OPBLOCK_SHADOW_MIRROR_MAX_ATTEMPTS = 3",
+    }
+    missing = sorted(token for token in required if token not in data_service_source)
+    if missing:
+        return False, f"Stage 6 safety token(s) missing: {missing}"
+    if "local-first" in data_service_source.lower() or "outbox" in data_service_source.lower() or "command_queue" in data_service_source.lower():
+        return False, "Stage 6 must not introduce persistent local-first/outbox/command queue wording into DataService"
+    ok, details = _check_opblock_stage1_no_sqlite_profile_changes(temp_root)
+    if not ok:
+        return ok, details
+    return True, "ok"
+
+
+def _check_analyzer_understands_shadow_mirror_post_commit_retry(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "opblock_stage6_shadow_logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260627.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-27T09:00:00+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 520000,
+            "first_action": "operblock_update_operation_case_form_data",
+        },
+        {
+            "ts": "2026-06-27T09:00:01+10:00",
+            "metric": "opblock_shadow_mirror_post_commit_failed",
+            "operation_name": "operblock_update_operation_case_form_data:31",
+            "operation_case_id": 31,
+            "table_code": "planned",
+            "attempt": 1,
+            "error_class": "OperationalError",
+            "error_message_sanitized": "database is locked",
+        },
+        {
+            "ts": "2026-06-27T09:05:00+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 530000,
+            "first_action": "operblock_release_operation_table",
+        },
+        {
+            "ts": "2026-06-27T09:05:01+10:00",
+            "metric": "opblock_shadow_mirror_retry_exhausted",
+            "operation_name": "operblock_release_operation_table:32",
+            "operation_case_id": 32,
+            "table_code": "emergency",
+            "attempt": 3,
+            "error_class": "OperationalError",
+            "error_message_sanitized": "database is locked",
+        },
+        {
+            "ts": "2026-06-27T09:10:00+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 540000,
+            "first_action": "operblock_update_operation_case_form_data",
+        },
+        {
+            "ts": "2026-06-27T09:10:01+10:00",
+            "metric": "opblock_action_finished",
+            "action": "operblock_update_operation_case_form_data",
+            "result": "error",
+            "error_class": "OperationalError",
+            "error_message_sanitized": "unable to open database file",
+        },
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"),
+            "--logs",
+            str(logs_dir),
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"Stage 6 analyzer failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    classifications = [incident.get("classification") for incident in (summary.get("incidents") or [])]
+    required = {"mirror_failed_after_commit", "mirror_retry_exhausted", "network_write_failed"}
+    missing = sorted(required - set(classifications))
+    if missing:
+        return False, f"Stage 6 analyzer classifications missing {missing}: {summary}"
     return True, "ok"
 
 
@@ -24957,13 +25461,12 @@ def _check_operblock_precommit_shadow_journal_contract(temp_root: str) -> tuple[
     if enqueue_idx < 0 or intent_idx < 0 or submit_idx < 0 or not intent_idx < submit_idx:
         return False, "enqueue_write must record durable opblock intent before queue submit"
     success_idx = data_service_source.find("def handle_success(result):", enqueue_idx)
-    mirror_idx = data_service_source.find(
-        "self._mirror_operblock_write_after_commit(description, operation_uuid=operation_uuid)",
-        success_idx,
-    )
-    shutdown_idx = data_service_source.find("if self._shutting_down:", success_idx)
-    if success_idx < 0 or mirror_idx < 0 or shutdown_idx < 0 or not mirror_idx < shutdown_idx:
-        return False, "queued committed writes must mirror before shutdown/outage success callbacks are skipped"
+    success_emit_idx = data_service_source.find("self._success_callback_requested.emit(on_success, result)", success_idx)
+    mirror_idx = data_service_source.find("self._mirror_operblock_write_after_commit(", success_emit_idx)
+    if success_idx < 0 or success_emit_idx < 0 or mirror_idx < 0 or not success_emit_idx < mirror_idx:
+        return False, "queued committed writes must post user success before post-commit shadow mirror scheduling"
+    if "opblock_shadow_mirror_decoupled_from_write" not in data_service_source:
+        return False, "post-commit shadow mirror decoupling metric is missing"
     if "raise RuntimeError(\"Не удалось сохранить локальный журнал записи оперблока.\")" not in data_service_source:
         return False, "opblock network write must not continue after pre-commit journal failure"
     return True, "ok"
@@ -25334,6 +25837,24 @@ def main(argv: list[str] | None = None):
         ("stage5_does_not_change_sqlite_profile", _check_stage5_does_not_change_sqlite_profile),
         ("stage5_does_not_enable_recovery_on_locked_busy", _check_stage5_does_not_enable_recovery_on_locked_busy),
         ("analyzer_understands_shadow_mirror_assignment_conflict", _check_analyzer_understands_shadow_mirror_assignment_conflict),
+        (
+            "shadow_mirror_failure_does_not_fail_committed_network_write",
+            _check_shadow_mirror_failure_does_not_fail_committed_network_write,
+        ),
+        ("shadow_mirror_runs_after_network_commit", _check_shadow_mirror_runs_after_network_commit),
+        ("shadow_mirror_failure_does_not_trigger_recovery", _check_shadow_mirror_failure_does_not_trigger_recovery),
+        ("shadow_mirror_retry_is_bounded", _check_shadow_mirror_retry_is_bounded),
+        ("shadow_mirror_success_after_retry", _check_shadow_mirror_success_after_retry),
+        (
+            "user_pending_cleared_after_network_commit_even_if_mirror_failed",
+            _check_user_pending_cleared_after_network_commit_even_if_mirror_failed,
+        ),
+        ("stage5_idempotency_still_holds", _check_stage5_idempotency_still_holds),
+        ("stage6_shadow_mirror_safety_invariants", _check_stage6_shadow_mirror_safety_invariants),
+        (
+            "analyzer_understands_shadow_mirror_post_commit_retry",
+            _check_analyzer_understands_shadow_mirror_post_commit_retry,
+        ),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),
