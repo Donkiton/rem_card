@@ -23,6 +23,10 @@ OPBLOCK_EVENTS = {
     "sqlite_write_lock_acquired",
     "sqlite_write_lock_released",
     "sqlite_write_lock_stale_observed",
+    "sqlite_write_lock_local_dead_pid_detected",
+    "sqlite_write_lock_stale_removed",
+    "sqlite_write_lock_stale_cleanup_skipped",
+    "sqlite_write_lock_stale_cleanup_failed",
     "opblock_shadow_mirror_started",
     "opblock_shadow_mirror_finished",
     "opblock_shadow_mirror_failed",
@@ -158,6 +162,20 @@ def _first(events: list[Event], *kinds: str) -> Event | None:
 
 
 def _classify(related: list[Event]) -> str:
+    if _first(related, "sqlite_write_lock_stale_removed"):
+        return "local_dead_pid_lock_removed"
+    if _first(related, "sqlite_write_lock_stale_cleanup_failed"):
+        return "local_dead_pid_cleanup_failed"
+    skipped = _first(related, "sqlite_write_lock_stale_cleanup_skipped")
+    if skipped:
+        reason = str(skipped.fields.get("reason") or "")
+        if reason == "other_host":
+            return "other_host_lock_wait"
+        if reason == "pid_alive":
+            return "live_pid_lock_wait"
+        if reason in {"unreadable", "parse_error", "permission_denied"}:
+            return "unreadable_lock_wait"
+        return "local_dead_pid_cleanup_skipped"
     timeout = _first(related, "sqlite_write_lock_timeout")
     finished = _first(related, "opblock_action_finished")
     if timeout:
@@ -188,6 +206,40 @@ def _classify(related: list[Event]) -> str:
     if _first(related, "event_loop_pause_ms"):
         return "unknown_ui_pause"
     return "unknown"
+
+
+def _cleanup_payload(related: list[Event], lock_event: Event | None) -> dict[str, Any]:
+    removed = _first(related, "sqlite_write_lock_stale_removed")
+    skipped = _first(related, "sqlite_write_lock_stale_cleanup_skipped")
+    failed = _first(related, "sqlite_write_lock_stale_cleanup_failed")
+    detected = _first(related, "sqlite_write_lock_local_dead_pid_detected")
+    cleanup_event = removed or failed or skipped or detected
+    cleanup = ""
+    reason = ""
+    pid_status = ""
+    if removed:
+        cleanup = "removed"
+        reason = str(removed.fields.get("reason") or "")
+        pid_status = "dead"
+    elif failed:
+        cleanup = "failed"
+        reason = str(failed.fields.get("reason") or "")
+    elif skipped:
+        cleanup = "skipped"
+        reason = str(skipped.fields.get("reason") or "")
+        pid_status = "live" if reason == "pid_alive" else ("unknown" if reason == "pid_unknown" else "")
+    elif detected:
+        cleanup = "detected"
+        pid_status = "dead"
+    return {
+        "lock_path": (cleanup_event.fields.get("lock_path") if cleanup_event else (lock_event.fields.get("lock_path") if lock_event else "")),
+        "cleanup": cleanup,
+        "cleanup_reason": reason,
+        "cleanup_pid_status": pid_status,
+        "cleanup_holder_pid": (cleanup_event.fields.get("holder_pid") if cleanup_event else None),
+        "cleanup_holder_host": (cleanup_event.fields.get("holder_host") if cleanup_event else ""),
+        "cleanup_holder_source": (cleanup_event.fields.get("holder_source") if cleanup_event else ""),
+    }
 
 
 def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
@@ -222,6 +274,7 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
         "lock_holder_pid": (lock_event.fields.get("lock_holder_pid") if lock_event else None),
         "lock_holder_host": (lock_event.fields.get("lock_holder_host") if lock_event else ""),
         "lock_holder_source": (lock_event.fields.get("lock_holder_source") if lock_event else ""),
+        **_cleanup_payload(related, lock_event),
         "ui_pause_ms": (ui_pause.value if ui_pause else None),
         "ui_result": (finished.fields.get("result") if finished else ("controlled busy" if pending_cleared else "")),
         "pending_cleared_after_busy_timeout": bool(pending_cleared),
@@ -269,10 +322,24 @@ def _print_text(incidents: list[dict[str, Any]]) -> None:
         print(f"SQLite lock wait: {_format_ms(incident.get('wait_ms')) if incident.get('wait_ms') is not None else 'none'}")
         print(
             "Lock holder: "
-            f"pid={incident.get('lock_holder_pid') or '?'} "
-            f"host={incident.get('lock_holder_host') or '?'} "
-            f"source={incident.get('lock_holder_source') or '?'}"
+            f"pid={incident.get('cleanup_holder_pid') or incident.get('lock_holder_pid') or '?'} "
+            f"host={incident.get('cleanup_holder_host') or incident.get('lock_holder_host') or '?'} "
+            f"source={incident.get('cleanup_holder_source') or incident.get('lock_holder_source') or '?'}"
         )
+        if incident.get("lock_path"):
+            print(f"Lock file: {incident.get('lock_path')}")
+        if incident.get("cleanup"):
+            cleanup = incident.get("cleanup")
+            reason = incident.get("cleanup_reason") or "unknown"
+            pid_status = incident.get("cleanup_pid_status") or "unknown"
+            print(f"PID status: {pid_status}")
+            if cleanup == "removed":
+                print("Cleanup: removed local dead-PID lock")
+                print("Result: write/startup continued")
+            elif cleanup == "skipped":
+                print(f"Cleanup: skipped, reason={reason}")
+            elif cleanup == "failed":
+                print(f"Cleanup: failed, reason={reason}")
         print(f"UI pause: {_format_ms(incident.get('ui_pause_ms')) if incident.get('ui_pause_ms') is not None else 'none'}")
         print(f"UI result: {incident.get('ui_result') or 'unknown'}")
         print(f"Maintenance overlap: {'yes' if incident.get('maintenance_overlap') else 'none'}")
@@ -282,7 +349,13 @@ def _print_text(incidents: list[dict[str, Any]]) -> None:
             print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
         print(f"Maintenance resumed: {', '.join(resumed) if resumed else 'none'}")
         conclusion = incident.get("classification")
-        if conclusion in {"file_lock_timeout", "begin_immediate_timeout", "opblock_busy_timeout", "sqlite_write_lock_timeout"}:
+        if conclusion == "local_dead_pid_lock_removed":
+            conclusion = "stale local db.lock cleaned safely"
+        elif conclusion in {"other_host_lock_wait", "live_pid_lock_wait", "unreadable_lock_wait"}:
+            conclusion = "remote/unknown lock was not removed"
+        elif conclusion == "local_dead_pid_cleanup_failed":
+            conclusion = "local dead-PID cleanup failed; lock was not removed"
+        elif conclusion in {"file_lock_timeout", "begin_immediate_timeout", "opblock_busy_timeout", "sqlite_write_lock_timeout"}:
             conclusion = "interactive opblock write timed out instead of hanging"
         print(f"Conclusion: {conclusion}")
         print()

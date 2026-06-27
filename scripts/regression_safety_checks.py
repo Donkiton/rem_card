@@ -16321,6 +16321,377 @@ def _check_analyzer_understands_opblock_busy_timeout(temp_root: str) -> tuple[bo
     return True, "ok"
 
 
+def _check_file_write_lock_local_dead_pid_cleanup_constant_or_helper_exists(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.sqlite_shared import is_local_pid_alive
+
+    source = (PROJECT_ROOT / "app/sqlite_shared.py").read_text(encoding="utf-8")
+    required = (
+        "def is_local_pid_alive",
+        "_read_lock_snapshot",
+        "_same_lock_snapshot",
+        "sqlite_write_lock_local_dead_pid_detected",
+        "sqlite_write_lock_stale_removed",
+        "sqlite_write_lock_stale_cleanup_skipped",
+        "sqlite_write_lock_stale_cleanup_failed",
+        "changed_during_cleanup_check",
+        "age-only cleanup is disabled",
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        return False, f"Stage 4 local dead-PID cleanup helper/logic missing: {missing}"
+    if is_local_pid_alive(os.getpid()) is not True:
+        return False, "is_local_pid_alive must report current PID as alive"
+    return True, "ok"
+
+
+def _write_stage4_file_lock(lock_path: Path, *, pid: int, host: str, source: str = "operblock_undo_last_action") -> str:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": time.time(),
+        "pid": int(pid),
+        "host": host,
+        "user_id": "stage4-holder",
+        "source": source,
+        "thread_id": 101,
+    }
+    raw = json.dumps(payload, ensure_ascii=True)
+    lock_path.write_text(raw, encoding="utf-8")
+    return raw
+
+
+def _capture_sqlite_shared_metrics():
+    import rem_card.app.sqlite_shared as sqlite_shared
+
+    events: list[dict[str, Any]] = []
+    original_record_metric = sqlite_shared.record_metric
+
+    def fake_record_metric(name, value=None, **fields):
+        payload = {"metric": str(name), "value": value}
+        payload.update(fields)
+        events.append(payload)
+
+    sqlite_shared.record_metric = fake_record_metric
+    return sqlite_shared, events, original_record_metric
+
+
+def _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric) -> None:
+    sqlite_shared.record_metric = original_record_metric
+
+
+def _metric_reasons(events: list[dict[str, Any]], metric: str) -> list[str]:
+    return [str(event.get("reason") or "") for event in events if event.get("metric") == metric]
+
+
+def _check_file_write_lock_same_host_dead_pid_removed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = Path(temp_root, "stage4_dead_pid", "db.lock")
+    current_host = socket.gethostname()
+    dead_pid = 99999999
+    _write_stage4_file_lock(lock_path, pid=dead_pid, host=current_host)
+    sqlite_shared, events, original_record_metric = _capture_sqlite_shared_metrics()
+    original_pid_checker = sqlite_shared.is_local_pid_alive
+    try:
+        if original_pid_checker(dead_pid) is not False:
+            sqlite_shared.is_local_pid_alive = lambda pid: False
+        lock = FileWriteLock(str(lock_path), stale_timeout_sec=3600.0)
+        acquired = lock.acquire(
+            owner_id="stage4-waiter",
+            source="operblock_undo_last_action",
+            metric_context={"request_id": "stage4-request", "role": "operblock"},
+        )
+        if not acquired:
+            return False, "same-host dead-PID lock was not cleaned and acquired"
+        try:
+            payload = json.loads(lock_path.read_text(encoding="utf-8"))
+            if payload.get("user_id") != "stage4-waiter":
+                return False, f"lock was not reacquired by waiter after cleanup: {payload}"
+            removed = [event for event in events if event.get("metric") == "sqlite_write_lock_stale_removed"]
+            if not removed or removed[-1].get("reason") != "local_dead_pid":
+                return False, f"stale_removed local_dead_pid metric missing: {events}"
+            detected = [event for event in events if event.get("metric") == "sqlite_write_lock_local_dead_pid_detected"]
+            if not detected:
+                return False, f"local dead PID detection metric missing: {events}"
+            if removed[-1].get("request_id") != "stage4-request" or removed[-1].get("role") != "operblock":
+                return False, f"cleanup metric lost opblock context: {removed[-1]}"
+            return True, "ok"
+        finally:
+            lock.release()
+    finally:
+        sqlite_shared.is_local_pid_alive = original_pid_checker
+        _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _check_file_write_lock_same_host_live_pid_not_removed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = Path(temp_root, "stage4_live_pid", "db.lock")
+    raw = _write_stage4_file_lock(lock_path, pid=os.getpid(), host=socket.gethostname())
+    sqlite_shared, events, original_record_metric = _capture_sqlite_shared_metrics()
+    try:
+        lock = FileWriteLock(str(lock_path), stale_timeout_sec=3600.0)
+        if lock.acquire(owner_id="stage4-waiter", source="operblock_undo_last_action"):
+            lock.release()
+            return False, "same-host live PID lock was incorrectly removed"
+        if lock_path.read_text(encoding="utf-8") != raw:
+            return False, "same-host live PID lock changed or was removed"
+        if "pid_alive" not in _metric_reasons(events, "sqlite_write_lock_stale_cleanup_skipped"):
+            return False, f"pid_alive skip metric missing: {events}"
+        return True, "ok"
+    finally:
+        _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _check_file_write_lock_other_host_not_removed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = Path(temp_root, "stage4_other_host", "db.lock")
+    other_host = f"{socket.gethostname()}-other"
+    raw = _write_stage4_file_lock(lock_path, pid=99999999, host=other_host)
+    sqlite_shared, events, original_record_metric = _capture_sqlite_shared_metrics()
+    original_pid_checker = sqlite_shared.is_local_pid_alive
+    try:
+        sqlite_shared.is_local_pid_alive = lambda pid: False
+        lock = FileWriteLock(str(lock_path), stale_timeout_sec=3600.0)
+        if lock.acquire(owner_id="stage4-waiter", source="operblock_undo_last_action"):
+            lock.release()
+            return False, "other-host lock was incorrectly removed"
+        if lock_path.read_text(encoding="utf-8") != raw:
+            return False, "other-host lock changed or was removed"
+        if "other_host" not in _metric_reasons(events, "sqlite_write_lock_stale_cleanup_skipped"):
+            return False, f"other_host skip metric missing: {events}"
+        return True, "ok"
+    finally:
+        sqlite_shared.is_local_pid_alive = original_pid_checker
+        _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _check_file_write_lock_unknown_pid_not_removed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = Path(temp_root, "stage4_unknown_pid", "db.lock")
+    raw = _write_stage4_file_lock(lock_path, pid=99999999, host=socket.gethostname())
+    sqlite_shared, events, original_record_metric = _capture_sqlite_shared_metrics()
+    original_pid_checker = sqlite_shared.is_local_pid_alive
+    try:
+        sqlite_shared.is_local_pid_alive = lambda pid: None
+        lock = FileWriteLock(str(lock_path), stale_timeout_sec=3600.0)
+        if lock.acquire(owner_id="stage4-waiter", source="operblock_undo_last_action"):
+            lock.release()
+            return False, "unknown PID lock was incorrectly removed"
+        if lock_path.read_text(encoding="utf-8") != raw:
+            return False, "unknown PID lock changed or was removed"
+        if "pid_unknown" not in _metric_reasons(events, "sqlite_write_lock_stale_cleanup_skipped"):
+            return False, f"pid_unknown skip metric missing: {events}"
+        return True, "ok"
+    finally:
+        sqlite_shared.is_local_pid_alive = original_pid_checker
+        _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _check_file_write_lock_unreadable_or_parse_error_not_removed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = Path(temp_root, "stage4_parse_error", "db.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = "{not-json"
+    lock_path.write_text(raw, encoding="utf-8")
+    sqlite_shared, events, original_record_metric = _capture_sqlite_shared_metrics()
+    try:
+        lock = FileWriteLock(str(lock_path), stale_timeout_sec=0.0)
+        if lock.acquire(owner_id="stage4-waiter", source="operblock_undo_last_action"):
+            lock.release()
+            return False, "parse-error lock was incorrectly removed"
+        if lock_path.read_text(encoding="utf-8") != raw:
+            return False, "parse-error lock changed or was removed"
+        if "parse_error" not in _metric_reasons(events, "sqlite_write_lock_stale_cleanup_skipped"):
+            return False, f"parse_error skip metric missing: {events}"
+        return True, "ok"
+    finally:
+        _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _check_file_write_lock_changed_during_cleanup_not_removed(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import FileWriteLock
+
+    lock_path = Path(temp_root, "stage4_changed", "db.lock")
+    _write_stage4_file_lock(lock_path, pid=99999999, host=socket.gethostname(), source="old_holder")
+    changed_raw = ""
+
+    class MutatingFileWriteLock(FileWriteLock):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.snapshot_reads = 0
+
+        def _read_lock_snapshot(self):
+            nonlocal changed_raw
+            snapshot = super()._read_lock_snapshot()
+            self.snapshot_reads += 1
+            if self.snapshot_reads == 1:
+                changed_raw = _write_stage4_file_lock(
+                    lock_path,
+                    pid=99999999,
+                    host=socket.gethostname(),
+                    source="new_holder",
+                )
+            return snapshot
+
+    sqlite_shared, events, original_record_metric = _capture_sqlite_shared_metrics()
+    original_pid_checker = sqlite_shared.is_local_pid_alive
+    try:
+        sqlite_shared.is_local_pid_alive = lambda pid: False
+        lock = MutatingFileWriteLock(str(lock_path), stale_timeout_sec=3600.0)
+        if lock.acquire(owner_id="stage4-waiter", source="operblock_undo_last_action"):
+            lock.release()
+            return False, "changed lock was incorrectly removed"
+        if lock_path.read_text(encoding="utf-8") != changed_raw:
+            return False, "changed lock content was not preserved"
+        if "changed_during_cleanup_check" not in _metric_reasons(events, "sqlite_write_lock_stale_cleanup_skipped"):
+            return False, f"changed_during_cleanup_check skip metric missing: {events}"
+        return True, "ok"
+    finally:
+        sqlite_shared.is_local_pid_alive = original_pid_checker
+        _restore_sqlite_shared_metrics(sqlite_shared, original_record_metric)
+        try:
+            lock_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _check_stage4_does_not_enable_recovery_on_locked_busy(temp_root: str) -> tuple[bool, str]:
+    ok, details = _check_busy_timeout_does_not_trigger_recovery(temp_root)
+    if not ok:
+        return ok, details
+    source = (PROJECT_ROOT / "app/sqlite_shared.py").read_text(encoding="utf-8")
+    cleanup_start = source.find("def _cleanup_local_dead_pid_lock")
+    cleanup_end = source.find("def _is_stale", cleanup_start)
+    cleanup_source = source[cleanup_start:cleanup_end]
+    forbidden = ("recover_shared_db", "restore_from_best_available_source", "quarantine_corrupted_db_file")
+    present = [token for token in forbidden if token in cleanup_source]
+    if present:
+        return False, f"Stage 4 cleanup path must not trigger recovery: {present}"
+    return True, "ok"
+
+
+def _check_stage4_does_not_change_sqlite_profile(temp_root: str) -> tuple[bool, str]:
+    return _check_opblock_stage1_no_sqlite_profile_changes(temp_root)
+
+
+def _check_opblock_interactive_timeout_still_works_when_cleanup_skipped(temp_root: str) -> tuple[bool, str]:
+    return _check_file_lock_timeout_does_not_delete_lock(temp_root)
+
+
+def _check_analyzer_understands_local_dead_pid_cleanup(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "opblock_stage4_cleanup_logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260626.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-26T11:13:42+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 520000,
+            "first_action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:13:43+10:00",
+            "metric": "sqlite_write_lock_local_dead_pid_detected",
+            "lock_path": "archiv\\db.lock",
+            "holder_pid": 5024,
+            "holder_host": "operblok1",
+            "holder_source": "operblock_undo_last_action",
+            "operation_name": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:13:43.050000+10:00",
+            "metric": "sqlite_write_lock_stale_removed",
+            "reason": "local_dead_pid",
+            "lock_path": "archiv\\db.lock",
+            "holder_pid": 5024,
+            "holder_host": "operblok1",
+            "holder_source": "operblock_undo_last_action",
+            "operation_name": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:13:44+10:00",
+            "metric": "opblock_action_finished",
+            "result": "success",
+            "action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:20:00+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 540000,
+            "first_action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:20:01+10:00",
+            "metric": "sqlite_write_lock_stale_cleanup_skipped",
+            "reason": "other_host",
+            "lock_path": "archiv\\db.lock",
+            "holder_pid": 5024,
+            "holder_host": "other-host",
+            "holder_source": "periodic_backup",
+            "operation_name": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:20:08+10:00",
+            "metric": "sqlite_write_lock_timeout",
+            "phase": "file_lock_timeout",
+            "total_wait_ms": 7002,
+        },
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"),
+            "--logs",
+            str(logs_dir),
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"Stage 4 cleanup analyzer failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    classifications = [incident.get("classification") for incident in (summary.get("incidents") or [])]
+    if "local_dead_pid_lock_removed" not in classifications:
+        return False, f"cleanup removed classification missing: {summary}"
+    if "other_host_lock_wait" not in classifications:
+        return False, f"cleanup skipped classification missing: {summary}"
+    first = (summary.get("incidents") or [{}])[0]
+    if first.get("cleanup") != "removed" or first.get("cleanup_pid_status") != "dead":
+        return False, f"cleanup payload missing removed/dead status: {summary}"
+    return True, "ok"
+
+
 def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
 
@@ -24613,6 +24984,20 @@ def main(argv: list[str] | None = None):
         ("ui_pending_cleared_after_busy_timeout", _check_ui_pending_cleared_after_busy_timeout),
         ("opblock_stage3_sqlite_profile_unchanged", _check_opblock_stage3_sqlite_profile_unchanged),
         ("analyzer_understands_opblock_busy_timeout", _check_analyzer_understands_opblock_busy_timeout),
+        ("file_write_lock_local_dead_pid_cleanup_constant_or_helper_exists", _check_file_write_lock_local_dead_pid_cleanup_constant_or_helper_exists),
+        ("file_write_lock_same_host_dead_pid_removed", _check_file_write_lock_same_host_dead_pid_removed),
+        ("file_write_lock_same_host_live_pid_not_removed", _check_file_write_lock_same_host_live_pid_not_removed),
+        ("file_write_lock_other_host_not_removed", _check_file_write_lock_other_host_not_removed),
+        ("file_write_lock_unknown_pid_not_removed", _check_file_write_lock_unknown_pid_not_removed),
+        ("file_write_lock_unreadable_or_parse_error_not_removed", _check_file_write_lock_unreadable_or_parse_error_not_removed),
+        ("file_write_lock_changed_during_cleanup_not_removed", _check_file_write_lock_changed_during_cleanup_not_removed),
+        ("stage4_does_not_enable_recovery_on_locked_busy", _check_stage4_does_not_enable_recovery_on_locked_busy),
+        ("stage4_does_not_change_sqlite_profile", _check_stage4_does_not_change_sqlite_profile),
+        (
+            "opblock_interactive_timeout_still_works_when_cleanup_skipped",
+            _check_opblock_interactive_timeout_still_works_when_cleanup_skipped,
+        ),
+        ("analyzer_understands_local_dead_pid_cleanup", _check_analyzer_understands_local_dead_pid_cleanup),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),
