@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import traceback
@@ -10988,154 +10989,207 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
             if match_pos < 0 or assign_pos < 0 or match_pos > assign_pos:
                 return False, "doctor: chart context must be checked before assigning the new admission_id"
 
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    probe = textwrap.dedent(
+        """
+        import os
+        from datetime import datetime, timedelta
 
-    from datetime import datetime, timedelta
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication
+        from _local_rem_card_bootstrap import bootstrap_local_rem_card
 
-    from rem_card.ui.shared.chart_widget import ChartWidget
+        bootstrap_local_rem_card()
 
-    class Vital:
-        def __init__(self, idx: int, timestamp: datetime, sys_value: int, dia_value: int):
-            self.id = idx
-            self.timestamp = timestamp
-            self.sys = sys_value
-            self.dia = dia_value
-            self.pulse = 70 + idx
-            self.temp = 36.5
-            self.spo2 = 98
-            self.rr = None
-            self.cvp = None
-            self.updated_at = f"2026-01-01T00:00:{idx:02d}"
+        from PySide6.QtWidgets import QApplication
+        from rem_card.ui.shared.chart_widget import ChartWidget
 
-    app = QApplication.instance() or QApplication([])
-    chart = ChartWidget()
-    start = datetime(2026, 1, 1, 8, 0, 0)
-    vitals = [
-        Vital(1, start + timedelta(hours=1), 120, 70),
-        Vital(2, start + timedelta(hours=2), 125, 75),
-        Vital(3, start + timedelta(hours=3), 118, 68),
-    ]
-    try:
-        chart.update_data(vitals, start, active_intervals=[])
-        app.processEvents()
-        fill = chart.fill_items[0]
-        if fill.path().isEmpty():
-            return False, "chart fill path was not created for blood-pressure data"
 
-        chart.clear_for_context(admission_id=999, start_time=start + timedelta(days=1))
-        app.processEvents()
-        if not fill.path().isEmpty():
-            return False, (
-                "ChartWidget.clear_for_context must clear stale blood-pressure fill path, "
-                f"elements={fill.path().elementCount()} bounds={fill.boundingRect()}"
-            )
+        class Vital:
+            def __init__(self, idx: int, timestamp: datetime, sys_value: int, dia_value: int):
+                self.id = idx
+                self.timestamp = timestamp
+                self.sys = sys_value
+                self.dia = dia_value
+                self.pulse = 70 + idx
+                self.temp = 36.5
+                self.spo2 = 98
+                self.rr = None
+                self.cvp = None
+                self.updated_at = f"2026-01-01T00:00:{idx:02d}"
 
-        chart.update_data(vitals, start, active_intervals=[])
-        app.processEvents()
-        chart.update_data([], start + timedelta(days=1), active_intervals=[])
-        app.processEvents()
-        if not fill.path().isEmpty():
-            return False, (
-                "ChartWidget.update_data must clear stale blood-pressure fill path for empty vitals, "
-                f"elements={fill.path().elementCount()} bounds={fill.boundingRect()}"
-            )
-    finally:
-        chart.deleteLater()
-        app.processEvents()
+
+        app = QApplication.instance() or QApplication([])
+        chart = ChartWidget()
+        start = datetime(2026, 1, 1, 8, 0, 0)
+        vitals = [
+            Vital(1, start + timedelta(hours=1), 120, 70),
+            Vital(2, start + timedelta(hours=2), 125, 75),
+            Vital(3, start + timedelta(hours=3), 118, 68),
+        ]
+        try:
+            chart.update_data(vitals, start, active_intervals=[])
+            app.processEvents()
+            fill = chart.fill_items[0]
+            if fill.path().isEmpty():
+                raise AssertionError("chart fill path was not created for blood-pressure data")
+
+            chart.clear_for_context(admission_id=999, start_time=start + timedelta(days=1))
+            app.processEvents()
+            if not fill.path().isEmpty():
+                raise AssertionError(
+                    "ChartWidget.clear_for_context must clear stale blood-pressure fill path, "
+                    f"elements={fill.path().elementCount()} bounds={fill.boundingRect()}"
+                )
+
+            chart.update_data(vitals, start, active_intervals=[])
+            app.processEvents()
+            chart.update_data([], start + timedelta(days=1), active_intervals=[])
+            app.processEvents()
+            if not fill.path().isEmpty():
+                raise AssertionError(
+                    "ChartWidget.update_data must clear stale blood-pressure fill path for empty vitals, "
+                    f"elements={fill.path().elementCount()} bounds={fill.boundingRect()}"
+                )
+        finally:
+            chart.deleteLater()
+            app.processEvents()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=45,
+    )
+    if result.returncode != 0:
+        return False, f"ChartWidget runtime probe failed rc={result.returncode}: {(result.stderr or result.stdout)[-800:]}"
 
     return True, "ok"
 
 
 def _check_chart_heavy_redraw_performance(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    probe = textwrap.dedent(
+        """
+        import json
+        import os
+        import time
+        from datetime import datetime, timedelta
 
-    from datetime import datetime, timedelta
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-    from PySide6.QtWidgets import QApplication
+        from _local_rem_card_bootstrap import bootstrap_local_rem_card
 
-    from rem_card.ui.shared.chart_widget import ChartWidget
+        bootstrap_local_rem_card()
 
-    class Vital:
-        def __init__(self, idx: int, timestamp: datetime, updated_at: str):
-            self.id = idx
-            self.timestamp = timestamp
-            self.sys = 110 + (idx % 25)
-            self.dia = 65 + (idx % 15)
-            self.pulse = 70 + (idx % 20)
-            self.temp = 36.2 + ((idx % 7) * 0.1)
-            self.spo2 = 95 + (idx % 4)
-            self.rr = 15 + (idx % 6)
-            self.cvp = 5 + (idx % 3)
-            self.updated_at = updated_at
+        from PySide6.QtWidgets import QApplication
+        from rem_card.ui.shared.chart_widget import ChartWidget
 
-        def clone(self):
-            copied = Vital(self.id, self.timestamp, self.updated_at)
-            copied.sys = self.sys
-            copied.dia = self.dia
-            copied.pulse = self.pulse
-            copied.temp = self.temp
-            copied.spo2 = self.spo2
-            copied.rr = self.rr
-            copied.cvp = self.cvp
-            return copied
 
-    def percentile(values: list[float], p: float) -> float:
-        arr = sorted(values)
-        k = (len(arr) - 1) * p
-        f = int(k)
-        c = min(f + 1, len(arr) - 1)
-        if f == c:
-            return arr[f]
-        return arr[f] + (arr[c] - arr[f]) * (k - f)
+        class Vital:
+            def __init__(self, idx: int, timestamp: datetime, updated_at: str):
+                self.id = idx
+                self.timestamp = timestamp
+                self.sys = 110 + (idx % 25)
+                self.dia = 65 + (idx % 15)
+                self.pulse = 70 + (idx % 20)
+                self.temp = 36.2 + ((idx % 7) * 0.1)
+                self.spo2 = 95 + (idx % 4)
+                self.rr = 15 + (idx % 6)
+                self.cvp = 5 + (idx % 3)
+                self.updated_at = updated_at
 
-    app = QApplication.instance() or QApplication([])
-    chart = ChartWidget()
-    start = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
-    base = start - timedelta(hours=24)
-    vitals = [
-        Vital(i + 1, base + timedelta(minutes=15 * i), f"2026-01-01T00:00:{i % 60:02d}")
-        for i in range(220)
-    ]
-    intervals = []
-    current = (start - timedelta(hours=36)).replace(second=0, microsecond=0)
-    for _idx in range(180):
-        active_start = current
-        active_end = active_start + timedelta(minutes=15)
-        intervals.append((active_start, active_end))
-        current = active_end + timedelta(minutes=5)
+            def clone(self):
+                copied = Vital(self.id, self.timestamp, self.updated_at)
+                copied.sys = self.sys
+                copied.dia = self.dia
+                copied.pulse = self.pulse
+                copied.temp = self.temp
+                copied.spo2 = self.spo2
+                copied.rr = self.rr
+                copied.cvp = self.cvp
+                return copied
 
-    try:
-        chart.update_data(vitals, start, active_intervals=intervals)
-        app.processEvents()
 
-        samples = []
-        for idx in range(5):
-            mutated = [vital.clone() for vital in vitals]
-            mutated[-1].pulse += idx + 1
-            mutated[-1].updated_at = f"2030-01-01T00:00:{idx:02d}"
-            started = time.perf_counter()
-            chart.update_data(mutated, start, active_intervals=intervals)
+        def percentile(values: list[float], p: float) -> float:
+            arr = sorted(values)
+            k = (len(arr) - 1) * p
+            f = int(k)
+            c = min(f + 1, len(arr) - 1)
+            if f == c:
+                return arr[f]
+            return arr[f] + (arr[c] - arr[f]) * (k - f)
+
+
+        app = QApplication.instance() or QApplication([])
+        chart = ChartWidget()
+        start = datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
+        base = start - timedelta(hours=24)
+        vitals = [
+            Vital(i + 1, base + timedelta(minutes=15 * i), f"2026-01-01T00:00:{i % 60:02d}")
+            for i in range(220)
+        ]
+        intervals = []
+        current = (start - timedelta(hours=36)).replace(second=0, microsecond=0)
+        for _idx in range(180):
+            active_start = current
+            active_end = active_start + timedelta(minutes=15)
+            intervals.append((active_start, active_end))
+            current = active_end + timedelta(minutes=5)
+
+        try:
+            chart.update_data(vitals, start, active_intervals=intervals)
             app.processEvents()
-            samples.append((time.perf_counter() - started) * 1000.0)
 
-        p95 = percentile(samples, 0.95)
-        limit_ms = float(os.environ.get("REMCARD_CHART_HEAVY_REDRAW_LIMIT_MS", "200"))
-        rendered_curves = len(chart.curve_items)
-        rendered_fills = len(chart.fill_items)
-        if p95 > limit_ms:
-            return (
-                False,
-                f"heavy chart redraw p95={p95:.1f}ms > {limit_ms:.1f}ms; samples={[round(v, 1) for v in samples]}",
-            )
-        if rendered_curves > 20 or rendered_fills > 4:
-            return False, f"chart must reuse plot items, got curves={rendered_curves}, fills={rendered_fills}"
-        return True, f"p95={p95:.1f}ms samples={[round(v, 1) for v in samples]}"
-    finally:
-        chart.deleteLater()
-        app.processEvents()
+            samples = []
+            for idx in range(5):
+                mutated = [vital.clone() for vital in vitals]
+                mutated[-1].pulse += idx + 1
+                mutated[-1].updated_at = f"2030-01-01T00:00:{idx:02d}"
+                started = time.perf_counter()
+                chart.update_data(mutated, start, active_intervals=intervals)
+                app.processEvents()
+                samples.append((time.perf_counter() - started) * 1000.0)
+
+            p95 = percentile(samples, 0.95)
+            limit_ms = float(os.environ.get("REMCARD_CHART_HEAVY_REDRAW_LIMIT_MS", "200"))
+            rendered_curves = len(chart.curve_items)
+            rendered_fills = len(chart.fill_items)
+            if p95 > limit_ms:
+                raise AssertionError(
+                    f"heavy chart redraw p95={p95:.1f}ms > {limit_ms:.1f}ms; "
+                    f"samples={[round(v, 1) for v in samples]}"
+                )
+            if rendered_curves > 20 or rendered_fills > 4:
+                raise AssertionError(f"chart must reuse plot items, got curves={rendered_curves}, fills={rendered_fills}")
+            print(json.dumps({"details": f"p95={p95:.1f}ms samples={[round(v, 1) for v in samples]}"}))
+        finally:
+            chart.deleteLater()
+            app.processEvents()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        return False, f"ChartWidget heavy redraw probe failed rc={result.returncode}: {(result.stderr or result.stdout)[-800:]}"
+    details = "ok"
+    try:
+        details = str(json.loads((result.stdout or "{}").splitlines()[-1]).get("details") or "ok")
+    except Exception:
+        details = "ok"
+    return True, details
 
 
 def _check_chart_snapshot_dedupes_unchanged_payload(temp_root: str) -> tuple[bool, str]:
@@ -15488,6 +15542,191 @@ def _check_analyze_ui_stall_logs_reports_operblock_icons_schema_drift(temp_root:
     classifications = summary.get("classifications") or {}
     if int(classifications.get("settings_snapshot_schema_drift") or 0) < 1:
         return False, f"schema drift classification missing: {summary}"
+    return True, "ok"
+
+
+def _check_opblock_idle_metrics_events_exist(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    sources = "\n".join(
+        (PROJECT_ROOT / rel_path).read_text(encoding="utf-8")
+        for rel_path in (
+            "ui/operblock_view/operblock_main_widget.py",
+            "ui/main_window.py",
+            "app/sqlite_shared.py",
+            "services/data_service.py",
+        )
+    )
+    required = {
+        "user_idle_detected",
+        "user_return_from_idle",
+        "opblock_action_started",
+        "opblock_action_finished",
+        "sqlite_write_lock_wait_started",
+        "sqlite_write_lock_wait_retry",
+        "sqlite_write_lock_timeout",
+        "sqlite_write_lock_acquired",
+        "sqlite_write_lock_released",
+        "sqlite_write_lock_stale_observed",
+        "opblock_shadow_mirror_started",
+        "opblock_shadow_mirror_finished",
+        "opblock_shadow_mirror_failed",
+        "maintenance_overlap_observed",
+        "ui_pending_state_observed",
+    }
+    missing = sorted(name for name in required if name not in sources)
+    if missing:
+        return False, f"opblock idle diagnostic events missing: {missing}"
+    return True, "ok"
+
+
+def _check_sqlite_lock_holder_diagnostics_is_read_only(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import describe_sqlite_lock_holder
+
+    lock_path = Path(temp_root, "archiv", "db.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "timestamp": time.time() - 12.5,
+        "pid": 123456,
+        "host": "regression-host",
+        "source": "regression_source",
+    }
+    raw = json.dumps(payload, ensure_ascii=True)
+    lock_path.write_text(raw, encoding="utf-8")
+    result = describe_sqlite_lock_holder(str(lock_path))
+    after = lock_path.read_text(encoding="utf-8")
+    if after != raw:
+        return False, "lock holder diagnostic helper modified lock payload"
+    if not lock_path.exists():
+        return False, "lock holder diagnostic helper removed lock file"
+    if not result.get("readable") or result.get("holder_pid") != 123456:
+        return False, f"lock holder diagnostic payload mismatch: {result}"
+    missing = describe_sqlite_lock_holder(str(lock_path.with_name("missing.lock")))
+    if missing.get("readable") or missing.get("reason") != "missing":
+        return False, f"missing lock diagnostic result mismatch: {missing}"
+    return True, "ok"
+
+
+def _check_uiwatchdog_opblock_context_fields(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "ui/main_window.py").read_text(encoding="utf-8")
+    required = (
+        "active_opblock_action",
+        "active_sqlite_operation",
+        "active_foreground_lease",
+        "last_user_action",
+        "idle_before_action_ms",
+        "current_operation_case_id",
+        "current_admission_id",
+        "current_table_code",
+        "lock_wait_operation",
+        "lock_holder_pid",
+        "lock_holder_host",
+        "lock_holder_source",
+        "shadow_mirror_active",
+        "ui_pending_action",
+        "ui_pending_since_ms",
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        return False, f"UIWatchdog opblock diagnostics fields missing: {missing}"
+    return True, "ok"
+
+
+def _check_opblock_idle_tracker_does_not_change_behavior(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "ui/operblock_view/operblock_main_widget.py").read_text(encoding="utf-8")
+    forbidden = (
+        "foreground_resume_lease_started",
+        "maintenance_deferred_for_foreground_resume",
+        "mark_foreground_activity(",
+        "should_defer_background_io",
+        "sqlite3.connect",
+        "recovery",
+    )
+    present = [token for token in forbidden if token in source]
+    if present:
+        return False, f"Stage 1 idle tracker introduced behavior/policy token(s): {present}"
+    if "self.data_service.enqueue_write(description, operation" not in source:
+        return False, "opblock write path no longer delegates through DataService.enqueue_write"
+    if "def diagnostic_snapshot" not in source or '"user_return_from_idle"' not in source:
+        return False, "opblock idle tracker diagnostics are missing"
+    return True, "ok"
+
+
+def _check_analyze_opblock_idle_stalls_script_exists(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "opblock_idle_logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260626.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-26T11:11:30+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 521000,
+            "first_action": "operblock_undo_last_action",
+        },
+        {
+            "ts": "2026-06-26T11:11:31+10:00",
+            "metric": "opblock_action_started",
+            "action": "operblock_undo_last_action",
+            "request_id": "regression",
+        },
+        {
+            "ts": "2026-06-26T11:11:32+10:00",
+            "metric": "sqlite_write_lock_wait_retry",
+            "total_wait_ms": 30000,
+            "lock_holder_pid": 5024,
+            "lock_holder_host": "operblok1",
+            "lock_holder_source": "operblock_undo_last_action",
+        },
+        {"ts": "2026-06-26T11:11:33+10:00", "metric": "event_loop_pause_ms", "value": 30120},
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    help_result = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"), "--help"],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if help_result.returncode != 0:
+        return False, f"analyze_opblock_idle_stalls --help failed: {help_result.stderr[-500:]}"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"),
+            "--logs",
+            str(logs_dir),
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"analyze_opblock_idle_stalls failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    incidents = summary.get("incidents") or []
+    if not incidents or incidents[0].get("classification") != "sqlite_write_lock_wait":
+        return False, f"opblock idle analyzer did not classify lock wait: {summary}"
+    return True, "ok"
+
+
+def _check_opblock_stage1_no_sqlite_profile_changes(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.sqlite_shared import _resolve_sqlite_profile_settings
+
+    settings = _resolve_sqlite_profile_settings("network")
+    expected = {"journal_mode": "DELETE", "synchronous": "EXTRA", "mmap_mb": 0}
+    mismatches = {key: settings.get(key) for key, value in expected.items() if settings.get(key) != value}
+    if mismatches:
+        return False, f"SQLite network profile changed: {mismatches}"
     return True, "ok"
 
 
@@ -23754,6 +23993,12 @@ def main(argv: list[str] | None = None):
         ("emergency_standby_refresh_deferred_rate_limited", _check_emergency_standby_refresh_deferred_rate_limited),
         ("analyze_ui_stall_logs_classifies_nurse_backup_contention", _check_analyze_ui_stall_logs_classifies_nurse_backup_contention),
         ("analyze_ui_stall_logs_reports_operblock_icons_schema_drift", _check_analyze_ui_stall_logs_reports_operblock_icons_schema_drift),
+        ("opblock_idle_metrics_events_exist", _check_opblock_idle_metrics_events_exist),
+        ("sqlite_lock_holder_diagnostics_is_read_only", _check_sqlite_lock_holder_diagnostics_is_read_only),
+        ("uiwatchdog_opblock_context_fields", _check_uiwatchdog_opblock_context_fields),
+        ("opblock_idle_tracker_does_not_change_behavior", _check_opblock_idle_tracker_does_not_change_behavior),
+        ("analyze_opblock_idle_stalls_script_exists", _check_analyze_opblock_idle_stalls_script_exists),
+        ("opblock_stage1_no_sqlite_profile_changes", _check_opblock_stage1_no_sqlite_profile_changes),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),

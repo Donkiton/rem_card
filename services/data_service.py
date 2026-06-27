@@ -1,10 +1,14 @@
 from datetime import datetime
+import re
+import threading
+import time
 from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal, Qt, Slot
 
 from rem_card.app.db_access_classifier import classify_database_access, classify_database_access_error
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_shared import LocalWriteQueue
 from rem_card.app.runtime_outage import (
     RuntimeNetworkOutageWriteBlockedError,
@@ -12,6 +16,24 @@ from rem_card.app.runtime_outage import (
 )
 from rem_card.services.data_update_monitor import DataUpdateMonitor
 from rem_card.services.sync_coordinator import SyncCoordinator
+
+
+def _sanitize_diagnostic_message(exc: Exception, *, limit: int = 240) -> str:
+    text = re.sub(r"\s+", " ", str(exc or "")).strip()
+    return text[:limit]
+
+
+def _operblock_description_context(description: str) -> dict[str, Any]:
+    text = str(description or "")
+    numbers = [int(match) for match in re.findall(r":(\d+)", text)]
+    operation_case_id = numbers[0] if numbers and "operation_case" in text else None
+    admission_id = numbers[0] if numbers and "admission" in text else None
+    if operation_case_id is None and text.startswith(("operblock_undo_last:", "operblock_release_operation_table:")):
+        operation_case_id = numbers[0] if numbers else None
+    return {
+        "operation_case_id": operation_case_id,
+        "admission_id": admission_id,
+    }
 
 
 class DataService(QObject):
@@ -40,6 +62,8 @@ class DataService(QObject):
         self._last_failure_category = ""
         self._unconfirmed_write_count = 0
         self._unknown_active_write = False
+        self._opblock_shadow_mirror_lock = threading.Lock()
+        self._opblock_shadow_mirror_active: dict[str, Any] | None = None
         self._outage_signal_emitted = False
         self._last_runtime_outage_shutdown_result = ""
         self._last_runtime_outage_queue_settled = None
@@ -222,9 +246,34 @@ class DataService(QObject):
         except Exception as journal_exc:
             logger.warning("Operblock failed-write local journal failed for %s: %s", description, journal_exc, exc_info=True)
 
+    def get_opblock_shadow_mirror_snapshot(self) -> dict[str, Any]:
+        with self._opblock_shadow_mirror_lock:
+            active = dict(self._opblock_shadow_mirror_active or {})
+        if not active:
+            return {"active": False}
+        active["active"] = True
+        active["age_ms"] = round((time.perf_counter() - float(active.get("started_monotonic") or time.perf_counter())) * 1000.0, 3)
+        return active
+
     def _mirror_operblock_write_after_commit(self, description: str, *, operation_uuid: str | None = None) -> None:
         if not self._is_operblock_network_write(description):
             return
+        started = time.perf_counter()
+        context = _operblock_description_context(description)
+        with self._opblock_shadow_mirror_lock:
+            self._opblock_shadow_mirror_active = {
+                "source": str(description or ""),
+                "reason": str(description or ""),
+                "started_monotonic": started,
+                **context,
+            }
+        record_metric(
+            "opblock_shadow_mirror_started",
+            1,
+            source=str(description or ""),
+            reason=str(description or ""),
+            **context,
+        )
         try:
             from rem_card.app.operblock_offline_store import (
                 mark_operblock_write_remote_committed,
@@ -238,8 +287,28 @@ class DataService(QObject):
                     operation_uuid=operation_uuid,
                     description=str(description or ""),
                 )
+            record_metric(
+                "opblock_shadow_mirror_finished",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                source=str(description or ""),
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                result="success",
+                **context,
+            )
         except Exception as exc:
+            record_metric(
+                "opblock_shadow_mirror_failed",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                source=str(description or ""),
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+                error_class=type(exc).__name__,
+                error_message_sanitized=_sanitize_diagnostic_message(exc),
+                **context,
+            )
             logger.warning("Operblock local shadow mirror failed after %s: %s", description, exc, exc_info=True)
+        finally:
+            with self._opblock_shadow_mirror_lock:
+                self._opblock_shadow_mirror_active = None
 
     def enqueue_write(
         self,

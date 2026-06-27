@@ -25,6 +25,124 @@ _SQLITE_ALLOWED_SYNCHRONOUS = {"OFF", "NORMAL", "FULL", "EXTRA"}
 _SQLITE_ALLOWED_TEMP_STORE = {"DEFAULT", "FILE", "MEMORY"}
 _LOCK_READ_UNAVAILABLE = object()
 _SQLITE_NATIVE_MAINTENANCE_LOCK = threading.RLock()
+_SQLITE_DIAGNOSTICS_LOCK = threading.Lock()
+_ACTIVE_SQLITE_OPERATIONS: dict[int, dict[str, Any]] = {}
+
+
+def _timestamp_ms() -> int:
+    return int(time.time() * 1000.0)
+
+
+def _payload_age_ms(payload: dict[str, Any]) -> Optional[float]:
+    ts = payload.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return None
+    return max(0.0, (time.time() - float(ts)) * 1000.0)
+
+
+def _payload_created_at(payload: dict[str, Any]) -> str:
+    ts = payload.get("timestamp")
+    if not isinstance(ts, (int, float)):
+        return ""
+    try:
+        return datetime.fromtimestamp(float(ts)).astimezone().isoformat(timespec="milliseconds")
+    except Exception:
+        return ""
+
+
+def describe_sqlite_lock_holder(lock_path: str) -> dict[str, Any]:
+    """Read db.lock holder data for diagnostics without changing lock state."""
+    path = str(lock_path or "")
+    base = {
+        "lock_path": path,
+        "readable": False,
+        "reason": "unknown",
+        "holder_pid": None,
+        "holder_host": "",
+        "holder_source": "",
+        "holder_created_at": "",
+        "holder_age_ms": None,
+    }
+    if not path:
+        base["reason"] = "missing"
+        return base
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        base["reason"] = "missing"
+        return base
+    except PermissionError:
+        base["reason"] = "permission_denied"
+        return base
+    except json.JSONDecodeError:
+        base["reason"] = "parse_error"
+        return base
+    except Exception:
+        base["reason"] = "unknown"
+        return base
+    if not isinstance(payload, dict):
+        base["reason"] = "parse_error"
+        return base
+    base.update(
+        {
+            "readable": True,
+            "reason": "ok",
+            "holder_pid": payload.get("pid"),
+            "holder_host": str(payload.get("host") or ""),
+            "holder_source": str(payload.get("source") or ""),
+            "holder_created_at": _payload_created_at(payload),
+            "holder_age_ms": _payload_age_ms(payload),
+        }
+    )
+    return base
+
+
+def _lock_holder_metric_fields(holder: dict[str, Any] | None) -> dict[str, Any]:
+    data = dict(holder or {})
+    return {
+        "lock_holder_pid": data.get("holder_pid"),
+        "lock_holder_host": data.get("holder_host"),
+        "lock_holder_source": data.get("holder_source"),
+        "lock_holder_age_ms": data.get("holder_age_ms"),
+    }
+
+
+def _set_active_sqlite_operation(thread_id: int, payload: dict[str, Any]) -> None:
+    with _SQLITE_DIAGNOSTICS_LOCK:
+        _ACTIVE_SQLITE_OPERATIONS[int(thread_id)] = dict(payload)
+
+
+def _clear_active_sqlite_operation(thread_id: int) -> None:
+    with _SQLITE_DIAGNOSTICS_LOCK:
+        _ACTIVE_SQLITE_OPERATIONS.pop(int(thread_id), None)
+
+
+def active_sqlite_operation_snapshot(*, limit: int = 4) -> dict[str, Any]:
+    now = time.perf_counter()
+    max_items = max(1, int(limit or 1))
+    with _SQLITE_DIAGNOSTICS_LOCK:
+        items = [dict(item) for item in _ACTIVE_SQLITE_OPERATIONS.values()]
+    items.sort(key=lambda item: float(item.get("started_monotonic") or 0.0), reverse=True)
+    compact: list[dict[str, Any]] = []
+    for item in items[:max_items]:
+        holder = dict(item.get("lock_holder") or {})
+        compact.append(
+            {
+                "operation_name": str(item.get("operation_name") or ""),
+                "source": str(item.get("source") or ""),
+                "status": str(item.get("status") or ""),
+                "db_path": str(item.get("db_path") or ""),
+                "lock_path": str(item.get("lock_path") or ""),
+                "attempt": item.get("attempt"),
+                "age_sec": round(max(0.0, now - float(item.get("started_monotonic") or now)), 3),
+                "lock_holder_pid": holder.get("holder_pid"),
+                "lock_holder_host": holder.get("holder_host"),
+                "lock_holder_source": holder.get("holder_source"),
+                "lock_holder_age_ms": holder.get("holder_age_ms"),
+            }
+        )
+    return {"active_count": len(items), "active": compact}
 
 
 def _safe_env_int(name: str) -> Optional[int]:
@@ -777,13 +895,74 @@ class SQLiteWriteController:
             lock_acquired = False
             last_exc = None
             lock_wait_started = time.perf_counter()
+            lock_held_started: float | None = None
+            committed = False
+            thread_id = threading.get_ident()
             try:
                 for attempt in range(1, self.max_retries + 1):
+                    total_wait_ms = round((time.perf_counter() - lock_wait_started) * 1000.0, 3)
+                    active_payload = {
+                        "operation_name": source,
+                        "source": source,
+                        "status": "waiting_for_file_lock",
+                        "db_path": self.db_path,
+                        "lock_path": self.lock_path,
+                        "attempt": attempt,
+                        "started_monotonic": lock_wait_started,
+                        "thread": thread_id,
+                    }
+                    _set_active_sqlite_operation(thread_id, active_payload)
+                    record_metric(
+                        "sqlite_write_lock_wait_started",
+                        1,
+                        operation_name=source,
+                        source=source,
+                        db_path=self.db_path,
+                        lock_path=self.lock_path,
+                        pid=os.getpid(),
+                        thread=thread_id,
+                        attempt=attempt,
+                        timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+                        timestamp_ms=_timestamp_ms(),
+                    )
+                    holder = describe_sqlite_lock_holder(self.lock_path)
+                    if holder.get("readable"):
+                        active_payload["lock_holder"] = holder
+                        _set_active_sqlite_operation(thread_id, active_payload)
+                    holder_age_ms = holder.get("holder_age_ms") if isinstance(holder, dict) else None
+                    if isinstance(holder_age_ms, (int, float)) and holder_age_ms >= self.lock.stale_timeout_sec * 1000.0:
+                        record_metric(
+                            "sqlite_write_lock_stale_observed",
+                            1,
+                            lock_path=self.lock_path,
+                            holder_pid=holder.get("holder_pid"),
+                            holder_host=holder.get("holder_host"),
+                            holder_source=holder.get("holder_source"),
+                            holder_age_ms=holder_age_ms,
+                            current_pid=os.getpid(),
+                            current_host=socket.gethostname(),
+                            decision="no_cleanup_in_stage1",
+                        )
                     if not self.lock.acquire(self.owner_id, source):
+                        holder = describe_sqlite_lock_holder(self.lock_path)
+                        active_payload["lock_holder"] = holder
+                        _set_active_sqlite_operation(thread_id, active_payload)
+                        retry_wait_ms = round(self.retry_delay_sec * 1000.0, 3)
+                        record_metric(
+                            "sqlite_write_lock_wait_retry",
+                            1,
+                            operation_name=source,
+                            source=source,
+                            attempt=attempt,
+                            wait_ms=retry_wait_ms,
+                            total_wait_ms=total_wait_ms,
+                            **_lock_holder_metric_fields(holder),
+                        )
                         time.sleep(self.retry_delay_sec)
                         continue
 
                     lock_acquired = True
+                    lock_held_started = time.perf_counter()
                     record_metric(
                         "db_lock_wait_ms",
                         round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
@@ -791,10 +970,22 @@ class SQLiteWriteController:
                         attempt=attempt,
                     )
                     try:
+                        active_payload["status"] = "begin_immediate"
+                        _set_active_sqlite_operation(thread_id, active_payload)
                         if before_begin is not None:
                             before_begin()
                         conn.execute("BEGIN IMMEDIATE")
                         cursor = conn.cursor()
+                        record_metric(
+                            "sqlite_write_lock_acquired",
+                            1,
+                            operation_name=source,
+                            source=source,
+                            total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
+                            attempts=attempt,
+                        )
+                        active_payload["status"] = "transaction_active"
+                        _set_active_sqlite_operation(thread_id, active_payload)
                         break
                     except sqlite3.OperationalError as exc:
                         last_exc = exc
@@ -802,14 +993,59 @@ class SQLiteWriteController:
                             record_metric("sqlite_locked_count", 1, source=source, phase="begin_immediate")
                         if conn.in_transaction:
                             conn.execute("ROLLBACK")
+                        record_metric(
+                            "sqlite_write_lock_released",
+                            1,
+                            operation_name=source,
+                            source=source,
+                            held_ms=(
+                                None
+                                if lock_held_started is None
+                                else round((time.perf_counter() - lock_held_started) * 1000.0, 3)
+                            ),
+                            committed=False,
+                        )
                         self.lock.release()
                         lock_acquired = False
+                        lock_held_started = None
                         if self._is_retryable(exc) and attempt < self.max_retries:
+                            record_metric(
+                                "sqlite_write_lock_wait_retry",
+                                1,
+                                operation_name=source,
+                                source=source,
+                                attempt=attempt,
+                                wait_ms=round(self.retry_delay_sec * 1000.0, 3),
+                                total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
+                                sqlite_error=str(exc),
+                                **_lock_holder_metric_fields(None),
+                            )
                             time.sleep(self.retry_delay_sec)
                             continue
+                        record_metric(
+                            "sqlite_write_lock_timeout",
+                            1,
+                            operation_name=source,
+                            source=source,
+                            total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
+                            timeout_ms=SQLITE_BUSY_TIMEOUT_MS,
+                            sqlite_error=str(exc),
+                            **_lock_holder_metric_fields(None),
+                        )
                         raise
 
                 if cursor is None:
+                    holder = describe_sqlite_lock_holder(self.lock_path)
+                    record_metric(
+                        "sqlite_write_lock_timeout",
+                        1,
+                        operation_name=source,
+                        source=source,
+                        total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
+                        timeout_ms=round(self.max_retries * self.retry_delay_sec * 1000.0, 3),
+                        sqlite_error=str(last_exc or "sequential write lock unavailable"),
+                        **_lock_holder_metric_fields(holder),
+                    )
                     if last_exc:
                         raise last_exc
                     raise sqlite3.OperationalError("Could not acquire sequential write lock for SQLite")
@@ -817,6 +1053,7 @@ class SQLiteWriteController:
                 yield cursor
                 conn.execute("COMMIT")
                 status = "ok"
+                committed = True
             except Exception:
                 if conn.in_transaction:
                     conn.execute("ROLLBACK")
@@ -830,7 +1067,20 @@ class SQLiteWriteController:
                     nested=False,
                 )
                 if lock_acquired:
+                    record_metric(
+                        "sqlite_write_lock_released",
+                        1,
+                        operation_name=source,
+                        source=source,
+                        held_ms=(
+                            None
+                            if lock_held_started is None
+                            else round((time.perf_counter() - lock_held_started) * 1000.0, 3)
+                        ),
+                        committed=bool(committed),
+                    )
                     self.lock.release()
+                _clear_active_sqlite_operation(thread_id)
 
     def execute(self, conn: sqlite3.Connection, query: str, params: tuple = (), source: str = "unknown"):
         with self.transaction(conn, source=source) as cursor:

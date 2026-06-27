@@ -19,6 +19,7 @@ from rem_card.app.foreground_activity import foreground_activity_snapshot, shoul
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.paths import get_icon_dir, get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
+from rem_card.app.sqlite_shared import active_sqlite_operation_snapshot
 from rem_card.app.roles import (
     ROLE_DOCTOR,
     ROLE_KEYS,
@@ -402,6 +403,15 @@ class MainWindow(QMainWindow):
             layout = getattr(remcard_widget, "layout_manager", None)
         elif current_widget == getattr(self, "nurse_main", None):
             layout = getattr(self.nurse_main, "layout_manager", None)
+        elif current_widget == getattr(self, "operblock_main", None) or current_widget in (self._operblock_widgets or {}).values():
+            snapshot_provider = getattr(current_widget, "diagnostic_snapshot", None)
+            snapshot = snapshot_provider() if callable(snapshot_provider) else {}
+            return {
+                "admission_id": snapshot.get("current_admission_id"),
+                "tab_name": "operblock",
+                "mode": str(snapshot.get("current_table_code") or ""),
+                "operation_case_id": snapshot.get("current_operation_case_id"),
+            }
         if layout is None:
             return {}
 
@@ -425,11 +435,30 @@ class MainWindow(QMainWindow):
         if not isinstance(items, list):
             return ""
         names = [
-            str(item.get("task_type") or item.get("name") or "")
+            str(item.get("task_type") or item.get("operation_name") or item.get("name") or "")
             for item in items
-            if isinstance(item, dict) and str(item.get("task_type") or item.get("name") or "")
+            if isinstance(item, dict) and str(item.get("task_type") or item.get("operation_name") or item.get("name") or "")
         ]
         return ",".join(names[:4])
+
+    @staticmethod
+    def _watchdog_first_snapshot_item(snapshot: dict, key: str) -> dict:
+        items = snapshot.get(key) if isinstance(snapshot, dict) else None
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return dict(items[0])
+        return {}
+
+    def _current_operblock_diagnostics_snapshot(self) -> dict:
+        current_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        if not (current_widget == getattr(self, "operblock_main", None) or current_widget in (self._operblock_widgets or {}).values()):
+            return {}
+        provider = getattr(current_widget, "diagnostic_snapshot", None)
+        if not callable(provider):
+            return {}
+        try:
+            return dict(provider() or {})
+        except Exception:
+            return {}
 
     def _install_decor_overlay(self) -> None:
         try:
@@ -1143,21 +1172,45 @@ class MainWindow(QMainWindow):
         visible_context = self._current_visible_remcard_context()
         maintenance_snapshot = active_maintenance_snapshot(limit=4)
         foreground_snapshot = foreground_activity_snapshot(limit=4)
+        sqlite_snapshot = active_sqlite_operation_snapshot(limit=4)
+        opblock_snapshot = self._current_operblock_diagnostics_snapshot()
         active_maintenance = self._watchdog_snapshot_names(maintenance_snapshot, "active")
         foreground_active = self._watchdog_snapshot_names(foreground_snapshot, "active")
         foreground_recent = self._watchdog_snapshot_names(foreground_snapshot, "recent")
+        active_sqlite = self._watchdog_snapshot_names(sqlite_snapshot, "active")
+        sqlite_item = self._watchdog_first_snapshot_item(sqlite_snapshot, "active")
+        maintenance_item = self._watchdog_first_snapshot_item(maintenance_snapshot, "active")
+        shadow_snapshot = {}
+        current_widget = self.stack.currentWidget() if hasattr(self, "stack") else None
+        data_service = getattr(getattr(current_widget, "remcard_service", None), "data_service", None)
+        shadow_provider = getattr(data_service, "get_opblock_shadow_mirror_snapshot", None)
+        if callable(shadow_provider):
+            try:
+                shadow_snapshot = dict(shadow_provider() or {})
+            except Exception:
+                shadow_snapshot = {}
         logger.warning(
             "[UIWatchdog] event_loop_pause_ms=%.1f threshold_ms=%.1f role=%s interval_ms=%s "
-            "tab=%s admission_id=%s active_maintenance=%s foreground_active=%s foreground_recent=%s",
+            "tab=%s admission_id=%s operation_case_id=%s active_maintenance=%s foreground_active=%s "
+            "foreground_recent=%s active_opblock_action=%s active_sqlite_operation=%s "
+            "lock_holder=%s/%s/%s shadow_mirror_active=%s ui_pending_action=%s",
             pause_ms,
             float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)),
             role,
             int(expected_interval_ms or 0),
             visible_context.get("tab_name", ""),
             visible_context.get("admission_id"),
+            visible_context.get("operation_case_id") or opblock_snapshot.get("current_operation_case_id"),
             active_maintenance,
             foreground_active,
             foreground_recent,
+            opblock_snapshot.get("active_opblock_action", ""),
+            active_sqlite,
+            sqlite_item.get("lock_holder_pid"),
+            sqlite_item.get("lock_holder_host", ""),
+            sqlite_item.get("lock_holder_source", ""),
+            int(bool(shadow_snapshot.get("active"))),
+            opblock_snapshot.get("ui_pending_action", ""),
         )
         record_metric(
             "event_loop_pause_ms",
@@ -1167,13 +1220,50 @@ class MainWindow(QMainWindow):
             role=role,
             tab_name=visible_context.get("tab_name", ""),
             admission_id=visible_context.get("admission_id"),
+            current_operation_case_id=opblock_snapshot.get("current_operation_case_id"),
+            current_admission_id=opblock_snapshot.get("current_admission_id"),
+            current_table_code=opblock_snapshot.get("current_table_code", ""),
             active_maintenance_count=int(maintenance_snapshot.get("active_count") or 0),
             active_maintenance=active_maintenance,
             foreground_active_count=int(foreground_snapshot.get("active_count") or 0),
             foreground_active=foreground_active,
             foreground_recent=foreground_recent,
+            active_opblock_action=opblock_snapshot.get("active_opblock_action", ""),
+            active_sqlite_operation=active_sqlite,
+            active_foreground_lease="",
+            last_user_action=opblock_snapshot.get("last_user_action", ""),
+            idle_before_action_ms=opblock_snapshot.get("idle_before_action_ms"),
+            lock_wait_operation=sqlite_item.get("operation_name", ""),
+            lock_holder_pid=sqlite_item.get("lock_holder_pid"),
+            lock_holder_host=sqlite_item.get("lock_holder_host", ""),
+            lock_holder_source=sqlite_item.get("lock_holder_source", ""),
+            shadow_mirror_active=int(bool(shadow_snapshot.get("active"))),
+            ui_pending_action=opblock_snapshot.get("ui_pending_action", ""),
+            ui_pending_since_ms=opblock_snapshot.get("ui_pending_since_ms"),
             source="refresh",
         )
+        if active_maintenance and opblock_snapshot.get("active_opblock_action"):
+            record_metric(
+                "maintenance_overlap_observed",
+                round(pause_ms, 3),
+                active_maintenance_task=maintenance_item.get("task_type", active_maintenance),
+                active_foreground_action=opblock_snapshot.get("active_opblock_action", ""),
+                operation_case_id=opblock_snapshot.get("current_operation_case_id"),
+                admission_id=opblock_snapshot.get("current_admission_id"),
+                duration_ms=round(pause_ms, 3),
+                source="ui_watchdog",
+            )
+        if opblock_snapshot.get("ui_pending_action"):
+            record_metric(
+                "ui_pending_state_observed",
+                1,
+                active_opblock_action=opblock_snapshot.get("ui_pending_action", ""),
+                request_id=opblock_snapshot.get("active_opblock_request_id", ""),
+                pending_since_ms=opblock_snapshot.get("ui_pending_since_ms"),
+                widget_alive=opblock_snapshot.get("widget_alive"),
+                case_still_current=opblock_snapshot.get("case_still_current"),
+                source="ui_watchdog",
+            )
         operblock_startup_metrics.record_event_loop_pause(
             pause_ms,
             threshold_ms=round(float(getattr(self, "_event_loop_watchdog_threshold_ms", 750.0)), 3),

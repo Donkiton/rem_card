@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+import uuid
 from typing import Any, TYPE_CHECKING
 import weakref
 
@@ -59,6 +60,7 @@ from PySide6.QtWidgets import (
 
 from rem_card.app import operblock_startup_metrics
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.patient_age import parse_date_value
 from rem_card.app.paths import get_icon_dir, get_patient_assets_dir
 from rem_card.services.mkb import MKBService
@@ -202,6 +204,7 @@ if TYPE_CHECKING:
 
 
 OPERBLOCK_VITAL_SETTINGS = {"ad": 1, "pulse": 1, "temp": 0, "spo2": 1, "rr": 0, "cvp": 0}
+OPERBLOCK_IDLE_DIAGNOSTIC_THRESHOLD_SEC = 300.0
 OPERBLOCK_INITIAL_CHART_HOURS = 3
 OPERBLOCK_CHART_EXPAND_THRESHOLD_MINUTES = 20
 OPERBLOCK_BOARD_MEDICATION_SCROLL_MAX_HEIGHT = 262
@@ -7772,6 +7775,10 @@ OPERBLOCK_STARTED_AT_LOCK_TOOLTIP = (
 )
 
 
+def _sanitize_diagnostic_message(exc: Exception, *, limit: int = 240) -> str:
+    return re.sub(r"\s+", " ", str(exc or "")).strip()[:limit]
+
+
 class OperBlockAdmissionTimeInput(QFrame):
     def __init__(self, initial_datetime: datetime | None = None, parent=None):
         super().__init__(parent)
@@ -9037,6 +9044,10 @@ class OperBlockMainWidget(QWidget):
         self._vitals_context_key: tuple[int, int, str] | None = None
         self._refresh_generation = 0
         self._write_pending = False
+        self._opblock_idle_last_activity_monotonic = time.monotonic()
+        self._opblock_idle_period_reported = False
+        self._active_opblock_action: dict[str, Any] | None = None
+        self._last_opblock_action: dict[str, Any] | None = None
         self._table_cards: dict[str, QFrame] = {}
         self._board_card_hashes: dict[str, str] = {}
         self._board_card_states: dict[str, dict] = {}
@@ -19008,21 +19019,187 @@ class OperBlockMainWidget(QWidget):
         if self._current_operation_case_id:
             self.refresh_protocol(force=True)
 
+    def _diagnostic_role(self) -> str:
+        code = str(self._table_filter_code or "").strip()
+        return f"operblock_{code}" if code else "operblock"
+
+    def _diagnostic_current_screen(self) -> str:
+        stack = getattr(self, "stack", None)
+        current = stack.currentWidget() if stack is not None else None
+        if current == getattr(self, "protocol_page", None):
+            return "protocol"
+        if current == getattr(self, "archive_page", None):
+            return "archive"
+        if current == getattr(self, "settings_page", None):
+            return "settings"
+        return "board"
+
+    def _diagnostic_table_code(self) -> str:
+        if self._table_filter_code:
+            return str(self._table_filter_code)
+        for source in (
+            getattr(self, "_current_timeline_snapshot", None),
+            getattr(self, "_current_stage_state", None),
+        ):
+            if isinstance(source, dict):
+                table_code = str(source.get("table_code") or "").strip()
+                if table_code:
+                    return table_code
+        return ""
+
+    def _record_user_idle_diagnostics(self, action: str) -> float:
+        now = time.monotonic()
+        previous = float(getattr(self, "_opblock_idle_last_activity_monotonic", now) or now)
+        idle_ms = max(0.0, (now - previous) * 1000.0)
+        threshold_ms = OPERBLOCK_IDLE_DIAGNOSTIC_THRESHOLD_SEC * 1000.0
+        if idle_ms >= threshold_ms and not bool(getattr(self, "_opblock_idle_period_reported", False)):
+            common = {
+                "role": self._diagnostic_role(),
+                "current_screen": self._diagnostic_current_screen(),
+                "current_admission_id": self._current_admission_id,
+                "current_operation_case_id": self._current_operation_case_id,
+                "idle_ms": round(idle_ms, 3),
+                "timestamp_ms": int(time.time() * 1000.0),
+            }
+            record_metric("user_idle_detected", 1, **common)
+            record_metric(
+                "user_return_from_idle",
+                1,
+                role=common["role"],
+                idle_ms=common["idle_ms"],
+                first_action=str(action or ""),
+                current_screen=common["current_screen"],
+                admission_id=self._current_admission_id,
+                operation_case_id=self._current_operation_case_id,
+                timestamp_ms=common["timestamp_ms"],
+            )
+            self._opblock_idle_period_reported = True
+        elif idle_ms < threshold_ms:
+            self._opblock_idle_period_reported = False
+        self._opblock_idle_last_activity_monotonic = now
+        return idle_ms
+
+    def _start_opblock_action_diagnostics(self, description: str) -> dict[str, Any]:
+        request_id = uuid.uuid4().hex
+        action = str(description or "")
+        idle_ms = self._record_user_idle_diagnostics(action)
+        started = time.monotonic()
+        payload = {
+            "action": action,
+            "source": action,
+            "operation_case_id": self._current_operation_case_id,
+            "admission_id": self._current_admission_id,
+            "table_code": self._diagnostic_table_code(),
+            "request_id": request_id,
+            "idle_before_action_ms": round(idle_ms, 3),
+            "timestamp_ms": int(time.time() * 1000.0),
+            "started_monotonic": started,
+            "pending_since_monotonic": started if self._write_pending else None,
+            "screen": self._diagnostic_current_screen(),
+        }
+        self._active_opblock_action = dict(payload)
+        self._last_opblock_action = dict(payload)
+        record_metric("opblock_action_started", 1, **{k: v for k, v in payload.items() if not k.endswith("_monotonic")})
+        if self._write_pending:
+            record_metric(
+                "ui_pending_state_observed",
+                1,
+                active_opblock_action=action,
+                request_id=request_id,
+                pending_since_ms=0,
+                widget_alive=True,
+                case_still_current=True,
+                source="opblock_action_started",
+            )
+        return payload
+
+    @staticmethod
+    def _diagnostic_result_for_error(exc: Exception) -> str:
+        text = str(exc or "").lower()
+        if "timeout" in text or "timed out" in text:
+            return "timeout"
+        if "busy" in text or "locked" in text or "занят" in text:
+            return "busy"
+        return "error"
+
+    def _finish_opblock_action_diagnostics(self, action_info: dict[str, Any] | None, result: str, exc: Exception | None = None):
+        if not action_info:
+            return
+        duration_ms = round((time.monotonic() - float(action_info.get("started_monotonic") or time.monotonic())) * 1000.0, 3)
+        payload = {
+            "action": str(action_info.get("action") or ""),
+            "request_id": str(action_info.get("request_id") or ""),
+            "result": result,
+            "duration_ms": duration_ms,
+            "error_class": type(exc).__name__ if exc is not None else "",
+            "error_message_sanitized": _sanitize_diagnostic_message(exc) if exc is not None else "",
+        }
+        record_metric("opblock_action_finished", duration_ms, **payload)
+        if (
+            self._active_opblock_action
+            and self._active_opblock_action.get("request_id") == action_info.get("request_id")
+        ):
+            self._active_opblock_action = None
+        self._last_opblock_action = {**dict(action_info), **payload, "finished_monotonic": time.monotonic()}
+
+    def diagnostic_snapshot(self) -> dict[str, Any]:
+        active = dict(getattr(self, "_active_opblock_action", None) or {})
+        last = dict(getattr(self, "_last_opblock_action", None) or {})
+        pending_since = active.get("pending_since_monotonic")
+        pending_since_ms = None
+        if isinstance(pending_since, (int, float)):
+            pending_since_ms = round(max(0.0, (time.monotonic() - float(pending_since)) * 1000.0), 3)
+        return {
+            "active_opblock_action": str(active.get("action") or ""),
+            "active_opblock_request_id": str(active.get("request_id") or ""),
+            "last_user_action": str(last.get("action") or ""),
+            "idle_before_action_ms": active.get("idle_before_action_ms") or last.get("idle_before_action_ms"),
+            "current_operation_case_id": self._current_operation_case_id,
+            "current_admission_id": self._current_admission_id,
+            "current_table_code": self._diagnostic_table_code(),
+            "ui_pending_action": str(active.get("action") or "") if self._write_pending else "",
+            "ui_pending_since_ms": pending_since_ms if self._write_pending else None,
+            "widget_alive": not bool(getattr(self, "_is_closing", False)),
+            "case_still_current": (
+                not active
+                or not active.get("operation_case_id")
+                or active.get("operation_case_id") == self._current_operation_case_id
+            ),
+        }
+
     def _enqueue_write(self, description: str, operation, on_success, on_error):
         if self.is_view_only_mode():
             logger.info("Operblock view-only write skipped: %s", description)
             self._write_pending = False
             self._apply_protocol_controls_state()
             return
+        action_info = self._start_opblock_action_diagnostics(description)
+
+        def diagnostic_success(result):
+            try:
+                on_success(result)
+            finally:
+                self._finish_opblock_action_diagnostics(action_info, "success")
+
+        def diagnostic_error(exc: Exception):
+            try:
+                on_error(exc)
+            finally:
+                self._finish_opblock_action_diagnostics(
+                    action_info,
+                    self._diagnostic_result_for_error(exc),
+                    exc,
+                )
+
         if not self.data_service:
             try:
                 result = operation()
             except Exception as exc:
-                on_error(exc)
+                diagnostic_error(exc)
             else:
-                on_success(result)
+                diagnostic_success(result)
             return
-        self.data_service.enqueue_write(description, operation, on_success=on_success, on_error=on_error)
+        self.data_service.enqueue_write(description, operation, on_success=diagnostic_success, on_error=diagnostic_error)
 
     def _cleanup_route_only_write_suppressions(self) -> None:
         now = time.monotonic()
