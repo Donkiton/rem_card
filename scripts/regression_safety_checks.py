@@ -16692,6 +16692,330 @@ def _check_analyzer_understands_local_dead_pid_cleanup(temp_root: str) -> tuple[
     return True, "ok"
 
 
+def _make_stage5_assignment_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE operation_table_assignments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation_case_id INTEGER NOT NULL,
+            table_code TEXT NOT NULL,
+            assigned_at TEXT NOT NULL,
+            released_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_by_role TEXT NOT NULL DEFAULT 'operblock',
+            created_by_client_id TEXT,
+            revision INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            last_modified_by TEXT
+        );
+        CREATE UNIQUE INDEX idx_operation_assignments_one_active_per_table
+        ON operation_table_assignments(table_code)
+        WHERE status = 'active' AND released_at IS NULL;
+        """
+    )
+    from rem_card.app.operblock_offline_store import _ensure_shadow_map_table
+
+    _ensure_shadow_map_table(conn)
+    return conn
+
+
+def _stage5_assignment_source(
+    *,
+    remote_id: int,
+    operation_case_id: int,
+    table_code: str = "emergency",
+    assigned_at: str = "2026-06-27 08:00:00",
+    status: str = "active",
+) -> dict[str, Any]:
+    return {
+        "id": int(remote_id),
+        "operation_case_id": int(operation_case_id),
+        "table_code": table_code,
+        "assigned_at": assigned_at,
+        "released_at": None,
+        "status": status,
+        "created_by_role": "operblock",
+        "created_by_client_id": "network-client",
+        "revision": 1,
+        "updated_at": assigned_at,
+        "last_modified_by": "operblock",
+    }
+
+
+def _capture_operblock_offline_store_metrics():
+    import rem_card.app.operblock_offline_store as store
+
+    events: list[dict[str, Any]] = []
+    original_record_metric = store.record_metric
+
+    def fake_record_metric(name, value=None, **fields):
+        payload = {"metric": str(name), "value": value}
+        payload.update(fields)
+        events.append(payload)
+
+    store.record_metric = fake_record_metric
+    return store, events, original_record_metric
+
+
+def _restore_operblock_offline_store_metrics(store, original_record_metric) -> None:
+    store.record_metric = original_record_metric
+
+
+def _assignment_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT id, operation_case_id, table_code, assigned_at, released_at, status
+            FROM operation_table_assignments
+            ORDER BY id
+            """
+        ).fetchall()
+    ]
+
+
+def _check_opblock_shadow_mirror_duplicate_table_code_idempotent(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    store, events, original_record_metric = _capture_operblock_offline_store_metrics()
+    conn = _make_stage5_assignment_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO operation_table_assignments (
+                operation_case_id, table_code, assigned_at, status, created_by_role, created_by_client_id, last_modified_by
+            ) VALUES (12, 'emergency', '2026-06-27 08:00:00', 'active', 'operblock', 'old-client', 'operblock')
+            """
+        )
+        local_id = store._mirror_operation_table_assignment(
+            conn,
+            source=_stage5_assignment_source(remote_id=100, operation_case_id=12),
+            overrides={"operation_case_id": 12},
+            offline_case_uuid="case-12",
+            remote_id=100,
+            reason="stage5_duplicate",
+        )
+        rows = _assignment_rows(conn)
+        if len(rows) != 1 or rows[0]["id"] != local_id or rows[0]["operation_case_id"] != 12:
+            return False, f"duplicate same table_code did not stay idempotent: {rows}"
+        if any("UNIQUE constraint failed" in str(event) for event in events):
+            return False, f"duplicate assignment leaked UNIQUE error: {events}"
+        if not any(event.get("metric") == "opblock_shadow_mirror_assignment_upserted" for event in events):
+            return False, f"assignment upsert metric missing: {events}"
+        return True, "ok"
+    finally:
+        conn.close()
+        _restore_operblock_offline_store_metrics(store, original_record_metric)
+
+
+def _check_opblock_shadow_mirror_table_code_reassignment_updates_row(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    store, events, original_record_metric = _capture_operblock_offline_store_metrics()
+    conn = _make_stage5_assignment_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO operation_table_assignments (
+                operation_case_id, table_code, assigned_at, status, created_by_role, created_by_client_id, last_modified_by
+            ) VALUES (12, 'emergency', '2026-06-27 08:00:00', 'active', 'operblock', 'old-client', 'operblock')
+            """
+        )
+        store._mirror_operation_table_assignment(
+            conn,
+            source=_stage5_assignment_source(remote_id=101, operation_case_id=13, assigned_at="2026-06-27 09:00:00"),
+            overrides={"operation_case_id": 13},
+            offline_case_uuid="case-13",
+            remote_id=101,
+            reason="stage5_reassignment",
+        )
+        rows = _assignment_rows(conn)
+        active_rows = [row for row in rows if row["status"] == "active" and row["released_at"] is None]
+        if len(rows) != 1 or len(active_rows) != 1 or active_rows[0]["operation_case_id"] != 13:
+            return False, f"table_code reassignment did not update one active row: {rows}"
+        resolved = [
+            event for event in events
+            if event.get("metric") == "opblock_shadow_mirror_duplicate_assignment_resolved"
+        ]
+        if not resolved or resolved[-1].get("old_operation_case_id") != 12 or resolved[-1].get("new_operation_case_id") != 13:
+            return False, f"duplicate assignment resolution metric missing/mismatched: {events}"
+        return True, "ok"
+    finally:
+        conn.close()
+        _restore_operblock_offline_store_metrics(store, original_record_metric)
+
+
+def _check_opblock_shadow_mirror_stale_assignment_removed_or_deactivated(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    store, events, original_record_metric = _capture_operblock_offline_store_metrics()
+    conn = _make_stage5_assignment_conn()
+    try:
+        conn.execute(
+            """
+            INSERT INTO operation_table_assignments (
+                id, operation_case_id, table_code, assigned_at, status, created_by_role, created_by_client_id, last_modified_by
+            ) VALUES (1, 12, 'emergency', '2026-06-27 08:00:00', 'active', 'operblock', 'old-client', 'operblock')
+            """
+        )
+        store._remember_mapping(conn, "case-12", "operation_table_assignments", 100, 1)
+        deactivated = store._deactivate_stale_shadow_assignments_for_case(
+            conn,
+            local_case_id=12,
+            offline_case_uuid="case-12",
+            active_remote_assignment_ids=set(),
+            source="stage5_stale",
+        )
+        rows = _assignment_rows(conn)
+        if deactivated != 1 or rows[0]["status"] != "released" or rows[0]["released_at"] is None:
+            return False, f"stale assignment was not deactivated: deactivated={deactivated}, rows={rows}"
+        if not any(event.get("metric") == "opblock_shadow_mirror_assignment_stale_deactivated" for event in events):
+            return False, f"stale deactivation metric missing: {events}"
+        return True, "ok"
+    finally:
+        conn.close()
+        _restore_operblock_offline_store_metrics(store, original_record_metric)
+
+
+def _check_opblock_shadow_mirror_repeat_run_is_noop(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    store, events, original_record_metric = _capture_operblock_offline_store_metrics()
+    conn = _make_stage5_assignment_conn()
+    try:
+        payload = _stage5_assignment_source(remote_id=100, operation_case_id=12)
+        first_id = store._mirror_operation_table_assignment(
+            conn,
+            source=payload,
+            overrides={"operation_case_id": 12},
+            offline_case_uuid="case-12",
+            remote_id=100,
+            reason="stage5_repeat",
+        )
+        first_rows = _assignment_rows(conn)
+        second_id = store._mirror_operation_table_assignment(
+            conn,
+            source=payload,
+            overrides={"operation_case_id": 12},
+            offline_case_uuid="case-12",
+            remote_id=100,
+            reason="stage5_repeat",
+        )
+        second_rows = _assignment_rows(conn)
+        if first_id != second_id or len(second_rows) != 1 or first_rows != second_rows:
+            return False, f"repeat mirror was not stable: first={first_rows}, second={second_rows}"
+        if not any(event.get("metric") == "opblock_shadow_mirror_assignment_upserted" and event.get("action") == "noop" for event in events):
+            return False, f"repeat mirror did not record noop upsert: {events}"
+        return True, "ok"
+    finally:
+        conn.close()
+        _restore_operblock_offline_store_metrics(store, original_record_metric)
+
+
+def _check_opblock_shadow_mirror_no_unique_constraint_in_assignment_path(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "app/operblock_offline_store.py").read_text(encoding="utf-8")
+    mirror_start = source.find("def _mirror_active_case")
+    mirror_end = source.find("def mirror_active_operblock_cases_from_network_db", mirror_start)
+    mirror_source = source[mirror_start:mirror_end]
+    if "_mirror_operation_table_assignment(" not in mirror_source:
+        return False, "active case mirror no longer routes assignments through idempotent helper"
+    if 'table_name="operation_table_assignments"' in mirror_source:
+        return False, "active case mirror still uses generic blind mapped insert for assignments"
+    required = (
+        "_active_assignment_for_table",
+        "_forget_assignment_mappings_for_local_id",
+        "opblock_shadow_mirror_duplicate_assignment_resolved",
+        "opblock_shadow_mirror_assignment_upserted",
+    )
+    missing = [token for token in required if token not in source]
+    if missing:
+        return False, f"idempotent assignment helper missing conflict handling tokens: {missing}"
+    return True, "ok"
+
+
+def _check_stage5_does_not_change_network_commit_result(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    source = (PROJECT_ROOT / "services/data_service.py").read_text(encoding="utf-8")
+    if "mirror_active_operblock_cases_from_network_db(self.db" not in source:
+        return False, "Stage 5 changed shadow mirror call site unexpectedly"
+    if "opblock_shadow_mirror_finished" not in source or "opblock_shadow_mirror_failed" not in source:
+        return False, "shadow mirror diagnostics were removed from DataService"
+    return True, "ok"
+
+
+def _check_stage5_does_not_change_sqlite_profile(temp_root: str) -> tuple[bool, str]:
+    return _check_opblock_stage1_no_sqlite_profile_changes(temp_root)
+
+
+def _check_stage5_does_not_enable_recovery_on_locked_busy(temp_root: str) -> tuple[bool, str]:
+    return _check_stage4_does_not_enable_recovery_on_locked_busy(temp_root)
+
+
+def _check_analyzer_understands_shadow_mirror_assignment_conflict(temp_root: str) -> tuple[bool, str]:
+    logs_dir = Path(temp_root, "opblock_stage5_shadow_logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = logs_dir / "metrics_20260626.jsonl"
+    rows = [
+        {
+            "ts": "2026-06-26T11:14:02+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 530000,
+            "first_action": "operblock_update_operation_case_form_data",
+        },
+        {
+            "ts": "2026-06-26T11:14:03+10:00",
+            "metric": "opblock_shadow_mirror_failed",
+            "error_message_sanitized": "UNIQUE constraint failed: operation_table_assignments.table_code",
+        },
+        {
+            "ts": "2026-06-26T11:18:02+10:00",
+            "metric": "user_return_from_idle",
+            "idle_ms": 540000,
+            "first_action": "operblock_update_operation_case_form_data",
+        },
+        {
+            "ts": "2026-06-26T11:18:03+10:00",
+            "metric": "opblock_shadow_mirror_duplicate_assignment_resolved",
+            "table_code": "emergency",
+            "old_operation_case_id": 12,
+            "new_operation_case_id": 13,
+        },
+        {
+            "ts": "2026-06-26T11:18:03.100000+10:00",
+            "metric": "opblock_shadow_mirror_assignment_upserted",
+            "table_code": "emergency",
+            "operation_case_id": 13,
+            "previous_operation_case_id": 12,
+            "action": "update",
+        },
+    ]
+    metrics_path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(PROJECT_ROOT / "scripts" / "analyze_opblock_idle_stalls.py"),
+            "--logs",
+            str(logs_dir),
+            "--json",
+        ],
+        cwd=str(PROJECT_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return False, f"Stage 5 analyzer failed: {result.stderr[-500:]}"
+    summary = json.loads(result.stdout)
+    classifications = [incident.get("classification") for incident in (summary.get("incidents") or [])]
+    if "shadow_mirror_unique_constraint_failed" not in classifications:
+        return False, f"unique constraint classification missing: {summary}"
+    if "shadow_mirror_duplicate_assignment_resolved" not in classifications:
+        return False, f"resolved duplicate classification missing: {summary}"
+    return True, "ok"
+
+
 def _check_emergency_standby_scheduler_shutdown_stops_worker(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_standby_scheduler import EmergencyStandbyScheduler
 
@@ -24998,6 +25322,18 @@ def main(argv: list[str] | None = None):
             _check_opblock_interactive_timeout_still_works_when_cleanup_skipped,
         ),
         ("analyzer_understands_local_dead_pid_cleanup", _check_analyzer_understands_local_dead_pid_cleanup),
+        ("opblock_shadow_mirror_duplicate_table_code_idempotent", _check_opblock_shadow_mirror_duplicate_table_code_idempotent),
+        ("opblock_shadow_mirror_table_code_reassignment_updates_row", _check_opblock_shadow_mirror_table_code_reassignment_updates_row),
+        (
+            "opblock_shadow_mirror_stale_assignment_removed_or_deactivated",
+            _check_opblock_shadow_mirror_stale_assignment_removed_or_deactivated,
+        ),
+        ("opblock_shadow_mirror_repeat_run_is_noop", _check_opblock_shadow_mirror_repeat_run_is_noop),
+        ("opblock_shadow_mirror_no_unique_constraint_in_assignment_path", _check_opblock_shadow_mirror_no_unique_constraint_in_assignment_path),
+        ("stage5_does_not_change_network_commit_result", _check_stage5_does_not_change_network_commit_result),
+        ("stage5_does_not_change_sqlite_profile", _check_stage5_does_not_change_sqlite_profile),
+        ("stage5_does_not_enable_recovery_on_locked_busy", _check_stage5_does_not_enable_recovery_on_locked_busy),
+        ("analyzer_understands_shadow_mirror_assignment_conflict", _check_analyzer_understands_shadow_mirror_assignment_conflict),
         ("emergency_standby_scheduler_shutdown_stops_worker", _check_emergency_standby_scheduler_shutdown_stops_worker),
         ("emergency_startup_only_available_for_nurse", _check_emergency_startup_only_available_for_nurse),
         ("emergency_startup_doctor_resumes_active_session_only", _check_emergency_startup_doctor_resumes_active_session_only),

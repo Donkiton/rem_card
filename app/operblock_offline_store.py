@@ -13,6 +13,7 @@ from typing import Any
 
 from rem_card.app.db_runtime_context import DbRuntimeContext, build_operblock_offline_runtime_context
 from rem_card.app.logger import logger
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.sqlite_shared import configure_connection, run_quick_check
 
 
@@ -601,6 +602,26 @@ def _remember_mapping(
     )
 
 
+def _forget_assignment_mappings_for_local_id(
+    conn: sqlite3.Connection,
+    *,
+    local_id: int,
+    keep_offline_case_uuid: str,
+    keep_remote_id: int,
+) -> None:
+    if not _table_exists(conn, "opblock_offline_shadow_map"):
+        return
+    conn.execute(
+        """
+        DELETE FROM opblock_offline_shadow_map
+        WHERE entity_name = 'operation_table_assignments'
+          AND local_id = ?
+          AND NOT (offline_case_uuid = ? AND remote_id = ?)
+        """,
+        (int(local_id), str(keep_offline_case_uuid or ""), int(keep_remote_id)),
+    )
+
+
 def _operation_case_shadow_mapping(conn: sqlite3.Connection, offline_case_uuid: str, local_case_id: int):
     if not _table_exists(conn, "opblock_offline_shadow_map"):
         return None
@@ -749,7 +770,25 @@ def _discard_stale_shadow_active_cases(conn: sqlite3.Connection, active_case_uui
             """,
             (operation_case_id, SHADOW_MIRROR_MIGRATION_STATUS),
         )
-        discarded += int(cursor.rowcount == 1)
+        if cursor.rowcount == 1:
+            discarded += 1
+            assignment_rows = conn.execute(
+                """
+                SELECT id
+                FROM operation_table_assignments
+                WHERE operation_case_id = ?
+                  AND status = 'active'
+                  AND released_at IS NULL
+                """,
+                (operation_case_id,),
+            ).fetchall()
+            for assignment_row in assignment_rows:
+                _deactivate_assignment_row(
+                    conn,
+                    local_id=int(assignment_row[0]),
+                    reason="missing_from_active_set",
+                    source="shadow_discard_stale_case",
+                )
     return discarded
 
 
@@ -820,6 +859,272 @@ def _insert_or_update_mapped_row(
     return local_id
 
 
+def _assignment_payload(
+    conn: sqlite3.Connection,
+    *,
+    source: dict[str, Any],
+    overrides: dict[str, Any],
+) -> dict[str, Any]:
+    columns = _columns(conn, "operation_table_assignments")
+    if not columns:
+        raise RuntimeError("Локальная таблица не готова: operation_table_assignments")
+    payload = {key: source.get(key) for key in columns if key != "id" and key in source}
+    payload.update({key: value for key, value in dict(overrides or {}).items() if key in columns and key != "id"})
+    return payload
+
+
+def _active_assignment_for_table(conn: sqlite3.Connection, table_code: str):
+    return conn.execute(
+        """
+        SELECT *
+        FROM operation_table_assignments
+        WHERE table_code = ?
+          AND status = 'active'
+          AND released_at IS NULL
+        ORDER BY id
+        LIMIT 1
+        """,
+        (str(table_code or ""),),
+    ).fetchone()
+
+
+def _assignment_values_equal(row, payload: dict[str, Any]) -> bool:
+    if row is None:
+        return False
+    for key, value in payload.items():
+        if str(row[key] if row[key] is not None else "") != str(value if value is not None else ""):
+            return False
+    return True
+
+
+def _row_value(row, key: str, index: int, default: Any = None) -> Any:
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row[index]
+        except Exception:
+            return default
+
+
+def _update_assignment_row(conn: sqlite3.Connection, *, local_id: int, payload: dict[str, Any]) -> None:
+    assignments = [f'"{key}" = ?' for key in payload]
+    if not assignments:
+        return
+    conn.execute(
+        f'UPDATE operation_table_assignments SET {", ".join(assignments)} WHERE id = ?',
+        [payload[key] for key in payload] + [int(local_id)],
+    )
+
+
+def _record_assignment_upsert_metric(
+    *,
+    table_code: str,
+    operation_case_id: int,
+    admission_id: int | None,
+    previous_operation_case_id: int | None,
+    action: str,
+    source: str,
+    duration_ms: float,
+) -> None:
+    record_metric(
+        "opblock_shadow_mirror_assignment_upserted",
+        1,
+        table_code=str(table_code or ""),
+        operation_case_id=int(operation_case_id),
+        admission_id=admission_id,
+        previous_operation_case_id=previous_operation_case_id,
+        action=str(action or ""),
+        source=str(source or ""),
+        duration_ms=round(float(duration_ms or 0.0), 3),
+    )
+
+
+def _record_assignment_duplicate_resolved(
+    *,
+    table_code: str,
+    old_operation_case_id: int | None,
+    new_operation_case_id: int,
+    source: str,
+) -> None:
+    record_metric(
+        "opblock_shadow_mirror_duplicate_assignment_resolved",
+        1,
+        table_code=str(table_code or ""),
+        old_operation_case_id=old_operation_case_id,
+        new_operation_case_id=int(new_operation_case_id),
+        source=str(source or ""),
+        reason="upsert_conflict",
+    )
+
+
+def _deactivate_assignment_row(
+    conn: sqlite3.Connection,
+    *,
+    local_id: int,
+    reason: str,
+    source: str,
+) -> bool:
+    columns = set(_columns(conn, "operation_table_assignments"))
+    now = _now_text()
+    updates: dict[str, Any] = {}
+    if "status" in columns:
+        updates["status"] = "released"
+    if "released_at" in columns:
+        updates["released_at"] = now
+    if "last_modified_by" in columns:
+        updates["last_modified_by"] = "operblock"
+    if "updated_at" in columns:
+        updates["updated_at"] = now
+    if not updates:
+        return False
+    row = conn.execute(
+        """
+        SELECT id, table_code, operation_case_id
+        FROM operation_table_assignments
+        WHERE id = ?
+          AND status = 'active'
+          AND released_at IS NULL
+        """,
+        (int(local_id),),
+    ).fetchone()
+    if not row:
+        return False
+    assignments = [f'"{key}" = ?' for key in updates]
+    cursor = conn.execute(
+        f'UPDATE operation_table_assignments SET {", ".join(assignments)} WHERE id = ?',
+        [updates[key] for key in updates] + [int(local_id)],
+    )
+    if cursor.rowcount == 1:
+        record_metric(
+            "opblock_shadow_mirror_assignment_stale_deactivated",
+            1,
+            table_code=str(_row_value(row, "table_code", 1, "") or ""),
+            old_operation_case_id=int(_row_value(row, "operation_case_id", 2, 0) or 0),
+            old_admission_id=None,
+            reason=str(reason or ""),
+            source=str(source or ""),
+        )
+        return True
+    return False
+
+
+def _deactivate_stale_shadow_assignments_for_case(
+    conn: sqlite3.Connection,
+    *,
+    local_case_id: int,
+    offline_case_uuid: str,
+    active_remote_assignment_ids: set[int],
+    source: str,
+) -> int:
+    if not _table_exists(conn, "operation_table_assignments") or not _table_exists(conn, "opblock_offline_shadow_map"):
+        return 0
+    rows = conn.execute(
+        """
+        SELECT item.id, map.remote_id
+        FROM operation_table_assignments item
+        JOIN opblock_offline_shadow_map map
+          ON map.entity_name = 'operation_table_assignments'
+         AND map.local_id = item.id
+        WHERE item.operation_case_id = ?
+          AND map.offline_case_uuid = ?
+          AND item.status = 'active'
+          AND item.released_at IS NULL
+        """,
+        (int(local_case_id), str(offline_case_uuid or "")),
+    ).fetchall()
+    deactivated = 0
+    for row in rows:
+        remote_id = int(row["remote_id"] or 0)
+        if remote_id in active_remote_assignment_ids:
+            continue
+        if _deactivate_assignment_row(
+            conn,
+            local_id=int(row["id"]),
+            reason="missing_from_active_set",
+            source=source,
+        ):
+            deactivated += 1
+    return deactivated
+
+
+def _mirror_operation_table_assignment(
+    conn: sqlite3.Connection,
+    *,
+    source: dict[str, Any],
+    overrides: dict[str, Any],
+    offline_case_uuid: str,
+    remote_id: int,
+    reason: str,
+) -> int:
+    started = time.perf_counter()
+    payload = _assignment_payload(conn, source=source, overrides=overrides)
+    table_code = str(payload.get("table_code") or "")
+    local_case_id = int(payload.get("operation_case_id") or 0)
+    admission_id = payload.get("admission_id")
+    mapped_id = _mapped_local_id(conn, offline_case_uuid, "operation_table_assignments", remote_id)
+    active_conflict = _active_assignment_for_table(conn, table_code) if table_code else None
+    payload_is_active = str(payload.get("status") or "") == "active" and not payload.get("released_at")
+    target_id = int(
+        (active_conflict["id"] if active_conflict is not None and payload_is_active else None)
+        or mapped_id
+        or 0
+    )
+    previous_case_id = int(active_conflict["operation_case_id"] or 0) if active_conflict else None
+    action = "insert"
+    if target_id:
+        if mapped_id and int(mapped_id) != target_id:
+            _deactivate_assignment_row(
+                conn,
+                local_id=int(mapped_id),
+                reason="superseded_by_table_code_upsert",
+                source=reason,
+            )
+        current = conn.execute("SELECT * FROM operation_table_assignments WHERE id = ?", (target_id,)).fetchone()
+        previous_case_id = int(current["operation_case_id"] or 0) if current else previous_case_id
+        if current is not None and _assignment_values_equal(current, payload):
+            action = "noop"
+        else:
+            _update_assignment_row(conn, local_id=target_id, payload=payload)
+            action = "update"
+        _forget_assignment_mappings_for_local_id(
+            conn,
+            local_id=target_id,
+            keep_offline_case_uuid=offline_case_uuid,
+            keep_remote_id=remote_id,
+        )
+        _remember_mapping(conn, offline_case_uuid, "operation_table_assignments", remote_id, target_id)
+    else:
+        insert_columns = list(payload)
+        placeholders = ", ".join("?" for _ in insert_columns)
+        quoted_columns = ", ".join(f'"{key}"' for key in insert_columns)
+        conn.execute(
+            f'INSERT INTO operation_table_assignments ({quoted_columns}) VALUES ({placeholders})',
+            [payload[key] for key in insert_columns],
+        )
+        target_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        _remember_mapping(conn, offline_case_uuid, "operation_table_assignments", remote_id, target_id)
+    if active_conflict is not None and int(active_conflict["id"] or 0) == target_id:
+        old_case_id = int(active_conflict["operation_case_id"] or 0)
+        if old_case_id != local_case_id or not mapped_id:
+            _record_assignment_duplicate_resolved(
+                table_code=table_code,
+                old_operation_case_id=old_case_id,
+                new_operation_case_id=local_case_id,
+                source=reason,
+            )
+    _record_assignment_upsert_metric(
+        table_code=table_code,
+        operation_case_id=local_case_id,
+        admission_id=int(admission_id) if admission_id is not None else None,
+        previous_operation_case_id=previous_case_id,
+        action=action,
+        source=reason,
+        duration_ms=(time.perf_counter() - started) * 1000.0,
+    )
+    return int(target_id)
+
+
 def _fetch_remote_rows(db_manager, query: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     return [dict(row) for row in db_manager.fetch_all_remcard(query, params)]
 
@@ -870,6 +1175,7 @@ def _mirror_active_case(
     remote_db_path: str,
     case: dict[str, Any],
     offline_session_id: str | None,
+    reason: str,
 ) -> str:
     remote_case_id = int(case["id"])
     remote_patient_id = int(case["patient_id"])
@@ -953,16 +1259,26 @@ def _mirror_active_case(
         "SELECT * FROM operation_table_assignments WHERE operation_case_id = ? ORDER BY id",
         (remote_case_id,),
     )
+    active_remote_assignment_ids: set[int] = set()
     for row in assignment_rows:
-        _insert_or_update_mapped_row(
+        remote_assignment_id = int(row.get("id") or 0)
+        if str(row.get("status") or "") == "active" and not row.get("released_at"):
+            active_remote_assignment_ids.add(remote_assignment_id)
+        _mirror_operation_table_assignment(
             local_conn,
-            table_name="operation_table_assignments",
             source=row,
             overrides={"operation_case_id": local_case_id},
             offline_case_uuid=offline_case_uuid,
-            entity_name="operation_table_assignments",
-            remote_id=int(row.get("id") or 0),
+            remote_id=remote_assignment_id,
+            reason=reason,
         )
+    _deactivate_stale_shadow_assignments_for_case(
+        local_conn,
+        local_case_id=local_case_id,
+        offline_case_uuid=offline_case_uuid,
+        active_remote_assignment_ids=active_remote_assignment_ids,
+        source=reason,
+    )
 
     event_map: dict[int, int] = {}
     event_rows = _fetch_remote_rows(
@@ -1030,6 +1346,7 @@ def mirror_active_operblock_cases_from_network_db(db_manager, *, reason: str = "
                 remote_db_path=remote_db_path,
                 case=case,
                 offline_session_id=getattr(metadata, "offline_session_id", "active") if metadata else "active",
+                reason=str(reason or ""),
             )
             active_case_uuids.add(case_uuid)
             if metadata is not None:

@@ -31,6 +31,10 @@ OPBLOCK_EVENTS = {
     "opblock_shadow_mirror_finished",
     "opblock_shadow_mirror_failed",
     "opblock_shadow_mirror_deferred_for_foreground_resume",
+    "opblock_shadow_mirror_assignment_upserted",
+    "opblock_shadow_mirror_assignment_stale_deactivated",
+    "opblock_shadow_mirror_assignment_stale_removed",
+    "opblock_shadow_mirror_duplicate_assignment_resolved",
     "foreground_resume_lease_started",
     "foreground_resume_lease_finished",
     "maintenance_deferred_for_foreground_resume",
@@ -191,7 +195,17 @@ def _classify(related: list[Event]) -> str:
         return "sqlite_write_lock_wait"
     if _first(related, "maintenance_overlap_observed"):
         return "maintenance_overlap"
-    if _first(related, "opblock_shadow_mirror_failed"):
+    if _first(related, "opblock_shadow_mirror_duplicate_assignment_resolved"):
+        return "shadow_mirror_duplicate_assignment_resolved"
+    if _first(related, "opblock_shadow_mirror_assignment_upserted"):
+        return "shadow_mirror_assignment_upsert"
+    if _first(related, "opblock_shadow_mirror_assignment_stale_removed", "opblock_shadow_mirror_assignment_stale_deactivated"):
+        return "shadow_mirror_stale_assignment_removed"
+    shadow_failed = _first(related, "opblock_shadow_mirror_failed")
+    if shadow_failed:
+        error_text = str(shadow_failed.fields.get("error_message_sanitized") or shadow_failed.fields.get("error") or "")
+        if "UNIQUE constraint failed: operation_table_assignments.table_code" in error_text:
+            return "shadow_mirror_unique_constraint_failed"
         return "shadow_mirror_failure"
     if _first(related, "foreground_resume_lease_started") and _first(
         related,
@@ -253,6 +267,14 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
     deferred_events = [item for item in related if item.kind == "maintenance_deferred_for_foreground_resume"]
     resumed_events = [item for item in related if item.kind == "maintenance_resume_after_foreground"]
     shadow_deferred = _first(related, "opblock_shadow_mirror_deferred_for_foreground_resume")
+    shadow_assignment = _first(
+        related,
+        "opblock_shadow_mirror_duplicate_assignment_resolved",
+        "opblock_shadow_mirror_assignment_upserted",
+        "opblock_shadow_mirror_assignment_stale_removed",
+        "opblock_shadow_mirror_assignment_stale_deactivated",
+        "opblock_shadow_mirror_failed",
+    )
     return {
         "incident_at": (event.ts.isoformat(sep=" ") if event.ts else ""),
         "idle_ms": event.fields.get("idle_ms"),
@@ -281,6 +303,27 @@ def _incident_payload(event: Event, related: list[Event]) -> dict[str, Any]:
         "maintenance_overlap": bool(_first(related, "maintenance_overlap_observed")),
         "shadow_mirror_overlap": bool(_first(related, "opblock_shadow_mirror_started", "opblock_shadow_mirror_failed")),
         "shadow_mirror_deferred": bool(shadow_deferred),
+        "shadow_mirror_table_code": (shadow_assignment.fields.get("table_code") if shadow_assignment else ""),
+        "shadow_mirror_previous_case": (
+            shadow_assignment.fields.get("previous_operation_case_id")
+            if shadow_assignment
+            else None
+        ),
+        "shadow_mirror_old_case": (
+            shadow_assignment.fields.get("old_operation_case_id")
+            if shadow_assignment
+            else None
+        ),
+        "shadow_mirror_new_case": (
+            shadow_assignment.fields.get("new_operation_case_id")
+            if shadow_assignment
+            else (shadow_assignment.fields.get("operation_case_id") if shadow_assignment else None)
+        ),
+        "shadow_mirror_error": (
+            shadow_assignment.fields.get("error_message_sanitized") or shadow_assignment.fields.get("error")
+            if shadow_assignment
+            else ""
+        ),
         "events": [item.kind for item in related],
     }
 
@@ -294,6 +337,48 @@ def _format_ms(value: Any) -> str:
         seconds = int((numeric % 60000) // 1000)
         return f"{minutes}m {seconds}s"
     return f"{int(numeric)} ms"
+
+
+def _print_shadow_mirror_text(incident: dict[str, Any]) -> None:
+    classification = incident.get("classification")
+    if incident.get("shadow_mirror_deferred"):
+        print("Shadow mirror: deferred")
+        return
+    if classification in {
+        "shadow_mirror_duplicate_assignment_resolved",
+        "shadow_mirror_assignment_upsert",
+        "shadow_mirror_stale_assignment_removed",
+    }:
+        print("Shadow mirror: assignment upserted")
+        print(f"Table code: {incident.get('shadow_mirror_table_code') or 'unknown'}")
+        print(f"Previous case: {incident.get('shadow_mirror_previous_case') or incident.get('shadow_mirror_old_case') or 'unknown'}")
+        print(f"New case: {incident.get('shadow_mirror_new_case') or 'unknown'}")
+        return
+    if classification == "shadow_mirror_unique_constraint_failed":
+        print("Shadow mirror: failed")
+        print(f"Error: {incident.get('shadow_mirror_error') or 'UNIQUE constraint failed: operation_table_assignments.table_code'}")
+        print(f"Table code: {incident.get('shadow_mirror_table_code') or 'unknown'}")
+        return
+    print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
+
+
+def _conclusion_text(classification: Any) -> str:
+    conclusion = str(classification or "")
+    if conclusion == "local_dead_pid_lock_removed":
+        return "stale local db.lock cleaned safely"
+    if conclusion in {"other_host_lock_wait", "live_pid_lock_wait", "unreadable_lock_wait"}:
+        return "remote/unknown lock was not removed"
+    if conclusion == "local_dead_pid_cleanup_failed":
+        return "local dead-PID cleanup failed; lock was not removed"
+    if conclusion in {"shadow_mirror_duplicate_assignment_resolved", "shadow_mirror_assignment_upsert"}:
+        return "duplicate assignment handled idempotently"
+    if conclusion == "shadow_mirror_stale_assignment_removed":
+        return "stale shadow table assignment removed"
+    if conclusion == "shadow_mirror_unique_constraint_failed":
+        return "shadow mirror duplicate table assignment conflict"
+    if conclusion in {"file_lock_timeout", "begin_immediate_timeout", "opblock_busy_timeout", "sqlite_write_lock_timeout"}:
+        return "interactive opblock write timed out instead of hanging"
+    return conclusion
 
 
 def _print_text(incidents: list[dict[str, Any]]) -> None:
@@ -343,21 +428,9 @@ def _print_text(incidents: list[dict[str, Any]]) -> None:
         print(f"UI pause: {_format_ms(incident.get('ui_pause_ms')) if incident.get('ui_pause_ms') is not None else 'none'}")
         print(f"UI result: {incident.get('ui_result') or 'unknown'}")
         print(f"Maintenance overlap: {'yes' if incident.get('maintenance_overlap') else 'none'}")
-        if incident.get("shadow_mirror_deferred"):
-            print("Shadow mirror: deferred")
-        else:
-            print(f"Shadow mirror overlap: {'yes' if incident.get('shadow_mirror_overlap') else 'none'}")
+        _print_shadow_mirror_text(incident)
         print(f"Maintenance resumed: {', '.join(resumed) if resumed else 'none'}")
-        conclusion = incident.get("classification")
-        if conclusion == "local_dead_pid_lock_removed":
-            conclusion = "stale local db.lock cleaned safely"
-        elif conclusion in {"other_host_lock_wait", "live_pid_lock_wait", "unreadable_lock_wait"}:
-            conclusion = "remote/unknown lock was not removed"
-        elif conclusion == "local_dead_pid_cleanup_failed":
-            conclusion = "local dead-PID cleanup failed; lock was not removed"
-        elif conclusion in {"file_lock_timeout", "begin_immediate_timeout", "opblock_busy_timeout", "sqlite_write_lock_timeout"}:
-            conclusion = "interactive opblock write timed out instead of hanging"
-        print(f"Conclusion: {conclusion}")
+        print(f"Conclusion: {_conclusion_text(incident.get('classification'))}")
         print()
 
 
