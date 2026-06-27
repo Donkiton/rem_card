@@ -266,7 +266,6 @@ class SectorIvl(BaseSectorWidget):
 
     def _fit_fixed_width_button(self, button: QPushButton):
         font = QFont(button.font())
-        font.setPixelSize(10)
         font.setBold(True)
         button.setFont(font)
         button.setFixedWidth(button.fontMetrics().horizontalAdvance(button.text()) + 22)
@@ -658,7 +657,6 @@ class SectorIvl(BaseSectorWidget):
                 border-radius: 6px;
                 padding: 6px 10px;
                 min-height: 34px;
-                font-size: 10px;
                 font-weight: 700;
             }
             QPushButton#ivl_btn_primary:hover,
@@ -802,7 +800,7 @@ class SectorIvl(BaseSectorWidget):
         stats_layout = QHBoxLayout(stats_card)
         stats_layout.setContentsMargins(10, 8, 10, 8)
         stats_layout.setSpacing(8)
-        stats_layout.addWidget(self._make_case_stat_block(), 2)
+        stats_layout.addWidget(self._make_case_stat_block(), 1)
         stats_layout.addWidget(self._make_stat_separator())
         stats_layout.addWidget(self._make_stat_block("time_ivl.png", "Суммарное время ИВЛ", self.lbl_total_duration), 1)
         stats_layout.addWidget(self._make_stat_separator())
