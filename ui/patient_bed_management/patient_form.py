@@ -127,8 +127,8 @@ class PatientForm(SavedFramelessDialogMixin, QDialog):
         self.dialog_title_text = "Новая карточка пациента" if self.is_new_admission else "Карточка пациента"
 
         self.setWindowTitle(f"{self.dialog_title_text} - {self.bed_label}")
-        self.setMinimumSize(1106, 506)
-        self.resize(1106, 506)
+        self.setMinimumSize(1166, 506)
+        self.resize(1166, 506)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         self.setMouseTracking(True)

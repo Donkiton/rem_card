@@ -74,19 +74,19 @@ class GeneralTabWidget(QWidget):
         self.history_number_input = QLineEdit()
         self.history_number_input.setPlaceholderText("Введите номер")
         self.history_number_input.setFixedHeight(34)
-        self.history_number_input.setFixedWidth(270)
+        self.history_number_input.setFixedWidth(300)
         self.history_number_input.addAction(line_icon("card", "#8ea0ba", 17), QLineEdit.TrailingPosition)
         self._add_row("Номер истории болезни", self.history_number_input)
 
         self.full_name_input = QLineEdit()
         self.full_name_input.setPlaceholderText("Введите ФИО")
         self.full_name_input.setFixedHeight(34)
-        self.full_name_input.setFixedWidth(270)
+        self.full_name_input.setFixedWidth(300)
         self.full_name_input.addAction(line_icon("user", "#8ea0ba", 17), QLineEdit.TrailingPosition)
         self._add_row("ФИО пациента", self.full_name_input)
 
         self.gender_combo = GenderSegmentedControl()
-        self.gender_combo.setFixedWidth(270)
+        self.gender_combo.setFixedWidth(300)
         self._add_row("Пол", self.gender_combo)
 
         birth_widget = QWidget()
@@ -120,7 +120,7 @@ class GeneralTabWidget(QWidget):
         current_dt = QDateTime.currentDateTime()
 
         self.admission_datetime_field = QFrame()
-        self.admission_datetime_field.setFixedSize(270, 34)
+        self.admission_datetime_field.setFixedSize(300, 34)
         self.admission_datetime_field.setStyleSheet(
             """
             QFrame {
@@ -181,7 +181,7 @@ class GeneralTabWidget(QWidget):
         self.source_department_input.addItems(["Приемное отделение", "Профильное отделение"])
         self.source_department_input.setCurrentText("Приемное отделение")
         self.source_department_input.setFixedHeight(34)
-        self.source_department_input.setFixedWidth(270)
+        self.source_department_input.setFixedWidth(300)
         self._add_row("Откуда поступил пациент", self.source_department_input)
 
         self.department_profile_input = SingleClickComboBox()
@@ -192,7 +192,7 @@ class GeneralTabWidget(QWidget):
         if self.department_profile_input.lineEdit() is not None:
             self.department_profile_input.lineEdit().setPlaceholderText("Укажите отделение")
         self.department_profile_input.setFixedHeight(34)
-        self.department_profile_input.setFixedWidth(270)
+        self.department_profile_input.setFixedWidth(300)
         self._add_row("Профиль основного отделения", self.department_profile_input)
         self.form_layout.setRowStretch(self._row, 1)
 
@@ -323,6 +323,7 @@ class GeneralTabWidget(QWidget):
     def set_data(self, patient, admission):
         if patient:
             self.full_name_input.setText(patient.full_name or "")
+            self.full_name_input.setCursorPosition(0)
             birth_date = parse_date_value(getattr(patient, "birth_date", None))
             if birth_date:
                 self.birth_date_input.blockSignals(True)

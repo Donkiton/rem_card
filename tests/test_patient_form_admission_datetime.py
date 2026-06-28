@@ -5,6 +5,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -39,6 +40,17 @@ class PatientFormAdmissionDateTimeTest(unittest.TestCase):
         self.assertEqual(data["admission_datetime"], datetime(2026, 6, 24, 7, 45))
         self.assertIn("combo_arrow_down.svg", widget.admission_date_input.styleSheet())
         self.assertIn("decor_arrow_up.svg", widget.admission_time_input.styleSheet())
+
+    def test_loaded_long_patient_name_is_positioned_at_start(self):
+        widget = GeneralTabWidget()
+        patient = SimpleNamespace(
+            full_name="Оченьдлиннаяфамилия-Составная Иван Иванович-Сергеевич",
+            birth_date=None,
+        )
+
+        widget.set_data(patient, None)
+
+        self.assertEqual(widget.full_name_input.cursorPosition(), 0)
 
     def test_non_today_admission_warning_can_keep_form_open_for_editing_date(self):
         original_warning_with_actions = CustomMessageBox.__dict__["warning_with_actions"]

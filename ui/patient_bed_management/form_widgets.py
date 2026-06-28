@@ -123,7 +123,7 @@ class GenderSegmentedControl(QWidget):
         super().__init__(parent)
         self._current = "Мужской"
         self.setFixedHeight(34)
-        self.setMinimumWidth(270)
+        self.setMinimumWidth(300)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
