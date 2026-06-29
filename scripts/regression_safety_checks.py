@@ -1227,6 +1227,63 @@ def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[boo
                 os.environ[key] = value
 
 
+def _check_updater_direct_launch_infers_patch_support_context(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import get_update_lock_path
+    from rem_card.app.updater_main import _build_direct_update_args
+
+    saved_env = {
+        key: os.environ.get(key)
+        for key in ("REMCARD_BAZA_DIR", "REMCARD_UPDATE_TARGET_DIR")
+    }
+    try:
+        os.environ.pop("REMCARD_BAZA_DIR", None)
+        os.environ.pop("REMCARD_UPDATE_TARGET_DIR", None)
+
+        root = os.path.join(temp_root, "patch_share")
+        baza_dir = os.path.join(root, "Baza_rao3_jurnal")
+        upd_dir = os.path.join(baza_dir, "UPD")
+        support_dir = os.path.join(upd_dir, "support")
+        target_dir = os.path.join(root, "Prog")
+        os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
+        os.makedirs(support_dir, exist_ok=True)
+        os.makedirs(target_dir, exist_ok=True)
+        Path(target_dir, "VERSION").write_text("1.0.0\n", encoding="utf-8")
+        Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
+        _write_fake_patch_package(upd_dir, base_version="1.0.0", version="1.0.1")
+
+        args = _build_direct_update_args(support_dir)
+        if args is None:
+            return False, "direct patch support package was not recognized"
+
+        expected = {
+            "source": os.path.abspath(upd_dir),
+            "target": os.path.abspath(target_dir),
+            "baza_dir": os.path.abspath(baza_dir),
+            "lock": os.path.abspath(get_update_lock_path(baza_dir, target_dir=target_dir)),
+            "target_version": "1.0.1",
+            "current_version": "1.0.0",
+        }
+        actual = {
+            "source": os.path.abspath(args.source),
+            "target": os.path.abspath(args.target),
+            "baza_dir": os.path.abspath(args.baza_dir),
+            "lock": os.path.abspath(args.lock),
+            "target_version": args.target_version,
+            "current_version": args.current_version,
+        }
+        if actual != expected:
+            return False, f"direct patch updater args mismatch: {actual}"
+        if args.parent_pid != "0" or args.starting_lock != "":
+            return False, f"unexpected direct patch launcher synchronization args: {args}"
+        return True, "ok"
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _check_updater_cleanup_retries_old_backup(temp_root: str) -> tuple[bool, str]:
     from rem_card.app import updater_main
 
@@ -26508,6 +26565,7 @@ def main(argv: list[str] | None = None):
         ("support_updater_used_when_updater_in_payload", _check_support_updater_used_when_updater_in_payload),
         ("first_patch_requires_patch_aware_updater", _check_first_patch_requires_patch_aware_updater),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
+        ("updater_direct_launch_infers_patch_support_context", _check_updater_direct_launch_infers_patch_support_context),
         ("updater_cleanup_retries_old_backup", _check_updater_cleanup_retries_old_backup),
         ("update_locks_are_scoped_to_target", _check_update_locks_are_scoped_to_target),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),

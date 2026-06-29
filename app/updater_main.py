@@ -104,6 +104,7 @@ REQUIRED_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
+SUPPORT_DIR_NAME = "support"
 MANAGED_ROOT_FILES = (
     "RemCard.exe",
     "RemCardDoctor.exe",
@@ -1307,6 +1308,21 @@ def _load_direct_release(executable_dir: str) -> Optional[tuple[str, str, dict[s
             continue
         if str(manifest.get("app") or "rem_card") != "rem_card":
             continue
+        if get_package_type(manifest) == PACKAGE_TYPE_PATCH:
+            source_dir = os.path.abspath(release_dir)
+            support_dir = os.path.abspath(os.path.join(source_dir, SUPPORT_DIR_NAME))
+            if not _same_path(support_dir, exe_dir):
+                continue
+            if not os.path.isfile(os.path.join(source_dir, READY_FILE_NAME)):
+                continue
+            if not os.path.isfile(os.path.join(support_dir, "RemCardUpdater.exe")):
+                continue
+            try:
+                normalized = _validate_patch_source(source_dir, manifest)
+            except Exception:
+                continue
+            return os.path.abspath(release_dir), source_dir, normalized
+
         prog_dir_name = str(manifest.get("prog_dir") or ".").strip() or "."
         source_dir = os.path.abspath(os.path.join(release_dir, prog_dir_name))
         if not _same_path(source_dir, exe_dir):
