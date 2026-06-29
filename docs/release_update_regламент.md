@@ -26,3 +26,40 @@
 ## Автоблокировка старого клиента
 
 После несовместимой миграции `client_policy.json.min_client_version` должен быть не ниже версии клиента, который выполнил миграцию. Клиент с `APP_VERSION < min_client_version` не должен открывать рабочую БД.
+
+## Full И Patch
+
+Full-релиз остается основным безопасным способом для крупных обновлений:
+
+```powershell
+python scripts\build_release.py
+```
+
+Patch-релиз используется для точечных обновлений собранной one-dir программы:
+
+```powershell
+python scripts\build_patch_update.py
+```
+
+Оба варианта публикуются в:
+
+```text
+C:\Test\Baza_rao3_jurnal\UPD
+```
+
+В финальном `UPD` нет папки `Prog`.
+
+Правила patch-релиза:
+
+- первый patch-aware updater доставляется только full-релизом;
+- patch применяется только к точной `base_version`;
+- при несовпадении базы нужен full-релиз;
+- `manifest.json` и `ready.ok` не участвуют в output diff;
+- `ready.ok` создается последним;
+- patch-builder делает `git push` до публикации в `UPD`;
+- cache хранится в `C:\Test\rem_card\.remcard_patch_cache`;
+- cache-база должна быть canonical patched tree;
+- `settings_release_snapshot.json` пропускается при одинаковом `content_hash`;
+- роли остаются отдельными EXE, без `--role`.
+
+Если patch payload получается большим или содержит массовые изменения EXE/PYZ/DLL/ZIP, используйте full-релиз либо запускайте patch-builder с явным override после проверки причины.

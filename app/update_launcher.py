@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from rem_card.app.process_launch import popen_hidden
 from rem_card.app.runtime_paths import get_executable_dir, is_compiled, resolve_baza_dir
+from rem_card.app.update_package import PACKAGE_TYPE_PATCH
 from rem_card.app.update_checker import (
     UpdateCandidate,
     get_update_lock_path,
@@ -20,6 +21,8 @@ from rem_card.app.version import APP_VERSION
 
 UPDATE_LOCK_STALE_SEC = 30 * 60
 UPDATE_STARTING_LOCK_STALE_SEC = 5 * 60
+SUPPORT_DIR_NAME = "support"
+UPDATER_EXE_NAME = "RemCardUpdater.exe"
 
 
 def _read_lock_payload(lock_path: str) -> Optional[dict[str, Any]]:
@@ -171,6 +174,24 @@ def _remove_lock_quietly(path: str):
         pass
 
 
+def _patch_payload_includes(candidate: UpdateCandidate, relative_path: str) -> bool:
+    target = relative_path.replace("\\", "/").casefold()
+    for entry in candidate.manifest.get("files") or []:
+        path = str(entry.get("path") or "").replace("\\", "/").casefold()
+        if path == target:
+            return True
+    return False
+
+
+def _select_updater_path(candidate: UpdateCandidate, target_dir: str) -> str:
+    if candidate.package_type != PACKAGE_TYPE_PATCH:
+        return os.path.join(candidate.prog_dir, UPDATER_EXE_NAME)
+
+    if _patch_payload_includes(candidate, UPDATER_EXE_NAME):
+        return os.path.join(candidate.prog_dir, SUPPORT_DIR_NAME, UPDATER_EXE_NAME)
+    return os.path.join(target_dir, UPDATER_EXE_NAME)
+
+
 def launch_update(
     candidate: UpdateCandidate,
     *,
@@ -180,16 +201,16 @@ def launch_update(
     if not is_compiled():
         return False
 
-    updater_path = os.path.join(candidate.prog_dir, "RemCardUpdater.exe")
-    if not os.path.isfile(updater_path):
-        return False
-
     try:
         baza_dir = resolve_baza_dir()
         target_dir = get_executable_dir()
         lock_path = get_update_lock_path(baza_dir, target_dir=target_dir)
         starting_lock_path = get_update_starting_lock_path(baza_dir, target_dir=target_dir)
     except Exception:
+        return False
+
+    updater_path = _select_updater_path(candidate, target_dir)
+    if not os.path.isfile(updater_path):
         return False
 
     if is_update_in_progress(target_dir=target_dir) or not _write_starting_lock(

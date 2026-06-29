@@ -21,6 +21,7 @@ dist/
 *.egg-info/
 
 tmp/
+.remcard_patch_cache/
 scripts/bench_results/
 *.log
 

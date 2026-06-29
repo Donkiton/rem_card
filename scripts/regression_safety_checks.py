@@ -248,6 +248,819 @@ def _write_fake_update_package(path: str, version: str = "9.9.9") -> None:
     Path(path, "ready.ok").write_text("ok\n", encoding="utf-8")
 
 
+def _write_fake_patch_package(path: str, *, base_version: str = "1.0.0", version: str = "1.0.1") -> str:
+    from rem_card.app.update_package import compute_sha256
+
+    payload_rel = "_internal/rem_card/icon/example.txt"
+    payload_path = Path(path, "payload", *payload_rel.split("/"))
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text("new payload\n", encoding="utf-8")
+    sha256 = compute_sha256(payload_path)
+    manifest = {
+        "schema_version": 1,
+        "app": "rem_card",
+        "package_type": "patch",
+        "version": version,
+        "base_version": base_version,
+        "created_at": "2026-01-01T00:00:00+10:00",
+        "base_commit": "base",
+        "source_commit": "source",
+        "patch_commit": "patch",
+        "builder": "scripts/build_patch_update.py",
+        "files": [
+            {
+                "path": payload_rel,
+                "size": payload_path.stat().st_size,
+                "sha256": sha256,
+                "old_sha256": _PATCH_OLD_SHA,
+            }
+        ],
+        "delete": [],
+    }
+    Path(path).mkdir(parents=True, exist_ok=True)
+    Path(path, "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    Path(path, "ready.ok").write_text("ok\n", encoding="utf-8")
+    return payload_rel
+
+
+def _write_targeted_patch_package(
+    package_dir: str,
+    target_dir: str,
+    *,
+    files: dict[str, bytes],
+    delete: list[str] | None = None,
+    base_version: str = "1.0.0",
+    version: str = "1.0.1",
+) -> dict[str, Any]:
+    from rem_card.app.update_package import compute_sha256
+
+    package = Path(package_dir)
+    package.mkdir(parents=True, exist_ok=True)
+    file_entries = []
+    for relative_path, content in files.items():
+        payload_path = package / "payload" / Path(*relative_path.split("/"))
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_bytes(content)
+        target_path = Path(target_dir, *relative_path.split("/"))
+        old_sha = compute_sha256(target_path) if target_path.is_file() else None
+        file_entries.append(
+            {
+                "path": relative_path,
+                "size": payload_path.stat().st_size,
+                "sha256": compute_sha256(payload_path),
+                "old_sha256": old_sha,
+            }
+        )
+
+    delete_entries = []
+    for relative_path in delete or []:
+        target_path = Path(target_dir, *relative_path.split("/"))
+        delete_entries.append(
+            {
+                "path": relative_path,
+                "old_sha256": compute_sha256(target_path),
+            }
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "app": "rem_card",
+        "package_type": "patch",
+        "version": version,
+        "base_version": base_version,
+        "created_at": "2026-01-01T00:00:00+10:00",
+        "base_commit": "base",
+        "source_commit": "source",
+        "patch_commit": "patch",
+        "builder": "scripts/build_patch_update.py",
+        "files": file_entries,
+        "delete": delete_entries,
+    }
+    (package / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (package / "ready.ok").write_text("ok\n", encoding="utf-8")
+    return manifest
+
+
+def _prepare_installed_tree(path: str, *, version: str = "1.0.0") -> None:
+    Path(path, "_internal", "rem_card").mkdir(parents=True, exist_ok=True)
+    Path(path, "_internal", "rem_card", "VERSION").write_text(version + "\n", encoding="utf-8")
+    Path(path, "manifest.json").write_text(
+        json.dumps({"package_type": "full", "version": version}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _apply_test_patch(source_dir: str, target_dir: str, manifest: dict[str, Any], *, current_version: str = "1.0.0"):
+    from rem_card.app.updater_main import _apply_patch_package
+
+    return _apply_patch_package(
+        source_dir=source_dir,
+        target_dir=target_dir,
+        manifest=manifest,
+        current_version=current_version,
+        status=lambda _text, _progress: None,
+    )
+
+
+_PATCH_OLD_SHA = "1" * 64
+_PATCH_NEW_SHA = "2" * 64
+_PATCH_DELETE_SHA = "3" * 64
+
+
+def _valid_patch_manifest() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "app": "rem_card",
+        "package_type": "patch",
+        "version": "1.0.1",
+        "base_version": "1.0.0",
+        "base_commit": "base",
+        "source_commit": "source",
+        "patch_commit": "patch",
+        "files": [
+            {
+                "path": "_internal/rem_card/icon/example.png",
+                "size": 4,
+                "sha256": _PATCH_NEW_SHA,
+                "old_sha256": _PATCH_OLD_SHA,
+            }
+        ],
+        "delete": [],
+    }
+
+
+def _expect_update_package_error(callback) -> tuple[bool, str]:
+    from rem_card.app.update_package import UpdatePackageError
+
+    try:
+        callback()
+    except UpdatePackageError:
+        return True, "ok"
+    except Exception as exc:
+        return False, f"unexpected exception type: {type(exc).__name__}: {exc}"
+    return False, "expected UpdatePackageError"
+
+
+def _check_package_type_missing_means_full(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import get_package_type
+
+    package_type = get_package_type({"version": "1.0.0"})
+    if package_type != "full":
+        return False, f"expected full, got {package_type!r}"
+    return True, "ok"
+
+
+def _check_patch_manifest_rejects_absolute_path(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    manifest["files"][0]["path"] = "/absolute/file.txt"
+    return _expect_update_package_error(lambda: validate_patch_manifest(manifest))
+
+
+def _check_patch_manifest_rejects_drive_letter(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    manifest["files"][0]["path"] = r"C:\Project\file.txt"
+    return _expect_update_package_error(lambda: validate_patch_manifest(manifest))
+
+
+def _check_patch_manifest_rejects_unc_path(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    manifest["files"][0]["path"] = r"\\server\share\file.txt"
+    return _expect_update_package_error(lambda: validate_patch_manifest(manifest))
+
+
+def _check_patch_manifest_rejects_dotdot(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    manifest["files"][0]["path"] = "_internal/../file.txt"
+    return _expect_update_package_error(lambda: validate_patch_manifest(manifest))
+
+
+def _check_patch_manifest_rejects_files_delete_overlap(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    manifest["delete"] = [{"path": manifest["files"][0]["path"], "old_sha256": _PATCH_DELETE_SHA}]
+    return _expect_update_package_error(lambda: validate_patch_manifest(manifest))
+
+
+def _check_patch_manifest_requires_old_sha_for_changed(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    del manifest["files"][0]["old_sha256"]
+    return _expect_update_package_error(lambda: validate_patch_manifest(manifest))
+
+
+def _check_patch_manifest_allows_old_sha_null_for_new_file(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from rem_card.app.update_package import validate_patch_manifest
+
+    manifest = _valid_patch_manifest()
+    manifest["files"][0]["old_sha256"] = None
+    try:
+        normalized = validate_patch_manifest(manifest)
+    except Exception as exc:
+        return False, f"new file with null old_sha256 was rejected: {exc}"
+    if normalized["files"][0]["old_sha256"] is not None:
+        return False, "null old_sha256 was not preserved"
+    return True, "ok"
+
+
+def _check_patch_candidate_detected(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import find_available_updates
+
+    update_root = os.path.join(temp_root, "UPD_patch_candidate")
+    _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
+    candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
+    if len(candidates) != 1:
+        return False, f"expected one patch candidate, got {len(candidates)}"
+    candidate = candidates[0]
+    if candidate.package_type != "patch" or candidate.version != "1.0.1":
+        return False, f"unexpected patch candidate: {candidate}"
+    return True, "ok"
+
+
+def _check_patch_rejected_when_base_version_differs(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import find_best_update_with_reason
+
+    update_root = os.path.join(temp_root, "UPD_patch_wrong_base")
+    _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.2")
+    candidate, reason = find_best_update_with_reason(current_version="1.0.1", update_root=update_root)
+    if candidate is not None:
+        return False, "patch with mismatched base_version was offered"
+    if "Патч предназначен для версии 1.0.0" not in reason or "установлена 1.0.1" not in reason:
+        return False, f"unexpected mismatch reason: {reason!r}"
+    return True, "ok"
+
+
+def _check_patch_rejected_when_payload_hash_mismatch(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import find_available_updates
+
+    update_root = os.path.join(temp_root, "UPD_patch_bad_hash")
+    payload_rel = _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
+    Path(update_root, "payload", *payload_rel.split("/")).write_text("corrupted\n", encoding="utf-8")
+    candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
+    if candidates:
+        return False, "patch with payload hash mismatch was offered"
+    return True, "ok"
+
+
+def _check_full_without_package_type_still_detected(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import find_available_updates
+
+    update_root = os.path.join(temp_root, "UPD_full_legacy")
+    _write_fake_update_package(update_root, version="1.0.1")
+    candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
+    if len(candidates) != 1:
+        return False, f"legacy full package was not detected: {candidates}"
+    if candidates[0].package_type != "full":
+        return False, f"legacy full package type mismatch: {candidates[0].package_type}"
+    return True, "ok"
+
+
+def _check_update_checker_does_not_require_upd_prog_folder(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.update_checker import find_available_updates
+
+    update_root = os.path.join(temp_root, "UPD_no_prog")
+    _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
+    if os.path.isdir(os.path.join(update_root, "Prog")):
+        return False, "test setup unexpectedly created UPD\\Prog"
+    candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
+    if not candidates:
+        return False, "patch candidate required UPD\\Prog folder"
+    return True, "ok"
+
+
+def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[bool, str, list[str]]:
+    from rem_card.app import update_launcher
+    from rem_card.app.update_checker import find_available_updates
+    from rem_card.app.update_package import compute_sha256
+
+    suffix = "support" if updater_in_payload else "installed"
+    update_root = os.path.join(temp_root, f"UPD_patch_launch_{suffix}")
+    target_dir = os.path.join(temp_root, f"Installed_{suffix}")
+    baza_dir = os.path.join(temp_root, f"Baza_rao3_jurnal_{suffix}")
+    os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
+    for lock_file in glob.glob(os.path.join(baza_dir, "locks", "*.lock")):
+        try:
+            os.remove(lock_file)
+        except FileNotFoundError:
+            pass
+    os.makedirs(target_dir, exist_ok=True)
+    Path(target_dir, "RemCardUpdater.exe").write_text("installed updater", encoding="utf-8")
+    _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
+
+    if updater_in_payload:
+        payload_path = Path(update_root, "payload", "RemCardUpdater.exe")
+        payload_path.write_text("new updater", encoding="utf-8")
+        manifest_path = Path(update_root, "manifest.json")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["files"].append(
+            {
+                "path": "RemCardUpdater.exe",
+                "size": payload_path.stat().st_size,
+                "sha256": compute_sha256(payload_path),
+                "old_sha256": _PATCH_OLD_SHA,
+            }
+        )
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        support_dir = Path(update_root, "support")
+        support_dir.mkdir(parents=True, exist_ok=True)
+        Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
+
+    candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
+    if len(candidates) != 1:
+        return False, f"patch candidate not found: {candidates}", []
+
+    captured: list[str] = []
+    original_is_compiled = update_launcher.is_compiled
+    original_resolve_baza_dir = update_launcher.resolve_baza_dir
+    original_get_executable_dir = update_launcher.get_executable_dir
+    original_popen_hidden = update_launcher.popen_hidden
+    try:
+        update_launcher.is_compiled = lambda: True
+        update_launcher.resolve_baza_dir = lambda: baza_dir
+        update_launcher.get_executable_dir = lambda: target_dir
+
+        def fake_popen_hidden(args, **_kwargs):
+            captured.extend(str(item) for item in args)
+
+        update_launcher.popen_hidden = fake_popen_hidden
+        if not update_launcher.launch_update(candidates[0], wait_for_parent=False):
+            return False, "launch_update returned False", captured
+        return True, "ok", captured
+    finally:
+        update_launcher.is_compiled = original_is_compiled
+        update_launcher.resolve_baza_dir = original_resolve_baza_dir
+        update_launcher.get_executable_dir = original_get_executable_dir
+        update_launcher.popen_hidden = original_popen_hidden
+
+
+def _check_patch_launcher_uses_installed_updater_when_no_support_updater(temp_root: str) -> tuple[bool, str]:
+    ok, message, args = _capture_patch_launch(temp_root, updater_in_payload=False)
+    if not ok:
+        return ok, message
+    expected = os.path.abspath(os.path.join(temp_root, "Installed_installed", "RemCardUpdater.exe"))
+    if os.path.abspath(args[0]) != expected:
+        return False, f"expected installed updater, got {args[0]}"
+    return True, "ok"
+
+
+def _check_patch_launcher_uses_support_updater_when_updater_is_payload(temp_root: str) -> tuple[bool, str]:
+    ok, message, args = _capture_patch_launch(temp_root, updater_in_payload=True)
+    if not ok:
+        return ok, message
+    expected = os.path.abspath(os.path.join(temp_root, "UPD_patch_launch_support", "support", "RemCardUpdater.exe"))
+    if os.path.abspath(args[0]) != expected:
+        return False, f"expected support updater, got {args[0]}"
+    return True, "ok"
+
+
+def _check_patch_launcher_target_is_executable_dir(temp_root: str) -> tuple[bool, str]:
+    ok, message, args = _capture_patch_launch(temp_root, updater_in_payload=False)
+    if not ok:
+        return ok, message
+    target_index = args.index("--target") + 1
+    expected = os.path.abspath(os.path.join(temp_root, "Installed_installed"))
+    if os.path.abspath(args[target_index]) != expected:
+        return False, f"launcher target mismatch: {args[target_index]}"
+    return True, "ok"
+
+
+def _check_patch_replaces_one_changed_file(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_replace_target")
+    source = os.path.join(temp_root, "patch_replace_source")
+    _prepare_installed_tree(target)
+    target_file = Path(target, "_internal", "rem_card", "icon", "example.txt")
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("old\n", encoding="utf-8")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"_internal/rem_card/icon/example.txt": b"new\n"},
+    )
+    _apply_test_patch(source, target, manifest)
+    if target_file.read_text(encoding="utf-8") != "new\n":
+        return False, "changed file was not replaced"
+    return True, "ok"
+
+
+def _check_patch_does_not_touch_unchanged_file(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_unchanged_target")
+    source = os.path.join(temp_root, "patch_unchanged_source")
+    _prepare_installed_tree(target)
+    changed = Path(target, "_internal", "rem_card", "icon", "changed.txt")
+    unchanged = Path(target, "_internal", "rem_card", "icon", "unchanged.txt")
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text("old\n", encoding="utf-8")
+    unchanged.write_text("stay\n", encoding="utf-8")
+    before_hash = hashlib.sha256(unchanged.read_bytes()).hexdigest()
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"_internal/rem_card/icon/changed.txt": b"new\n"},
+    )
+    _apply_test_patch(source, target, manifest)
+    after_hash = hashlib.sha256(unchanged.read_bytes()).hexdigest()
+    if before_hash != after_hash or unchanged.read_text(encoding="utf-8") != "stay\n":
+        return False, "unchanged file was modified"
+    return True, "ok"
+
+
+def _check_patch_adds_new_file(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_add_target")
+    source = os.path.join(temp_root, "patch_add_source")
+    _prepare_installed_tree(target)
+    new_file = Path(target, "_internal", "rem_card", "icon", "new.txt")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"_internal/rem_card/icon/new.txt": b"added\n"},
+    )
+    _apply_test_patch(source, target, manifest)
+    if new_file.read_text(encoding="utf-8") != "added\n":
+        return False, "new file was not added"
+    return True, "ok"
+
+
+def _check_patch_deletes_file_with_old_sha(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_delete_target")
+    source = os.path.join(temp_root, "patch_delete_source")
+    _prepare_installed_tree(target)
+    delete_file = Path(target, "_internal", "rem_card", "icon", "delete.txt")
+    delete_file.parent.mkdir(parents=True, exist_ok=True)
+    delete_file.write_text("delete me\n", encoding="utf-8")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={},
+        delete=["_internal/rem_card/icon/delete.txt"],
+    )
+    _apply_test_patch(source, target, manifest)
+    if delete_file.exists():
+        return False, "file was not deleted"
+    return True, "ok"
+
+
+def _check_patch_rejected_when_installed_old_sha_mismatch(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_hash_mismatch_target")
+    source = os.path.join(temp_root, "patch_hash_mismatch_source")
+    _prepare_installed_tree(target)
+    target_file = Path(target, "_internal", "rem_card", "icon", "example.txt")
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("old\n", encoding="utf-8")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"_internal/rem_card/icon/example.txt": b"new\n"},
+    )
+    target_file.write_text("user modified\n", encoding="utf-8")
+    try:
+        _apply_test_patch(source, target, manifest)
+    except RuntimeError as exc:
+        if "SHA-256 установленного файла" not in str(exc):
+            return False, f"unexpected error: {exc}"
+        return True, "ok"
+    return False, "hash mismatch patch was applied"
+
+
+def _check_patch_rollback_on_copy_failure(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import updater_main
+
+    target = os.path.join(temp_root, "patch_rollback_target")
+    source = os.path.join(temp_root, "patch_rollback_source")
+    _prepare_installed_tree(target)
+    target_file = Path(target, "_internal", "rem_card", "icon", "example.txt")
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("old\n", encoding="utf-8")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"_internal/rem_card/icon/example.txt": b"new\n"},
+    )
+
+    original_copy2 = updater_main.shutil.copy2
+
+    def failing_copy2(src, dst, *args, **kwargs):
+        dst_abs = os.path.abspath(str(dst))
+        if dst_abs.startswith(os.path.abspath(target)) and "__upd_new_" not in dst_abs:
+            raise PermissionError("simulated copy failure")
+        return original_copy2(src, dst, *args, **kwargs)
+
+    try:
+        updater_main.shutil.copy2 = failing_copy2
+        try:
+            _apply_test_patch(source, target, manifest)
+        except RuntimeError:
+            pass
+        else:
+            return False, "patch unexpectedly succeeded"
+    finally:
+        updater_main.shutil.copy2 = original_copy2
+
+    if target_file.read_text(encoding="utf-8") != "old\n":
+        return False, "rollback did not restore old file"
+    return True, "ok"
+
+
+def _check_patch_preserves_local_files(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_preserve_target")
+    source = os.path.join(temp_root, "patch_preserve_source")
+    _prepare_installed_tree(target)
+    local_file = Path(target, "remcard_data_path.json")
+    local_file.write_text('{"baza_dir":"local"}\n', encoding="utf-8")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"remcard_data_path.json": b'{"baza_dir":"patched"}\n'},
+    )
+    try:
+        _apply_test_patch(source, target, manifest)
+    except RuntimeError as exc:
+        if "локальный файл" not in str(exc):
+            return False, f"unexpected preserve error: {exc}"
+    else:
+        return False, "patch changed preserved local file"
+    if local_file.read_text(encoding="utf-8") != '{"baza_dir":"local"}\n':
+        return False, "preserved local file content changed"
+    return True, "ok"
+
+
+def _write_builder_full_package(path: Path, *, version: str, commit: str, patch_capable: bool = True) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "RemCardDoctor.exe").write_text("doctor\n", encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "app": "rem_card",
+        "package_type": "full",
+        "version": version,
+        "prog_dir": ".",
+        "source_commit": commit,
+    }
+    if patch_capable:
+        manifest["patch_update_capable"] = True
+    (path / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    (path / "ready.ok").write_text("ok\n", encoding="utf-8")
+
+
+def _write_builder_snapshot(path: Path, *, content_hash: str, exported_at: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "content_hash": content_hash,
+        "exported_at": exported_at,
+        "tables": {"example": 1},
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _reset_test_dirs(*paths: Path) -> None:
+    for path in paths:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _check_patch_builder_registers_current_UPD_full_as_base_when_valid(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    root = Path(temp_root, "r")
+    upd = Path(temp_root, "u")
+    _reset_test_dirs(root, upd)
+    version = "1.0.0"
+    commit = "a" * 40
+    _write_builder_full_package(upd, version=version, commit=commit, patch_capable=True)
+    base = build_patch_update.register_base_from_full_package(root, upd, version=version, commit=commit)
+    if not (base.canonical_tree / "RemCardDoctor.exe").is_file():
+        return False, "canonical base tree was not registered"
+    if (base.canonical_tree / "ready.ok").exists():
+        return False, "ready.ok should not be stored in canonical base tree"
+    return True, "ok"
+
+
+def _check_patch_builder_refuses_without_base_cache(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    root = Path(temp_root, "r")
+    upd = Path(temp_root, "u")
+    _reset_test_dirs(root, upd)
+    try:
+        build_patch_update.find_or_register_base(root, version="1.0.0", commit="b" * 40, upd_dir=upd)
+    except RuntimeError as exc:
+        if "Нет базовой сборки" in str(exc):
+            return True, "ok"
+        return False, f"unexpected error: {exc}"
+    return False, "builder accepted missing base cache"
+
+
+def _check_first_patch_requires_patch_aware_updater(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    root = Path(temp_root, "r")
+    upd = Path(temp_root, "u")
+    _reset_test_dirs(root, upd)
+    version = "1.0.0"
+    commit = "c" * 40
+    _write_builder_full_package(upd, version=version, commit=commit, patch_capable=False)
+    try:
+        build_patch_update.register_base_from_full_package(root, upd, version=version, commit=commit)
+    except RuntimeError as exc:
+        if "patch-aware" in str(exc):
+            return True, "ok"
+        return False, f"unexpected error: {exc}"
+    return False, "non patch-aware full package was accepted as patch base"
+
+
+def _check_patch_builder_skips_settings_snapshot_when_content_hash_same(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    base = Path(temp_root, "b")
+    raw_new = Path(temp_root, "n")
+    canonical = Path(temp_root, "c")
+    _reset_test_dirs(base, raw_new, canonical)
+    snapshot_rel = Path(*build_patch_update.SNAPSHOT_REL_PATH.split("/"))
+    _write_builder_snapshot(base / snapshot_rel, content_hash="same", exported_at="old")
+    _write_builder_snapshot(raw_new / snapshot_rel, content_hash="same", exported_at="new")
+    skipped = build_patch_update.canonicalize_full_tree(base, raw_new, canonical)
+    if build_patch_update.SNAPSHOT_REL_PATH not in skipped:
+        return False, "same content_hash snapshot was not skipped"
+    canonical_payload = json.loads((canonical / snapshot_rel).read_text(encoding="utf-8"))
+    if canonical_payload.get("exported_at") != "old":
+        return False, "canonical tree did not carry forward base snapshot"
+    return True, "ok"
+
+
+def _check_patch_builder_includes_settings_snapshot_when_content_hash_changes(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    base = Path(temp_root, "b")
+    raw_new = Path(temp_root, "n")
+    canonical = Path(temp_root, "c")
+    _reset_test_dirs(base, raw_new, canonical)
+    snapshot_rel = Path(*build_patch_update.SNAPSHOT_REL_PATH.split("/"))
+    _write_builder_snapshot(base / snapshot_rel, content_hash="old-hash", exported_at="old")
+    _write_builder_snapshot(raw_new / snapshot_rel, content_hash="new-hash", exported_at="new")
+    skipped = build_patch_update.canonicalize_full_tree(base, raw_new, canonical)
+    if skipped:
+        return False, f"changed content_hash snapshot was skipped: {skipped}"
+    canonical_payload = json.loads((canonical / snapshot_rel).read_text(encoding="utf-8"))
+    if canonical_payload.get("content_hash") != "new-hash":
+        return False, "changed snapshot was not kept from new full build"
+    diff = build_patch_update.build_patch_diff(base, canonical, skipped)
+    if build_patch_update.SNAPSHOT_REL_PATH not in {entry["path"] for entry in diff.files}:
+        return False, "changed snapshot was not included in patch diff"
+    return True, "ok"
+
+
+def _check_patch_builder_uses_canonical_tree_after_generated_skip(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    root = Path(temp_root, "r")
+    base = Path(temp_root, "b")
+    raw_new = Path(temp_root, "n")
+    canonical = Path(temp_root, "c")
+    _reset_test_dirs(root, base, raw_new, canonical)
+    snapshot_rel = Path(*build_patch_update.SNAPSHOT_REL_PATH.split("/"))
+    _write_builder_snapshot(base / snapshot_rel, content_hash="same", exported_at="base-time")
+    _write_builder_snapshot(raw_new / snapshot_rel, content_hash="same", exported_at="new-time")
+    (base / "unchanged.txt").write_text("same\n", encoding="utf-8")
+    (raw_new / "unchanged.txt").write_text("same\n", encoding="utf-8")
+    (raw_new / "changed.txt").write_text("new\n", encoding="utf-8")
+
+    skipped = build_patch_update.canonicalize_full_tree(base, raw_new, canonical)
+    diff = build_patch_update.build_patch_diff(base, canonical, skipped)
+    diff_paths = {entry["path"] for entry in diff.files}
+    if build_patch_update.SNAPSHOT_REL_PATH in diff_paths:
+        return False, "timestamp-only snapshot leaked into patch diff"
+    if "changed.txt" not in diff_paths:
+        return False, "real changed file was not included in patch diff"
+
+    registered = build_patch_update.register_published_base(
+        root,
+        version="1.0.1",
+        commit="d" * 40,
+        canonical_new_tree=canonical,
+        raw_new_tree=raw_new,
+        manifest={
+            "package_type": "patch",
+            "version": "1.0.1",
+            "base_version": "1.0.0",
+            "base_commit": "base",
+            "source_commit": "source",
+            "patch_commit": "patch",
+            "files": [],
+            "delete": [],
+        },
+    )
+    registered_payload = json.loads((registered.canonical_tree / snapshot_rel).read_text(encoding="utf-8"))
+    if registered_payload.get("exported_at") != "base-time":
+        return False, "published base registered raw timestamp-only snapshot instead of canonical tree"
+    return True, "ok"
+
+
+def _check_patch_ready_ok_is_last_publish_step(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+    from rem_card.app.update_package import compute_sha256
+
+    patch_dir = Path(temp_root, "p")
+    target_dir = Path(temp_root, "u")
+    _reset_test_dirs(patch_dir, target_dir)
+    payload_rel = "_internal/rem_card/icon/example.txt"
+    payload = patch_dir / "payload" / Path(*payload_rel.split("/"))
+    payload.parent.mkdir(parents=True, exist_ok=True)
+    payload.write_text("payload\n", encoding="utf-8")
+    manifest = {
+        "schema_version": 1,
+        "app": "rem_card",
+        "package_type": "patch",
+        "version": "1.0.1",
+        "base_version": "1.0.0",
+        "base_commit": "base",
+        "source_commit": "source",
+        "patch_commit": "patch",
+        "files": [
+            {
+                "path": payload_rel,
+                "size": payload.stat().st_size,
+                "sha256": compute_sha256(payload),
+                "old_sha256": "1" * 64,
+            }
+        ],
+        "delete": [],
+    }
+    (target_dir / "old").mkdir(parents=True, exist_ok=True)
+    (target_dir / "ready.ok").write_text("old ready\n", encoding="utf-8")
+    build_patch_update.publish_patch_package(patch_dir, target_dir, manifest)
+    ready_path = target_dir / "ready.ok"
+    manifest_path = target_dir / "manifest.json"
+    published_payload = target_dir / "payload" / Path(*payload_rel.split("/"))
+    if not ready_path.is_file():
+        return False, "ready.ok was not published"
+    if ready_path.stat().st_mtime_ns < manifest_path.stat().st_mtime_ns:
+        return False, "ready.ok timestamp is older than manifest.json"
+    if ready_path.stat().st_mtime_ns < published_payload.stat().st_mtime_ns:
+        return False, "ready.ok timestamp is older than payload"
+    if (target_dir / "old").exists():
+        return False, "old package content was not cleared before publish"
+    return True, "ok"
+
+
+def _check_build_release_full_behavior_unchanged(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = Path(PROJECT_ROOT, "scripts", "build_release.py").read_text(encoding="utf-8")
+    required_tokens = (
+        'run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)',
+        'run(["git", "commit", "-m", f"Релиз {version}"], cwd=root)',
+        'parser.add_argument("--push"',
+    )
+    missing = [token for token in required_tokens if token not in text]
+    if missing:
+        return False, f"build_release.py full-release behavior token missing: {missing}"
+    return True, "ok"
+
+
+def _check_role_exe_names_preserved(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    text = Path(PROJECT_ROOT, "RemCard.spec").read_text(encoding="utf-8")
+    expected = (
+        "RemCardDoctor",
+        "RemCardNurse",
+        "RemCardOperBlockEmergency",
+        "RemCardOperBlockPlanned",
+        "RemCardPathSetup",
+        "RemCardUpdater",
+    )
+    missing = [name for name in expected if f"name='{name}'" not in text and f'name="{name}"' not in text]
+    if missing:
+        return False, f"role EXE names missing from RemCard.spec: {missing}"
+    if "--role" in text:
+        return False, "RemCard.spec unexpectedly switched to --role model"
+    return True, "ok"
+
+
+def _check_updater_does_not_require_UPD_Prog_folder(temp_root: str) -> tuple[bool, str]:
+    return _check_update_checker_does_not_require_upd_prog_folder(temp_root)
+
+
+def _check_updater_target_uses_executable_dir(temp_root: str) -> tuple[bool, str]:
+    return _check_patch_launcher_target_is_executable_dir(temp_root)
+
+
+def _check_support_updater_used_when_updater_in_payload(temp_root: str) -> tuple[bool, str]:
+    return _check_patch_launcher_uses_support_updater_when_updater_is_payload(temp_root)
+
+
 def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.update_checker import get_update_lock_path
     from rem_card.app.updater_main import _build_direct_update_args
@@ -25544,6 +26357,41 @@ def main(argv: list[str] | None = None):
         ("startup_quickcheck_background_updater", _check_startup_quickcheck_background_updater),
         ("dev_baza_dir_prefers_project_baza_name", _check_dev_baza_dir_prefers_project_baza_name),
         ("arbitrary_baza_dir_name_allowed", _check_arbitrary_baza_dir_name_allowed),
+        ("package_type_missing_means_full", _check_package_type_missing_means_full),
+        ("patch_manifest_rejects_absolute_path", _check_patch_manifest_rejects_absolute_path),
+        ("patch_manifest_rejects_drive_letter", _check_patch_manifest_rejects_drive_letter),
+        ("patch_manifest_rejects_unc_path", _check_patch_manifest_rejects_unc_path),
+        ("patch_manifest_rejects_dotdot", _check_patch_manifest_rejects_dotdot),
+        ("patch_manifest_rejects_files_delete_overlap", _check_patch_manifest_rejects_files_delete_overlap),
+        ("patch_manifest_requires_old_sha_for_changed", _check_patch_manifest_requires_old_sha_for_changed),
+        ("patch_manifest_allows_old_sha_null_for_new_file", _check_patch_manifest_allows_old_sha_null_for_new_file),
+        ("patch_candidate_detected", _check_patch_candidate_detected),
+        ("patch_rejected_when_base_version_differs", _check_patch_rejected_when_base_version_differs),
+        ("patch_rejected_when_payload_hash_mismatch", _check_patch_rejected_when_payload_hash_mismatch),
+        ("full_without_package_type_still_detected", _check_full_without_package_type_still_detected),
+        ("update_checker_does_not_require_upd_prog_folder", _check_update_checker_does_not_require_upd_prog_folder),
+        ("patch_launcher_uses_installed_updater_when_no_support_updater", _check_patch_launcher_uses_installed_updater_when_no_support_updater),
+        ("patch_launcher_uses_support_updater_when_updater_is_payload", _check_patch_launcher_uses_support_updater_when_updater_is_payload),
+        ("patch_launcher_target_is_executable_dir", _check_patch_launcher_target_is_executable_dir),
+        ("patch_replaces_one_changed_file", _check_patch_replaces_one_changed_file),
+        ("patch_does_not_touch_unchanged_file", _check_patch_does_not_touch_unchanged_file),
+        ("patch_adds_new_file", _check_patch_adds_new_file),
+        ("patch_deletes_file_with_old_sha", _check_patch_deletes_file_with_old_sha),
+        ("patch_rejected_when_installed_old_sha_mismatch", _check_patch_rejected_when_installed_old_sha_mismatch),
+        ("patch_rollback_on_copy_failure", _check_patch_rollback_on_copy_failure),
+        ("patch_preserves_local_files", _check_patch_preserves_local_files),
+        ("patch_ready_ok_is_last_publish_step", _check_patch_ready_ok_is_last_publish_step),
+        ("patch_builder_refuses_without_base_cache", _check_patch_builder_refuses_without_base_cache),
+        ("patch_builder_registers_current_UPD_full_as_base_when_valid", _check_patch_builder_registers_current_UPD_full_as_base_when_valid),
+        ("patch_builder_skips_settings_snapshot_when_content_hash_same", _check_patch_builder_skips_settings_snapshot_when_content_hash_same),
+        ("patch_builder_includes_settings_snapshot_when_content_hash_changes", _check_patch_builder_includes_settings_snapshot_when_content_hash_changes),
+        ("patch_builder_uses_canonical_tree_after_generated_skip", _check_patch_builder_uses_canonical_tree_after_generated_skip),
+        ("build_release_full_behavior_unchanged", _check_build_release_full_behavior_unchanged),
+        ("updater_does_not_require_UPD_Prog_folder", _check_updater_does_not_require_UPD_Prog_folder),
+        ("updater_target_uses_executable_dir", _check_updater_target_uses_executable_dir),
+        ("role_exe_names_preserved", _check_role_exe_names_preserved),
+        ("support_updater_used_when_updater_in_payload", _check_support_updater_used_when_updater_in_payload),
+        ("first_patch_requires_patch_aware_updater", _check_first_patch_requires_patch_aware_updater),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
         ("updater_cleanup_retries_old_backup", _check_updater_cleanup_retries_old_backup),
         ("update_locks_are_scoped_to_target", _check_update_locks_are_scoped_to_target),

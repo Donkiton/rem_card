@@ -25,6 +25,16 @@ from PySide6.QtWidgets import (
 
 from rem_card.app.process_launch import hidden_window_creationflags, hidden_window_startupinfo, popen_hidden
 from rem_card.app.update_checker import get_update_lock_path, update_lock_scope_id
+from rem_card.app.update_package import (
+    PACKAGE_TYPE_PATCH,
+    UpdatePackageError,
+    compute_sha256,
+    get_package_type,
+    patch_payload_path,
+    safe_join_install_root,
+    validate_patch_manifest,
+    validate_relative_payload_path,
+)
 
 # Обновлятор запускается из пакета в UPD. Общую тему приложения сюда не
 # импортируем: runtime-настройки живут в central settings DB, а не в JSON рядом с exe.
@@ -120,6 +130,23 @@ STALE_UPDATE_CLEANUP_DELAY_SEC = 0.2
 DEFERRED_CLEANUP_ARG = "--cleanup-leftovers"
 DEFERRED_CLEANUP_ATTEMPTS = 600
 DEFERRED_CLEANUP_DELAY_SEC = 1.0
+PRESERVED_PATCH_PATH_PREFIXES = (
+    "crash/",
+    "crashes/",
+    "emergency/",
+    "fault/",
+    "faults/",
+    "local/",
+    "logs/",
+    "rem_card/data/dictionaries/",
+    "settings/",
+)
+PRESERVED_PATCH_PATHS = {
+    "remcard_data_path.json",
+}
+PRESERVED_PATCH_PATH_SUFFIXES = (
+    ".log",
+)
 
 
 class UpdateAlreadyRunning(RuntimeError):
@@ -360,12 +387,31 @@ def _validate_source(source_dir: str) -> dict[str, Any]:
     manifest = _read_json(manifest_path)
     if not manifest:
         raise RuntimeError("Не удалось прочитать manifest.json пакета обновления.")
+    if get_package_type(manifest) == PACKAGE_TYPE_PATCH:
+        return _validate_patch_source(source, manifest)
     for exe_name in REQUIRED_EXES:
         if not os.path.isfile(os.path.join(source, exe_name)):
             raise RuntimeError(f"В пакете обновления отсутствует {exe_name}.")
     if not os.path.isdir(os.path.join(source, "_internal")):
         raise RuntimeError("В пакете обновления отсутствует папка _internal.")
     return manifest
+
+
+def _validate_patch_source(source_dir: str, manifest: dict[str, Any]) -> dict[str, Any]:
+    try:
+        normalized = validate_patch_manifest(manifest)
+    except UpdatePackageError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    for entry in normalized["files"]:
+        source_path = patch_payload_path(source_dir, entry["path"])
+        if not os.path.isfile(source_path):
+            raise RuntimeError(f"В patch-пакете отсутствует payload-файл: {entry['path']}")
+        if os.path.getsize(source_path) != int(entry["size"]):
+            raise RuntimeError(f"Размер payload-файла не совпадает с manifest: {entry['path']}")
+        if compute_sha256(source_path) != str(entry["sha256"]).lower():
+            raise RuntimeError(f"SHA-256 payload-файла не совпадает с manifest: {entry['path']}")
+    return normalized
 
 
 def _make_path_writable_and_retry(func: Callable[[str], None], path: str, _exc_info):
@@ -558,6 +604,204 @@ def _copy_source_to_staging(source_dir: str, staging_dir: str):
     shutil.copytree(source_dir, staging_dir, ignore=ignore)
 
 
+def _patch_path_is_preserved(relative_path: str) -> bool:
+    try:
+        normalized = validate_relative_payload_path(relative_path).casefold()
+    except UpdatePackageError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return normalized in PRESERVED_PATCH_PATHS or any(
+        normalized.startswith(prefix) for prefix in PRESERVED_PATCH_PATH_PREFIXES
+    ) or any(
+        normalized.endswith(suffix) for suffix in PRESERVED_PATCH_PATH_SUFFIXES
+    )
+
+
+def _ensure_patch_path_allowed(relative_path: str) -> None:
+    normalized = relative_path.replace("\\", "/").casefold()
+    if normalized in {"manifest.json", "ready.ok"}:
+        raise RuntimeError(f"Patch не должен напрямую менять служебный файл {relative_path}.")
+    if _patch_path_is_preserved(relative_path):
+        raise RuntimeError(f"Patch не должен менять локальный файл рабочей папки: {relative_path}.")
+
+
+def _write_json_atomic(path: str, payload: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        _remove_file_quietly(tmp_path)
+
+
+def _backup_existing_file(target: str, backup: str, relative_path: str) -> bool:
+    target_path = safe_join_install_root(target, relative_path)
+    if not os.path.exists(target_path):
+        return False
+    if not os.path.isfile(target_path):
+        raise RuntimeError(f"Patch может менять только файлы: {relative_path}")
+    backup_path = safe_join_install_root(backup, relative_path)
+    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
+    _retry(
+        lambda target_path=target_path, backup_path=backup_path: shutil.move(target_path, backup_path),
+        f"Не удалось зарезервировать {relative_path}",
+    )
+    return True
+
+
+def _restore_patch_backup(target: str, backup: str) -> None:
+    if not os.path.isdir(backup):
+        return
+    for current_dir, _dir_names, file_names in os.walk(backup):
+        for file_name in file_names:
+            backup_path = os.path.join(current_dir, file_name)
+            relative_path = os.path.relpath(backup_path, backup).replace(os.sep, "/")
+            target_path = safe_join_install_root(target, relative_path)
+            try:
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                if os.path.exists(target_path):
+                    _remove_path(target_path)
+                shutil.move(backup_path, target_path)
+            except Exception:
+                pass
+
+
+def _remove_installed_patch_files(target: str, relative_paths: list[str]) -> None:
+    for relative_path in reversed(relative_paths):
+        try:
+            target_path = safe_join_install_root(target, relative_path)
+            if os.path.isfile(target_path):
+                _remove_path(target_path)
+        except Exception:
+            pass
+
+
+def _validate_patch_base_version(manifest: dict[str, Any], target: str, current_version: str) -> None:
+    base_version = str(manifest.get("base_version") or "").strip()
+    installed_version = str(current_version or "").strip() or _read_version_from_dir(target)
+    if not installed_version:
+        raise RuntimeError("Не удалось определить установленную версию для применения patch.")
+    if base_version != installed_version:
+        raise RuntimeError(
+            f"Патч предназначен для версии {base_version}, установлена {installed_version}. Нужен полный релиз."
+        )
+
+
+def _validate_patch_target_hashes(target: str, manifest: dict[str, Any]) -> None:
+    for entry in manifest["files"]:
+        _ensure_patch_path_allowed(entry["path"])
+        target_path = safe_join_install_root(target, entry["path"])
+        expected = entry.get("old_sha256")
+        if expected is None:
+            if os.path.exists(target_path):
+                raise RuntimeError(f"Patch ожидал новый файл, но он уже существует: {entry['path']}")
+            continue
+        if not os.path.isfile(target_path):
+            raise RuntimeError(f"Patch не может проверить старый файл: {entry['path']}")
+        if compute_sha256(target_path) != str(expected).lower():
+            raise RuntimeError(f"SHA-256 установленного файла не совпадает с manifest: {entry['path']}")
+
+    for entry in manifest["delete"]:
+        _ensure_patch_path_allowed(entry["path"])
+        target_path = safe_join_install_root(target, entry["path"])
+        if not os.path.isfile(target_path):
+            raise RuntimeError(f"Patch не может удалить отсутствующий файл: {entry['path']}")
+        if compute_sha256(target_path) != str(entry["old_sha256"]).lower():
+            raise RuntimeError(f"SHA-256 удаляемого файла не совпадает с manifest: {entry['path']}")
+
+
+def _stage_patch_payload(source: str, staging: str, manifest: dict[str, Any]) -> None:
+    _remove_path(staging)
+    os.makedirs(staging, exist_ok=True)
+    for entry in manifest["files"]:
+        source_path = patch_payload_path(source, entry["path"])
+        staged_path = safe_join_install_root(staging, entry["path"])
+        os.makedirs(os.path.dirname(staged_path), exist_ok=True)
+        shutil.copy2(source_path, staged_path)
+        if compute_sha256(staged_path) != str(entry["sha256"]).lower():
+            raise RuntimeError(f"Staging SHA-256 не совпадает с manifest: {entry['path']}")
+
+
+def _apply_patch_package(
+    *,
+    source_dir: str,
+    target_dir: str,
+    manifest: dict[str, Any],
+    current_version: str,
+    status: Callable[[str, int], None],
+    log: Optional[Callable[[str], None]] = None,
+) -> tuple[str, str]:
+    source = os.path.abspath(source_dir)
+    target = os.path.abspath(target_dir)
+    if os.path.normcase(source) == os.path.normcase(target):
+        raise RuntimeError("Источник обновления совпадает с рабочей папкой программы.")
+    if not os.path.isdir(target):
+        raise RuntimeError(f"Рабочая папка программы не найдена: {target}")
+
+    normalized = _validate_patch_source(source, manifest)
+    _validate_patch_base_version(normalized, target, current_version)
+    _validate_patch_target_hashes(target, normalized)
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    staging = os.path.join(target, f"__upd_new_{stamp}_{os.getpid()}")
+    backup = os.path.join(target, f"__upd_old_{stamp}_{os.getpid()}")
+    installed_paths: list[str] = []
+    try:
+        status("Подготовка patch-файлов...", 25)
+        _stage_patch_payload(source, staging, normalized)
+        os.makedirs(backup, exist_ok=True)
+
+        status("Проверка и резервирование файлов...", 42)
+        for entry in normalized["files"]:
+            if _backup_existing_file(target, backup, entry["path"]):
+                pass
+        for entry in normalized["delete"]:
+            _backup_existing_file(target, backup, entry["path"])
+        _backup_existing_file(target, backup, MANIFEST_FILE_NAME)
+
+        status("Применение patch-файлов...", 65)
+        for entry in normalized["files"]:
+            staged_path = safe_join_install_root(staging, entry["path"])
+            target_path = safe_join_install_root(target, entry["path"])
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+            installed_paths.append(entry["path"])
+            _retry(
+                lambda staged_path=staged_path, target_path=target_path: shutil.copy2(staged_path, target_path),
+                f"Не удалось установить patch-файл {entry['path']}",
+            )
+
+        manifest_target = safe_join_install_root(target, MANIFEST_FILE_NAME)
+        _write_json_atomic(manifest_target, normalized)
+        installed_paths.append(MANIFEST_FILE_NAME)
+
+        status("Очистка временных файлов...", 92)
+        pending_cleanup: list[str] = []
+        if not _remove_update_tree_with_retry(backup, "резервная папка patch", log=log):
+            pending_cleanup.append(backup)
+        if not _remove_update_tree_with_retry(staging, "staging patch", log=log):
+            pending_cleanup.append(staging)
+        pending_cleanup.extend(
+            _cleanup_stale_update_dirs(
+                target,
+                exclude={backup, staging},
+                log=log,
+            )
+        )
+        _spawn_deferred_cleanup(pending_cleanup, log=log)
+        return staging, backup
+    except Exception:
+        _remove_installed_patch_files(target, installed_paths)
+        _restore_patch_backup(target, backup)
+        try:
+            if os.path.isdir(staging):
+                _remove_update_tree_with_retry(staging, "staging patch после ошибки", log=log)
+        except Exception:
+            pass
+        raise
+
+
 def _replace_program_dir(
     *,
     source_dir: str,
@@ -724,12 +968,22 @@ class UpdateWorker(QObject):
 
             _wait_for_parent(int(self.args.parent_pid or 0), self._status)
             _wait_for_active_sessions(baza_dir, self._status)
-            _replace_program_dir(
-                source_dir=source,
-                target_dir=target,
-                status=self._status,
-                log=lambda message: _write_log(baza_dir, message),
-            )
+            if get_package_type(manifest) == PACKAGE_TYPE_PATCH:
+                _apply_patch_package(
+                    source_dir=source,
+                    target_dir=target,
+                    manifest=manifest,
+                    current_version=str(self.args.current_version or ""),
+                    status=self._status,
+                    log=lambda message: _write_log(baza_dir, message),
+                )
+            else:
+                _replace_program_dir(
+                    source_dir=source,
+                    target_dir=target,
+                    status=self._status,
+                    log=lambda message: _write_log(baza_dir, message),
+                )
 
             self._status("Обновление завершено.", 100)
             _write_log(baza_dir, f"update finished version={payload['target_version']}")
@@ -1123,11 +1377,20 @@ def _resolve_direct_target_dir(baza_dir: str, release_dir: str, source_dir: str)
 
 
 def _read_version_from_dir(directory: str) -> str:
-    try:
-        with open(os.path.join(directory, "VERSION"), "r", encoding="utf-8") as fh:
-            return fh.readline().strip()
-    except Exception:
-        return ""
+    candidates = (
+        os.path.join(directory, "VERSION"),
+        os.path.join(directory, "_internal", "rem_card", "VERSION"),
+        os.path.join(directory, "rem_card", "VERSION"),
+    )
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                version = fh.readline().strip()
+            if version:
+                return version
+        except Exception:
+            continue
+    return ""
 
 
 def _build_direct_update_args(executable_dir: Optional[str] = None) -> Optional[argparse.Namespace]:
@@ -1159,7 +1422,7 @@ def _build_direct_update_args(executable_dir: Optional[str] = None) -> Optional[
 
 def _launch_update_from_installed_updater() -> tuple[bool, str]:
     try:
-        from rem_card.app.update_checker import find_best_update
+        from rem_card.app.update_checker import find_best_update_with_reason
         from rem_card.app.update_launcher import describe_update_lock, is_update_in_progress, launch_update
         from rem_card.app.version import APP_VERSION
 
@@ -1167,9 +1430,9 @@ def _launch_update_from_installed_updater() -> tuple[bool, str]:
             return False, describe_update_lock()
 
         current_version = _read_version_from_dir(_current_executable_dir()) or APP_VERSION
-        candidate = find_best_update(current_version=current_version)
+        candidate, reason = find_best_update_with_reason(current_version=current_version)
         if not candidate:
-            return False, "Готовый пакет обновления не найден или его версия не выше установленной."
+            return False, reason or "Готовый пакет обновления не найден или его версия не выше установленной."
 
         if launch_update(candidate, restart_exe=None, wait_for_parent=True):
             return True, ""

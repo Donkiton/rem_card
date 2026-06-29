@@ -9,6 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from rem_card.app.runtime_paths import resolve_baza_dir
+from rem_card.app.update_package import (
+    PACKAGE_TYPE_FULL,
+    PACKAGE_TYPE_PATCH,
+    UpdatePackageError,
+    compute_sha256,
+    get_package_type,
+    patch_payload_path,
+    validate_patch_manifest,
+)
 from rem_card.app.version import APP_VERSION
 
 
@@ -114,6 +123,13 @@ class UpdateCandidate:
     prog_dir: str
     manifest_path: str
     manifest: dict[str, Any]
+    package_type: str = PACKAGE_TYPE_FULL
+
+
+@dataclass(frozen=True)
+class UpdateScanResult:
+    candidates: list[UpdateCandidate]
+    reasons: list[str]
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -207,9 +223,15 @@ def _load_candidate(release_dir: str) -> Optional[UpdateCandidate]:
         return None
     if str(manifest.get("app") or APP_ID) != APP_ID:
         return None
+    package_type = get_package_type(manifest)
 
     version = str(manifest.get("version") or "").strip()
     if not is_valid_version(version):
+        return None
+
+    if package_type == PACKAGE_TYPE_PATCH:
+        return _load_patch_candidate(release_dir, manifest_path, manifest, version)
+    if package_type != PACKAGE_TYPE_FULL:
         return None
 
     prog_dir_name = str(manifest.get("prog_dir") or DEFAULT_PROG_DIR_NAME).strip() or DEFAULT_PROG_DIR_NAME
@@ -227,15 +249,49 @@ def _load_candidate(release_dir: str) -> Optional[UpdateCandidate]:
         prog_dir=prog_dir,
         manifest_path=os.path.abspath(manifest_path),
         manifest=manifest,
+        package_type=PACKAGE_TYPE_FULL,
     )
 
 
-def find_available_updates(
+def _load_patch_candidate(
+    release_dir: str,
+    manifest_path: str,
+    manifest: dict[str, Any],
+    version: str,
+) -> Optional[UpdateCandidate]:
+    try:
+        normalized = validate_patch_manifest(manifest)
+        for entry in normalized["files"]:
+            path = patch_payload_path(release_dir, entry["path"])
+            if not os.path.isfile(path):
+                return None
+            try:
+                if os.path.getsize(path) != int(entry["size"]):
+                    return None
+            except Exception:
+                return None
+            if compute_sha256(path) != str(entry["sha256"]).lower():
+                return None
+    except (OSError, UpdatePackageError):
+        return None
+
+    return UpdateCandidate(
+        version=version,
+        release_dir=os.path.abspath(release_dir),
+        prog_dir=os.path.abspath(release_dir),
+        manifest_path=os.path.abspath(manifest_path),
+        manifest=normalized,
+        package_type=PACKAGE_TYPE_PATCH,
+    )
+
+
+def _find_available_updates_with_reasons(
     *,
     current_version: str = APP_VERSION,
     update_root: Optional[str] = None,
-) -> list[UpdateCandidate]:
+) -> UpdateScanResult:
     candidates: list[UpdateCandidate] = []
+    reasons: list[str] = []
     roots = [os.path.abspath(update_root)] if update_root else _default_update_roots()
     for root in roots:
         if not os.path.isdir(root):
@@ -247,9 +303,31 @@ def find_available_updates(
                 continue
             if compare_versions(candidate.version, current_version) <= 0:
                 continue
+            if candidate.package_type == PACKAGE_TYPE_PATCH:
+                base_version = str(candidate.manifest.get("base_version") or "").strip()
+                if base_version != current_version:
+                    reasons.append(
+                        f"Патч предназначен для версии {base_version}, "
+                        f"установлена {current_version}. Нужен полный релиз."
+                    )
+                    continue
             candidates.append(candidate)
 
-    return sorted(candidates, key=lambda item: _version_tuple(item.version), reverse=True)
+    return UpdateScanResult(
+        candidates=sorted(candidates, key=lambda item: _version_tuple(item.version), reverse=True),
+        reasons=reasons,
+    )
+
+
+def find_available_updates(
+    *,
+    current_version: str = APP_VERSION,
+    update_root: Optional[str] = None,
+) -> list[UpdateCandidate]:
+    return _find_available_updates_with_reasons(
+        current_version=current_version,
+        update_root=update_root,
+    ).candidates
 
 
 def find_best_update(
@@ -259,6 +337,20 @@ def find_best_update(
 ) -> Optional[UpdateCandidate]:
     updates = find_available_updates(current_version=current_version, update_root=update_root)
     return updates[0] if updates else None
+
+
+def find_best_update_with_reason(
+    *,
+    current_version: str = APP_VERSION,
+    update_root: Optional[str] = None,
+) -> tuple[Optional[UpdateCandidate], str]:
+    result = _find_available_updates_with_reasons(
+        current_version=current_version,
+        update_root=update_root,
+    )
+    if result.candidates:
+        return result.candidates[0], ""
+    return None, result.reasons[0] if result.reasons else ""
 
 
 def _default_update_roots() -> list[str]:

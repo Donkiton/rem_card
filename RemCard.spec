@@ -421,9 +421,12 @@ def _write_update_manifest(directory):
     manifest = {
         "schema_version": 1,
         "app": "rem_card",
+        "package_type": "full",
         "version": version,
         "min_client_version": version,
         "prog_dir": ".",
+        "patch_update_capable": True,
+        "source_commit": _current_git_commit(),
         "built_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "release_info": release_info,
     }
