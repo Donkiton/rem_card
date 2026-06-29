@@ -2289,6 +2289,7 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._apply_table_scrollbar_style()
         self.table.setStyleSheet(
             """
             QTableWidget#OperBlockAnesthesiaTypesTable {
@@ -2361,6 +2362,23 @@ class OperBlockAnesthesiaTypesDialog(OperBlockStyledDialog):
         footer.addWidget(cancel_button)
         footer.addWidget(self.save_button)
         layout.addLayout(footer)
+
+    def _apply_table_scrollbar_style(self) -> None:
+        scrollbar = self.table.verticalScrollBar()
+        if scrollbar is None:
+            return
+        scrollbar.setObjectName("OperBlockAnesthesiaTypesTableScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(34)
+        scrollbar.setPageStep(136)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockAnesthesiaTypesTableScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
 
     def _render_table(self, select_id: str | None = None):
         selected_id = select_id or self._selected_item_id()
