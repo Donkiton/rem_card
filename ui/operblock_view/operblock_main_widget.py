@@ -5039,6 +5039,7 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         self.table.setItemDelegate(_OperBlockTableTextDelegate(self.table))
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(30)
+        self._apply_table_scrollbar_style()
         header = self.table.horizontalHeader()
         header.setStretchLastSection(False)
         header.setSectionsMovable(True)
@@ -5129,6 +5130,23 @@ class OperBlockMedicationPresetsDialog(OperBlockStyledDialog):
         actions.addWidget(self.cancel_button)
         actions.addWidget(self.save_button)
         layout.addLayout(actions)
+
+    def _apply_table_scrollbar_style(self) -> None:
+        scrollbar = self.table.verticalScrollBar()
+        if scrollbar is None:
+            return
+        scrollbar.setObjectName("OperBlockMedicationPresetsTableScrollBar")
+        scrollbar.setFixedWidth(14)
+        scrollbar.setSingleStep(34)
+        scrollbar.setPageStep(136)
+        scrollbar.setStyleSheet(
+            _operblock_vertical_scrollbar_style(
+                "OperBlockMedicationPresetsTableScrollBar",
+                width_px=14,
+                left_margin_px=3,
+                right_margin_px=2,
+            )
+        )
 
     def _apply_default_table_column_widths(self):
         defaults = {
