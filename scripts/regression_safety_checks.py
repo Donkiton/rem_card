@@ -849,6 +849,38 @@ def _check_patch_builder_registers_current_UPD_full_as_base_when_valid(temp_root
     return True, "ok"
 
 
+def _check_patch_builder_accepts_full_manifest_parent_source_commit(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    root = Path(temp_root, "r")
+    upd = Path(temp_root, "u")
+    _reset_test_dirs(root, upd)
+    version = "1.0.0"
+    source_commit = "a" * 40
+    release_commit = "b" * 40
+    _write_builder_full_package(upd, version=version, commit=source_commit, patch_capable=True)
+
+    original_git_output = build_patch_update.git_output
+    try:
+        build_patch_update.git_output = lambda _root, args: (
+            f"{release_commit} {source_commit}" if args == ["rev-list", "--parents", "-n", "1", release_commit] else ""
+        )
+        base = build_patch_update.register_base_from_full_package(
+            root,
+            upd,
+            version=version,
+            commit=release_commit,
+        )
+    finally:
+        build_patch_update.git_output = original_git_output
+
+    if base.commit != release_commit:
+        return False, f"base cache did not use release commit key: {base.commit}"
+    if not (base.canonical_tree / "RemCardDoctor.exe").is_file():
+        return False, "canonical base tree was not registered"
+    return True, "ok"
+
+
 def _check_patch_builder_refuses_without_base_cache(temp_root: str) -> tuple[bool, str]:
     from scripts import build_patch_update
 
@@ -26383,6 +26415,7 @@ def main(argv: list[str] | None = None):
         ("patch_ready_ok_is_last_publish_step", _check_patch_ready_ok_is_last_publish_step),
         ("patch_builder_refuses_without_base_cache", _check_patch_builder_refuses_without_base_cache),
         ("patch_builder_registers_current_UPD_full_as_base_when_valid", _check_patch_builder_registers_current_UPD_full_as_base_when_valid),
+        ("patch_builder_accepts_full_manifest_parent_source_commit", _check_patch_builder_accepts_full_manifest_parent_source_commit),
         ("patch_builder_skips_settings_snapshot_when_content_hash_same", _check_patch_builder_skips_settings_snapshot_when_content_hash_same),
         ("patch_builder_includes_settings_snapshot_when_content_hash_changes", _check_patch_builder_includes_settings_snapshot_when_content_hash_changes),
         ("patch_builder_uses_canonical_tree_after_generated_skip", _check_patch_builder_uses_canonical_tree_after_generated_skip),

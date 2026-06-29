@@ -187,6 +187,18 @@ def _full_manifest_commit(manifest: dict[str, Any]) -> str:
     ).strip()
 
 
+def _full_manifest_commit_matches_base(root: Path, manifest_commit: str, base_commit: str) -> bool:
+    if manifest_commit == base_commit:
+        return True
+    try:
+        raw = git_output(root, ["rev-list", "--parents", "-n", "1", base_commit])
+    except Exception:
+        return False
+    commits = raw.split()
+    parents = commits[1:] if commits else []
+    return manifest_commit in parents
+
+
 def register_base_from_full_package(
     root: Path,
     package_dir: Path,
@@ -214,10 +226,10 @@ def register_base_from_full_package(
             "В full-пакете UPD нет source_commit. "
             "Сначала пересоберите full-релиз новым build_release.py/RemCard.spec."
         )
-    if manifest_commit and manifest_commit != commit:
+    if manifest_commit and not _full_manifest_commit_matches_base(root, manifest_commit, commit):
         raise RuntimeError(
             f"Commit full-пакета в UPD не совпадает с ожидаемой базой: "
-            f"{manifest_commit[:12]} != {commit[:12]}"
+            f"{manifest_commit[:12]} не равен {commit[:12]} и не является его прямым родителем"
         )
 
     base_root = _base_dir(root, version, commit)
