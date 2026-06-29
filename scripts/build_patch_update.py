@@ -56,6 +56,7 @@ from rem_card.app.updater_main import READY_FILE_NAME  # noqa: E402
 
 PATCH_CACHE_DIR_NAME = ".remcard_patch_cache"
 DEFAULT_PATCH_TARGET_DIR = ROOT.parent / "Baza_rao3_jurnal" / "UPD"
+DEFAULT_LARGE_THRESHOLD_MB = 200.0
 DETERMINISTIC_HASH_SEED = "0"
 SNAPSHOT_REL_PATH = "_internal/rem_card/settings_release/settings_release_snapshot.json"
 GENERATED_POLICY = {
@@ -100,6 +101,36 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _backup_versioned_files(root: Path) -> dict[str, bytes | None]:
+    backup: dict[str, bytes | None] = {}
+    for rel in VERSIONED_FILES:
+        path = root / rel
+        backup[rel] = path.read_bytes() if path.exists() else None
+    return backup
+
+
+def _restore_versioned_files(root: Path, backup: dict[str, bytes | None]) -> None:
+    for rel, content in backup.items():
+        path = root / rel
+        if content is None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
+def _remove_tree_quietly(path: Path | None) -> None:
+    if not path:
+        return
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _rel_path(path: Path, root: Path) -> str:
@@ -289,6 +320,43 @@ def build_temp_full(root: Path, target_dir: Path, deterministic_env: dict[str, s
 def commit_patch(root: Path, version: str) -> None:
     _run(["git", "add", *VERSIONED_FILES], cwd=root)
     _run(["git", "commit", "-m", f"Патч {version}"], cwd=root)
+
+
+def _is_own_patch_commit(root: Path, *, patch_commit: str, source_commit: str, version: str) -> bool:
+    try:
+        current = head_commit(root)
+        parent = git_output(root, ["rev-parse", f"{patch_commit}^"])
+        subject = git_output(root, ["show", "-s", "--format=%s", patch_commit])
+    except Exception:
+        return False
+    return current == patch_commit and parent == source_commit and subject == f"Патч {version}"
+
+
+def cleanup_failed_patch_attempt(
+    root: Path,
+    *,
+    source_commit: str,
+    version: str | None,
+    versioned_backup: dict[str, bytes | None],
+    work_dir: Path | None,
+    patch_commit: str | None,
+    pushed: bool,
+) -> None:
+    _remove_tree_quietly(work_dir)
+    if pushed:
+        return
+    if patch_commit and version and _is_own_patch_commit(
+        root,
+        patch_commit=patch_commit,
+        source_commit=source_commit,
+        version=version,
+    ):
+        _run(["git", "reset", "--soft", source_commit], cwd=root)
+        _restore_versioned_files(root, versioned_backup)
+        _run(["git", "reset", "--", *VERSIONED_FILES], cwd=root)
+        return
+    _restore_versioned_files(root, versioned_backup)
+    _run(["git", "reset", "--", *VERSIONED_FILES], cwd=root)
 
 
 def _snapshot_content_hash(path: Path) -> str:
@@ -485,7 +553,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--change", action="append", default=[], help="Добавить пункт в changelog вручную.")
     parser.add_argument("--allow-empty", action="store_true", help="Разрешить patch без новых git-коммитов.")
     parser.add_argument("--target-dir", default=str(DEFAULT_PATCH_TARGET_DIR), help="Папка публикации UPD.")
-    parser.add_argument("--large-threshold-mb", type=float, default=80.0)
+    parser.add_argument("--large-threshold-mb", type=float, default=DEFAULT_LARGE_THRESHOLD_MB)
     parser.add_argument("--allow-large", action="store_true")
     return parser.parse_args(argv)
 
@@ -509,68 +577,87 @@ def main(argv: list[str] | None = None) -> int:
         changes = ["Технический patch без изменений в коде"]
     ensure_russian_changelog(changes)
 
-    level = detect_level(changes) if args.level == "auto" else args.level
-    _current, next_version = update_release_files(root, level, changes, set_version=args.set_version)
-    commit_patch(root, next_version)
-    patch_commit = head_commit(root)
-    deterministic_env = _deterministic_env(root, patch_commit)
+    versioned_backup = _backup_versioned_files(root)
+    next_version: str | None = None
+    patch_commit: str | None = None
+    work: Path | None = None
+    pushed = False
 
-    work = _work_dir(root, next_version)
-    if work.exists():
-        shutil.rmtree(work)
-    raw_new = work / "full_new_raw"
-    canonical_new = work / "full_new_canonical"
-    patch_payload = work / "patch_payload"
+    try:
+        level = detect_level(changes) if args.level == "auto" else args.level
+        _current, next_version = update_release_files(root, level, changes, set_version=args.set_version)
+        commit_patch(root, next_version)
+        patch_commit = head_commit(root)
+        deterministic_env = _deterministic_env(root, patch_commit)
 
-    build_temp_full(root, raw_new, deterministic_env)
-    skipped_generated = canonicalize_full_tree(base.canonical_tree, raw_new, canonical_new)
-    diff = build_patch_diff(base.canonical_tree, canonical_new, skipped_generated)
-    if not diff.files and not diff.delete:
-        raise RuntimeError("Patch diff пустой: нечего публиковать.")
+        work = _work_dir(root, next_version)
+        if work.exists():
+            shutil.rmtree(work)
+        raw_new = work / "full_new_raw"
+        canonical_new = work / "full_new_canonical"
+        patch_payload = work / "patch_payload"
 
-    manifest = build_patch_manifest(
-        version=next_version,
-        base_version=base_version,
-        base_commit=base_commit,
-        source_commit=source_commit,
-        patch_commit=patch_commit,
-        deterministic_env=deterministic_env,
-        diff=diff,
-    )
-    _write_json(canonical_new / MANIFEST_FILE_NAME, manifest)
-    write_patch_payload(patch_payload, canonical_new, manifest)
-    dry_run_patch_apply(base.canonical_tree, patch_payload, manifest, canonical_new)
+        build_temp_full(root, raw_new, deterministic_env)
+        skipped_generated = canonicalize_full_tree(base.canonical_tree, raw_new, canonical_new)
+        diff = build_patch_diff(base.canonical_tree, canonical_new, skipped_generated)
+        if not diff.files and not diff.delete:
+            raise RuntimeError("Patch diff пустой: нечего публиковать.")
 
-    patch_size = sum(Path(patch_payload_path(patch_payload, entry["path"])).stat().st_size for entry in manifest["files"])
-    patch_size_mb = patch_size / (1024 * 1024)
-    if patch_size_mb > float(args.large_threshold_mb) and not args.allow_large:
-        raise RuntimeError(
-            f"Patch payload {patch_size_mb:.1f} MB больше порога {args.large_threshold_mb:.1f} MB. "
-            "Используйте full-релиз или повторите с --allow-large."
+        manifest = build_patch_manifest(
+            version=next_version,
+            base_version=base_version,
+            base_commit=base_commit,
+            source_commit=source_commit,
+            patch_commit=patch_commit,
+            deterministic_env=deterministic_env,
+            diff=diff,
         )
-    binary_paths = binary_output_paths(manifest)
-    if binary_paths:
-        print(
-            "Предупреждение: patch содержит PyInstaller/binary output: "
-            + ", ".join(binary_paths[:8])
-        )
-    if len(binary_paths) >= 4 and not args.allow_large:
-        raise RuntimeError(
-            "Patch содержит массовые изменения EXE/PYZ/DLL/ZIP. "
-            "Проверьте детерминированность сборки и повторите с --allow-large "
-            "или используйте full-релиз."
-        )
+        _write_json(canonical_new / MANIFEST_FILE_NAME, manifest)
+        write_patch_payload(patch_payload, canonical_new, manifest)
+        dry_run_patch_apply(base.canonical_tree, patch_payload, manifest, canonical_new)
 
-    push_current_branch(root)
-    publish_patch_package(patch_payload, Path(args.target_dir), manifest)
-    register_published_base(
-        root,
-        version=next_version,
-        commit=patch_commit,
-        canonical_new_tree=canonical_new,
-        raw_new_tree=raw_new,
-        manifest=manifest,
-    )
+        patch_size = sum(Path(patch_payload_path(patch_payload, entry["path"])).stat().st_size for entry in manifest["files"])
+        patch_size_mb = patch_size / (1024 * 1024)
+        if patch_size_mb > float(args.large_threshold_mb) and not args.allow_large:
+            raise RuntimeError(
+                f"Patch payload {patch_size_mb:.1f} MB больше порога {args.large_threshold_mb:.1f} MB. "
+                "Используйте full-релиз или повторите с --allow-large."
+            )
+        binary_paths = binary_output_paths(manifest)
+        if binary_paths:
+            print(
+                "Предупреждение: patch содержит PyInstaller/binary output: "
+                + ", ".join(binary_paths[:8])
+            )
+        if len(binary_paths) >= 4:
+            print(
+                "Предупреждение: patch содержит массовые изменения EXE/PYZ/DLL/ZIP; "
+                "публикация разрешена, если общий размер не превышает порог."
+            )
+
+        push_current_branch(root)
+        pushed = True
+        publish_patch_package(patch_payload, Path(args.target_dir), manifest)
+        register_published_base(
+            root,
+            version=next_version,
+            commit=patch_commit,
+            canonical_new_tree=canonical_new,
+            raw_new_tree=raw_new,
+            manifest=manifest,
+        )
+    except Exception:
+        cleanup_failed_patch_attempt(
+            root,
+            source_commit=source_commit,
+            version=next_version,
+            versioned_backup=versioned_backup,
+            work_dir=work,
+            patch_commit=patch_commit,
+            pushed=pushed,
+        )
+        raise
+
     cleanup_old_bases(root)
     print(f"Patch update {next_version} опубликован в {Path(args.target_dir)}")
     return 0

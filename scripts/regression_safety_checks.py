@@ -1001,6 +1001,86 @@ def _check_patch_builder_uses_canonical_tree_after_generated_skip(temp_root: str
     return True, "ok"
 
 
+def _check_patch_builder_default_large_threshold_is_200(temp_root: str) -> tuple[bool, str]:
+    _ = temp_root
+    from scripts import build_patch_update
+
+    if float(build_patch_update.DEFAULT_LARGE_THRESHOLD_MB) != 200.0:
+        return False, f"DEFAULT_LARGE_THRESHOLD_MB={build_patch_update.DEFAULT_LARGE_THRESHOLD_MB!r}"
+    args = build_patch_update.parse_args([])
+    if float(args.large_threshold_mb) != 200.0:
+        return False, f"parse_args default threshold={args.large_threshold_mb!r}"
+    return True, "ok"
+
+
+def _check_patch_builder_cleans_failed_attempt_artifacts(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+
+    root = Path(temp_root, "patch_cleanup_repo")
+    _reset_test_dirs(root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "app").mkdir(parents=True, exist_ok=True)
+    (root / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
+    (root / "app" / "release_info.json").write_text(
+        json.dumps({"version": "1.0.0"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=root,
+            check=True,
+            text=True,
+            encoding="utf-8",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return str(result.stdout or "").strip()
+
+    git("init")
+    git("config", "user.email", "regression@example.local")
+    git("config", "user.name", "Regression")
+    git("add", ".")
+    git("commit", "-m", "База")
+    source_commit = git("rev-parse", "HEAD")
+    versioned_backup = build_patch_update._backup_versioned_files(root)
+
+    (root / "VERSION").write_text("1.0.1\n", encoding="utf-8")
+    (root / "CHANGELOG.md").write_text("# Changelog\n\n## 1.0.1\n- Проверка\n", encoding="utf-8")
+    (root / "app" / "release_info.json").write_text(
+        json.dumps({"version": "1.0.1"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    git("add", ".")
+    git("commit", "-m", "Патч 1.0.1")
+    patch_commit = git("rev-parse", "HEAD")
+    work_dir = root / ".remcard_patch_cache" / "work" / "1.0.1"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    (work_dir / "generated.txt").write_text("temporary\n", encoding="utf-8")
+
+    build_patch_update.cleanup_failed_patch_attempt(
+        root,
+        source_commit=source_commit,
+        version="1.0.1",
+        versioned_backup=versioned_backup,
+        work_dir=work_dir,
+        patch_commit=patch_commit,
+        pushed=False,
+    )
+
+    if git("rev-parse", "HEAD") != source_commit:
+        return False, "failed patch commit was not rolled back"
+    if git("status", "--porcelain"):
+        return False, "cleanup left git worktree dirty"
+    if work_dir.exists():
+        return False, "cleanup left patch work dir"
+    if (root / "VERSION").read_text(encoding="utf-8") != "1.0.0\n":
+        return False, "VERSION was not restored"
+    return True, "ok"
+
+
 def _check_patch_ready_ok_is_last_publish_step(temp_root: str) -> tuple[bool, str]:
     from scripts import build_patch_update
     from rem_card.app.update_package import compute_sha256
@@ -26419,6 +26499,8 @@ def main(argv: list[str] | None = None):
         ("patch_builder_skips_settings_snapshot_when_content_hash_same", _check_patch_builder_skips_settings_snapshot_when_content_hash_same),
         ("patch_builder_includes_settings_snapshot_when_content_hash_changes", _check_patch_builder_includes_settings_snapshot_when_content_hash_changes),
         ("patch_builder_uses_canonical_tree_after_generated_skip", _check_patch_builder_uses_canonical_tree_after_generated_skip),
+        ("patch_builder_default_large_threshold_is_200", _check_patch_builder_default_large_threshold_is_200),
+        ("patch_builder_cleans_failed_attempt_artifacts", _check_patch_builder_cleans_failed_attempt_artifacts),
         ("build_release_full_behavior_unchanged", _check_build_release_full_behavior_unchanged),
         ("updater_does_not_require_UPD_Prog_folder", _check_updater_does_not_require_UPD_Prog_folder),
         ("updater_target_uses_executable_dir", _check_updater_target_uses_executable_dir),
