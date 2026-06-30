@@ -21,8 +21,10 @@ from rem_card.app.version import APP_VERSION
 
 UPDATE_LOCK_STALE_SEC = 30 * 60
 UPDATE_STARTING_LOCK_STALE_SEC = 5 * 60
+LEGACY_STARTING_LOCK_STALE_SEC = 15
 SUPPORT_DIR_NAME = "support"
 UPDATER_EXE_NAME = "RemCardUpdater.exe"
+INTERNAL_DIR_NAME = "_internal"
 
 
 def _read_lock_payload(lock_path: str) -> Optional[dict[str, Any]]:
@@ -50,12 +52,52 @@ def _payload_age(payload: Optional[dict[str, Any]], lock_path: str) -> float:
     return max(0.0, time.time() - mtime) if mtime else UPDATE_LOCK_STALE_SEC + 1
 
 
+def _is_pid_alive(pid: Any) -> bool:
+    try:
+        value = int(pid or 0)
+    except Exception:
+        return False
+    if value <= 0:
+        return False
+    if value == os.getpid():
+        return True
+    try:
+        os.kill(value, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _starting_lock_is_dead(payload: dict[str, Any], lock_path: str) -> bool:
+    if str(payload.get("state") or "") != "starting":
+        return False
+
+    updater_pid = payload.get("updater_pid")
+    if updater_pid:
+        return not _is_pid_alive(updater_pid)
+
+    legacy_pid = payload.get("pid")
+    if legacy_pid and not _is_pid_alive(legacy_pid):
+        return True
+
+    return _payload_age(payload, lock_path) > LEGACY_STARTING_LOCK_STALE_SEC
+
+
 def _active_lock_payload(path: str, stale_sec: int, *, target_dir: Optional[str] = None) -> Optional[dict[str, Any]]:
     payload = _read_lock_payload(path)
     if not payload:
         return None
 
     if target_dir and not update_lock_payload_matches_target(payload, target_dir):
+        return None
+
+    if _starting_lock_is_dead(payload, path):
+        try:
+            os.remove(path)
+        except Exception:
+            return payload
         return None
 
     if _payload_age(payload, path) > stale_sec:
@@ -145,6 +187,7 @@ def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str)
         "started_at": _now_text(),
         "host": socket.gethostname(),
         "pid": os.getpid(),
+        "updater_pid": 0,
         "state": "starting",
         "source": candidate.prog_dir,
         "target": target_dir,
@@ -163,6 +206,18 @@ def _write_starting_lock(path: str, candidate: UpdateCandidate, target_dir: str)
         return False
     except Exception:
         return False
+
+
+def _mark_starting_lock_updater_pid(path: str, pid: Any) -> None:
+    try:
+        payload = _read_lock_payload(path) or {}
+        payload["updater_pid"] = int(pid or 0)
+        payload["state"] = "starting"
+        payload["timestamp"] = time.time()
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=True, indent=2)
+    except Exception:
+        pass
 
 
 def _remove_lock_quietly(path: str):
@@ -188,7 +243,10 @@ def _select_updater_path(candidate: UpdateCandidate, target_dir: str) -> str:
         return os.path.join(candidate.prog_dir, UPDATER_EXE_NAME)
 
     if _patch_payload_includes(candidate, UPDATER_EXE_NAME):
-        return os.path.join(candidate.prog_dir, SUPPORT_DIR_NAME, UPDATER_EXE_NAME)
+        support_dir = os.path.join(candidate.prog_dir, SUPPORT_DIR_NAME)
+        if not os.path.isdir(os.path.join(support_dir, INTERNAL_DIR_NAME)):
+            return ""
+        return os.path.join(support_dir, UPDATER_EXE_NAME)
     return os.path.join(target_dir, UPDATER_EXE_NAME)
 
 
@@ -210,7 +268,7 @@ def launch_update(
         return False
 
     updater_path = _select_updater_path(candidate, target_dir)
-    if not os.path.isfile(updater_path):
+    if not updater_path or not os.path.isfile(updater_path):
         return False
 
     if is_update_in_progress(target_dir=target_dir) or not _write_starting_lock(
@@ -245,7 +303,14 @@ def launch_update(
         args.extend(["--restart-exe", restart_exe])
 
     try:
-        popen_hidden(args)
+        process = popen_hidden(args)
+        _mark_starting_lock_updater_pid(starting_lock_path, getattr(process, "pid", 0))
+        poll = getattr(process, "poll", None)
+        if callable(poll):
+            time.sleep(0.2)
+            if poll() is not None:
+                _remove_lock_quietly(starting_lock_path)
+                return False
         return True
     except Exception:
         _remove_lock_quietly(starting_lock_path)

@@ -58,6 +58,9 @@ PATCH_CACHE_DIR_NAME = ".remcard_patch_cache"
 DEFAULT_PATCH_TARGET_DIR = ROOT.parent / "Baza_rao3_jurnal" / "UPD"
 DEFAULT_LARGE_THRESHOLD_MB = 1024.0
 DETERMINISTIC_HASH_SEED = "0"
+INTERNAL_DIR_NAME = "_internal"
+SUPPORT_DIR_NAME = "support"
+UPDATER_EXE_NAME = "RemCardUpdater.exe"
 SNAPSHOT_REL_PATH = "_internal/rem_card/settings_release/settings_release_snapshot.json"
 GENERATED_POLICY = {
     SNAPSHOT_REL_PATH: {
@@ -432,21 +435,63 @@ def build_patch_manifest(
     return validate_patch_manifest(manifest)
 
 
+def _patch_payload_includes_updater(manifest: dict[str, Any]) -> bool:
+    updater = UPDATER_EXE_NAME.casefold()
+    return any(str(entry.get("path") or "").replace("\\", "/").casefold() == updater for entry in manifest.get("files") or [])
+
+
+def _copy_support_updater_bundle(patch_dir: Path, canonical_new_tree: Path) -> None:
+    updater_source = canonical_new_tree / UPDATER_EXE_NAME
+    internal_source = canonical_new_tree / INTERNAL_DIR_NAME
+    if not updater_source.is_file():
+        raise RuntimeError(f"Не найден support updater source: {updater_source}")
+    if not internal_source.is_dir():
+        raise RuntimeError(f"Не найдена runtime-папка support updater: {internal_source}")
+
+    support_dir = patch_dir / SUPPORT_DIR_NAME
+    support_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(updater_source, support_dir / UPDATER_EXE_NAME)
+    _copy_tree(internal_source, support_dir / INTERNAL_DIR_NAME)
+
+
+def _validate_support_updater_bundle(package_dir: Path, manifest: dict[str, Any]) -> None:
+    if not _patch_payload_includes_updater(manifest):
+        return
+    support_dir = package_dir / SUPPORT_DIR_NAME
+    updater_path = support_dir / UPDATER_EXE_NAME
+    internal_dir = support_dir / INTERNAL_DIR_NAME
+    if not updater_path.is_file():
+        raise RuntimeError(f"Patch-пакет обновляет updater, но нет {SUPPORT_DIR_NAME}\\{UPDATER_EXE_NAME}.")
+    if not internal_dir.is_dir():
+        raise RuntimeError(
+            f"Patch-пакет обновляет updater, но нет {SUPPORT_DIR_NAME}\\{INTERNAL_DIR_NAME}. "
+            "Для one-dir PyInstaller support updater не запустится без runtime-папки."
+        )
+
+
+def patch_package_size_bytes(patch_dir: Path) -> int:
+    total = 0
+    for item in patch_dir.rglob("*"):
+        if item.is_file() and item.name != MANIFEST_FILE_NAME:
+            total += item.stat().st_size
+    return total
+
+
 def write_patch_payload(patch_dir: Path, canonical_new_tree: Path, manifest: dict[str, Any]) -> None:
     if patch_dir.exists():
         shutil.rmtree(patch_dir)
     patch_dir.mkdir(parents=True, exist_ok=True)
+    needs_support_updater = _patch_payload_includes_updater(manifest)
     for entry in manifest["files"]:
         rel = str(entry["path"])
         source_path = canonical_new_tree / Path(*rel.split("/"))
         payload_path = Path(patch_payload_path(patch_dir, rel))
         payload_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, payload_path)
-        if rel.casefold() == "remcardupdater.exe":
-            support_path = patch_dir / "support" / "RemCardUpdater.exe"
-            support_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_path, support_path)
+    if needs_support_updater:
+        _copy_support_updater_bundle(patch_dir, canonical_new_tree)
     _write_json(patch_dir / MANIFEST_FILE_NAME, manifest)
+    _validate_support_updater_bundle(patch_dir, manifest)
 
 
 def binary_output_paths(manifest: dict[str, Any]) -> list[str]:
@@ -478,6 +523,7 @@ def dry_run_patch_apply(base_tree: Path, patch_dir: Path, manifest: dict[str, An
 
 
 def publish_patch_package(patch_dir: Path, target_dir: Path, manifest: dict[str, Any]) -> None:
+    _validate_support_updater_bundle(patch_dir, manifest)
     target_dir.mkdir(parents=True, exist_ok=True)
     ready_path = target_dir / READY_FILE_NAME
     if ready_path.exists():
@@ -500,6 +546,7 @@ def publish_patch_package(patch_dir: Path, target_dir: Path, manifest: dict[str,
             shutil.copy2(item, dest)
     _write_json(target_dir / MANIFEST_FILE_NAME, manifest)
     validate_patch_manifest(_read_json(target_dir / MANIFEST_FILE_NAME))
+    _validate_support_updater_bundle(target_dir, manifest)
     for entry in manifest["files"]:
         payload_path = Path(patch_payload_path(target_dir, entry["path"]))
         if compute_sha256(payload_path) != str(entry["sha256"]).lower():
@@ -616,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         write_patch_payload(patch_payload, canonical_new, manifest)
         dry_run_patch_apply(base.canonical_tree, patch_payload, manifest, canonical_new)
 
-        patch_size = sum(Path(patch_payload_path(patch_payload, entry["path"])).stat().st_size for entry in manifest["files"])
+        patch_size = patch_package_size_bytes(patch_payload)
         patch_size_mb = patch_size / (1024 * 1024)
         if patch_size_mb > float(args.large_threshold_mb) and not args.allow_large:
             raise RuntimeError(

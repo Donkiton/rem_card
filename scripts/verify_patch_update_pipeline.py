@@ -29,10 +29,11 @@ from build_patch_update import (  # noqa: E402
     build_patch_manifest,
     canonicalize_full_tree,
     dry_run_patch_apply,
+    patch_package_size_bytes,
     write_patch_payload,
     _tree_hashes,
 )
-from rem_card.app.update_package import compute_sha256, patch_payload_path  # noqa: E402
+from rem_card.app.update_package import compute_sha256  # noqa: E402
 
 
 FIXTURE_BASE_VERSION = "1.0.0"
@@ -121,13 +122,6 @@ def _tree_size(root: Path) -> int:
     return total
 
 
-def _payload_size(patch_dir: Path, manifest: dict[str, Any]) -> int:
-    total = 0
-    for entry in manifest["files"]:
-        total += Path(patch_payload_path(patch_dir, entry["path"])).stat().st_size
-    return total
-
-
 def _settings_policy_result(skipped_generated: list[str], diff_paths: set[str]) -> str:
     if SNAPSHOT_REL_PATH in skipped_generated:
         return "skipped_same_content_hash"
@@ -168,7 +162,7 @@ def verify_pipeline(
     write_patch_payload(patch_payload, canonical_new, manifest)
     dry_run_patch_apply(base_tree, patch_payload, manifest, canonical_new)
 
-    payload_size = _payload_size(patch_payload, manifest)
+    payload_size = patch_package_size_bytes(patch_payload)
     full_size = _tree_size(raw_new_tree)
     diff_paths = {str(entry["path"]) for entry in manifest["files"]}
     warnings: list[str] = []

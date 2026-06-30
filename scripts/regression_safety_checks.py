@@ -581,6 +581,8 @@ def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[
         support_dir = Path(update_root, "support")
         support_dir.mkdir(parents=True, exist_ok=True)
         Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
+        Path(support_dir, "_internal", "python311.dll").parent.mkdir(parents=True, exist_ok=True)
+        Path(support_dir, "_internal", "python311.dll").write_text("python runtime", encoding="utf-8")
 
     candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
     if len(candidates) != 1:
@@ -1013,6 +1015,61 @@ def _check_patch_builder_default_large_threshold_is_1gb(temp_root: str) -> tuple
     return True, "ok"
 
 
+def _check_patch_builder_support_updater_includes_internal_runtime(temp_root: str) -> tuple[bool, str]:
+    from scripts import build_patch_update
+    from rem_card.app.update_package import compute_sha256, patch_payload_path
+
+    canonical = Path(temp_root, "support_runtime_canonical")
+    patch_dir = Path(temp_root, "support_runtime_patch")
+    _reset_test_dirs(canonical, patch_dir)
+    updater_path = canonical / "RemCardUpdater.exe"
+    updater_path.parent.mkdir(parents=True, exist_ok=True)
+    updater_path.write_bytes(b"updater exe")
+    (canonical / "_internal" / "python311.dll").parent.mkdir(parents=True, exist_ok=True)
+    (canonical / "_internal" / "python311.dll").write_bytes(b"python runtime")
+    (canonical / "_internal" / "rem_card" / "app").mkdir(parents=True, exist_ok=True)
+    (canonical / "_internal" / "rem_card" / "app" / "updater_main.pyc").write_bytes(b"updater module")
+
+    diff = build_patch_update.PatchDiff(
+        files=[
+            {
+                "path": "RemCardUpdater.exe",
+                "size": updater_path.stat().st_size,
+                "sha256": compute_sha256(updater_path),
+                "old_sha256": None,
+            }
+        ],
+        delete=[],
+        skipped_generated=[],
+    )
+    manifest = build_patch_update.build_patch_manifest(
+        version="1.0.1",
+        base_version="1.0.0",
+        base_commit="base",
+        source_commit="source",
+        patch_commit="patch",
+        deterministic_env={},
+        diff=diff,
+    )
+
+    build_patch_update.write_patch_payload(patch_dir, canonical, manifest)
+    checks = [
+        patch_dir / "support" / "RemCardUpdater.exe",
+        patch_dir / "support" / "_internal" / "python311.dll",
+        patch_dir / "support" / "_internal" / "rem_card" / "app" / "updater_main.pyc",
+        Path(patch_payload_path(patch_dir, "RemCardUpdater.exe")),
+    ]
+    missing = [str(path) for path in checks if not path.exists()]
+    if missing:
+        return False, "support updater bundle incomplete: " + ", ".join(missing)
+
+    payload_only = Path(patch_payload_path(patch_dir, "RemCardUpdater.exe")).stat().st_size
+    package_size = build_patch_update.patch_package_size_bytes(patch_dir)
+    if package_size <= payload_only:
+        return False, "patch package size must include support runtime bundle"
+    return True, "ok"
+
+
 def _check_patch_builder_cleans_failed_attempt_artifacts(temp_root: str) -> tuple[bool, str]:
     from scripts import build_patch_update
 
@@ -1402,6 +1459,110 @@ def _check_update_locks_are_scoped_to_target(temp_root: str) -> tuple[bool, str]
             os.environ.pop("REMCARD_BAZA_DIR", None)
         else:
             os.environ["REMCARD_BAZA_DIR"] = saved_env
+
+
+def _check_update_starting_lock_dead_pid_clears(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import update_launcher
+    from rem_card.app.update_checker import get_update_starting_lock_path
+
+    saved_env = os.environ.get("REMCARD_BAZA_DIR")
+    original_is_compiled = update_launcher.is_compiled
+    try:
+        baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal_dead_start")
+        target_dir = os.path.join(temp_root, "Prog_dead_start")
+        os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
+        os.makedirs(target_dir, exist_ok=True)
+        os.environ["REMCARD_BAZA_DIR"] = baza_dir
+        update_launcher.is_compiled = lambda: True
+
+        lock_path = get_update_starting_lock_path(baza_dir, target_dir=target_dir)
+        payload = {
+            "timestamp": time.time(),
+            "started_at": "2026-01-01 00:00:00",
+            "host": socket.gethostname(),
+            "pid": 99999999,
+            "updater_pid": 99999999,
+            "state": "starting",
+            "target": target_dir,
+            "target_version": "1.0.1",
+        }
+        Path(lock_path).write_text(json.dumps(payload), encoding="utf-8")
+        if update_launcher.is_update_in_progress(target_dir=target_dir):
+            return False, "dead updater_pid starting lock must not block update"
+        if os.path.exists(lock_path):
+            return False, "dead updater_pid starting lock was not removed"
+        return True, "ok"
+    finally:
+        update_launcher.is_compiled = original_is_compiled
+        if saved_env is None:
+            os.environ.pop("REMCARD_BAZA_DIR", None)
+        else:
+            os.environ["REMCARD_BAZA_DIR"] = saved_env
+
+
+def _check_patch_launcher_removes_starting_lock_when_updater_exits_immediately(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import update_launcher
+    from rem_card.app.update_checker import find_available_updates, get_update_starting_lock_path
+    from rem_card.app.update_package import compute_sha256
+
+    update_root = os.path.join(temp_root, "UPD_patch_launch_exit")
+    target_dir = os.path.join(temp_root, "Installed_exit")
+    baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal_exit")
+    os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
+    os.makedirs(target_dir, exist_ok=True)
+    Path(target_dir, "RemCardUpdater.exe").write_text("installed updater", encoding="utf-8")
+    _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
+
+    payload_path = Path(update_root, "payload", "RemCardUpdater.exe")
+    payload_path.write_text("new updater", encoding="utf-8")
+    manifest_path = Path(update_root, "manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {
+            "path": "RemCardUpdater.exe",
+            "size": payload_path.stat().st_size,
+            "sha256": compute_sha256(payload_path),
+            "old_sha256": _PATCH_OLD_SHA,
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    support_dir = Path(update_root, "support")
+    support_dir.mkdir(parents=True, exist_ok=True)
+    Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
+    Path(support_dir, "_internal", "python311.dll").parent.mkdir(parents=True, exist_ok=True)
+    Path(support_dir, "_internal", "python311.dll").write_text("python runtime", encoding="utf-8")
+
+    candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
+    if len(candidates) != 1:
+        return False, f"patch candidate not found: {candidates}"
+
+    class ExitedProcess:
+        pid = 99999999
+
+        def poll(self):
+            return 1
+
+    original_is_compiled = update_launcher.is_compiled
+    original_resolve_baza_dir = update_launcher.resolve_baza_dir
+    original_get_executable_dir = update_launcher.get_executable_dir
+    original_popen_hidden = update_launcher.popen_hidden
+    try:
+        update_launcher.is_compiled = lambda: True
+        update_launcher.resolve_baza_dir = lambda: baza_dir
+        update_launcher.get_executable_dir = lambda: target_dir
+        update_launcher.popen_hidden = lambda _args: ExitedProcess()
+
+        if update_launcher.launch_update(candidates[0], wait_for_parent=False):
+            return False, "launch_update must fail when updater exits immediately"
+        lock_path = get_update_starting_lock_path(baza_dir, target_dir=target_dir)
+        if os.path.exists(lock_path):
+            return False, "starting lock was not removed after immediate updater exit"
+        return True, "ok"
+    finally:
+        update_launcher.is_compiled = original_is_compiled
+        update_launcher.resolve_baza_dir = original_resolve_baza_dir
+        update_launcher.get_executable_dir = original_get_executable_dir
+        update_launcher.popen_hidden = original_popen_hidden
 
 
 def _check_lock_read_unavailable_not_stale(temp_root: str) -> tuple[bool, str]:
@@ -26557,6 +26718,7 @@ def main(argv: list[str] | None = None):
         ("patch_builder_includes_settings_snapshot_when_content_hash_changes", _check_patch_builder_includes_settings_snapshot_when_content_hash_changes),
         ("patch_builder_uses_canonical_tree_after_generated_skip", _check_patch_builder_uses_canonical_tree_after_generated_skip),
         ("patch_builder_default_large_threshold_is_1gb", _check_patch_builder_default_large_threshold_is_1gb),
+        ("patch_builder_support_updater_includes_internal_runtime", _check_patch_builder_support_updater_includes_internal_runtime),
         ("patch_builder_cleans_failed_attempt_artifacts", _check_patch_builder_cleans_failed_attempt_artifacts),
         ("build_release_full_behavior_unchanged", _check_build_release_full_behavior_unchanged),
         ("updater_does_not_require_UPD_Prog_folder", _check_updater_does_not_require_UPD_Prog_folder),
@@ -26568,6 +26730,8 @@ def main(argv: list[str] | None = None):
         ("updater_direct_launch_infers_patch_support_context", _check_updater_direct_launch_infers_patch_support_context),
         ("updater_cleanup_retries_old_backup", _check_updater_cleanup_retries_old_backup),
         ("update_locks_are_scoped_to_target", _check_update_locks_are_scoped_to_target),
+        ("update_starting_lock_dead_pid_clears", _check_update_starting_lock_dead_pid_clears),
+        ("patch_launcher_removes_starting_lock_when_updater_exits_immediately", _check_patch_launcher_removes_starting_lock_when_updater_exits_immediately),
         ("schema_migration_backup_fastpath_policy", _check_schema_migration_backup_fastpath_policy),
         ("schema_migration_invalid_backup_blocks_ddl", _check_schema_migration_invalid_backup_blocks_ddl),
         ("schema_migration_failure_rolls_back", _check_schema_migration_failure_rolls_back),
