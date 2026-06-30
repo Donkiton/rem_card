@@ -714,7 +714,8 @@ class SettingsService:
                 catalog_key=BACKGROUND_SETTINGS_KEY,
                 log_change=False,
             )
-            self._sync_background_rows_in_tx(cursor, repaired_payload)
+            # ui_backgrounds already is the repair source here; syncing it back would
+            # re-read and rewrite background image blobs during startup.
             self._bump_catalog_version(
                 cursor,
                 BACKGROUND_SETTINGS_KEY,

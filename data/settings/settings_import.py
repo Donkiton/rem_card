@@ -20,6 +20,24 @@ from rem_card.data.settings.settings_release import (
 
 
 SETTINGS_IMPORT_SOURCE_CLIENT_ID = "settings_dev_import_from_network"
+PREVIEW_IGNORED_COLUMNS = {"id", "created_at", "updated_at", "revision"}
+PREVIEW_BINARY_COLUMNS = {"image_blob", "logo_blob"}
+PREVIEW_MAX_CHANGED_LINES = 8
+PREVIEW_LIST_ID_KEYS = (
+    "preset_id",
+    "code",
+    "key",
+    "template_key",
+    "analysis_code",
+    "background_key",
+    "icon_key",
+    "id",
+    "name",
+    "full_name",
+    "label",
+    "display_name",
+)
+_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -96,11 +114,10 @@ def _encode_value(value: Any) -> Any:
 def _normalized_for_compare(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
-    ignored = {"id", "created_at", "updated_at", "revision"}
     return {
         key: _encode_value(value)
         for key, value in row.items()
-        if key not in ignored
+        if key not in PREVIEW_IGNORED_COLUMNS
     }
 
 
@@ -108,6 +125,246 @@ def _rows_equal(left: dict[str, Any] | None, right: dict[str, Any] | None) -> bo
     if left is None or right is None:
         return left is right
     return _stable_json(_normalized_for_compare(left)) == _stable_json(_normalized_for_compare(right))
+
+
+def format_settings_import_change_side(
+    row: dict[str, Any] | None,
+    other_row: dict[str, Any] | None,
+    *,
+    max_lines: int = PREVIEW_MAX_CHANGED_LINES,
+    value_limit: int = 180,
+) -> str:
+    if row is None:
+        return "нет"
+    entries = _preview_diff_entries(row, other_row or {})
+    if not entries:
+        keys = sorted((set(row) | set(other_row or {})) - PREVIEW_IGNORED_COLUMNS)
+        entries = [
+            (str(key), row.get(key, _MISSING), (other_row or {}).get(key, _MISSING))
+            for key in keys
+            if key not in PREVIEW_BINARY_COLUMNS
+        ]
+    parts = [
+        f"{path}: {_short_preview_value(value, limit=value_limit)}"
+        for path, value, _other_value in entries[:max_lines]
+    ]
+    if len(entries) > max_lines:
+        parts.append(f"... еще {len(entries) - max_lines}")
+    return "\n".join(parts) if parts else "без данных"
+
+
+def _preview_diff_entries(
+    row: dict[str, Any],
+    other_row: dict[str, Any],
+) -> list[tuple[str, Any, Any]]:
+    entries: list[tuple[str, Any, Any]] = []
+    keys = sorted((set(row) | set(other_row)) - PREVIEW_IGNORED_COLUMNS)
+    for key in keys:
+        value = row.get(key, _MISSING)
+        other_value = other_row.get(key, _MISSING)
+        if _preview_values_equal(value, other_value):
+            continue
+        parsed_value, value_is_json = _parse_preview_json(value)
+        parsed_other, other_is_json = _parse_preview_json(other_value)
+        if value_is_json or other_is_json:
+            nested_entries: list[tuple[str, Any, Any]] = []
+            _append_preview_diff_entries(
+                parsed_value if value_is_json else value,
+                parsed_other if other_is_json else other_value,
+                "",
+                nested_entries,
+            )
+            if nested_entries:
+                prefix = "" if key == "value_json" else str(key)
+                for nested_path, nested_value, nested_other in nested_entries:
+                    path = _join_preview_path(prefix, nested_path) if prefix else nested_path
+                    entries.append((path or str(key), nested_value, nested_other))
+                continue
+        entries.append((str(key), value, other_value))
+    return entries
+
+
+def _append_preview_diff_entries(
+    value: Any,
+    other_value: Any,
+    path: str,
+    entries: list[tuple[str, Any, Any]],
+) -> None:
+    if _preview_values_equal(value, other_value):
+        return
+    if isinstance(value, dict) and isinstance(other_value, dict):
+        for key in sorted(set(value) | set(other_value), key=str):
+            _append_preview_diff_entries(
+                value.get(key, _MISSING),
+                other_value.get(key, _MISSING),
+                _preview_child_path(path, key),
+                entries,
+            )
+        return
+    if isinstance(value, dict) and other_value is _MISSING:
+        for key in sorted(value, key=str):
+            _append_preview_diff_entries(
+                value.get(key, _MISSING),
+                _MISSING,
+                _preview_child_path(path, key),
+                entries,
+            )
+        return
+    if value is _MISSING and isinstance(other_value, dict):
+        for key in sorted(other_value, key=str):
+            _append_preview_diff_entries(
+                _MISSING,
+                other_value.get(key, _MISSING),
+                _preview_child_path(path, key),
+                entries,
+            )
+        return
+    if isinstance(value, list) and isinstance(other_value, list):
+        _append_preview_list_diff_entries(value, other_value, path, entries)
+        return
+    if isinstance(value, list) and other_value is _MISSING:
+        _append_preview_list_diff_entries(value, [], path, entries)
+        return
+    if value is _MISSING and isinstance(other_value, list):
+        _append_preview_list_diff_entries([], other_value, path, entries)
+        return
+    entries.append((path or "value", value, other_value))
+
+
+def _append_preview_list_diff_entries(
+    values: list[Any],
+    other_values: list[Any],
+    path: str,
+    entries: list[tuple[str, Any, Any]],
+) -> None:
+    identity_key = _preview_list_identity_key(values, other_values)
+    if identity_key:
+        values_by_key = {str(item.get(identity_key)): item for item in values if isinstance(item, dict)}
+        other_by_key = {str(item.get(identity_key)): item for item in other_values if isinstance(item, dict)}
+        for item_key in sorted(set(values_by_key) | set(other_by_key)):
+            _append_preview_diff_entries(
+                values_by_key.get(item_key, _MISSING),
+                other_by_key.get(item_key, _MISSING),
+                _preview_identity_path(path, identity_key, item_key),
+                entries,
+            )
+        order = [str(item.get(identity_key)) for item in values if isinstance(item, dict)]
+        other_order = [str(item.get(identity_key)) for item in other_values if isinstance(item, dict)]
+        if values and other_values and order != other_order:
+            entries.append((_preview_child_path(path, "order"), order, other_order))
+        return
+    for index in range(max(len(values), len(other_values))):
+        _append_preview_diff_entries(
+            values[index] if index < len(values) else _MISSING,
+            other_values[index] if index < len(other_values) else _MISSING,
+            _preview_index_path(path, index),
+            entries,
+        )
+
+
+def _preview_list_identity_key(values: list[Any], other_values: list[Any]) -> str:
+    combined = [item for item in (*values, *other_values) if isinstance(item, dict)]
+    if not combined or len(combined) != len(values) + len(other_values):
+        return ""
+    for key in PREVIEW_LIST_ID_KEYS:
+        left_ids = [str(item.get(key) or "") for item in values]
+        right_ids = [str(item.get(key) or "") for item in other_values]
+        if (
+            all(left_ids)
+            and all(right_ids)
+            and len(left_ids) == len(set(left_ids))
+            and len(right_ids) == len(set(right_ids))
+        ):
+            return key
+    return ""
+
+
+def _parse_preview_json(value: Any) -> tuple[Any, bool]:
+    if not isinstance(value, str):
+        return value, False
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return value, False
+    try:
+        return json.loads(text), True
+    except Exception:
+        return value, False
+
+
+def _preview_values_equal(value: Any, other_value: Any) -> bool:
+    if value is _MISSING or other_value is _MISSING:
+        return value is other_value
+    parsed_value, value_is_json = _parse_preview_json(value)
+    parsed_other, other_is_json = _parse_preview_json(other_value)
+    if value_is_json and other_is_json:
+        return _stable_json(parsed_value) == _stable_json(parsed_other)
+    if isinstance(value, bytes) or isinstance(other_value, bytes):
+        return _stable_json(_preview_blob_value(value)) == _stable_json(_preview_blob_value(other_value))
+    try:
+        return _stable_json(value) == _stable_json(other_value)
+    except TypeError:
+        return str(value) == str(other_value)
+
+
+def _preview_blob_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"blob_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
+    return value
+
+
+def _preview_child_path(path: str, key: Any) -> str:
+    return _join_preview_path(path, _preview_key_segment(key))
+
+
+def _preview_key_segment(key: Any) -> str:
+    text = str(key)
+    if text and (text[0].isalpha() or text[0] == "_") and all(ch.isalnum() or ch == "_" for ch in text):
+        return text
+    return f"[{json.dumps(text, ensure_ascii=False)}]"
+
+
+def _preview_index_path(path: str, index: int) -> str:
+    return f"{path}[{index}]" if path else f"[{index}]"
+
+
+def _preview_identity_path(path: str, key: str, value: Any) -> str:
+    token = str(value).replace("]", "\\]")
+    if len(token) > 80:
+        token = f"{token[:77]}..."
+    suffix = f"[{key}={token}]"
+    return f"{path}{suffix}" if path else suffix
+
+
+def _join_preview_path(left: str, right: str) -> str:
+    if not left:
+        return right
+    if not right:
+        return left
+    if right.startswith("["):
+        return f"{left}{right}"
+    return f"{left}.{right}"
+
+
+def _short_preview_value(value: Any, *, limit: int = 180) -> str:
+    if value is _MISSING:
+        return "нет"
+    if isinstance(value, bytes):
+        digest = hashlib.sha256(value).hexdigest()[:12]
+        return f"BLOB {len(value)} байт, sha256={digest}"
+    if isinstance(value, str):
+        text = value.strip()
+        if text and text[0] in "[{":
+            try:
+                parsed = json.loads(text)
+                text = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            except Exception:
+                pass
+    else:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:

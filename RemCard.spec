@@ -207,6 +207,8 @@ def _settings_release_snapshot_datas():
         return []
 
     from rem_card.data.settings.settings_release import (
+        SETTINGS_RELEASE_MANIFEST_FILE,
+        SETTINGS_RELEASE_MEDIA_DIR,
         SETTINGS_RELEASE_SNAPSHOT_FILE,
         export_settings_release_snapshot,
     )
@@ -225,9 +227,17 @@ def _settings_release_snapshot_datas():
     )
     print(
         "===> Settings release snapshot exported: "
-        f"{report['snapshot_path']} hash={report['content_hash']} rows={report['row_counts']} <==="
+        f"{report['snapshot_path']} hash={report['content_hash']} rows={report['row_counts']} "
+        f"media_files={report.get('media_files', 0)} media_bytes={report.get('media_bytes', 0)} <==="
     )
-    return [(snapshot_path, SETTINGS_RELEASE_TARGET)]
+    datas = [
+        (snapshot_path, SETTINGS_RELEASE_TARGET),
+        (os.path.join(snapshot_dir, SETTINGS_RELEASE_MANIFEST_FILE), SETTINGS_RELEASE_TARGET),
+    ]
+    media_dir = os.path.join(snapshot_dir, SETTINGS_RELEASE_MEDIA_DIR)
+    if os.path.isdir(media_dir):
+        datas.append((media_dir, os.path.join(SETTINGS_RELEASE_TARGET, SETTINGS_RELEASE_MEDIA_DIR)))
+    return datas
 
 a = Analysis(
     [

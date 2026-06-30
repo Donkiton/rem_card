@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import os
 from typing import Any
 
@@ -21,7 +19,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from rem_card.data.settings.settings_import import SettingsImportPreview
+from rem_card.data.settings.settings_import import (
+    SettingsImportPreview,
+    format_settings_import_change_side,
+)
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
@@ -531,44 +532,4 @@ class SettingsImportPreviewDialog(BaseStyledDialog):
 
 
 def _format_change_side(row: dict[str, Any] | None, other_row: dict[str, Any] | None) -> str:
-    if row is None:
-        return "нет"
-    ignored = {"id", "created_at", "updated_at", "revision"}
-    keys = sorted((set(row) | set(other_row or {})) - ignored)
-    changed_keys = [
-        key
-        for key in keys
-        if _normalized_value(row.get(key)) != _normalized_value((other_row or {}).get(key))
-    ]
-    if not changed_keys:
-        changed_keys = [key for key in keys if key not in {"image_blob", "logo_blob"}][:8]
-    parts = [f"{key}: {_short_value(row.get(key))}" for key in changed_keys[:8]]
-    if len(changed_keys) > 8:
-        parts.append(f"... еще {len(changed_keys) - 8}")
-    return "\n".join(parts) if parts else "без данных"
-
-
-def _normalized_value(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return {"blob_sha256": hashlib.sha256(value).hexdigest(), "size": len(value)}
-    return value
-
-
-def _short_value(value: Any, limit: int = 180) -> str:
-    if isinstance(value, bytes):
-        digest = hashlib.sha256(value).hexdigest()[:12]
-        return f"BLOB {len(value)} байт, sha256={digest}"
-    if isinstance(value, str):
-        text = value.strip()
-        if text and text[0] in "[{":
-            try:
-                parsed = json.loads(text)
-                text = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            except Exception:
-                pass
-    else:
-        text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
-    text = " ".join(str(text).split())
-    if len(text) > limit:
-        return text[: limit - 3] + "..."
-    return text
+    return format_settings_import_change_side(row, other_row)

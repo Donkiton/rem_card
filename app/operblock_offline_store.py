@@ -772,16 +772,23 @@ def _discard_stale_shadow_active_cases(conn: sqlite3.Connection, active_case_uui
         )
         if cursor.rowcount == 1:
             discarded += 1
-            assignment_rows = conn.execute(
-                """
-                SELECT id
-                FROM operation_table_assignments
-                WHERE operation_case_id = ?
-                  AND status = 'active'
-                  AND released_at IS NULL
-                """,
-                (operation_case_id,),
-            ).fetchall()
+            assignment_rows = []
+            assignment_columns = set(_columns(conn, "operation_table_assignments"))
+            if {"id", "operation_case_id"}.issubset(assignment_columns):
+                assignment_filters = ["operation_case_id = ?"]
+                assignment_params: list[Any] = [operation_case_id]
+                if "status" in assignment_columns:
+                    assignment_filters.append("status = 'active'")
+                if "released_at" in assignment_columns:
+                    assignment_filters.append("released_at IS NULL")
+                assignment_rows = conn.execute(
+                    f"""
+                    SELECT id
+                    FROM operation_table_assignments
+                    WHERE {" AND ".join(assignment_filters)}
+                    """,
+                    tuple(assignment_params),
+                ).fetchall()
             for assignment_row in assignment_rows:
                 _deactivate_assignment_row(
                     conn,
@@ -978,13 +985,19 @@ def _deactivate_assignment_row(
         updates["updated_at"] = now
     if not updates:
         return False
+    select_columns = ["id"]
+    select_columns.append("table_code" if "table_code" in columns else "'' AS table_code")
+    select_columns.append("operation_case_id" if "operation_case_id" in columns else "0 AS operation_case_id")
+    filters = ["id = ?"]
+    if "status" in columns:
+        filters.append("status = 'active'")
+    if "released_at" in columns:
+        filters.append("released_at IS NULL")
     row = conn.execute(
-        """
-        SELECT id, table_code, operation_case_id
+        f"""
+        SELECT {", ".join(select_columns)}
         FROM operation_table_assignments
-        WHERE id = ?
-          AND status = 'active'
-          AND released_at IS NULL
+        WHERE {" AND ".join(filters)}
         """,
         (int(local_id),),
     ).fetchone()
@@ -1019,17 +1032,25 @@ def _deactivate_stale_shadow_assignments_for_case(
 ) -> int:
     if not _table_exists(conn, "operation_table_assignments") or not _table_exists(conn, "opblock_offline_shadow_map"):
         return 0
+    columns = set(_columns(conn, "operation_table_assignments"))
+    if not {"id", "operation_case_id"}.issubset(columns):
+        return 0
+    filters = [
+        "item.operation_case_id = ?",
+        "map.offline_case_uuid = ?",
+    ]
+    if "status" in columns:
+        filters.append("item.status = 'active'")
+    if "released_at" in columns:
+        filters.append("item.released_at IS NULL")
     rows = conn.execute(
-        """
+        f"""
         SELECT item.id, map.remote_id
         FROM operation_table_assignments item
         JOIN opblock_offline_shadow_map map
           ON map.entity_name = 'operation_table_assignments'
          AND map.local_id = item.id
-        WHERE item.operation_case_id = ?
-          AND map.offline_case_uuid = ?
-          AND item.status = 'active'
-          AND item.released_at IS NULL
+        WHERE {" AND ".join(filters)}
         """,
         (int(local_case_id), str(offline_case_uuid or "")),
     ).fetchall()
