@@ -1001,14 +1001,14 @@ def _check_patch_builder_uses_canonical_tree_after_generated_skip(temp_root: str
     return True, "ok"
 
 
-def _check_patch_builder_default_large_threshold_is_200(temp_root: str) -> tuple[bool, str]:
+def _check_patch_builder_default_large_threshold_is_1gb(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from scripts import build_patch_update
 
-    if float(build_patch_update.DEFAULT_LARGE_THRESHOLD_MB) != 200.0:
+    if float(build_patch_update.DEFAULT_LARGE_THRESHOLD_MB) != 1024.0:
         return False, f"DEFAULT_LARGE_THRESHOLD_MB={build_patch_update.DEFAULT_LARGE_THRESHOLD_MB!r}"
     args = build_patch_update.parse_args([])
-    if float(args.large_threshold_mb) != 200.0:
+    if float(args.large_threshold_mb) != 1024.0:
         return False, f"parse_args default threshold={args.large_threshold_mb!r}"
     return True, "ok"
 
@@ -26556,7 +26556,7 @@ def main(argv: list[str] | None = None):
         ("patch_builder_skips_settings_snapshot_when_content_hash_same", _check_patch_builder_skips_settings_snapshot_when_content_hash_same),
         ("patch_builder_includes_settings_snapshot_when_content_hash_changes", _check_patch_builder_includes_settings_snapshot_when_content_hash_changes),
         ("patch_builder_uses_canonical_tree_after_generated_skip", _check_patch_builder_uses_canonical_tree_after_generated_skip),
-        ("patch_builder_default_large_threshold_is_200", _check_patch_builder_default_large_threshold_is_200),
+        ("patch_builder_default_large_threshold_is_1gb", _check_patch_builder_default_large_threshold_is_1gb),
         ("patch_builder_cleans_failed_attempt_artifacts", _check_patch_builder_cleans_failed_attempt_artifacts),
         ("build_release_full_behavior_unchanged", _check_build_release_full_behavior_unchanged),
         ("updater_does_not_require_UPD_Prog_folder", _check_updater_does_not_require_UPD_Prog_folder),

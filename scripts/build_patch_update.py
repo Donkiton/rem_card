@@ -56,7 +56,7 @@ from rem_card.app.updater_main import READY_FILE_NAME  # noqa: E402
 
 PATCH_CACHE_DIR_NAME = ".remcard_patch_cache"
 DEFAULT_PATCH_TARGET_DIR = ROOT.parent / "Baza_rao3_jurnal" / "UPD"
-DEFAULT_LARGE_THRESHOLD_MB = 200.0
+DEFAULT_LARGE_THRESHOLD_MB = 1024.0
 DETERMINISTIC_HASH_SEED = "0"
 SNAPSHOT_REL_PATH = "_internal/rem_card/settings_release/settings_release_snapshot.json"
 GENERATED_POLICY = {
