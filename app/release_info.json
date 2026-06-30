@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "version": "3.11.4",
+  "version": "3.11.5",
   "date": "2026-06-30",
   "changes": [
-    "Исправить support runtime patch-апдейтера"
+    "Перевести patch-обновления на локальный runner"
   ]
 }
