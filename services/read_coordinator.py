@@ -49,6 +49,10 @@ READ_ORDERS_COALESCE_WAIT_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_ORDERS_COALESCE_WAIT_SEC", "0.25")),
 )
+READ_DOCTOR_ORDERS_COALESCE_WAIT_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_DOCTOR_ORDERS_COALESCE_WAIT_SEC", "0.45")),
+)
 READ_ORDERS_POISON_THRESHOLD_SEC = max(
     READ_ORDERS_STALL_THRESHOLD_SEC,
     float(os.environ.get("REMCARD_ORDERS_POISON_THRESHOLD_SEC", "12")),
@@ -3434,8 +3438,13 @@ class ReadCoordinator:
         request_id: str,
     ):
         active_done = active.get("done_event")
-        if isinstance(active_done, threading.Event) and READ_ORDERS_COALESCE_WAIT_SEC > 0:
-            active_done.wait(READ_ORDERS_COALESCE_WAIT_SEC)
+        coalesce_wait_sec = (
+            READ_DOCTOR_ORDERS_COALESCE_WAIT_SEC
+            if context.role == "doctor"
+            else READ_ORDERS_COALESCE_WAIT_SEC
+        )
+        if isinstance(active_done, threading.Event) and coalesce_wait_sec > 0:
+            active_done.wait(coalesce_wait_sec)
         snapshot = self.get_cached_or_stale_orders_tab(context)
         if snapshot is None:
             logger.warning(

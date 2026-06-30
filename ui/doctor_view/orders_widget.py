@@ -25,7 +25,7 @@ from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, TEXT_SEC
 
 ORDERS_CELL_REPEAT_GUARD_SEC = max(
     0.15,
-    float(os.getenv("REMCARD_ORDERS_CELL_REPEAT_GUARD_SEC", "0.25")),
+    float(os.getenv("REMCARD_ORDERS_CELL_REPEAT_GUARD_SEC", "0.45")),
 )
 ORDERS_DEFERRED_CELL_ACTIONS_LIMIT = max(
     1,
@@ -142,6 +142,7 @@ class OrdersWidget(QWidget):
         self._legacy_direct_snapshot_warned = False
         self._load_yesterday_worker = None
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
+        self._pending_admin_change_defer_ms = max(250, int(ORDERS_CELL_REPEAT_GUARD_SEC * 1000))
         self._pending_change_context_key = None
         self._pending_change_reload = False
         self._pending_change_invalidated = False
@@ -2069,15 +2070,19 @@ class OrdersWidget(QWidget):
         pending_context_key = self._pending_change_context_key
         should_reload = bool(self._pending_change_reload)
         batch_count = int(self._pending_change_count or 0)
-        self._reset_change_batch(stop_timer=False)
         current_context_key = self._current_context_key()
         if pending_context_key is None or current_context_key is None or pending_context_key != current_context_key:
+            self._reset_change_batch(stop_timer=False)
             logger.info(
                 "[OrdersWidget] discard debounced change batch pending_context=%s current_context=%s",
                 pending_context_key,
                 current_context_key,
             )
             return
+        if self._has_pending_admin_cell_writes():
+            self._change_batch_timer.start(self._pending_admin_change_defer_ms)
+            return
+        self._reset_change_batch(stop_timer=False)
         logger.info(
             "[OrdersWidget] flush debounced change batch count=%s reload=%s context_key=%s",
             batch_count,
@@ -2304,6 +2309,9 @@ class OrdersWidget(QWidget):
 
     def _finish_admin_write(self):
         self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
+
+    def _has_pending_admin_cell_writes(self) -> bool:
+        return self._pending_admin_write_count > 0 or bool(self._pending_admin_cell_write_keys)
 
     @staticmethod
     def _normalize_admin_order_id(order_id):
