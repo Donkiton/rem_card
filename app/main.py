@@ -385,6 +385,58 @@ def _show_custom_warning(title: str, message: str):
         _show_native_warning(title, message)
 
 
+def _settings_startup_warnings_from_container(container) -> list[dict]:
+    info = getattr(container, "settings_info", None)
+    if not isinstance(info, dict):
+        return []
+    raw_warnings = info.get("settings_startup_warnings") or []
+    result: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in raw_warnings:
+        if not isinstance(item, dict):
+            continue
+        operation = str(item.get("operation") or "").strip()
+        source = str(item.get("source") or "").strip()
+        message = str(item.get("message") or "").strip()
+        if not operation and not message:
+            continue
+        key = (source, operation or message)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(dict(item))
+    return result
+
+
+def _show_settings_startup_warnings_if_needed(container) -> None:
+    warnings = _settings_startup_warnings_from_container(container)
+    if not warnings:
+        return
+    title = str(warnings[0].get("title") or "Настройки временно заняты")
+    if len(warnings) == 1:
+        message = str(warnings[0].get("message") or "").strip()
+    else:
+        operations = []
+        for warning in warnings:
+            operation = str(warning.get("operation") or "").strip()
+            if operation:
+                operations.append(f"- {operation}")
+        holder = warnings[0].get("holder") if isinstance(warnings[0].get("holder"), dict) else {}
+        host = str(holder.get("holder_host") or "").strip() if isinstance(holder, dict) else ""
+        holder_line = f"\n\nСейчас настройки заняты на компьютере: {host}." if host else ""
+        message = (
+            "База настроек сейчас занята другим рабочим местом. "
+            "Программа запущена с уже сохраненными настройками, без служебной записи при старте."
+            f"{holder_line}\n\n"
+            "Пропущено сейчас:\n"
+            f"{chr(10).join(operations)}\n\n"
+            "Можно продолжать работу. Если настройки только что меняли на другом ПК, "
+            "они применятся после обновления или следующего запуска программы."
+        )
+    if message:
+        _show_custom_warning(title, message)
+
+
 def _show_startup_warning_without_settings(title: str, message: str):
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
@@ -1898,6 +1950,11 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             splash.finish(window)
         window.show()
         _opblock_startup_record_window_shown(args.role, initial_role_prepared, QTimer)
+        if container is not None:
+            QTimer.singleShot(
+                350,
+                lambda current_container=container: _show_settings_startup_warnings_if_needed(current_container),
+            )
         if initial_role_prepared and hasattr(window, "wake_initial_role_monitor"):
             QTimer.singleShot(250, window.wake_initial_role_monitor)
         _startup_trace(logger, startup_started_at, "window_shown", role=args.role or "default")

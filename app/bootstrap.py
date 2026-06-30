@@ -16,7 +16,12 @@ if TYPE_CHECKING:
 
 
 class Container:
-    def __init__(self, db_manager: "DatabaseManager", role: str | None = None):
+    def __init__(
+        self,
+        db_manager: "DatabaseManager",
+        role: str | None = None,
+        settings_info: dict | None = None,
+    ):
         from rem_card.data.dao.patient_status_dao import PatientStatusDAO
         from rem_card.data.dao.remcard_dao import (
             FluidsDAO,
@@ -32,6 +37,7 @@ class Container:
         from rem_card.services.remcard_service import PatientService, RemCardService
 
         self.db_manager = db_manager
+        self.settings_info = dict(settings_info or {})
         self.runtime_context = getattr(db_manager, "runtime_context", None)
         self.runtime_mode = getattr(self.runtime_context, "mode", "network")
         role_key = str(role or os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()
@@ -200,4 +206,4 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
             result.integrity_check or "",
         )
 
-    return Container(db_manager, role=role)
+    return Container(db_manager, role=role, settings_info=settings_info)

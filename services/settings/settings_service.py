@@ -16,10 +16,15 @@ from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app import operblock_startup_metrics
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
-from rem_card.app.sqlite_shared import run_integrity_check, run_quick_check
+from rem_card.app.sqlite_shared import describe_sqlite_lock_holder, run_integrity_check, run_quick_check
 from rem_card.data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabMaterial
 from rem_card.data.dto.remcard_dto import DietTemplateDTO
-from rem_card.data.settings.settings_db import SettingsDatabase, get_settings_database, reset_settings_database
+from rem_card.data.settings.settings_db import (
+    SettingsDatabase,
+    SettingsDbError,
+    get_settings_database,
+    reset_settings_database,
+)
 from rem_card.data.settings.settings_schema import SEED_IMPORT_VERSION, now_text
 from rem_card.services.operblock_icon_defaults import (
     MAX_OPERBLOCK_ICON_BLOB_BYTES,
@@ -74,6 +79,19 @@ LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_imp
 OPERBLOCK_ICONS_SEED_META_VERSION_KEY = "operblock_icons_seed_version"
 OPERBLOCK_ICONS_SEED_META_HASH_KEY = "operblock_icons_seed_hash"
 OPERBLOCK_ICONS_SEED_VERSION = "seeded_custom_icons_v4"
+SETTINGS_STARTUP_WRITE_BUSY_REASON = "settings_write_lock_busy"
+SETTINGS_STARTUP_WARNING_TITLE = "Настройки временно заняты"
+SETTINGS_STARTUP_WRITE_BUSY_MARKERS = (
+    "бд настроек временно занята",
+    "временно занята другим рабочим местом",
+    "could not acquire sequential write lock",
+    "sequential write lock",
+    "database is locked",
+    "database table is locked",
+    "database is busy",
+    "locked",
+    "busy",
+)
 SEEDED_ICON_DEFINITIONS = (
     *SEEDED_CUSTOM_ICON_DEFINITIONS,
     *REMCARD_ICON_DEFINITIONS,
@@ -363,6 +381,110 @@ class SettingsService:
         self._last_seen_settings_change_id = 0
         self.source_client_id = PROCESS_SOURCE_CLIENT_ID
 
+    @staticmethod
+    def _is_settings_startup_write_busy(exc: Exception) -> bool:
+        if isinstance(exc, SettingsDbError):
+            return True
+        message = str(exc or "").lower()
+        return any(marker in message for marker in SETTINGS_STARTUP_WRITE_BUSY_MARKERS)
+
+    @staticmethod
+    def _settings_startup_warning_message(operation_label: str, holder: dict[str, Any] | None) -> str:
+        holder = dict(holder or {})
+        host = str(holder.get("holder_host") or "").strip()
+        holder_line = f"\n\nСейчас настройки заняты на компьютере: {host}." if host else ""
+        return (
+            "База настроек сейчас занята другим рабочим местом. "
+            "Программа запущена с уже сохраненными настройками, без служебной записи при старте."
+            f"{holder_line}\n\n"
+            f"Пропущено сейчас: {operation_label}.\n\n"
+            "Можно продолжать работу. Если настройки только что меняли на другом ПК, "
+            "они применятся после обновления или следующего запуска программы."
+        )
+
+    def _settings_startup_write_skipped_report(
+        self,
+        *,
+        source: str,
+        operation_label: str,
+        exc: Exception | None = None,
+        holder: dict[str, Any] | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        if holder is None:
+            holder = describe_sqlite_lock_holder(self.db.lock_path)
+        holder = dict(holder or {})
+        technical_reason = str(exc or holder.get("reason") or SETTINGS_STARTUP_WRITE_BUSY_REASON)
+        logger.warning(
+            "Settings startup write skipped: source=%s operation=%s reason=%s holder=%s",
+            source,
+            operation_label,
+            technical_reason,
+            holder,
+        )
+        record_metric(
+            "settings_startup_write_skipped",
+            1,
+            source=source,
+            reason=SETTINGS_STARTUP_WRITE_BUSY_REASON,
+            lock_path=self.db.lock_path,
+            holder_pid=holder.get("holder_pid"),
+            holder_host=str(holder.get("holder_host") or ""),
+            holder_source=str(holder.get("holder_source") or ""),
+            holder_age_ms=holder.get("holder_age_ms"),
+        )
+        warning = {
+            "title": SETTINGS_STARTUP_WARNING_TITLE,
+            "message": self._settings_startup_warning_message(operation_label, holder),
+            "operation": operation_label,
+            "source": source,
+            "holder": holder,
+        }
+        report: dict[str, Any] = {
+            "skipped": True,
+            "reason": SETTINGS_STARTUP_WRITE_BUSY_REASON,
+            "source": source,
+            "operation": operation_label,
+            "technical_reason": technical_reason,
+            "holder": holder,
+            "warning": warning,
+        }
+        report.update(extra)
+        return report
+
+    def _settings_startup_write_precheck_report(
+        self,
+        *,
+        source: str,
+        operation_label: str,
+        **extra: Any,
+    ) -> dict[str, Any] | None:
+        holder = describe_sqlite_lock_holder(self.db.lock_path)
+        if str(holder.get("reason") or "") == "missing":
+            return None
+        return self._settings_startup_write_skipped_report(
+            source=source,
+            operation_label=operation_label,
+            holder=holder,
+            **extra,
+        )
+
+    @staticmethod
+    def _add_startup_warning_from_report(
+        startup_warnings: list[dict[str, Any]],
+        report: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(report, dict):
+            return
+        warning = report.get("warning")
+        if not isinstance(warning, dict):
+            return
+        key = (str(warning.get("source") or ""), str(warning.get("operation") or ""))
+        for existing in startup_warnings:
+            if (str(existing.get("source") or ""), str(existing.get("operation") or "")) == key:
+                return
+        startup_warnings.append(dict(warning))
+
     def ensure_ready(self) -> dict[str, Any]:
         with self._ready_lock:
             if self._ready:
@@ -372,16 +494,30 @@ class SettingsService:
                 self._ready = True
                 self._ready_info = dict(info)
                 return dict(info)
+            startup_warnings: list[dict[str, Any]] = []
             self._ensure_legacy_import()
-            self._ensure_operblock_settings_imported()
+            operblock_import_report = self._ensure_operblock_settings_imported()
+            if operblock_import_report:
+                info = {**info, "operblock_settings_startup_import": operblock_import_report}
+                self._add_startup_warning_from_report(startup_warnings, operblock_import_report)
             release_report = self._apply_bundled_release_snapshot_if_needed()
             if release_report:
                 info = {**info, "settings_release_snapshot": release_report}
+                self._add_startup_warning_from_report(startup_warnings, release_report)
             background_repair_report = self._repair_background_settings_from_rows()
             if background_repair_report:
                 info = {**info, "background_settings_repair": background_repair_report}
-            self._ensure_default_decor_settings()
-            self._ensure_default_operblock_icons()
+                self._add_startup_warning_from_report(startup_warnings, background_repair_report)
+            decor_report = self._ensure_default_decor_settings()
+            if decor_report:
+                info = {**info, "decor_settings_startup": decor_report}
+                self._add_startup_warning_from_report(startup_warnings, decor_report)
+            icons_report = self._ensure_default_operblock_icons()
+            if icons_report:
+                info = {**info, "operblock_icons_startup": icons_report}
+                self._add_startup_warning_from_report(startup_warnings, icons_report)
+            if startup_warnings:
+                info = {**info, "settings_startup_warnings": startup_warnings}
             self._ready = True
             self._ready_info = dict(info)
             return dict(info)
@@ -578,7 +714,7 @@ class SettingsService:
             ),
         }
 
-    def _ensure_operblock_settings_imported(self) -> None:
+    def _ensure_operblock_settings_imported(self) -> dict[str, Any] | None:
         with self.db.read_connection() as conn:
             placeholders = ",".join("?" for _ in OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS)
             rows = conn.execute(
@@ -592,44 +728,72 @@ class SettingsService:
             existing_keys = {str(row["key"]) for row in rows}
         missing_keys = [key for key in OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS if key not in existing_keys]
         if not missing_keys:
-            return
+            return None
         payloads = self._legacy_operblock_settings_payloads()
         if not payloads:
-            return
+            return None
 
         changed: dict[str, Any] = {}
-        with self.db.transaction("settings_operblock_legacy_import") as cursor:
-            for key in missing_keys:
-                if self._select_app_setting(cursor, OPERBLOCK_SETTINGS_SCOPE, key) is not None:
-                    continue
-                payload = payloads[key]
-                self._write_app_setting_in_tx(
-                    cursor,
-                    OPERBLOCK_SETTINGS_SCOPE,
-                    key,
-                    payload,
-                    changed_by_role="system",
-                    catalog_key=OPERBLOCK_SETTINGS_KEY,
-                    log_change=False,
+        lock_report = self._settings_startup_write_precheck_report(
+            source="settings_operblock_legacy_import",
+            operation_label="подготовка настроек оперблока",
+            imported=False,
+            missing_keys=missing_keys,
+        )
+        if lock_report:
+            return lock_report
+        try:
+            with self.db.transaction("settings_operblock_legacy_import") as cursor:
+                for key in missing_keys:
+                    if self._select_app_setting(cursor, OPERBLOCK_SETTINGS_SCOPE, key) is not None:
+                        continue
+                    payload = payloads[key]
+                    self._write_app_setting_in_tx(
+                        cursor,
+                        OPERBLOCK_SETTINGS_SCOPE,
+                        key,
+                        payload,
+                        changed_by_role="system",
+                        catalog_key=OPERBLOCK_SETTINGS_KEY,
+                        log_change=False,
+                    )
+                    changed[key] = payload
+                if changed:
+                    self._bump_catalog_version(
+                        cursor,
+                        OPERBLOCK_SETTINGS_KEY,
+                        "operblock_settings",
+                        None,
+                        "import",
+                        changed_by_role="system",
+                        before=None,
+                        after=changed,
+                    )
+        except Exception as exc:
+            if self._is_settings_startup_write_busy(exc):
+                return self._settings_startup_write_skipped_report(
+                    source="settings_operblock_legacy_import",
+                    operation_label="подготовка настроек оперблока",
+                    exc=exc,
+                    imported=False,
+                    missing_keys=missing_keys,
                 )
-                changed[key] = payload
-            if changed:
-                self._bump_catalog_version(
-                    cursor,
-                    OPERBLOCK_SETTINGS_KEY,
-                    "operblock_settings",
-                    None,
-                    "import",
-                    changed_by_role="system",
-                    before=None,
-                    after=changed,
-                )
+            raise
+        if not changed:
+            return None
+        return {
+            "imported": True,
+            "source": "settings_operblock_legacy_import",
+            "keys": sorted(changed.keys()),
+        }
 
     def _apply_bundled_release_snapshot_if_needed(self) -> dict[str, Any]:
         from rem_card.app.runtime_paths import is_compiled
         from rem_card.data.settings.settings_release import (
+            SETTINGS_RELEASE_APPLIED_HASH_KEY,
             apply_settings_release_snapshot,
             find_release_snapshot_path,
+            load_settings_release_manifest,
         )
 
         should_apply = is_compiled() or os.environ.get("REMCARD_APPLY_SETTINGS_RELEASE_SNAPSHOT") == "1"
@@ -639,12 +803,51 @@ class SettingsService:
         if not snapshot_path:
             return {}
         try:
+            manifest = load_settings_release_manifest(snapshot_path)
+        except Exception:
+            manifest = None
+        if isinstance(manifest, dict):
+            manifest_hash = str(manifest.get("content_hash") or "")
+            if manifest_hash:
+                with self.db.read_connection() as conn:
+                    row = conn.execute(
+                        "SELECT value FROM settings_meta WHERE key = ?",
+                        (SETTINGS_RELEASE_APPLIED_HASH_KEY,),
+                    ).fetchone()
+                if row and str(row["value"] or "") == manifest_hash:
+                    report = {
+                        "applied": False,
+                        "reason": "already_applied",
+                        "snapshot_hash": manifest_hash,
+                        "release_version": str(manifest.get("release_version") or ""),
+                        "changed_rows": 0,
+                        "fast_path": "manifest",
+                    }
+                    logger.info("Settings release snapshot result: %s", report)
+                    return report
+        lock_report = self._settings_startup_write_precheck_report(
+            source="settings_release_snapshot_apply",
+            operation_label="служебное обновление настроек из пакета",
+            applied=False,
+            changed_rows=0,
+        )
+        if lock_report:
+            return lock_report
+        try:
             report = apply_settings_release_snapshot(
                 self.db,
                 snapshot_path,
                 bump_catalog_version=self._bump_catalog_version,
             )
         except Exception as exc:
+            if self._is_settings_startup_write_busy(exc):
+                return self._settings_startup_write_skipped_report(
+                    source="settings_release_snapshot_apply",
+                    operation_label="служебное обновление настроек из пакета",
+                    exc=exc,
+                    applied=False,
+                    changed_rows=0,
+                )
             raise RuntimeError(f"Не удалось применить пакет обновления настроек: {exc}") from exc
         if report.get("applied"):
             self.invalidate_cache()
@@ -703,40 +906,61 @@ class SettingsService:
             return None
 
         repaired_payload = normalize_background_settings_payload({"backgrounds": [*current_backgrounds, *restored_entries]})
-        with self.db.transaction("settings_background_settings_repair") as cursor:
-            before = self._select_app_setting(cursor, "shared", "background_settings")
-            self._write_app_setting_in_tx(
-                cursor,
-                "shared",
-                "background_settings",
-                repaired_payload,
-                changed_by_role="repair",
-                catalog_key=BACKGROUND_SETTINGS_KEY,
-                log_change=False,
-            )
-            # ui_backgrounds already is the repair source here; syncing it back would
-            # re-read and rewrite background image blobs during startup.
-            self._bump_catalog_version(
-                cursor,
-                BACKGROUND_SETTINGS_KEY,
-                "background_settings",
-                "shared:background_settings",
-                "repair_missing_rows",
-                changed_by_role="repair",
-                before=before,
-                after=repaired_payload,
-            )
+        lock_report = self._settings_startup_write_precheck_report(
+            source="settings_background_settings_repair",
+            operation_label="восстановление списка фоновых картинок",
+            repaired=False,
+            restored_rows_pending=len(restored_entries),
+            restored_ids=[str(item.get("id") or "") for item in restored_entries],
+        )
+        if lock_report:
+            return lock_report
+        try:
+            with self.db.transaction("settings_background_settings_repair") as cursor:
+                before = self._select_app_setting(cursor, "shared", "background_settings")
+                self._write_app_setting_in_tx(
+                    cursor,
+                    "shared",
+                    "background_settings",
+                    repaired_payload,
+                    changed_by_role="repair",
+                    catalog_key=BACKGROUND_SETTINGS_KEY,
+                    log_change=False,
+                )
+                # ui_backgrounds already is the repair source here; syncing it back would
+                # re-read and rewrite background image blobs during startup.
+                self._bump_catalog_version(
+                    cursor,
+                    BACKGROUND_SETTINGS_KEY,
+                    "background_settings",
+                    "shared:background_settings",
+                    "repair_missing_rows",
+                    changed_by_role="repair",
+                    before=before,
+                    after=repaired_payload,
+                )
+        except Exception as exc:
+            if self._is_settings_startup_write_busy(exc):
+                return self._settings_startup_write_skipped_report(
+                    source="settings_background_settings_repair",
+                    operation_label="восстановление списка фоновых картинок",
+                    exc=exc,
+                    repaired=False,
+                    restored_rows_pending=len(restored_entries),
+                    restored_ids=[str(item.get("id") or "") for item in restored_entries],
+                )
+            raise
         return {
             "repaired": True,
             "restored_rows": len(restored_entries),
             "restored_ids": [str(item.get("id") or "") for item in restored_entries],
         }
 
-    def _ensure_default_decor_settings(self) -> None:
+    def _ensure_default_decor_settings(self) -> dict[str, Any] | None:
         try:
             from rem_card.ui.shared.decor_settings import default_decor_settings_payload, normalize_decor_settings_payload
         except Exception:
-            return
+            return None
 
         with self.db.read_connection() as conn:
             row = conn.execute(
@@ -744,28 +968,49 @@ class SettingsService:
                 (DECOR_SETTINGS_APP_KEY,),
             ).fetchone()
         if row:
-            return
+            return None
 
         payload = normalize_decor_settings_payload(default_decor_settings_payload())
-        with self.db.transaction("settings_default_decor_settings") as cursor:
-            self._write_app_setting_in_tx(
-                cursor,
-                "shared",
-                DECOR_SETTINGS_APP_KEY,
-                payload,
-                changed_by_role="system",
-                catalog_key=DISPLAY_SETTINGS_KEY,
-                log_change=False,
-            )
-            self._bump_catalog_version(
-                cursor,
-                DISPLAY_SETTINGS_KEY,
-                "decor_settings",
-                f"shared:{DECOR_SETTINGS_APP_KEY}",
-                "insert",
-                changed_by_role="system",
-                after=payload,
-            )
+        lock_report = self._settings_startup_write_precheck_report(
+            source="settings_default_decor_settings",
+            operation_label="подготовка стандартных настроек оформления",
+            created=False,
+        )
+        if lock_report:
+            return lock_report
+        try:
+            with self.db.transaction("settings_default_decor_settings") as cursor:
+                self._write_app_setting_in_tx(
+                    cursor,
+                    "shared",
+                    DECOR_SETTINGS_APP_KEY,
+                    payload,
+                    changed_by_role="system",
+                    catalog_key=DISPLAY_SETTINGS_KEY,
+                    log_change=False,
+                )
+                self._bump_catalog_version(
+                    cursor,
+                    DISPLAY_SETTINGS_KEY,
+                    "decor_settings",
+                    f"shared:{DECOR_SETTINGS_APP_KEY}",
+                    "insert",
+                    changed_by_role="system",
+                    after=payload,
+                )
+        except Exception as exc:
+            if self._is_settings_startup_write_busy(exc):
+                return self._settings_startup_write_skipped_report(
+                    source="settings_default_decor_settings",
+                    operation_label="подготовка стандартных настроек оформления",
+                    exc=exc,
+                    created=False,
+                )
+            raise
+        return {
+            "created": True,
+            "source": "settings_default_decor_settings",
+        }
 
     def _import_legacy_sources(self, cursor) -> dict[str, Any]:
         started = time.perf_counter()
@@ -2852,7 +3097,7 @@ class SettingsService:
         existing_keys = {str(row["icon_key"] or "") for row in rows}
         return [key for key in expected_keys if key not in existing_keys]
 
-    def _ensure_default_operblock_icons(self) -> None:
+    def _ensure_default_operblock_icons(self) -> dict[str, Any] | None:
         inserted: list[str] = []
         if getattr(self.db, "settings_readonly", False):
             operblock_startup_metrics.record_value(
@@ -2865,7 +3110,7 @@ class SettingsService:
                 "readonly",
                 source="settings_service",
             )
-            return
+            return None
 
         fastpath_started = operblock_startup_metrics.timer_start()
         fastpath_state: dict[str, Any]
@@ -2895,10 +3140,37 @@ class SettingsService:
                 str(fastpath_state.get("reason") or "fast_path"),
                 source="settings_service",
             )
-            return
+            return None
 
         metric_started = operblock_startup_metrics.timer_start()
         seed_status = "error"
+        skipped_report: dict[str, Any] | None = None
+        lock_report = self._settings_startup_write_precheck_report(
+            source="settings_operblock_icons_seed",
+            operation_label="подготовка стандартных иконок",
+            seeded=False,
+            inserted_count=0,
+        )
+        if lock_report:
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_skipped",
+                "write_lock_busy",
+                source="settings_service",
+            )
+            operblock_startup_metrics.record_value(
+                "settings_operblock_icons_seed_reason",
+                SETTINGS_STARTUP_WRITE_BUSY_REASON,
+                source="settings_service",
+            )
+            operblock_startup_metrics.record_since(
+                "settings_operblock_icons_seed_ms",
+                metric_started,
+                source="settings_service",
+                inserted_count=0,
+                status="skipped",
+                reason=SETTINGS_STARTUP_WRITE_BUSY_REASON,
+            )
+            return lock_report
         try:
             from rem_card.app.paths import get_icon_dir
 
@@ -3011,15 +3283,27 @@ class SettingsService:
                 source="settings_service",
             )
         except Exception as exc:
+            if self._is_settings_startup_write_busy(exc):
+                skipped_report = self._settings_startup_write_skipped_report(
+                    source="settings_operblock_icons_seed",
+                    operation_label="подготовка стандартных иконок",
+                    exc=exc,
+                    seeded=False,
+                    inserted_count=len(inserted),
+                )
+                skip_reason = "write_lock_busy"
+                seed_status = "skipped"
+            else:
+                skip_reason = "error"
             logger.warning("Не удалось подготовить стандартные иконки оперблока: %s", exc)
             operblock_startup_metrics.record_value(
                 "settings_operblock_icons_seed_skipped",
-                "error",
+                skip_reason,
                 source="settings_service",
             )
             operblock_startup_metrics.record_value(
                 "settings_operblock_icons_seed_reason",
-                f"error:{type(exc).__name__}",
+                SETTINGS_STARTUP_WRITE_BUSY_REASON if skipped_report else f"error:{type(exc).__name__}",
                 source="settings_service",
             )
         finally:
@@ -3031,6 +3315,7 @@ class SettingsService:
                 status=seed_status,
                 reason=fastpath_state.get("reason"),
             )
+        return skipped_report
 
     def list_operblock_icons(self) -> dict[str, dict[str, Any]]:
         self.ensure_ready()
