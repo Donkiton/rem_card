@@ -27,10 +27,6 @@ ORDERS_CELL_REPEAT_GUARD_SEC = max(
     0.15,
     float(os.getenv("REMCARD_ORDERS_CELL_REPEAT_GUARD_SEC", "0.45")),
 )
-ORDERS_DEFERRED_CELL_ACTIONS_LIMIT = max(
-    1,
-    int(os.getenv("REMCARD_ORDERS_DEFERRED_CELL_ACTIONS_LIMIT", "32")),
-)
 ORDERS_POST_FINALIZE_WATCHDOG_MS = max(
     1000,
     int(os.getenv("REMCARD_ORDERS_POST_FINALIZE_WATCHDOG_MS", "7000")),
@@ -133,16 +129,12 @@ class OrdersWidget(QWidget):
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
         self._pending_admin_cell_write_keys = set()
-        self._pending_admin_cell_write_counts = {}
         self._recent_admin_cell_clicks = {}
-        self._deferred_admin_cell_actions = {}
-        self._deferred_admin_cell_action_seq = 0
         self._local_cell_draft_guard = False
         self._local_cell_draft_guard_signatures = {}
         self._legacy_direct_snapshot_warned = False
         self._load_yesterday_worker = None
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
-        self._pending_admin_change_defer_ms = max(250, int(ORDERS_CELL_REPEAT_GUARD_SEC * 1000))
         self._pending_change_context_key = None
         self._pending_change_reload = False
         self._pending_change_invalidated = False
@@ -189,9 +181,7 @@ class OrdersWidget(QWidget):
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
         self._pending_admin_cell_write_keys.clear()
-        self._pending_admin_cell_write_counts.clear()
         self._recent_admin_cell_clicks.clear()
-        self._discard_deferred_admin_cell_actions(discard_reason="context_reset")
         self._discard_deferred_forced_reload_after_guard(discard_reason="context_reset")
         self._clear_local_cell_draft_guard()
 
@@ -2070,19 +2060,15 @@ class OrdersWidget(QWidget):
         pending_context_key = self._pending_change_context_key
         should_reload = bool(self._pending_change_reload)
         batch_count = int(self._pending_change_count or 0)
+        self._reset_change_batch(stop_timer=False)
         current_context_key = self._current_context_key()
         if pending_context_key is None or current_context_key is None or pending_context_key != current_context_key:
-            self._reset_change_batch(stop_timer=False)
             logger.info(
                 "[OrdersWidget] discard debounced change batch pending_context=%s current_context=%s",
                 pending_context_key,
                 current_context_key,
             )
             return
-        if self._has_pending_admin_cell_writes():
-            self._change_batch_timer.start(self._pending_admin_change_defer_ms)
-            return
-        self._reset_change_batch(stop_timer=False)
         logger.info(
             "[OrdersWidget] flush debounced change batch count=%s reload=%s context_key=%s",
             batch_count,
@@ -2310,21 +2296,14 @@ class OrdersWidget(QWidget):
     def _finish_admin_write(self):
         self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
 
-    def _has_pending_admin_cell_writes(self) -> bool:
-        return self._pending_admin_write_count > 0 or bool(self._pending_admin_cell_write_keys)
-
-    @staticmethod
-    def _normalize_admin_order_id(order_id):
-        try:
-            return int(order_id)
-        except Exception:
-            return order_id
-
     @staticmethod
     def _admin_cell_write_key(order_id, planned_time):
         if order_id is None or planned_time is None:
             return None
-        normalized_order_id = OrdersWidget._normalize_admin_order_id(order_id)
+        try:
+            normalized_order_id = int(order_id)
+        except Exception:
+            normalized_order_id = order_id
         planned_key = planned_time.isoformat() if hasattr(planned_time, "isoformat") else str(planned_time)
         return (normalized_order_id, planned_key)
 
@@ -2339,12 +2318,12 @@ class OrdersWidget(QWidget):
     def _skip_reason_for_admin_cell_click(self, key) -> str:
         if key is None:
             return ""
+        if key in self._pending_admin_cell_write_keys:
+            return "pending_write"
         self._prune_recent_admin_cell_clicks()
         clicked_at = self._recent_admin_cell_clicks.get(key)
         if clicked_at is not None and (time.monotonic() - float(clicked_at or 0.0)) < ORDERS_CELL_REPEAT_GUARD_SEC:
             return "repeat_click"
-        if key in self._pending_admin_cell_write_keys:
-            return "pending_write"
         return ""
 
     def _mark_admin_cell_click_accepted(self, key):
@@ -2354,170 +2333,11 @@ class OrdersWidget(QWidget):
     def _mark_pending_admin_cell_writes(self, keys):
         for key in keys or ():
             if key is not None:
-                self._pending_admin_cell_write_counts[key] = self._pending_admin_cell_write_counts.get(key, 0) + 1
                 self._pending_admin_cell_write_keys.add(key)
 
     def _clear_pending_admin_cell_writes(self, keys):
         for key in keys or ():
-            if key is None:
-                continue
-            count = self._pending_admin_cell_write_counts.get(key, 0) - 1
-            if count > 0:
-                self._pending_admin_cell_write_counts[key] = count
-            else:
-                self._pending_admin_cell_write_counts.pop(key, None)
-                self._pending_admin_cell_write_keys.discard(key)
-
-    def _discard_deferred_admin_cell_actions(self, keys=None, *, discard_reason: str):
-        if not self._deferred_admin_cell_actions:
-            return
-        if keys is None:
-            removed_count = sum(len(items) for items in self._deferred_admin_cell_actions.values())
-            self._deferred_admin_cell_actions.clear()
-        else:
-            removed_count = 0
-            for key in list(keys or ()):
-                queue = self._deferred_admin_cell_actions.pop(key, [])
-                removed_count += len(queue)
-        if removed_count:
-            logger.info(
-                "[OrdersClick] deferred_cell_actions_discard role=doctor admission_id=%s count=%s reason=%s",
-                self.admission_id,
-                removed_count,
-                discard_reason,
-            )
-
-    def _defer_admin_cell_action(self, key, payload: dict, *, reason: str) -> bool:
-        if key is None:
-            return False
-        queue = self._deferred_admin_cell_actions.setdefault(key, [])
-        if len(queue) >= ORDERS_DEFERRED_CELL_ACTIONS_LIMIT:
-            logger.info(
-                "[OrdersClick] click_defer_drop role=doctor admission_id=%s reason=limit key=%s op=%s queued=%s",
-                self.admission_id,
-                key,
-                payload.get("op_prefix"),
-                len(queue),
-            )
-            return False
-        self._deferred_admin_cell_action_seq += 1
-        payload = dict(payload)
-        payload["seq"] = self._deferred_admin_cell_action_seq
-        payload["defer_reason"] = reason
-        queue.append(payload)
-        logger.info(
-            "[OrdersClick] click_defer role=doctor admission_id=%s reason=%s op=%s key=%s queued=%s",
-            self.admission_id,
-            reason,
-            payload.get("op_prefix"),
-            key,
-            len(queue),
-        )
-        return True
-
-    def _pop_next_deferred_admin_cell_action(self, keys):
-        candidates = []
-        for key in keys or ():
-            queue = self._deferred_admin_cell_actions.get(key)
-            if queue:
-                candidates.append((int(queue[0].get("seq") or 0), key))
-        if not candidates:
-            return None, None
-        _seq, key = min(candidates, key=lambda item: item[0])
-        queue = self._deferred_admin_cell_actions.get(key) or []
-        payload = queue.pop(0)
-        if queue:
-            self._deferred_admin_cell_actions[key] = queue
-        else:
-            self._deferred_admin_cell_actions.pop(key, None)
-        return key, payload
-
-    def _index_for_admin_cell_key(self, key):
-        if self.model is None or key is None:
-            return QModelIndex()
-        order_id, planned_key = key
-        normalized_order_id = self._normalize_admin_order_id(order_id)
-        row = next(
-            (
-                row_idx
-                for row_idx, order in enumerate(getattr(self.model, "orders", []))
-                if order is not None and self._normalize_admin_order_id(getattr(order, "id", None)) == normalized_order_id
-            ),
-            None,
-        )
-        col = next(
-            (
-                col_idx + 1
-                for col_idx, slot in enumerate(getattr(self.model, "time_slots", []))
-                if slot.isoformat() == planned_key
-            ),
-            None,
-        )
-        if row is None or col is None:
-            return QModelIndex()
-        return self.model.index(row, col)
-
-    def _service_action_for_cell_op(self, op_prefix: str):
-        if not self.service:
-            return None
-        if op_prefix == "orders_left_click":
-            return getattr(self.service, "apply_order_left_click", None)
-        if op_prefix == "orders_middle_click":
-            return getattr(self.service, "apply_order_middle_click", None)
-        return None
-
-    def _drain_deferred_admin_cell_actions(self, keys, target_admission_id, target_shift_date):
-        key, payload = self._pop_next_deferred_admin_cell_action(keys)
-        if not payload:
-            return
-        if not self._is_current_context(target_admission_id, target_shift_date):
-            self._discard_deferred_admin_cell_actions([key], discard_reason="context_changed")
-            return
-
-        def replay():
-            if self._is_closing or not self._is_current_context(target_admission_id, target_shift_date):
-                self._discard_deferred_admin_cell_actions([key], discard_reason="context_changed")
-                return
-            self._replay_deferred_admin_cell_action(key, payload)
-
-        QTimer.singleShot(0, replay)
-
-    def _replay_deferred_admin_cell_action(self, key, payload: dict):
-        index = self._index_for_admin_cell_key(key)
-        op_prefix = str(payload.get("op_prefix") or "")
-        if not index.isValid():
-            logger.info(
-                "[OrdersClick] click_defer_drop role=doctor admission_id=%s reason=index_missing op=%s key=%s",
-                self.admission_id,
-                op_prefix,
-                key,
-            )
-            self._discard_deferred_admin_cell_actions([key], discard_reason="index_missing")
-            return
-        logger.info(
-            "[OrdersClick] click_defer_replay role=doctor admission_id=%s op=%s key=%s original_seq=%s",
-            self.admission_id,
-            op_prefix,
-            key,
-            payload.get("seq"),
-        )
-        if op_prefix in ("orders_left_click", "orders_middle_click"):
-            service_action = self._service_action_for_cell_op(op_prefix)
-            if not callable(service_action):
-                logger.info(
-                    "[OrdersClick] click_defer_drop role=doctor admission_id=%s reason=service_missing op=%s key=%s",
-                    self.admission_id,
-                    op_prefix,
-                    key,
-                )
-                self._discard_deferred_admin_cell_actions([key], discard_reason="service_missing")
-                return
-            self._handle_cell_action(index, op_prefix, service_action, from_deferred=True)
-            return
-        if op_prefix == "doctor_order_mark":
-            self._handle_doctor_order_mark(index, from_deferred=True)
-            return
-        self._discard_deferred_admin_cell_actions([key], discard_reason="unknown_op")
+            self._pending_admin_cell_write_keys.discard(key)
 
     def _run_fast_sync(self):
         """
@@ -2612,7 +2432,7 @@ class OrdersWidget(QWidget):
         order_id = getattr(admin, "order_id", None)
         if planned_time is None or order_id is None:
             return None
-        return (OrdersWidget._normalize_admin_order_id(order_id), planned_time.isoformat())
+        return (order_id, planned_time.isoformat())
 
     def _apply_pending_order_mark(self, index, admin, mark: str) -> dict:
         if not self.model or not index.isValid() or admin is None:
@@ -2994,16 +2814,13 @@ class OrdersWidget(QWidget):
             self._clear_pending_admin_cell_writes(pending_keys)
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
-                self._discard_deferred_admin_cell_actions(pending_keys, discard_reason="context_changed")
                 return
             self._schedule_fast_sync()
             self._schedule_state_sync()
-            self._drain_deferred_admin_cell_actions(pending_keys, target_admission_id, target_shift_date)
 
         def on_error(exc):
             self._clear_pending_admin_cell_writes(pending_keys)
             self._finish_admin_write()
-            self._discard_deferred_admin_cell_actions(pending_keys, discard_reason="write_error")
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
             self._restore_admin_cells(previous_by_key)
@@ -3757,7 +3574,7 @@ class OrdersWidget(QWidget):
         except Exception:
             return True
 
-    def _handle_doctor_order_mark(self, index, *, from_deferred: bool = False):
+    def _handle_doctor_order_mark(self, index):
         if self._is_read_only():
             return
         if not index.isValid() or index.column() == 0 or not self.model:
@@ -3806,32 +3623,6 @@ class OrdersWidget(QWidget):
             self.request_refresh(force=True, source="doctor_order_mark_uncommitted", priority="HIGH")
             return
 
-        cell_key = self._admin_key_from_admin(admin)
-        skip_reason = "" if from_deferred else self._skip_reason_for_admin_cell_click(cell_key)
-        if skip_reason == "pending_write":
-            if self._defer_admin_cell_action(
-                cell_key,
-                {
-                    "op_prefix": "doctor_order_mark",
-                    "admin_id": admin_id,
-                    "row": index.row(),
-                    "col": index.column(),
-                },
-                reason=skip_reason,
-            ):
-                self._mark_admin_cell_click_accepted(cell_key)
-            return
-        if skip_reason:
-            logger.info(
-                "[OrdersClick] click_skip role=doctor_mark reason=%s admission_id=%s row=%s col=%s admin_id=%s",
-                skip_reason,
-                self.admission_id,
-                index.row(),
-                index.column(),
-                admin_id,
-            )
-            return
-
         mark = str(getattr(admin, "comment", "") or "")
         set_mark = getattr(self.service, "set_doctor_order_mark", None) or getattr(self.service, "set_nurse_order_mark", None)
         cancel_mark = getattr(self.service, "cancel_doctor_order_mark", None) or getattr(self.service, "cancel_nurse_order_mark", None)
@@ -3848,10 +3639,9 @@ class OrdersWidget(QWidget):
             next_mark = NURSE_MARK_EXECUTED
             operation = lambda aid=admin_id: set_mark(aid, NURSE_MARK_EXECUTED)
 
-        self._mark_admin_cell_click_accepted(cell_key)
         click_seq = self._next_orders_click_seq()
         logger.info(
-            "[OrdersClick] click_accept role=doctor_mark seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s deferred=%s",
+            "[OrdersClick] click_accept role=doctor_mark seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s",
             click_seq,
             self.admission_id,
             index.row(),
@@ -3859,7 +3649,6 @@ class OrdersWidget(QWidget):
             admin_id,
             mark,
             next_mark,
-            int(bool(from_deferred)),
         )
 
         target_admission_id = self.admission_id
@@ -3867,26 +3656,17 @@ class OrdersWidget(QWidget):
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._begin_admin_write()
         previous_by_key = self._apply_pending_order_mark(index, admin, next_mark)
-        pending_keys = set(previous_by_key.keys()) if previous_by_key else set()
-        if cell_key is not None:
-            pending_keys.add(cell_key)
-        self._mark_pending_admin_cell_writes(pending_keys)
 
         def on_success():
-            self._clear_pending_admin_cell_writes(pending_keys)
             self._finish_admin_write()
             if not self._is_current_context(target_admission_id, target_shift_date):
-                self._discard_deferred_admin_cell_actions(pending_keys, discard_reason="context_changed")
                 return
             self._apply_committed_order_mark(index, admin, next_mark)
             self._schedule_fast_sync()
             self._schedule_state_sync()
-            self._drain_deferred_admin_cell_actions(pending_keys, target_admission_id, target_shift_date)
 
         def on_error(exc):
-            self._clear_pending_admin_cell_writes(pending_keys)
             self._finish_admin_write()
-            self._discard_deferred_admin_cell_actions(pending_keys, discard_reason="write_error")
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
             self._restore_admin_cells(previous_by_key)
@@ -3904,7 +3684,7 @@ class OrdersWidget(QWidget):
         self._orders_click_seq += 1
         return self._orders_click_seq
 
-    def _handle_cell_action(self, index, op_prefix: str, service_action, *, from_deferred: bool = False):
+    def _handle_cell_action(self, index, op_prefix: str, service_action):
         if self._is_read_only():
             return
         if not index.isValid() or index.column() == 0 or not self.model:
@@ -3924,21 +3704,7 @@ class OrdersWidget(QWidget):
         admin = self.model.data(index, Qt.UserRole)
         planned_time = self.model.time_slots[time_slot_idx]
         cell_key = self._admin_cell_write_key(getattr(order, "id", None), planned_time)
-        skip_reason = "" if from_deferred else self._skip_reason_for_admin_cell_click(cell_key)
-        if skip_reason == "pending_write":
-            if self._defer_admin_cell_action(
-                cell_key,
-                {
-                    "op_prefix": op_prefix,
-                    "order_id": getattr(order, "id", None),
-                    "planned_time": planned_time.isoformat(),
-                    "row": row,
-                    "col": col,
-                },
-                reason=skip_reason,
-            ):
-                self._mark_admin_cell_click_accepted(cell_key)
-            return
+        skip_reason = self._skip_reason_for_admin_cell_click(cell_key)
         if skip_reason:
             logger.info(
                 "[OrdersClick] click_skip role=doctor reason=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s",
@@ -3954,7 +3720,7 @@ class OrdersWidget(QWidget):
         self._mark_admin_cell_click_accepted(cell_key)
         click_seq = self._next_orders_click_seq()
         logger.info(
-            "[OrdersClick] click_accept role=doctor seq=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s admin_id=%s admin_status=%s admin_role=%s admin_mark=%s deferred=%s",
+            "[OrdersClick] click_accept role=doctor seq=%s op=%s admission_id=%s row=%s col=%s order_id=%s planned_time=%s admin_id=%s admin_status=%s admin_role=%s admin_mark=%s",
             click_seq,
             op_prefix,
             self.admission_id,
@@ -3966,7 +3732,6 @@ class OrdersWidget(QWidget):
             getattr(admin, "status", None),
             getattr(admin, "cell_role", None),
             getattr(admin, "comment", None),
-            int(bool(from_deferred)),
         )
         perf_click_id = self._perf_start_click(index, op_prefix)
         self._enqueue_cell_write(

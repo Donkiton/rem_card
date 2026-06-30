@@ -5587,16 +5587,14 @@ def _assert_orders_same_cell_fast_click_guard(
 
 def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, str]:
     from datetime import datetime, timedelta
-    import time
 
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
     from rem_card.data.dto.remcard_dto import AdministrationDTO, OrderDTO
-    from rem_card.ui.doctor_view.orders_widget import ORDERS_CELL_REPEAT_GUARD_SEC, OrdersWidget
+    from rem_card.ui.doctor_view.orders_widget import OrdersWidget
     from rem_card.ui.nurse_view.components.nurse_orders_widget import NurseOrdersWidget
     from rem_card.ui.shared.orders_model import OrdersModel
-    from rem_card.services.read_coordinator import ReadCoordinator
     from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 
     _ = temp_root
@@ -5628,7 +5626,6 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
 
     shift = datetime(2026, 5, 3, 8, 0)
     service = FakeOrdersService()
-    service.read_coordinator = ReadCoordinator(service)
     doctor_widget = OrdersWidget(service=service, admission_id=1, shift_date=shift, defer_ui=True)
     nurse_widget = NurseOrdersWidget(service=service, admission_id=1, shift_date=shift, defer_ui=True)
     try:
@@ -5636,26 +5633,6 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         doctor_order = OrderDTO(id=1, admission_id=1, latin="Test", is_committed=1)
         doctor_model.orders = [doctor_order]
         doctor_widget.model = doctor_model
-        refresh_calls = []
-        original_request_snapshot = doctor_widget._request_snapshot
-        doctor_widget._request_snapshot = lambda **kwargs: refresh_calls.append(dict(kwargs))
-        context_key = doctor_widget._current_context_key()
-        doctor_widget._pending_change_context_key = context_key
-        doctor_widget._pending_change_reload = True
-        doctor_widget._pending_change_invalidated = True
-        doctor_widget._pending_change_count = 1
-        doctor_widget._pending_admin_write_count = 1
-        doctor_widget._flush_change_batch()
-        if refresh_calls:
-            return False, "doctor pending write did not defer change-batch refresh"
-        if not doctor_widget._change_batch_timer.isActive():
-            return False, "doctor pending write did not reschedule change-batch refresh"
-        doctor_widget._change_batch_timer.stop()
-        doctor_widget._pending_admin_write_count = 0
-        doctor_widget._flush_change_batch()
-        if len(refresh_calls) != 1:
-            return False, f"doctor change-batch refresh did not run after pending write finished: {refresh_calls}"
-        doctor_widget._request_snapshot = original_request_snapshot
 
         doctor_widget._mark_local_order_row_deleted(0, doctor_order, was_committed=True)
         app.processEvents()
@@ -5800,16 +5777,10 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
         marked_admin = doctor_model.data(index, Qt.UserRole)
         if getattr(marked_admin, "comment", "") != NURSE_MARK_EXECUTED:
             return False, "doctor right click did not mark cell as executed"
-        doctor_widget._recent_admin_cell_clicks[doctor_widget._admin_key_from_admin(committed_admin)] = (
-            time.monotonic() - ORDERS_CELL_REPEAT_GUARD_SEC - 0.05
-        )
         doctor_widget._handle_doctor_order_mark(index)
         marked_admin = doctor_model.data(index, Qt.UserRole)
         if getattr(marked_admin, "comment", "") != NURSE_MARK_NOT_EXECUTED:
             return False, "doctor right click did not switch executed mark to not executed"
-        doctor_widget._recent_admin_cell_clicks[doctor_widget._admin_key_from_admin(committed_admin)] = (
-            time.monotonic() - ORDERS_CELL_REPEAT_GUARD_SEC - 0.05
-        )
         doctor_widget._handle_doctor_order_mark(index)
         marked_admin = doctor_model.data(index, Qt.UserRole)
         if getattr(marked_admin, "comment", ""):
@@ -9320,7 +9291,6 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     original_stall_threshold = read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC
     original_poison_threshold = read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC
     original_coalesce_wait = read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC
-    original_doctor_coalesce_wait = read_coordinator.READ_DOCTOR_ORDERS_COALESCE_WAIT_SEC
     original_widget_metric = orders_widget_module.record_metric
     original_widget_watchdog_ms = orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS
 
@@ -9399,7 +9369,6 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = 0.05
     read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = 0.12
     read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = 0.01
-    read_coordinator.READ_DOCTOR_ORDERS_COALESCE_WAIT_SEC = 0.01
     orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = 50
     foreground_activity._reset_foreground_activity_for_tests()
     service = SlowOrdersService()
@@ -9610,7 +9579,6 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         read_coordinator.READ_ORDERS_STALL_THRESHOLD_SEC = original_stall_threshold
         read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = original_poison_threshold
         read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = original_coalesce_wait
-        read_coordinator.READ_DOCTOR_ORDERS_COALESCE_WAIT_SEC = original_doctor_coalesce_wait
         orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = original_widget_watchdog_ms
         foreground_activity._reset_foreground_activity_for_tests()
 
