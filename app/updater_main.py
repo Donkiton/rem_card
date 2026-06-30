@@ -104,7 +104,7 @@ REQUIRED_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
-SUPPORT_DIR_NAME = "support"
+LOCAL_RUNNER_PREFIX = "remcard_update_runner_"
 MANAGED_ROOT_FILES = (
     "RemCard.exe",
     "RemCardDoctor.exe",
@@ -123,7 +123,7 @@ UPDATE_DIR_NAME = "UPD"
 DEFAULT_TARGET_DIR_NAME = "Prog"
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
 DIRECT_TARGET_DIR_ENV = "REMCARD_UPDATE_TARGET_DIR"
-UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_")
+UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_", LOCAL_RUNNER_PREFIX)
 UPDATE_CLEANUP_ATTEMPTS = 60
 UPDATE_CLEANUP_DELAY_SEC = 0.5
 STALE_UPDATE_CLEANUP_ATTEMPTS = 10
@@ -521,20 +521,29 @@ def _cleanup_stale_update_dirs(
     return failed
 
 
-def _spawn_deferred_cleanup(paths: list[str], log: Optional[Callable[[str], None]] = None) -> bool:
+def _spawn_deferred_cleanup(
+    paths: list[str],
+    log: Optional[Callable[[str], None]] = None,
+    *,
+    cleanup_executable: Optional[str] = None,
+) -> bool:
     pending = [os.path.abspath(path) for path in paths if path and os.path.exists(path) and _is_update_temp_dir(path)]
     if not pending:
         return False
     if not (getattr(sys, "frozen", False) or "__compiled__" in globals()):
         return False
 
-    args = [os.path.abspath(sys.executable), DEFERRED_CLEANUP_ARG, "--parent-pid", str(os.getpid())]
+    executable = os.path.abspath(cleanup_executable or sys.executable)
+    if not os.path.isfile(executable):
+        return False
+
+    args = [executable, DEFERRED_CLEANUP_ARG, "--parent-pid", str(os.getpid())]
     for path in pending:
         args.extend(["--path", path])
 
     try:
         popen_kwargs = {
-            "cwd": os.path.dirname(os.path.abspath(sys.executable)),
+            "cwd": os.path.dirname(executable),
             "close_fds": True,
             "creationflags": hidden_window_creationflags(detached=True),
         }
@@ -549,6 +558,20 @@ def _spawn_deferred_cleanup(paths: list[str], log: Optional[Callable[[str], None
         if log:
             log(f"Не удалось запустить отложенную очистку временных папок обновления: {exc}")
         return False
+
+
+def _cleanup_runner_dir_later(
+    runner_dir: str,
+    target_dir: str,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    runner = str(runner_dir or "").strip()
+    if not runner:
+        return
+    cleanup_executable = os.path.join(os.path.abspath(target_dir), "RemCardUpdater.exe")
+    if not os.path.isfile(cleanup_executable):
+        cleanup_executable = None
+    _spawn_deferred_cleanup([runner], log=log, cleanup_executable=cleanup_executable)
 
 
 def _run_cleanup_mode(args: argparse.Namespace) -> int:
@@ -695,22 +718,41 @@ def _validate_patch_target_hashes(target: str, manifest: dict[str, Any]) -> None
         _ensure_patch_path_allowed(entry["path"])
         target_path = safe_join_install_root(target, entry["path"])
         expected = entry.get("old_sha256")
+        expected_new = str(entry["sha256"]).lower()
         if expected is None:
             if os.path.exists(target_path):
-                raise RuntimeError(f"Patch ожидал новый файл, но он уже существует: {entry['path']}")
+                if os.path.isfile(target_path) and compute_sha256(target_path) == expected_new:
+                    continue
+                raise RuntimeError(f"Patch ожидал новый файл, но он уже существует с другим содержимым: {entry['path']}")
             continue
         if not os.path.isfile(target_path):
             raise RuntimeError(f"Patch не может проверить старый файл: {entry['path']}")
-        if compute_sha256(target_path) != str(expected).lower():
-            raise RuntimeError(f"SHA-256 установленного файла не совпадает с manifest: {entry['path']}")
+        actual = compute_sha256(target_path)
+        if actual == str(expected).lower() or actual == expected_new:
+            continue
+        raise RuntimeError(
+            "SHA-256 установленного файла не совпадает с manifest: "
+            f"{entry['path']} (actual={actual[:12]}, expected_old={str(expected).lower()[:12]}, "
+            f"expected_new={expected_new[:12]})"
+        )
 
     for entry in manifest["delete"]:
         _ensure_patch_path_allowed(entry["path"])
         target_path = safe_join_install_root(target, entry["path"])
         if not os.path.isfile(target_path):
-            raise RuntimeError(f"Patch не может удалить отсутствующий файл: {entry['path']}")
-        if compute_sha256(target_path) != str(entry["old_sha256"]).lower():
-            raise RuntimeError(f"SHA-256 удаляемого файла не совпадает с manifest: {entry['path']}")
+            continue
+        actual = compute_sha256(target_path)
+        expected = str(entry["old_sha256"]).lower()
+        if actual != expected:
+            raise RuntimeError(
+                "SHA-256 удаляемого файла не совпадает с manifest: "
+                f"{entry['path']} (actual={actual[:12]}, expected_old={expected[:12]})"
+            )
+
+
+def _patch_file_already_current(target: str, entry: dict[str, Any]) -> bool:
+    target_path = safe_join_install_root(target, entry["path"])
+    return os.path.isfile(target_path) and compute_sha256(target_path) == str(entry["sha256"]).lower()
 
 
 def _stage_patch_payload(source: str, staging: str, manifest: dict[str, Any]) -> None:
@@ -756,6 +798,8 @@ def _apply_patch_package(
 
         status("Проверка и резервирование файлов...", 42)
         for entry in normalized["files"]:
+            if _patch_file_already_current(target, entry):
+                continue
             if _backup_existing_file(target, backup, entry["path"]):
                 pass
         for entry in normalized["delete"]:
@@ -764,6 +808,8 @@ def _apply_patch_package(
 
         status("Применение patch-файлов...", 65)
         for entry in normalized["files"]:
+            if _patch_file_already_current(target, entry):
+                continue
             staged_path = safe_join_install_root(staging, entry["path"])
             target_path = safe_join_install_root(target, entry["path"])
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -1006,6 +1052,11 @@ class UpdateWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             _remove_file_quietly(str(self.args.starting_lock or ""))
+            _cleanup_runner_dir_later(
+                str(getattr(self.args, "runner_dir", "") or ""),
+                os.path.abspath(self.args.target),
+                log=lambda message: _write_log(os.path.abspath(self.args.baza_dir), message),
+            )
             if lock:
                 lock.release()
 
@@ -1308,21 +1359,6 @@ def _load_direct_release(executable_dir: str) -> Optional[tuple[str, str, dict[s
             continue
         if str(manifest.get("app") or "rem_card") != "rem_card":
             continue
-        if get_package_type(manifest) == PACKAGE_TYPE_PATCH:
-            source_dir = os.path.abspath(release_dir)
-            support_dir = os.path.abspath(os.path.join(source_dir, SUPPORT_DIR_NAME))
-            if not _same_path(support_dir, exe_dir):
-                continue
-            if not os.path.isfile(os.path.join(source_dir, READY_FILE_NAME)):
-                continue
-            if not os.path.isfile(os.path.join(support_dir, "RemCardUpdater.exe")):
-                continue
-            try:
-                normalized = _validate_patch_source(source_dir, manifest)
-            except Exception:
-                continue
-            return os.path.abspath(release_dir), source_dir, normalized
-
         prog_dir_name = str(manifest.get("prog_dir") or ".").strip() or "."
         source_dir = os.path.abspath(os.path.join(release_dir, prog_dir_name))
         if not _same_path(source_dir, exe_dir):
@@ -1480,6 +1516,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--target-version", default="")
     parser.add_argument("--restart-exe", default="")
     parser.add_argument("--launcher-host", default="")
+    parser.add_argument("--runner-dir", default="")
     return parser.parse_args(argv)
 
 

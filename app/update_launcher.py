@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import socket
 import sys
 import time
@@ -22,9 +23,12 @@ from rem_card.app.version import APP_VERSION
 UPDATE_LOCK_STALE_SEC = 30 * 60
 UPDATE_STARTING_LOCK_STALE_SEC = 5 * 60
 LEGACY_STARTING_LOCK_STALE_SEC = 15
-SUPPORT_DIR_NAME = "support"
 UPDATER_EXE_NAME = "RemCardUpdater.exe"
 INTERNAL_DIR_NAME = "_internal"
+LOCAL_RUNNER_ROOT_NAME = "RemCard"
+LOCAL_RUNNER_DIR_NAME = "update_runner"
+LOCAL_RUNNER_PREFIX = "remcard_update_runner_"
+LOCAL_RUNNER_STALE_SEC = 24 * 60 * 60
 
 
 def _read_lock_payload(lock_path: str) -> Optional[dict[str, Any]]:
@@ -229,25 +233,69 @@ def _remove_lock_quietly(path: str):
         pass
 
 
-def _patch_payload_includes(candidate: UpdateCandidate, relative_path: str) -> bool:
-    target = relative_path.replace("\\", "/").casefold()
-    for entry in candidate.manifest.get("files") or []:
-        path = str(entry.get("path") or "").replace("\\", "/").casefold()
-        if path == target:
-            return True
-    return False
+def _local_runner_root() -> str:
+    local_root = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    return os.path.abspath(os.path.join(local_root, LOCAL_RUNNER_ROOT_NAME, LOCAL_RUNNER_DIR_NAME))
 
 
-def _select_updater_path(candidate: UpdateCandidate, target_dir: str) -> str:
+def _remove_tree_quietly(path: str) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _cleanup_stale_local_runners(root: str) -> None:
+    try:
+        now = time.time()
+        if not os.path.isdir(root):
+            return
+        for name in os.listdir(root):
+            if not name.startswith(LOCAL_RUNNER_PREFIX):
+                continue
+            path = os.path.join(root, name)
+            if not os.path.isdir(path):
+                continue
+            try:
+                age = now - os.path.getmtime(path)
+            except Exception:
+                age = LOCAL_RUNNER_STALE_SEC + 1
+            if age > LOCAL_RUNNER_STALE_SEC:
+                _remove_tree_quietly(path)
+    except Exception:
+        pass
+
+
+def _copy_local_patch_runner(target_dir: str) -> tuple[str, str]:
+    source_exe = os.path.join(target_dir, UPDATER_EXE_NAME)
+    source_internal = os.path.join(target_dir, INTERNAL_DIR_NAME)
+    if not os.path.isfile(source_exe):
+        raise RuntimeError(f"В установленной программе отсутствует {UPDATER_EXE_NAME}.")
+    if not os.path.isdir(source_internal):
+        raise RuntimeError(f"В установленной программе отсутствует папка {INTERNAL_DIR_NAME}.")
+
+    root = _local_runner_root()
+    os.makedirs(root, exist_ok=True)
+    _cleanup_stale_local_runners(root)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    runner_dir = os.path.join(root, f"{LOCAL_RUNNER_PREFIX}{stamp}_{os.getpid()}")
+    if os.path.exists(runner_dir):
+        _remove_tree_quietly(runner_dir)
+    os.makedirs(runner_dir, exist_ok=True)
+    try:
+        shutil.copy2(source_exe, os.path.join(runner_dir, UPDATER_EXE_NAME))
+        shutil.copytree(source_internal, os.path.join(runner_dir, INTERNAL_DIR_NAME))
+    except Exception:
+        _remove_tree_quietly(runner_dir)
+        raise
+    return os.path.join(runner_dir, UPDATER_EXE_NAME), runner_dir
+
+
+def _select_updater_path(candidate: UpdateCandidate, target_dir: str) -> tuple[str, str]:
     if candidate.package_type != PACKAGE_TYPE_PATCH:
-        return os.path.join(candidate.prog_dir, UPDATER_EXE_NAME)
+        return os.path.join(candidate.prog_dir, UPDATER_EXE_NAME), ""
 
-    if _patch_payload_includes(candidate, UPDATER_EXE_NAME):
-        support_dir = os.path.join(candidate.prog_dir, SUPPORT_DIR_NAME)
-        if not os.path.isdir(os.path.join(support_dir, INTERNAL_DIR_NAME)):
-            return ""
-        return os.path.join(support_dir, UPDATER_EXE_NAME)
-    return os.path.join(target_dir, UPDATER_EXE_NAME)
+    return _copy_local_patch_runner(target_dir)
 
 
 def launch_update(
@@ -267,8 +315,14 @@ def launch_update(
     except Exception:
         return False
 
-    updater_path = _select_updater_path(candidate, target_dir)
+    runner_dir = ""
+    try:
+        updater_path, runner_dir = _select_updater_path(candidate, target_dir)
+    except Exception:
+        return False
     if not updater_path or not os.path.isfile(updater_path):
+        if runner_dir:
+            _remove_tree_quietly(runner_dir)
         return False
 
     if is_update_in_progress(target_dir=target_dir) or not _write_starting_lock(
@@ -299,21 +353,27 @@ def launch_update(
         "--launcher-host",
         socket.gethostname(),
     ]
+    if runner_dir:
+        args.extend(["--runner-dir", runner_dir])
     if restart_exe:
         args.extend(["--restart-exe", restart_exe])
 
     try:
-        process = popen_hidden(args)
+        process = popen_hidden(args, cwd=os.path.dirname(os.path.abspath(updater_path)))
         _mark_starting_lock_updater_pid(starting_lock_path, getattr(process, "pid", 0))
         poll = getattr(process, "poll", None)
         if callable(poll):
             time.sleep(0.2)
             if poll() is not None:
                 _remove_lock_quietly(starting_lock_path)
+                if runner_dir:
+                    _remove_tree_quietly(runner_dir)
                 return False
         return True
     except Exception:
         _remove_lock_quietly(starting_lock_path)
+        if runner_dir:
+            _remove_tree_quietly(runner_dir)
         return False
 
 

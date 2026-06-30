@@ -550,10 +550,11 @@ def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[
     from rem_card.app.update_checker import find_available_updates
     from rem_card.app.update_package import compute_sha256
 
-    suffix = "support" if updater_in_payload else "installed"
+    suffix = "updater_payload" if updater_in_payload else "payload_only"
     update_root = os.path.join(temp_root, f"UPD_patch_launch_{suffix}")
     target_dir = os.path.join(temp_root, f"Installed_{suffix}")
     baza_dir = os.path.join(temp_root, f"Baza_rao3_jurnal_{suffix}")
+    local_appdata = os.path.join(temp_root, f"localappdata_{suffix}")
     os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
     for lock_file in glob.glob(os.path.join(baza_dir, "locks", "*.lock")):
         try:
@@ -562,6 +563,8 @@ def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[
             pass
     os.makedirs(target_dir, exist_ok=True)
     Path(target_dir, "RemCardUpdater.exe").write_text("installed updater", encoding="utf-8")
+    Path(target_dir, "_internal", "python311.dll").parent.mkdir(parents=True, exist_ok=True)
+    Path(target_dir, "_internal", "python311.dll").write_text("installed runtime", encoding="utf-8")
     _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
 
     if updater_in_payload:
@@ -578,11 +581,6 @@ def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[
             }
         )
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
-        support_dir = Path(update_root, "support")
-        support_dir.mkdir(parents=True, exist_ok=True)
-        Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
-        Path(support_dir, "_internal", "python311.dll").parent.mkdir(parents=True, exist_ok=True)
-        Path(support_dir, "_internal", "python311.dll").write_text("python runtime", encoding="utf-8")
 
     candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
     if len(candidates) != 1:
@@ -593,7 +591,9 @@ def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[
     original_resolve_baza_dir = update_launcher.resolve_baza_dir
     original_get_executable_dir = update_launcher.get_executable_dir
     original_popen_hidden = update_launcher.popen_hidden
+    saved_local_appdata = os.environ.get("LOCALAPPDATA")
     try:
+        os.environ["LOCALAPPDATA"] = local_appdata
         update_launcher.is_compiled = lambda: True
         update_launcher.resolve_baza_dir = lambda: baza_dir
         update_launcher.get_executable_dir = lambda: target_dir
@@ -610,25 +610,43 @@ def _capture_patch_launch(temp_root: str, *, updater_in_payload: bool) -> tuple[
         update_launcher.resolve_baza_dir = original_resolve_baza_dir
         update_launcher.get_executable_dir = original_get_executable_dir
         update_launcher.popen_hidden = original_popen_hidden
+        if saved_local_appdata is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = saved_local_appdata
 
 
-def _check_patch_launcher_uses_installed_updater_when_no_support_updater(temp_root: str) -> tuple[bool, str]:
-    ok, message, args = _capture_patch_launch(temp_root, updater_in_payload=False)
-    if not ok:
-        return ok, message
-    expected = os.path.abspath(os.path.join(temp_root, "Installed_installed", "RemCardUpdater.exe"))
-    if os.path.abspath(args[0]) != expected:
-        return False, f"expected installed updater, got {args[0]}"
-    return True, "ok"
-
-
-def _check_patch_launcher_uses_support_updater_when_updater_is_payload(temp_root: str) -> tuple[bool, str]:
+def _check_patch_launcher_uses_local_runner_for_patch(temp_root: str) -> tuple[bool, str]:
     ok, message, args = _capture_patch_launch(temp_root, updater_in_payload=True)
     if not ok:
         return ok, message
-    expected = os.path.abspath(os.path.join(temp_root, "UPD_patch_launch_support", "support", "RemCardUpdater.exe"))
-    if os.path.abspath(args[0]) != expected:
-        return False, f"expected support updater, got {args[0]}"
+    runner_exe = os.path.abspath(args[0])
+    expected_root = os.path.abspath(os.path.join(temp_root, "localappdata_updater_payload", "RemCard", "update_runner"))
+    if not runner_exe.startswith(expected_root):
+        return False, f"expected local runner under {expected_root}, got {runner_exe}"
+    if "\\support\\" in runner_exe.replace("/", "\\").lower():
+        return False, f"patch launcher unexpectedly used UPD support runner: {runner_exe}"
+    if not os.path.isfile(runner_exe):
+        return False, f"local runner exe was not created: {runner_exe}"
+    runner_dir = os.path.dirname(runner_exe)
+    if not os.path.isdir(os.path.join(runner_dir, "_internal")):
+        return False, "local runner _internal was not copied"
+    if "--runner-dir" not in args:
+        return False, "local runner dir was not passed to updater"
+    runner_arg = os.path.abspath(args[args.index("--runner-dir") + 1])
+    if runner_arg != os.path.abspath(runner_dir):
+        return False, f"runner-dir arg mismatch: {runner_arg} != {runner_dir}"
+    return True, "ok"
+
+
+def _check_patch_launcher_uses_local_runner_without_updater_payload(temp_root: str) -> tuple[bool, str]:
+    ok, message, args = _capture_patch_launch(temp_root, updater_in_payload=False)
+    if not ok:
+        return ok, message
+    runner_exe = os.path.abspath(args[0])
+    expected_root = os.path.abspath(os.path.join(temp_root, "localappdata_payload_only", "RemCard", "update_runner"))
+    if not runner_exe.startswith(expected_root):
+        return False, f"expected local runner under {expected_root}, got {runner_exe}"
     return True, "ok"
 
 
@@ -637,7 +655,7 @@ def _check_patch_launcher_target_is_executable_dir(temp_root: str) -> tuple[bool
     if not ok:
         return ok, message
     target_index = args.index("--target") + 1
-    expected = os.path.abspath(os.path.join(temp_root, "Installed_installed"))
+    expected = os.path.abspath(os.path.join(temp_root, "Installed_payload_only"))
     if os.path.abspath(args[target_index]) != expected:
         return False, f"launcher target mismatch: {args[target_index]}"
     return True, "ok"
@@ -738,6 +756,25 @@ def _check_patch_rejected_when_installed_old_sha_mismatch(temp_root: str) -> tup
             return False, f"unexpected error: {exc}"
         return True, "ok"
     return False, "hash mismatch patch was applied"
+
+
+def _check_patch_allows_file_already_at_new_sha(temp_root: str) -> tuple[bool, str]:
+    target = os.path.join(temp_root, "patch_already_new_target")
+    source = os.path.join(temp_root, "patch_already_new_source")
+    _prepare_installed_tree(target)
+    target_file = Path(target, "_internal", "rem_card", "icon", "example.txt")
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("old\n", encoding="utf-8")
+    manifest = _write_targeted_patch_package(
+        source,
+        target,
+        files={"_internal/rem_card/icon/example.txt": b"new\n"},
+    )
+    target_file.write_bytes(b"new\n")
+    _apply_test_patch(source, target, manifest)
+    if target_file.read_text(encoding="utf-8") != "new\n":
+        return False, "already-new file was changed unexpectedly"
+    return True, "ok"
 
 
 def _check_patch_rollback_on_copy_failure(temp_root: str) -> tuple[bool, str]:
@@ -1015,12 +1052,12 @@ def _check_patch_builder_default_large_threshold_is_1gb(temp_root: str) -> tuple
     return True, "ok"
 
 
-def _check_patch_builder_support_updater_includes_internal_runtime(temp_root: str) -> tuple[bool, str]:
+def _check_patch_builder_does_not_publish_support_runtime(temp_root: str) -> tuple[bool, str]:
     from scripts import build_patch_update
     from rem_card.app.update_package import compute_sha256, patch_payload_path
 
-    canonical = Path(temp_root, "support_runtime_canonical")
-    patch_dir = Path(temp_root, "support_runtime_patch")
+    canonical = Path(temp_root, "no_support_runtime_canonical")
+    patch_dir = Path(temp_root, "no_support_runtime_patch")
     _reset_test_dirs(canonical, patch_dir)
     updater_path = canonical / "RemCardUpdater.exe"
     updater_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1054,19 +1091,18 @@ def _check_patch_builder_support_updater_includes_internal_runtime(temp_root: st
 
     build_patch_update.write_patch_payload(patch_dir, canonical, manifest)
     checks = [
-        patch_dir / "support" / "RemCardUpdater.exe",
-        patch_dir / "support" / "_internal" / "python311.dll",
-        patch_dir / "support" / "_internal" / "rem_card" / "app" / "updater_main.pyc",
         Path(patch_payload_path(patch_dir, "RemCardUpdater.exe")),
     ]
     missing = [str(path) for path in checks if not path.exists()]
     if missing:
-        return False, "support updater bundle incomplete: " + ", ".join(missing)
+        return False, "patch payload incomplete: " + ", ".join(missing)
+    if (patch_dir / "support").exists():
+        return False, "patch builder must not publish UPD\\support runtime"
 
     payload_only = Path(patch_payload_path(patch_dir, "RemCardUpdater.exe")).stat().st_size
     package_size = build_patch_update.patch_package_size_bytes(patch_dir)
-    if package_size <= payload_only:
-        return False, "patch package size must include support runtime bundle"
+    if package_size != payload_only:
+        return False, f"patch package size must only include payload files: {package_size} != {payload_only}"
     return True, "ok"
 
 
@@ -1226,8 +1262,8 @@ def _check_updater_target_uses_executable_dir(temp_root: str) -> tuple[bool, str
     return _check_patch_launcher_target_is_executable_dir(temp_root)
 
 
-def _check_support_updater_used_when_updater_in_payload(temp_root: str) -> tuple[bool, str]:
-    return _check_patch_launcher_uses_support_updater_when_updater_is_payload(temp_root)
+def _check_local_runner_used_when_updater_in_payload(temp_root: str) -> tuple[bool, str]:
+    return _check_patch_launcher_uses_local_runner_for_patch(temp_root)
 
 
 def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[bool, str]:
@@ -1275,63 +1311,6 @@ def _check_updater_direct_launch_infers_upd_context(temp_root: str) -> tuple[boo
             return False, f"direct updater args mismatch: {actual}"
         if args.parent_pid != "0" or args.starting_lock != "":
             return False, f"unexpected direct launcher synchronization args: {args}"
-        return True, "ok"
-    finally:
-        for key, value in saved_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
-
-def _check_updater_direct_launch_infers_patch_support_context(temp_root: str) -> tuple[bool, str]:
-    from rem_card.app.update_checker import get_update_lock_path
-    from rem_card.app.updater_main import _build_direct_update_args
-
-    saved_env = {
-        key: os.environ.get(key)
-        for key in ("REMCARD_BAZA_DIR", "REMCARD_UPDATE_TARGET_DIR")
-    }
-    try:
-        os.environ.pop("REMCARD_BAZA_DIR", None)
-        os.environ.pop("REMCARD_UPDATE_TARGET_DIR", None)
-
-        root = os.path.join(temp_root, "patch_share")
-        baza_dir = os.path.join(root, "Baza_rao3_jurnal")
-        upd_dir = os.path.join(baza_dir, "UPD")
-        support_dir = os.path.join(upd_dir, "support")
-        target_dir = os.path.join(root, "Prog")
-        os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
-        os.makedirs(support_dir, exist_ok=True)
-        os.makedirs(target_dir, exist_ok=True)
-        Path(target_dir, "VERSION").write_text("1.0.0\n", encoding="utf-8")
-        Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
-        _write_fake_patch_package(upd_dir, base_version="1.0.0", version="1.0.1")
-
-        args = _build_direct_update_args(support_dir)
-        if args is None:
-            return False, "direct patch support package was not recognized"
-
-        expected = {
-            "source": os.path.abspath(upd_dir),
-            "target": os.path.abspath(target_dir),
-            "baza_dir": os.path.abspath(baza_dir),
-            "lock": os.path.abspath(get_update_lock_path(baza_dir, target_dir=target_dir)),
-            "target_version": "1.0.1",
-            "current_version": "1.0.0",
-        }
-        actual = {
-            "source": os.path.abspath(args.source),
-            "target": os.path.abspath(args.target),
-            "baza_dir": os.path.abspath(args.baza_dir),
-            "lock": os.path.abspath(args.lock),
-            "target_version": args.target_version,
-            "current_version": args.current_version,
-        }
-        if actual != expected:
-            return False, f"direct patch updater args mismatch: {actual}"
-        if args.parent_pid != "0" or args.starting_lock != "":
-            return False, f"unexpected direct patch launcher synchronization args: {args}"
         return True, "ok"
     finally:
         for key, value in saved_env.items():
@@ -1508,9 +1487,12 @@ def _check_patch_launcher_removes_starting_lock_when_updater_exits_immediately(t
     update_root = os.path.join(temp_root, "UPD_patch_launch_exit")
     target_dir = os.path.join(temp_root, "Installed_exit")
     baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal_exit")
+    local_appdata = os.path.join(temp_root, "localappdata_exit")
     os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
     os.makedirs(target_dir, exist_ok=True)
     Path(target_dir, "RemCardUpdater.exe").write_text("installed updater", encoding="utf-8")
+    Path(target_dir, "_internal", "python311.dll").parent.mkdir(parents=True, exist_ok=True)
+    Path(target_dir, "_internal", "python311.dll").write_text("installed runtime", encoding="utf-8")
     _write_fake_patch_package(update_root, base_version="1.0.0", version="1.0.1")
 
     payload_path = Path(update_root, "payload", "RemCardUpdater.exe")
@@ -1526,12 +1508,6 @@ def _check_patch_launcher_removes_starting_lock_when_updater_exits_immediately(t
         }
     )
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
-    support_dir = Path(update_root, "support")
-    support_dir.mkdir(parents=True, exist_ok=True)
-    Path(support_dir, "RemCardUpdater.exe").write_text("support updater", encoding="utf-8")
-    Path(support_dir, "_internal", "python311.dll").parent.mkdir(parents=True, exist_ok=True)
-    Path(support_dir, "_internal", "python311.dll").write_text("python runtime", encoding="utf-8")
-
     candidates = find_available_updates(current_version="1.0.0", update_root=update_root)
     if len(candidates) != 1:
         return False, f"patch candidate not found: {candidates}"
@@ -1546,23 +1522,37 @@ def _check_patch_launcher_removes_starting_lock_when_updater_exits_immediately(t
     original_resolve_baza_dir = update_launcher.resolve_baza_dir
     original_get_executable_dir = update_launcher.get_executable_dir
     original_popen_hidden = update_launcher.popen_hidden
+    saved_local_appdata = os.environ.get("LOCALAPPDATA")
+    runner_args: list[str] = []
     try:
+        os.environ["LOCALAPPDATA"] = local_appdata
         update_launcher.is_compiled = lambda: True
         update_launcher.resolve_baza_dir = lambda: baza_dir
         update_launcher.get_executable_dir = lambda: target_dir
-        update_launcher.popen_hidden = lambda _args: ExitedProcess()
+
+        def fake_popen_hidden(args, **_kwargs):
+            runner_args.extend(str(item) for item in args)
+            return ExitedProcess()
+
+        update_launcher.popen_hidden = fake_popen_hidden
 
         if update_launcher.launch_update(candidates[0], wait_for_parent=False):
             return False, "launch_update must fail when updater exits immediately"
         lock_path = get_update_starting_lock_path(baza_dir, target_dir=target_dir)
         if os.path.exists(lock_path):
             return False, "starting lock was not removed after immediate updater exit"
+        if runner_args and os.path.exists(os.path.dirname(os.path.abspath(runner_args[0]))):
+            return False, "local runner dir was not removed after immediate updater exit"
         return True, "ok"
     finally:
         update_launcher.is_compiled = original_is_compiled
         update_launcher.resolve_baza_dir = original_resolve_baza_dir
         update_launcher.get_executable_dir = original_get_executable_dir
         update_launcher.popen_hidden = original_popen_hidden
+        if saved_local_appdata is None:
+            os.environ.pop("LOCALAPPDATA", None)
+        else:
+            os.environ["LOCALAPPDATA"] = saved_local_appdata
 
 
 def _check_lock_read_unavailable_not_stale(temp_root: str) -> tuple[bool, str]:
@@ -26700,14 +26690,15 @@ def main(argv: list[str] | None = None):
         ("patch_rejected_when_payload_hash_mismatch", _check_patch_rejected_when_payload_hash_mismatch),
         ("full_without_package_type_still_detected", _check_full_without_package_type_still_detected),
         ("update_checker_does_not_require_upd_prog_folder", _check_update_checker_does_not_require_upd_prog_folder),
-        ("patch_launcher_uses_installed_updater_when_no_support_updater", _check_patch_launcher_uses_installed_updater_when_no_support_updater),
-        ("patch_launcher_uses_support_updater_when_updater_is_payload", _check_patch_launcher_uses_support_updater_when_updater_is_payload),
+        ("patch_launcher_uses_local_runner_for_patch", _check_patch_launcher_uses_local_runner_for_patch),
+        ("patch_launcher_uses_local_runner_without_updater_payload", _check_patch_launcher_uses_local_runner_without_updater_payload),
         ("patch_launcher_target_is_executable_dir", _check_patch_launcher_target_is_executable_dir),
         ("patch_replaces_one_changed_file", _check_patch_replaces_one_changed_file),
         ("patch_does_not_touch_unchanged_file", _check_patch_does_not_touch_unchanged_file),
         ("patch_adds_new_file", _check_patch_adds_new_file),
         ("patch_deletes_file_with_old_sha", _check_patch_deletes_file_with_old_sha),
         ("patch_rejected_when_installed_old_sha_mismatch", _check_patch_rejected_when_installed_old_sha_mismatch),
+        ("patch_allows_file_already_at_new_sha", _check_patch_allows_file_already_at_new_sha),
         ("patch_rollback_on_copy_failure", _check_patch_rollback_on_copy_failure),
         ("patch_preserves_local_files", _check_patch_preserves_local_files),
         ("patch_ready_ok_is_last_publish_step", _check_patch_ready_ok_is_last_publish_step),
@@ -26718,16 +26709,15 @@ def main(argv: list[str] | None = None):
         ("patch_builder_includes_settings_snapshot_when_content_hash_changes", _check_patch_builder_includes_settings_snapshot_when_content_hash_changes),
         ("patch_builder_uses_canonical_tree_after_generated_skip", _check_patch_builder_uses_canonical_tree_after_generated_skip),
         ("patch_builder_default_large_threshold_is_1gb", _check_patch_builder_default_large_threshold_is_1gb),
-        ("patch_builder_support_updater_includes_internal_runtime", _check_patch_builder_support_updater_includes_internal_runtime),
+        ("patch_builder_does_not_publish_support_runtime", _check_patch_builder_does_not_publish_support_runtime),
         ("patch_builder_cleans_failed_attempt_artifacts", _check_patch_builder_cleans_failed_attempt_artifacts),
         ("build_release_full_behavior_unchanged", _check_build_release_full_behavior_unchanged),
         ("updater_does_not_require_UPD_Prog_folder", _check_updater_does_not_require_UPD_Prog_folder),
         ("updater_target_uses_executable_dir", _check_updater_target_uses_executable_dir),
         ("role_exe_names_preserved", _check_role_exe_names_preserved),
-        ("support_updater_used_when_updater_in_payload", _check_support_updater_used_when_updater_in_payload),
+        ("local_runner_used_when_updater_in_payload", _check_local_runner_used_when_updater_in_payload),
         ("first_patch_requires_patch_aware_updater", _check_first_patch_requires_patch_aware_updater),
         ("updater_direct_launch_infers_upd_context", _check_updater_direct_launch_infers_upd_context),
-        ("updater_direct_launch_infers_patch_support_context", _check_updater_direct_launch_infers_patch_support_context),
         ("updater_cleanup_retries_old_backup", _check_updater_cleanup_retries_old_backup),
         ("update_locks_are_scoped_to_target", _check_update_locks_are_scoped_to_target),
         ("update_starting_lock_dead_pid_clears", _check_update_starting_lock_dead_pid_clears),
