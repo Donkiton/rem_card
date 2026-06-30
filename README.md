@@ -12,6 +12,7 @@
   <img alt="Python" src="https://img.shields.io/badge/Python-3.x-3776AB?style=for-the-badge&logo=python&logoColor=white">
   <img alt="PySide6" src="https://img.shields.io/badge/UI-PySide6-41CD52?style=for-the-badge&logo=qt&logoColor=white">
   <img alt="SQLite" src="https://img.shields.io/badge/DB-SQLite-003B57?style=for-the-badge&logo=sqlite&logoColor=white">
+  <img alt="License" src="https://img.shields.io/badge/License-MIT-111827?style=for-the-badge">
   <img alt="Status" src="https://img.shields.io/badge/status-vibe%20coded-f59e0b?style=for-the-badge">
 </p>
 
@@ -86,6 +87,8 @@ flowchart LR
 
 Создатель проекта вообще не владеет ни одним языком программирования; это его первый проект. Большая часть решений рождалась через итерации с AI, быстрые правки, эксперименты и попытки заставить задачу работать здесь и сейчас.
 
+Проект начинался в VS Code + Cline на Gemini 3.1. Позже, после постоянных ошибок запуска, сломанных итераций и усталости от ручного разгребания проблем, дальнейшая разработка переехала в Codex-приложение и ChatGPT-чат.
+
 Поэтому проект может содержать и, скорее всего, содержит:
 
 - большое количество костылей;
@@ -108,6 +111,10 @@ flowchart LR
 - [docs/auto_update.md](docs/auto_update.md) - full/patch автообновление.
 - [docs/operational_acceptance.md](docs/operational_acceptance.md) - приемочные проверки.
 - [docs/project_checkpoint/00_MASTER_CONTEXT_FOR_CHATGPT.md](docs/project_checkpoint/00_MASTER_CONTEXT_FOR_CHATGPT.md) - большой архитектурный снимок.
+
+## Связь
+
+Если проект заинтересовал, можно написать на [security@example.invalid](mailto:security@example.invalid) с темой письма `РЕМ КАРТА`. Я с радостью расскажу, как это творение работает.
 
 ## Проверки
 
@@ -133,6 +140,10 @@ python scripts\restore_drill.py --max-files 20 --cleanup-restored
 Стабильность отдельных частей разная: базовые сценарии активно доводятся, но код нельзя считать завершенным или надежным без проверки под конкретную среду. Любые изменения, связанные с БД, миграциями, recovery, update, оперблоком или аварийным режимом, нужно делать особенно осторожно.
 
 ## Лицензия и ответственность
+
+Код распространяется под открытой лицензией [MIT](LICENSE).
+
+Создатель проекта не несет никакой ответственности, если у пользователя что-то пошло не так: потерялись данные, сломалась база, приложение повело себя неправильно, были приняты неверные решения или возник любой другой ущерб. Любое использование - строго на свой страх и риск.
 
 Если вы смотрите этот репозиторий как разработчик, относитесь к нему как к большому экспериментальному desktop-проекту, а не как к готовому медицинскому продукту.
 
