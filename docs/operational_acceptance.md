@@ -1,6 +1,6 @@
 # Приемочная проверка после дорожной карты
 
-Цель проверки: доказать, что врач и медсестра могут работать с одной сетевой SQLite-БД без повреждения файла, потери commit и ложного UI-состояния.
+Цель проверки: доказать, что врач, медсестра и затронутые рабочие места оперблока могут работать с одной сетевой SQLite-БД без повреждения файла, потери commit и ложного UI-состояния.
 
 ## Обязательный набор
 
@@ -9,6 +9,12 @@
 3. `python scripts/regression_safety_checks.py`
 4. `python scripts/network_acceptance_runner.py --operations 24 --benchmark-clicks 3`
 5. `python scripts/restore_drill.py --max-files 20`
+
+## Дополнительные проверки по области
+
+- Если менялся аварийный режим: `python scripts/emergency_db_acceptance_runner.py`
+- Если менялся локальный/offline-режим оперблока: `python scripts/operblock_offline_acceptance_runner.py`
+- Если менялся старт оперблока: `python scripts/startup_benchmark.py --role operblock --runs 5`
 
 ## Критерии приемки
 
@@ -20,6 +26,7 @@
 - Конфликт optimistic lock по orders показывает доменную ошибку, а не затирает строку молча.
 - Обычные изменения через `change_log` не вызывают full snapshot всей карты.
 - PDF/отчеты строятся в worker, а не в UI callback.
+- Для затронутого оперблока active/offline сценарии проходят без потери завершенных случаев и без обхода сетевого профиля БД.
 
 ## Что считать провалом
 

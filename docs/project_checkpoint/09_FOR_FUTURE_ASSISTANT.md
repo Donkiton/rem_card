@@ -2,9 +2,9 @@
 
 ## Always remember
 
-Проект `Рем Карта` — PySide6 desktop app для врача и медсестры. Работает с одной SQLite БД в сетевой папке: `BAZA_DIR\archiv\rao_journal.db`. Главная цель архитектуры — сохранность БД и честное UI-состояние, скорость вторична.
+Проект `Рем Карта` — PySide6 desktop app для врача, медсестры и оперблока. Работает с одной SQLite БД в сетевой папке: `BAZA_DIR\archiv\rao_journal.db`. Главная цель архитектуры — сохранность БД и честное UI-состояние, скорость вторична.
 
-Реальные entrypoints: `run_doctor.py`, `run_nurse.py`, `run_path_setup.py`, `run_updater.py`. Главные файлы: `app/main.py`, `app/sqlite_shared.py`, `data/dao/db_manager.py`, `services/data_service.py`, `services/read_coordinator.py`, `services/sync_coordinator.py`, `ui/doctor_view/doctor_remcard_widget.py`, `ui/nurse_view/nurse_main_widget.py`.
+Реальные release entrypoints: `run_doctor.py`, `run_nurse.py`, `run_operblock_emergency.py`, `run_operblock_planned.py`, `run_path_setup.py`, `run_updater.py`. `run_operblock.py` остается dev entrypoint общего оперблока. Главные файлы: `app/main.py`, `app/roles.py`, `app/sqlite_shared.py`, `data/dao/db_manager.py`, `services/data_service.py`, `services/read_coordinator.py`, `services/sync_coordinator.py`, `ui/doctor_view/doctor_remcard_widget.py`, `ui/nurse_view/nurse_main_widget.py`, `ui/operblock_view/operblock_main_widget.py`.
 
 ## Never suggest
 
@@ -92,6 +92,8 @@ python scripts\network_acceptance_runner.py --operations 24 --benchmark-clicks 3
 python scripts\validate_backups.py --max-files 20 --move-invalid
 python scripts\restore_drill.py --max-files 20 --cleanup-restored
 ```
+
+Domain-specific gates: for emergency-mode changes run `python scripts\emergency_db_acceptance_runner.py`; for operblock offline/local changes run `python scripts\operblock_offline_acceptance_runner.py`.
 
 For doc-only changes, do not run heavy gates unless needed; at minimum verify changed files and `git diff --check`.
 

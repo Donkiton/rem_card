@@ -2,6 +2,8 @@
 
 Документ собран по текущему коду репозитория `C:\Test\rem_card` на 2026-05-12. Если утверждение не подтверждено кодом, оно помечено как `НЕ НАЙДЕНО В КОДЕ`, `ТРЕБУЕТ УТОЧНЕНИЯ` или `ПРЕДПОЛОЖЕНИЕ, НУЖНА ПРОВЕРКА`.
 
+Актуальность: исходный checkpoint остается снимком от 2026-05-12. Entry point'ы и сборка ниже частично уточнены по текущему коду на 2026-06-30; line refs могут отставать и требуют сверки перед изменениями.
+
 Исходное состояние git перед созданием checkpoint:
 
 - Ветка: `master` (`git branch --show-current`).
@@ -11,7 +13,7 @@
 
 ## 1. Что это за программа
 
-`Рем Карта` — desktop-приложение на PySide6 для ведения карты пациента в отделении реанимации/интенсивной терапии. Основные пользователи: врач и медсестра. В коде роли запускаются отдельными entrypoint-файлами: `run_doctor.py:14-18` вызывает `main(forced_role="doctor")`, `run_nurse.py:14-18` вызывает `main(forced_role="nurse")`.
+`Рем Карта` — desktop-приложение на PySide6 для ведения карты пациента в отделении реанимации/интенсивной терапии и работы оперблока. Основные пользователи: врач, медсестра, экстренная операционная и плановая операционная. В коде release-роли запускаются отдельными entrypoint-файлами: `run_doctor.py`, `run_nurse.py`, `run_operblock_emergency.py`, `run_operblock_planned.py`; `run_operblock.py` остается dev entrypoint общего оперблока.
 
 Карта пациента — набор данных активной госпитализации: пациент, койка, диагноз, витальные показатели, назначения и выполнения, баланс жидкости, питание, ИВЛ, события/статус, печать и архив. Схема таблиц задаётся в `app/unified_db_schema.py`: `patients`, `admissions`, `beds`, `vitals`, `fluids`, `orders`, `administrations`, `patient_status_events`, `ivl_episodes`, `clinical_events`, `diet_plan`, `oral_intake_events` и другие (`app/unified_db_schema.py:12-38`, `533-981`).
 
@@ -102,7 +104,7 @@ UI widgets
 
 ## 5. Как работает запуск приложения
 
-1. Entry point выбирает роль: `run_doctor.py`, `run_nurse.py`, `run_path_setup.py`, `run_updater.py`.
+1. Entry point выбирает роль: `run_doctor.py`, `run_nurse.py`, `run_operblock_emergency.py`, `run_operblock_planned.py`, `run_path_setup.py`, `run_updater.py`. `run_operblock.py` используется как dev entrypoint общего оперблока.
 2. `_main_impl()` в `app/main.py:659-850` готовит Qt, роль, startup guard, single-instance и role lock.
 3. Путь к БД определяется в `app/paths.py`: `BAZA_DIR` через `REMCARD_BAZA_DIR`, compiled `resolve_baza_dir()` или dev fallback (`app/paths.py:122-131`).
 4. В compiled doctor/nurse запускается `run_startup_db_guard()` (`app/main.py:484-539`; `app/startup_db_guard.py:975-1125`).
@@ -200,7 +202,7 @@ DB config/profile:
 
 ## 10. UI и роли
 
-Вход врача: `run_doctor.py`; вход медсестры: `run_nurse.py`. Главное окно: `MainWindow` (`ui/main_window.py:104-188`) лениво загружает роль (`ui/main_window.py:250-252`). Врач: `DoctorMainWidget` (`ui/doctor_view/doctor_main_widget.py:60-210`), `DoctorRemCardWidget` (`ui/doctor_view/doctor_remcard_widget.py:59`). Медсестра: `NurseMainWidget` (`ui/nurse_view/nurse_main_widget.py:83`).
+Вход врача: `run_doctor.py`; вход медсестры: `run_nurse.py`; входы оперблока: `run_operblock_emergency.py` и `run_operblock_planned.py`. Главное окно: `MainWindow` (`ui/main_window.py:104-188`) лениво загружает роль (`ui/main_window.py:250-252`). Врач: `DoctorMainWidget` (`ui/doctor_view/doctor_main_widget.py:60-210`), `DoctorRemCardWidget` (`ui/doctor_view/doctor_remcard_widget.py:59`). Медсестра: `NurseMainWidget` (`ui/nurse_view/nurse_main_widget.py:83`). Оперблок: `OperblockMainWidget` (`ui/operblock_view/operblock_main_widget.py`).
 
 W1/W1a/W1b:
 
@@ -280,7 +282,7 @@ Shutdown:
 
 ## 15. Сборка, обновление, релиз
 
-PyInstaller spec `RemCard.spec` собирает четыре EXE: `RemCardDoctor`, `RemCardNurse`, `RemCardPathSetup`, `RemCardUpdater` (`RemCard.spec:116-170`). `COLLECT` кладёт сборку в `Prog` (`RemCard.spec:172-183`). Post-build копирует в target update package, создаёт `manifest.json`, затем последним пишет `ready.ok` (`RemCard.spec:214-252`).
+PyInstaller spec `RemCard.spec` собирает шесть EXE: `RemCardDoctor`, `RemCardNurse`, `RemCardOperBlockEmergency`, `RemCardOperBlockPlanned`, `RemCardPathSetup`, `RemCardUpdater`. `COLLECT` кладёт сборку в `Prog`. Post-build копирует в target update package, создаёт `manifest.json`, затем последним пишет `ready.ok`.
 
 Updater:
 

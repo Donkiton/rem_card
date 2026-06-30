@@ -2,6 +2,8 @@
 
 Репозиторий: `C:\Test\rem_card`.
 
+Актуальность: исходный checkpoint собран 2026-05-12; entrypoint'ы, сборка и часть статуса обновлены по текущему коду на 2026-06-30. Старые line refs в этом каталоге могут отставать, перед изменениями сверяйте с кодом.
+
 ## 1. Корневые файлы
 
 | Путь | Назначение | Кто использует |
@@ -9,14 +11,17 @@
 | `_local_rem_card_bootstrap.py` | Dev-bootstrap alias package `rem_card` на текущий checkout; не подменяет frozen-сборку (`_local_rem_card_bootstrap.py:11-49`). | Scripts/tests/entrypoints. |
 | `run_doctor.py` | Entry point врача: `main(forced_role="doctor")` (`run_doctor.py:14-18`). | PyInstaller, dev запуск. |
 | `run_nurse.py` | Entry point медсестры: `main(forced_role="nurse")` (`run_nurse.py:14-18`). | PyInstaller, dev запуск. |
+| `run_operblock.py` | Dev/диагностический entry point общего оперблока: `main(forced_role="operblock")`. | Dev запуск, не основной release EXE. |
+| `run_operblock_emergency.py` | Entry point экстренной операционной: `main(forced_role="operblock_emergency")`. | PyInstaller, dev запуск. |
+| `run_operblock_planned.py` | Entry point плановой операционной: `main(forced_role="operblock_planned")`. | PyInstaller, dev запуск. |
 | `run_path_setup.py` | Entry point настройки пути к сетевой базе (`run_path_setup.py:9-13`). | `RemCardPathSetup.exe`. |
 | `run_updater.py` | Entry point updater (`run_updater.py:9-13`). | `RemCardUpdater.exe`. |
-| `launcher.py` | Legacy/вспомогательный запуск. ТРЕБУЕТ УТОЧНЕНИЯ: не изучался глубоко. | Dev/legacy. |
-| `RemCard.spec` | PyInstaller сборка четырёх EXE и update package (`RemCard.spec:116-183`, `214-252`). | Release build. |
+| `launcher.py` | Dev helper без фиксированной роли: вызывает `main()` и полагается на выбор/определение роли. | Dev/ручной запуск. |
+| `RemCard.spec` | PyInstaller сборка шести EXE и update package: doctor, nurse, operblock emergency/planned, path setup, updater. | Release build. |
 | `VERSION` | Версия приложения; читается release/build/version code (`app/version.py`, `scripts/build_release.py`). | UI/update/build. |
 | `CHANGELOG.md` | Changelog; build script обновляет release notes. | `scripts/build_release.py`. |
 | `bars.py` | BARS-related entry/helper. ТРЕБУЕТ УТОЧНЕНИЯ. | BARS workflow. |
-| `update_db.py` | Legacy DB update helper. ТРЕБУЕТ УТОЧНЕНИЯ перед использованием. | Ручные операции/legacy. |
+| `update_db.py` | Ручной helper миграции unified schema под lock/integrity-check. Для обычного релиза использовать release/update flow, не этот скрипт. | Ручные операции сопровождения. |
 
 ## 2. Папки
 
@@ -74,6 +79,7 @@ PySide6 UI.
 - `ui/main_window.py` — окно, role loading, shutdown (`ui/main_window.py:104-188`, `624-660`).
 - `ui/doctor_view/` — doctor role UI: `DoctorMainWidget`, `DoctorRemCardWidget`, orders, archive, W1 beds.
 - `ui/nurse_view/` — nurse role UI: `NurseMainWidget`, nurse layout/orders/beds/sectors.
+- `ui/operblock_view/` — UI экстренной/плановой операционной.
 - `ui/shared/` — shared widgets/layout/workers/style helpers.
 - `ui/rem_card_sectors/` — sector widgets and print.
 - `ui/patient_bed_management/` — W1 patient/bed management and `PatientForm`.
@@ -127,6 +133,9 @@ Gates, benchmarks, release helpers.
 |---|---|---|
 | Врач | `run_doctor.py` | Запускает `app.main.main(forced_role="doctor")`. |
 | Медсестра | `run_nurse.py` | Запускает `app.main.main(forced_role="nurse")`. |
+| Оперблок общий | `run_operblock.py` | Dev entrypoint `forced_role="operblock"`; release использует отдельные столы. |
+| Экстренная операционная | `run_operblock_emergency.py` | Запускает `forced_role="operblock_emergency"`, release EXE `RemCardOperBlockEmergency.exe`. |
+| Плановая операционная | `run_operblock_planned.py` | Запускает `forced_role="operblock_planned"`, release EXE `RemCardOperBlockPlanned.exe`. |
 | Path setup | `run_path_setup.py`, `app/main.py:_run_path_setup()` | Выбор сетевой папки и создание структуры (`app/main.py:413-446`). |
 | Updater | `run_updater.py`, `app/updater_main.py` | Установка update package. |
 | Startup benchmark | `scripts/startup_benchmark.py` | Измерение startup phases. |
