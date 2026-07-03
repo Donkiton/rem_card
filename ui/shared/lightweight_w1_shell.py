@@ -207,7 +207,7 @@ class LightweightW1Shell(QWidget):
                 if self._ensure_archive_widget() is None:
                     return
                 self.selection_stack.setCurrentIndex(2)
-                self._refresh_archive_if_needed(force=self._archive_last_change_id < 0)
+                self._refresh_archive_if_needed(force=True, reset_page=True)
                 self.current_mode = "archive"
                 self.selection_mode_changed.emit("archive")
             finally:
@@ -288,11 +288,13 @@ class LightweightW1Shell(QWidget):
         self._archive_layout.addWidget(self.archive_widget)
         return self.archive_widget
 
-    def _refresh_archive_if_needed(self, force: bool = False):
+    def _refresh_archive_if_needed(self, force: bool = False, *, reset_page: bool = False):
         if self.archive_widget is None:
             return
+        if hasattr(self, "selection_stack") and self.selection_stack.currentIndex() != 2:
+            return
         if force or not getattr(self.archive_widget, "all_archived_patients", None):
-            self.archive_widget.load_data()
+            self.archive_widget.load_data(reset_page=reset_page)
             self._archive_last_change_id = max(self._archive_last_change_id, 0)
 
     def _ensure_admin_widget(self):

@@ -703,11 +703,13 @@ class RemCardLayoutManager(QWidget):
             if updates_were_enabled:
                 self.setUpdatesEnabled(True)
 
-    def _refresh_archive_if_needed(self, force: bool = False):
+    def _refresh_archive_if_needed(self, force: bool = False, *, reset_page: bool = False):
         if not getattr(self, "archive_widget", None):
             return
+        if hasattr(self, "selection_stack") and self.selection_stack.currentIndex() != 2:
+            return
         if force or not getattr(self.archive_widget, "all_archived_patients", None):
-            self.archive_widget.load_data()
+            self.archive_widget.load_data(reset_page=reset_page)
             self._archive_last_change_id = max(self._archive_last_change_id, 0)
 
     def _w1_display_flags(self) -> tuple[bool, bool]:
@@ -808,7 +810,7 @@ class RemCardLayoutManager(QWidget):
                     )
                     self._archive_layout.addWidget(self.archive_widget)
                 self.selection_stack.setCurrentIndex(2)
-                self._refresh_archive_if_needed(force=self.archive_widget is not None and self._archive_last_change_id < 0)
+                self._refresh_archive_if_needed(force=True, reset_page=True)
                 self.sector_1b.setEnabled(False)
                 self.current_mode = "archive"
                 self.selection_mode_changed.emit("archive")

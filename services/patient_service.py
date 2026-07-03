@@ -93,6 +93,30 @@ class PatientService:
     def get_archived_patients(self, start_dt: str | None = None, end_dt: str | None = None) -> List[PatientDTO]:
         return self.dao.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
 
+    def get_archived_patients_page(
+        self,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+    ) -> dict:
+        if hasattr(self.dao, "get_archived_patients_page"):
+            return self.dao.get_archived_patients_page(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                page=page,
+                page_size=page_size,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+            )
+        records = self.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
+        return {"records": records, "total_count": len(records), "page": page, "page_size": page_size}
+
     def get_archive_db_paths_for_period(self, start_dt: str | None, end_dt: str | None) -> list[str]:
         if hasattr(self.dao, "get_archive_db_paths_for_period"):
             return self.dao.get_archive_db_paths_for_period(start_dt, end_dt)

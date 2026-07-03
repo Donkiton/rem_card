@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import html
 import json
+from math import ceil
 import os
 import re
 import time
@@ -9137,6 +9138,10 @@ class OperBlockMainWidget(QWidget):
         self._orders_empty_widget: QWidget | None = None
         self._last_infusion_elapsed_refresh_minute = ""
         self._archive_cases: list[dict] = []
+        self._archive_page_size = 50
+        self._archive_current_page = 1
+        self._archive_total_pages = 1
+        self._archive_total_records = 0
         self._external_archive_viewer = None
         self._external_archive_db_manager = None
         self._role_launcher_mode = False
@@ -9354,7 +9359,9 @@ class OperBlockMainWidget(QWidget):
         self.archive_search_input = QLineEdit()
         self.archive_search_input.setPlaceholderText("ФИО, ИБ, диагноз")
         self.archive_search_input.setMinimumHeight(34)
-        self.archive_search_input.textChanged.connect(self._apply_operblock_archive_cases)
+        self.archive_search_input.textChanged.connect(
+            lambda _text: self.refresh_operblock_archive(force=True, page=1)
+        )
         self.archive_refresh_button = QPushButton("Обновить")
         self.archive_refresh_button.setMinimumHeight(34)
         self.archive_refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
@@ -9380,11 +9387,46 @@ class OperBlockMainWidget(QWidget):
         self.archive_table.itemDoubleClicked.connect(lambda _item: self._open_selected_archive_case())
         layout.addWidget(self.archive_table, 1)
 
+        pagination = QHBoxLayout()
+        pagination.setContentsMargins(0, 0, 0, 0)
+        pagination.setSpacing(6)
+        self.archive_prev_page_button = QPushButton("◀")
+        self.archive_prev_page_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_prev_page_button.clicked.connect(lambda: self._set_operblock_archive_page(self._archive_current_page - 1))
+        pagination.addWidget(self.archive_prev_page_button)
+
+        self.archive_page_buttons_layout = QHBoxLayout()
+        self.archive_page_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.archive_page_buttons_layout.setSpacing(4)
+        pagination.addLayout(self.archive_page_buttons_layout)
+
+        self.archive_next_page_button = QPushButton("▶")
+        self.archive_next_page_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_next_page_button.clicked.connect(lambda: self._set_operblock_archive_page(self._archive_current_page + 1))
+        pagination.addWidget(self.archive_next_page_button)
+
+        self.archive_page_info_label = QLabel("Страница 1 из 1")
+        self.archive_page_info_label.setStyleSheet(f"border: none; color: {TEXT_SECONDARY}; font-weight: 600;")
+        pagination.addWidget(self.archive_page_info_label)
+        pagination.addStretch(1)
+
+        self.archive_page_jump_input = QLineEdit()
+        self.archive_page_jump_input.setPlaceholderText("№")
+        self.archive_page_jump_input.setMaximumWidth(52)
+        self.archive_page_jump_input.returnPressed.connect(self._jump_operblock_archive_page_from_input)
+        pagination.addWidget(self.archive_page_jump_input)
+
+        self.archive_page_jump_button = QPushButton("Перейти")
+        self.archive_page_jump_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.archive_page_jump_button.clicked.connect(self._jump_operblock_archive_page_from_input)
+        pagination.addWidget(self.archive_page_jump_button)
+        layout.addLayout(pagination)
+
         actions = QHBoxLayout()
         actions.addStretch(1)
         self.archive_open_button = QPushButton("Открыть карту")
         self.archive_restore_button = QPushButton("Вернуть на стол")
-        self.archive_delete_button = QPushButton("Удалить текущего")
+        self.archive_delete_button = QPushButton("Удалить анест. карту")
         self.archive_delete_all_button = QPushButton("Удалить всех")
         for button in (self.archive_open_button, self.archive_restore_button, self.archive_delete_button, self.archive_delete_all_button):
             button.setMinimumHeight(36)
@@ -10863,9 +10905,11 @@ class OperBlockMainWidget(QWidget):
         finally:
             self._hide_operblock_loading(loading_key)
 
-    def refresh_operblock_archive(self, *, force: bool = False, loading_message: str | None = None):
+    def refresh_operblock_archive(self, *, force: bool = False, loading_message: str | None = None, page: int | None = None):
         if self._is_closing:
             return
+        if page is not None:
+            self._archive_current_page = max(1, int(page or 1))
         loading_key = self._show_operblock_loading(
             loading_message,
             key="archive-refresh",
@@ -10873,13 +10917,41 @@ class OperBlockMainWidget(QWidget):
         )
         try:
             try:
-                cases = self._filter_archive_cases_by_table(self.operblock_service.list_archived_operation_cases())
+                search_query = str(
+                    getattr(self, "archive_search_input", None).text()
+                    if hasattr(self, "archive_search_input")
+                    else ""
+                ).strip()
+                if hasattr(self.operblock_service, "list_archived_operation_cases_page"):
+                    payload = self.operblock_service.list_archived_operation_cases_page(
+                        page=self._archive_current_page,
+                        page_size=self._archive_page_size,
+                        table_code=self._table_filter_code,
+                        search_query=search_query,
+                    )
+                    cases = [dict(item or {}) for item in (payload or {}).get("records") or []]
+                    total_count = int((payload or {}).get("total_count") or len(cases))
+                    loaded_page = int((payload or {}).get("page") or self._archive_current_page or 1)
+                else:
+                    all_cases = self._filter_archive_cases_by_table(self.operblock_service.list_archived_operation_cases())
+                    cases = all_cases
+                    total_count = len(all_cases)
+                    loaded_page = 1
             except Exception as exc:
                 logger.error("operblock archive refresh failed: %s", exc, exc_info=True)
                 CustomMessageBox.warning(self, "Архив оперблока", f"Не удалось обновить архив:\n{exc}")
                 return
+            total_pages = max(1, int(ceil(total_count / self._archive_page_size))) if total_count else 1
+            if loaded_page > total_pages:
+                self._archive_current_page = total_pages
+                QTimer.singleShot(0, lambda: self.refresh_operblock_archive(force=True, page=total_pages))
+                return
+            self._archive_current_page = max(1, min(loaded_page, total_pages))
+            self._archive_total_records = max(0, total_count)
+            self._archive_total_pages = total_pages
             source_hash = _stable_ui_hash(cases)
             if not force and source_hash == getattr(self, "_archive_cases_hash", ""):
+                self._refresh_operblock_archive_pagination_ui()
                 return
             self._archive_cases_hash = source_hash
             self._archive_cases = [dict(item or {}) for item in cases]
@@ -11214,7 +11286,7 @@ class OperBlockMainWidget(QWidget):
             self._current_protocol_display = ""
             self._update_protocol_title_label()
             self._update_operblock_staff_legend()
-            self.refresh_operblock_archive(force=True)
+            self.refresh_operblock_archive(force=True, page=1)
             if first_open:
                 operblock_startup_metrics.record_since(
                     "first_open_archive_ms",
@@ -11273,6 +11345,62 @@ class OperBlockMainWidget(QWidget):
                     item.setData(Qt.UserRole, dict(case))
                 table.setItem(row, column, item)
         self._update_operblock_archive_buttons()
+        self._refresh_operblock_archive_pagination_ui()
+
+    def _set_operblock_archive_page(self, page: int):
+        page = max(1, min(int(page or 1), int(getattr(self, "_archive_total_pages", 1) or 1)))
+        if page == getattr(self, "_archive_current_page", 1) and getattr(self, "_archive_cases", None):
+            self._apply_operblock_archive_cases()
+            return
+        self.refresh_operblock_archive(force=True, page=page)
+
+    def _jump_operblock_archive_page_from_input(self):
+        raw = str(getattr(self, "archive_page_jump_input", None).text() if hasattr(self, "archive_page_jump_input") else "").strip()
+        if not raw:
+            return
+        if not raw.isdigit():
+            CustomMessageBox.warning(self, "Пагинация", "Введите номер страницы цифрами.")
+            return
+        self._set_operblock_archive_page(int(raw))
+
+    def _refresh_operblock_archive_pagination_ui(self):
+        layout = getattr(self, "archive_page_buttons_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        current_page = max(1, int(getattr(self, "_archive_current_page", 1) or 1))
+        total_pages = max(1, int(getattr(self, "_archive_total_pages", 1) or 1))
+        max_visible = 7
+        start_page = max(1, current_page - 3)
+        end_page = min(total_pages, start_page + max_visible - 1)
+        start_page = max(1, end_page - max_visible + 1)
+
+        for page in range(start_page, end_page + 1):
+            button = QPushButton(str(page))
+            button.setCheckable(True)
+            button.setChecked(page == current_page)
+            button.setMinimumWidth(30)
+            button.setFixedHeight(28)
+            button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+            button.clicked.connect(lambda _checked=False, p=page: self._set_operblock_archive_page(p))
+            layout.addWidget(button)
+
+        if hasattr(self, "archive_prev_page_button"):
+            self.archive_prev_page_button.setEnabled(current_page > 1 and not self._write_pending)
+        if hasattr(self, "archive_next_page_button"):
+            self.archive_next_page_button.setEnabled(current_page < total_pages and not self._write_pending)
+        if hasattr(self, "archive_page_info_label"):
+            total_records = int(getattr(self, "_archive_total_records", 0) or 0)
+            self.archive_page_info_label.setText(f"Страница {current_page} из {total_pages} · записей: {total_records}")
+        if hasattr(self, "archive_page_jump_button"):
+            self.archive_page_jump_button.setEnabled(not self._write_pending)
+        if hasattr(self, "archive_page_jump_input"):
+            self.archive_page_jump_input.setEnabled(not self._write_pending)
 
     def _archive_case_from_row(self, row: int) -> dict | None:
         table = getattr(self, "archive_table", None)
@@ -11299,6 +11427,7 @@ class OperBlockMainWidget(QWidget):
             and not selected_external
             and str((selected or {}).get("status") or "").strip().lower() == "closed"
         )
+        selected_current_case = enabled and not selected_external
         has_closed_cases = any(
             str((case or {}).get("status") or "").strip().lower() == "closed"
             and not bool((case or {}).get("is_external_archive"))
@@ -11309,9 +11438,10 @@ class OperBlockMainWidget(QWidget):
         if hasattr(self, "archive_restore_button"):
             self.archive_restore_button.setEnabled(selected_closed)
         if hasattr(self, "archive_delete_button"):
-            self.archive_delete_button.setEnabled(selected_closed)
+            self.archive_delete_button.setEnabled(selected_current_case)
         if hasattr(self, "archive_delete_all_button"):
             self.archive_delete_all_button.setEnabled(has_closed_cases)
+        self._refresh_operblock_archive_pagination_ui()
 
     def _open_selected_archive_case(self):
         selected = self._selected_archive_case()
@@ -11461,7 +11591,8 @@ class OperBlockMainWidget(QWidget):
         reply = CustomMessageBox.question(
             self,
             "Удаление из архива",
-            f"Действительно удалить из архива пациента {patient_name}?",
+            f"Действительно удалить анестезиологическую карту пациента {patient_name}?\n"
+            "Если случай ещё открыт, он будет закрыт, а операционный стол освобождён.",
             CustomMessageBox.Yes | CustomMessageBox.No,
             CustomMessageBox.No,
         )

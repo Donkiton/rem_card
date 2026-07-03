@@ -921,6 +921,14 @@ class OperBlockService:
         admission_columns: set[str] | None = None,
         start_dt: str | None = None,
         end_dt: str | None = None,
+        table_code: str | None = None,
+        search_query: str = "",
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+        limit: int | None = 500,
+        offset: int = 0,
+        count_only: bool = False,
     ) -> tuple[str, tuple[Any, ...]]:
         tables = set(tables or {"operating_tables", "admissions", "patients"})
         admission_columns = set(admission_columns or {"unit_scope"})
@@ -941,6 +949,60 @@ class OperBlockService:
         if start_dt and end_dt:
             period_clause = "AND DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
             params.extend([start_dt, end_dt])
+        table_clause = ""
+        clean_table_code = str(table_code or "").strip().lower()
+        if clean_table_code:
+            table_clause = "AND LOWER(TRIM(COALESCE(oc.table_code, ''))) = ?"
+            params.append(clean_table_code)
+        search_clause = ""
+        clean_search = str(search_query or "").strip().casefold()
+        if clean_search:
+            search_expr = (
+                "LOWER(COALESCE(p.full_name, '') || ' ' || "
+                "COALESCE(a.history_number, '') || ' ' || "
+                "COALESCE(a.diagnosis_code, '') || ' ' || "
+                "COALESCE(a.diagnosis_text, '') || ' ' || "
+                "COALESCE(oc.table_code, ''))"
+            )
+            search_clause = f"AND {search_expr} LIKE ?"
+            params.append(f"%{clean_search}%")
+        field_search_clauses: list[str] = []
+        clean_name = str(search_name or "").strip().casefold()
+        if clean_name:
+            field_search_clauses.append("AND LOWER(COALESCE(p.full_name, '')) LIKE ?")
+            params.append(f"%{clean_name}%")
+        clean_ib = str(search_ib or "").strip().casefold()
+        if clean_ib:
+            field_search_clauses.append("AND LOWER(COALESCE(a.history_number, '')) LIKE ?")
+            params.append(f"%{clean_ib}%")
+        clean_diag = str(search_diag or "").strip().casefold()
+        if clean_diag:
+            field_search_clauses.append(
+                "AND LOWER(COALESCE(a.diagnosis_code, '') || ' ' || COALESCE(a.diagnosis_text, '')) LIKE ?"
+            )
+            params.append(f"%{clean_diag}%")
+        field_search_sql = "\n              ".join(field_search_clauses)
+
+        if count_only:
+            query = f"""
+            SELECT COUNT(*) AS total_count
+            FROM operation_cases oc
+            {table_join}
+            JOIN admissions a ON a.id = oc.admission_id
+            JOIN patients p ON p.id = oc.patient_id
+            WHERE oc.status IN ('active', 'closed', 'transferred_to_rao')
+              {unit_scope_clause}
+              {period_clause}
+              {table_clause}
+              {search_clause}
+              {field_search_sql}
+            """
+            return query, tuple(params)
+
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = "LIMIT ? OFFSET ?"
+            params.extend((max(1, int(limit)), max(0, int(offset or 0))))
 
         query = f"""
             SELECT
@@ -965,14 +1027,17 @@ class OperBlockService:
             {table_join}
             JOIN admissions a ON a.id = oc.admission_id
             JOIN patients p ON p.id = oc.patient_id
-            WHERE oc.status IN ('active', 'closed')
+            WHERE oc.status IN ('active', 'closed', 'transferred_to_rao')
               {unit_scope_clause}
               {period_clause}
+              {table_clause}
+              {search_clause}
+              {field_search_sql}
             ORDER BY
                 CASE WHEN oc.status = 'active' THEN 0 ELSE 1 END,
                 datetime(COALESCE(oc.ended_at, oc.started_at)) DESC,
                 oc.id DESC
-            LIMIT 500
+            {limit_sql}
             """
         return query, tuple(params)
 
@@ -1009,6 +1074,13 @@ class OperBlockService:
         *,
         start_dt: str | None = None,
         end_dt: str | None = None,
+        table_code: str | None = None,
+        search_query: str = "",
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+        limit: int | None = 500,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         if not db_path or not os.path.isfile(db_path):
             return []
@@ -1030,8 +1102,59 @@ class OperBlockService:
                 admission_columns=admission_columns,
                 start_dt=start_dt,
                 end_dt=end_dt,
+                table_code=table_code,
+                search_query=search_query,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+                limit=limit,
+                offset=offset,
             )
             return [dict(row) for row in conn.execute(query, params).fetchall()]
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _fetch_archive_case_count_from_db(
+        db_path: str,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        table_code: str | None = None,
+        search_query: str = "",
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+    ) -> int:
+        if not db_path or not os.path.isfile(db_path):
+            return 0
+        conn = sqlite3.connect(
+            f"file:{os.path.abspath(db_path)}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        try:
+            configure_connection(conn, readonly=True)
+            tables = _sqlite_table_names(conn)
+            if not {"operation_cases", "admissions", "patients"}.issubset(tables):
+                return 0
+            admission_columns = _sqlite_columns(conn, "admissions")
+            query, params = OperBlockService._build_archive_cases_query(
+                tables=tables,
+                admission_columns=admission_columns,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                table_code=table_code,
+                search_query=search_query,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+                count_only=True,
+            )
+            row = conn.execute(query, params).fetchone()
+            return int(row["total_count"] or 0) if row else 0
         finally:
             conn.close()
 
@@ -1379,6 +1502,163 @@ class OperBlockService:
         )
         return active + archived
 
+    def list_archived_operation_cases_page(
+        self,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+        table_code: str | None = None,
+        search_query: str = "",
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+    ) -> dict[str, Any]:
+        validate_operblock_runtime_path(self.db)
+        page_size = max(1, int(page_size or 50))
+        page = max(1, int(page or 1))
+        offset = (page - 1) * page_size
+        fetch_limit = offset + page_size
+        clean_table_code = self._validate_table_code(table_code) if table_code else None
+
+        result: list[dict[str, Any]] = []
+        total_count = 0
+        current_db_path = self._current_db_path()
+        current_key = os.path.normcase(current_db_path) if current_db_path else ""
+        db_paths = self.get_archive_db_paths_for_period(start_dt, end_dt) if start_dt and end_dt else self._iter_archive_db_paths(include_current=True)
+        if not db_paths and current_db_path:
+            db_paths = [current_db_path]
+        use_global_merge = len(db_paths) > 1
+
+        for db_path in db_paths:
+            abs_path = os.path.abspath(str(db_path or ""))
+            is_current = bool(current_key) and os.path.normcase(abs_path) == current_key
+            try:
+                if is_current:
+                    current_conn = getattr(self.db, "conn", None) or getattr(self.db, "_remcard_conn", None)
+                    tables = (
+                        _sqlite_table_names(current_conn)
+                        if current_conn is not None
+                        else {"operating_tables", "admissions", "patients"}
+                    )
+                    admission_columns = (
+                        _sqlite_columns(current_conn, "admissions")
+                        if current_conn is not None
+                        else {"unit_scope"}
+                    )
+                    count_query, count_params = self._build_archive_cases_query(
+                        tables=tables,
+                        admission_columns=admission_columns,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        table_code=clean_table_code,
+                        search_query=search_query,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                        count_only=True,
+                    )
+                    total_count += self._fetch_count_from_manager(count_query, count_params)
+                    query, params = self._build_archive_cases_query(
+                        tables=tables,
+                        admission_columns=admission_columns,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        table_code=clean_table_code,
+                        search_query=search_query,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                        limit=fetch_limit if use_global_merge else page_size,
+                        offset=0 if use_global_merge else offset,
+                    )
+                    rows = [_row_to_dict(row) for row in self.db.fetch_all_remcard(query, params)]
+                else:
+                    total_count += self._fetch_archive_case_count_from_db(
+                        abs_path,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        table_code=clean_table_code,
+                        search_query=search_query,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                    )
+                    rows = self._fetch_archive_case_rows_from_db(
+                        abs_path,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        table_code=clean_table_code,
+                        search_query=search_query,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                        limit=fetch_limit if use_global_merge else page_size,
+                        offset=0 if use_global_merge else offset,
+                    )
+                for row in rows:
+                    result.append(
+                        self._archive_case_payload(
+                            row,
+                            db_path=abs_path,
+                            is_external=not is_current,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("Skipping operblock archive DB %s due to paged read error: %s", abs_path, exc)
+
+        records = self._sort_archive_case_payloads(result)
+        if use_global_merge:
+            records = records[offset : offset + page_size]
+        return {
+            "records": records,
+            "total_count": int(total_count),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def _fetch_count_from_manager(self, query: str, params: tuple[Any, ...]) -> int:
+        rows = self.db.fetch_all_remcard(query, params)
+        if not rows:
+            return 0
+        row = rows[0]
+        try:
+            return int(row["total_count"] or 0)
+        except Exception:
+            try:
+                return int(row[0] or 0)
+            except Exception:
+                return 0
+
+    @staticmethod
+    def _sort_archive_case_payloads(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        active = [
+            item
+            for item in items
+            if str(item.get("status") or "").strip().lower() == "active"
+        ]
+        archived = [
+            item
+            for item in items
+            if str(item.get("status") or "").strip().lower() != "active"
+        ]
+        active.sort(
+            key=lambda item: (
+                _parse_dt(item.get("started_at")) or datetime.min,
+                int(item.get("source_operation_case_id") or item.get("operation_case_id") or 0),
+            ),
+            reverse=True,
+        )
+        archived.sort(
+            key=lambda item: (
+                _parse_dt(item.get("ended_at")) or _parse_dt(item.get("started_at")) or datetime.min,
+                int(item.get("source_operation_case_id") or item.get("operation_case_id") or 0),
+            ),
+            reverse=True,
+        )
+        return active + archived
+
     def restore_archived_operation_case(self, operation_case_id: int) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
         now = _now_text()
@@ -1583,6 +1863,7 @@ class OperBlockService:
 
     def delete_archived_operation_case(self, operation_case_id: int) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
+        now = _now_text()
 
         def operation(cursor: sqlite3.Cursor):
             case = cursor.execute(
@@ -1597,8 +1878,56 @@ class OperBlockService:
             ).fetchone()
             if not case:
                 raise OperBlockConflictError("Архивный случай не найден.")
-            if str(case["status"] or "") not in {"closed", "cancelled"}:
-                raise OperBlockConflictError("Удалить можно только пациента из архива.")
+            case_status = str(case["status"] or "").strip().lower()
+            if case_status not in {"active", "closed", "cancelled", "transferred_to_rao"}:
+                raise OperBlockConflictError("Случай не может быть удалён из архива оперблока.")
+            if case_status == "active":
+                cursor.execute(
+                    """
+                    UPDATE operation_cases
+                    SET status = 'closed',
+                        ended_at = COALESCE(ended_at, ?),
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                      AND status = 'active'
+                    """,
+                    (now, int(operation_case_id)),
+                )
+                cursor.execute(
+                    """
+                    UPDATE operation_table_assignments
+                    SET status = 'released',
+                        released_at = COALESCE(released_at, ?),
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE operation_case_id = ?
+                      AND status = 'active'
+                      AND released_at IS NULL
+                    """,
+                    (now, int(operation_case_id)),
+                )
+                cursor.execute(
+                    """
+                    UPDATE patient_status_events
+                    SET end_time = COALESCE(end_time, ?),
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE admission_id = ?
+                      AND end_time IS NULL
+                    """,
+                    (now, int(case["admission_id"])),
+                )
+                cursor.execute(
+                    """
+                    UPDATE admissions
+                    SET is_active = 0,
+                        updated_at = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (now, int(case["admission_id"])),
+                )
             result = self._hard_delete_archived_operation_cases(cursor, [case])
             if int(result.get("deleted") or 0) != 1:
                 raise OperBlockConflictError("Случай изменён другим рабочим местом. Обновите архив.")

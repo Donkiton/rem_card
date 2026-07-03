@@ -58,6 +58,7 @@ class ArchiveWidget(QWidget):
         self.page_size = 50
         self.current_page = 1
         self.total_pages = 1
+        self.total_records = 0
         self._load_worker = None
         self._load_pending = False
         self._load_token = 0
@@ -88,26 +89,26 @@ class ArchiveWidget(QWidget):
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate(2020, 1, 1))
-        self.date_from.dateChanged.connect(self.load_data)
+        self.date_from.dateChanged.connect(lambda _date: self.load_data(reset_page=True))
         
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
-        self.date_to.dateChanged.connect(self.load_data)
+        self.date_to.dateChanged.connect(lambda _date: self.load_data(reset_page=True))
         
         self.search_ib = QLineEdit()
         self.search_ib.setPlaceholderText("Номер ИБ")
         self.search_ib.setMinimumWidth(100)
         self.search_ib.setMaximumWidth(120)
-        self.search_ib.textChanged.connect(self.filter_data)
+        self.search_ib.textChanged.connect(lambda _text: self.load_data(reset_page=True))
         
         self.search_name = QLineEdit()
         self.search_name.setPlaceholderText("ФИО")
-        self.search_name.textChanged.connect(self.filter_data)
+        self.search_name.textChanged.connect(lambda _text: self.load_data(reset_page=True))
         
         self.search_diag = QLineEdit()
         self.search_diag.setPlaceholderText("Диагноз")
-        self.search_diag.textChanged.connect(self.filter_data)
+        self.search_diag.textChanged.connect(lambda _text: self.load_data(reset_page=True))
         
         lbl_from = QLabel("С:")
         lbl_from.setStyleSheet(STYLE_TRANSPARENT_LABEL)
@@ -259,7 +260,11 @@ class ArchiveWidget(QWidget):
         layout.addLayout(buttons_layout)
         main_layout.addWidget(self.frame)
 
-    def load_data(self):
+    def load_data(self, *_, page: int | None = None, reset_page: bool = False):
+        if reset_page:
+            self.current_page = 1
+        if page is not None:
+            self.current_page = max(1, int(page or 1))
         if self._load_worker and self._load_worker.isRunning():
             self._load_pending = True
             self._load_token += 1
@@ -268,29 +273,59 @@ class ArchiveWidget(QWidget):
         self._load_pending = False
         start_dt, end_dt = self._get_archive_period_bounds()
         mode = self.archive_source_mode
+        requested_page = max(1, int(self.current_page or 1))
         self._load_token += 1
         load_token = self._load_token
         if mode == ARCHIVE_MODE_OPERBLOCK:
-            loader = lambda: self._load_operblock_archive_cases(start_dt, end_dt)
+            loader = lambda: self._load_operblock_archive_page(start_dt, end_dt, requested_page)
         else:
-            loader = lambda: self.patient_service.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
+            loader = lambda: self._load_rao_archive_page(start_dt, end_dt, requested_page)
         worker = AsyncCallThread(
             loader,
             parent=self,
         )
         self._load_worker = worker
-        worker.succeeded.connect(lambda rows, token=load_token, source_mode=mode: self._apply_loaded_records(token, source_mode, rows))
+        worker.succeeded.connect(lambda payload, token=load_token, source_mode=mode: self._apply_loaded_records(token, source_mode, payload))
         worker.failed.connect(lambda exc, token=load_token, source_mode=mode: self._on_load_failed(exc, token, source_mode))
         worker.finished.connect(lambda: self._on_load_finished(worker))
         worker.start()
 
-    def _apply_loaded_records(self, load_token: int, source_mode: str, records):
+    def _load_rao_archive_page(self, start_dt: str, end_dt: str, page: int) -> dict:
+        if hasattr(self.patient_service, "get_archived_patients_page"):
+            return self.patient_service.get_archived_patients_page(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                page=page,
+                page_size=self.page_size,
+                search_name=self.search_name.text(),
+                search_ib=self.search_ib.text(),
+                search_diag=self.search_diag.text(),
+            )
+        records = self.patient_service.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
+        return {"records": records, "total_count": len(records), "page": 1, "page_size": self.page_size}
+
+    def _apply_loaded_records(self, load_token: int, source_mode: str, payload):
         if load_token != self._load_token or source_mode != self.archive_source_mode:
             return
-        self.all_archived_patients = list(records or [])
+        if isinstance(payload, dict):
+            records = list(payload.get("records") or [])
+            total_count = int(payload.get("total_count") or len(records))
+            loaded_page = int(payload.get("page") or self.current_page or 1)
+        else:
+            records = list(payload or [])
+            total_count = len(records)
+            loaded_page = 1
+        self.all_archived_patients = list(records)
+        self.filtered_patients = list(records)
+        self.total_records = max(0, total_count)
+        self.total_pages = max(1, int(ceil(self.total_records / self.page_size))) if self.total_records else 1
+        if loaded_page > self.total_pages:
+            self.current_page = self.total_pages
+            QTimer.singleShot(0, lambda: self.load_data(page=self.current_page))
+            return
+        self.current_page = max(1, min(loaded_page, self.total_pages))
         self._period_db_paths = self._collect_db_paths_for_archive_period()
-        self.current_page = 1
-        self.filter_data()
+        self._render_current_page()
 
     def _on_load_failed(self, exc: Exception, load_token: int, source_mode: str):
         if load_token != self._load_token or source_mode != self.archive_source_mode:
@@ -308,53 +343,7 @@ class ArchiveWidget(QWidget):
             QTimer.singleShot(0, self.load_data)
 
     def filter_data(self):
-        # Запоминаем текущий выбранный ключ записи
-        selected_key = None
-        current_row = self.table.currentRow()
-        if current_row >= 0:
-            patient = self._patient_from_row(current_row)
-            if patient:
-                selected_key = self._patient_key(patient)
-        
-        start_date = self.date_from.date().toPython()
-        end_date = self.date_to.date().toPython()
-        name_filter = self.search_name.text().lower()
-        ib_filter = self.search_ib.text().lower()
-        diag_filter = self.search_diag.text().lower()
-        
-        filtered = []
-        for p in self.all_archived_patients:
-            # Проверка дат поступления
-            adm_dt = self._record_admission_datetime(p)
-            if adm_dt:
-                adm_date = adm_dt.date()
-                if not (start_date <= adm_date <= end_date):
-                    continue
-            
-            # Проверка строк
-            if name_filter and name_filter not in self._record_display_name(p).lower():
-                continue
-            if ib_filter and ib_filter not in self._record_history_number(p).lower():
-                continue
-            diag = self._record_diagnosis_text(p)
-            if diag_filter and diag_filter not in diag.lower():
-                continue
-                
-            filtered.append(p)
-        self.filtered_patients = filtered
-        self.total_pages = max(1, int(ceil(len(self.filtered_patients) / self.page_size))) if self.filtered_patients else 1
-
-        if selected_key:
-            for idx, patient in enumerate(self.filtered_patients):
-                if self._patient_key(patient) == selected_key:
-                    self.current_page = (idx // self.page_size) + 1
-                    break
-            else:
-                self.current_page = 1
-        else:
-            self.current_page = 1
-
-        self._set_page(self.current_page, selected_key=selected_key)
+        self.load_data(reset_page=True)
 
     def on_item_clicked(self, item):
         patient = self._patient_from_row(item.row())
@@ -659,17 +648,17 @@ class ArchiveWidget(QWidget):
             page = 1
         if page > self.total_pages:
             page = self.total_pages
-        self.current_page = page
-        self._render_current_page(selected_key=selected_key)
+        if page == self.current_page and self.filtered_patients:
+            self._render_current_page(selected_key=selected_key)
+            return
+        self.load_data(page=page)
 
     def _render_current_page(self, selected_key: str = None):
         self._apply_table_headers()
         self.table.clearSelection()
         self.table.setRowCount(0)
 
-        start = (self.current_page - 1) * self.page_size
-        end = start + self.page_size
-        page_items = self.filtered_patients[start:end]
+        page_items = list(self.filtered_patients or [])
 
         self.table.setRowCount(len(page_items))
         selected_patient = None
@@ -746,7 +735,6 @@ class ArchiveWidget(QWidget):
     def _apply_action_buttons_state(self, patient):
         if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK:
             has_selected_case = isinstance(patient, dict) and bool(patient.get("operation_case_id"))
-            selected_closed = has_selected_case and str(patient.get("status") or "").strip().lower() == "closed"
             selected_external = has_selected_case and bool(patient.get("is_external_archive"))
             has_period_data = bool(self._period_db_paths) or bool(self.filtered_patients)
             has_current_closed_cases = any(
@@ -759,7 +747,7 @@ class ArchiveWidget(QWidget):
             self.btn_graphs.setEnabled(False)
             self.btn_open.setEnabled(has_selected_case and not self._delete_pending)
             self.btn_edit.setEnabled(False)
-            self.btn_delete_last.setEnabled(selected_closed and not selected_external and not self._delete_pending)
+            self.btn_delete_last.setEnabled(has_selected_case and not selected_external and not self._delete_pending)
             self.btn_delete.setEnabled(self.operblock_service is not None and has_current_closed_cases and not self._delete_pending)
             return
 
@@ -852,7 +840,8 @@ class ArchiveWidget(QWidget):
         reply = CustomMessageBox.question(
             self,
             "Удаление из архива оперблока",
-            f"Действительно удалить из архива оперблока пациента {patient_name}?",
+            f"Действительно удалить анестезиологическую карту пациента {patient_name}?\n"
+            "Если случай ещё открыт, он будет закрыт, а операционный стол освобождён.",
             CustomMessageBox.Yes | CustomMessageBox.No,
             CustomMessageBox.No,
         )
@@ -939,6 +928,7 @@ class ArchiveWidget(QWidget):
         self.archive_source_mode = mode
         self.all_archived_patients = []
         self.filtered_patients = []
+        self.total_records = 0
         self._period_db_paths = []
         self.current_page = 1
         self.total_pages = 1
@@ -950,6 +940,9 @@ class ArchiveWidget(QWidget):
         if hasattr(self, "archive_title"):
             title = "Архив пациентов оперблока" if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK else "Архив пациентов РАО"
             self.archive_title.setText(title)
+        if hasattr(self, "btn_delete_last"):
+            label = " Удалить анест. карту" if self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK else " Удалить последнюю карту"
+            self.btn_delete_last.setText(label)
         if hasattr(self, "btn_mode_operblock"):
             self.btn_mode_operblock.setChecked(self.archive_source_mode == ARCHIVE_MODE_OPERBLOCK)
         if hasattr(self, "btn_mode_rao"):
@@ -967,22 +960,21 @@ class ArchiveWidget(QWidget):
             self.table.setHorizontalHeaderLabels(["ФИО", "ИБ №", "Диагноз", "Поступил", "Выписан"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-    def _load_operblock_archive_cases(self, start_dt: str, end_dt: str) -> list[dict]:
+    def _load_operblock_archive_page(self, start_dt: str, end_dt: str, page: int) -> dict:
         if self.operblock_service is None:
-            return []
-        start = self._parse_datetime_value(start_dt)
-        end = self._parse_datetime_value(end_dt)
+            return {"records": [], "total_count": 0, "page": page, "page_size": self.page_size}
+        if hasattr(self.operblock_service, "list_archived_operation_cases_page"):
+            return self.operblock_service.list_archived_operation_cases_page(
+                start_dt=start_dt,
+                end_dt=end_dt,
+                page=page,
+                page_size=self.page_size,
+                search_name=self.search_name.text(),
+                search_ib=self.search_ib.text(),
+                search_diag=self.search_diag.text(),
+            )
         cases = self.operblock_service.list_archived_operation_cases(start_dt=start_dt, end_dt=end_dt)
-        result = []
-        for case in cases or []:
-            item = dict(case or {})
-            case_dt = self._parse_datetime_value(item.get("started_at")) or self._parse_datetime_value(item.get("ended_at"))
-            if case_dt and start and case_dt < start:
-                continue
-            if case_dt and end and case_dt > end:
-                continue
-            result.append(item)
-        return result
+        return {"records": list(cases or []), "total_count": len(cases or []), "page": 1, "page_size": self.page_size}
 
     def _render_operblock_case_row(self, row: int, case: dict, selected_key: str = None):
         diagnosis_text = self._record_diagnosis_text(case) or "—"
