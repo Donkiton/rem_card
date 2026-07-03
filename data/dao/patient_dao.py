@@ -85,6 +85,121 @@ class PatientDAO:
         patients.sort(key=lambda p: p.admission_datetime or datetime.min, reverse=True)
         return patients
 
+    def get_archived_patients_page(
+        self,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+    ) -> dict:
+        page_size = max(1, int(page_size or 50))
+        page = max(1, int(page or 1))
+        offset = (page - 1) * page_size
+        fetch_limit = offset + page_size
+
+        current_db_path = os.path.abspath(str(getattr(self.db, "db_path", "") or ""))
+        if start_dt and end_dt:
+            db_paths = self.get_archive_db_paths_for_period(start_dt, end_dt)
+        else:
+            db_paths = self._iter_archived_db_paths(current_db_path, include_current=True)
+        current_key = os.path.normcase(current_db_path)
+        use_global_merge = len(db_paths) > 1
+
+        rows: list[dict] = []
+        total_count = 0
+        for archived_db_path in db_paths:
+            try:
+                abs_path = os.path.abspath(archived_db_path)
+                is_current = bool(current_key) and os.path.normcase(abs_path) == current_key
+                if is_current:
+                    tables = self._get_current_table_names()
+                    patient_columns = self._get_current_table_columns("patients")
+                    admission_columns = self._get_current_table_columns("admissions")
+                    count_query, count_params = self._build_archived_patients_query(
+                        patient_columns=patient_columns,
+                        admission_columns=admission_columns,
+                        has_operations_table="operations" in tables,
+                        has_operation_cases_table="operation_cases" in tables,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                        count_only=True,
+                    )
+                    total_count += self._fetch_count_from_manager(count_query, count_params)
+                    query, params = self._build_archived_patients_query(
+                        patient_columns=patient_columns,
+                        admission_columns=admission_columns,
+                        has_operations_table="operations" in tables,
+                        has_operation_cases_table="operation_cases" in tables,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                        limit=fetch_limit if use_global_merge else page_size,
+                        offset=0 if use_global_merge else offset,
+                    )
+                    archived_rows = [dict(row) for row in self.db.fetch_all_remcard(query, params)]
+                    is_external = False
+                else:
+                    total_count += self._fetch_archived_count_from_db(
+                        abs_path,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                    )
+                    archived_rows = self._fetch_archived_rows_from_db(
+                        abs_path,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        search_name=search_name,
+                        search_ib=search_ib,
+                        search_diag=search_diag,
+                        limit=fetch_limit if use_global_merge else page_size,
+                        offset=0 if use_global_merge else offset,
+                    )
+                    is_external = True
+                for data in archived_rows:
+                    data["source_db_path"] = abs_path
+                    data["source_db_name"] = os.path.basename(archived_db_path)
+                    data["source_admission_id"] = data.get("admission_id")
+                    data["is_external_archive"] = is_external
+                    rows.append(data)
+            except Exception as exc:
+                logger.warning("Skipping archived DB %s due to paged read error: %s", archived_db_path, exc)
+
+        patients = self._map_patients(rows)
+        patients.sort(key=lambda p: p.admission_datetime or datetime.min, reverse=True)
+        if use_global_merge:
+            patients = patients[offset : offset + page_size]
+        return {
+            "records": patients,
+            "total_count": int(total_count),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def _fetch_count_from_manager(self, query: str, params: tuple) -> int:
+        rows = self.db.fetch_all_remcard(query, params)
+        if not rows:
+            return 0
+        row = rows[0]
+        try:
+            return int(row["total_count"] or 0)
+        except Exception:
+            try:
+                return int(row[0] or 0)
+            except Exception:
+                return 0
+
     def _get_current_table_names(self) -> set[str]:
         try:
             rows = self.db.fetch_all_remcard("SELECT name FROM sqlite_master WHERE type='table'")
@@ -405,6 +520,12 @@ class PatientDAO:
         has_operation_cases_table: bool = False,
         start_dt: str | None = None,
         end_dt: str | None = None,
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+        count_only: bool = False,
     ) -> tuple[str, tuple]:
         patient_columns = patient_columns or {"last_name", "first_name", "middle_name", "full_name", "birth_date"}
         admission_columns = admission_columns or {
@@ -469,7 +590,49 @@ class PatientDAO:
                 "NOT EXISTS (SELECT 1 FROM operation_cases oc WHERE oc.admission_id = a.id)"
             )
 
+        clean_name = str(search_name or "").strip().lower()
+        if clean_name:
+            name_expr = (
+                f"LOWER(COALESCE({p_col('full_name')}, '') || ' ' || "
+                f"COALESCE({p_col('last_name')}, '') || ' ' || "
+                f"COALESCE({p_col('first_name')}, '') || ' ' || "
+                f"COALESCE({p_col('middle_name')}, ''))"
+            )
+            where_parts.append(f"{name_expr} LIKE ?")
+            params.append(f"%{clean_name}%")
+
+        clean_ib = str(search_ib or "").strip().lower()
+        if clean_ib and "history_number" in admission_columns:
+            where_parts.append("LOWER(COALESCE(a.history_number, '')) LIKE ?")
+            params.append(f"%{clean_ib}%")
+
+        clean_diag = str(search_diag or "").strip().lower()
+        if clean_diag:
+            diag_parts = []
+            if "diagnosis_text" in admission_columns:
+                diag_parts.append("COALESCE(a.diagnosis_text, '')")
+            if "diagnosis_code" in admission_columns:
+                diag_parts.append("COALESCE(a.diagnosis_code, '')")
+            if diag_parts:
+                diag_expr = " || ' ' || ".join(diag_parts)
+                where_parts.append(f"LOWER({diag_expr}) LIKE ?")
+                params.append(f"%{clean_diag}%")
+
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+        if count_only:
+            query = f"""
+                SELECT COUNT(*) AS total_count
+                FROM admissions a
+                JOIN patients p ON a.patient_id = p.id
+                {where_sql}
+            """
+            return query, tuple(params)
+
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = "LIMIT ? OFFSET ?"
+            params.extend((max(1, int(limit)), max(0, int(offset or 0))))
 
         query = f"""
             SELECT
@@ -496,6 +659,7 @@ class PatientDAO:
             JOIN patients p ON a.patient_id = p.id
             {where_sql}
             ORDER BY {order_expr}
+            {limit_sql}
         """
         return query, tuple(params)
 
@@ -513,7 +677,18 @@ class PatientDAO:
             end_dt=end_dt,
         )
 
-    def _fetch_archived_rows_from_db(self, db_path: str, *, start_dt: str | None = None, end_dt: str | None = None) -> list[dict]:
+    def _fetch_archived_rows_from_db(
+        self,
+        db_path: str,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict]:
         uri = f"file:{db_path}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
@@ -543,7 +718,58 @@ class PatientDAO:
                 has_operation_cases_table=has_operation_cases,
                 start_dt=start_dt,
                 end_dt=end_dt,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+                limit=limit,
+                offset=offset,
             )
             return [dict(row) for row in conn.execute(query, params).fetchall()]
+        finally:
+            conn.close()
+
+    def _fetch_archived_count_from_db(
+        self,
+        db_path: str,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+    ) -> int:
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
+        try:
+            configure_connection(conn, readonly=True)
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+            if "patients" not in tables or "admissions" not in tables:
+                return 0
+
+            patient_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(patients)").fetchall()
+            }
+            admission_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(admissions)").fetchall()
+            }
+            query, params = self._build_archived_patients_query(
+                patient_columns=patient_columns,
+                admission_columns=admission_columns,
+                has_operations_table="operations" in tables,
+                has_operation_cases_table="operation_cases" in tables,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+                count_only=True,
+            )
+            row = conn.execute(query, params).fetchone()
+            return int(row["total_count"] or 0) if row else 0
         finally:
             conn.close()

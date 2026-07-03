@@ -169,3 +169,21 @@ def test_legacy_archive_hides_operation_case_source_without_unit_scope(tmp_path)
     history_numbers = {row.get("history_number") for row in rows}
     assert history_numbers == {"RAO-1", "RAO-POST"}
     assert "OP-1" not in history_numbers
+
+
+def test_rao_archive_page_returns_only_requested_page_and_keeps_recovery_card(tmp_path):
+    db_path = tmp_path / "current.db"
+    _create_archive_scope_db(db_path, include_scope_columns=True)
+    manager = _DbManager(str(db_path))
+    try:
+        page_1 = PatientDAO(manager).get_archived_patients_page(page=1, page_size=1)
+        page_2 = PatientDAO(manager).get_archived_patients_page(page=2, page_size=1)
+    finally:
+        manager.close()
+
+    assert page_1["total_count"] == 2
+    assert len(page_1["records"]) == 1
+    assert len(page_2["records"]) == 1
+    history_numbers = {page_1["records"][0].history_number, page_2["records"][0].history_number}
+    assert history_numbers == {"RAO-1", "RAO-POST"}
+    assert "OP-1" not in history_numbers
