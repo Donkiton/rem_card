@@ -866,7 +866,7 @@ class SettingsService:
             ).fetchone()
             background_rows = conn.execute(
                 """
-                SELECT background_key, value_json
+                SELECT background_key, value_json, image_blob IS NOT NULL AS has_image_blob
                 FROM ui_backgrounds
                 WHERE enabled = 1
                 ORDER BY active DESC, background_key ASC
@@ -898,6 +898,8 @@ class SettingsService:
             entry = dict(value)
             entry["id"] = str(entry.get("id") or background_key)
             if entry["id"] in current_ids:
+                continue
+            if not self._background_entry_has_available_image(entry, bool(row["has_image_blob"])):
                 continue
             restored_entries.append(entry)
             current_ids.add(entry["id"])
@@ -955,6 +957,25 @@ class SettingsService:
             "restored_rows": len(restored_entries),
             "restored_ids": [str(item.get("id") or "") for item in restored_entries],
         }
+
+    def _background_entry_has_available_image(self, entry: dict[str, Any], has_image_blob: bool) -> bool:
+        file_name = os.path.basename(str(entry.get("file") or "").strip().replace("\\", os.sep).replace("/", os.sep))
+        if not file_name:
+            return False
+
+        shared_path = os.path.join(self.db.settings_dir, "backgrounds", file_name)
+        if os.path.isfile(shared_path):
+            return True
+
+        try:
+            from rem_card.ui.shared.background_settings import background_legacy_file_path
+
+            if os.path.isfile(background_legacy_file_path(file_name)):
+                return True
+        except Exception:
+            pass
+
+        return bool(has_image_blob)
 
     def _ensure_default_decor_settings(self) -> dict[str, Any] | None:
         try:
@@ -2910,20 +2931,57 @@ class SettingsService:
     def _sync_background_rows_in_tx(self, cursor, payload: Any) -> None:
         if not isinstance(payload, dict):
             return
-        backgrounds = payload.get("backgrounds")
+        try:
+            from rem_card.ui.shared.background_settings import normalize_background_settings_payload
+
+            normalized_payload = normalize_background_settings_payload(payload)
+        except Exception:
+            normalized_payload = payload
+
+        backgrounds = normalized_payload.get("backgrounds")
         if not isinstance(backgrounds, list):
             return
         active_key = ""
         try:
             from rem_card.ui.shared.background_settings import active_background_entry
 
-            active_key = str(active_background_entry(payload, require_file=False).get("id") or "")
+            active_key = str(active_background_entry(normalized_payload, require_file=False).get("id") or "")
         except Exception:
             active_key = ""
+
+        active_keys: list[str] = []
+        seen_keys: set[str] = set()
         for index, raw in enumerate(backgrounds, start=1):
             if not isinstance(raw, dict):
                 continue
-            key = str(raw.get("id") or f"background_{index}")
+            key = str(raw.get("id") or f"background_{index}").strip()
+            if not key or key in seen_keys:
+                continue
+            active_keys.append(key)
+            seen_keys.add(key)
+
+        disabled_at = now_text()
+        if active_keys:
+            placeholders = ", ".join("?" for _ in active_keys)
+            cursor.execute(
+                f"""
+                UPDATE ui_backgrounds
+                SET enabled = 0,
+                    active = 0,
+                    revision = COALESCE(revision, 0) + 1,
+                    updated_at = ?
+                WHERE scope = 'shared'
+                  AND enabled = 1
+                  AND background_key NOT IN ({placeholders})
+                """,
+                (disabled_at, *active_keys),
+            )
+        for index, raw in enumerate(backgrounds, start=1):
+            if not isinstance(raw, dict):
+                continue
+            key = str(raw.get("id") or f"background_{index}").strip()
+            if not key:
+                continue
             file_name = str(raw.get("file") or "")
             image_blob = None
             image_mime = None
@@ -2967,6 +3025,7 @@ class SettingsService:
                     image_blob = COALESCE(excluded.image_blob, ui_backgrounds.image_blob),
                     image_mime = COALESCE(excluded.image_mime, ui_backgrounds.image_mime),
                     image_hash = COALESCE(excluded.image_hash, ui_backgrounds.image_hash),
+                    enabled = 1,
                     active = excluded.active,
                     revision = ui_backgrounds.revision + 1,
                     updated_at = excluded.updated_at

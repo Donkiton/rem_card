@@ -401,8 +401,8 @@ def run_integrity_check(conn: sqlite3.Connection) -> tuple[bool, str]:
     started = time.perf_counter()
     ok = False
     try:
-        with _SQLITE_NATIVE_MAINTENANCE_LOCK:
-            row = conn.execute("PRAGMA integrity_check").fetchone()
+        # Keep long DB scans outside _SQLITE_NATIVE_MAINTENANCE_LOCK; UI connection setup uses it.
+        row = conn.execute("PRAGMA integrity_check").fetchone()
         if not row:
             return False, "integrity_check returned no result"
         result = row[0]
@@ -420,8 +420,8 @@ def run_quick_check(conn: sqlite3.Connection) -> tuple[bool, str]:
     started = time.perf_counter()
     ok = False
     try:
-        with _SQLITE_NATIVE_MAINTENANCE_LOCK:
-            row = conn.execute("PRAGMA quick_check").fetchone()
+        # Keep long DB scans outside _SQLITE_NATIVE_MAINTENANCE_LOCK; UI connection setup uses it.
+        row = conn.execute("PRAGMA quick_check").fetchone()
         if not row:
             return False, "quick_check returned no result"
         result = row[0]
