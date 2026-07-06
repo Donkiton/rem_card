@@ -46,6 +46,33 @@
 - данные врача и медсестры синхронизируются через общую SQLite-БД в сетевой папке;
 - приложение старается не показывать "сохранено" до реального commit в БД.
 
+## Установка и запуск
+
+Проект разрабатывается и проверяется в основном на Windows и Python 3.11. Для локального запуска из исходников:
+
+```powershell
+git clone https://github.com/santa1264-hash/rem_card.git
+cd rem_card
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python launcher.py
+```
+
+Я обычно запускаю проект именно через `launcher.py`. Он поднимает локальный package alias через `_local_rem_card_bootstrap.py`, после чего вызывает `rem_card.app.main.main()`.
+
+Для прямого запуска конкретных ролей есть отдельные entry point'ы:
+
+```powershell
+python run_doctor.py
+python run_nurse.py
+python run_operblock_emergency.py
+python run_operblock_planned.py
+```
+
+В dev-режиме приложение само использует/создает структуру `Baza_rao3_jurnal` для базы, логов, настроек, backup и update-пакетов. В реальной эксплуатации это обычно общая сетевая папка, поэтому перед рабочим использованием путь и права доступа нужно проверять отдельно.
+
 ## Как работает
 
 ```mermaid
@@ -59,6 +86,20 @@ flowchart LR
 ```
 
 Ключевая идея: несколько клиентов работают с одной сетевой папкой `Baza_rao3_jurnal`. Основная медицинская БД лежит в `archiv/rao_journal.db`, общие настройки и справочники - в `settings/remcard_settings.db`.
+
+Наглядно запуск из исходников выглядит так:
+
+```mermaid
+flowchart TD
+    Launch["python launcher.py"] --> Bootstrap["_local_rem_card_bootstrap.py<br/>добавляет checkout как пакет rem_card"]
+    Bootstrap --> Main["app/main.py<br/>main()"]
+    Main --> Role["выбор роли, single-instance,<br/>role lock и startup guard"]
+    Role --> Window["ui/main_window.py<br/>MainWindow"]
+    Window --> Services["services/<br/>бизнес-логика и снапшоты"]
+    Services --> DAO["data/dao/<br/>чтение и запись"]
+    DAO --> SQLite["Baza_rao3_jurnal/archiv/rao_journal.db"]
+    Services --> Settings["Baza_rao3_jurnal/settings/remcard_settings.db"]
+```
 
 Для сетевой SQLite-БД проект жестко держит безопасный профиль:
 
@@ -80,6 +121,31 @@ flowchart LR
 - Центральная settings DB для справочников, тем, фонов и настроек.
 - Автообновление full/patch-пакетами.
 - Аварийный режим и offline-сценарии для части workflow.
+
+## Структура проекта
+
+```text
+rem_card/
+├── launcher.py                    # мой обычный dev-запуск проекта
+├── run_doctor.py                  # прямой запуск роли врача
+├── run_nurse.py                   # прямой запуск роли медсестры
+├── run_operblock_emergency.py     # экстренная операционная
+├── run_operblock_planned.py       # плановая операционная
+├── app/                           # startup, роли, пути, SQLite-профиль, update/recovery
+├── data/                          # DTO, DAO, schema, settings DB
+├── services/                      # бизнес-логика: карты, назначения, виталы, баланс, оперблок
+├── ui/                            # PySide6-интерфейс врача, медсестры, оперблока и общих виджетов
+├── scripts/                       # проверки, релизные сборки, backup/restore-drill, benchmark
+├── docs/                          # регламенты, safety contracts, checkpoint'ы и планы
+├── settings/                      # seed/default JSON-настройки для settings DB
+├── data/dictionaries/             # справочники для первого импорта
+├── icon/                          # иконки и графические ресурсы
+├── procedure_templates/           # шаблоны процедур
+├── RemCard.spec                   # PyInstaller-сборка release EXE
+└── requirements.txt               # зависимости для pip install -r requirements.txt
+```
+
+Основной поток такой: UI вызывает сервисы, сервисы работают через DAO, DAO пишет в SQLite через общий безопасный профиль и транзакции. Update/backup/recovery-скрипты живут отдельно в `scripts/` и документации, потому что любые изменения в БД и обновлениях считаются зоной повышенного риска.
 
 ## Честно о качестве
 
