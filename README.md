@@ -87,20 +87,6 @@ flowchart LR
 
 Ключевая идея: несколько клиентов работают с одной сетевой папкой `Baza_rao3_jurnal`. Основная медицинская БД лежит в `archiv/rao_journal.db`, общие настройки и справочники - в `settings/remcard_settings.db`.
 
-Наглядно запуск из исходников выглядит так:
-
-```mermaid
-flowchart TD
-    Launch["python launcher.py"] --> Bootstrap["_local_rem_card_bootstrap.py<br/>добавляет checkout как пакет rem_card"]
-    Bootstrap --> Main["app/main.py<br/>main()"]
-    Main --> Role["выбор роли, single-instance,<br/>role lock и startup guard"]
-    Role --> Window["ui/main_window.py<br/>MainWindow"]
-    Window --> Services["services/<br/>бизнес-логика и снапшоты"]
-    Services --> DAO["data/dao/<br/>чтение и запись"]
-    DAO --> SQLite["Baza_rao3_jurnal/archiv/rao_journal.db"]
-    Services --> Settings["Baza_rao3_jurnal/settings/remcard_settings.db"]
-```
-
 Для сетевой SQLite-БД проект жестко держит безопасный профиль:
 
 - `journal_mode=DELETE`;
@@ -126,24 +112,93 @@ flowchart TD
 
 ```text
 rem_card/
-├── launcher.py                    # мой обычный dev-запуск проекта
-├── run_doctor.py                  # прямой запуск роли врача
-├── run_nurse.py                   # прямой запуск роли медсестры
-├── run_operblock_emergency.py     # экстренная операционная
-├── run_operblock_planned.py       # плановая операционная
-├── app/                           # startup, роли, пути, SQLite-профиль, update/recovery
-├── data/                          # DTO, DAO, schema, settings DB
-├── services/                      # бизнес-логика: карты, назначения, виталы, баланс, оперблок
-├── ui/                            # PySide6-интерфейс врача, медсестры, оперблока и общих виджетов
-├── scripts/                       # проверки, релизные сборки, backup/restore-drill, benchmark
-├── docs/                          # регламенты, safety contracts, checkpoint'ы и планы
-├── settings/                      # seed/default JSON-настройки для settings DB
-├── data/dictionaries/             # справочники для первого импорта
-├── icon/                          # иконки и графические ресурсы
-├── procedure_templates/           # шаблоны процедур
-├── RemCard.spec                   # PyInstaller-сборка release EXE
-└── requirements.txt               # зависимости для pip install -r requirements.txt
+├── launcher.py
+├── run_doctor.py / run_nurse.py / run_operblock_*.py
+├── app/
+├── data/
+├── services/
+├── ui/
+├── scripts/
+├── docs/
+├── settings/
+├── icon/
+├── procedure_templates/
+├── RemCard.spec
+├── requirements.txt
+├── VERSION
+└── CHANGELOG.md
 ```
+
+### Корень
+
+- `launcher.py` - мой обычный запуск в dev-режиме. Файл вызывает `_local_rem_card_bootstrap.py`, чтобы текущая папка работала как пакет `rem_card`, и затем передает управление в `app.main.main()`.
+- `run_doctor.py`, `run_nurse.py`, `run_operblock_emergency.py`, `run_operblock_planned.py` - прямые entry point'ы ролей.
+- `run_path_setup.py` - настройка пути к рабочей папке базы для собранной версии.
+- `run_updater.py` - запуск updater'а.
+- `RemCard.spec` - сборка PyInstaller: врач, медсестра, две операционные, path setup и updater.
+- `VERSION`, `CHANGELOG.md`, `LICENSE`, `requirements.txt` - версия, история изменений, лицензия и зависимости.
+
+### app
+
+`app/` - слой запуска и системной инфраструктуры:
+
+- `main.py` - основной startup приложения, выбор роли, создание Qt-приложения и главного окна.
+- `roles.py` - роли врача, медсестры, оперблока и их нормализация.
+- `paths.py`, `runtime_paths.py`, `db_runtime_context.py` - где искать `Baza_rao3_jurnal`, БД, логи, backup, настройки и runtime-файлы.
+- `sqlite_shared.py`, `unified_db_schema.py` - общий SQLite-профиль, schema init, миграционные инварианты.
+- `startup_db_guard.py`, `db_lifecycle.py`, `db_availability.py` - проверки старта, доступность БД, recovery/rotation logic.
+- `updater_main.py`, `update_package.py`, `version.py` - обновление, manifest, версия приложения.
+
+### data
+
+`data/` - слой данных:
+
+- `data/dao/` - DAO для таблиц: пациенты, назначения, виталы, баланс, статусы, ИВЛ, процедуры, анализы, settings.
+- `data/dto/` - dataclass/DTO-объекты, которыми обмениваются сервисы и UI.
+- `data/settings/` - schema/import/release snapshot для центральной settings DB.
+- `data/dictionaries/` - seed-справочники для первого импорта в settings DB.
+- `data/mkb/` - локальная база/ресурсы МКБ.
+- `data/patient_assets/` - ресурсы, связанные с пациентами и UI.
+
+### services
+
+`services/` - бизнес-логика между UI и DAO:
+
+- `remcard_facade.py` - главный фасад RemCard для карты пациента.
+- `patient_service.py`, `patient_status_service.py` - пациенты, койки, статусы, исходы.
+- `vital_service.py`, `fluid_service.py`, `order_service.py` - витальные функции, баланс, назначения.
+- `read_coordinator.py`, `sync_coordinator.py`, `data_service.py` - снапшоты, refresh, синхронизация изменений.
+- `operblock_service.py` и `operblock_*` - логика экстренной/плановой операционной.
+- `procedures_service.py`, `procedures_print_service.py`, `lab_orders_service.py` - процедуры, печать, анализы.
+- `settings/`, `mkb/`, `analytics/`, `patient_bed_management/` - настройки, МКБ, графики/аналитика и управление пациентами/койками.
+
+### ui
+
+`ui/` - весь PySide6-интерфейс:
+
+- `main_window.py` - главное окно и переключение ролей.
+- `doctor_view/` - рабочее место врача, W1-экран, карта пациента, назначения, архив.
+- `nurse_view/` - рабочее место медсестры, назначения, выполнения, печать.
+- `operblock_view/` - интерфейс экстренной и плановой операционной.
+- `patient_bed_management/` - встроенное управление пациентами и койками.
+- `rem_card_sectors/` - сектора реанимационной карты: виталы, баланс, печать, события, ИВЛ, анализы.
+- `procedures/` - UI процедур.
+- `shared/` - общие виджеты, диалоги, графики, overlays, helpers.
+- `styles/` - темы, QSS, токены, стили компонентов.
+
+### scripts и docs
+
+- `scripts/` - проверки, benchmarks, release/patch build, backup validation, restore drill, network acceptance. Это техническая зона сопровождения проекта.
+- `scripts/pyinstaller_hooks/` - локальные hooks для PyInstaller.
+- `docs/` - регламенты и контекст: DB safety, обновления, acceptance, emergency mode, checkpoint для будущей разработки.
+- `docs/assets/readme/` - реальные скриншоты, которые отображаются в README.
+
+### Ресурсы и runtime-данные
+
+- `settings/` - JSON seed/default-настройки, из которых создается settings DB.
+- `icon/` - иконки приложения, кнопок и собранных EXE.
+- `procedure_templates/` - шаблоны процедур.
+- `Baza_rao3_jurnal/` - рабочая runtime-папка, которая в dev-режиме может появляться рядом с проектом, а в эксплуатации обычно находится в сетевой папке. Внутри нее живут `archiv/rao_journal.db`, `settings/remcard_settings.db`, `backups/`, `logs/`, `UPD/`, locks и recovery-файлы.
 
 Основной поток такой: UI вызывает сервисы, сервисы работают через DAO, DAO пишет в SQLite через общий безопасный профиль и транзакции. Update/backup/recovery-скрипты живут отдельно в `scripts/` и документации, потому что любые изменения в БД и обновлениях считаются зоной повышенного риска.
 
