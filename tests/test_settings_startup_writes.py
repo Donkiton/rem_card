@@ -19,6 +19,7 @@ if str(PACKAGE_PARENT) not in sys.path:
 from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError  # noqa: E402
 from rem_card.data.settings.settings_schema import now_text  # noqa: E402
 from rem_card.services.settings.settings_service import (  # noqa: E402
+    BACKGROUND_SETTINGS_KEY,
     SETTINGS_STARTUP_WRITE_BUSY_REASON,
     SettingsService,
 )
@@ -111,12 +112,13 @@ class SettingsStartupWritesTest(unittest.TestCase):
                         background_key, name, scope, kind, value_json, image_blob,
                         image_mime, image_hash, enabled, active, revision, created_at, updated_at
                     )
-                    VALUES (?, ?, 'shared', 'image', ?, NULL, 'image/png', ?, 1, 1, 1, ?, ?)
+                    VALUES (?, ?, 'shared', 'image', ?, ?, 'image/png', ?, 1, 1, 1, ?, ?)
                     """,
                     (
                         "test_bg",
                         "Test background",
                         json.dumps(background_entry, ensure_ascii=False, sort_keys=True),
+                        b"test image bytes",
                         "hash",
                         now,
                         now,
@@ -134,6 +136,196 @@ class SettingsStartupWritesTest(unittest.TestCase):
                     "SELECT 1 FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
                 ).fetchone()
             self.assertIsNone(row)
+
+    def test_background_save_disables_removed_rows_so_repair_does_not_restore_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = SettingsDatabase(baza_dir=str(root / "baza"))
+            db.ensure_ready()
+            service = SettingsService(db)
+            now = now_text()
+            keep_entry = {
+                "id": "keep_bg",
+                "name": "Keep background",
+                "file": "keep.png",
+                "start": "01-01",
+                "end": "01-02",
+            }
+            removed_entry = {
+                "id": "removed_bg",
+                "name": "Removed background",
+                "file": "removed.png",
+                "start": "02-01",
+                "end": "02-02",
+            }
+            with db.transaction("test_background_seed") as cursor:
+                for entry in (keep_entry, removed_entry):
+                    cursor.execute(
+                        """
+                        INSERT INTO ui_backgrounds (
+                            background_key, name, scope, kind, value_json, image_blob,
+                            image_mime, image_hash, enabled, active, revision, created_at, updated_at
+                        )
+                        VALUES (?, ?, 'shared', 'image', ?, ?, 'image/png', ?, 1, 0, 1, ?, ?)
+                        """,
+                        (
+                            entry["id"],
+                            entry["name"],
+                            json.dumps(entry, ensure_ascii=False, sort_keys=True),
+                            b"test image bytes",
+                            f"hash-{entry['id']}",
+                            now,
+                            now,
+                        ),
+                    )
+
+            payload = {
+                "version": 1,
+                "backgrounds": [
+                    {
+                        "id": "default",
+                        "name": "Стандартный фон",
+                        "file": "fon.png",
+                        "start": "01-01",
+                        "end": "12-31",
+                        "locked": True,
+                    },
+                    keep_entry,
+                ],
+            }
+            with db.transaction("test_background_save") as cursor:
+                service._write_app_setting_in_tx(
+                    cursor,
+                    "shared",
+                    "background_settings",
+                    payload,
+                    changed_by_role="doctor",
+                    catalog_key=BACKGROUND_SETTINGS_KEY,
+                    log_change=False,
+                )
+                service._sync_background_rows_in_tx(cursor, payload)
+
+            with db.read_connection() as conn:
+                removed_row = conn.execute(
+                    "SELECT enabled, active FROM ui_backgrounds WHERE background_key = 'removed_bg'"
+                ).fetchone()
+                keep_row = conn.execute(
+                    "SELECT enabled FROM ui_backgrounds WHERE background_key = 'keep_bg'"
+                ).fetchone()
+            self.assertIsNotNone(removed_row)
+            self.assertEqual(int(removed_row["enabled"]), 0)
+            self.assertEqual(int(removed_row["active"]), 0)
+            self.assertEqual(int(keep_row["enabled"]), 1)
+
+            repair_report = service._repair_background_settings_from_rows()
+
+            self.assertIsNone(repair_report)
+            with db.read_connection() as conn:
+                saved_row = conn.execute(
+                    "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
+                ).fetchone()
+            self.assertIsNotNone(saved_row)
+            saved = json.loads(saved_row["value_json"])
+            saved_ids = {
+                str(item.get("id") or "")
+                for item in saved.get("backgrounds", [])
+                if isinstance(item, dict)
+            }
+            self.assertIn("keep_bg", saved_ids)
+            self.assertNotIn("removed_bg", saved_ids)
+
+    def test_background_repair_skips_rows_without_file_or_blob(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = SettingsDatabase(baza_dir=str(root / "baza"))
+            db.ensure_ready()
+            service = SettingsService(db)
+            now = now_text()
+            missing_entry = {
+                "id": "missing_bg",
+                "name": "Missing background",
+                "file": "missing.png",
+                "start": "01-01",
+                "end": "01-02",
+            }
+            with db.transaction("test_background_missing_seed") as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO ui_backgrounds (
+                        background_key, name, scope, kind, value_json, image_blob,
+                        image_mime, image_hash, enabled, active, revision, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'shared', 'image', ?, NULL, NULL, NULL, 1, 0, 1, ?, ?)
+                    """,
+                    (
+                        "missing_bg",
+                        "Missing background",
+                        json.dumps(missing_entry, ensure_ascii=False, sort_keys=True),
+                        now,
+                        now,
+                    ),
+                )
+
+            report = service._repair_background_settings_from_rows()
+
+            self.assertIsNone(report)
+            with db.read_connection() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
+                ).fetchone()
+            self.assertIsNone(row)
+
+    def test_background_repair_restores_rows_with_blob_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = SettingsDatabase(baza_dir=str(root / "baza"))
+            db.ensure_ready()
+            service = SettingsService(db)
+            now = now_text()
+            blob_entry = {
+                "id": "blob_bg",
+                "name": "Blob background",
+                "file": "blob.png",
+                "start": "01-01",
+                "end": "01-02",
+            }
+            with db.transaction("test_background_blob_seed") as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO ui_backgrounds (
+                        background_key, name, scope, kind, value_json, image_blob,
+                        image_mime, image_hash, enabled, active, revision, created_at, updated_at
+                    )
+                    VALUES (?, ?, 'shared', 'image', ?, ?, 'image/png', ?, 1, 0, 1, ?, ?)
+                    """,
+                    (
+                        "blob_bg",
+                        "Blob background",
+                        json.dumps(blob_entry, ensure_ascii=False, sort_keys=True),
+                        b"test image bytes",
+                        "hash",
+                        now,
+                        now,
+                    ),
+                )
+
+            report = service._repair_background_settings_from_rows()
+
+            self.assertIsNotNone(report)
+            self.assertTrue(report["repaired"])
+            self.assertEqual(report["restored_ids"], ["blob_bg"])
+            with db.read_connection() as conn:
+                saved_row = conn.execute(
+                    "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = 'background_settings'"
+                ).fetchone()
+            self.assertIsNotNone(saved_row)
+            saved = json.loads(saved_row["value_json"])
+            saved_ids = [
+                str(item.get("id") or "")
+                for item in saved.get("backgrounds", [])
+                if isinstance(item, dict)
+            ]
+            self.assertIn("blob_bg", saved_ids)
 
 
 if __name__ == "__main__":
