@@ -881,7 +881,23 @@ class SettingsService:
             except Exception:
                 current_payload = {}
         current_normalized = normalize_background_settings_payload(current_payload)
-        current_backgrounds = list(current_normalized.get("backgrounds") or [])
+        background_blob_by_key = {
+            str(row["background_key"] or ""): bool(row["has_image_blob"])
+            for row in background_rows
+        }
+        current_backgrounds = []
+        pruned_entries: list[dict[str, Any]] = []
+        for entry in list(current_normalized.get("backgrounds") or []):
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("id") or "")
+            if entry_id == "default" or self._background_entry_has_available_image(
+                entry,
+                background_blob_by_key.get(entry_id, False),
+            ):
+                current_backgrounds.append(entry)
+            else:
+                pruned_entries.append(entry)
         current_ids = {str(item.get("id") or "") for item in current_backgrounds if isinstance(item, dict)}
 
         restored_entries: list[dict[str, Any]] = []
@@ -904,7 +920,7 @@ class SettingsService:
             restored_entries.append(entry)
             current_ids.add(entry["id"])
 
-        if not restored_entries:
+        if not restored_entries and not pruned_entries:
             return None
 
         repaired_payload = normalize_background_settings_payload({"backgrounds": [*current_backgrounds, *restored_entries]})
@@ -914,6 +930,8 @@ class SettingsService:
             repaired=False,
             restored_rows_pending=len(restored_entries),
             restored_ids=[str(item.get("id") or "") for item in restored_entries],
+            pruned_rows_pending=len(pruned_entries),
+            pruned_ids=[str(item.get("id") or "") for item in pruned_entries],
         )
         if lock_report:
             return lock_report
@@ -950,12 +968,16 @@ class SettingsService:
                     repaired=False,
                     restored_rows_pending=len(restored_entries),
                     restored_ids=[str(item.get("id") or "") for item in restored_entries],
+                    pruned_rows_pending=len(pruned_entries),
+                    pruned_ids=[str(item.get("id") or "") for item in pruned_entries],
                 )
             raise
         return {
             "repaired": True,
             "restored_rows": len(restored_entries),
             "restored_ids": [str(item.get("id") or "") for item in restored_entries],
+            "pruned_rows": len(pruned_entries),
+            "pruned_ids": [str(item.get("id") or "") for item in pruned_entries],
         }
 
     def _background_entry_has_available_image(self, entry: dict[str, Any], has_image_blob: bool) -> bool:
