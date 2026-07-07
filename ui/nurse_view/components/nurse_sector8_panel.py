@@ -1,7 +1,7 @@
 import os
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import QSize, Signal
+from PySide6.QtCore import QSize, QTimer, Signal
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
 from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
 
@@ -15,6 +15,8 @@ class NurseSector8Panel(QWidget):
     calc_clicked = Signal()
     bonus_clicked = Signal()
     settings_clicked = Signal()
+    user_report_clicked = Signal()
+    user_reports_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -47,6 +49,24 @@ class NurseSector8Panel(QWidget):
         self.btn_refresh.setMinimumHeight(32)
         self.btn_refresh.setStyleSheet(STYLE_SECTOR8_BUTTON)
         self.btn_refresh.clicked.connect(self.refresh_clicked.emit)
+
+        # Кнопка отправки пользовательского репорта
+        self.btn_user_report = QPushButton(" Репорт", self)
+        report_icon = os.path.join(self.icon_dir, "warning.png")
+        self.btn_user_report.setIcon(QIcon(report_icon))
+        self.btn_user_report.setIconSize(QSize(18, 18))
+        self.btn_user_report.setMinimumHeight(32)
+        self.btn_user_report.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_user_report.clicked.connect(self.user_report_clicked.emit)
+
+        # Кнопка просмотра входящих репортов
+        self.btn_user_reports = QPushButton(" Репорты", self)
+        reports_icon = os.path.join(self.icon_dir, "medical-chart.png")
+        self.btn_user_reports.setIcon(QIcon(reports_icon))
+        self.btn_user_reports.setIconSize(QSize(18, 18))
+        self.btn_user_reports.setMinimumHeight(32)
+        self.btn_user_reports.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.btn_user_reports.clicked.connect(self.user_reports_clicked.emit)
 
         # Кнопка Добавить пациента (доступна только в режиме списка коек)
         self.btn_add_patient = QPushButton(" Добавить пациента", self)
@@ -104,6 +124,8 @@ class NurseSector8Panel(QWidget):
         self._button_widgets = {
             "archive": self.btn_archive,
             "refresh": self.btn_refresh,
+            "user_report": self.btn_user_report,
+            "user_reports": self.btn_user_reports,
             "add_patient": self.btn_add_patient,
             "calc": self.btn_calc,
             "bonus": self.btn_bonus,
@@ -111,7 +133,11 @@ class NurseSector8Panel(QWidget):
             "back": self.btn_back,
             "exit": self.btn_exit,
         }
+        self._reports_count_timer = QTimer(self)
+        self._reports_count_timer.timeout.connect(self.refresh_user_reports_count)
+        self._reports_count_timer.start(60000)
         self.apply_display_settings()
+        QTimer.singleShot(0, self.refresh_user_reports_count)
 
     def _clear_layout(self):
         while self.layout.count():
@@ -143,3 +169,16 @@ class NurseSector8Panel(QWidget):
     def set_add_patient_enabled(self, enabled: bool):
         if hasattr(self, "btn_add_patient"):
             self.btn_add_patient.setEnabled(enabled)
+
+    def refresh_user_reports_count(self):
+        button = getattr(self, "btn_user_reports", None)
+        if button is None:
+            return
+        try:
+            from rem_card.services.user_reports import UserReportsService
+
+            count = UserReportsService().count_new_reports()
+        except Exception:
+            count = 0
+        button.setText(f" Репорты ({count})" if count else " Репорты")
+        button.setToolTip(f"Новых репортов: {count}" if count else "Новых репортов нет")

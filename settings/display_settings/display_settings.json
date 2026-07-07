@@ -6,6 +6,8 @@
         "order": [
           "add_patient",
           "refresh",
+          "user_report",
+          "user_reports",
           "archive",
           "bars",
           "calc",
@@ -18,6 +20,8 @@
         "visible": {
           "archive": true,
           "refresh": true,
+          "user_report": true,
+          "user_reports": false,
           "add_patient": true,
           "bars": false,
           "calc": true,
@@ -61,6 +65,8 @@
       "sector8_buttons": {
         "order": [
           "add_patient",
+          "user_report",
+          "user_reports",
           "archive",
           "refresh",
           "bonus",
@@ -72,6 +78,8 @@
         "visible": {
           "archive": false,
           "refresh": true,
+          "user_report": true,
+          "user_reports": false,
           "add_patient": true,
           "calc": false,
           "bonus": true,

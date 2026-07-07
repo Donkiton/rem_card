@@ -23,6 +23,8 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "doctor": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
+        {"id": "user_report", "label": "Репорт", "default_visible": True, "can_hide": True},
+        {"id": "user_reports", "label": "Репорты", "default_visible": False, "can_hide": True},
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
         {"id": "bars", "label": "БАРС", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
@@ -35,6 +37,8 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "nurse": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
+        {"id": "user_report", "label": "Репорт", "default_visible": True, "can_hide": True},
+        {"id": "user_reports", "label": "Репорты", "default_visible": False, "can_hide": True},
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
@@ -45,6 +49,8 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "operblock": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
+        {"id": "user_report", "label": "Репорт", "default_visible": True, "can_hide": True},
+        {"id": "user_reports", "label": "Репорты", "default_visible": False, "can_hide": True},
         {"id": "settings", "label": "Настройки", "default_visible": False, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},

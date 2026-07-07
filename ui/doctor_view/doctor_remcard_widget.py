@@ -2183,6 +2183,8 @@ class DoctorRemCardWidget(QWidget):
         self.sector8_panel.add_patient_clicked.connect(self.on_add_patient_clicked)
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
         self.sector8_panel.bars_clicked.connect(self.on_bars_clicked)
+        self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
+        self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
         self.sector8_panel.set_bars_auth_state(False)
         logger.info("[StartupDiag] phase=bars_auth_autocheck_disabled")
 
@@ -3401,6 +3403,28 @@ class DoctorRemCardWidget(QWidget):
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
         if admin_widget:
             admin_widget.set_print_context(self.service, self.admission_id, self._current_date)
+
+    def on_user_report_clicked(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportDialog
+
+        dialog = UserReportDialog(role="doctor", parent=self)
+        dialog.submitted.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def on_user_reports_clicked(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportsInboxDialog
+
+        dialog = UserReportsInboxDialog(role="doctor", parent=self)
+        dialog.reports_changed.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _refresh_user_reports_count(self):
+        panel = getattr(self, "sector8_panel", None)
+        method = getattr(panel, "refresh_user_reports_count", None)
+        if callable(method):
+            method()
 
     def _remember_settings_return_mode(self):
         mode = self._resolve_selection_mode()
