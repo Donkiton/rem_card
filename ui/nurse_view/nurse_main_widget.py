@@ -1357,6 +1357,8 @@ class NurseMainWidget(QWidget):
         self.sector8_panel.calc_clicked.connect(self.on_calculator_clicked)
         self.sector8_panel.bonus_clicked.connect(self.on_bonus_clicked)
         self.sector8_panel.settings_clicked.connect(self.on_settings_clicked)
+        self.sector8_panel.user_report_clicked.connect(self.on_user_report_clicked)
+        self.sector8_panel.user_reports_clicked.connect(self.on_user_reports_clicked)
         
         self.layout_manager.sector_8.set_content(self.sector8_panel)
         if hasattr(self.layout_manager, "selection_mode_changed"):
@@ -2296,6 +2298,28 @@ class NurseMainWidget(QWidget):
                 self.layout_manager.current_admission_id,
                 self._current_date,
             )
+
+    def on_user_report_clicked(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportDialog
+
+        dialog = UserReportDialog(role="nurse", parent=self)
+        dialog.submitted.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def on_user_reports_clicked(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportsInboxDialog
+
+        dialog = UserReportsInboxDialog(role="nurse", parent=self)
+        dialog.reports_changed.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _refresh_user_reports_count(self):
+        panel = getattr(self, "sector8_panel", None)
+        method = getattr(panel, "refresh_user_reports_count", None)
+        if callable(method):
+            method()
 
     def _remember_settings_return_mode(self):
         mode = self._resolve_selection_mode()

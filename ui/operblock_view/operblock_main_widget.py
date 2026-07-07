@@ -1962,17 +1962,25 @@ class OperBlockSector8Panel(QWidget):
 
         self.btn_archive = self._button(" Архив", "binder.png")
         self.btn_refresh = self._button(" Обновить", "refresh.png")
+        self.btn_user_report = self._button(" Репорт", "warning.png")
+        self.btn_user_reports = self._button(" Репорты", "medical-chart.png")
         self.btn_settings = self._button(" Настройки", "settings.png")
         self.btn_back = self._button(" Назад", "back.png")
         self.btn_exit = self._button(" Выход", "exit.png")
         self._button_widgets = {
             "archive": self.btn_archive,
             "refresh": self.btn_refresh,
+            "user_report": self.btn_user_report,
+            "user_reports": self.btn_user_reports,
             "settings": self.btn_settings,
             "back": self.btn_back,
             "exit": self.btn_exit,
         }
+        self._reports_count_timer = QTimer(self)
+        self._reports_count_timer.timeout.connect(self.refresh_user_reports_count)
+        self._reports_count_timer.start(60000)
         self.apply_display_settings()
+        QTimer.singleShot(0, self.refresh_user_reports_count)
 
     def set_title(self, title: str):
         self.title_label.setText(str(title or "Оперблок"))
@@ -2036,6 +2044,19 @@ class OperBlockSector8Panel(QWidget):
         self._protocol_mode = bool(enabled)
         self._launcher_back = bool(launcher_back)
         self._apply_back_visibility()
+
+    def refresh_user_reports_count(self):
+        button = getattr(self, "btn_user_reports", None)
+        if button is None:
+            return
+        try:
+            from rem_card.services.user_reports import UserReportsService
+
+            count = UserReportsService().count_new_reports()
+        except Exception:
+            count = 0
+        button.setText(f" Репорты ({count})" if count else " Репорты")
+        button.setToolTip(f"Новых репортов: {count}" if count else "Новых репортов нет")
 
 
 class ElidedTooltipLabel(QLabel):
@@ -9223,6 +9244,8 @@ class OperBlockMainWidget(QWidget):
             self.sector_8_panel.set_title(self._table_filter_name)
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
+        self.sector_8_panel.btn_user_report.clicked.connect(self._open_user_report_dialog)
+        self.sector_8_panel.btn_user_reports.clicked.connect(self._open_user_reports_dialog)
         self.sector_8_panel.btn_settings.clicked.connect(self._open_unified_settings)
         self.sector_8_panel.btn_back.clicked.connect(self.on_back_clicked)
         self.sector_8_panel.btn_exit.clicked.connect(lambda: self.window().close())
@@ -9235,6 +9258,28 @@ class OperBlockMainWidget(QWidget):
         self.stack.addWidget(self.board_page)
         root.addWidget(self.stack, 1)
         self._set_protocol_chrome(False)
+
+    def _open_user_report_dialog(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportDialog
+
+        dialog = UserReportDialog(role="operblock", parent=self)
+        dialog.submitted.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _open_user_reports_dialog(self):
+        from rem_card.ui.shared.user_reports_dialog import UserReportsInboxDialog
+
+        dialog = UserReportsInboxDialog(role="operblock", parent=self)
+        dialog.reports_changed.connect(self._refresh_user_reports_count)
+        dialog.exec()
+        self._refresh_user_reports_count()
+
+    def _refresh_user_reports_count(self):
+        panel = getattr(self, "sector_8_panel", None)
+        method = getattr(panel, "refresh_user_reports_count", None)
+        if callable(method):
+            method()
 
     def _visible_operblock_tables(self) -> list[dict]:
         if not self._table_filter_code:
