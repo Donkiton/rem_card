@@ -85,6 +85,12 @@ SETTINGS_BACKUP_FORCE_SOURCE_PREFIXES = (
     "settings_legacy_import",
     "settings_legacy_prescription_overrides",
 )
+SETTINGS_AUTO_BACKUPS_ENABLED = os.environ.get("REMCARD_SETTINGS_AUTO_BACKUPS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 SETTINGS_PRE_WRITE_BACKUP_STAMP_PLACEHOLDER = "00000000_000000_000000"
 SETTINGS_PRE_WRITE_WINDOWS_PATH_LIMIT = 240
 
@@ -281,7 +287,11 @@ class SettingsDatabase:
             reason=schema_status.reason,
             force_flush=True,
         )
-        record_metric("settings_backup_skipped_reason", "not_skipped", reason=schema_status.reason)
+        record_metric(
+            "settings_backup_skipped_reason",
+            "not_skipped" if SETTINGS_AUTO_BACKUPS_ENABLED else "manual_only",
+            reason=schema_status.reason,
+        )
         record_metric("settings_integrity_check_skipped_reason", "not_skipped", reason=schema_status.reason)
 
         conn = self.connect(readonly=False)
@@ -486,6 +496,10 @@ class SettingsDatabase:
                 )
 
     def _backup_before_migration(self, conn: sqlite3.Connection) -> None:
+        if not SETTINGS_AUTO_BACKUPS_ENABLED:
+            record_metric("settings_backup_skipped_reason", "manual_only_migration")
+            logger.info("Settings migration backup skipped: settings backups are manual-only.")
+            return
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = os.path.join(self.backups_dir, f"settings_migration_{stamp}.db")
         backup_connection(
@@ -511,6 +525,9 @@ class SettingsDatabase:
         *,
         force: bool = False,
     ) -> str | None:
+        if not SETTINGS_AUTO_BACKUPS_ENABLED:
+            record_metric("settings_backup_skipped_reason", "manual_only", source=source)
+            return None
         if not force and not _settings_source_forces_backup(source):
             recent_backup = self._find_recent_valid_pre_write_backup(source)
             if recent_backup:
@@ -545,6 +562,31 @@ class SettingsDatabase:
             source=source or "settings_write",
         )
         return created_path
+
+    def create_manual_backup(self, source: str = "manual_settings_backup") -> str:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = os.path.join(self.backups_dir, f"settings_manual_{stamp}.db")
+        conn = self.connect(readonly=True)
+        try:
+            created_path = backup_connection(
+                conn,
+                backup_path,
+                invalid_dir=os.path.join(self.backups_dir, "invalid"),
+                logger=logger,
+                validate=True,
+                lock_path=self.lock_path,
+                source=source,
+                lock_wait_sec=20.0,
+            )
+            self._annotate_settings_backup_meta(
+                created_path,
+                backup_kind="settings_manual",
+                source=source,
+            )
+            record_metric("settings_manual_backup_created", 1, backup_path=created_path)
+            return created_path
+        finally:
+            conn.close()
 
     def _find_recent_valid_pre_write_backup(self, source: str) -> str | None:
         if SETTINGS_PRE_WRITE_BACKUP_COALESCE_SEC <= 0:

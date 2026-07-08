@@ -1,6 +1,7 @@
 import hashlib
 import json
 import time
+from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -62,6 +63,22 @@ def orders_snapshot_caller(
         _ORDERS_SNAPSHOT_REQUEST_SOURCE.reset(request_source_token)
         _ORDERS_SNAPSHOT_CONTEXT_HASH.reset(context_token)
         _ORDERS_SNAPSHOT_CALLER.reset(token)
+
+
+def read_scoped_snapshot(method):
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if bool(kwargs.get("ensure_initial_status")):
+            return method(self, *args, **kwargs)
+        db = getattr(getattr(self, "orders_dao", None), "db", None)
+        scope = getattr(db, "central_read_scope", None)
+        if callable(scope):
+            with scope(method.__name__):
+                return method(self, *args, **kwargs)
+        return method(self, *args, **kwargs)
+
+    return wrapper
+
 
 class RemCardService(QObject):
     """Р¤Р°СЃР°Рґ, РѕР±СЉРµРґРёРЅСЏСЋС‰РёР№ РІСЃРµ РїРѕРґСЃРµСЂРІРёСЃС‹ РґР»СЏ СѓРґРѕР±СЃС‚РІР° РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РІ UI."""
@@ -336,6 +353,7 @@ class RemCardService(QObject):
             }
         return snapshot
 
+    @read_scoped_snapshot
     def build_beds_snapshot(
         self,
         reference_dt: Optional[datetime] = None,
@@ -366,6 +384,7 @@ class RemCardService(QObject):
             return None
         return self.status_service.get_current_status(admission_id)
 
+    @read_scoped_snapshot
     def build_vitals_snapshot(
         self,
         admission_id: int,
@@ -428,6 +447,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
+    @read_scoped_snapshot
     def build_patient_header_snapshot(
         self,
         admission_id: int,
@@ -458,6 +478,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
+    @read_scoped_snapshot
     def build_status_snapshot(
         self,
         admission_id: int,
@@ -480,6 +501,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
+    @read_scoped_snapshot
     def build_balance_snapshot(
         self,
         admission_id: int,
@@ -514,6 +536,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
+    @read_scoped_snapshot
     def build_diet_snapshot(
         self,
         admission_id: int,
@@ -532,6 +555,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
+    @read_scoped_snapshot
     def build_ivl_snapshot(
         self,
         admission_id: int,
@@ -555,6 +579,7 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id)
         return snapshot
 
+    @read_scoped_snapshot
     def build_lab_orders_snapshot(
         self,
         admission_id: int,
@@ -619,6 +644,7 @@ class RemCardService(QObject):
                 return rows, check_date
         return [], None
 
+    @read_scoped_snapshot
     def build_full_card_snapshot(
         self,
         admission_id: int,
@@ -680,6 +706,7 @@ class RemCardService(QObject):
             ensure_initial_status=ensure_initial_status,
         )
 
+    @read_scoped_snapshot
     def build_orders_snapshot(
         self,
         admission_id: int,
@@ -1896,6 +1923,7 @@ class RemCardService(QObject):
         payload = json.dumps(stable_rows, ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @read_scoped_snapshot
     def build_w1a_upcoming_orders_snapshot(self, shift_date: Optional[datetime] = None) -> Dict[str, Any]:
         effective_shift_date = shift_date or datetime.now()
         rows = [

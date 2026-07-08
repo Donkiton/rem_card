@@ -85,6 +85,8 @@ class AdminMainWidget(QWidget):
         self.btn_emergency_password = QPushButton("Аварийный пароль")
         self.btn_db_rotation = QPushButton("Ручная ротация БД")
         self.btn_import_settings = QPushButton("Загрузить настройки")
+        self.btn_backup_settings = QPushButton("Сделать бекап настроек")
+        self.btn_backup_main_db = QPushButton("Создать бекап основной бд")
 
         def prepare_button(btn: QPushButton):
             btn.setObjectName("DialogOkBtn")
@@ -114,6 +116,8 @@ class AdminMainWidget(QWidget):
             self.btn_background_settings,
             self.btn_decor_settings,
             self.btn_remcard_icon_settings,
+            self.btn_backup_settings,
+            self.btn_backup_main_db,
         ]
         try:
             from rem_card.app.runtime_paths import is_compiled
@@ -198,6 +202,8 @@ class AdminMainWidget(QWidget):
         self.btn_emergency_password.clicked.connect(self.open_emergency_password)
         self.btn_db_rotation.clicked.connect(self.open_db_rotation)
         self.btn_import_settings.clicked.connect(self.open_settings_import)
+        self.btn_backup_settings.clicked.connect(self.create_settings_backup)
+        self.btn_backup_main_db.clicked.connect(self.create_main_db_backup)
 
     def _show_settings_loading(
         self,
@@ -559,6 +565,42 @@ class AdminMainWidget(QWidget):
         finally:
             self._hide_settings_loading(loading_key)
         self.db_rotation_dialog.exec()
+
+    def create_settings_backup(self):
+        from rem_card.services.settings.settings_service import get_settings_service
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        loading_key = self._show_settings_loading("Создание бекапа настроек...", key="settings-backup", auto_hide_ms=60000)
+        try:
+            backup_path = get_settings_service().create_manual_settings_backup()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Бекап настроек", f"Не удалось создать бекап настроек:\n{exc}")
+            return
+        finally:
+            self._hide_settings_loading(loading_key)
+        CustomMessageBox.information(
+            self,
+            "Бекап настроек",
+            f"Бекап настроек создан.\n\nФайл:\n{backup_path}",
+        )
+
+    def create_main_db_backup(self):
+        from rem_card.app.backup_and_cleanup import create_manual_primary_db_backup
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        loading_key = self._show_settings_loading("Создание бекапа основной БД...", key="main-db-backup", auto_hide_ms=300000)
+        try:
+            backup_path = create_manual_primary_db_backup()
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Бекап основной БД", f"Не удалось создать бекап основной БД:\n{exc}")
+            return
+        finally:
+            self._hide_settings_loading(loading_key)
+        CustomMessageBox.information(
+            self,
+            "Бекап основной БД",
+            f"Бекап основной БД создан.\n\nФайл:\n{backup_path}",
+        )
 
     def open_settings_import(self):
         from rem_card.services.settings.settings_service import get_settings_service

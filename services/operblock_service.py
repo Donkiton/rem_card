@@ -1276,57 +1276,57 @@ class OperBlockService:
                 (
                     SELECT v.id FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) ASC, v.id ASC
+                    ORDER BY v.datetime ASC, v.id ASC
                     LIMIT 1
                 ) AS first_vitals_id,
                 (
                     SELECT v.id FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_vitals_id,
                 (
                     SELECT v.sys FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_sys,
                 (
                     SELECT v.dia FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_dia,
                 (
                     SELECT v.pulse FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_pulse,
                 (
                     SELECT v.spo2 FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_spo2,
                 (
                     SELECT v.datetime FROM vitals v
                     WHERE v.admission_id = oc.admission_id
-                      AND STRFTIME('%Y-%m-%d %H:%M', v.datetime) >= STRFTIME('%Y-%m-%d %H:%M', oc.started_at)
+                      AND v.datetime >= oc.started_at
                       AND (v.sys IS NOT NULL OR v.dia IS NOT NULL OR v.pulse IS NOT NULL OR v.spo2 IS NOT NULL)
-                    ORDER BY CAST(STRFTIME('%s', v.datetime) AS INTEGER) DESC, v.id DESC
+                    ORDER BY v.datetime DESC, v.id DESC
                     LIMIT 1
                 ) AS latest_vitals_time
             FROM operating_tables t
@@ -2048,11 +2048,11 @@ class OperBlockService:
             if started_at is None:
                 bounds_clause = "AND 1 = 0"
             else:
-                bounds_clause = 'AND datetime("datetime") >= datetime(?)'
+                bounds_clause = 'AND "datetime" >= ?'
                 params.append(_minute_floor(started_at).isoformat())
                 ended_at = _parse_dt(case.get("ended_at"))
                 if ended_at is not None:
-                    bounds_clause += ' AND datetime("datetime") <= datetime(?)'
+                    bounds_clause += ' AND "datetime" <= ?'
                     params.append(_minute_floor(ended_at).isoformat())
         rows = self.db.fetch_all_remcard(
             f"""
@@ -2060,7 +2060,7 @@ class OperBlockService:
             FROM vitals
             WHERE admission_id = ?
               {bounds_clause}
-            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
+            ORDER BY "datetime" DESC, id DESC
             LIMIT 50
             """,
             tuple(params),
@@ -2820,7 +2820,7 @@ class OperBlockService:
         params: list[Any] = [admission_id, _minute_floor(started_at).isoformat()]
         end_clause = ""
         if ended_at is not None:
-            end_clause = 'AND datetime("datetime") <= datetime(?)'
+            end_clause = 'AND "datetime" <= ?'
             params.append(ended_at.isoformat())
         rows = self.db.fetch_all_remcard(
             f"""
@@ -2828,9 +2828,9 @@ class OperBlockService:
                    last_modified_by, updated_at, COALESCE(revision, 0) AS revision
             FROM vitals
             WHERE admission_id = ?
-              AND datetime("datetime") >= datetime(?)
+              AND "datetime" >= ?
               {end_clause}
-            ORDER BY datetime("datetime") ASC, id ASC
+            ORDER BY "datetime" ASC, id ASC
             """,
             tuple(params),
         )
@@ -2870,13 +2870,13 @@ class OperBlockService:
         params: list[Any] = [int(admission_id), _minute_floor(started_at).isoformat()]
         end_clause = ""
         if ended_at is not None:
-            end_clause = 'AND datetime("datetime") <= datetime(?)'
+            end_clause = 'AND "datetime" <= ?'
             params.append(_minute_floor(ended_at).isoformat())
         query = f"""
             SELECT 1
             FROM vitals
             WHERE admission_id = ?
-              AND datetime("datetime") >= datetime(?)
+              AND "datetime" >= ?
               {end_clause}
             LIMIT 1
         """
@@ -4850,12 +4850,12 @@ class OperBlockService:
             SELECT sys, dia, pulse, temp, spo2, rr, cvp
             FROM vitals
             WHERE admission_id = ?
-              AND CAST(STRFTIME('%s', datetime) AS INTEGER) <= CAST(STRFTIME('%s', ?) AS INTEGER)
+              AND "datetime" <= ?
               AND (
                   sys IS NOT NULL OR dia IS NOT NULL OR pulse IS NOT NULL OR temp IS NOT NULL
                   OR spo2 IS NOT NULL OR rr IS NOT NULL OR cvp IS NOT NULL
               )
-            ORDER BY CAST(STRFTIME('%s', datetime) AS INTEGER) DESC, id DESC
+            ORDER BY "datetime" DESC, id DESC
             LIMIT 1
             """,
             (int(source_admission_id), event_dt_text),
@@ -5128,15 +5128,23 @@ class OperBlockService:
         def operation(cursor: sqlite3.Cursor):
             case = self._assert_active_operation_for_admission(cursor, int(dto.admission_id))
             self._assert_datetime_in_operation_bounds(timestamp, case, entity_label="Время витальных функций")
-            target_minute = timestamp.strftime("%Y-%m-%d %H:%M")
+            target_start = timestamp.replace(second=0, microsecond=0)
+            target_end = target_start + timedelta(minutes=1)
+            target_start_iso = target_start.isoformat()
+            target_end_iso = target_end.isoformat()
+            target_start_space = target_start_iso.replace("T", " ")
+            target_end_space = target_end_iso.replace("T", " ")
             row = cursor.execute(
                 """
                 SELECT id, COALESCE(revision, 0) AS revision
                 FROM vitals
                 WHERE admission_id = ?
-                  AND STRFTIME('%Y-%m-%d %H:%M', datetime) = ?
+                  AND (
+                    ("datetime" >= ? AND "datetime" < ?)
+                    OR ("datetime" >= ? AND "datetime" < ?)
+                  )
                 """,
-                (int(dto.admission_id), target_minute),
+                (int(dto.admission_id), target_start_iso, target_end_iso, target_start_space, target_end_space),
             ).fetchone()
             last_modified_by = dto.last_modified_by or "operblock"
             if row:

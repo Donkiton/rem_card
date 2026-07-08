@@ -1808,23 +1808,36 @@ class MainWindow(QMainWindow):
     def _run_maintenance_async(self):
         if self._defer_ui_maintenance_if_foreground():
             return
-        token = self.show_loading_indicator(
-            "Обслуживание базы: проверка и резервное копирование...",
-            key="maintenance",
-            auto_hide_ms=300000,
+        role_key = self._initial_role if self._initial_role in (ROLE_DOCTOR, ROLE_NURSE) else self._current_role_key()
+        modal_delay_ms = max(
+            0,
+            int(float(os.environ.get("REMCARD_MAINTENANCE_MODAL_DELAY_MS", "1500"))),
         )
+        state = {"finished": False, "token": ""}
+
+        def _show_modal_if_still_running():
+            if state["finished"] or getattr(self, "_is_closing", False):
+                return
+            state["token"] = self.show_loading_indicator(
+                "Обслуживание базы: проверка и резервное копирование...",
+                key="maintenance",
+                auto_hide_ms=300000,
+            )
+
+        QTimer.singleShot(modal_delay_ms, _show_modal_if_still_running)
 
         def _worker():
             try:
                 from rem_card.app.backup_and_cleanup import perform_daily_backup_and_cleanup
 
                 with maintenance_task("daily_backup_cleanup", source="main_window"):
-                    perform_daily_backup_and_cleanup()
+                    perform_daily_backup_and_cleanup(role=role_key)
             except Exception:
                 pass
             finally:
                 try:
-                    self.maintenance_finished.emit(token)
+                    state["finished"] = True
+                    self.maintenance_finished.emit(state["token"] or "maintenance")
                 except Exception:
                     pass
 

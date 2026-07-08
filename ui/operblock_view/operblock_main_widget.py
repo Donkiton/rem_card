@@ -156,6 +156,7 @@ from rem_card.ui.rem_card_sectors.sector_2g import Sector2g
 from rem_card.ui.rem_card_sectors.sector_2v import Sector2v
 from rem_card.ui.rem_card_sectors.sector_8 import Sector8
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.operblock_icon_settings import load_operblock_icon_pixmap
@@ -9086,6 +9087,8 @@ class OperBlockMainWidget(QWidget):
         self._view_only_mode = bool(view_only)
         self._is_closing = False
         self._board_hash = ""
+        self._board_refresh_worker = None
+        self._board_refresh_pending: dict[str, Any] | None = None
         self._protocol_hash = ""
         self._current_operation_case_id: int | None = None
         self._current_admission_id: int | None = None
@@ -10858,73 +10861,99 @@ class OperBlockMainWidget(QWidget):
     ):
         if self._is_closing:
             return
+        worker = getattr(self, "_board_refresh_worker", None)
+        if worker is not None and worker.isRunning():
+            pending = dict(self._board_refresh_pending or {})
+            self._board_refresh_pending = {
+                "force": bool(force) or bool(pending.get("force")),
+                "refresh_reason": str(refresh_reason or pending.get("refresh_reason") or "refresh_board"),
+                "loading_message": loading_message or pending.get("loading_message"),
+            }
+            return
         loading_key = self._show_operblock_loading(
             loading_message,
             key="board-refresh",
             auto_hide_ms=30000,
         )
-        try:
-            enter_started = operblock_startup_metrics.timer_start()
-            self._board_refresh_seq += 1
-            refresh_seq = self._board_refresh_seq
-            self._board_refresh_count_before_ready += 1
-            is_first_refresh = not getattr(self, "_operblock_startup_first_refresh_recorded", False)
-            refresh_fields = {
-                "refresh_seq": refresh_seq,
-                "refresh_reason": str(refresh_reason or "refresh_board"),
-                "force": bool(force),
-                "is_first": bool(is_first_refresh),
-                "is_first_refresh": bool(is_first_refresh),
-            }
-            operblock_startup_metrics.record_value("refresh_seq", refresh_seq, source="operblock_widget", **refresh_fields)
-            operblock_startup_metrics.record_value(
-                "refresh_count_before_ready",
-                self._board_refresh_count_before_ready,
+        enter_started = operblock_startup_metrics.timer_start()
+        self._board_refresh_seq += 1
+        refresh_seq = self._board_refresh_seq
+        self._board_refresh_count_before_ready += 1
+        is_first_refresh = not getattr(self, "_operblock_startup_first_refresh_recorded", False)
+        refresh_fields = {
+            "refresh_seq": refresh_seq,
+            "refresh_reason": str(refresh_reason or "refresh_board"),
+            "force": bool(force),
+            "is_first": bool(is_first_refresh),
+            "is_first_refresh": bool(is_first_refresh),
+        }
+        operblock_startup_metrics.record_value("refresh_seq", refresh_seq, source="operblock_widget", **refresh_fields)
+        operblock_startup_metrics.record_value(
+            "refresh_count_before_ready",
+            self._board_refresh_count_before_ready,
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value(
+            "refresh_reason",
+            refresh_fields["refresh_reason"],
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value("refresh_force", bool(force), source="operblock_widget", **refresh_fields)
+        operblock_startup_metrics.record_value(
+            "refresh_is_first_refresh",
+            bool(is_first_refresh),
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_value(
+            "refresh_is_first",
+            bool(is_first_refresh),
+            source="operblock_widget",
+            **refresh_fields,
+        )
+        operblock_startup_metrics.record_since("refresh_board_enter_ms", enter_started, source="operblock_widget", **refresh_fields)
+        first_refresh_started = None
+        if not getattr(self, "_operblock_startup_first_refresh_recorded", False):
+            first_refresh_started = operblock_startup_metrics.timer_start()
+            self._operblock_startup_first_refresh_recorded = True
+        snapshot_started = operblock_startup_metrics.timer_start()
+        worker = AsyncCallThread(self.operblock_service.build_operblock_board_snapshot, parent=self)
+        self._board_refresh_worker = worker
+        finalized = {"done": False}
+
+        def finalize_refresh():
+            if finalized["done"]:
+                return
+            finalized["done"] = True
+            operblock_startup_metrics.record_since(
+                "first_refresh_board_ms",
+                first_refresh_started,
                 source="operblock_widget",
+                nested_role="child",
+                parent_phase="start_auto_refresh_ms",
                 **refresh_fields,
             )
-            operblock_startup_metrics.record_value(
-                "refresh_reason",
-                refresh_fields["refresh_reason"],
-                source="operblock_widget",
-                **refresh_fields,
-            )
-            operblock_startup_metrics.record_value("refresh_force", bool(force), source="operblock_widget", **refresh_fields)
-            operblock_startup_metrics.record_value(
-                "refresh_is_first_refresh",
-                bool(is_first_refresh),
-                source="operblock_widget",
-                **refresh_fields,
-            )
-            operblock_startup_metrics.record_value(
-                "refresh_is_first",
-                bool(is_first_refresh),
-                source="operblock_widget",
-                **refresh_fields,
-            )
-            operblock_startup_metrics.record_since("refresh_board_enter_ms", enter_started, source="operblock_widget", **refresh_fields)
-            first_refresh_started = None
-            if not getattr(self, "_operblock_startup_first_refresh_recorded", False):
-                first_refresh_started = operblock_startup_metrics.timer_start()
-                self._operblock_startup_first_refresh_recorded = True
+            self._hide_operblock_loading(loading_key)
+            if getattr(self, "_board_refresh_worker", None) is worker:
+                self._board_refresh_worker = None
+            pending = self._board_refresh_pending
+            self._board_refresh_pending = None
+            if pending and not self._is_closing:
+                QTimer.singleShot(0, lambda pending=pending: self.refresh_board(**pending))
+
+        def on_snapshot_ready(snapshot):
             try:
-                try:
-                    snapshot_started = operblock_startup_metrics.timer_start()
-                    snapshot = self.operblock_service.build_operblock_board_snapshot()
-                    snapshot = self._filter_board_snapshot(snapshot)
-                except Exception as exc:
-                    logger.error("operblock board refresh failed: %s", exc, exc_info=True)
-                    CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
-                    return
-                finally:
-                    operblock_startup_metrics.record_since(
-                        "refresh_board_snapshot_ms",
-                        snapshot_started if "snapshot_started" in locals() else 0.0,
-                        source="operblock_widget",
-                        nested_role="child",
-                        parent_phase="first_refresh_board_ms",
-                        **refresh_fields,
-                    )
+                operblock_startup_metrics.record_since(
+                    "refresh_board_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    nested_role="child",
+                    parent_phase="first_refresh_board_ms",
+                    **refresh_fields,
+                )
+                snapshot = self._filter_board_snapshot(snapshot)
                 if not force and snapshot.get("content_hash") == self._board_hash:
                     return
                 self._board_hash = snapshot.get("content_hash") or ""
@@ -10938,17 +10967,31 @@ class OperBlockMainWidget(QWidget):
                     parent_phase="first_refresh_board_ms",
                     **refresh_fields,
                 )
+            except Exception as exc:
+                logger.error("operblock board refresh apply failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
             finally:
+                finalize_refresh()
+
+        def on_snapshot_failed(exc):
+            try:
                 operblock_startup_metrics.record_since(
-                    "first_refresh_board_ms",
-                    first_refresh_started,
+                    "refresh_board_snapshot_ms",
+                    snapshot_started,
                     source="operblock_widget",
                     nested_role="child",
-                    parent_phase="start_auto_refresh_ms",
+                    parent_phase="first_refresh_board_ms",
+                    status="error",
                     **refresh_fields,
                 )
-        finally:
-            self._hide_operblock_loading(loading_key)
+                logger.error("operblock board refresh failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка чтения БД", str(exc))
+            finally:
+                finalize_refresh()
+
+        worker.succeeded.connect(on_snapshot_ready)
+        worker.failed.connect(on_snapshot_failed)
+        worker.start()
 
     def refresh_operblock_archive(self, *, force: bool = False, loading_message: str | None = None, page: int | None = None):
         if self._is_closing:

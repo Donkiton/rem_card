@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -255,12 +255,12 @@ class UserReportsInboxDialog(BaseStyledDialog):
             except Exception as exc:
                 self.reports = []
                 CustomMessageBox.warning(self, "Репорты", f"Не удалось загрузить репорты:\n{exc}")
-            self._fill_table(selected)
+            selected_restored = self._fill_table(selected)
             self._update_summary()
         finally:
             self._loading = False
-        if self.table.currentItem() is not None:
-            self._on_selection_changed()
+        if selected_restored:
+            self._on_selection_changed(mark_opened=False)
 
     def _filtered_reports(self) -> list[dict[str, Any]]:
         filter_key = str(self.filter_combo.currentData() or "all")
@@ -270,42 +270,46 @@ class UserReportsInboxDialog(BaseStyledDialog):
             return [item for item in self.reports if item.get("type") == filter_key]
         return [item for item in self.reports if item.get("status") == filter_key]
 
-    def _fill_table(self, selected_directory: str = ""):
-        self.table.blockSignals(True)
-        self.table.setRowCount(0)
-        reports = self._filtered_reports()
+    def _fill_table(self, selected_directory: str = "") -> bool:
+        previous_blocked = self.table.blockSignals(True)
         selected_row = -1
-        for row, report in enumerate(reports):
-            self.table.insertRow(row)
-            directory = str(report.get("directory") or "")
-            values = [
-                str(report.get("created_at") or ""),
-                str(report.get("type_label") or ""),
-                str(report.get("status_label") or ""),
-                self._author_text(report),
-                self._preview_text(str(report.get("text") or "")),
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setData(Qt.UserRole, directory)
-                if column == 2 and report.get("status") == STATUS_NEW:
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                self.table.setItem(row, column, item)
-            if directory and directory == selected_directory:
-                selected_row = row
-        self.table.blockSignals(False)
+        reports = self._filtered_reports()
+        try:
+            self.table.setRowCount(0)
+            for row, report in enumerate(reports):
+                self.table.insertRow(row)
+                directory = str(report.get("directory") or "")
+                values = [
+                    str(report.get("created_at") or ""),
+                    str(report.get("type_label") or ""),
+                    str(report.get("status_label") or ""),
+                    self._author_text(report),
+                    self._preview_text(str(report.get("text") or "")),
+                ]
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(value)
+                    item.setData(Qt.UserRole, directory)
+                    if column == 2 and report.get("status") == STATUS_NEW:
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+                    self.table.setItem(row, column, item)
+                if selected_directory and directory and directory == selected_directory:
+                    selected_row = row
 
-        if selected_row >= 0:
-            self.table.selectRow(selected_row)
-        elif reports:
-            self.table.selectRow(0)
-        else:
-            self._selected_directory = ""
-            self.detail_text.setPlainText("Репортов нет.")
-            self.logs_text.clear()
-            self._update_action_buttons()
+            if selected_row >= 0:
+                self.table.selectRow(selected_row)
+            else:
+                self.table.clearSelection()
+                self.table.setCurrentIndex(QModelIndex())
+                self._selected_directory = ""
+                self.detail_text.setPlainText("Выберите репорт в списке." if reports else "Репортов нет.")
+                self.logs_text.clear()
+                self._update_action_buttons()
+        finally:
+            self.table.blockSignals(previous_blocked)
+
+        return selected_row >= 0
 
     def _update_summary(self):
         total = len(self.reports)
@@ -313,7 +317,7 @@ class UserReportsInboxDialog(BaseStyledDialog):
         filtered = len(self._filtered_reports())
         self.summary_label.setText(f"Всего: {total}. Новых: {new_count}. В текущем фильтре: {filtered}.")
 
-    def _on_selection_changed(self):
+    def _on_selection_changed(self, *, mark_opened: bool = True):
         if self._loading:
             return
         item = self.table.currentItem()
@@ -326,7 +330,7 @@ class UserReportsInboxDialog(BaseStyledDialog):
             self._update_action_buttons()
             return
 
-        if report.get("status") == STATUS_NEW:
+        if mark_opened and report.get("status") == STATUS_NEW:
             try:
                 updated = self.service.mark_opened(directory, role=self.role)
                 if updated:
