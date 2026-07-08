@@ -86,6 +86,12 @@ RUNTIME_BACKUP_MAX_TOTAL_BYTES = max(
 )
 RUNTIME_BACKUP_RETENTION_DAYS = max(3, int(os.environ.get("REMCARD_RUNTIME_BACKUP_RETENTION_DAYS", "21")))
 PERIODIC_BACKUP_INTERVAL_SEC = 10 * 60
+RUNTIME_AUTO_BACKUPS_ENABLED = os.environ.get("REMCARD_RUNTIME_AUTO_BACKUPS", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 PERIODIC_BACKUP_FOREGROUND_IDLE_SEC = max(
     0.0,
     float(os.environ.get("REMCARD_PERIODIC_BACKUP_FOREGROUND_IDLE_SEC", "5")),
@@ -182,7 +188,7 @@ SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC = max(
     0.1,
     float(os.environ.get("REMCARD_SHUTDOWN_CENTRAL_IO_LOCK_TIMEOUT_SEC", "3.0")),
 )
-CHANGELOG_LIVE_TRIM_ENABLED = os.environ.get("REMCARD_CHANGELOG_LIVE_TRIM_ENABLED", "1") != "0"
+CHANGELOG_LIVE_TRIM_ENABLED = os.environ.get("REMCARD_CHANGELOG_LIVE_TRIM_ENABLED", "0") == "1"
 CHANGELOG_LIVE_CAP_ROWS = max(20_000, int(os.environ.get("REMCARD_CHANGELOG_LIVE_CAP_ROWS", "120000")))
 CHANGELOG_LIVE_TRIM_BATCH = max(1_000, int(os.environ.get("REMCARD_CHANGELOG_LIVE_TRIM_BATCH", "20000")))
 CHANGELOG_LIVE_TRIM_INTERVAL_SEC = max(
@@ -1869,6 +1875,44 @@ class DatabaseManager:
             except Exception as exc:
                 logger.debug("Failed to close finished thread central read connection: %s", exc)
 
+    @contextmanager
+    def central_read_scope(self, source: str = "snapshot"):
+        """Reuse one short-lived read-only central connection inside a snapshot build."""
+        state = self._thread_state
+        depth = int(getattr(state, "central_read_scope_depth", 0) or 0)
+        if depth > 0:
+            state.central_read_scope_depth = depth + 1
+            try:
+                yield self
+            finally:
+                state.central_read_scope_depth = depth
+            return
+
+        conn = None
+        state.central_read_scope_depth = 1
+        try:
+            if not self._in_current_thread_remcard_transaction() and not self._should_read_from_local():
+                with self._central_io_lock_scope("remcard_read_scope_open", source=str(source or "snapshot")):
+                    conn = self._open_readonly_central_connection()
+                state.central_read_scope_conn = conn
+            yield self
+        finally:
+            state.central_read_scope_depth = 0
+            if hasattr(state, "central_read_scope_conn"):
+                try:
+                    delattr(state, "central_read_scope_conn")
+                except Exception:
+                    pass
+            if conn is not None:
+                try:
+                    with self.write_controller.connection_guard(conn):
+                        conn.close()
+                except Exception as exc:
+                    logger.debug("Failed to close scoped central read connection: %s", exc)
+
+    def _scoped_central_read_connection(self) -> Optional[sqlite3.Connection]:
+        return getattr(self._thread_state, "central_read_scope_conn", None)
+
     @staticmethod
     def _read_cancel_requested(cancel_check, cancel_state: dict[str, Any]) -> bool:
         if cancel_check is None:
@@ -1961,6 +2005,9 @@ class DatabaseManager:
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
                     with self.write_controller.connection_guard(conn):
                         return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
+                scoped_conn = self._scoped_central_read_connection()
+                if scoped_conn is not None:
+                    return self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check)
                 conn = self._open_readonly_central_connection()
                 try:
                     return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
@@ -1983,6 +2030,11 @@ class DatabaseManager:
                         cursor = conn.cursor()
                         cursor.execute(query, params)
                         return cursor.fetchone()
+                scoped_conn = self._scoped_central_read_connection()
+                if scoped_conn is not None:
+                    cursor = scoped_conn.cursor()
+                    cursor.execute(query, params)
+                    return cursor.fetchone()
                 conn = self._open_readonly_central_connection()
                 try:
                     cursor = conn.cursor()
@@ -2159,6 +2211,9 @@ class DatabaseManager:
         return self._create_named_backup(prefix=prefix, source=source)
 
     def _create_shutdown_backup(self):
+        if not RUNTIME_AUTO_BACKUPS_ENABLED:
+            logger.info("Skipping shutdown backup: runtime automatic backups are disabled.")
+            return
         if SHUTDOWN_BACKUP_MIN_INTERVAL_SEC > 0:
             latest_shutdown_backup = self._find_latest_runtime_backup_by_prefix("shutdown_")
             if latest_shutdown_backup:
@@ -2174,6 +2229,8 @@ class DatabaseManager:
         self._create_named_backup(prefix="shutdown", source="close")
 
     def _maybe_create_periodic_backup(self, source: str = "write"):
+        if not RUNTIME_AUTO_BACKUPS_ENABLED:
+            return
         now = time.time()
         if now - self._last_backup_ts < self._periodic_backup_interval_sec:
             return

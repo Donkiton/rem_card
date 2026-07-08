@@ -380,6 +380,24 @@ class SettingsService:
         self._snapshot_cache: dict[str, tuple[int, str, Any]] = {}
         self._last_seen_settings_change_id = 0
         self.source_client_id = PROCESS_SOURCE_CLIENT_ID
+        self._operblock_settings_on_demand_checked = False
+        self._operblock_icons_on_demand_checked = False
+
+    @staticmethod
+    def _current_startup_role() -> str:
+        role = str(os.environ.get("REMCARD_UI_ROLE") or "").strip().lower()
+        if role in {"doctor", "врач"}:
+            return "doctor"
+        if role in {"nurse", "медсестра"}:
+            return "nurse"
+        if role.startswith("operblock"):
+            return "operblock"
+        return role
+
+    def _should_prepare_operblock_on_startup(self) -> bool:
+        if os.environ.get("REMCARD_SETTINGS_STARTUP_SEED_OPERBLOCK") == "1":
+            return True
+        return self._current_startup_role() not in {"doctor", "nurse"}
 
     @staticmethod
     def _is_settings_startup_write_busy(exc: Exception) -> bool:
@@ -496,10 +514,18 @@ class SettingsService:
                 return dict(info)
             startup_warnings: list[dict[str, Any]] = []
             self._ensure_legacy_import()
-            operblock_import_report = self._ensure_operblock_settings_imported()
-            if operblock_import_report:
-                info = {**info, "operblock_settings_startup_import": operblock_import_report}
-                self._add_startup_warning_from_report(startup_warnings, operblock_import_report)
+            if self._should_prepare_operblock_on_startup():
+                operblock_import_report = self._ensure_operblock_settings_imported()
+                if operblock_import_report:
+                    info = {**info, "operblock_settings_startup_import": operblock_import_report}
+                    self._add_startup_warning_from_report(startup_warnings, operblock_import_report)
+            else:
+                record_metric(
+                    "settings_operblock_startup_seed_skipped",
+                    1,
+                    reason="role_startup_lazy",
+                    role=self._current_startup_role(),
+                )
             release_report = self._apply_bundled_release_snapshot_if_needed()
             if release_report:
                 info = {**info, "settings_release_snapshot": release_report}
@@ -512,15 +538,47 @@ class SettingsService:
             if decor_report:
                 info = {**info, "decor_settings_startup": decor_report}
                 self._add_startup_warning_from_report(startup_warnings, decor_report)
-            icons_report = self._ensure_default_operblock_icons()
-            if icons_report:
-                info = {**info, "operblock_icons_startup": icons_report}
-                self._add_startup_warning_from_report(startup_warnings, icons_report)
+            if self._should_prepare_operblock_on_startup():
+                icons_report = self._ensure_default_operblock_icons()
+                if icons_report:
+                    info = {**info, "operblock_icons_startup": icons_report}
+                    self._add_startup_warning_from_report(startup_warnings, icons_report)
+            else:
+                operblock_startup_metrics.record_value(
+                    "settings_operblock_icons_seed_skipped",
+                    "role_startup_lazy",
+                    source="settings_service",
+                )
+                operblock_startup_metrics.record_value(
+                    "settings_operblock_icons_seed_reason",
+                    "role_startup_lazy",
+                    source="settings_service",
+                )
             if startup_warnings:
                 info = {**info, "settings_startup_warnings": startup_warnings}
             self._ready = True
             self._ready_info = dict(info)
             return dict(info)
+
+    def create_manual_settings_backup(self) -> str:
+        self.ensure_ready()
+        return self.db.create_manual_backup()
+
+    def _ensure_operblock_settings_on_demand(self) -> None:
+        if self._operblock_settings_on_demand_checked:
+            return
+        self._operblock_settings_on_demand_checked = True
+        report = self._ensure_operblock_settings_imported()
+        if report:
+            logger.info("Operblock settings prepared on demand: %s", report)
+
+    def _ensure_operblock_icons_on_demand(self) -> None:
+        if self._operblock_icons_on_demand_checked:
+            return
+        self._operblock_icons_on_demand_checked = True
+        report = self._ensure_default_operblock_icons()
+        if report:
+            logger.info("Operblock icons prepared on demand: %s", report)
 
     def invalidate_cache(self, catalog_key: str | None = None) -> None:
         if catalog_key:
@@ -2864,6 +2922,8 @@ class SettingsService:
 
     def get_app_setting(self, scope: str, key: str, *, default: Any = None) -> Any:
         self.ensure_ready()
+        if str(scope) == OPERBLOCK_SETTINGS_SCOPE and str(key) in OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS:
+            self._ensure_operblock_settings_on_demand()
         with self.db.read_connection() as conn:
             row = conn.execute(
                 "SELECT value_json FROM app_settings WHERE scope = ? AND key = ?",
@@ -3398,8 +3458,10 @@ class SettingsService:
             )
         return skipped_report
 
-    def list_operblock_icons(self) -> dict[str, dict[str, Any]]:
+    def list_operblock_icons(self, *, ensure_defaults: bool = True) -> dict[str, dict[str, Any]]:
         self.ensure_ready()
+        if ensure_defaults:
+            self._ensure_operblock_icons_on_demand()
         with self.db.read_connection() as conn:
             rows = conn.execute(
                 """
@@ -3426,7 +3488,7 @@ class SettingsService:
         return result
 
     def list_remcard_icons(self) -> dict[str, dict[str, Any]]:
-        records = self.list_operblock_icons()
+        records = self.list_operblock_icons(ensure_defaults=False)
         remcard_keys = {definition.icon_key for definition in REMCARD_ICON_DEFINITIONS}
         return {
             key: record

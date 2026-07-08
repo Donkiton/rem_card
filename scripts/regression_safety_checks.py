@@ -4970,7 +4970,6 @@ def _check_archive_delete_enqueue_error_refreshes(temp_root: str) -> tuple[bool,
         remcard_service = FakeWriteService(result=(True, None, "ok"))
         widget = ArchiveWidget(patient_service, remcard_service=remcard_service)
         load_calls = []
-        widget.load_data = lambda: load_calls.append(True)
         patient = FakeArchivePatient(
             id=1,
             full_name="Иванов Иван",
@@ -4982,6 +4981,15 @@ def _check_archive_delete_enqueue_error_refreshes(temp_root: str) -> tuple[bool,
             source_db_path=None,
             source_admission_id=None,
         )
+        def fake_load_data(*args, **kwargs):
+            load_calls.append((args, kwargs))
+            widget._apply_loaded_records(
+                widget._load_token,
+                widget.archive_source_mode,
+                {"records": [patient], "total_count": 1, "page": 1, "page_size": widget.page_size},
+            )
+
+        widget.load_data = fake_load_data
         widget.all_archived_patients = [patient]
         widget.filter_data()
         widget.table.selectRow(0)
@@ -5913,6 +5921,205 @@ def _check_backup_cleanup_gating(temp_root: str) -> tuple[bool, str]:
         return False, "cleanup gate passed unexpectedly with only corrupt backup"
 
     return True, "ok"
+
+
+def _with_isolated_daily_backup_paths(temp_root: str):
+    from rem_card.app import backup_and_cleanup
+    from rem_card.app import paths as app_paths
+
+    root = Path(temp_root)
+    baza_dir = root / "Baza"
+    archiv_dir = baza_dir / "archiv"
+    report_dir = baza_dir / "report"
+    backups_dir = baza_dir / "backups"
+    valid_dir = backups_dir / "valid"
+    health_dir = baza_dir / "backup_health"
+    invalid_dir = health_dir / "invalid_backups"
+    logs_dir = root / "logs"
+    db_path = archiv_dir / "rao_journal.db"
+    lock_path = archiv_dir / "db.lock"
+
+    values = {
+        "ARCHIV_DIR": str(archiv_dir),
+        "REPORT_DIR": str(report_dir),
+        "BACKUPS_RC_DIR": str(backups_dir),
+        "BACKUPS_VALID_DIR": str(valid_dir),
+        "BACKUP_HEALTH_DIR": str(health_dir),
+        "INVALID_BACKUPS_DIR": str(invalid_dir),
+        "LOGS_DIR": str(logs_dir),
+        "REMCARD_DB_PATH": str(db_path),
+        "DB_LOCK_PATH": str(lock_path),
+    }
+    saved_module = {name: getattr(backup_and_cleanup, name) for name in values}
+    saved_paths = {
+        "REPORT_DIR": app_paths.REPORT_DIR,
+        "LOGS_DIR": app_paths.LOGS_DIR,
+        "BAZA_LOGS_DIR": app_paths.BAZA_LOGS_DIR,
+    }
+    saved_ensure = backup_and_cleanup.ensure_directories
+
+    def fake_ensure_directories():
+        for directory in (
+            baza_dir,
+            archiv_dir,
+            report_dir,
+            backups_dir,
+            valid_dir,
+            health_dir,
+            invalid_dir,
+            logs_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+
+    for name, value in values.items():
+        setattr(backup_and_cleanup, name, value)
+    app_paths.REPORT_DIR = str(report_dir)
+    app_paths.LOGS_DIR = str(logs_dir)
+    app_paths.BAZA_LOGS_DIR = str(logs_dir)
+    backup_and_cleanup.ensure_directories = fake_ensure_directories
+
+    def restore():
+        for name, value in saved_module.items():
+            setattr(backup_and_cleanup, name, value)
+        for name, value in saved_paths.items():
+            setattr(app_paths, name, value)
+        backup_and_cleanup.ensure_directories = saved_ensure
+
+    return backup_and_cleanup, {
+        "baza_dir": baza_dir,
+        "archiv_dir": archiv_dir,
+        "report_dir": report_dir,
+        "backups_dir": backups_dir,
+        "valid_dir": valid_dir,
+        "health_dir": health_dir,
+        "invalid_dir": invalid_dir,
+        "logs_dir": logs_dir,
+        "db_path": db_path,
+        "lock_path": lock_path,
+    }, restore
+
+
+def _check_daily_backup_does_not_catch_up_after_window(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.services.user_reports import USER_REPORTS_DIR_NAME, UserReportsService
+
+    backup_and_cleanup, paths, restore = _with_isolated_daily_backup_paths(temp_root)
+    saved_now = backup_and_cleanup._network_now_or_local
+    saved_create = backup_and_cleanup._create_safe_sqlite_backup
+    calls: list[tuple[str, str]] = []
+    try:
+        backup_and_cleanup._network_now_or_local = lambda: (datetime(2026, 7, 9, 8, 0, 0), "regression")
+        backup_and_cleanup._create_safe_sqlite_backup = lambda db_path, backup_path: calls.append((db_path, backup_path))
+
+        first = backup_and_cleanup.perform_daily_backup_and_cleanup(role="doctor")
+        second = backup_and_cleanup.perform_daily_backup_and_cleanup(role="doctor")
+
+        if calls:
+            return False, f"morning startup attempted backup after window: {calls}"
+        if first.get("status") != "skipped" or first.get("reason") != "after_night_window":
+            return False, f"unexpected first morning result: {first}"
+        if second.get("status") != "skipped" or second.get("reason") != "after_night_window":
+            return False, f"unexpected second morning result: {second}"
+
+        service = UserReportsService(reports_root=paths["report_dir"] / USER_REPORTS_DIR_NAME, logs_dirs=[])
+        reports = service.list_reports()
+        if len(reports) != 1:
+            return False, f"morning missed backup should create one deduped report, got {len(reports)}"
+        report_text = str(reports[0].get("text") or "")
+        if "не был создан" not in report_text or "ночное окно" not in report_text:
+            return False, f"morning missed backup report has unexpected text: {report_text[:300]}"
+        if list(paths["valid_dir"].glob("*.db")):
+            return False, "morning missed backup created a DB file"
+        return True, "ok"
+    finally:
+        backup_and_cleanup._network_now_or_local = saved_now
+        backup_and_cleanup._create_safe_sqlite_backup = saved_create
+        restore()
+
+
+def _check_daily_backup_skips_when_primary_db_unavailable(temp_root: str) -> tuple[bool, str]:
+    from datetime import datetime
+
+    from rem_card.services.user_reports import USER_REPORTS_DIR_NAME, UserReportsService
+
+    backup_and_cleanup, paths, restore = _with_isolated_daily_backup_paths(temp_root)
+    saved_now = backup_and_cleanup._network_now_or_local
+    saved_create = backup_and_cleanup._create_safe_sqlite_backup
+    calls: list[tuple[str, str]] = []
+    try:
+        paths["archiv_dir"].mkdir(parents=True, exist_ok=True)
+        paths["db_path"].write_bytes(b"not sqlite")
+        backup_and_cleanup._network_now_or_local = lambda: (datetime(2026, 7, 9, 3, 5, 0), "regression")
+        backup_and_cleanup._create_safe_sqlite_backup = lambda db_path, backup_path: calls.append((db_path, backup_path))
+
+        result = backup_and_cleanup.perform_daily_backup_and_cleanup(role="doctor")
+
+        if calls:
+            return False, f"backup started despite unavailable primary DB: {calls}"
+        if result.get("status") != "primary_db_unavailable":
+            return False, f"unexpected unavailable primary DB result: {result}"
+        if list(paths["valid_dir"].glob("*.db")):
+            return False, "unavailable primary DB created a backup file"
+        backup_date = str(result.get("backup_date") or "")
+        if backup_date:
+            daily_paths = backup_and_cleanup._daily_backup_paths(backup_date)
+            if os.path.exists(daily_paths["lock"]) or os.path.exists(daily_paths["reserved"]):
+                return False, "unavailable primary DB left a daily backup reservation"
+            if os.path.exists(daily_paths["done"]):
+                return False, "unavailable primary DB marked backup as done"
+
+        service = UserReportsService(reports_root=paths["report_dir"] / USER_REPORTS_DIR_NAME, logs_dirs=[])
+        reports = service.list_reports()
+        if len(reports) != 1:
+            return False, f"unavailable primary DB should create one report, got {len(reports)}"
+        report_text = str(reports[0].get("text") or "")
+        if "основная база" not in report_text.lower() or "не был создан" not in report_text:
+            return False, f"unavailable primary DB report has unexpected text: {report_text[:300]}"
+        return True, "ok"
+    finally:
+        backup_and_cleanup._network_now_or_local = saved_now
+        backup_and_cleanup._create_safe_sqlite_backup = saved_create
+        restore()
+
+
+def _check_manual_primary_db_backup_button_and_api(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app.sqlite_shared import backup_meta_path, validate_sqlite_file
+
+    admin_source = (PROJECT_ROOT / "ui" / "admin_view" / "admin_main_widget.py").read_text(encoding="utf-8")
+    for marker in (
+        "Создать бекап основной бд",
+        "self.btn_backup_main_db.clicked.connect(self.create_main_db_backup)",
+        "create_manual_primary_db_backup",
+    ):
+        if marker not in admin_source:
+            return False, f"manual primary DB backup UI marker missing: {marker}"
+
+    backup_and_cleanup, paths, restore = _with_isolated_daily_backup_paths(temp_root)
+    try:
+        paths["archiv_dir"].mkdir(parents=True, exist_ok=True)
+        _create_sqlite_file(str(paths["db_path"]))
+
+        backup_path = backup_and_cleanup.create_manual_primary_db_backup()
+        if not os.path.isfile(backup_path):
+            return False, f"manual primary DB backup file was not created: {backup_path}"
+        if "_manual_" not in os.path.basename(backup_path):
+            return False, f"manual primary DB backup name is not marked as manual: {backup_path}"
+        ok, reason = validate_sqlite_file(backup_path)
+        if not ok:
+            return False, f"manual primary DB backup is invalid: {reason}"
+        meta_path = backup_meta_path(backup_path)
+        if not os.path.isfile(meta_path):
+            return False, f"manual primary DB backup metadata missing: {meta_path}"
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        if meta.get("backup_kind") != "primary_manual":
+            return False, f"manual primary DB backup metadata kind is wrong: {meta}"
+        if meta.get("source") != "manual_primary_db_backup":
+            return False, f"manual primary DB backup metadata source is wrong: {meta}"
+        return True, "ok"
+    finally:
+        restore()
 
 
 def _check_backup_count_limit_enforcement(temp_root: str) -> tuple[bool, str]:
@@ -8603,6 +8810,7 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
     from rem_card.services.read_coordinator import ReadCoordinator
 
     _ = temp_root
+    original_runtime_auto_backups = dbm.RUNTIME_AUTO_BACKUPS_ENABLED
     required_tokens = {
         "app/foreground_activity.py": ["foreground_activity_snapshot"],
         "app/maintenance_activity.py": ["maintenance_task", "active_maintenance_snapshot"],
@@ -8699,6 +8907,7 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
         def get_latest_change_id(self, admission_id=None, include_global=True):
             return 42
 
+    dbm.RUNTIME_AUTO_BACKUPS_ENABLED = True
     foreground_activity._reset_foreground_activity_for_tests()
     try:
         service = StaticOrdersService()
@@ -8770,6 +8979,7 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
             return False, "background integrity_check must not hold _central_io_lock while running"
         return True, "ok"
     finally:
+        dbm.RUNTIME_AUTO_BACKUPS_ENABLED = original_runtime_auto_backups
         foreground_activity._reset_foreground_activity_for_tests()
 
 
@@ -9293,6 +9503,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
     original_coalesce_wait = read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC
     original_widget_metric = orders_widget_module.record_metric
     original_widget_watchdog_ms = orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS
+    original_runtime_auto_backups = dbm.RUNTIME_AUTO_BACKUPS_ENABLED
 
     def capture_metric(name, value=None, **fields):
         metrics.append((str(name), value, dict(fields)))
@@ -9363,6 +9574,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         def get_latest_change_id(self, admission_id=None, include_global=True):
             return self.change_id
 
+    dbm.RUNTIME_AUTO_BACKUPS_ENABLED = True
     read_coordinator.record_metric = capture_metric
     dbm.record_metric = capture_metric
     orders_widget_module.record_metric = capture_metric
@@ -9580,6 +9792,7 @@ def _check_orders_post_finalize_stall_guard(temp_root: str) -> tuple[bool, str]:
         read_coordinator.READ_ORDERS_POISON_THRESHOLD_SEC = original_poison_threshold
         read_coordinator.READ_ORDERS_COALESCE_WAIT_SEC = original_coalesce_wait
         orders_widget_module.ORDERS_POST_FINALIZE_WATCHDOG_MS = original_widget_watchdog_ms
+        dbm.RUNTIME_AUTO_BACKUPS_ENABLED = original_runtime_auto_backups
         foreground_activity._reset_foreground_activity_for_tests()
 
 
@@ -21640,7 +21853,7 @@ def _check_settings_db_schema_and_no_wal(temp_root: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -> tuple[bool, str]:
+def _check_settings_manual_backup_only(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.settings_db_paths import get_settings_backup_dir
     from rem_card.app.sqlite_shared import backup_meta_path
     from rem_card.data.settings.settings_db import SettingsDatabase
@@ -21650,9 +21863,10 @@ def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -
     service = SettingsService(SettingsDatabase(baza_dir=baza_dir))
     service.ensure_ready()
     backup_dir = get_settings_backup_dir(baza_dir)
-    before = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
-    first_marker = f"settings_pre_write_backup_first_{os.getpid()}"
-    second_marker = f"settings_pre_write_backup_second_{os.getpid()}"
+    before_pre = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
+    before_manual = set(glob.glob(os.path.join(backup_dir, "settings_manual_*.db")))
+    first_marker = f"settings_manual_backup_first_{os.getpid()}"
+    second_marker = f"settings_manual_backup_second_{os.getpid()}"
     service.set_app_setting(
         "shared",
         "display_settings",
@@ -21669,20 +21883,28 @@ def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -
         entity_type="display_settings",
         operation="update",
     )
-    after = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
-    created = sorted(after - before)
-    if len(created) != 1:
-        return False, f"expected one coalesced pre-write backup for repeated settings writes, got {len(created)}"
+    after_pre_write = set(glob.glob(os.path.join(backup_dir, "settings_pre_*.db")))
+    after_manual_write = set(glob.glob(os.path.join(backup_dir, "settings_manual_*.db")))
+    if after_pre_write != before_pre:
+        return False, "ordinary settings writes must not create automatic settings_pre backups"
+    if after_manual_write != before_manual:
+        return False, "ordinary settings writes must not create manual settings backups"
 
-    latest_backup = created[-1]
+    manual_path = service.create_manual_settings_backup()
+    after_manual = set(glob.glob(os.path.join(backup_dir, "settings_manual_*.db")))
+    created = sorted(after_manual - before_manual)
+    if len(created) != 1 or os.path.abspath(created[0]) != os.path.abspath(manual_path):
+        return False, f"expected one manual settings backup, got {len(created)}"
+
+    latest_backup = manual_path
     meta_path = backup_meta_path(latest_backup)
     if not os.path.isfile(meta_path):
         return False, f"missing backup metadata: {meta_path}"
     meta = json.loads(Path(meta_path).read_text(encoding="utf-8"))
     if meta.get("quick_check") != "ok" or meta.get("integrity_check") != "ok":
         return False, f"backup was not validated: {meta}"
-    if meta.get("settings_source") != "settings_app_setting_display_settings":
-        return False, f"backup metadata lost settings source: {meta}"
+    if meta.get("backup_kind") != "settings_manual":
+        return False, f"manual backup metadata lost backup kind: {meta}"
 
     with sqlite3.connect(latest_backup) as backup_conn:
         row = backup_conn.execute(
@@ -21691,9 +21913,9 @@ def _check_settings_write_coalesces_validated_pre_write_backup(temp_root: str) -
         ).fetchone()
     raw_value = str(row[0] if row else "")
     if first_marker in raw_value:
-        return False, "coalesced pre-write backup should contain state before the repeated write burst"
-    if second_marker in raw_value:
-        return False, "coalesced pre-write backup contains data written after backup point"
+        return False, "manual backup should contain the current state, not stale first write"
+    if second_marker not in raw_value:
+        return False, "manual backup did not contain current settings state"
 
     current = service.get_app_setting("shared", "display_settings", default={})
     if not isinstance(current, dict) or current.get("probe") != second_marker:
@@ -25772,10 +25994,28 @@ def _check_background_release_preserves_user_settings(temp_root: str) -> tuple[b
     repair_baza = os.path.join(temp_root, "RepairBaza")
     repair_service = SettingsService(SettingsDatabase(baza_dir=repair_baza))
     repair_service.ensure_ready()
+    user_background_file = "background_release_user.png"
+    user_background_dir = os.path.join(repair_service.db.settings_dir, "backgrounds")
+    os.makedirs(user_background_dir, exist_ok=True)
+    with open(os.path.join(user_background_dir, user_background_file), "wb") as handle:
+        handle.write(b"\x89PNG\r\n\x1a\n")
+    repair_user_payload = bg.normalize_background_settings_payload(
+        {
+            "backgrounds": [
+                {
+                    "id": background_key,
+                    "name": "Пользовательский фон",
+                    "file": user_background_file,
+                    "start": "02-01",
+                    "end": "02-02",
+                }
+            ]
+        }
+    )
     repair_service.set_app_setting(
         "shared",
         "background_settings",
-        user_payload,
+        repair_user_payload,
         catalog_key=BACKGROUND_SETTINGS_KEY,
         entity_type="background_settings",
         operation="user_probe",
@@ -26777,6 +27017,9 @@ def main(argv: list[str] | None = None):
         ("card_bottom_row_hidden_on_vitals_open", _check_card_bottom_row_hidden_on_vitals_open),
         ("local_replica_tmp_cleanup", _check_local_replica_tmp_cleanup),
         ("backup_cleanup_gating", _check_backup_cleanup_gating),
+        ("daily_backup_does_not_catch_up_after_window", _check_daily_backup_does_not_catch_up_after_window),
+        ("daily_backup_skips_when_primary_db_unavailable", _check_daily_backup_skips_when_primary_db_unavailable),
+        ("manual_primary_db_backup_button_and_api", _check_manual_primary_db_backup_button_and_api),
         ("backup_count_limit_enforcement", _check_backup_count_limit_enforcement),
         ("db_rotation_forbids_emergency_runtime", _check_db_rotation_forbids_emergency_runtime),
         ("db_rotation_creates_validated_backup", _check_db_rotation_creates_validated_backup),
@@ -27249,7 +27492,7 @@ def main(argv: list[str] | None = None):
         ("emergency_acceptance_runner_checks_remote_settings_untouched", _check_emergency_acceptance_runner_checks_remote_settings_untouched),
         ("settings_db_path_is_network_data_root_settings_folder", _check_settings_db_path_is_network_data_root_settings_folder),
         ("settings_db_schema_and_no_wal", _check_settings_db_schema_and_no_wal),
-        ("settings_write_coalesces_validated_pre_write_backup", _check_settings_write_coalesces_validated_pre_write_backup),
+        ("settings_manual_backup_only", _check_settings_manual_backup_only),
         ("sqlite_backup_handles_long_metadata_path", _check_sqlite_backup_handles_long_metadata_path),
         ("settings_backup_cleanup_rotates_old_files", _check_settings_backup_cleanup_rotates_old_files),
         ("settings_schema_fastpath_current_schema_no_write", _check_settings_schema_fastpath_current_schema_no_write),

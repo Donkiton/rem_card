@@ -11,6 +11,15 @@ from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
 
 
+REM_CARD_MONITOR_ROLES = {"doctor", "nurse", "врач", "медсестра"}
+OPBLOCK_CHANGE_ENTITIES = {
+    "operating_tables",
+    "operation_cases",
+    "operation_table_assignments",
+    "operblock_timeline_events",
+}
+
+
 def _float_env(name: str, default: float, *, minimum: float) -> float:
     raw = os.environ.get(name)
     if raw is None or str(raw).strip() == "":
@@ -263,10 +272,10 @@ class DataUpdateMonitor(QThread):
 
         if current_change_id > previous_change_id:
             rows = self._data_service.fetch_changes_since(previous_change_id)
-            changes = [self._normalize_row(row) for row in rows] + settings_changes
-            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
-            self._set_last_seen_settings_id(current_settings_change_id)
-            if not changes:
+            raw_changes = [self._normalize_row(row) for row in rows]
+            if not raw_changes and not settings_changes:
+                self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+                self._set_last_seen_settings_id(current_settings_change_id)
                 logger.warning(
                     "Change-log gap suspected: previous=%s current=%s rows=0. Forcing full refresh.",
                     previous_change_id,
@@ -284,6 +293,17 @@ class DataUpdateMonitor(QThread):
                     force_sources=force_sources,
                 )
                 return
+            changes = self._filter_changes_for_runtime_role(raw_changes + settings_changes)
+            self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
+            self._set_last_seen_settings_id(current_settings_change_id)
+            if not changes:
+                record_metric(
+                    "change_payload_suppressed",
+                    1,
+                    reason="runtime_role_scope_filter",
+                    role=str(getattr(self._data_service, "_runtime_role", "") or ""),
+                )
+                return
             self._emit_payload(
                 current_change_id=current_change_id,
                 previous_change_id=previous_change_id,
@@ -298,6 +318,9 @@ class DataUpdateMonitor(QThread):
         self._set_last_seen_id(current_change_id, observed_refresh_seq=observed_refresh_seq)
         self._set_last_seen_settings_id(current_settings_change_id)
         if settings_changed:
+            settings_changes = self._filter_changes_for_runtime_role(settings_changes)
+            if not settings_changes:
+                return
             self._emit_payload(
                 current_change_id=current_change_id,
                 previous_change_id=previous_change_id,
@@ -318,6 +341,170 @@ class DataUpdateMonitor(QThread):
                 forced=True,
                 force_sources=force_sources,
             )
+
+    def _filter_changes_for_runtime_role(self, changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        role = str(getattr(self._data_service, "_runtime_role", "") or "").strip().lower()
+        if role not in REM_CARD_MONITOR_ROLES:
+            return changes
+        if not changes:
+            return changes
+        result: list[dict[str, Any]] = []
+        scope_by_change_id = self._classify_change_scopes(changes)
+        filtered_count = 0
+        for change in changes:
+            if self._is_operblock_only_change(change, scope_by_change_id.get(int(change.get("id") or 0), {})):
+                filtered_count += 1
+                continue
+            result.append(change)
+        if filtered_count:
+            record_metric(
+                "opblock_only_change_filtered",
+                filtered_count,
+                role=role,
+                total_changes=len(changes),
+            )
+            logger.debug(
+                "Filtered %s opblock-only change(s) for runtime role %s (total=%s)",
+                filtered_count,
+                role,
+                len(changes),
+            )
+        return result
+
+    def _classify_change_scopes(self, changes: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+        medical_changes = [
+            change for change in changes
+            if not change.get("settings_change") and change.get("id") is not None
+        ]
+        if not medical_changes:
+            return {}
+        values_sql = ",".join("(?, ?, ?, ?)" for _ in medical_changes)
+        params: list[Any] = []
+        for change in medical_changes:
+            params.extend(
+                [
+                    int(change.get("id") or 0),
+                    str(change.get("entity_name") or ""),
+                    change.get("entity_id"),
+                    change.get("admission_id"),
+                ]
+            )
+        query = f"""
+            WITH input(change_id, entity_name, entity_id, admission_id) AS (
+                VALUES {values_sql}
+            )
+            SELECT
+                i.change_id,
+                LOWER(TRIM(COALESCE(a.unit_scope, ''))) AS admission_unit_scope,
+                LOWER(TRIM(COALESCE(a.admission_type, ''))) AS admission_type,
+                COALESCE(
+                    oc.future_rao_admission_id,
+                    oc_assignment.future_rao_admission_id,
+                    oc_event.future_rao_admission_id,
+                    (
+                        SELECT oc_by_admission.future_rao_admission_id
+                        FROM operation_cases oc_by_admission
+                        WHERE oc_by_admission.admission_id = i.admission_id
+                          AND oc_by_admission.future_rao_admission_id IS NOT NULL
+                        LIMIT 1
+                    )
+                ) AS future_rao_admission_id,
+                CASE
+                    WHEN i.entity_name = 'patients'
+                     AND EXISTS (
+                        SELECT 1
+                        FROM admissions patient_admission
+                        WHERE patient_admission.patient_id = i.entity_id
+                          AND (
+                            LOWER(TRIM(COALESCE(patient_admission.unit_scope, ''))) = 'operblock'
+                            OR LOWER(TRIM(COALESCE(patient_admission.admission_type, ''))) = 'operblock'
+                          )
+                     )
+                    THEN 1 ELSE 0
+                END AS patient_has_operblock_admission,
+                CASE
+                    WHEN i.entity_name = 'patients'
+                     AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM admissions visible_admission
+                            WHERE visible_admission.patient_id = i.entity_id
+                              AND LOWER(TRIM(COALESCE(visible_admission.unit_scope, ''))) <> 'operblock'
+                              AND LOWER(TRIM(COALESCE(visible_admission.admission_type, ''))) <> 'operblock'
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM operation_cases visible_case
+                            WHERE visible_case.patient_id = i.entity_id
+                              AND visible_case.future_rao_admission_id IS NOT NULL
+                        )
+                     )
+                    THEN 1 ELSE 0
+                END AS patient_has_visible_admission
+            FROM input i
+            LEFT JOIN admissions a ON a.id = i.admission_id
+            LEFT JOIN operation_cases oc
+                ON i.entity_name = 'operation_cases'
+               AND oc.id = i.entity_id
+            LEFT JOIN operation_table_assignments ota
+                ON i.entity_name = 'operation_table_assignments'
+               AND ota.id = i.entity_id
+            LEFT JOIN operation_cases oc_assignment
+                ON oc_assignment.id = ota.operation_case_id
+            LEFT JOIN operblock_timeline_events ote
+                ON i.entity_name = 'operblock_timeline_events'
+               AND ote.id = i.entity_id
+            LEFT JOIN operation_cases oc_event
+                ON oc_event.id = ote.operation_case_id
+        """
+        db = getattr(self._data_service, "db", None)
+        fetch_all = getattr(db, "fetch_all_remcard", None)
+        if not callable(fetch_all):
+            return {}
+        try:
+            rows = fetch_all(query, tuple(params))
+        except Exception as exc:
+            logger.debug("Change scope classification failed; keeping changes unfiltered: %s", exc)
+            return {}
+        result: dict[int, dict[str, Any]] = {}
+        for row in rows or []:
+            change_id = int(row["change_id"] if hasattr(row, "keys") else row[0])
+            if hasattr(row, "keys"):
+                result[change_id] = {
+                    "admission_unit_scope": str(row["admission_unit_scope"] or ""),
+                    "admission_type": str(row["admission_type"] or ""),
+                    "future_rao_admission_id": row["future_rao_admission_id"],
+                    "patient_has_operblock_admission": bool(row["patient_has_operblock_admission"]),
+                    "patient_has_visible_admission": bool(row["patient_has_visible_admission"]),
+                }
+            else:
+                result[change_id] = {
+                    "admission_unit_scope": str(row[1] or ""),
+                    "admission_type": str(row[2] or ""),
+                    "future_rao_admission_id": row[3],
+                    "patient_has_operblock_admission": bool(row[4]),
+                    "patient_has_visible_admission": bool(row[5]),
+                }
+        return result
+
+    @staticmethod
+    def _is_operblock_only_change(change: dict[str, Any], scope: dict[str, Any]) -> bool:
+        if change.get("settings_change"):
+            return str(change.get("settings_scope") or "").strip().lower() == "operblock"
+        entity_name = str(change.get("entity_name") or "")
+        if entity_name == "operating_tables":
+            return True
+        if scope.get("future_rao_admission_id") not in (None, "", 0):
+            return False
+        if entity_name in OPBLOCK_CHANGE_ENTITIES:
+            return True
+        if str(scope.get("admission_unit_scope") or "") == "operblock":
+            return True
+        if str(scope.get("admission_type") or "") == "operblock":
+            return True
+        if entity_name == "patients" and scope.get("patient_has_operblock_admission"):
+            return not bool(scope.get("patient_has_visible_admission"))
+        return False
 
     def _emit_payload(
         self,
