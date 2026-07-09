@@ -17,8 +17,11 @@ import argparse
 import json
 import os
 import queue
+import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -30,6 +33,7 @@ from typing import Any, Callable
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 DEFAULT_REPORT_DIR = SCRIPT_DIR / "bench_results" / "sanity_runs"
+REGRESSION_TEMP_PREFIX = "remcard_regression_checks_"
 
 
 @dataclass
@@ -72,14 +76,91 @@ def _tail(text: str, max_chars: int = 1600) -> str:
     return text[-max_chars:]
 
 
+def _safe_managed_temp_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+        temp_root = Path(tempfile.gettempdir()).resolve(strict=False)
+        return (
+            resolved.name.startswith(REGRESSION_TEMP_PREFIX)
+            and os.path.commonpath([str(resolved), str(temp_root)]) == str(temp_root)
+        )
+    except Exception:
+        return False
+
+
+def _rmtree_with_retries(path: Path, *, attempts: int = 12, delay_sec: float = 0.5) -> str:
+    if not path.exists():
+        return ""
+    if not _safe_managed_temp_path(path):
+        return f"refused unsafe temp cleanup path: {path}"
+    last_error = ""
+    for attempt in range(1, attempts + 1):
+        try:
+            shutil.rmtree(path)
+            return ""
+        except FileNotFoundError:
+            return ""
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < attempts:
+                time.sleep(delay_sec)
+    return f"failed to remove {path}: {last_error}"
+
+
+def _cleanup_temp_paths(paths: list[Path]) -> list[str]:
+    errors: list[str] = []
+    for path in paths:
+        error = _rmtree_with_retries(path)
+        if error:
+            errors.append(error)
+    return errors
+
+
+def _cleanup_previous_managed_regression_temps() -> list[str]:
+    temp_root = Path(tempfile.gettempdir())
+    paths = [
+        path
+        for path in temp_root.glob(f"{REGRESSION_TEMP_PREFIX}sanity_*")
+        if path.is_dir()
+    ]
+    return _cleanup_temp_paths(paths)
+
+
+def _make_regression_temp_root() -> Path:
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Path(tempfile.gettempdir()) / f"{REGRESSION_TEMP_PREFIX}sanity_{stamp}_{os.getpid()}_{time.time_ns()}"
+
+
 def _terminate_process(proc: subprocess.Popen[str]) -> None:
     if proc.poll() is not None:
         return
-    proc.terminate()
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        proc.terminate()
     try:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            proc.kill()
         proc.wait(timeout=5)
 
 
@@ -101,6 +182,7 @@ def _run_check(
     timeout_sec: float,
     idle_timeout_sec: float | None = None,
     env: dict[str, str],
+    cleanup_paths: list[Path] | None = None,
     validate: Callable[[int, dict[str, Any] | None], tuple[bool, str]],
 ) -> CheckResult:
     started = time.perf_counter()
@@ -118,6 +200,7 @@ def _run_check(
         encoding="utf-8",
         errors="replace",
         env=env,
+        start_new_session=os.name != "nt",
     )
     readers = [
         threading.Thread(target=_read_pipe, args=(proc.stdout, "stdout", output_queue), daemon=True),
@@ -168,20 +251,27 @@ def _run_check(
     stdout = "".join(stdout_parts)
     stderr = "".join(stderr_parts)
     payload = _extract_last_json_dict(stdout) or _extract_last_json_dict(stderr)
+    cleanup_errors = _cleanup_temp_paths(cleanup_paths or [])
     if timed_out_reason:
+        reason = timed_out_reason
+        if cleanup_errors:
+            reason = f"{reason}; temp cleanup failed: {'; '.join(cleanup_errors)}"
         duration = time.perf_counter() - started
         return CheckResult(
             name=name,
             ok=False,
             duration_sec=duration,
             exit_code=None,
-            reason=timed_out_reason,
+            reason=reason,
             json_payload=payload,
             stdout_tail=_tail(stdout),
             stderr_tail=_tail(stderr),
             command=command,
         )
     ok, reason = validate(proc.returncode or 0, payload)
+    if cleanup_errors:
+        ok = False
+        reason = f"{reason}; temp cleanup failed: {'; '.join(cleanup_errors)}"
     return CheckResult(
         name=name,
         ok=ok,
@@ -326,6 +416,7 @@ def main() -> int:
 
     report_dir = Path(args.report_dir).resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
+    startup_cleanup_errors = _cleanup_previous_managed_regression_temps()
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(PROJECT_ROOT)
@@ -374,18 +465,32 @@ def main() -> int:
     ]
 
     results: list[CheckResult] = []
-    failed = False
-    failure_reason = ""
+    failed = bool(startup_cleanup_errors)
+    failure_reason = (
+        "startup temp cleanup failed: " + "; ".join(startup_cleanup_errors)
+        if startup_cleanup_errors
+        else ""
+    )
     started_at = datetime.now()
     started_perf = time.perf_counter()
 
     for item in checks_plan:
+        if failed:
+            break
+        item_env = env
+        cleanup_paths: list[Path] = []
+        if item["name"] == "regression_safety_checks":
+            regression_temp_root = _make_regression_temp_root()
+            item_env = env.copy()
+            item_env["REMCARD_REGRESSION_TEMP_ROOT"] = str(regression_temp_root)
+            cleanup_paths.append(regression_temp_root)
         result = _run_check(
             name=item["name"],
             command=item["command"],
             timeout_sec=item["timeout"],
             idle_timeout_sec=item.get("idle_timeout"),
-            env=env,
+            env=item_env,
+            cleanup_paths=cleanup_paths,
             validate=item["validate"],
         )
         results.append(result)
@@ -403,6 +508,7 @@ def main() -> int:
         "finished_at": finished_at.isoformat(),
         "duration_sec": round(duration_total, 3),
         "failure_reason": failure_reason,
+        "startup_cleanup_errors": startup_cleanup_errors,
         "checks_total": len(checks_plan),
         "checks_executed": len(results),
         "checks_passed": sum(1 for r in results if r.ok),

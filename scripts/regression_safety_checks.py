@@ -35,6 +35,7 @@ from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGRESSION_TIMEOUT_SEC = 1200.0
+DIRECT_REGRESSION_TEMP_PREFIX = "remcard_regression_checks_direct_"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 try:
@@ -46,7 +47,79 @@ except Exception:
 
 
 def _make_temp_root() -> str:
-    return tempfile.mkdtemp(prefix="remcard_regression_checks_")
+    explicit_root = os.environ.get("REMCARD_REGRESSION_TEMP_ROOT")
+    if explicit_root:
+        root = Path(explicit_root).resolve()
+        system_temp = Path(tempfile.gettempdir()).resolve()
+        if (
+            not root.name.startswith("remcard_regression_checks_")
+            or os.path.commonpath([str(root), str(system_temp)]) != str(system_temp)
+        ):
+            raise RuntimeError(f"Unsafe REMCARD_REGRESSION_TEMP_ROOT name: {root}")
+        root.mkdir(parents=True, exist_ok=True)
+        return str(root)
+    return tempfile.mkdtemp(prefix=f"{DIRECT_REGRESSION_TEMP_PREFIX}{os.getpid()}_")
+
+
+def _safe_regression_temp_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+        system_temp = Path(tempfile.gettempdir()).resolve(strict=False)
+        return (
+            resolved.name.startswith(DIRECT_REGRESSION_TEMP_PREFIX)
+            and os.path.commonpath([str(resolved), str(system_temp)]) == str(system_temp)
+        )
+    except Exception:
+        return False
+
+
+def _owner_pid_from_direct_temp_name(name: str) -> int | None:
+    if not name.startswith(DIRECT_REGRESSION_TEMP_PREFIX):
+        return None
+    tail = name[len(DIRECT_REGRESSION_TEMP_PREFIX):]
+    pid_text = tail.split("_", 1)[0]
+    try:
+        return int(pid_text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pid_is_running(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+                check=False,
+            )
+            return str(pid) in (result.stdout or "")
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _cleanup_orphan_direct_temp_roots() -> None:
+    system_temp = Path(tempfile.gettempdir())
+    for path in system_temp.glob(f"{DIRECT_REGRESSION_TEMP_PREFIX}*"):
+        if not path.is_dir() or not _safe_regression_temp_path(path):
+            continue
+        owner_pid = _owner_pid_from_direct_temp_name(path.name)
+        if _pid_is_running(owner_pid):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _float_env(name: str, default: float) -> float:
@@ -26893,6 +26966,7 @@ def main(argv: list[str] | None = None):
         faulthandler.enable()
         faulthandler.dump_traceback_later(timeout_s, repeat=False, exit=False)
 
+    _cleanup_orphan_direct_temp_roots()
     temp_root = _make_temp_root()
     _prepare_import_environment(temp_root)
 
