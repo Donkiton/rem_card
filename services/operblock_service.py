@@ -829,6 +829,8 @@ class OperBlockService:
     def __init__(self, db_manager):
         self.db = db_manager
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
+        self._operation_case_columns_cache: set[str] | None = None
+        self._timeline_events_table_exists_cache: bool | None = None
 
     def _run_report_read_operation(self, source: str, operation: Callable[[], Any]) -> Any:
         scope = getattr(self.db, "central_read_scope", None)
@@ -1269,11 +1271,17 @@ class OperBlockService:
         items.sort(key=lambda item: (_parse_dt(item.get("time")) or datetime.min, int(item.get("source_id") or 0)))
         return items
 
-    def build_operblock_board_snapshot(self) -> dict[str, Any]:
+    def build_operblock_board_snapshot(self, table_code: str | None = None) -> dict[str, Any]:
         metric_started = operblock_startup_metrics.timer_start()
         validate_operblock_runtime_path(self.db)
+        clean_table_code = self._validate_table_code(table_code) if table_code else None
+        table_filter_clause = ""
+        params: tuple[Any, ...] = ()
+        if clean_table_code:
+            table_filter_clause = "AND t.code = ?"
+            params = (clean_table_code,)
         rows = self.db.fetch_all_remcard(
-            """
+            f"""
             SELECT
                 t.code AS table_code,
                 t.display_name AS table_display_name,
@@ -1373,13 +1381,18 @@ class OperBlockService:
             LEFT JOIN admissions a ON a.id = oc.admission_id
             LEFT JOIN patients p ON p.id = oc.patient_id
             WHERE t.code IN ('emergency', 'planned')
+              {table_filter_clause}
             ORDER BY t.sort_order
-            """
+            """,
+            params,
         )
 
         by_code = {str(row["table_code"]): _row_to_dict(row) for row in rows}
         tables = []
-        for table in OPERBLOCK_TABLES:
+        visible_tables = [
+            table for table in OPERBLOCK_TABLES if not clean_table_code or str(table.get("code") or "") == clean_table_code
+        ]
+        for table in visible_tables:
             row = by_code.get(table["code"], {})
             occupied = row.get("operation_case_id") is not None
             patient = None
@@ -1999,10 +2012,15 @@ class OperBlockService:
 
         return dict(self.db.run_write_operation(operation, source="operblock_delete_all_archived_cases"))
 
-    def build_operblock_patient_header_snapshot(self, operation_case_id: int) -> dict[str, Any]:
-        case = self._get_case_row(operation_case_id)
-        latest = self.get_latest_vital_values(int(case["admission_id"]))
-        stage_state = self.build_operation_stage_state(operation_case_id)
+    def _build_operblock_patient_header_snapshot_from_case(
+        self,
+        case: dict[str, Any],
+        *,
+        latest: dict[str, Any] | None = None,
+        stage_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        latest = latest if latest is not None else self.get_latest_vital_values(int(case["admission_id"]))
+        stage_state = stage_state if stage_state is not None else self.build_operation_stage_state(int(case["operation_case_id"]))
         payload = {
             "operation_case_id": int(case["operation_case_id"]),
             "patient_id": int(case["patient_id"]),
@@ -2043,12 +2061,15 @@ class OperBlockService:
         payload["content_hash"] = _hash_payload(payload)
         return payload
 
-    def build_operation_stage_state(self, operation_case_id: int) -> dict[str, Any]:
+    def build_operblock_patient_header_snapshot(self, operation_case_id: int) -> dict[str, Any]:
         case = self._get_case_row(operation_case_id)
-        rows = self._fetch_operblock_timeline_event_rows(
-            int(case["admission_id"]),
-            operation_case_id=int(operation_case_id),
-        )
+        return self._build_operblock_patient_header_snapshot_from_case(case)
+
+    def _build_operation_stage_state_from_case_rows(
+        self,
+        case: dict[str, Any],
+        rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         stage_rows = _stage_rows_from_timeline_rows(rows)
         state = _build_stage_intervals(stage_rows)
         state["events"] = [
@@ -2069,15 +2090,22 @@ class OperBlockService:
         )
         return state
 
-    def build_operblock_vitals_snapshot(
+    def build_operation_stage_state(self, operation_case_id: int) -> dict[str, Any]:
+        case = self._get_case_row(operation_case_id)
+        rows = self._fetch_operblock_timeline_event_rows(
+            int(case["admission_id"]),
+            operation_case_id=int(operation_case_id),
+        )
+        return self._build_operation_stage_state_from_case_rows(case, rows)
+
+    def _build_operblock_vitals_snapshot_for_case(
         self,
         admission_id: int,
         *,
-        operation_case_id: int | None = None,
+        case: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         params: list[Any] = [int(admission_id)]
         bounds_clause = ""
-        case = self._get_case_row(operation_case_id) if operation_case_id else None
         if case:
             if int(case.get("admission_id") or 0) != int(admission_id):
                 raise OperBlockConflictError("Операция не принадлежит выбранной госпитализации.")
@@ -2121,13 +2149,22 @@ class OperBlockService:
         payload["content_hash"] = _hash_payload(payload)
         return payload
 
-    def build_operblock_orders_snapshot(
+    def build_operblock_vitals_snapshot(
         self,
         admission_id: int,
         *,
         operation_case_id: int | None = None,
     ) -> dict[str, Any]:
         case = self._get_case_row(operation_case_id) if operation_case_id else None
+        return self._build_operblock_vitals_snapshot_for_case(admission_id, case=case)
+
+    def _build_operblock_orders_snapshot_for_case(
+        self,
+        admission_id: int,
+        *,
+        case: dict[str, Any] | None = None,
+        timeline_rows: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if case:
             if int(case.get("admission_id") or 0) != int(admission_id):
                 raise OperBlockConflictError("Операция не принадлежит выбранной госпитализации.")
@@ -2154,10 +2191,11 @@ class OperBlockService:
         )
         orders = self._apply_preset_display_names_to_order_rows([_row_to_dict(row) for row in rows])
         if case:
-            timeline_rows = self._fetch_operblock_timeline_event_rows(
-                int(admission_id),
-                operation_case_id=int(case["operation_case_id"]),
-            )
+            if timeline_rows is None:
+                timeline_rows = self._fetch_operblock_timeline_event_rows(
+                    int(admission_id),
+                    operation_case_id=int(case["operation_case_id"]),
+                )
             intervals = self._all_anesthesia_intervals(_stage_rows_from_timeline_rows(timeline_rows))
             if intervals:
                 orders = [row for row in orders if self._order_row_in_any_interval(row, intervals)]
@@ -2167,6 +2205,15 @@ class OperBlockService:
         payload = {"admission_id": int(admission_id), "orders": orders}
         payload["content_hash"] = _hash_payload(payload)
         return payload
+
+    def build_operblock_orders_snapshot(
+        self,
+        admission_id: int,
+        *,
+        operation_case_id: int | None = None,
+    ) -> dict[str, Any]:
+        case = self._get_case_row(operation_case_id) if operation_case_id else None
+        return self._build_operblock_orders_snapshot_for_case(admission_id, case=case)
 
     @staticmethod
     def _order_row_in_any_interval(row: dict[str, Any], intervals: list[tuple[datetime, datetime | None]]) -> bool:
@@ -2207,22 +2254,27 @@ class OperBlockService:
                 row["drug_display_name"] = display_name
         return rows
 
-    def build_operblock_timeline_snapshot(
+    def _build_operblock_timeline_snapshot_for_case(
         self,
         admission_id: int,
-        operation_case_id: int | None = None,
+        *,
+        case: dict[str, Any] | None = None,
+        orders_snapshot: dict[str, Any] | None = None,
+        timeline_rows: list[dict[str, Any]] | None = None,
     ) -> OperBlockTimelineSnapshot:
-        case = self._get_case_row(operation_case_id) if operation_case_id else self._get_latest_case_row_for_admission(admission_id)
         if case and int(case.get("admission_id") or 0) != int(admission_id):
             raise OperBlockConflictError("Операция не принадлежит выбранной госпитализации.")
-        orders_snapshot = self.build_operblock_orders_snapshot(
-            admission_id,
-            operation_case_id=int(case["operation_case_id"]) if case else None,
-        )
-        timeline_rows = self._fetch_operblock_timeline_event_rows(
-            admission_id,
-            operation_case_id=int(case["operation_case_id"]) if case else None,
-        )
+        if timeline_rows is None:
+            timeline_rows = self._fetch_operblock_timeline_event_rows(
+                admission_id,
+                operation_case_id=int(case["operation_case_id"]) if case else None,
+            )
+        if orders_snapshot is None:
+            orders_snapshot = self._build_operblock_orders_snapshot_for_case(
+                admission_id,
+                case=case,
+                timeline_rows=timeline_rows,
+            )
         snapshot = build_timeline_snapshot_from_legacy_orders(
             admission_id=int(admission_id),
             operation_case_id=int(case["operation_case_id"]) if case else None,
@@ -2232,6 +2284,14 @@ class OperBlockService:
             generated_at=_now_text(),
         )
         return self._apply_operation_end_to_timeline_snapshot(snapshot, _parse_dt(case.get("ended_at")) if case else None)
+
+    def build_operblock_timeline_snapshot(
+        self,
+        admission_id: int,
+        operation_case_id: int | None = None,
+    ) -> OperBlockTimelineSnapshot:
+        case = self._get_case_row(operation_case_id) if operation_case_id else self._get_latest_case_row_for_admission(admission_id)
+        return self._build_operblock_timeline_snapshot_for_case(admission_id, case=case)
 
     @staticmethod
     def _apply_operation_end_to_timeline_snapshot(
@@ -2264,17 +2324,59 @@ class OperBlockService:
         )
 
     def build_operblock_protocol_snapshot(self, operation_case_id: int) -> dict[str, Any]:
-        header = self.build_operblock_patient_header_snapshot(operation_case_id)
-        admission_id = int(header["admission_id"])
-        vitals = self.build_operblock_vitals_snapshot(admission_id, operation_case_id=operation_case_id)
-        orders = self.build_operblock_orders_snapshot(admission_id, operation_case_id=operation_case_id)
-        timeline = self.build_operblock_timeline_snapshot(admission_id, operation_case_id=operation_case_id)
+        case = self._get_case_row(operation_case_id)
+        admission_id = int(case["admission_id"])
+        timeline_rows = self._fetch_operblock_timeline_event_rows(
+            admission_id,
+            operation_case_id=int(case["operation_case_id"]),
+        )
+        stage_state = self._build_operation_stage_state_from_case_rows(case, timeline_rows)
+        header = self._build_operblock_patient_header_snapshot_from_case(
+            case,
+            latest=self.get_latest_vital_values(admission_id),
+            stage_state=stage_state,
+        )
+        vitals = self._build_operblock_vitals_snapshot_for_case(admission_id, case=case)
+        orders = self._build_operblock_orders_snapshot_for_case(
+            admission_id,
+            case=case,
+            timeline_rows=timeline_rows,
+        )
+        timeline = self._build_operblock_timeline_snapshot_for_case(
+            admission_id,
+            case=case,
+            orders_snapshot=orders,
+            timeline_rows=timeline_rows,
+        )
+        chart_vitals = self._list_operation_vitals_for_case(case)
         timeline_payload = timeline.to_dict()
-        payload = {"header": header, "vitals": vitals, "orders": orders, "timeline": timeline_payload}
+        payload = {
+            "header": header,
+            "vitals": vitals,
+            "orders": orders,
+            "timeline": timeline_payload,
+            "chart_vitals": chart_vitals,
+        }
         hash_payload = dict(payload)
         timeline_hash_payload = dict(timeline_payload)
         timeline_hash_payload.pop("generated_at", None)
         hash_payload["timeline"] = timeline_hash_payload
+        hash_payload["chart_vitals"] = [
+            {
+                "id": vital.id,
+                "admission_id": vital.admission_id,
+                "timestamp": vital.timestamp.isoformat(timespec="seconds"),
+                "sys": vital.sys,
+                "dia": vital.dia,
+                "pulse": vital.pulse,
+                "temp": vital.temp,
+                "spo2": vital.spo2,
+                "rr": vital.rr,
+                "cvp": vital.cvp,
+                "revision": vital.revision,
+            }
+            for vital in chart_vitals
+        ]
         payload["content_hash"] = _hash_payload(hash_payload)
         return payload
 
@@ -2859,8 +2961,7 @@ class OperBlockService:
         text = re.sub(r"_+", "_", text).strip("._ ")
         return text[:80] or "report"
 
-    def list_operation_vitals(self, operation_case_id: int) -> list[VitalDTO]:
-        case = self._get_case_row(operation_case_id)
+    def _list_operation_vitals_for_case(self, case: dict[str, Any]) -> list[VitalDTO]:
         admission_id = int(case["admission_id"])
         started_at = _parse_dt(case.get("started_at"))
         ended_at = _parse_dt(case.get("ended_at"))
@@ -2907,6 +3008,10 @@ class OperBlockService:
                 )
             )
         return result
+
+    def list_operation_vitals(self, operation_case_id: int) -> list[VitalDTO]:
+        case = self._get_case_row(operation_case_id)
+        return self._list_operation_vitals_for_case(case)
 
     def _operation_has_vitals_between(
         self,
@@ -6630,10 +6735,15 @@ class OperBlockService:
         return [_row_to_dict(row) for row in rows]
 
     def _operblock_timeline_events_table_exists(self) -> bool:
+        cached = getattr(self, "_timeline_events_table_exists_cache", None)
+        if cached is not None:
+            return bool(cached)
         row = self.db.fetch_one_remcard(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='operblock_timeline_events'"
         )
-        return bool(row)
+        exists = bool(row)
+        self._timeline_events_table_exists_cache = exists
+        return exists
 
     @staticmethod
     def _normalize_timeline_event_datetime(value: Any) -> datetime:
@@ -6866,27 +6976,36 @@ class OperBlockService:
         if cursor.rowcount != 1:
             raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
-    def _operation_case_column_expr(self, column_name: str, *, alias: str | None = None) -> str:
-        clean_column = re.sub(r"[^0-9A-Za-z_]+", "", str(column_name or ""))
-        clean_alias = re.sub(r"[^0-9A-Za-z_]+", "", str(alias or clean_column))
-        if not clean_column or not clean_alias:
-            return "NULL"
+    def _operation_case_columns(self) -> set[str]:
+        cached = getattr(self, "_operation_case_columns_cache", None)
+        if cached is not None:
+            return set(cached)
+        columns: set[str] = set()
         try:
             columns = {
                 str(row[1])
                 for row in self.db.fetch_all_remcard('PRAGMA table_info("operation_cases")')
                 if row and row[1]
             }
-            if clean_column in columns:
-                return f"oc.{clean_column}"
         except Exception:
-            pass
-        conn = getattr(self.db, "_remcard_conn", None)
-        try:
-            if conn is not None and clean_column in _sqlite_columns(conn, "operation_cases"):
-                return f"oc.{clean_column}"
-        except Exception:
-            pass
+            columns = set()
+        if not columns:
+            conn = getattr(self.db, "_remcard_conn", None)
+            try:
+                if conn is not None:
+                    columns = _sqlite_columns(conn, "operation_cases")
+            except Exception:
+                columns = set()
+        self._operation_case_columns_cache = set(columns)
+        return set(columns)
+
+    def _operation_case_column_expr(self, column_name: str, *, alias: str | None = None) -> str:
+        clean_column = re.sub(r"[^0-9A-Za-z_]+", "", str(column_name or ""))
+        clean_alias = re.sub(r"[^0-9A-Za-z_]+", "", str(alias or clean_column))
+        if not clean_column or not clean_alias:
+            return "NULL"
+        if clean_column in self._operation_case_columns():
+            return f"oc.{clean_column}"
         return f"NULL AS {clean_alias}"
 
     def _get_case_row(self, operation_case_id: int) -> dict[str, Any]:
