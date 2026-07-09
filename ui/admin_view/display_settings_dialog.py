@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -23,6 +24,8 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.display_settings_storage import (
     DISPLAY_ROLES,
     DisplaySettingsStorage,
+    SECTOR8_BUTTON_SIDE_LEFT,
+    SECTOR8_BUTTON_SIDE_RIGHT,
     normalize_display_role,
     normalize_role_display_settings,
     remcard_tab_options,
@@ -33,6 +36,7 @@ from rem_card.ui.shared.display_settings_storage import (
 
 class OrderedVisibilityList(QWidget):
     changed = Signal()
+    move_requested = Signal(str)
 
     def __init__(
         self,
@@ -40,11 +44,15 @@ class OrderedVisibilityList(QWidget):
         options: list[dict],
         state: dict,
         require_one_visible: bool = False,
+        move_arrow=None,
+        move_tooltip: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self.options = {str(option["id"]): dict(option) for option in options}
         self.require_one_visible = require_one_visible
+        self.move_arrow = move_arrow
+        self.move_tooltip = str(move_tooltip or "")
         self.order = []
         for raw_id in state.get("order", []):
             item_id = str(raw_id)
@@ -168,6 +176,14 @@ class OrderedVisibilityList(QWidget):
             label.installEventFilter(self)
             label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             row_layout.addWidget(label)
+
+            if self.move_arrow is not None:
+                move_btn = QToolButton(row)
+                move_btn.setArrowType(self.move_arrow)
+                move_btn.setCursor(Qt.PointingHandCursor)
+                move_btn.setToolTip(self.move_tooltip)
+                move_btn.clicked.connect(lambda _checked=False, current_id=item_id: self.move_requested.emit(current_id))
+                row_layout.addWidget(move_btn)
 
             switch = ToggleSwitch(row)
             switch.setChecked(bool(self.visible.get(item_id, False)))
@@ -321,6 +337,214 @@ class OrderedVisibilityList(QWidget):
         }
 
 
+class Sector8SidesEditor(QWidget):
+    changed = Signal()
+
+    def __init__(self, *, options: list[dict], state: dict, parent=None):
+        super().__init__(parent)
+        self.options = {str(option["id"]): dict(option) for option in options}
+        self.order = []
+        for raw_id in state.get("order", []):
+            item_id = str(raw_id)
+            if item_id in self.options and item_id not in self.order:
+                self.order.append(item_id)
+        for item_id in self.options:
+            if item_id not in self.order:
+                self.order.append(item_id)
+
+        raw_visible = state.get("visible") if isinstance(state, dict) else {}
+        self.visible = {
+            item_id: bool(raw_visible.get(item_id, self.options[item_id].get("default_visible", True)))
+            for item_id in self.options
+        }
+        for item_id, option in self.options.items():
+            if not bool(option.get("can_hide", True)):
+                self.visible[item_id] = True
+
+        raw_side = state.get("side") if isinstance(state, dict) else {}
+        if not isinstance(raw_side, dict):
+            raw_side = {}
+        self.side = {
+            item_id: self._normalize_side(raw_side.get(item_id), self._default_side(self.options[item_id]))
+            for item_id in self.options
+        }
+        self.left_list: OrderedVisibilityList | None = None
+        self.right_list: OrderedVisibilityList | None = None
+
+        self._setup_ui()
+        self._rebuild_lists()
+
+    @staticmethod
+    def _normalize_side(value, default: str = SECTOR8_BUTTON_SIDE_RIGHT) -> str:
+        side = str(value or "").strip().lower()
+        return side if side in (SECTOR8_BUTTON_SIDE_LEFT, SECTOR8_BUTTON_SIDE_RIGHT) else default
+
+    @classmethod
+    def _default_side(cls, option: dict) -> str:
+        return cls._normalize_side(option.get("default_side"), SECTOR8_BUTTON_SIDE_RIGHT)
+
+    def _setup_ui(self):
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(12)
+
+        self.left_container = QWidget(self)
+        left_layout = QVBoxLayout(self.left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        left_title = QLabel("Левая часть")
+        left_title.setObjectName("DisplaySettingsSideTitle")
+        left_layout.addWidget(left_title)
+        self.left_list_container = QWidget(self.left_container)
+        self.left_list_layout = QVBoxLayout(self.left_list_container)
+        self.left_list_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.addWidget(self.left_list_container, 1)
+
+        self.right_container = QWidget(self)
+        right_layout = QVBoxLayout(self.right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        right_title = QLabel("Правая часть")
+        right_title.setObjectName("DisplaySettingsSideTitle")
+        right_layout.addWidget(right_title)
+        self.right_list_container = QWidget(self.right_container)
+        self.right_list_layout = QVBoxLayout(self.right_list_container)
+        self.right_list_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addWidget(self.right_list_container, 1)
+
+        root_layout.addWidget(self.left_container, 1)
+        root_layout.addWidget(self.right_container, 1)
+
+    def _clear_layout(self, layout: QVBoxLayout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _ids_for_side(self, side: str) -> list[str]:
+        return [
+            item_id
+            for item_id in self.order
+            if self._normalize_side(self.side.get(item_id), self._default_side(self.options[item_id])) == side
+        ]
+
+    def _state_for_ids(self, ids: list[str]) -> dict:
+        return {
+            "order": list(ids),
+            "visible": {item_id: bool(self.visible.get(item_id, False)) for item_id in ids},
+        }
+
+    def _rebuild_lists(self):
+        self._clear_layout(self.left_list_layout)
+        self._clear_layout(self.right_list_layout)
+
+        left_ids = self._ids_for_side(SECTOR8_BUTTON_SIDE_LEFT)
+        right_ids = self._ids_for_side(SECTOR8_BUTTON_SIDE_RIGHT)
+
+        self.left_list = OrderedVisibilityList(
+            options=[self.options[item_id] for item_id in left_ids],
+            state=self._state_for_ids(left_ids),
+            move_arrow=Qt.RightArrow,
+            move_tooltip="Перенести в правую часть",
+        )
+        self.right_list = OrderedVisibilityList(
+            options=[self.options[item_id] for item_id in right_ids],
+            state=self._state_for_ids(right_ids),
+            move_arrow=Qt.LeftArrow,
+            move_tooltip="Перенести в левую часть",
+        )
+        self.left_list.changed.connect(self._on_list_changed)
+        self.right_list.changed.connect(self._on_list_changed)
+        self.left_list.move_requested.connect(lambda item_id: self._move_item(item_id, SECTOR8_BUTTON_SIDE_RIGHT))
+        self.right_list.move_requested.connect(lambda item_id: self._move_item(item_id, SECTOR8_BUTTON_SIDE_LEFT))
+        self.left_list_layout.addWidget(self.left_list)
+        self.right_list_layout.addWidget(self.right_list)
+
+    def _on_list_changed(self):
+        self._collect_from_lists()
+        self.changed.emit()
+
+    def _collect_from_lists(self):
+        left_state = self.left_list.state() if self.left_list is not None else {"order": [], "visible": {}}
+        right_state = self.right_list.state() if self.right_list is not None else {"order": [], "visible": {}}
+        left_order = [str(item_id) for item_id in left_state.get("order", []) if str(item_id) in self.options]
+        right_order = [str(item_id) for item_id in right_state.get("order", []) if str(item_id) in self.options]
+        seen = set(left_order + right_order)
+        for item_id in self.order:
+            if item_id not in seen:
+                if self.side.get(item_id) == SECTOR8_BUTTON_SIDE_LEFT:
+                    left_order.append(item_id)
+                else:
+                    right_order.append(item_id)
+                seen.add(item_id)
+        self.order = left_order + right_order
+
+        visible: dict[str, bool] = {}
+        for source in (left_state.get("visible", {}), right_state.get("visible", {})):
+            if not isinstance(source, dict):
+                continue
+            for item_id, value in source.items():
+                item_id = str(item_id)
+                if item_id in self.options:
+                    visible[item_id] = bool(value)
+        for item_id in self.options:
+            if item_id not in visible:
+                visible[item_id] = bool(self.visible.get(item_id, self.options[item_id].get("default_visible", True)))
+            if not bool(self.options[item_id].get("can_hide", True)):
+                visible[item_id] = True
+        self.visible = visible
+
+        for item_id in left_order:
+            self.side[item_id] = SECTOR8_BUTTON_SIDE_LEFT
+        for item_id in right_order:
+            self.side[item_id] = SECTOR8_BUTTON_SIDE_RIGHT
+
+    def _move_item(self, item_id: str, target_side: str):
+        item_id = str(item_id)
+        if item_id not in self.options:
+            return
+        target_side = self._normalize_side(target_side)
+        self._collect_from_lists()
+        left_order = [
+            current_id
+            for current_id in self.order
+            if current_id != item_id and self.side.get(current_id) == SECTOR8_BUTTON_SIDE_LEFT
+        ]
+        right_order = [
+            current_id
+            for current_id in self.order
+            if current_id != item_id and self.side.get(current_id) == SECTOR8_BUTTON_SIDE_RIGHT
+        ]
+        if target_side == SECTOR8_BUTTON_SIDE_LEFT:
+            left_order.append(item_id)
+        else:
+            right_order.append(item_id)
+        self.side[item_id] = target_side
+        self.order = left_order + right_order
+        self._rebuild_lists()
+        self.changed.emit()
+
+    def set_all_visible(self, visible: bool):
+        changed = False
+        for item_id, option in self.options.items():
+            next_value = True if not bool(option.get("can_hide", True)) else bool(visible)
+            if self.visible.get(item_id) != next_value:
+                self.visible[item_id] = next_value
+                changed = True
+        if changed:
+            self._rebuild_lists()
+            self.changed.emit()
+
+    def state(self) -> dict:
+        self._collect_from_lists()
+        return {
+            "order": list(self.order),
+            "visible": dict(self.visible),
+            "side": dict(self.side),
+        }
+
+
 class DisplaySettingsDialog(BaseStyledDialog):
     def __init__(self, initial_role: str | None = "doctor", parent=None):
         super().__init__("Отображение", parent)
@@ -333,7 +557,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self.current_role = "doctor"
         self._remcard_tabs_index = -1
         self._w1a_tab_index = -1
-        self.sector8_list: OrderedVisibilityList | None = None
+        self.sector8_list: Sector8SidesEditor | None = None
         self.tabs_list: OrderedVisibilityList | None = None
         self.w1a_switch: ToggleSwitch | None = None
         self.w1b_switch: ToggleSwitch | None = None
@@ -470,6 +694,11 @@ class DisplaySettingsDialog(BaseStyledDialog):
                 color: #2c3e50;
                 padding: 0 0 4px 0;
             }
+            QLabel#DisplaySettingsSideTitle {
+                font-weight: bold;
+                color: #2c3e50;
+                padding: 0 0 2px 0;
+            }
             QFrame#DisplaySettingsOptionCard {
                 background-color: #ffffff;
                 border: 1px solid #c7d1da;
@@ -525,7 +754,7 @@ class DisplaySettingsDialog(BaseStyledDialog):
         self._clear_container(self.buttons_container_layout)
         self._clear_container(self.tabs_container_layout)
 
-        self.sector8_list = OrderedVisibilityList(
+        self.sector8_list = Sector8SidesEditor(
             options=sector8_button_options(role),
             state=draft["sector8_buttons"],
         )

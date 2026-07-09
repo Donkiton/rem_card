@@ -1,5 +1,5 @@
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 
@@ -110,12 +110,16 @@ class AdminMainWidget(QWidget):
             template_buttons.append(self.btn_diet_templates)
 
         self.btn_style.setVisible(False)
-        program_buttons = [
-            self.btn_print,
+        interface_buttons = [
             self.btn_display_settings,
             self.btn_background_settings,
             self.btn_decor_settings,
             self.btn_remcard_icon_settings,
+        ]
+        report_buttons = [
+            self.btn_print,
+        ]
+        maintenance_buttons = [
             self.btn_backup_settings,
             self.btn_backup_main_db,
         ]
@@ -125,12 +129,11 @@ class AdminMainWidget(QWidget):
             is_dev_version = not is_compiled()
         except Exception:
             is_dev_version = False
-        global_admin_buttons = []
         if is_dev_version:
-            global_admin_buttons.append(self.btn_import_settings)
+            maintenance_buttons.append(self.btn_import_settings)
         if self.role == "doctor":
-            program_buttons.append(self.btn_emergency_password)
-            program_buttons.append(self.btn_db_rotation)
+            maintenance_buttons.append(self.btn_emergency_password)
+            maintenance_buttons.append(self.btn_db_rotation)
         operblock_buttons = [
             self.btn_operblock_icon_settings,
             self.btn_operblock_medications,
@@ -140,11 +143,23 @@ class AdminMainWidget(QWidget):
             self.btn_operblock_team,
         ]
 
-        columns_layout = QHBoxLayout()
-        columns_layout.setSpacing(22)
-        columns_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        categories = [
+            ("Препараты", drug_buttons),
+            ("Шаблоны", template_buttons),
+            ("Интерфейс", interface_buttons),
+            ("Отчеты", report_buttons),
+            ("Обслуживание", maintenance_buttons),
+        ]
+        if self.role != "nurse":
+            categories.append(("Оперблок", operblock_buttons))
 
-        def add_column(column_title: str, buttons: list[QPushButton]):
+        columns_layout = QGridLayout()
+        columns_layout.setHorizontalSpacing(22)
+        columns_layout.setVerticalSpacing(18)
+        columns_layout.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        max_columns = 4
+
+        def add_column(row: int, column_index: int, column_title: str, buttons: list[QPushButton]):
             column = QWidget()
             column_layout = QVBoxLayout(column)
             column_layout.setContentsMargins(0, 0, 0, 0)
@@ -154,16 +169,11 @@ class AdminMainWidget(QWidget):
             for btn in buttons:
                 column_layout.addWidget(prepare_button(btn))
             column_layout.addStretch()
-            columns_layout.addWidget(column)
+            columns_layout.addWidget(column, row, column_index)
 
-        add_column("Препараты", drug_buttons)
-        add_column("Шаблоны", template_buttons)
-        add_column("Настройка программы", program_buttons)
-        if global_admin_buttons:
-            add_column("Глобальный администратор", global_admin_buttons)
-        if self.role != "nurse":
-            add_column("Оперблок", operblock_buttons)
-        columns_layout.addStretch()
+        for index, (column_title, buttons) in enumerate(categories):
+            row, column_index = divmod(index, max_columns)
+            add_column(row, column_index, column_title, buttons)
 
         menu_layout.addLayout(columns_layout, 1)
         menu_layout.addStretch()
