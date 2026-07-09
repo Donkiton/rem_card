@@ -56,6 +56,7 @@ class VitalsWidget(QWidget):
         self._eff_start = None
         self._eff_end = None
         self._has_vitals = False
+        self._cached_vitals = None
         self._forced_read_only = False
         self._extra_action_widgets = []
         self.layout = QVBoxLayout(self)
@@ -221,6 +222,7 @@ class VitalsWidget(QWidget):
         self._db_cache_dirty = True
         self._last_settings = None
         self._cached_settings = None
+        self._cached_vitals = None
 
     def set_context(self, admission_id, shift_date):
         """Обновляет контекст виджета (пациент/дата) без его пересоздания."""
@@ -240,12 +242,13 @@ class VitalsWidget(QWidget):
                 from ...app.logger import logger
                 logger.error(f"Error updating context in VitalsWidget: {e}")
 
-    def apply_context_snapshot(self, *, patient, settings, effective_bounds, has_vitals: bool):
+    def apply_context_snapshot(self, *, patient, settings, effective_bounds, has_vitals: bool, vitals=None):
         self.patient = patient
         self.time_edit.set_context(self.service, self.shift_date)
         self._cached_settings = dict(settings or {})
         self._eff_start, self._eff_end = effective_bounds if effective_bounds else (None, None)
-        self._has_vitals = bool(has_vitals)
+        self._cached_vitals = list(vitals or [])
+        self._has_vitals = bool(has_vitals) or bool(self._cached_vitals)
         self._db_cache_dirty = False
         self._last_settings = None
         self.build_grid()
@@ -397,8 +400,12 @@ class VitalsWidget(QWidget):
                 if self._eff_start is None or self._eff_end is None:
                     self._eff_start, self._eff_end = self.service.get_effective_bounds(self.admission_id, self.shift_date)
                 if self._cached_settings is None:
-                    vitals = self.service.get_vitals(self.admission_id, self.shift_date)
-                    self._has_vitals = bool(vitals)
+                    if self._cached_vitals is not None:
+                        self._has_vitals = bool(self._cached_vitals)
+                    else:
+                        vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+                        self._cached_vitals = list(vitals or [])
+                        self._has_vitals = bool(self._cached_vitals)
                 self._db_cache_dirty = False
             
             suggested_time = self.service.suggest_vital_time(
@@ -423,7 +430,11 @@ class VitalsWidget(QWidget):
             if not self._db_cache_dirty and self._cached_settings is not None:
                 self.undo_btn.setEnabled(bool(self._has_vitals))
                 return
-            vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+            if self._cached_vitals is not None:
+                vitals = list(self._cached_vitals)
+            else:
+                vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+                self._cached_vitals = list(vitals or [])
             self._has_vitals = len(vitals) > 0
             self.undo_btn.setEnabled(self._has_vitals)
         except Exception:
@@ -581,7 +592,11 @@ class VitalsWidget(QWidget):
         if not self.service or not self.admission_id:
             return None
         target = self._minute_floor(timestamp)
-        for vital in self.service.get_vitals(self.admission_id, self.shift_date):
+        vitals = self._cached_vitals
+        if vitals is None:
+            vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+            self._cached_vitals = list(vitals or [])
+        for vital in vitals:
             if self._minute_floor(vital.timestamp) == target:
                 return int(getattr(vital, "revision", 0) or 0)
         return None
@@ -589,7 +604,10 @@ class VitalsWidget(QWidget):
     def _expected_revision_for_last_vital(self):
         if not self.service or not self.admission_id:
             return None
-        vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+        vitals = self._cached_vitals
+        if vitals is None:
+            vitals = self.service.get_vitals(self.admission_id, self.shift_date)
+            self._cached_vitals = list(vitals or [])
         if not vitals:
             return None
         return int(getattr(vitals[-1], "revision", 0) or 0)

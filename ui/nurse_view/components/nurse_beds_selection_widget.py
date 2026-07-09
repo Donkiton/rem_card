@@ -193,6 +193,36 @@ class NurseBedsSelectionWidget(QWidget):
         worker.finished.connect(self._on_refresh_finished)
         worker.start()
 
+    def refresh_admissions(self, admission_ids, *, queue_if_running: bool = True):
+        if self._is_closing or _app_is_closing() or not _qt_is_valid(self):
+            return
+        ids = sorted({int(adm_id) for adm_id in (admission_ids or []) if adm_id is not None})
+        if not ids:
+            return
+        if QThread.currentThread() is not self.thread():
+            QTimer.singleShot(0, lambda: self.refresh_admissions(ids, queue_if_running=queue_if_running))
+            return
+        if not self._last_ordered_row_ids or any(adm_id not in self._rows_by_admission_id for adm_id in ids):
+            self.refresh(queue_if_running=queue_if_running)
+            return
+
+        worker = self._refresh_worker
+        if worker is not None and not _qt_is_valid(worker):
+            self._refresh_worker = None
+            worker = None
+        if worker is not None and worker.isRunning():
+            if queue_if_running:
+                self._refresh_pending = True
+            return
+
+        self._refresh_pending = False
+        worker = AsyncCallThread(lambda: self._load_beds_partial_snapshot(ids))
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._apply_beds_partial_snapshot)
+        worker.failed.connect(self._on_partial_refresh_failed)
+        worker.finished.connect(self._on_refresh_finished)
+        worker.start()
+
     def _load_beds_snapshot(self):
         if self.remcard_service and hasattr(self.remcard_service, "build_beds_snapshot"):
             return self.remcard_service.build_beds_snapshot()
@@ -213,6 +243,40 @@ class NurseBedsSelectionWidget(QWidget):
             "now": now,
             "yesterday": yesterday,
             "runtime_snapshot": runtime_snapshot,
+        }
+
+    def _load_beds_partial_snapshot(self, admission_ids):
+        ids = sorted({int(adm_id) for adm_id in (admission_ids or []) if adm_id is not None})
+        if self.remcard_service and hasattr(self.remcard_service, "build_beds_partial_snapshot"):
+            return self.remcard_service.build_beds_partial_snapshot(ids)
+
+        getter = getattr(self.patient_service, "get_active_patients_by_ids", None)
+        if callable(getter):
+            active_patients = getter(ids)
+        else:
+            requested = set(ids)
+            active_patients = [
+                patient
+                for patient in self.patient_service.get_active_patients()
+                if getattr(patient, "id", None) is not None and int(patient.id) in requested
+            ]
+        now = datetime.datetime.now()
+        yesterday = now - datetime.timedelta(days=1)
+        ordered_ids = [
+            int(getattr(patient, "id"))
+            for patient in active_patients
+            if getattr(patient, "id", None) is not None
+        ]
+        runtime_snapshot = {}
+        if self.remcard_service and ordered_ids:
+            runtime_snapshot = self.remcard_service.get_beds_runtime_snapshot(ordered_ids, now, yesterday)
+        return {
+            "patients": active_patients,
+            "now": now,
+            "yesterday": yesterday,
+            "runtime_snapshot": runtime_snapshot,
+            "partial": True,
+            "requested_admission_ids": ids,
         }
 
     def _apply_beds_snapshot(self, snapshot):
@@ -295,10 +359,71 @@ class NurseBedsSelectionWidget(QWidget):
         self._last_ordered_row_ids = ordered_ids_tuple
         self._last_ordered_row_signatures = ordered_signatures
 
+    def _apply_beds_partial_snapshot(self, snapshot):
+        if self._is_closing:
+            return
+        if not snapshot or not snapshot.get("partial"):
+            self._refresh_pending = True
+            return
+        requested_ids = {
+            int(adm_id)
+            for adm_id in (snapshot.get("requested_admission_ids") or [])
+            if adm_id is not None
+        }
+        active_patients = list(snapshot.get("patients") or [])
+        patients_by_id = {
+            int(getattr(patient, "id")): patient
+            for patient in active_patients
+            if getattr(patient, "id", None) is not None
+        }
+        if not requested_ids or any(adm_id not in self._rows_by_admission_id for adm_id in requested_ids):
+            self._refresh_pending = True
+            return
+        if any(adm_id not in patients_by_id for adm_id in requested_ids):
+            self._refresh_pending = True
+            return
+
+        self._refresh_apply_count += 1
+        now = snapshot.get("now") or datetime.datetime.now()
+        yesterday = snapshot.get("yesterday") or (now - datetime.timedelta(days=1))
+        runtime_snapshot = dict(snapshot.get("runtime_snapshot") or {})
+        for adm_id in requested_ids:
+            patient = patients_by_id.get(adm_id)
+            row = self._rows_by_admission_id.get(adm_id)
+            if patient is None or row is None:
+                self._refresh_pending = True
+                return
+            row_signature = build_w1_bed_row_signature(patient, runtime_snapshot.get(adm_id))
+            if getattr(row, "_w1_row_signature", None) == row_signature:
+                continue
+            row.update_patient(patient, now)
+            self._apply_runtime_state(
+                row=row,
+                patient=patient,
+                now=now,
+                yesterday=yesterday,
+                runtime_snapshot=runtime_snapshot.get(adm_id),
+            )
+            row._w1_row_signature = row_signature
+
+        self._last_ordered_row_signatures = tuple(
+            (
+                adm_id,
+                getattr(self._rows_by_admission_id.get(adm_id), "_w1_row_signature", None),
+            )
+            for adm_id in self._last_ordered_row_ids
+            if adm_id in self._rows_by_admission_id
+        )
+
     def _on_refresh_failed(self, exc: Exception):
         if self._is_closing:
             return
         pass
+
+    def _on_partial_refresh_failed(self, exc: Exception):
+        if self._is_closing:
+            return
+        self._refresh_pending = True
 
     def _on_refresh_finished(self):
         worker = self.sender()
@@ -317,7 +442,9 @@ class NurseBedsSelectionWidget(QWidget):
             return
         for signal, slot in (
             (worker.succeeded, self._apply_beds_snapshot),
+            (worker.succeeded, self._apply_beds_partial_snapshot),
             (worker.failed, self._on_refresh_failed),
+            (worker.failed, self._on_partial_refresh_failed),
             (worker.finished, self._on_refresh_finished),
         ):
             try:

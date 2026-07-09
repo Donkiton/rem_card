@@ -379,6 +379,36 @@ class RemCardService(QObject):
             snapshot["change_id"] = self.get_latest_change_id(admission_id=None, include_global=True)
         return snapshot
 
+    @read_scoped_snapshot
+    def build_beds_partial_snapshot(
+        self,
+        admission_ids: Sequence[int],
+        reference_dt: Optional[datetime] = None,
+        *,
+        include_change_cursor: bool = False,
+    ) -> Dict[str, Any]:
+        ids = sorted({int(adm_id) for adm_id in (admission_ids or []) if adm_id is not None})
+        now = reference_dt or datetime.now()
+        yesterday = now - timedelta(days=1)
+        active_patients = self.get_active_patients_by_ids(ids)
+        ordered_ids = [
+            int(getattr(patient, "id"))
+            for patient in active_patients
+            if getattr(patient, "id", None) is not None
+        ]
+        runtime_snapshot = self.get_beds_runtime_snapshot(ordered_ids, now, yesterday) if ordered_ids else {}
+        snapshot = {
+            "patients": active_patients,
+            "now": now,
+            "yesterday": yesterday,
+            "runtime_snapshot": runtime_snapshot,
+            "partial": True,
+            "requested_admission_ids": ids,
+        }
+        if include_change_cursor:
+            snapshot["change_id"] = self.get_latest_change_id(admission_id=None, include_global=True)
+        return snapshot
+
     def get_current_status(self, admission_id: int):
         if not self.status_service:
             return None
@@ -1118,6 +1148,9 @@ class RemCardService(QObject):
     # --- Patient Service Methods ---
     def get_active_patients(self) -> List[PatientDTO]:
         return self._patients.get_active_patients()
+
+    def get_active_patients_by_ids(self, admission_ids: Sequence[int]) -> List[PatientDTO]:
+        return self._patients.get_active_patients_by_ids(list(admission_ids or []))
 
     def maybe_release_due_outcome_beds(self, force: bool = False) -> int:
         return self._patients.maybe_release_due_outcome_beds(force=force)

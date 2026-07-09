@@ -3,7 +3,9 @@ import socket
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QStackedWidget
 from PySide6.QtCore import QTimer, Qt
 from datetime import datetime, timedelta
+from rem_card.app.foreground_activity import should_defer_background_io
 from rem_card.app.logger import logger, log_execution_time
+from rem_card.app.local_metrics import record_metric
 from rem_card.app.paths import get_role_lock_path
 from rem_card.app.role_session_lock import RoleSessionLock
 from rem_card.ui.shared.async_call import AsyncCallThread
@@ -25,6 +27,14 @@ CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "0") == "1"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
 CARD_OPEN_HYDRATE_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_OPEN_HYDRATE_DELAY_MS", "250")))
+CARD_HYDRATION_FOREGROUND_IDLE_SEC = max(
+    0.0,
+    float(os.environ.get("REMCARD_CARD_HYDRATION_FOREGROUND_IDLE_SEC", "3")),
+)
+CARD_HYDRATION_MAX_DEFER_ATTEMPTS = max(
+    0,
+    int(os.environ.get("REMCARD_CARD_HYDRATION_MAX_DEFER_ATTEMPTS", "5")),
+)
 CHART_LAZY_INIT_DELAY_MS = max(0, int(os.environ.get("REMCARD_CHART_LAZY_INIT_DELAY_MS", "0")))
 W1A_STARTUP_IDLE_DELAY_MS = max(0, int(os.environ.get("REMCARD_W1A_STARTUP_IDLE_DELAY_MS", "500")))
 JOURNAL_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_JOURNAL_PREWARM_DELAY_MS", "60000")))
@@ -81,6 +91,13 @@ W1_BEDS_REFRESH_ENTITIES = {
     "patient_status_events",
     "fluids",
     "orders",
+    "diet_plan",
+    "oral_intake_events",
+}
+W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
+    "vitals",
+    "vital_settings",
+    "fluids",
     "diet_plan",
     "oral_intake_events",
 }
@@ -142,9 +159,7 @@ class NurseMainWidget(QWidget):
         self._balance_update_timer = QTimer(self)
         self._balance_update_timer.setSingleShot(True)
         self._balance_update_timer.timeout.connect(self._flush_scheduled_balance_update)
-        self._add_patient_lock_watch_timer = QTimer(self)
-        self._add_patient_lock_watch_timer.timeout.connect(self._refresh_add_patient_button_lock_state)
-        self._add_patient_lock_watch_timer.start(ADD_PATIENT_LOCK_POLL_INTERVAL_MS)
+        self._add_patient_lock_watch_timer = None
         QTimer.singleShot(0, self._refresh_add_patient_button_lock_state)
         if CARD_UI_PREWARM_ENABLED:
             QTimer.singleShot(CARD_UI_PREWARM_DELAY_MS, self._schedule_card_ui_prewarm)
@@ -241,13 +256,10 @@ class NurseMainWidget(QWidget):
         if not hasattr(self, "sector8_panel") or not hasattr(self.sector8_panel, "set_add_patient_enabled"):
             return
         is_beds_mode = self._selection_mode == "beds"
-        enabled = is_beds_mode and not self._add_patient_locked_by_other
+        enabled = is_beds_mode
         self.sector8_panel.set_add_patient_enabled(enabled)
 
-        if self._add_patient_locked_by_other:
-            holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
-            self._set_add_patient_button_hint(f"Добавление пациента уже открыто.\n{holder}")
-        elif is_beds_mode:
+        if is_beds_mode:
             self._set_add_patient_button_hint("Открыть управление пациентами")
         else:
             self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
@@ -262,13 +274,7 @@ class NurseMainWidget(QWidget):
         if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE and self._add_patient_lock_held:
             self._release_add_patient_lock()
 
-        locked_by_other = False
-        try:
-            if self._add_patient_lock and not self._add_patient_lock_held:
-                locked_by_other = self._add_patient_lock.is_held_by_other()
-        except Exception as exc:
-            logger.warning("Failed to check add-patient lock state (nurse): %s", exc)
-        self._add_patient_locked_by_other = bool(locked_by_other)
+        self._add_patient_locked_by_other = False
         self._apply_add_patient_button_state()
 
     def _get_data_service(self):
@@ -612,6 +618,7 @@ class NurseMainWidget(QWidget):
         context_key,
         *,
         ensure_initial_status: bool,
+        defer_attempts: int = 0,
     ):
         current_admission_id = getattr(self.layout_manager, "current_admission_id", None)
         if int(admission_id or 0) != int(current_admission_id or 0):
@@ -619,6 +626,42 @@ class NurseMainWidget(QWidget):
         if shift_date != self._current_date:
             return
         if context_key != self._current_snapshot_context_key(load_scope="patient_open_card"):
+            return
+
+        should_defer, reason, age_sec = should_defer_background_io(
+            idle_window_sec=CARD_HYDRATION_FOREGROUND_IDLE_SEC,
+            names={"orders", "orders_show"},
+        )
+        active_foreground = str(reason or "").startswith("active:")
+        if should_defer and (active_foreground or defer_attempts < CARD_HYDRATION_MAX_DEFER_ATTEMPTS):
+            delay_ms = max(1000, CARD_OPEN_HYDRATE_DELAY_MS)
+            logger.info(
+                "[NURSE_VIEW] card_hydration_deferred_for_foreground admission_id=%s reason=%s age_sec=%s attempt=%s delay_ms=%s",
+                admission_id,
+                reason,
+                None if age_sec is None else round(age_sec, 3),
+                defer_attempts + 1,
+                delay_ms,
+            )
+            record_metric(
+                "card_hydration_deferred_for_foreground",
+                1,
+                admission_id=admission_id,
+                reason=reason,
+                age_sec=None if age_sec is None else round(age_sec, 3),
+                attempt=defer_attempts + 1,
+                source="refresh",
+            )
+            QTimer.singleShot(
+                delay_ms,
+                lambda: self._request_card_hydration_if_current(
+                    admission_id,
+                    shift_date,
+                    context_key,
+                    ensure_initial_status=ensure_initial_status,
+                    defer_attempts=defer_attempts + 1,
+                ),
+            )
             return
 
         self._request_card_snapshot(
@@ -774,6 +817,7 @@ class NurseMainWidget(QWidget):
                 settings=snapshot.get("settings") or {},
                 effective_bounds=effective_bounds,
                 has_vitals=bool(snapshot.get("has_vitals")),
+                vitals=snapshot.get("vitals") or [],
             )
 
         if hasattr(self, "balance_controller") and effective_bounds and snapshot.get("fluids") is not None:
@@ -897,6 +941,49 @@ class NurseMainWidget(QWidget):
         if raw_one:
             sources.append(str(raw_one))
         return list(dict.fromkeys(sources))
+
+    @staticmethod
+    def _admission_ids_from_payload(payload: dict) -> set[int]:
+        ids = {
+            int(admission_id)
+            for admission_id in (payload.get("admission_ids") or [])
+            if admission_id is not None
+        }
+        for change in payload.get("changes") or []:
+            admission_id = change.get("admission_id")
+            if admission_id is not None:
+                ids.add(int(admission_id))
+        return ids
+
+    def _refresh_beds_for_payload(
+        self,
+        payload: dict,
+        *,
+        changed_entities: set[str],
+        force_sources: list[str],
+        full_refresh_required: bool,
+    ):
+        source_requires_full = any(
+            source.startswith(prefix)
+            for source in force_sources
+            for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
+        )
+        beds_widget = getattr(self.layout_manager, "beds_selection_widget", None)
+        admission_ids = self._admission_ids_from_payload(payload)
+        if (
+            not full_refresh_required
+            and not payload.get("forced")
+            and not source_requires_full
+            and admission_ids
+            and changed_entities
+            and set(changed_entities).issubset(W1_BEDS_PARTIAL_REFRESH_ENTITIES)
+            and beds_widget
+            and hasattr(beds_widget, "refresh_admissions")
+        ):
+            beds_widget.refresh_admissions(admission_ids)
+            return
+        if beds_widget:
+            beds_widget.refresh()
 
     def _is_local_orders_force_payload(self, payload: dict, changed_entities: set[str]) -> bool:
         if not payload.get("forced"):
@@ -1230,7 +1317,12 @@ class NurseMainWidget(QWidget):
                 or bool(payload.get("forced"))
             )
             if beds_refresh_needed and hasattr(self.layout_manager, "beds_selection_widget") and self.layout_manager.beds_selection_widget:
-                self.layout_manager.beds_selection_widget.refresh()
+                self._refresh_beds_for_payload(
+                    payload,
+                    changed_entities=changed_entities,
+                    force_sources=force_sources,
+                    full_refresh_required=full_refresh_required,
+                )
             if w1a_refresh_needed:
                 self._refresh_w1a(payload)
         if self._selection_mode == "archive":
@@ -2330,11 +2422,10 @@ class NurseMainWidget(QWidget):
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         if not self._acquire_add_patient_lock():
-            holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
             CustomMessageBox.warning(
                 self,
                 "Добавление занято",
-                f"Добавление пациента уже открыто на другом рабочем месте.\n\n{holder}",
+                "Окно добавления пациента уже открыто.\nПожалуйста, подождите.",
             )
             self._refresh_add_patient_button_lock_state()
             return
@@ -2434,7 +2525,11 @@ class NurseMainWidget(QWidget):
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
-            self._add_patient_lock_watch_timer.stop()
+            if self._add_patient_lock_watch_timer:
+                self._add_patient_lock_watch_timer.stop()
+        panel = getattr(self, "sector8_panel", None)
+        if panel is not None and hasattr(panel, "shutdown"):
+            panel.shutdown()
         self._disconnect_monitor()
         self._release_add_patient_lock()
         if getattr(self, "layout_manager", None) is getattr(self, "_w1_shell", None):

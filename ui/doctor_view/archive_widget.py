@@ -21,6 +21,7 @@ from math import ceil
 
 ARCHIVE_MODE_RAO = "rao"
 ARCHIVE_MODE_OPERBLOCK = "operblock"
+ARCHIVE_FILTER_DEBOUNCE_MS = 350
 
 STYLE_ARCHIVE_MODE_BUTTON = STYLE_SMALL_NEUTRAL_BUTTON + """
     QPushButton:checked {
@@ -64,6 +65,9 @@ class ArchiveWidget(QWidget):
         self._load_token = 0
         self._delete_pending = False
         self._period_db_paths = []
+        self._filter_reload_timer = QTimer(self)
+        self._filter_reload_timer.setSingleShot(True)
+        self._filter_reload_timer.timeout.connect(lambda: self.load_data(reset_page=True))
         self.init_ui()
 
     def init_ui(self):
@@ -89,26 +93,26 @@ class ArchiveWidget(QWidget):
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
         self.date_from.setDate(QDate(2020, 1, 1))
-        self.date_from.dateChanged.connect(lambda _date: self.load_data(reset_page=True))
+        self.date_from.dateChanged.connect(self._schedule_filter_reload)
         
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
         self.date_to.setDate(QDate.currentDate())
-        self.date_to.dateChanged.connect(lambda _date: self.load_data(reset_page=True))
+        self.date_to.dateChanged.connect(self._schedule_filter_reload)
         
         self.search_ib = QLineEdit()
         self.search_ib.setPlaceholderText("Номер ИБ")
         self.search_ib.setMinimumWidth(100)
         self.search_ib.setMaximumWidth(120)
-        self.search_ib.textChanged.connect(lambda _text: self.load_data(reset_page=True))
+        self.search_ib.textChanged.connect(self._schedule_filter_reload)
         
         self.search_name = QLineEdit()
         self.search_name.setPlaceholderText("ФИО")
-        self.search_name.textChanged.connect(lambda _text: self.load_data(reset_page=True))
+        self.search_name.textChanged.connect(self._schedule_filter_reload)
         
         self.search_diag = QLineEdit()
         self.search_diag.setPlaceholderText("Диагноз")
-        self.search_diag.textChanged.connect(lambda _text: self.load_data(reset_page=True))
+        self.search_diag.textChanged.connect(self._schedule_filter_reload)
         
         lbl_from = QLabel("С:")
         lbl_from.setStyleSheet(STYLE_TRANSPARENT_LABEL)
@@ -343,7 +347,12 @@ class ArchiveWidget(QWidget):
             QTimer.singleShot(0, self.load_data)
 
     def filter_data(self):
+        self._filter_reload_timer.stop()
         self.load_data(reset_page=True)
+
+    def _schedule_filter_reload(self, *_):
+        self.current_page = 1
+        self._filter_reload_timer.start(ARCHIVE_FILTER_DEBOUNCE_MS)
 
     def on_item_clicked(self, item):
         patient = self._patient_from_row(item.row())

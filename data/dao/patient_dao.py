@@ -42,6 +42,33 @@ class PatientDAO:
         rows = self.db.fetch_all_remcard(query)
         return self._map_patients(rows)
 
+    def get_active_patients_by_ids(self, admission_ids: List[int]) -> List[PatientDTO]:
+        ids = [int(admission_id) for admission_id in (admission_ids or []) if admission_id is not None]
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
+        query = f"""
+            SELECT
+                a.id as admission_id, p.last_name, p.first_name, p.middle_name, p.full_name, p.birth_date,
+                a.history_number, a.bed_number, a.admission_datetime, COALESCE(a.transfer_datetime, a.death_datetime) as transfer_datetime,
+                a.diagnosis_text, a.patient_age, a.patient_months, a.patient_age_unit, a.patient_gender,
+                a.diagnosis_code as mkb_code,
+                a.emergency_notice_number,
+                a.emergency_notice_entered_at,
+                COALESCE(
+                    a.operation_description,
+                    (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)
+                ) as operation_info
+            FROM admissions a
+            JOIN patients p ON a.patient_id = p.id
+            JOIN beds b ON a.id = b.current_admission_id
+            WHERE b.status = 'OCCUPIED'
+              AND a.id IN ({placeholders})
+            ORDER BY b.bed_number
+        """
+        rows = self.db.fetch_all_remcard(query, tuple(ids))
+        return self._map_patients(rows)
+
     def get_archived_patients(self, start_dt: str | None = None, end_dt: str | None = None) -> List[PatientDTO]:
         current_db_path = os.path.abspath(str(getattr(self.db, "db_path", "") or ""))
         rows: list[dict] = []
