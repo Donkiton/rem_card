@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "active": {
     "doctor": {
       "sector8_buttons": {
@@ -30,6 +30,20 @@
           "settings": true,
           "back": true,
           "exit": true
+        },
+        "side": {
+          "archive": "right",
+          "refresh": "right",
+          "user_report": "left",
+          "user_reports": "left",
+          "add_patient": "right",
+          "bars": "right",
+          "calc": "right",
+          "electrolytes_calc": "right",
+          "bonus": "right",
+          "settings": "right",
+          "back": "right",
+          "exit": "right"
         }
       },
       "remcard_tabs": {
@@ -86,6 +100,18 @@
           "settings": false,
           "back": true,
           "exit": true
+        },
+        "side": {
+          "archive": "right",
+          "refresh": "right",
+          "user_report": "left",
+          "user_reports": "left",
+          "add_patient": "right",
+          "calc": "right",
+          "bonus": "right",
+          "settings": "right",
+          "back": "right",
+          "exit": "right"
         }
       },
       "remcard_tabs": {

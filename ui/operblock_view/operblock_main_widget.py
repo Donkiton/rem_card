@@ -157,7 +157,13 @@ from rem_card.ui.rem_card_sectors.sector_2v import Sector2v
 from rem_card.ui.rem_card_sectors.sector_8 import Sector8
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.shared.async_call import AsyncCallThread
-from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
+from rem_card.ui.shared.display_settings_storage import (
+    DisplaySettingsStorage,
+    SECTOR8_BUTTON_SIDE_LEFT,
+    SECTOR8_BUTTON_SIDE_RIGHT,
+    ordered_visible_ids_by_side,
+    role_display_settings_from_payload,
+)
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.shared.operblock_icon_settings import load_operblock_icon_pixmap
 from rem_card.ui.shared.pdf_opener import open_pdf_file
@@ -2008,9 +2014,21 @@ class OperBlockSector8Panel(QWidget):
             section = settings["sector8_buttons"]
             order = list(section["order"])
             visible = dict(section["visible"])
+            left_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT)
+            right_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_RIGHT)
         except Exception:
             order = list(getattr(self, "_button_widgets", {}).keys())
             visible = {button_id: True for button_id in order}
+            left_order = [
+                button_id
+                for button_id in order
+                if button_id in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+            ]
+            right_order = [
+                button_id
+                for button_id in order
+                if button_id not in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+            ]
 
         self._display_order = [button_id for button_id in order if button_id in self._button_widgets]
         for button_id in self._button_widgets:
@@ -2023,10 +2041,17 @@ class OperBlockSector8Panel(QWidget):
 
         self._clear_layout()
         self.layout.addWidget(self.title_label)
-        self.layout.addStretch(1)
         for button in self._button_widgets.values():
             button.setVisible(False)
-        for button_id in self._display_order:
+        for button_id in left_order:
+            button = self._button_widgets.get(button_id)
+            if button is None:
+                continue
+            if self._display_visible.get(button_id, True):
+                self.layout.addWidget(button)
+                button.setVisible(True)
+        self.layout.addStretch(1)
+        for button_id in right_order:
             button = self._button_widgets.get(button_id)
             if button is None:
                 continue

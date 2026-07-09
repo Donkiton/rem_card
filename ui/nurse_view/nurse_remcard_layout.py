@@ -127,7 +127,7 @@ class NurseRemCardLayoutManager(QWidget):
 
         self.sector_3_4_spacer = QWidget()
         self.sector_3_4_wrapper = QWidget()
-        self.sector_3_4_wrapper.setFixedWidth(230) 
+        self.sector_3_4_wrapper.setFixedWidth(240)
         wrapper_layout = QVBoxLayout(self.sector_3_4_wrapper)
         wrapper_layout.setContentsMargins(4, 3, 0, 4)
         wrapper_layout.setSpacing(0)

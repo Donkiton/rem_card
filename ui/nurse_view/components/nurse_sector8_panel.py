@@ -4,7 +4,13 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSize, QTimer, Signal
 from rem_card.app.logger import logger
 from rem_card.ui.shared.async_call import AsyncCallThread
-from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
+from rem_card.ui.shared.display_settings_storage import (
+    DisplaySettingsStorage,
+    SECTOR8_BUTTON_SIDE_LEFT,
+    SECTOR8_BUTTON_SIDE_RIGHT,
+    ordered_visible_ids_by_side,
+    role_display_settings_from_payload,
+)
 from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
 
 
@@ -153,22 +159,38 @@ class NurseSector8Panel(QWidget):
             payload = DisplaySettingsStorage().load()
             settings = role_display_settings_from_payload(payload, "nurse")
             section = settings["sector8_buttons"]
-            order = section["order"]
-            visible = section["visible"]
+            left_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_LEFT)
+            right_order = ordered_visible_ids_by_side(section, SECTOR8_BUTTON_SIDE_RIGHT)
         except Exception:
             order = list(getattr(self, "_button_widgets", {}).keys())
             visible = {button_id: True for button_id in order}
+            left_order = [
+                button_id
+                for button_id in order
+                if button_id in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+            ]
+            right_order = [
+                button_id
+                for button_id in order
+                if button_id not in {"user_report", "user_reports"} and bool(visible.get(button_id, True))
+            ]
 
         self._clear_layout()
-        self.layout.addStretch()
-        for button_id in order:
+        for button in self._button_widgets.values():
+            button.setVisible(False)
+        for button_id in left_order:
             button = self._button_widgets.get(button_id)
             if button is None:
                 continue
-            is_visible = bool(visible.get(button_id, True))
-            button.setVisible(is_visible)
-            if is_visible:
-                self.layout.addWidget(button)
+            button.setVisible(True)
+            self.layout.addWidget(button)
+        self.layout.addStretch()
+        for button_id in right_order:
+            button = self._button_widgets.get(button_id)
+            if button is None:
+                continue
+            button.setVisible(True)
+            self.layout.addWidget(button)
         self.updateGeometry()
 
     def set_add_patient_enabled(self, enabled: bool):

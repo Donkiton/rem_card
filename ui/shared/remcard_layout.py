@@ -121,8 +121,8 @@ class RemCardLayoutManager(QWidget):
 
         self.sector_3_4_spacer = QWidget()
         self.sector_3_4_wrapper = QWidget()
-        # Фиксируем ширину 230 пикселей для всех вкладок
-        self.sector_3_4_wrapper.setFixedWidth(230) 
+        # Фиксируем ширину 240 пикселей для всех вкладок
+        self.sector_3_4_wrapper.setFixedWidth(240)
         wrapper_layout = QVBoxLayout(self.sector_3_4_wrapper)
         # Правый край рамок правой колонки совпадает с верхними секторами.
         wrapper_layout.setContentsMargins(4, 3, 0, 4) 
@@ -1036,8 +1036,8 @@ class RemCardLayoutManager(QWidget):
             if updates_enabled:
                 self.setUpdatesEnabled(False)
             try:
-                # Всегда 230px
-                self.sector_3_4_wrapper.setFixedWidth(230)
+                # Всегда 240px
+                self.sector_3_4_wrapper.setFixedWidth(240)
                 self._apply_bottom_row_visibility(tab_name, is_orders=is_orders)
                 self.sector_3_4_spacer.show()
 

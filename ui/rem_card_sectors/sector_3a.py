@@ -1,5 +1,5 @@
 import os
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QSizePolicy)
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 from rem_card.ui.shared.base_sector import BaseSectorWidget
@@ -37,8 +37,8 @@ class Sector3a(BaseSectorWidget):
         self.data_area = QWidget()
         self.data_area.setObjectName("balance_data_area")
         self.data_layout = QVBoxLayout(self.data_area)
-        self.data_layout.setContentsMargins(10, 10, 10, 10)
-        self.data_layout.setSpacing(8)
+        self.data_layout.setContentsMargins(10, 6, 10, 6)
+        self.data_layout.setSpacing(4)
 
         # Заголовок "Введено" внутри области данных
         header_layout = QHBoxLayout()
@@ -99,39 +99,43 @@ class Sector3a(BaseSectorWidget):
 
     def add_balance_row(self, title, icon_name, value):
         row_layout = QHBoxLayout()
-        
-        label_container = QHBoxLayout()
-        label_container.setSpacing(5)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(2)
         
         icon_lbl = QLabel()
+        icon_lbl.setFixedSize(12, 16)
+        icon_lbl.setAlignment(Qt.AlignCenter)
         icon_lbl.setStyleSheet("border: none; background: transparent;")
         icon_path = os.path.join(self.icons_dir, icon_name)
         
         if os.path.exists(icon_path):
             pixmap = QPixmap(icon_path)
-            scaled_pixmap = pixmap.scaledToHeight(14, Qt.SmoothTransformation)
+            scaled_pixmap = pixmap.scaled(12, 14, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             icon_lbl.setPixmap(scaled_pixmap)
         else:
             alt_path = os.path.join("icon", icon_name)
             if os.path.exists(alt_path):
                 pixmap = QPixmap(alt_path)
-                scaled_pixmap = pixmap.scaledToHeight(14, Qt.SmoothTransformation)
+                scaled_pixmap = pixmap.scaled(12, 14, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 icon_lbl.setPixmap(scaled_pixmap)
-            else:
-                icon_lbl.setFixedSize(14, 14)
             
         text_lbl = QLabel(title)
         text_lbl.setStyleSheet("font-size: 12px; color: #495057; border: none; background: transparent;")
-        
-        label_container.addWidget(icon_lbl)
-        label_container.addWidget(text_lbl)
+        text_lbl.ensurePolished()
+        text_lbl.setFixedWidth(text_lbl.sizeHint().width())
+        text_lbl.setFixedHeight(max(16, text_lbl.sizeHint().height() + 2))
+        text_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        text_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         
         val_lbl = QLabel(value)
         val_lbl.setStyleSheet("font-weight: 600; color: #495057; font-size: 12px; border: none; background: transparent;")
+        val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        val_lbl.setMinimumWidth(0)
+        val_lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         
-        row_layout.addLayout(label_container)
-        row_layout.addStretch()
-        row_layout.addWidget(val_lbl)
+        row_layout.addWidget(icon_lbl)
+        row_layout.addWidget(text_lbl)
+        row_layout.addWidget(val_lbl, 1)
         
         self.data_layout.addLayout(row_layout)
         return val_lbl

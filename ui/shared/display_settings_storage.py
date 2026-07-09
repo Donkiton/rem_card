@@ -12,19 +12,34 @@ from rem_card.ui.styles.theme_storage import get_style_settings_path
 
 
 DISPLAY_SETTINGS_ENV = "REMCARD_DISPLAY_SETTINGS_PATH"
-DISPLAY_SETTINGS_VERSION = 1
+DISPLAY_SETTINGS_VERSION = 2
 DISPLAY_SETTINGS_RELATIVE_PATH = os.path.join("settings", "display_settings", "display_settings.json")
 W1A_UPCOMING_ORDERS_DEFAULT_ENABLED = True
 W1B_LOWER_SECTOR_DEFAULT_ENABLED = True
 DISPLAY_ROLES = ("doctor", "nurse", "operblock")
+SECTOR8_BUTTON_SIDE_LEFT = "left"
+SECTOR8_BUTTON_SIDE_RIGHT = "right"
+SECTOR8_BUTTON_SIDES = (SECTOR8_BUTTON_SIDE_LEFT, SECTOR8_BUTTON_SIDE_RIGHT)
 
 
 SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "doctor": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
-        {"id": "user_report", "label": "Репорт", "default_visible": True, "can_hide": True},
-        {"id": "user_reports", "label": "Репорты", "default_visible": False, "can_hide": True},
+        {
+            "id": "user_report",
+            "label": "Репорт",
+            "default_visible": True,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
+        {
+            "id": "user_reports",
+            "label": "Репорты",
+            "default_visible": False,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
         {"id": "bars", "label": "БАРС", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
@@ -37,8 +52,20 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "nurse": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
-        {"id": "user_report", "label": "Репорт", "default_visible": True, "can_hide": True},
-        {"id": "user_reports", "label": "Репорты", "default_visible": False, "can_hide": True},
+        {
+            "id": "user_report",
+            "label": "Репорт",
+            "default_visible": True,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
+        {
+            "id": "user_reports",
+            "label": "Репорты",
+            "default_visible": False,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
         {"id": "add_patient", "label": "Добавить пациента", "default_visible": True, "can_hide": True},
         {"id": "calc", "label": "Калькулятор", "default_visible": True, "can_hide": True},
         {"id": "bonus", "label": "Бонус", "default_visible": True, "can_hide": True},
@@ -49,8 +76,20 @@ SECTOR8_BUTTONS: dict[str, tuple[dict[str, Any], ...]] = {
     "operblock": (
         {"id": "archive", "label": "Архив", "default_visible": True, "can_hide": True},
         {"id": "refresh", "label": "Обновить", "default_visible": True, "can_hide": True},
-        {"id": "user_report", "label": "Репорт", "default_visible": True, "can_hide": True},
-        {"id": "user_reports", "label": "Репорты", "default_visible": False, "can_hide": True},
+        {
+            "id": "user_report",
+            "label": "Репорт",
+            "default_visible": True,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
+        {
+            "id": "user_reports",
+            "label": "Репорты",
+            "default_visible": False,
+            "can_hide": True,
+            "default_side": SECTOR8_BUTTON_SIDE_LEFT,
+        },
         {"id": "settings", "label": "Настройки", "default_visible": False, "can_hide": True},
         {"id": "back", "label": "Назад", "default_visible": True, "can_hide": True},
         {"id": "exit", "label": "Выход", "default_visible": True, "can_hide": True},
@@ -123,20 +162,35 @@ def _option_ids(options: tuple[dict[str, Any], ...]) -> list[str]:
     return [str(option["id"]) for option in options]
 
 
-def _default_section(options: tuple[dict[str, Any], ...]) -> dict[str, Any]:
-    return {
+def _normalize_sector8_button_side(value: Any, default: str = SECTOR8_BUTTON_SIDE_RIGHT) -> str:
+    side = str(value or "").strip().lower()
+    return side if side in SECTOR8_BUTTON_SIDES else default
+
+
+def _default_sector8_button_side(option: dict[str, Any]) -> str:
+    return _normalize_sector8_button_side(option.get("default_side"), SECTOR8_BUTTON_SIDE_RIGHT)
+
+
+def _default_section(options: tuple[dict[str, Any], ...], *, include_side: bool = False) -> dict[str, Any]:
+    section = {
         "order": _option_ids(options),
         "visible": {
             str(option["id"]): bool(option.get("default_visible", True))
             for option in options
         },
     }
+    if include_side:
+        section["side"] = {
+            str(option["id"]): _default_sector8_button_side(option)
+            for option in options
+        }
+    return section
 
 
 def default_role_display_settings(role: str | None) -> dict[str, Any]:
     role_key = normalize_display_role(role)
     return {
-        "sector8_buttons": _default_section(SECTOR8_BUTTONS[role_key]),
+        "sector8_buttons": _default_section(SECTOR8_BUTTONS[role_key], include_side=True),
         "remcard_tabs": _default_section(REMCARD_TABS[role_key]),
         "w1a_upcoming_orders": {
             "enabled": W1A_UPCOMING_ORDERS_DEFAULT_ENABLED,
@@ -187,8 +241,9 @@ def _normalize_section(
     *,
     base_section: Any = None,
     require_one_visible: bool = False,
+    include_side: bool = False,
 ) -> dict[str, Any]:
-    default = _default_section(options)
+    default = _default_section(options, include_side=include_side)
     if not isinstance(data, dict):
         data = {}
     if not isinstance(base_section, dict):
@@ -214,7 +269,27 @@ def _normalize_section(
     if require_one_visible and not any(visible.values()) and order:
         visible[order[0]] = True
 
-    return {"order": order, "visible": visible}
+    result = {"order": order, "visible": visible}
+    if include_side:
+        raw_side = data.get("side")
+        if not isinstance(raw_side, dict):
+            raw_side = {}
+        base_side = base_section.get("side")
+        if not isinstance(base_side, dict):
+            base_side = {}
+
+        side: dict[str, str] = {}
+        default_side_map = default.get("side") if isinstance(default.get("side"), dict) else {}
+        for option in options:
+            item_id = str(option["id"])
+            default_side = _normalize_sector8_button_side(
+                base_side.get(item_id, default_side_map.get(item_id)),
+                _default_sector8_button_side(option),
+            )
+            side[item_id] = _normalize_sector8_button_side(raw_side.get(item_id, default_side), default_side)
+        result["side"] = side
+
+    return result
 
 
 def _normalize_w1a_upcoming_orders_section(data: Any, *, base_section: Any = None) -> dict[str, Any]:
@@ -250,6 +325,7 @@ def normalize_role_display_settings(role: str | None, data: Any, base_settings: 
             data.get("sector8_buttons"),
             SECTOR8_BUTTONS[role_key],
             base_section=base_settings.get("sector8_buttons"),
+            include_side=True,
         ),
         "remcard_tabs": _normalize_section(
             data.get("remcard_tabs"),
@@ -288,6 +364,23 @@ def ordered_visible_ids(section: dict[str, Any]) -> list[str]:
     if not isinstance(order, list) or not isinstance(visible, dict):
         return []
     return [str(item_id) for item_id in order if bool(visible.get(str(item_id), False))]
+
+
+def ordered_visible_ids_by_side(section: dict[str, Any], side: str) -> list[str]:
+    order = section.get("order") if isinstance(section, dict) else []
+    visible = section.get("visible") if isinstance(section, dict) else {}
+    side_map = section.get("side") if isinstance(section, dict) else {}
+    if not isinstance(order, list) or not isinstance(visible, dict):
+        return []
+    if not isinstance(side_map, dict):
+        side_map = {}
+    target_side = _normalize_sector8_button_side(side)
+    return [
+        str(item_id)
+        for item_id in order
+        if bool(visible.get(str(item_id), False))
+        and _normalize_sector8_button_side(side_map.get(str(item_id)), SECTOR8_BUTTON_SIDE_RIGHT) == target_side
+    ]
 
 
 def w1a_upcoming_orders_enabled(payload: dict[str, Any], role: str | None) -> bool:
