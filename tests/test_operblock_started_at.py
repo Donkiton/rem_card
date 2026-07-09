@@ -4,8 +4,10 @@ import os
 import sqlite3
 import sys
 import unittest
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -33,10 +35,16 @@ class _MemoryDb:
     def __init__(self):
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
+        self.read_scope_sources: list[str] = []
         self._prepare_schema()
 
     def close(self):
         self.conn.close()
+
+    @contextmanager
+    def central_read_scope(self, source: str = "snapshot"):
+        self.read_scope_sources.append(str(source))
+        yield self
 
     def run_write_operation(self, operation, source="test"):
         cursor = self.conn.cursor()
@@ -188,8 +196,11 @@ class _MemoryDb:
                 admission_id INTEGER,
                 datetime TEXT,
                 text TEXT,
+                drug_key TEXT,
                 comment TEXT,
                 status TEXT,
+                is_committed INTEGER DEFAULT 1,
+                created_at TEXT,
                 updated_at TEXT,
                 last_modified_by TEXT,
                 revision INTEGER DEFAULT 0
@@ -306,6 +317,33 @@ class OperBlockStartedAtTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Время поступления в оперблок можно изменить"):
             payload = self._base_payload(started_at - timedelta(minutes=20))
             self.service.update_operation_case_form_data(result["operation_case_id"], payload)
+
+    def test_operation_report_context_uses_central_read_scope(self):
+        started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        result = self.service.create_operation_case(self._base_payload(started_at))
+        self.db.read_scope_sources.clear()
+
+        context = self.service.build_operation_report_context(result["operation_case_id"])
+
+        self.assertEqual(context["operation_case_id"], result["operation_case_id"])
+        self.assertEqual(self.db.read_scope_sources, ["operblock_report_context"])
+
+    def test_operation_report_read_retries_database_locked(self):
+        calls = {"count": 0}
+
+        def operation():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return "ok"
+
+        with patch("rem_card.services.operblock_service.time.sleep") as sleep_mock:
+            result = self.service._run_report_read_operation("operblock_report_context", operation)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls["count"], 2)
+        self.assertEqual(self.db.read_scope_sources[-2:], ["operblock_report_context", "operblock_report_context"])
+        sleep_mock.assert_called_once()
 
 
 class OperBlockTimeParserTest(unittest.TestCase):

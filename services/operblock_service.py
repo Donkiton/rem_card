@@ -10,7 +10,8 @@ from pathlib import Path
 import re
 import socket
 import sqlite3
-from typing import Any, Mapping, Optional
+import time
+from typing import Any, Callable, Mapping, Optional
 import uuid
 
 from rem_card.app import operblock_startup_metrics
@@ -66,6 +67,8 @@ OPERBLOCK_BLOOD_RH_OPTIONS = (
 )
 OPERBLOCK_TRANSFER_DEPARTMENT_OPTIONS = ("РАО",) + PROFILE_DEPARTMENTS
 OPERBLOCK_REPORT_RETENTION_DAYS = 7
+OPERBLOCK_REPORT_READ_RETRIES = 3
+OPERBLOCK_REPORT_READ_RETRY_DELAY_SEC = 0.25
 OPERBLOCK_MKB_CODE_RE = re.compile(r"^[A-Z]\d{2}(?:\.\d{1,2})?$")
 _RU_TO_EN_KEYBOARD = {
     "й": "q",
@@ -201,6 +204,15 @@ def validate_operblock_runtime_path(db_manager: Any | None = None) -> None:
     db_path = str(getattr(db_manager, "db_path", "") or getattr(db_manager, "remcard_db_path", "") or "")
     if db_path and not os.path.isfile(db_path):
         raise RuntimeError(f"БД оперблока недоступна: {db_path}")
+
+
+def _is_sqlite_locked_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database schema is locked" in message
+    )
 
 
 def _now_text() -> str:
@@ -817,6 +829,31 @@ class OperBlockService:
     def __init__(self, db_manager):
         self.db = db_manager
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
+
+    def _run_report_read_operation(self, source: str, operation: Callable[[], Any]) -> Any:
+        scope = getattr(self.db, "central_read_scope", None)
+        attempts = max(1, int(OPERBLOCK_REPORT_READ_RETRIES))
+        for attempt in range(1, attempts + 1):
+            try:
+                if callable(scope):
+                    with scope(source):
+                        return operation()
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_locked_error(exc) or attempt >= attempts:
+                    raise
+                delay_sec = OPERBLOCK_REPORT_READ_RETRY_DELAY_SEC * attempt
+                logger.warning(
+                    "Operblock report read locked source=%s attempt=%s/%s retry_in=%.2fs: %s",
+                    source,
+                    attempt,
+                    attempts,
+                    delay_sec,
+                    exc,
+                )
+                time.sleep(delay_sec)
+
+        return operation()
 
     def _runtime_mode(self) -> str:
         return str(getattr(getattr(self.db, "runtime_context", None), "mode", "") or "")
@@ -2242,6 +2279,12 @@ class OperBlockService:
         return payload
 
     def build_operation_report_context(self, operation_case_id: int) -> dict[str, Any]:
+        return self._run_report_read_operation(
+            "operblock_report_context",
+            lambda: self._build_operation_report_context(operation_case_id),
+        )
+
+    def _build_operation_report_context(self, operation_case_id: int) -> dict[str, Any]:
         snapshot = self.build_operblock_protocol_snapshot(operation_case_id)
         header = dict(snapshot.get("header") or {})
         stage_state = dict(header.get("stage_state") or {})
@@ -2767,6 +2810,12 @@ class OperBlockService:
         return rows
 
     def build_operation_report_pdf_path(self, operation_case_id: int) -> Path:
+        return self._run_report_read_operation(
+            "operblock_report_pdf_path",
+            lambda: self._build_operation_report_pdf_path(operation_case_id),
+        )
+
+    def _build_operation_report_pdf_path(self, operation_case_id: int) -> Path:
         self.cleanup_operation_report_dir()
         case = self._get_case_row(operation_case_id)
         patient_name = self._safe_report_filename(case.get("full_name") or "patient")
@@ -6822,6 +6871,16 @@ class OperBlockService:
         clean_alias = re.sub(r"[^0-9A-Za-z_]+", "", str(alias or clean_column))
         if not clean_column or not clean_alias:
             return "NULL"
+        try:
+            columns = {
+                str(row[1])
+                for row in self.db.fetch_all_remcard('PRAGMA table_info("operation_cases")')
+                if row and row[1]
+            }
+            if clean_column in columns:
+                return f"oc.{clean_column}"
+        except Exception:
+            pass
         conn = getattr(self.db, "_remcard_conn", None)
         try:
             if conn is not None and clean_column in _sqlite_columns(conn, "operation_cases"):
