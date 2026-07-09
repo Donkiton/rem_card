@@ -13,7 +13,7 @@ import uuid
 from typing import Any, TYPE_CHECKING
 import weakref
 
-from PySide6.QtCore import QDate, QEvent, QMimeData, QPointF, QRectF, QRegularExpression, QSettings, QSize, Qt, QTime, QTimer, Signal
+from PySide6.QtCore import QDate, QEvent, QEventLoop, QMimeData, QPointF, QRectF, QRegularExpression, QSettings, QSize, Qt, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QColor,
     QDrag,
@@ -8262,27 +8262,41 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         main.addWidget(header)
 
         content = QFrame(self.bg_container)
-        content.setStyleSheet(STYLE_PATIENT_FORM_TAB)
+        content.setObjectName("OperBlockOccupyFormContent")
+        content.setStyleSheet(
+            f"""
+            {STYLE_PATIENT_FORM_TAB}
+            QFrame#OperBlockOccupyFormContent {{
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(20, 16, 20, 20)
         content_layout.setSpacing(10)
 
         self.form_scroll = QScrollArea()
+        self.form_scroll.setObjectName("OperBlockOccupyFormScroll")
         self.form_scroll.setWidgetResizable(True)
         self.form_scroll.setFrameShape(QScrollArea.NoFrame)
         self.form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.form_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.form_scroll.setStyleSheet(
             f"""
-            QScrollArea {{
+            QScrollArea#OperBlockOccupyFormScroll {{
                 border: none;
                 background: {BG_MAIN};
             }}
-            QScrollArea > QWidget {{
+            QScrollArea#OperBlockOccupyFormScroll > QWidget {{
+                background: {BG_MAIN};
+            }}
+            QScrollArea#OperBlockOccupyFormScroll > QWidget > QWidget {{
                 background: {BG_MAIN};
             }}
             """
         )
+        self.form_scroll.viewport().setObjectName("OperBlockOccupyFormViewport")
+        self.form_scroll.viewport().setStyleSheet(f"background: {BG_MAIN};")
         form_scrollbar = self.form_scroll.verticalScrollBar()
         form_scrollbar.setObjectName("OperBlockPatientFormScrollBar")
         form_scrollbar.setFixedWidth(14)
@@ -8298,7 +8312,15 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         )
 
         self.form_page = QWidget()
-        self.form_page.setStyleSheet(STYLE_PATIENT_FORM_PAGE)
+        self.form_page.setObjectName("OperBlockOccupyFormPage")
+        self.form_page.setStyleSheet(
+            f"""
+            {STYLE_PATIENT_FORM_PAGE}
+            QWidget#OperBlockOccupyFormPage {{
+                background-color: {BG_MAIN};
+            }}
+            """
+        )
         page_layout = QVBoxLayout(self.form_page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
@@ -8312,6 +8334,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.gender_combo.setFixedHeight(34)
         self.gender_combo.addItems(["Мужской", "Женский"])
         self.gender_combo.setStyleSheet(_operblock_combo_box_style())
+        self._install_occupy_combo_wheel_redirect(self.gender_combo)
         self.birth_date_input = _line_edit()
         self.birth_date_input.setObjectName("OperBlockOccupyBirthDateInput")
         self.birth_date_input.setFixedHeight(34)
@@ -8343,6 +8366,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         diagnosis_form.addRow("Код диагноза МКБ-10 *:", code_line)
         diagnosis_form.addRow("Диагноз *:", self.diagnosis_text_input)
         self.department_profile_combo = self._profile_department_combo()
+        self._install_occupy_combo_wheel_redirect(self.department_profile_combo)
         diagnosis_form.addRow("Профильное отделение:", self.department_profile_combo)
         page_layout.addWidget(diagnosis)
 
@@ -8372,6 +8396,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 self.anesthesia_assistance_type_combo.addItem(label, label)
         self.anesthesia_assistance_type_combo.setCurrentIndex(-1)
         self.anesthesia_assistance_type_combo.setEditText("")
+        self._install_occupy_combo_wheel_redirect(self.anesthesia_assistance_type_combo)
         self.height_input = _line_edit()
         self.height_input.setPlaceholderText("см")
         self.height_input.setValidator(QIntValidator(1, 260, self.height_input))
@@ -8409,6 +8434,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.allergies_input.setPlaceholderText("Нет данных")
         self.blood_group_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_GROUP_OPTIONS)
         self.blood_rh_combo = self._fixed_option_combo(OPERBLOCK_BLOOD_RH_OPTIONS)
+        self._install_occupy_combo_wheel_redirect(self.blood_group_combo)
+        self._install_occupy_combo_wheel_redirect(self.blood_rh_combo)
         blood_widget = QWidget()
         blood_widget.setObjectName("OperBlockOccupyBloodFields")
         blood_widget.setStyleSheet(
@@ -8465,6 +8492,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
 
         self.operating_nurse_combo = StartAnesthesiaDialog._staff_combo(self._operating_nurse_options)
         self._configure_occupy_team_combo(self.operating_nurse_combo)
+        self._install_occupy_combo_wheel_redirect(self.operating_nurse_combo)
         self.add_surgeon_button = QPushButton("+ Добавить хирурга")
         self.add_surgeon_button.setCursor(Qt.PointingHandCursor)
         self.add_surgeon_button.setFixedHeight(32)
@@ -8478,6 +8506,7 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.anesthetist_combo = StartAnesthesiaDialog._staff_combo(self._anesthetist_options)
         for combo in (self.anesthesiologist_combo, self.anesthetist_combo):
             self._configure_occupy_team_combo(combo)
+            self._install_occupy_combo_wheel_redirect(combo)
         anesthesia_team_widget = QWidget()
         anesthesia_team_widget.setObjectName("OperBlockOccupyAnesthesiaFields")
         anesthesia_team_widget.setStyleSheet(
@@ -8591,9 +8620,16 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         combo.setMinimumContentsLength(18)
         combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    def _install_occupy_combo_wheel_redirect(self, combo: QComboBox) -> None:
+        combo.installEventFilter(self)
+        line_edit = combo.lineEdit()
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+
     def _add_surgeon_row(self, text: str = "") -> QComboBox:
         combo = StartAnesthesiaDialog._staff_combo(self._surgeon_options)
         self._configure_occupy_team_combo(combo)
+        self._install_occupy_combo_wheel_redirect(combo)
         if text:
             combo.setEditText(text)
         remove_button = QPushButton("Удалить")
@@ -8702,6 +8738,62 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
                 combo.setCurrentIndex(index)
                 return
         combo.setCurrentIndex(0)
+
+    def _occupy_combo_wheel_widgets(self) -> list[QComboBox]:
+        combos: list[QComboBox] = []
+        for attr in (
+            "gender_combo",
+            "department_profile_combo",
+            "anesthesia_assistance_type_combo",
+            "blood_group_combo",
+            "blood_rh_combo",
+            "operating_nurse_combo",
+            "anesthesiologist_combo",
+            "anesthetist_combo",
+        ):
+            combo = getattr(self, attr, None)
+            if isinstance(combo, QComboBox):
+                combos.append(combo)
+        combos.extend(combo for _widget, combo in getattr(self, "_surgeon_rows", []))
+        unique: list[QComboBox] = []
+        seen: set[int] = set()
+        for combo in combos:
+            key = id(combo)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(combo)
+        return unique
+
+    def _is_occupy_combo_wheel_widget(self, watched) -> bool:
+        for combo in self._occupy_combo_wheel_widgets():
+            if watched is combo:
+                return True
+            line_edit = combo.lineEdit()
+            if line_edit is not None and watched is line_edit:
+                return True
+        return False
+
+    def _scroll_occupy_form_wheel(self, event) -> bool:
+        scroll = getattr(self, "form_scroll", None)
+        if scroll is None:
+            event.accept()
+            return True
+        pixel_delta = event.pixelDelta().y() if hasattr(event, "pixelDelta") else 0
+        angle_delta = event.angleDelta().y() if hasattr(event, "angleDelta") else 0
+        delta = pixel_delta or angle_delta
+        if delta:
+            bar = scroll.verticalScrollBar()
+            if bar.maximum() > bar.minimum():
+                if pixel_delta:
+                    shift = -pixel_delta
+                else:
+                    steps = max(1, int(round(abs(angle_delta) / 120)))
+                    shift = (-1 if angle_delta > 0 else 1) * bar.singleStep() * steps
+                next_value = max(bar.minimum(), min(bar.maximum(), bar.value() + shift))
+                bar.setValue(next_value)
+        event.accept()
+        return True
 
     def _replace_surgeons(self, surgeons: list[str]) -> None:
         for widget, _combo in list(self._surgeon_rows):
@@ -8936,6 +9028,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.save_button.setText("СОХРАНЕНИЕ..." if saving else self._save_button_text)
 
     def eventFilter(self, watched, event):
+        if event.type() == QEvent.Wheel and self._is_occupy_combo_wheel_widget(watched):
+            return self._scroll_occupy_form_wheel(event)
         if watched is getattr(self, "sys_input", None) and event.type() == QEvent.KeyPress:
             if event.key() == Qt.Key_Slash:
                 self.dia_input.setFocus(Qt.TabFocusReason)
@@ -9090,6 +9184,12 @@ class OperBlockMainWidget(QWidget):
         self._board_refresh_worker = None
         self._board_refresh_pending: dict[str, Any] | None = None
         self._protocol_hash = ""
+        self._protocol_refresh_worker = None
+        self._protocol_refresh_pending: dict[str, Any] | None = None
+        self._protocol_tab_ready_pending = False
+        self._chart_module_preload_worker = None
+        self._chart_module_preloaded = False
+        self._chart_module_preload_failed = False
         self._current_operation_case_id: int | None = None
         self._current_admission_id: int | None = None
         self._current_operation_start: datetime | None = None
@@ -9122,6 +9222,7 @@ class OperBlockMainWidget(QWidget):
         self._board_photo_thumbnail_cache: dict[tuple, QPixmap] = {}
         self._quick_order_templates: list[dict] = []
         self._medication_presets: list[dict] = []
+        self._quick_orders_data_loaded = False
         self._preset_search_text = ""
         self._preset_kind_filter = "bolus"
         self._quick_order_filter_buttons: list[dict] = []
@@ -9144,6 +9245,8 @@ class OperBlockMainWidget(QWidget):
         self._orders_force_top_on_next_apply = False
         self._current_orders_rows: list[dict] = []
         self._current_timeline_snapshot: dict | None = None
+        self._current_chart_vitals: list[Any] = []
+        self._pending_orders_snapshot: dict | None = None
         self._route_only_write_suppressions: dict[tuple[int, int], float] = {}
         self._local_write_refresh_suppressions: dict[str, dict] = {}
         self._collapsed_order_group_keys: set[str] = set()
@@ -9172,6 +9275,8 @@ class OperBlockMainWidget(QWidget):
         self.protocol_page: QWidget | None = None
         self.archive_page: QWidget | None = None
         self.settings_page: QWidget | None = None
+        self._vitals_tab_built = False
+        self._orders_tab_built = False
         self._settings_return_page = "board"
         self._settings_return_operation_case_id: int | None = None
         self.content_stack: QStackedWidget | None = None
@@ -9222,6 +9327,12 @@ class OperBlockMainWidget(QWidget):
     def _hide_operblock_loading(self, loading_key: str | None, *, delay_ms: int = 350) -> None:
         if loading_key:
             hide_app_loading(self, loading_key, delay_ms=delay_ms)
+
+    def _pump_operblock_ui_events(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _apply_view_only_chrome_state(self):
         if not self.is_view_only_mode():
@@ -9525,8 +9636,10 @@ class OperBlockMainWidget(QWidget):
         right_layout.addWidget(self.tab_bar, 0)
 
         self.content_stack = QStackedWidget()
-        self.content_stack.addWidget(self._build_vitals_tab())
-        self.content_stack.addWidget(self._build_orders_tab())
+        self._vitals_tab_built = False
+        self._orders_tab_built = False
+        self.content_stack.addWidget(self._make_protocol_tab_placeholder("Загрузка графика..."))
+        self.content_stack.addWidget(self._make_protocol_tab_placeholder("Загрузка назначений..."))
         right_layout.addWidget(self.content_stack, 1)
         self._apply_protocol_tab_display_settings()
 
@@ -9539,6 +9652,141 @@ class OperBlockMainWidget(QWidget):
                 source="operblock_widget",
             )
         return page
+
+    def _make_protocol_tab_placeholder(self, text: str) -> QWidget:
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"""
+            QFrame {{
+                background-color: {BG_LIGHT};
+                border-left: 1.5px solid {BORDER_COLOR};
+                border-right: 1.5px solid {BORDER_COLOR};
+                border-bottom: 1.5px solid {BORDER_COLOR};
+            }}
+            QLabel {{
+                background: transparent;
+                border: none;
+                color: {TEXT_SECONDARY};
+                font-size: 14px;
+                font-weight: 600;
+            }}
+            """
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(str(text or "Загрузка..."))
+        label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(label, 1)
+        return frame
+
+    def _replace_protocol_tab_widget(self, index: int, widget: QWidget) -> None:
+        if self.content_stack is None:
+            return
+        current_index = self.content_stack.currentIndex()
+        old_widget = self.content_stack.widget(index)
+        if old_widget is widget:
+            return
+        if old_widget is not None:
+            self.content_stack.removeWidget(old_widget)
+            old_widget.deleteLater()
+        self.content_stack.insertWidget(index, widget)
+        if current_index == index:
+            self.content_stack.setCurrentIndex(index)
+
+    def _ensure_vitals_tab_created(self) -> bool:
+        if self._vitals_tab_built:
+            return True
+        if self.content_stack is None:
+            return False
+        if not self._chart_module_preloaded and not self._chart_module_preload_failed:
+            self._preload_operblock_chart_module()
+            return False
+        self._replace_protocol_tab_widget(0, self._build_vitals_tab())
+        self._vitals_tab_built = True
+        self._update_operblock_staff_legend()
+        self._apply_protocol_controls_state()
+        self._update_vitals_chart()
+        return True
+
+    def _ensure_orders_tab_created(self) -> bool:
+        if self._orders_tab_built:
+            return True
+        if self.content_stack is None:
+            return False
+        self._replace_protocol_tab_widget(1, self._build_orders_tab())
+        self._orders_tab_built = True
+        self._apply_active_infusions()
+        self._apply_orders(getattr(self, "_pending_orders_snapshot", None) or {"orders": self._current_orders_rows})
+        self._apply_protocol_controls_state()
+        QTimer.singleShot(0, self._refresh_quick_orders)
+        return True
+
+    def _ensure_current_protocol_tab_ready(self) -> None:
+        self._protocol_tab_ready_pending = False
+        if self._is_closing or self.protocol_page is None or self.content_stack is None:
+            return
+        if self.stack.currentWidget() != self.protocol_page:
+            return
+        if self.content_stack.currentIndex() == 1:
+            self._ensure_orders_tab_created()
+        else:
+            self._ensure_vitals_tab_created()
+
+    def _schedule_current_protocol_tab_ready(self, delay_ms: int = 0) -> None:
+        if self._protocol_tab_ready_pending:
+            return
+        self._protocol_tab_ready_pending = True
+        QTimer.singleShot(max(0, int(delay_ms or 0)), self._ensure_current_protocol_tab_ready)
+
+    def _preload_operblock_chart_module(self) -> None:
+        if self._chart_module_preloaded or self._chart_module_preload_failed:
+            return
+        worker = getattr(self, "_chart_module_preload_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+
+        def import_chart_module():
+            import importlib
+
+            return importlib.import_module("rem_card.ui.operblock_view.operblock_chart_widget")
+
+        worker = AsyncCallThread(import_chart_module, parent=self)
+        self._chart_module_preload_worker = worker
+        preload_started = operblock_startup_metrics.timer_start()
+
+        def on_preload_ready(_module):
+            self._chart_module_preloaded = True
+            if getattr(self, "_chart_module_preload_worker", None) is worker:
+                self._chart_module_preload_worker = None
+            operblock_startup_metrics.record_since(
+                "operblock_chart_background_import_ms",
+                preload_started,
+                source="operblock_widget",
+            )
+            if (
+                self.protocol_page is not None
+                and self.stack.currentWidget() == self.protocol_page
+                and self.content_stack is not None
+                and self.content_stack.currentIndex() == 0
+            ):
+                self._schedule_current_protocol_tab_ready()
+
+        def on_preload_failed(exc):
+            self._chart_module_preload_failed = True
+            if getattr(self, "_chart_module_preload_worker", None) is worker:
+                self._chart_module_preload_worker = None
+            logger.warning("operblock chart background import failed: %s", exc, exc_info=True)
+            if (
+                self.protocol_page is not None
+                and self.stack.currentWidget() == self.protocol_page
+                and self.content_stack is not None
+                and self.content_stack.currentIndex() == 0
+            ):
+                self._schedule_current_protocol_tab_ready()
+
+        worker.succeeded.connect(on_preload_ready)
+        worker.failed.connect(on_preload_failed)
+        worker.start()
 
     def _build_protocol_left_column(self) -> QWidget:
         column = QWidget()
@@ -9877,8 +10125,8 @@ class OperBlockMainWidget(QWidget):
         self.content_stack.setCurrentIndex(target_index)
         for current_id, button in (getattr(self, "_protocol_tab_widgets", {}) or {}).items():
             button.setChecked(current_id == target_id)
-        if target_id == "vitals":
-            QTimer.singleShot(0, self._update_vitals_chart)
+        if self.protocol_page is not None and self.stack.currentWidget() == self.protocol_page:
+            self._schedule_current_protocol_tab_ready()
 
     def _ensure_visible_protocol_tab(self):
         stack = getattr(self, "content_stack", None)
@@ -10330,6 +10578,7 @@ class OperBlockMainWidget(QWidget):
         input_body.addLayout(input_layout)
         self._update_manual_order_type_fields()
         layout.addWidget(input_panel, 0)
+        self._pump_operblock_ui_events()
 
         active_panel, active_body = self._orders_panel("")
         self.active_infusions_panel = active_panel
@@ -10397,6 +10646,7 @@ class OperBlockMainWidget(QWidget):
         self.active_infusions_scroll.setWidget(self.active_infusions_content)
         active_body.addWidget(self.active_infusions_scroll, 0)
         layout.addWidget(active_panel, 0)
+        self._pump_operblock_ui_events()
 
         timeline_panel, timeline_body = self._orders_panel("")
         self.orders_timeline_panel = timeline_panel
@@ -10476,6 +10726,7 @@ class OperBlockMainWidget(QWidget):
         layout.addWidget(timeline_panel, 1)
 
         outer_layout.addWidget(content_column, 1)
+        self._pump_operblock_ui_events()
 
         quick_wrapper = QWidget()
         quick_wrapper.setStyleSheet("background: transparent;")
@@ -10542,57 +10793,13 @@ class OperBlockMainWidget(QWidget):
         filter_row.setVerticalSpacing(4)
         filter_row.setColumnStretch(0, 1)
         filter_row.setColumnStretch(1, 1)
-        self.preset_filter_group = QButtonGroup(self)
-        self.preset_filter_group.setExclusive(True)
-        self._quick_order_filter_buttons = self._load_quick_order_filter_buttons()
+        self.preset_filter_layout = filter_row
+        if not self._quick_order_filter_buttons:
+            self._quick_order_filter_buttons = self._fallback_quick_order_filter_buttons()
         self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
         if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
             self._preset_kind_filter = self._quick_order_filter_keys[0]
-        grid_row = 0
-        grid_column = 0
-        for index, button_info in enumerate(self._quick_order_filter_buttons):
-            filter_key = str((button_info or {}).get("key") or "").strip()
-            label = str((button_info or {}).get("label") or filter_key).strip()
-            if not filter_key or not label:
-                continue
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setChecked(filter_key == self._preset_kind_filter)
-            button.setFixedHeight(28)
-            button.setMinimumWidth(0)
-            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            button.setToolTip(label)
-            button.setCursor(Qt.PointingHandCursor)
-            button.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background-color: #F8FAFC;
-                    color: {OPERBLOCK_ORDERS_MUTED};
-                    border: 1px solid {OPERBLOCK_ORDERS_BORDER};
-                    border-radius: 6px;
-                    padding: 4px 6px;
-                    font-size: 11px;
-                    font-weight: 500;
-                }}
-                QPushButton:checked {{
-                    background-color: #EEF3FF;
-                    color: {OPERBLOCK_ORDERS_ACCENT};
-                    border-color: {OPERBLOCK_ORDERS_BORDER};
-                }}
-                """
-            )
-            self.preset_filter_group.addButton(button, index)
-            if filter_key == "favorite":
-                filter_row.addWidget(button, grid_row, 0, 1, 2)
-                grid_row += 1
-                grid_column = 0
-            else:
-                filter_row.addWidget(button, grid_row, grid_column)
-                grid_column += 1
-                if grid_column > 1:
-                    grid_column = 0
-                    grid_row += 1
-        self.preset_filter_group.idClicked.connect(self._on_preset_filter_changed)
+        self._rebuild_quick_order_filter_buttons_ui()
         quick_controls_layout.addLayout(filter_row)
 
         self.preset_settings_button = QPushButton("Настроить препараты")
@@ -10614,6 +10821,7 @@ class OperBlockMainWidget(QWidget):
         self.preset_settings_button.setVisible(False)
         quick_controls_layout.addWidget(self.preset_settings_button)
         quick_body.addWidget(self.quick_orders_controls_panel, 0)
+        self._pump_operblock_ui_events()
 
         quick_scroll = QScrollArea()
         quick_scroll.setObjectName("operblockQuickOrdersScroll")
@@ -10643,8 +10851,8 @@ class OperBlockMainWidget(QWidget):
         quick_body.addWidget(quick_scroll, 1)
         quick_wrapper_layout.addWidget(quick_panel, 1)
         outer_layout.addWidget(quick_wrapper, 0)
+        self._pump_operblock_ui_events()
 
-        self._refresh_quick_orders()
         operblock_startup_metrics.record_since("build_orders_tab_ms", metric_started, source="operblock_widget")
         if getattr(self, "_creating_lazy_protocol_page", False):
             operblock_startup_metrics.record_since(
@@ -10919,7 +11127,11 @@ class OperBlockMainWidget(QWidget):
             first_refresh_started = operblock_startup_metrics.timer_start()
             self._operblock_startup_first_refresh_recorded = True
         snapshot_started = operblock_startup_metrics.timer_start()
-        worker = AsyncCallThread(self.operblock_service.build_operblock_board_snapshot, parent=self)
+        worker = AsyncCallThread(
+            self.operblock_service.build_operblock_board_snapshot,
+            table_code=self._table_filter_code,
+            parent=self,
+        )
         self._board_refresh_worker = worker
         finalized = {"done": False}
 
@@ -10942,6 +11154,8 @@ class OperBlockMainWidget(QWidget):
             self._board_refresh_pending = None
             if pending and not self._is_closing:
                 QTimer.singleShot(0, lambda pending=pending: self.refresh_board(**pending))
+            elif is_first_refresh and not self._is_closing:
+                QTimer.singleShot(300, self._preload_operblock_chart_module)
 
         def on_snapshot_ready(snapshot):
             try:
@@ -11050,31 +11264,101 @@ class OperBlockMainWidget(QWidget):
     def refresh_protocol(self, *, force: bool = False, loading_message: str | None = None):
         if self._is_closing or not self._current_operation_case_id:
             return
+        worker = getattr(self, "_protocol_refresh_worker", None)
+        if worker is not None and worker.isRunning():
+            self._refresh_generation += 1
+            pending = dict(self._protocol_refresh_pending or {})
+            self._protocol_refresh_pending = {
+                "force": bool(force) or bool(pending.get("force")),
+                "loading_message": loading_message or pending.get("loading_message"),
+            }
+            return
         loading_key = self._show_operblock_loading(
             loading_message,
             key="protocol-refresh",
             auto_hide_ms=30000,
         )
-        try:
-            generation = self._refresh_generation = self._refresh_generation + 1
-            try:
-                snapshot = self.operblock_service.build_operblock_protocol_snapshot(self._current_operation_case_id)
-            except OperBlockConflictError as exc:
-                CustomMessageBox.warning(self, "Оперблок", str(exc))
-                self._show_board()
+        generation = self._refresh_generation = self._refresh_generation + 1
+        operation_case_id = int(self._current_operation_case_id)
+        snapshot_started = operblock_startup_metrics.timer_start()
+        worker = AsyncCallThread(
+            self.operblock_service.build_operblock_protocol_snapshot,
+            operation_case_id,
+            parent=self,
+        )
+        self._protocol_refresh_worker = worker
+        finalized = {"done": False}
+
+        def finalize_refresh():
+            if finalized["done"]:
                 return
+            finalized["done"] = True
+            self._hide_operblock_loading(loading_key)
+            if getattr(self, "_protocol_refresh_worker", None) is worker:
+                self._protocol_refresh_worker = None
+            pending = self._protocol_refresh_pending
+            self._protocol_refresh_pending = None
+            if pending and not self._is_closing:
+                QTimer.singleShot(0, lambda pending=pending: self.refresh_protocol(**pending))
+
+        def is_stale_result() -> bool:
+            return (
+                self._is_closing
+                or generation != self._refresh_generation
+                or int(self._current_operation_case_id or 0) != operation_case_id
+            )
+
+        def on_snapshot_ready(snapshot):
+            try:
+                operblock_startup_metrics.record_since(
+                    "refresh_protocol_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    operation_case_id=operation_case_id,
+                )
+                if is_stale_result():
+                    return
+                if not force and snapshot.get("content_hash") == self._protocol_hash:
+                    return
+                self._protocol_hash = snapshot.get("content_hash") or ""
+                apply_started = operblock_startup_metrics.timer_start()
+                self._apply_protocol_snapshot(snapshot)
+                operblock_startup_metrics.record_since(
+                    "refresh_protocol_apply_ms",
+                    apply_started,
+                    source="operblock_widget",
+                    operation_case_id=operation_case_id,
+                )
+                self._schedule_current_protocol_tab_ready(120)
             except Exception as exc:
+                logger.error("operblock protocol refresh apply failed: %s", exc, exc_info=True)
+                CustomMessageBox.warning(self, "Ошибка", f"Не удалось обновить протокол:\n{exc}")
+            finally:
+                finalize_refresh()
+
+        def on_snapshot_failed(exc):
+            try:
+                operblock_startup_metrics.record_since(
+                    "refresh_protocol_snapshot_ms",
+                    snapshot_started,
+                    source="operblock_widget",
+                    operation_case_id=operation_case_id,
+                    status="error",
+                )
+                if is_stale_result():
+                    return
+                if isinstance(exc, OperBlockConflictError):
+                    CustomMessageBox.warning(self, "Оперблок", str(exc))
+                    self._show_board()
+                    return
                 logger.error("operblock protocol refresh failed: %s", exc, exc_info=True)
                 CustomMessageBox.warning(self, "Ошибка", f"Не удалось обновить протокол:\n{exc}")
-                return
-            if self._is_closing or generation != self._refresh_generation:
-                return
-            if not force and snapshot.get("content_hash") == self._protocol_hash:
-                return
-            self._protocol_hash = snapshot.get("content_hash") or ""
-            self._apply_protocol_snapshot(snapshot)
-        finally:
-            self._hide_operblock_loading(loading_key)
+            finally:
+                finalize_refresh()
+
+        worker.succeeded.connect(on_snapshot_ready)
+        worker.failed.connect(on_snapshot_failed)
+        worker.start()
 
     @staticmethod
     def _empty_board_table_payload(table: dict) -> dict:
@@ -13066,8 +13350,13 @@ class OperBlockMainWidget(QWidget):
             self._vitals_context_key = None
             self._current_orders_rows = []
             self._current_timeline_snapshot = None
+            self._current_chart_vitals = []
+            self._pending_orders_snapshot = {"orders": []}
             if getattr(self, "vitals_chart", None) and hasattr(self.vitals_chart, "set_timeline_snapshot"):
                 self.vitals_chart.set_timeline_snapshot(None, None, force=True)
+            if getattr(self, "_orders_tab_built", False):
+                self._apply_active_infusions()
+                self._apply_orders({"orders": []})
             self._protocol_hash = ""
             self.operblock_vitals_service.set_operation_context(
                 operation_case_id=self._current_operation_case_id,
@@ -13077,7 +13366,9 @@ class OperBlockMainWidget(QWidget):
             )
             self._set_protocol_chrome(True)
             self.stack.setCurrentWidget(self.protocol_page)
-            self.refresh_protocol(force=True)
+            self._preload_operblock_chart_module()
+            self._schedule_current_protocol_tab_ready(150)
+            self.refresh_protocol(force=True, loading_message="Загрузка протокола операции...")
             if first_open:
                 operblock_startup_metrics.record_since(
                     "first_open_protocol_ms",
@@ -13122,10 +13413,15 @@ class OperBlockMainWidget(QWidget):
         orders_snapshot = snapshot.get("orders") or {}
         self._current_orders_rows = [dict(row or {}) for row in orders_snapshot.get("orders") or []]
         self._current_timeline_snapshot = dict(snapshot.get("timeline") or {})
-        self._apply_active_infusions()
+        self._current_chart_vitals = list(snapshot.get("chart_vitals") or [])
+        self._pending_orders_snapshot = dict(orders_snapshot or {})
+        if getattr(self, "_orders_tab_built", False):
+            self._apply_active_infusions()
         self._set_vitals_context(self._current_admission_id)
-        self._update_vitals_chart()
-        self._apply_orders(orders_snapshot)
+        if getattr(self, "_vitals_tab_built", False):
+            self._update_vitals_chart()
+        if getattr(self, "_orders_tab_built", False):
+            self._apply_orders(orders_snapshot)
         self._apply_protocol_controls_state()
 
     def _update_protocol_status_label(self, started_at, *, active: bool):
@@ -13248,7 +13544,7 @@ class OperBlockMainWidget(QWidget):
             return
         try:
             start_dt = self._current_operation_start or self._current_protocol_date
-            vitals = self.operblock_service.list_operation_vitals(self._current_operation_case_id)
+            vitals = list(getattr(self, "_current_chart_vitals", []) or [])
             anesthesia_started_at = self._first_anesthesia_start_for_chart()
             timeline_transform = type(chart).build_operation_timeline_transform(anesthesia_started_at, vitals)
             display_start_dt = timeline_transform.display_origin_at or start_dt
@@ -13395,6 +13691,8 @@ class OperBlockMainWidget(QWidget):
                 if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
                     self._preset_kind_filter = self._quick_order_filter_keys[0]
             self._rebuild_quick_order_search_index()
+            self._quick_orders_data_loaded = True
+            self._rebuild_quick_order_filter_buttons_ui()
         finally:
             elapsed_ms = (time.perf_counter() - metric_started) * 1000.0 if metric_started else 0.0
             operblock_startup_metrics.record_duration(
@@ -13423,6 +13721,66 @@ class OperBlockMainWidget(QWidget):
             for button in buttons or []
             if str((button or {}).get("key") or "").strip()
         ]
+
+    def _rebuild_quick_order_filter_buttons_ui(self) -> None:
+        layout = getattr(self, "preset_filter_layout", None)
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.preset_filter_group = QButtonGroup(self)
+        self.preset_filter_group.setExclusive(True)
+        self._quick_order_filter_keys = self._quick_order_filter_keys_from_buttons(self._quick_order_filter_buttons)
+        if self._quick_order_filter_keys and self._preset_kind_filter not in self._quick_order_filter_keys:
+            self._preset_kind_filter = self._quick_order_filter_keys[0]
+        grid_row = 0
+        grid_column = 0
+        for index, button_info in enumerate(self._quick_order_filter_buttons):
+            filter_key = str((button_info or {}).get("key") or "").strip()
+            label = str((button_info or {}).get("label") or filter_key).strip()
+            if not filter_key or not label:
+                continue
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setChecked(filter_key == self._preset_kind_filter)
+            button.setFixedHeight(28)
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button.setToolTip(label)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setStyleSheet(
+                f"""
+                QPushButton {{
+                    background-color: #F8FAFC;
+                    color: {OPERBLOCK_ORDERS_MUTED};
+                    border: 1px solid {OPERBLOCK_ORDERS_BORDER};
+                    border-radius: 6px;
+                    padding: 4px 6px;
+                    font-size: 11px;
+                    font-weight: 500;
+                }}
+                QPushButton:checked {{
+                    background-color: #EEF3FF;
+                    color: {OPERBLOCK_ORDERS_ACCENT};
+                    border-color: {OPERBLOCK_ORDERS_BORDER};
+                }}
+                """
+            )
+            self.preset_filter_group.addButton(button, index)
+            if filter_key == "favorite":
+                layout.addWidget(button, grid_row, 0, 1, 2)
+                grid_row += 1
+                grid_column = 0
+            else:
+                layout.addWidget(button, grid_row, grid_column)
+                grid_column += 1
+                if grid_column > 1:
+                    grid_column = 0
+                    grid_row += 1
+        self.preset_filter_group.idClicked.connect(self._on_preset_filter_changed)
 
     def _load_quick_order_filter_buttons(self) -> list[dict]:
         try:
@@ -13490,8 +13848,9 @@ class OperBlockMainWidget(QWidget):
             for preset in getattr(self, "_medication_presets", []) or []
         }
 
-    def _refresh_quick_orders(self):
-        self._load_quick_orders_data()
+    def _refresh_quick_orders(self, *, force_reload: bool = False):
+        if force_reload or not getattr(self, "_quick_orders_data_loaded", False):
+            self._load_quick_orders_data()
         self._render_quick_orders()
 
     def _on_preset_search_changed(self, text: str):
@@ -13918,7 +14277,7 @@ class OperBlockMainWidget(QWidget):
             except Exception as exc:
                 logger.warning("operblock view-only quick order reorder cache failed: %s", exc, exc_info=True)
                 self._cancel_quick_order_drag()
-                self._refresh_quick_orders()
+                self._refresh_quick_orders(force_reload=True)
                 return False
             self._quick_order_drag_committed = True
             self._finish_quick_order_drag_layout(order)
@@ -13931,7 +14290,7 @@ class OperBlockMainWidget(QWidget):
             logger.error("operblock quick order reorder failed: %s", exc, exc_info=True)
             CustomMessageBox.warning(self, "Быстрые назначения", f"Не удалось сохранить порядок:\n{exc}")
             self._cancel_quick_order_drag()
-            self._refresh_quick_orders()
+            self._refresh_quick_orders(force_reload=True)
             return False
         self._quick_order_drag_committed = True
         self._finish_quick_order_drag_layout(order)
@@ -14478,6 +14837,7 @@ class OperBlockMainWidget(QWidget):
             self._quick_order_templates = load_operblock_quick_orders()
         except Exception:
             self._quick_order_templates = []
+        self._quick_orders_data_loaded = True
         self._rebuild_quick_order_search_index()
         self._render_quick_orders()
         if self._current_operation_case_id:
@@ -14488,7 +14848,7 @@ class OperBlockMainWidget(QWidget):
         self._write_pending = False
         self.sector_8_panel.btn_settings.setEnabled(True)
         CustomMessageBox.warning(self, "Ошибка сохранения", str(exc))
-        self._refresh_quick_orders()
+        self._refresh_quick_orders(force_reload=True)
 
     def _apply_orders(self, snapshot: dict, *, update_chart_markers: bool = True):
         scroll_state = self._capture_orders_scroll_state()
@@ -19827,6 +20187,8 @@ class OperBlockMainWidget(QWidget):
             self._vitals_context_key = None
             self._current_orders_rows = []
             self._current_timeline_snapshot = None
+            self._current_chart_vitals = []
+            self._pending_orders_snapshot = {"orders": []}
             self._apply_active_infusions()
             self.operblock_vitals_service.set_operation_context(
                 operation_case_id=None,

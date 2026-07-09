@@ -763,18 +763,31 @@ def _existing_session_locks(directory: str) -> list[str]:
     return locks
 
 
+def _fs_path(path: str) -> str:
+    if os.name != "nt":
+        return path
+    if path.startswith("\\\\?\\"):
+        return path
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
+
+
 def _check_probe_writable_dir(directory: str) -> str:
     try:
-        if os.path.exists(directory) and not os.path.isdir(directory):
+        probe_dir = _fs_path(directory)
+        if os.path.exists(probe_dir) and not os.path.isdir(probe_dir):
             return f"not a directory: {directory}"
-        os.makedirs(directory, exist_ok=True)
+        os.makedirs(probe_dir, exist_ok=True)
         path = os.path.join(directory, f".dry_run_probe_{os.getpid()}_{uuid.uuid4().hex}.tmp")
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        probe_path = _fs_path(path)
+        fd = os.open(probe_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         try:
             os.write(fd, b"dry-run")
         finally:
             os.close(fd)
-        os.remove(path)
+        os.remove(probe_path)
         return "ready"
     except OSError as exc:
         return str(exc)

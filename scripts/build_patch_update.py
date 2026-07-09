@@ -128,13 +128,31 @@ def _remove_tree_quietly(path: Path | None) -> None:
     if not path:
         return
     try:
-        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(_fs_path(path), ignore_errors=True)
     except Exception:
         pass
 
 
 def _rel_path(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
+
+
+def _fs_path(path: Path) -> str:
+    raw = os.fspath(path)
+    if os.name != "nt":
+        return raw
+    if raw.startswith("\\\\?\\"):
+        return raw
+    absolute = os.path.abspath(raw)
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute.lstrip("\\")
+    return "\\\\?\\" + absolute
+
+
+def _io_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    return Path(_fs_path(path))
 
 
 def _iter_tree_files(root: Path):
@@ -162,16 +180,16 @@ def _tree_hashes(root: Path, *, exclude: set[str] | None = None) -> dict[str, di
 
 def _copy_tree(source: Path, target: Path, *, exclude: set[str] | None = None) -> None:
     excluded = exclude or set()
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True, exist_ok=True)
+    if os.path.exists(_fs_path(target)):
+        shutil.rmtree(_fs_path(target))
+    os.makedirs(_fs_path(target), exist_ok=True)
     for path in _iter_tree_files(source):
         rel = _rel_path(path, source)
         if rel in excluded:
             continue
         dest = target / Path(*rel.split("/"))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dest)
+        os.makedirs(_fs_path(dest.parent), exist_ok=True)
+        shutil.copy2(_fs_path(path), _fs_path(dest))
 
 
 def _cache_root(root: Path) -> Path:
@@ -202,9 +220,9 @@ def _load_base_build(root: Path, version: str, commit: str) -> BaseBuild | None:
     return BaseBuild(
         version=str(metadata.get("version") or version),
         commit=str(metadata.get("commit") or commit),
-        root=base_root,
-        canonical_tree=canonical,
-        raw_full_tree=raw,
+        root=_io_path(base_root),
+        canonical_tree=_io_path(canonical),
+        raw_full_tree=_io_path(raw),
         manifest=manifest,
     )
 
@@ -266,8 +284,8 @@ def register_base_from_full_package(
     base_root = _base_dir(root, version, commit)
     canonical = base_root / "canonical_tree"
     raw = base_root / "raw_full_tree"
-    if base_root.exists():
-        shutil.rmtree(base_root)
+    if os.path.exists(_fs_path(base_root)):
+        shutil.rmtree(_fs_path(base_root))
     _copy_tree(package_dir, canonical, exclude=TREE_EXCLUDES)
     _copy_tree(package_dir, raw, exclude=TREE_EXCLUDES)
     hashes = _tree_hashes(canonical)
@@ -281,7 +299,7 @@ def register_base_from_full_package(
         "tree_file_count": len(hashes),
     }
     _write_json(base_root / "metadata.json", metadata)
-    return BaseBuild(version, commit, base_root, canonical, raw, manifest)
+    return BaseBuild(version, commit, _io_path(base_root), _io_path(canonical), _io_path(raw), manifest)
 
 
 def find_or_register_base(root: Path, *, version: str, commit: str, upd_dir: Path) -> BaseBuild:
@@ -308,8 +326,8 @@ def _deterministic_env(root: Path, patch_commit: str) -> dict[str, str]:
 
 
 def build_temp_full(root: Path, target_dir: Path, deterministic_env: dict[str, str]) -> None:
-    if target_dir.exists():
-        shutil.rmtree(target_dir)
+    if os.path.exists(_fs_path(target_dir)):
+        shutil.rmtree(_fs_path(target_dir))
     env = os.environ.copy()
     env.update(deterministic_env)
     env["REMCARD_BUILD_TARGET_DIR"] = str(target_dir)
@@ -441,8 +459,8 @@ def patch_package_size_bytes(patch_dir: Path) -> int:
 
 
 def write_patch_payload(patch_dir: Path, canonical_new_tree: Path, manifest: dict[str, Any]) -> None:
-    if patch_dir.exists():
-        shutil.rmtree(patch_dir)
+    if os.path.exists(_fs_path(patch_dir)):
+        shutil.rmtree(_fs_path(patch_dir))
     patch_dir.mkdir(parents=True, exist_ok=True)
     for entry in manifest["files"]:
         rel = str(entry["path"])
@@ -488,7 +506,7 @@ def publish_patch_package(patch_dir: Path, target_dir: Path, manifest: dict[str,
         ready_path.unlink()
     for name in target_dir.iterdir():
         if name.is_dir():
-            shutil.rmtree(name, ignore_errors=True)
+            shutil.rmtree(_fs_path(name), ignore_errors=True)
         else:
             try:
                 name.unlink()
@@ -523,8 +541,8 @@ def register_published_base(
     base_root = _base_dir(root, version, commit)
     canonical = base_root / "canonical_tree"
     raw = base_root / "raw_full_tree"
-    if base_root.exists():
-        shutil.rmtree(base_root)
+    if os.path.exists(_fs_path(base_root)):
+        shutil.rmtree(_fs_path(base_root))
     _copy_tree(canonical_new_tree, canonical)
     _copy_tree(raw_new_tree, raw, exclude=TREE_EXCLUDES)
     _write_json(base_root / "base_manifest.json", manifest)
@@ -538,7 +556,7 @@ def register_published_base(
             "source": "patch_publish",
         },
     )
-    return BaseBuild(version, commit, base_root, canonical, raw, manifest)
+    return BaseBuild(version, commit, _io_path(base_root), _io_path(canonical), _io_path(raw), manifest)
 
 
 def cleanup_old_bases(root: Path, *, keep: int = 3) -> None:
@@ -547,7 +565,7 @@ def cleanup_old_bases(root: Path, *, keep: int = 3) -> None:
         return
     bases = sorted((path for path in bases_dir.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True)
     for path in bases[max(1, keep):]:
-        shutil.rmtree(path, ignore_errors=True)
+        shutil.rmtree(_fs_path(path), ignore_errors=True)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -595,8 +613,8 @@ def main(argv: list[str] | None = None) -> int:
         deterministic_env = _deterministic_env(root, patch_commit)
 
         work = _work_dir(root, next_version)
-        if work.exists():
-            shutil.rmtree(work)
+        if os.path.exists(_fs_path(work)):
+            shutil.rmtree(_fs_path(work))
         raw_new = work / "full_new_raw"
         canonical_new = work / "full_new_canonical"
         patch_payload = work / "patch_payload"
