@@ -113,6 +113,9 @@ def build_graphs_html(
             html_content = generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_content)
             html_content = generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_content)
             return GraphsBuildResult(html=html_content, image_paths=img_paths)
+    except Exception:
+        _cleanup_graph_image_files(img_paths)
+        raise
     finally:
         if cleanup:
             cleanup()
@@ -187,6 +190,16 @@ def _thread_local_manager(db_manager):
         manager = create_readonly_analytics_manager(db_path)
         return manager, manager.close_connection
     return db_manager, None
+
+
+def _cleanup_graph_image_files(paths: Sequence[str]) -> None:
+    for path in paths or ():
+        try:
+            os.remove(str(path))
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
 
 
 def _parse_graphs_pdf_items(html_content: str) -> list[_GraphsPdfItem]:

@@ -1,4 +1,6 @@
 import os
+import re
+import tempfile
 from datetime import datetime
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QWidget, QGraphicsDropShadowEffect, QScrollArea, QCheckBox, QTextBrowser, QFrame)
@@ -54,6 +56,7 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self._graphs_worker = None
         self._graphs_pdf_worker = None
         self._closing = False
+        self._temp_graph_paths: set[str] = set()
 
         self._init_ui()
         self._restore_saved_geometry()
@@ -328,8 +331,13 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
         self._graphs_worker.start()
 
     def _on_graphs_ready(self, result, save_pdf: bool):
+        image_paths = list(getattr(result, "image_paths", []) or [])
         if self._closing:
+            self._remember_temp_graph_paths(image_paths)
+            self._cleanup_temp_graph_files_if_idle()
             return
+        self._cleanup_temp_graph_files()
+        self._remember_temp_graph_paths(image_paths)
         html = getattr(result, "html", "")
         self.report_text.setHtml(self._fit_graphs_preview_html(html))
         if save_pdf:
@@ -398,13 +406,19 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
     def _fit_graphs_preview_html(self, html: str) -> str:
         viewport = self.report_text.viewport()
         width = viewport.width() - 100 if viewport is not None else 760
-        return fit_chart_images_to_width(html, width, resize_images=True)
+        fitted_html = fit_chart_images_to_width(html, width, resize_images=True)
+        self._remember_temp_graph_paths(re.findall(r"<img\b[^>]*?\bsrc='([^']+)'", fitted_html))
+        return fitted_html
 
     def _clear_graphs_worker(self):
         self._graphs_worker = None
+        if self._closing:
+            self._cleanup_temp_graph_files_if_idle()
 
     def _clear_graphs_pdf_worker(self):
         self._graphs_pdf_worker = None
+        if self._closing:
+            self._cleanup_temp_graph_files_if_idle()
 
     def _cancel_workers(self):
         self._closing = True
@@ -414,6 +428,42 @@ class GraphsDialog(SavedFramelessDialogMixin, QDialog):
                     worker.cancel()
                 except Exception:
                     pass
+        self._cleanup_temp_graph_files_if_idle()
+
+    def _remember_temp_graph_paths(self, paths) -> None:
+        for raw_path in paths or ():
+            path = str(raw_path or "").strip()
+            if self._is_temp_graph_file(path):
+                self._temp_graph_paths.add(os.path.abspath(path))
+
+    def _is_temp_graph_file(self, path: str) -> bool:
+        if not path:
+            return False
+        name = os.path.basename(path).lower()
+        if not name.endswith(".png") or not (name.startswith("graph_") or name.startswith("graph_preview_")):
+            return False
+        try:
+            temp_root = os.path.normcase(os.path.abspath(tempfile.gettempdir()))
+            path_abs = os.path.normcase(os.path.abspath(path))
+            return os.path.commonpath([path_abs, temp_root]) == temp_root
+        except Exception:
+            return False
+
+    def _cleanup_temp_graph_files_if_idle(self) -> None:
+        for worker in (self._graphs_worker, self._graphs_pdf_worker):
+            if worker is not None and worker.isRunning():
+                return
+        self._cleanup_temp_graph_files()
+
+    def _cleanup_temp_graph_files(self) -> None:
+        remaining: set[str] = set()
+        for path in list(self._temp_graph_paths):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except OSError:
+                remaining.add(path)
+        self._temp_graph_paths = remaining
 
     def reject(self):
         self._cancel_workers()
