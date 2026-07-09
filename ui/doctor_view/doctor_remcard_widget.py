@@ -157,10 +157,8 @@ class DoctorRemCardWidget(QWidget):
         self._balance_update_timer.setSingleShot(True)
         self._balance_update_timer.timeout.connect(self._flush_scheduled_balance_update)
 
-        # Мониторинг "кнопка-лок" для "Добавить пациента" (между врачом и медсестрой).
-        self._add_patient_lock_watch_timer = QTimer(self)
-        self._add_patient_lock_watch_timer.timeout.connect(self._refresh_add_patient_button_lock_state)
-        self._add_patient_lock_watch_timer.start(ADD_PATIENT_LOCK_POLL_INTERVAL_MS)
+        # Кнопка не опрашивает сетевой lock в фоне: проверка выполняется только при нажатии.
+        self._add_patient_lock_watch_timer = None
         QTimer.singleShot(0, self._refresh_add_patient_button_lock_state)
         if CARD_UI_PREWARM_ENABLED:
             QTimer.singleShot(CARD_UI_PREWARM_DELAY_MS, self._schedule_card_ui_prewarm)
@@ -287,17 +285,14 @@ class DoctorRemCardWidget(QWidget):
         if not self._is_qobject_alive(panel):
             return
         is_beds_mode = self._selection_mode == "beds"
-        enabled = is_beds_mode and not self._add_patient_locked_by_other
+        enabled = is_beds_mode
         try:
             panel.set_add_patient_enabled(enabled)
         except RuntimeError as exc:
             logger.warning("Failed to update add-patient button state (doctor): %s", exc)
             return
 
-        if self._add_patient_locked_by_other:
-            holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
-            self._set_add_patient_button_hint(f"Добавление пациента уже открыто.\n{holder}")
-        elif is_beds_mode:
+        if is_beds_mode:
             self._set_add_patient_button_hint("Открыть управление пациентами")
         else:
             self._set_add_patient_button_hint("Кнопка доступна только в режиме списка коек")
@@ -315,13 +310,7 @@ class DoctorRemCardWidget(QWidget):
             if self._selection_mode != PATIENT_BED_MANAGEMENT_MODE and self._add_patient_lock_held:
                 self._release_add_patient_lock()
 
-            locked_by_other = False
-            try:
-                if self._add_patient_lock and not self._add_patient_lock_held:
-                    locked_by_other = self._add_patient_lock.is_held_by_other()
-            except Exception as exc:
-                logger.warning("Failed to check add-patient lock state (doctor): %s", exc)
-            self._add_patient_locked_by_other = bool(locked_by_other)
+            self._add_patient_locked_by_other = False
             self._apply_add_patient_button_state()
         except RuntimeError as exc:
             logger.warning("Failed to refresh add-patient button lock state (doctor): %s", exc)
@@ -838,15 +827,7 @@ class DoctorRemCardWidget(QWidget):
         else:
             self._schedule_chart_init()
 
-        if hasattr(self, "vitals_input") and effective_bounds:
-            self.vitals_input.admission_id = self.admission_id
-            self.vitals_input.shift_date = self._current_date
-            self.vitals_input.apply_context_snapshot(
-                patient=snapshot.get("patient"),
-                settings=snapshot.get("settings") or {},
-                effective_bounds=effective_bounds,
-                has_vitals=bool(snapshot.get("has_vitals")),
-            )
+        self._apply_vitals_input_snapshot(snapshot, effective_bounds)
 
         if hasattr(self, 'layout_manager') and hasattr(self.layout_manager, 'sector_2a'):
             self.layout_manager.sector_2a.update_period(snapshot.get("start_dt"))
@@ -879,6 +860,19 @@ class DoctorRemCardWidget(QWidget):
                 "Пусто",
                 f"Нет данных за {self._current_date.strftime('%d.%m.%Y')}",
             )
+
+    def _apply_vitals_input_snapshot(self, snapshot: dict, effective_bounds):
+        if not hasattr(self, "vitals_input") or not effective_bounds:
+            return
+        self.vitals_input.admission_id = self.admission_id
+        self.vitals_input.shift_date = self._current_date
+        self.vitals_input.apply_context_snapshot(
+            patient=snapshot.get("patient"),
+            settings=snapshot.get("settings") or {},
+            effective_bounds=effective_bounds,
+            has_vitals=bool(snapshot.get("has_vitals")),
+            vitals=snapshot.get("vitals") or [],
+        )
 
     def _on_card_snapshot_failed(self, exc: Exception):
         if self._is_closing:
@@ -3460,11 +3454,10 @@ class DoctorRemCardWidget(QWidget):
             self._show_read_only_hint()
             return
         if not self._acquire_add_patient_lock():
-            holder = self._add_patient_lock.describe_holder() if self._add_patient_lock else "другой пользователь"
             CustomMessageBox.warning(
                 self,
                 "Добавление занято",
-                f"Добавление пациента уже открыто на другом рабочем месте.\n\n{holder}",
+                "Окно добавления пациента уже открыто.\nПожалуйста, подождите.",
             )
             self._refresh_add_patient_button_lock_state()
             return
@@ -3504,7 +3497,6 @@ class DoctorRemCardWidget(QWidget):
 
     def on_refresh_beds_clicked(self):
         self.force_refresh_everywhere()
-        self.refresh_requested.emit()
         if hasattr(self, 'chart'):
             self.chart.update()
 
@@ -4059,7 +4051,11 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self, "_balance_update_timer"):
             self._balance_update_timer.stop()
         if hasattr(self, "_add_patient_lock_watch_timer"):
-            self._add_patient_lock_watch_timer.stop()
+            if self._add_patient_lock_watch_timer:
+                self._add_patient_lock_watch_timer.stop()
+        panel = getattr(self, "sector8_panel", None)
+        if panel is not None and hasattr(panel, "shutdown"):
+            panel.shutdown()
         self._disconnect_monitor()
         self._release_add_patient_lock()
         if getattr(self, "layout_manager", None) is getattr(self, "_w1_shell", None):

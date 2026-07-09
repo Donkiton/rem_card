@@ -32,6 +32,13 @@ W1_BEDS_REFRESH_ENTITIES = {
     "diet_plan",
     "oral_intake_events",
 }
+W1_BEDS_PARTIAL_REFRESH_ENTITIES = {
+    "vitals",
+    "vital_settings",
+    "fluids",
+    "diet_plan",
+    "oral_intake_events",
+}
 W1_REFRESH_ENTITIES = W1_BEDS_REFRESH_ENTITIES | W1A_PANEL_REFRESH_ENTITIES | {"diet_templates"}
 W1_BEDS_REFRESH_SOURCE_PREFIXES = (
     "patient_bed",
@@ -185,6 +192,53 @@ class DoctorMainWidget(QWidget):
             return
         beds_widget.refresh(queue_if_running=queue_if_running)
 
+    @staticmethod
+    def _admission_ids_from_payload(payload: dict) -> set[int]:
+        ids = {
+            int(admission_id)
+            for admission_id in (payload.get("admission_ids") or [])
+            if admission_id is not None
+        }
+        for change in payload.get("changes") or []:
+            admission_id = change.get("admission_id")
+            if admission_id is not None:
+                ids.add(int(admission_id))
+        return ids
+
+    def _refresh_beds_for_payload(
+        self,
+        payload: dict,
+        *,
+        changed_entities: set[str],
+        force_sources: list[str],
+        forced_refresh: bool,
+    ):
+        source_requires_full = any(
+            source.startswith(prefix)
+            for source in force_sources
+            for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
+        )
+        if forced_refresh or payload.get("forced") or source_requires_full:
+            self._refresh_beds_if_available()
+            return
+
+        remcard_widget = getattr(self, "remcard_widget", None)
+        layout = getattr(remcard_widget, "layout_manager", None) if _qt_is_valid(remcard_widget) else None
+        beds_widget = getattr(layout, "beds_selection_widget", None) if layout is not None else None
+        admission_ids = self._admission_ids_from_payload(payload)
+        if (
+            admission_ids
+            and changed_entities
+            and set(changed_entities).issubset(W1_BEDS_PARTIAL_REFRESH_ENTITIES)
+            and beds_widget is not None
+            and _qt_is_valid(beds_widget)
+            and hasattr(beds_widget, "refresh_admissions")
+        ):
+            beds_widget.refresh_admissions(admission_ids)
+            return
+
+        self._refresh_beds_if_available()
+
     def _on_data_changes(self, payload: dict):
         if self._is_closing or _app_is_closing() or not self.isVisible():
             return
@@ -227,7 +281,12 @@ class DoctorMainWidget(QWidget):
                 for prefix in W1_BEDS_REFRESH_SOURCE_PREFIXES
             )
         ):
-            self._refresh_beds_if_available()
+            self._refresh_beds_for_payload(
+                payload,
+                changed_entities=changed_entities,
+                force_sources=force_sources,
+                forced_refresh=forced_refresh,
+            )
         if forced_event or changed_entities.intersection(W1A_PANEL_REFRESH_ENTITIES):
             self._refresh_w1a(payload)
 

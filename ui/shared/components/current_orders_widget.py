@@ -86,6 +86,9 @@ class CurrentNurseOrdersWidget(QWidget):
     def _current_change_id(self) -> int:
         if not self.service or not self.admission_id:
             return 0
+        observed_change_id = self._observed_change_id()
+        if observed_change_id is not None:
+            return observed_change_id
         if hasattr(self.service, "get_latest_change_id"):
             try:
                 return int(self.service.get_latest_change_id(admission_id=self.admission_id, include_global=False) or 0)
@@ -97,6 +100,21 @@ class CurrentNurseOrdersWidget(QWidget):
             except Exception as exc:
                 logger.warning("CurrentNurseOrdersWidget change_id lookup failed: %s", exc)
         return 0
+
+    def _observed_change_id(self) -> int | None:
+        getter = getattr(self.service, "get_observed_change_state", None)
+        if not callable(getter):
+            data_service = getattr(self.service, "data_service", None)
+            getter = getattr(data_service, "get_observed_change_state", None)
+        if not callable(getter):
+            return None
+        try:
+            state = getter() or {}
+            if not state:
+                return None
+            return int(state.get("change_id") or 0)
+        except Exception:
+            return None
 
     def _apply_cached_snapshot_if_available(self) -> bool:
         key = self._cache_key()

@@ -20,6 +20,7 @@ from rem_card.ui.patient_bed_management.bed_labels import is_recovery_bed
 from rem_card.ui.patient_bed_management.bed_widget import BedWidget
 from rem_card.ui.patient_bed_management.patient_form import PatientForm
 from rem_card.ui.patient_bed_management.side_patient_card import SidePatientCard
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 from rem_card.ui.styles.theme import (
     STYLE_PATIENT_BED_HEADER,
@@ -67,6 +68,10 @@ class PatientBedManagementWidget(QWidget):
         self._opening_patient_form = False
         self._active_patient_form = None
         self._active_patient_form_context = None
+        self._refresh_worker = None
+        self._refresh_pending = False
+        self._beds_snapshot_by_bed = {}
+        self._pending_side_card_update = None
 
         self.bed_widgets = []
         self._init_ui()
@@ -157,6 +162,8 @@ class PatientBedManagementWidget(QWidget):
 
     def _on_bed_clicked(self, bed_number: int, current_admission_id: int):
         if self._is_closing:
+            return
+        if self._update_side_card_from_snapshot(bed_number):
             return
         patient, admission = None, None
         if current_admission_id:
@@ -275,18 +282,8 @@ class PatientBedManagementWidget(QWidget):
             int(bed_number),
             expected_admission_id,
         )
-        new_patient, new_admission = self.patient_bed_service.get_patient_with_current_admission(bed_number)
-        new_admission_id = getattr(new_admission, "id", None)
+        self._pending_side_card_update = (int(bed_number), expected_admission_id)
         self.refresh_bed_statuses()
-        if expected_admission_id is None or new_admission_id is None or int(expected_admission_id) == int(new_admission_id):
-            self.side_card.update_info(bed_number, new_patient, new_admission)
-        logger.info(
-            "patient_form_refresh_end role=%s bed=%s admission_id=%s current_admission_id=%s",
-            _current_role(),
-            int(bed_number),
-            expected_admission_id,
-            new_admission_id,
-        )
 
     def move_patient(self, source_bed: int, target_bed: int):
         if self._is_closing or self._move_pending:
@@ -346,9 +343,8 @@ class PatientBedManagementWidget(QWidget):
                 self.refresh_bed_statuses()
                 CustomMessageBox.warning(self, "Ошибка", "Перенос не выполнен: исходная койка уже изменилась.")
                 return
+            self._pending_side_card_update = (int(target_bed), None)
             self.refresh_bed_statuses()
-            patient, admission = self.patient_bed_service.get_patient_with_current_admission(target_bed)
-            self.side_card.update_info(target_bed, patient, admission)
 
         def on_error(exc):
             if self._is_closing:
@@ -392,9 +388,28 @@ class PatientBedManagementWidget(QWidget):
     def refresh_bed_statuses(self):
         if self._is_closing:
             return
+        worker = self._refresh_worker
+        if worker is not None and worker.isRunning():
+            self._refresh_pending = True
+            return
+        self._refresh_pending = False
         logger.info("patient_beds_refresh_start role=%s", _current_role())
-        rows = self.patient_bed_service.get_beds_snapshot()
+        worker = AsyncCallThread(self._load_bed_status_rows, parent=self)
+        self._refresh_worker = worker
+        worker.succeeded.connect(self._apply_bed_status_rows)
+        worker.failed.connect(self._on_bed_status_refresh_failed)
+        worker.finished.connect(lambda: self._on_bed_status_refresh_finished(worker))
+        worker.start()
+
+    def _load_bed_status_rows(self):
+        return self.patient_bed_service.get_beds_snapshot()
+
+    def _apply_bed_status_rows(self, rows):
+        if self._is_closing:
+            return
+        rows = list(rows or [])
         by_bed = {int(row["bed_number"]): row for row in rows}
+        self._beds_snapshot_by_bed = by_bed
 
         for bed_widget in self.bed_widgets:
             bed_data = by_bed.get(int(bed_widget.bed_number))
@@ -411,10 +426,70 @@ class PatientBedManagementWidget(QWidget):
             else:
                 bed_widget.set_patient_info("")
 
-        if self.bed_widgets:
-            selected = self.bed_widgets[0]
-            self._on_bed_clicked(selected.bed_number, selected.current_admission_id)
+        pending_side_update = self._pending_side_card_update
+        self._pending_side_card_update = None
+        if pending_side_update:
+            bed_number, expected_admission_id = pending_side_update
+            self._update_side_card_from_snapshot(bed_number, expected_admission_id=expected_admission_id)
+            current_id = self._row_admission_id(by_bed.get(int(bed_number)))
+            logger.info(
+                "patient_form_refresh_end role=%s bed=%s admission_id=%s current_admission_id=%s",
+                _current_role(),
+                int(bed_number),
+                expected_admission_id,
+                current_id,
+            )
+        elif self.bed_widgets:
+            current_bed = getattr(self.side_card, "current_bed_number", None)
+            target_bed = int(current_bed) if current_bed else int(self.bed_widgets[0].bed_number)
+            self._update_side_card_from_snapshot(target_bed)
+
         logger.info("patient_beds_refresh_end role=%s rows=%s", _current_role(), len(rows))
+
+    def _on_bed_status_refresh_failed(self, exc):
+        if self._is_closing:
+            return
+        logger.warning("patient_beds_refresh_failed role=%s error=%s", _current_role(), exc, exc_info=True)
+
+    def _on_bed_status_refresh_finished(self, worker):
+        if self._refresh_worker is worker:
+            self._refresh_worker = None
+        if self._is_closing:
+            self._refresh_pending = False
+            return
+        if self._refresh_pending:
+            QTimer.singleShot(0, self.refresh_bed_statuses)
+
+    @staticmethod
+    def _row_admission_id(row):
+        if not row:
+            return None
+        try:
+            value = row["current_admission_id"]
+        except Exception:
+            value = None
+        return int(value) if value is not None else None
+
+    def _update_side_card_from_snapshot(self, bed_number: int, *, expected_admission_id=None) -> bool:
+        row = self._beds_snapshot_by_bed.get(int(bed_number))
+        if row is None:
+            return False
+        current_admission_id = self._row_admission_id(row)
+        if (
+            expected_admission_id is not None
+            and current_admission_id is not None
+            and int(expected_admission_id) != int(current_admission_id)
+        ):
+            return False
+        builder = getattr(self.patient_bed_service, "records_from_bed_snapshot_row", None)
+        if callable(builder):
+            patient, admission = builder(row)
+        elif current_admission_id:
+            patient, admission = self.patient_bed_service.get_patient_with_current_admission(int(bed_number))
+        else:
+            patient, admission = None, None
+        self.side_card.update_info(int(bed_number), patient, admission)
+        return True
 
     def shutdown(self):
         self._is_closing = True
@@ -422,6 +497,12 @@ class PatientBedManagementWidget(QWidget):
         dialog = self._active_patient_form
         self._active_patient_form = None
         self._active_patient_form_context = None
+        worker = self._refresh_worker
+        self._refresh_worker = None
+        self._refresh_pending = False
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(1200)
         if _qt_is_valid(dialog):
             try:
                 if hasattr(dialog, "force_close_for_shutdown"):

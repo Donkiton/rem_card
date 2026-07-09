@@ -2,6 +2,8 @@ import os
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QPushButton
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QSize, QTimer, Signal
+from rem_card.app.logger import logger
+from rem_card.ui.shared.async_call import AsyncCallThread
 from rem_card.ui.shared.display_settings_storage import DisplaySettingsStorage, role_display_settings_from_payload
 from rem_card.ui.styles.theme import STYLE_SECTOR8_BUTTON
 
@@ -23,6 +25,9 @@ class NurseSector8Panel(QWidget):
         # Путь к иконкам (на уровень выше, чем у врача)
         self.icon_dir = os.path.join(os.path.dirname(__file__), "..", "..", "..", "icon")
         self.icon_dir = os.path.normpath(self.icon_dir)
+        self._reports_count_worker = None
+        self._last_reports_count = 0
+        self._is_closing = False
         self.init_ui()
 
     def init_ui(self):
@@ -174,11 +179,59 @@ class NurseSector8Panel(QWidget):
         button = getattr(self, "btn_user_reports", None)
         if button is None:
             return
-        try:
-            from rem_card.services.user_reports import UserReportsService
+        worker = self._reports_count_worker
+        if worker is not None and worker.isRunning():
+            return
+        worker = AsyncCallThread(self._load_user_reports_count, parent=self)
+        self._reports_count_worker = worker
+        worker.succeeded.connect(self._apply_user_reports_count)
+        worker.failed.connect(self._on_user_reports_count_failed)
+        worker.finished.connect(lambda: self._on_user_reports_count_finished(worker))
+        worker.start()
 
-            count = UserReportsService().count_new_reports()
+    @staticmethod
+    def _load_user_reports_count():
+        from rem_card.services.user_reports import UserReportsService
+
+        return int(UserReportsService().count_new_reports() or 0)
+
+    def _apply_user_reports_count(self, count):
+        if self._is_closing:
+            return
+        try:
+            count = max(0, int(count or 0))
         except Exception:
             count = 0
+        self._last_reports_count = count
+        self._set_user_reports_count(count)
+
+    def _on_user_reports_count_failed(self, exc):
+        if self._is_closing:
+            return
+        logger.warning("Nurse reports count refresh failed: %s", exc)
+        self._set_user_reports_count(self._last_reports_count)
+
+    def _on_user_reports_count_finished(self, worker):
+        if self._reports_count_worker is worker:
+            self._reports_count_worker = None
+
+    def _set_user_reports_count(self, count: int):
+        button = getattr(self, "btn_user_reports", None)
+        if button is None:
+            return
         button.setText(f" Репорты ({count})" if count else " Репорты")
         button.setToolTip(f"Новых репортов: {count}" if count else "Новых репортов нет")
+
+    def shutdown(self, timeout_ms: int = 1200):
+        self._is_closing = True
+        if hasattr(self, "_reports_count_timer") and self._reports_count_timer:
+            self._reports_count_timer.stop()
+        worker = self._reports_count_worker
+        self._reports_count_worker = None
+        if worker is not None and worker.isRunning():
+            worker.quit()
+            worker.wait(timeout_ms)
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)

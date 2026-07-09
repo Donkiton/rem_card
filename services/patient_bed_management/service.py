@@ -70,9 +70,29 @@ class PatientBedManagementService:
                 b.bed_number,
                 b.status,
                 b.current_admission_id,
+                p.id AS p_id,
                 p.full_name,
+                p.admission_uid,
+                p.birth_date,
+                a.patient_id,
                 a.history_number,
+                a.admission_datetime,
+                a.patient_age,
+                a.patient_months,
+                a.patient_age_unit,
+                a.patient_gender,
+                a.diagnosis_code,
                 a.diagnosis_text,
+                a.department_profile,
+                a.source_department,
+                (
+                    SELECT pse.status
+                    FROM patient_status_events pse
+                    WHERE pse.admission_id = a.id
+                      AND pse.end_time IS NULL
+                    ORDER BY datetime(pse.start_time) DESC, pse.id DESC
+                    LIMIT 1
+                ) AS current_status,
                 COALESCE(b.revision, 0) AS bed_revision,
                 COALESCE(a.revision, 0) AS admission_revision
             FROM beds b
@@ -112,6 +132,39 @@ class PatientBedManagementService:
             (int(bed_number),),
         )
         return self._records_from_admission_row(row)
+
+    def records_from_bed_snapshot_row(self, row) -> tuple[Optional[PatientRecord], Optional[AdmissionRecord]]:
+        if not row:
+            return None, None
+        data = dict(row)
+        if data.get("current_admission_id") is None or str(data.get("status") or "").upper() == "FREE":
+            return None, None
+        if data.get("p_id") is None or data.get("patient_id") is None:
+            return None, None
+        patient = PatientRecord(
+            id=int(data["p_id"]),
+            full_name=str(data.get("full_name") or ""),
+            admission_uid=data.get("admission_uid"),
+            birth_date=self._parse_date(data.get("birth_date")),
+        )
+        admission = AdmissionRecord(
+            id=int(data["current_admission_id"]) if data.get("current_admission_id") is not None else None,
+            patient_id=int(data["patient_id"]),
+            bed_number=int(data["bed_number"]),
+            history_number=str(data.get("history_number") or ""),
+            admission_datetime=self._parse_dt(data.get("admission_datetime")),
+            patient_age=self._safe_int_or_none(data.get("patient_age")),
+            patient_months=self._safe_int_or_none(data.get("patient_months")),
+            patient_age_unit=data.get("patient_age_unit"),
+            patient_gender=data.get("patient_gender"),
+            current_status=data.get("current_status"),
+            diagnosis_code=data.get("diagnosis_code"),
+            diagnosis_text=data.get("diagnosis_text"),
+            department_profile=data.get("department_profile"),
+            source_department=data.get("source_department"),
+            revision=int(data.get("admission_revision") or 0),
+        )
+        return patient, admission
 
     def get_patient_with_admission(self, admission_id: int) -> tuple[Optional[PatientRecord], Optional[AdmissionRecord]]:
         row = self.db.fetch_one_remcard(

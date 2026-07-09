@@ -90,6 +90,19 @@ class PatientService:
         result = self.dao.get_active_patients()
         return result
 
+    def get_active_patients_by_ids(self, admission_ids: List[int]) -> List[PatientDTO]:
+        getter = getattr(self.dao, "get_active_patients_by_ids", None)
+        if callable(getter):
+            return getter(admission_ids)
+        requested = {int(admission_id) for admission_id in (admission_ids or []) if admission_id is not None}
+        if not requested:
+            return []
+        return [
+            patient
+            for patient in self.dao.get_active_patients()
+            if getattr(patient, "id", None) is not None and int(patient.id) in requested
+        ]
+
     def get_archived_patients(self, start_dt: str | None = None, end_dt: str | None = None) -> List[PatientDTO]:
         return self.dao.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
 
