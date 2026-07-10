@@ -1970,7 +1970,7 @@ class OperBlockSector8Panel(QWidget):
         self.btn_archive = self._button(" Архив", "binder.png")
         self.btn_refresh = self._button(" Обновить", "refresh.png")
         self.btn_user_report = self._button(" Репорт", "warning.png")
-        self.btn_user_reports = self._button(" Репорты", "medical-chart.png")
+        self.btn_user_reports = self._button(" Репорты", "reports.png")
         self.btn_settings = self._button(" Настройки", "settings.png")
         self.btn_back = self._button(" Назад", "back.png")
         self.btn_exit = self._button(" Выход", "exit.png")
