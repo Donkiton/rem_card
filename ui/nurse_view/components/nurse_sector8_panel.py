@@ -72,7 +72,7 @@ class NurseSector8Panel(QWidget):
 
         # Кнопка просмотра входящих репортов
         self.btn_user_reports = QPushButton(" Репорты", self)
-        reports_icon = os.path.join(self.icon_dir, "medical-chart.png")
+        reports_icon = os.path.join(self.icon_dir, "reports.png")
         self.btn_user_reports.setIcon(QIcon(reports_icon))
         self.btn_user_reports.setIconSize(QSize(18, 18))
         self.btn_user_reports.setMinimumHeight(32)
