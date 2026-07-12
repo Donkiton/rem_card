@@ -20,6 +20,7 @@ from rem_card.ui.analytics.graphs_generators_1 import save_plot
 # Импортируем вспомогательную функцию _calc_daily_counts
 from rem_card.ui.analytics.graphs_generators_1 import _calc_daily_counts, _patient_count_axis_limit
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
+from rem_card.services.analytics.period import parse_analytics_datetime
 from rem_card.ui.analytics.chart_renderer import plot_pie_with_legend
 
 
@@ -31,7 +32,7 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
             SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
@@ -50,7 +51,7 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
         df = pd.read_sql_query("""
             SELECT strftime('%w', admission_datetime) as dow,
             SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY dow
         """, conn, params=params)
         if not df.empty:
@@ -73,12 +74,20 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
         events = []
         for row in adms:
             if row['admission_datetime']:
-                try: events.append((datetime.strptime(row['admission_datetime'].split('.')[0], "%Y-%m-%d %H:%M:%S"), 1))
-                except Exception: pass
+                try:
+                    event_dt = parse_analytics_datetime(row['admission_datetime'])
+                    if event_dt is not None:
+                        events.append((event_dt, 1))
+                except Exception:
+                    pass
             end_dt_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
             if end_dt_str:
-                try: events.append((datetime.strptime(end_dt_str.split('.')[0], "%Y-%m-%d %H:%M:%S"), -1))
-                except Exception: pass
+                try:
+                    event_dt = parse_analytics_datetime(end_dt_str)
+                    if event_dt is not None:
+                        events.append((event_dt, -1))
+                except Exception:
+                    pass
         events.sort()
         curr, max_p = 0, 0
         for t, c in events:
@@ -95,7 +104,7 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
     if "g49" in selected:
         df = pd.read_sql_query("""
             SELECT outcome, AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ? AND outcome IN ('умер', 'выписан')
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND outcome IN ('умер', 'выписан')
             GROUP BY outcome ORDER BY avg_duration DESC
         """, conn, params=params)
         if not df.empty:
@@ -111,7 +120,7 @@ def generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html
     if "g50" in selected:
         df = pd.read_sql_query("""
             SELECT diagnosis_code, AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ? AND diagnosis_code IS NOT NULL AND diagnosis_code != ''
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND diagnosis_code IS NOT NULL AND diagnosis_code != ''
             GROUP BY diagnosis_code ORDER BY avg_duration DESC LIMIT 5
         """, conn, params=params)
         if not df.empty:
@@ -134,7 +143,7 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
         df = pd.read_sql_query("""
             SELECT strftime('%w', admission_datetime) as dow,
             SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY dow
         """, conn, params=params)
         if not df.empty:
@@ -154,7 +163,7 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
     if "g52" in selected:
         df = pd.read_sql_query(
             "SELECT bed_number, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime BETWEEN ? AND ? GROUP BY bed_number",
+            "WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY bed_number",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -183,10 +192,14 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
         durations = []
         for row in adms:
             try:
-                start = datetime.strptime(row['admission_datetime'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                start = parse_analytics_datetime(row['admission_datetime'])
+                if start is None:
+                    continue
                 end_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
                 if end_str:
-                    end = datetime.strptime(end_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                    end = parse_analytics_datetime(end_str)
+                    if end is None:
+                        continue
                     duration = (end - start).days
                     if 0 <= duration < 3: # Менее 3 дней
                         durations.append(duration)
@@ -206,10 +219,14 @@ def generate_g51_g55(selected, conn, params, chart_colors, img_paths, adms, star
         durations = []
         for row in adms:
             try:
-                start = datetime.strptime(row['admission_datetime'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                start = parse_analytics_datetime(row['admission_datetime'])
+                if start is None:
+                    continue
                 end_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
                 if end_str:
-                    end = datetime.strptime(end_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                    end = parse_analytics_datetime(end_str)
+                    if end is None:
+                        continue
                     duration = (end - start).days
                     if duration >= 14: # 14 дней и более
                         durations.append(duration)
@@ -234,7 +251,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
     if "g56" in selected:
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', operation_datetime) as month, COUNT(id) as count
-            FROM operations WHERE operation_datetime BETWEEN ? AND ?
+            FROM operations WHERE operation_datetime >= ? AND operation_datetime < ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
@@ -249,7 +266,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
     if "g57" in selected:
         df = pd.read_sql_query("""
             SELECT description as operation_type, COUNT(id) as count FROM operations
-            WHERE operation_datetime BETWEEN ? AND ? AND description IS NOT NULL AND description != ''
+            WHERE operation_datetime >= ? AND operation_datetime < ? AND description IS NOT NULL AND description != ''
             GROUP BY description ORDER BY count DESC LIMIT 5
         """, conn, params=params)
         if not df.empty:
@@ -264,7 +281,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
     if "g58" in selected:
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', datetime) as month, COUNT(id) as count
-            FROM transfusions WHERE datetime BETWEEN ? AND ?
+            FROM transfusions WHERE datetime >= ? AND datetime < ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
@@ -279,7 +296,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
     if "g59" in selected:
         df = pd.read_sql_query("""
             SELECT type as transfusion_type, COUNT(id) as count FROM transfusions
-            WHERE datetime BETWEEN ? AND ? AND type IS NOT NULL AND type != ''
+            WHERE datetime >= ? AND datetime < ? AND type IS NOT NULL AND type != ''
             GROUP BY type ORDER BY count DESC LIMIT 5
         """, conn, params=params)
         if not df.empty:
@@ -295,7 +312,7 @@ def generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_conte
         df = pd.read_sql_query("""
             SELECT AVG(julianday(COALESCE(t2.death_datetime, t2.transfer_datetime, datetime('now'))) - julianday(t2.admission_datetime)) as avg_duration
             FROM operations t1 INNER JOIN admissions t2 ON t1.admission_id = t2.id
-            WHERE t1.operation_datetime BETWEEN ? AND ?
+            WHERE t1.operation_datetime >= ? AND t1.operation_datetime < ?
         """, conn, params=params)
         if not df.empty and df['avg_duration'].iloc[0] is not None:
             avg_duration = df['avg_duration'].iloc[0]
@@ -317,7 +334,7 @@ def generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_conte
     if "g61" in selected:
         df = pd.read_sql_query("""
             SELECT source_department as department, COUNT(id) as count FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ? AND source_department IS NOT NULL AND source_department != ''
+            WHERE admission_datetime >= ? AND admission_datetime < ? AND source_department IS NOT NULL AND source_department != ''
             GROUP BY source_department ORDER BY count DESC
         """, conn, params=params)
         if not df.empty:
@@ -332,7 +349,7 @@ def generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_conte
     if "g62" in selected:
         df = pd.read_sql_query("""
             SELECT source_department as department, AVG(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as avg_duration
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ? AND source_department IS NOT NULL AND source_department != ''
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND source_department IS NOT NULL AND source_department != ''
             GROUP BY source_department ORDER BY avg_duration DESC
         """, conn, params=params)
         if not df.empty:
@@ -348,7 +365,7 @@ def generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_conte
     if "g63" in selected:
         df = pd.read_sql_query("""
             SELECT source_department as department, julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime) as duration
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ? AND source_department IS NOT NULL AND source_department != ''
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? AND source_department IS NOT NULL AND source_department != ''
         """, conn, params=params)
         if not df.empty:
             departments = df['department'].unique()
@@ -372,7 +389,7 @@ def generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_conte
     if "g65" in selected:
         df = pd.read_sql_query(
             "SELECT strftime('%H', admission_datetime) as hour, COUNT(id) as count "
-            "FROM admissions WHERE admission_datetime BETWEEN ? AND ? GROUP BY hour ORDER BY hour",
+            "FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY hour ORDER BY hour",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)

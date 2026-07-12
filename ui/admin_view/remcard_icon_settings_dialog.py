@@ -235,7 +235,7 @@ class RemCardIconSettingsDialog(BaseStyledDialog):
 
     def _load_icon_records(self) -> dict[str, dict]:
         try:
-            records = get_settings_service().list_remcard_icons()
+            records = get_settings_service().list_remcard_icons(include_blob=False)
         except Exception:
             return {}
         return records if isinstance(records, dict) else {}

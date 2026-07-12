@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""
+r"""
 Regression checks for SQLite safety, local replica hygiene and backup cleanup gating.
 
 Usage:
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import ast
 import argparse
+from collections import OrderedDict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import faulthandler
 import glob
 import hashlib
@@ -20,6 +22,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -34,8 +37,59 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REGRESSION_TIMEOUT_SEC = 1200.0
+DEFAULT_REGRESSION_TIMEOUT_SEC = 600.0
 DIRECT_REGRESSION_TEMP_PREFIX = "remcard_regression_checks_direct_"
+WORKER_REGRESSION_TEMP_PREFIX = "remcard_regression_checks_w"
+try:
+    DEFAULT_FAST_JOBS = max(1, min(4, int(os.environ.get("REMCARD_REGRESSION_JOBS", "4"))))
+except (TypeError, ValueError):
+    DEFAULT_FAST_JOBS = 4
+
+
+# Стандартный ast.get_source_segment() заново кодирует и разбивает весь исходник
+# при каждом вызове. Здесь много AST-контрактов над крупными UI-файлами, поэтому прежний
+# вариант тратил минуты на одинаковую подготовку строк. Кэш ограничен, а
+# смещения обрабатываются в UTF-8 так же, как в stdlib ast.
+_AST_SOURCE_LINE_CACHE: OrderedDict[int, tuple[str, list[bytes]]] = OrderedDict()
+_AST_SOURCE_LINE_CACHE_LIMIT = 16
+
+
+def _cached_source_segment(source: str, node: ast.AST, *, padded: bool = False) -> str | None:
+    if not all(
+        getattr(node, attribute, None) is not None
+        for attribute in ("lineno", "end_lineno", "col_offset", "end_col_offset")
+    ):
+        return None
+
+    cache_key = id(source)
+    cached = _AST_SOURCE_LINE_CACHE.get(cache_key)
+    if cached is None or cached[0] is not source:
+        encoded_lines = [line.encode("utf-8") for line in source.splitlines()]
+        _AST_SOURCE_LINE_CACHE[cache_key] = (source, encoded_lines)
+        _AST_SOURCE_LINE_CACHE.move_to_end(cache_key)
+        while len(_AST_SOURCE_LINE_CACHE) > _AST_SOURCE_LINE_CACHE_LIMIT:
+            _AST_SOURCE_LINE_CACHE.popitem(last=False)
+    else:
+        encoded_lines = cached[1]
+        _AST_SOURCE_LINE_CACHE.move_to_end(cache_key)
+
+    start_line = int(node.lineno) - 1
+    end_line = int(node.end_lineno) - 1
+    if start_line < 0 or end_line >= len(encoded_lines) or end_line < start_line:
+        return None
+    start_col = int(node.col_offset)
+    end_col = int(node.end_col_offset)
+    if start_line == end_line:
+        return encoded_lines[start_line][start_col:end_col].decode("utf-8")
+
+    first = encoded_lines[start_line][start_col:].decode("utf-8")
+    if padded:
+        first = " " * start_col + first
+    middle = [line.decode("utf-8") for line in encoded_lines[start_line + 1:end_line]]
+    last = encoded_lines[end_line][:end_col].decode("utf-8")
+    return "\n".join((first, *middle, last))
+
+_REGRESSION_RESTORE_PROBES: list[Any] = []
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 try:
@@ -66,17 +120,58 @@ def _safe_regression_temp_path(path: Path) -> bool:
         resolved = path.resolve(strict=False)
         system_temp = Path(tempfile.gettempdir()).resolve(strict=False)
         return (
-            resolved.name.startswith(DIRECT_REGRESSION_TEMP_PREFIX)
+            resolved.name.startswith((DIRECT_REGRESSION_TEMP_PREFIX, WORKER_REGRESSION_TEMP_PREFIX))
             and os.path.commonpath([str(resolved), str(system_temp)]) == str(system_temp)
         )
     except Exception:
         return False
 
 
+def _rmtree_regression_root(path: str | Path) -> str:
+    target = Path(path)
+    if not target.exists():
+        return ""
+    try:
+        resolved = target.resolve(strict=False)
+        system_temp = Path(tempfile.gettempdir()).resolve(strict=False)
+        safe = (
+            resolved.name.startswith("remcard_regression_checks_")
+            and os.path.commonpath([str(resolved), str(system_temp)]) == str(system_temp)
+        )
+    except Exception as exc:
+        return f"failed to validate temp cleanup path {target}: {exc}"
+    if not safe:
+        return f"refused unsafe temp cleanup path: {resolved}"
+
+    delete_path = str(resolved)
+    if os.name == "nt" and not delete_path.startswith("\\\\?\\"):
+        delete_path = "\\\\?\\" + delete_path
+
+    def make_writable_and_retry(function, item_path, _exc_info):
+        os.chmod(item_path, stat.S_IRWXU)
+        function(item_path)
+
+    last_error = ""
+    for attempt in range(3):
+        try:
+            shutil.rmtree(delete_path, onerror=make_writable_and_retry)
+            return ""
+        except FileNotFoundError:
+            return ""
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < 2:
+                time.sleep(0.1)
+    return f"failed to remove regression temp root {resolved}: {last_error}"
+
+
 def _owner_pid_from_direct_temp_name(name: str) -> int | None:
-    if not name.startswith(DIRECT_REGRESSION_TEMP_PREFIX):
+    if name.startswith(DIRECT_REGRESSION_TEMP_PREFIX):
+        tail = name[len(DIRECT_REGRESSION_TEMP_PREFIX):]
+    elif name.startswith(WORKER_REGRESSION_TEMP_PREFIX):
+        tail = name[len(WORKER_REGRESSION_TEMP_PREFIX):]
+    else:
         return None
-    tail = name[len(DIRECT_REGRESSION_TEMP_PREFIX):]
     pid_text = tail.split("_", 1)[0]
     try:
         return int(pid_text)
@@ -113,13 +208,15 @@ def _pid_is_running(pid: int | None) -> bool:
 
 def _cleanup_orphan_direct_temp_roots() -> None:
     system_temp = Path(tempfile.gettempdir())
-    for path in system_temp.glob(f"{DIRECT_REGRESSION_TEMP_PREFIX}*"):
+    candidates = list(system_temp.glob(f"{DIRECT_REGRESSION_TEMP_PREFIX}*"))
+    candidates.extend(system_temp.glob(f"{WORKER_REGRESSION_TEMP_PREFIX}*"))
+    for path in candidates:
         if not path.is_dir() or not _safe_regression_temp_path(path):
             continue
         owner_pid = _owner_pid_from_direct_temp_name(path.name)
         if _pid_is_running(owner_pid):
             continue
-        shutil.rmtree(path, ignore_errors=True)
+        _rmtree_regression_root(path)
 
 
 def _float_env(name: str, default: float) -> float:
@@ -131,6 +228,29 @@ def _float_env(name: str, default: float) -> float:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Regression checks for RemCard safety contracts")
+    parser.add_argument(
+        "--profile",
+        choices=("fast", "exhaustive"),
+        default=os.environ.get("REMCARD_REGRESSION_PROFILE", "fast"),
+        help=(
+            "fast runs the complete check registry in isolated parallel shards; "
+            "exhaustive runs the same registry sequentially in the historical order."
+        ),
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=0,
+        help="Worker count for the fast profile (0 uses REMCARD_REGRESSION_JOBS or up to 4).",
+    )
+    parser.add_argument(
+        "--shards",
+        type=int,
+        default=0,
+        help="Contiguous shard count for fast profile (0 uses four shards per worker).",
+    )
+    parser.add_argument("--worker-shard-index", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--worker-shard-count", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--timeout-s",
         type=float,
@@ -145,12 +265,68 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Do not print per-check progress lines before the final JSON report.",
     )
+    parser.add_argument(
+        "--json-detail",
+        choices=("summary", "all"),
+        default="summary",
+        help="summary prints failures and slowest checks; all prints every check result.",
+    )
+    parser.add_argument(
+        "--report-path",
+        default="",
+        help="Optional path for the complete JSON report, independent of stdout detail.",
+    )
     return parser.parse_args(argv)
 
 
 def _print_progress(message: str, *, quiet: bool) -> None:
     if not quiet:
         print(message, flush=True)
+
+
+def _configure_utf8_console() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
+
+
+def _emit_regression_report(
+    report: dict[str, Any],
+    *,
+    json_detail: str,
+    report_path: str = "",
+) -> None:
+    resolved_report_path = ""
+    if report_path:
+        target = Path(report_path).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        resolved_report_path = str(target)
+    if json_detail == "all":
+        output = report
+    else:
+        checks = list(report.get("checks") or [])
+        output = {key: value for key, value in report.items() if key != "checks"}
+        output["checks"] = [item for item in checks if not item.get("ok")]
+        output["slowest_checks"] = [
+            {
+                "check": item.get("check"),
+                "duration_sec": item.get("duration_sec", 0.0),
+            }
+            for item in sorted(
+                (item for item in checks if item.get("check") not in {"__timeout__"}),
+                key=lambda item: float(item.get("duration_sec", 0.0) or 0.0),
+                reverse=True,
+            )[:15]
+        ]
+        names = [str(item.get("check")) for item in checks if not str(item.get("check")).startswith("__")]
+        output["check_manifest_sha256"] = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
+        output["detailed_report_path"] = resolved_report_path
+    print(json.dumps(output, ensure_ascii=False, indent=2))
 
 
 def _prepare_import_environment(temp_root: str):
@@ -163,6 +339,38 @@ def _prepare_import_environment(temp_root: str):
     os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_CACHE_RETENTION_DAYS"] = "3"
     os.environ["REMCARD_LOCAL_CACHE_MAX_FILES"] = "200"
+
+
+def _cleanup_check_resources() -> list[str]:
+    """Release runner-owned background resources before the next check."""
+    errors: list[str] = []
+    while _REGRESSION_RESTORE_PROBES:
+        probe = _REGRESSION_RESTORE_PROBES.pop()
+        try:
+            probe.release_network_emergency_role_marker()
+        except Exception as exc:
+            errors.append(f"restore probe cleanup: {type(exc).__name__}: {exc}")
+    leaked_heartbeats = [
+        thread.name
+        for thread in threading.enumerate()
+        if thread.is_alive() and thread.name.startswith("RoleLockHeartbeat:")
+    ]
+    if leaked_heartbeats:
+        errors.append(f"leaked role lock heartbeat threads: {sorted(leaked_heartbeats)}")
+    return errors
+
+
+def _select_worker_shard(
+    checks: list[tuple[str, Any]],
+    *,
+    shard_index: int,
+    shard_count: int,
+) -> list[tuple[str, Any]]:
+    if shard_count < 1 or not 0 <= shard_index < shard_count:
+        raise ValueError("invalid worker shard selection")
+    start = len(checks) * shard_index // shard_count
+    end = len(checks) * (shard_index + 1) // shard_count
+    return checks[start:end]
 
 
 def _path_is_under(path: str, root: str) -> bool:
@@ -259,6 +467,11 @@ def _check_arbitrary_baza_dir_name_allowed(temp_root: str) -> tuple[bool, str]:
         env.pop("REMCARD_BAZA_DIR", None)
         env["REMCARD_DATA_PATH_CONFIG"] = config_path
         env["PYTHONPATH"] = str(PROJECT_ROOT)
+        # The probe writes resolved paths to a pipe.  On Windows a child Python
+        # process otherwise uses the active ANSI code page, while the parent
+        # intentionally decodes worker output as UTF-8.  A non-ASCII user/temp
+        # directory would then look like a product path mismatch.
+        env["PYTHONIOENCODING"] = "utf-8"
         fake_exe_dir = os.path.join(temp_root, "compiled_probe", "Prog")
         os.makedirs(fake_exe_dir, exist_ok=True)
         env["REMCARD_FAKE_EXE_DIR"] = fake_exe_dir
@@ -4093,7 +4306,7 @@ def _check_local_metrics_are_buffered(temp_root: str) -> tuple[bool, str]:
     if missing:
         return False, f"local_metrics missing buffered helpers: {missing}"
 
-    record_source = ast.get_source_segment(source_text, functions["record_metric"]) or ""
+    record_source = _cached_source_segment(source_text, functions["record_metric"]) or ""
     if "put_nowait" not in record_source:
         return False, "record_metric must enqueue without blocking the read path"
     if "_write_payloads([payload])" not in record_source:
@@ -4830,7 +5043,7 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
     from datetime import datetime
     from types import SimpleNamespace
 
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QSize, Qt
     from PySide6.QtGui import QPixmap
     from PySide6.QtWidgets import QApplication
 
@@ -4853,14 +5066,21 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
         asset_by_key[icon_key] = asset_path
 
     requested_keys = []
-    original_loader = side_module.load_remcard_icon_pixmap
+    original_loader = side_module.request_remcard_icon_pixmap
 
-    def fake_load_remcard_icon_pixmap(icon_key, *, fallback_file=""):
-        _ = fallback_file
+    def fake_request_remcard_icon_pixmap(_label, icon_key, *, target_size=None, **kwargs):
         requested_keys.append(icon_key)
-        return QPixmap(asset_by_key.get(icon_key, ""))
+        pixmap = QPixmap(asset_by_key.get(icon_key, ""))
+        if target_size is not None and not pixmap.isNull():
+            size = target_size if isinstance(target_size, QSize) else QSize(*target_size)
+            pixmap = pixmap.scaled(
+                size,
+                kwargs.get("aspect_mode", Qt.KeepAspectRatio),
+                kwargs.get("transformation_mode", Qt.SmoothTransformation),
+            )
+        return pixmap
 
-    side_module.load_remcard_icon_pixmap = fake_load_remcard_icon_pixmap
+    side_module.request_remcard_icon_pixmap = fake_request_remcard_icon_pixmap
     card = SidePatientCard()
     try:
         for label, asset_name, icon_key, current_status in checks:
@@ -4907,7 +5127,7 @@ def _check_side_patient_card_child_photo_uses_gender_assets(temp_root: str) -> t
                     return False, f"side patient card photo pixels do not match expected asset for {label}"
         return True, "ok"
     finally:
-        side_module.load_remcard_icon_pixmap = original_loader
+        side_module.request_remcard_icon_pixmap = original_loader
         card.close()
         app.processEvents()
 
@@ -8341,7 +8561,7 @@ def _check_statistics_dialog_snapshot(temp_root: str) -> tuple[bool, str]:
     result = {"filled": snapshot(True), "empty": snapshot(False)}
     encoded = json.dumps(result, ensure_ascii=False, sort_keys=True, default=str)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    expected_digest = "ec1f03f3d11fdf5ebcdc8ed0c2eb5d5d66ea533eee4e39d3c6d73cc5835b4b39"
+    expected_digest = "e610616cd80fc77b714fbf59c3fac0c69236c6d41ac7b845263fc6900a71a2f9"
     if digest != expected_digest:
         return False, f"statistics snapshot changed: {digest}"
     if result["filled"]["stats"]["N"] != 4 or result["filled"]["stats"]["deaths"] != 1:
@@ -11384,8 +11604,8 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     load_method = methods.get("load_patient_card")
     if load_method is None:
         return False, "load_patient_card not found"
-    load_source = ast.get_source_segment(source_text, load_method) or ""
-    orders_context_source = ast.get_source_segment(
+    load_source = _cached_source_segment(source_text, load_method) or ""
+    orders_context_source = _cached_source_segment(
         source_text,
         methods.get("_sync_orders_widget_context_for_patient_open"),
     ) or ""
@@ -11426,7 +11646,7 @@ def _check_doctor_create_card_avoids_open_snapshot_race(temp_root: str) -> tuple
     create_method = methods.get("on_create_card_clicked")
     if create_method is None:
         return False, "on_create_card_clicked not found"
-    create_source = ast.get_source_segment(source_text, create_method) or ""
+    create_source = _cached_source_segment(source_text, create_method) or ""
     if "_create_card_after_snapshot" not in create_source or "_snapshot_worker is not None" not in create_source:
         return False, "create-card write is not deferred while snapshot worker is pending"
 
@@ -11442,7 +11662,7 @@ def _check_doctor_load_patient_card_refactor_path(temp_root: str) -> tuple[bool,
     if not class_defs:
         return False, "DoctorRemCardWidget class not found"
     methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
-    load_source = ast.get_source_segment(source_text, methods.get("load_patient_card")) or ""
+    load_source = _cached_source_segment(source_text, methods.get("load_patient_card")) or ""
     if not load_source:
         return False, "load_patient_card not found"
 
@@ -11527,14 +11747,14 @@ def _check_doctor_load_patient_card_refactor_path(temp_root: str) -> tuple[bool,
         ),
     }
     for helper_name, tokens in helper_tokens.items():
-        helper_source = ast.get_source_segment(source_text, methods.get(helper_name)) or ""
+        helper_source = _cached_source_segment(source_text, methods.get(helper_name)) or ""
         if not helper_source:
             return False, f"{helper_name} helper not found"
         missing = [token for token in tokens if token not in helper_source]
         if missing:
             return False, f"{helper_name} lost patient-open side effects: {missing}"
 
-    chart_source = ast.get_source_segment(source_text, methods.get("_update_chart_context_for_patient_open")) or ""
+    chart_source = _cached_source_segment(source_text, methods.get("_update_chart_context_for_patient_open")) or ""
     match_pos = chart_source.find("chart_matches_target = self._chart_matches_context")
     clear_pos = chart_source.find("self.chart.clear_for_context")
     assign_pos = chart_source.find("self.chart.admission_id = admission_id")
@@ -11568,21 +11788,21 @@ def _check_orders_widgets_defer_snapshot_reload_thread_creation(temp_root: str) 
             if method_name not in methods:
                 return False, f"{role}: {method_name} not found"
 
-        request_source = ast.get_source_segment(source_text, methods["_request_snapshot"]) or ""
+        request_source = _cached_source_segment(source_text, methods["_request_snapshot"]) or ""
         if "self._snapshot_worker is not None" not in request_source:
             return False, f"{role}: snapshot worker must stay busy until finished signal"
 
-        stale_source = ast.get_source_segment(source_text, methods["_queue_forced_reload_after_stale_snapshot"]) or ""
+        stale_source = _cached_source_segment(source_text, methods["_queue_forced_reload_after_stale_snapshot"]) or ""
         enqueue_method = methods.get("_enqueue_forced_reload")
-        enqueue_source = ast.get_source_segment(source_text, enqueue_method) if enqueue_method else ""
+        enqueue_source = _cached_source_segment(source_text, enqueue_method) if enqueue_method else ""
         if "_defer_snapshot_request" not in stale_source and "_defer_snapshot_request" not in enqueue_source:
             return False, f"{role}: stale snapshot reload must be deferred"
 
-        finished_source = ast.get_source_segment(source_text, methods["_on_snapshot_finished"]) or ""
+        finished_source = _cached_source_segment(source_text, methods["_on_snapshot_finished"]) or ""
         if "_defer_snapshot_request" not in finished_source:
             return False, f"{role}: pending reload after worker finish must be deferred"
 
-        defer_source = ast.get_source_segment(source_text, methods["_defer_snapshot_request"]) or ""
+        defer_source = _cached_source_segment(source_text, methods["_defer_snapshot_request"]) or ""
         if "QTimer.singleShot" not in defer_source:
             return False, f"{role}: deferred reload helper must use QTimer.singleShot"
 
@@ -11664,7 +11884,7 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
         request_method = methods.get(request_method_name)
         if request_method is None:
             return False, f"{role}: {request_method_name} not found"
-        request_source = ast.get_source_segment(source_text, request_method) or ""
+        request_source = _cached_source_segment(source_text, request_method) or ""
         if "AsyncCallThread" not in request_source:
             return False, f"{role}: request method does not start AsyncCallThread"
         if _async_call_uses_parent_self(request_method):
@@ -11676,15 +11896,15 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
             method = methods.get(method_name)
             if method is None:
                 return False, f"{role}: {method_name} not found"
-            method_source = ast.get_source_segment(source_text, method) or ""
+            method_source = _cached_source_segment(source_text, method) or ""
             if "_is_closing" not in method_source:
                 return False, f"{role}: {method_name} must guard _is_closing"
 
-        shutdown_source = ast.get_source_segment(source_text, methods["shutdown"]) or ""
+        shutdown_source = _cached_source_segment(source_text, methods["shutdown"]) or ""
         helper_source = ""
         helper = methods.get("_shutdown_snapshot_worker")
         if helper is not None:
-            helper_source = ast.get_source_segment(source_text, helper) or ""
+            helper_source = _cached_source_segment(source_text, helper) or ""
         lifecycle_source = shutdown_source + "\n" + helper_source
         if "disconnect" not in lifecycle_source or ".wait(" not in lifecycle_source:
             return False, f"{role}: shutdown must disconnect and wait active snapshot workers"
@@ -11744,8 +11964,8 @@ def _check_patient_open_cache_snapshot_bypasses_worker_request_id(temp_root: str
         apply_method = methods.get("_apply_card_snapshot")
         if cache_method is None or apply_method is None:
             return False, f"{role}: patient-open cache/apply methods not found"
-        cache_source = ast.get_source_segment(source_text, cache_method) or ""
-        apply_source = ast.get_source_segment(source_text, apply_method) or ""
+        cache_source = _cached_source_segment(source_text, cache_method) or ""
+        apply_source = _cached_source_segment(source_text, apply_method) or ""
         if '"from_cache": True' not in cache_source:
             return False, f"{role}: patient-open cache request must be marked from_cache"
         if 'request_id is None and not request.get("from_cache")' not in apply_source:
@@ -11772,8 +11992,8 @@ def _check_patient_form_open_is_deferred_from_callback(temp_root: str) -> tuple[
     safe_method = methods.get("_open_patient_form_safe")
     if open_method is None or safe_method is None:
         return False, "deferred patient form helpers not found"
-    open_source = ast.get_source_segment(source_text, open_method) or ""
-    safe_source = ast.get_source_segment(source_text, safe_method) or ""
+    open_source = _cached_source_segment(source_text, open_method) or ""
+    safe_source = _cached_source_segment(source_text, safe_method) or ""
     if "QTimer.singleShot" not in open_source:
         return False, "PatientForm opening must be deferred with QTimer.singleShot"
     if "dialog.exec" in open_source:
@@ -11811,7 +12031,7 @@ def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]
     close_method = main_methods.get("closeEvent")
     if close_method is None:
         return False, "MainWindow.closeEvent not found"
-    close_source = ast.get_source_segment(main_window_text, close_method) or ""
+    close_source = _cached_source_segment(main_window_text, close_method) or ""
     if "set_shutting_down" not in close_source:
         return False, "MainWindow.closeEvent must mark DataService shutting down before UI shutdown"
     if "db_manager.close(" in close_source or "data_service.shutdown()" in close_source:
@@ -11831,7 +12051,7 @@ def _check_shutdown_queue_db_ordering_guards(temp_root: str) -> tuple[bool, str]
     )
     if shutdown_func is None:
         return False, "app.main._shutdown_window_resources not found"
-    shutdown_source = ast.get_source_segment(main_app_text, shutdown_func) or ""
+    shutdown_source = _cached_source_segment(main_app_text, shutdown_func) or ""
     data_shutdown_idx = shutdown_source.find("data_service.shutdown()")
     db_close_idx = shutdown_source.find("db_manager.close()")
     if data_shutdown_idx < 0 or db_close_idx < 0:
@@ -11868,7 +12088,7 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
         if method_name not in methods:
             return False, f"doctor: {method_name} not found"
 
-    enqueue_source = ast.get_source_segment(source_text, methods["_enqueue_cell_write"]) or ""
+    enqueue_source = _cached_source_segment(source_text, methods["_enqueue_cell_write"]) or ""
     if "_defer_snapshot_request" in enqueue_source or "_request_snapshot" in enqueue_source:
         return False, "doctor: cell write success must not start an immediate orders snapshot"
     if "_schedule_fast_sync" not in enqueue_source:
@@ -11876,7 +12096,7 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
     if "_schedule_state_sync" not in enqueue_source:
         return False, "doctor: cell write success must keep state buttons in sync"
 
-    emit_source = ast.get_source_segment(source_text, methods["_emit_admin_cell_changes"]) or ""
+    emit_source = _cached_source_segment(source_text, methods["_emit_admin_cell_changes"]) or ""
     if ".viewport().update(" in emit_source or "viewport().update()" in emit_source:
         return False, "doctor: local cell changes must not repaint the whole orders viewport"
 
@@ -11884,7 +12104,7 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
         method = methods_map.get(method_name)
         if method is None:
             return False, f"{label}: {method_name} not found"
-        method_source = ast.get_source_segment(text, method) or ""
+        method_source = _cached_source_segment(text, method) or ""
         if ".viewport().update(" in method_source or "viewport().update()" in method_source:
             return False, f"{label}: {method_name} must use targeted dataChanged, not full viewport repaint"
         return True, "ok"
@@ -11936,7 +12156,7 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
     apply_admin_method = model_methods.get("apply_admin_rows_snapshot")
     if apply_admin_method is None:
         return False, "shared: OrdersModel.apply_admin_rows_snapshot not found"
-    apply_admin_source = ast.get_source_segment(model_text, apply_admin_method) or ""
+    apply_admin_source = _cached_source_segment(model_text, apply_admin_method) or ""
     if "_set_has_any_draft(" not in apply_admin_source or "emit_order_column=True" not in apply_admin_source:
         return False, "shared: admin-only snapshot must repaint order column when draft state changes"
 
@@ -11953,7 +12173,7 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
     delegate_methods = {node.name: node for node in delegate_classes[0].body if isinstance(node, ast.FunctionDef)}
     if "_is_admin_pending" not in delegate_methods:
         return False, "shared: OrdersDelegate._is_admin_pending not found"
-    pending_source = ast.get_source_segment(delegate_text, delegate_methods["_is_admin_pending"]) or ""
+    pending_source = _cached_source_segment(delegate_text, delegate_methods["_is_admin_pending"]) or ""
     if "_pending_cell_action" in pending_source:
         return False, "shared: ordinary planned X must not be drawn as pending"
 
@@ -11978,7 +12198,7 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     readonly_method = doctor_methods.get("_apply_archive_read_only_state")
     if readonly_method is None:
         return False, "DoctorRemCardWidget._apply_archive_read_only_state not found"
-    readonly_source = ast.get_source_segment(doctor_text, readonly_method) or ""
+    readonly_source = _cached_source_segment(doctor_text, readonly_method) or ""
     if "_read_only_widget_signature" not in doctor_text or "apply_widget_state" not in readonly_source:
         return False, "doctor read-only state must be idempotent for child widgets"
     if "self.controls" not in readonly_source or "set_save_active" not in readonly_source:
@@ -11986,7 +12206,7 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     load_patient_card = doctor_methods.get("load_patient_card")
     if load_patient_card is None:
         return False, "DoctorRemCardWidget.load_patient_card not found"
-    load_patient_source = ast.get_source_segment(doctor_text, load_patient_card) or ""
+    load_patient_source = _cached_source_segment(doctor_text, load_patient_card) or ""
     prepare_orders_source = _method_source(
         doctor_text,
         doctor_methods,
@@ -12021,9 +12241,9 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     clear_method = orders_methods.get("clear_drafts")
     if guard_method is None or source_probe_method is None or clear_method is None:
         return False, "orders clear-drafts guard methods are missing"
-    guard_source = ast.get_source_segment(orders_text, guard_method) or ""
-    source_probe_source = ast.get_source_segment(orders_text, source_probe_method) or ""
-    clear_source = ast.get_source_segment(orders_text, clear_method) or ""
+    guard_source = _cached_source_segment(orders_text, guard_method) or ""
+    source_probe_source = _cached_source_segment(orders_text, source_probe_method) or ""
+    clear_source = _cached_source_segment(orders_text, clear_method) or ""
     if "self.model.admission_id != self.admission_id" not in guard_source:
         return False, "clear-drafts guard must not skip when model context is different"
     if "_last_applied_snapshot_signature" not in guard_source:
@@ -12046,7 +12266,7 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     if not diet_classes:
         return False, "DietIntakeWidget class not found"
     diet_methods = {node.name: node for node in diet_classes[0].body if isinstance(node, ast.FunctionDef)}
-    set_read_only = ast.get_source_segment(diet_text, diet_methods.get("set_read_only")) if diet_methods.get("set_read_only") else ""
+    set_read_only = _cached_source_segment(diet_text, diet_methods.get("set_read_only")) if diet_methods.get("set_read_only") else ""
     if "self.read_only == bool(read_only)" not in (set_read_only or ""):
         return False, "DietIntakeWidget.set_read_only must skip unchanged state"
 
@@ -12109,8 +12329,8 @@ def _check_report_pdf_callbacks_are_qobject_slots(temp_root: str) -> tuple[bool,
         full_method = methods.get(full_method_name)
         if daily_method is None or full_method is None:
             return False, f"{role}: report request methods not found"
-        daily_source = ast.get_source_segment(source_text, daily_method) or ""
-        full_source = ast.get_source_segment(source_text, full_method) or ""
+        daily_source = _cached_source_segment(source_text, daily_method) or ""
+        full_source = _cached_source_segment(source_text, full_method) or ""
         if "def on_finished" in daily_source or "def on_error" in daily_source:
             return False, f"{role}: daily report must not use nested callbacks"
         if "def on_finished" in full_source or "def on_error" in full_source:
@@ -12162,7 +12382,7 @@ def _check_pdf_build_runs_in_worker(temp_root: str) -> tuple[bool, str]:
             return False, f"{relative_path}: PdfBuildWorker is not retained by the widget"
         tree = ast.parse(source_text)
         methods = {
-            node.name: ast.get_source_segment(source_text, node) or ""
+            node.name: _cached_source_segment(source_text, node) or ""
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef)
         }
@@ -12330,15 +12550,15 @@ def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tu
     if not ensure_kw or not isinstance(ensure_kw[0][1], ast.Constant) or ensure_kw[0][1].value is not None:
         return False, "load_patient_card must accept ensure_initial_status=None keyword"
 
-    yest_clicked_source = ast.get_source_segment(source_text, methods.get("on_yest_card_clicked")) or ""
+    yest_clicked_source = _cached_source_segment(source_text, methods.get("on_yest_card_clicked")) or ""
     if "QTimer.singleShot" not in yest_clicked_source or "safe_load_archived_card" not in yest_clicked_source:
         return False, "open-card yesterday action must defer archive loading through QTimer.singleShot"
 
-    select_source = ast.get_source_segment(source_text, methods.get("on_patient_selected_from_list")) or ""
+    select_source = _cached_source_segment(source_text, methods.get("on_patient_selected_from_list")) or ""
     if "QTimer.singleShot" not in select_source or "_open_w1_yesterday_card" not in select_source:
         return False, "W1 yesterday action must defer loading through QTimer.singleShot"
 
-    open_w1_source = ast.get_source_segment(source_text, methods.get("_open_w1_yesterday_card")) or ""
+    open_w1_source = _cached_source_segment(source_text, methods.get("_open_w1_yesterday_card")) or ""
     if "ensure_initial_status=False" not in open_w1_source:
         return False, "W1 yesterday card must skip initial status writes"
 
@@ -12351,7 +12571,7 @@ def _check_w1_yesterday_card_skips_status_write_and_defers(temp_root: str) -> tu
     archive_method = methods.get("safe_load_archived_card")
     if archive_method is None:
         return False, "safe_load_archived_card not found"
-    archive_source = ast.get_source_segment(source_text, archive_method) or ""
+    archive_source = _cached_source_segment(source_text, archive_method) or ""
 
     if not _w1_archive_assigns_initial_status_helper_result(archive_method):
         return False, "safe_load_archived_card must assign helper result for selected_date"
@@ -12389,13 +12609,13 @@ def _check_chart_clears_on_card_context_change(temp_root: str) -> tuple[bool, st
         load_method = methods.get("load_patient_card")
         if load_method is None:
             return False, f"{role}: load_patient_card not found"
-        load_source = ast.get_source_segment(source_text, load_method) or ""
+        load_source = _cached_source_segment(source_text, load_method) or ""
         chart_context_source = load_source
         if role == "doctor":
             chart_context_source = "\n".join(
                 (
                     load_source,
-                    ast.get_source_segment(
+                    _cached_source_segment(
                         source_text,
                         methods.get("_update_chart_context_for_patient_open"),
                     ) or "",
@@ -12755,7 +12975,7 @@ def _check_w1_beds_refreshes_on_vitals_change(temp_root: str) -> tuple[bool, str
         ]
         if not methods:
             return False, f"{role}: _on_data_changes not found"
-        method_source = ast.get_source_segment(source, methods[0]) or ""
+        method_source = _cached_source_segment(source, methods[0]) or ""
         if "W1_REFRESH_ENTITIES" not in method_source:
             return False, f"{role}: W1 beds refresh must use W1_REFRESH_ENTITIES"
 
@@ -12814,7 +13034,7 @@ def _class_methods_from_source(source: str, class_name: str):
 
 def _method_source(source: str, methods: dict, name: str) -> str:
     node = methods.get(name)
-    return ast.get_source_segment(source, node) if node is not None else ""
+    return _cached_source_segment(source, node) if node is not None else ""
 
 
 def _check_lazy_full_card_role_contract(
@@ -13475,7 +13695,7 @@ def _check_beds_mode_reentry_does_not_warn(temp_root: str) -> tuple[bool, str]:
     source_text = source_path.read_text(encoding="utf-8")
     tree = ast.parse(source_text)
     methods = {
-        node.name: ast.get_source_segment(source_text, node) or ""
+        node.name: _cached_source_segment(source_text, node) or ""
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef)
     }
@@ -13737,6 +13957,7 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     from datetime import datetime
 
+    from rem_card.services import persistent_snapshot_cache
     from rem_card.services.read_coordinator import READ_CACHE_MAX_PATIENTS, ReadCoordinator
 
     if READ_CACHE_MAX_PATIENTS != 10:
@@ -13837,6 +14058,8 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
         return False, "recently used patient 1 was evicted instead of oldest entry"
     if card_key(2) in coordinator._patient_card_cache:
         return False, "oldest patient 2 memory cache survived after 11th context"
+    if not persistent_snapshot_cache.flush(timeout_sec=5.0):
+        return False, "patient card persistent cache writer did not flush"
 
     same_shift_times = [
         datetime(2026, 5, 3, 8, 0, 0),
@@ -13860,6 +14083,8 @@ def _check_patient_card_cache_lru_10(temp_root: str) -> tuple[bool, str]:
         return False, f"unexpected restored admission_id: {persisted_after_restart.get('admission_id')}"
 
     coordinator.load_patient_vitals_snapshot(3, shift_date, role="doctor", force_refresh=False)
+    if not persistent_snapshot_cache.flush(timeout_sec=5.0):
+        return False, "patient vitals persistent cache writer did not flush"
     restarted_vitals = ReadCoordinator(service)
     persisted_vitals = restarted_vitals.get_cached_vitals(vitals_key(3))
     if persisted_vitals is None:
@@ -14285,7 +14510,7 @@ def _check_read_coordinator_partial_snapshots(temp_root: str) -> tuple[bool, str
         apply_snapshot = ""
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "_apply_card_snapshot":
-                apply_snapshot = ast.get_source_segment(widget_source, node) or ""
+                apply_snapshot = _cached_source_segment(widget_source, node) or ""
                 break
         if "context_key" not in apply_snapshot or "_current_snapshot_context_key" not in apply_snapshot:
             return False, f"{widget_path.name}: snapshot stale guard does not use context key"
@@ -14499,6 +14724,8 @@ def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple
     orders_widget.shift_date = same_shift_times[0]
     orders_widget._snapshot_cache = OrderedDict()
     orders_widget._store_snapshot_cache([{"id": 1, "planned_time": "2026-05-03T09:00:00"}])
+    if not persistent_snapshot_cache.flush(timeout_sec=5.0):
+        return False, "current orders persistent cache writer did not flush"
     orders_persisted = persistent_snapshot_cache.load_snapshot("current_orders", orders_widget._cache_key())
     if not orders_persisted or orders_persisted.get("data", [{}])[0].get("id") != 1:
         return False, f"current orders persistent cache was not stored: {orders_persisted}"
@@ -14510,6 +14737,8 @@ def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple
     diet._events = []
     diet.shift_date = same_shift_times[0]
     diet._store_snapshot_cache()
+    if not persistent_snapshot_cache.flush(timeout_sec=5.0):
+        return False, "diet persistent cache writer did not flush"
     diet_persisted = persistent_snapshot_cache.load_snapshot("diet", diet._cache_key())
     if diet_persisted is None or "events" not in diet_persisted:
         return False, f"diet persistent cache was not stored: {diet_persisted}"
@@ -15078,7 +15307,7 @@ def _check_card_widgets_use_sync_actions_for_partial_refresh(temp_root: str) -> 
         source_text = path.read_text(encoding="utf-8")
         tree = ast.parse(source_text)
         methods = {
-            node.name: ast.get_source_segment(source_text, node) or ""
+            node.name: _cached_source_segment(source_text, node) or ""
             for node in ast.walk(tree)
             if isinstance(node, ast.FunctionDef)
         }
@@ -19928,6 +20157,7 @@ def _prepare_restore_probe_fixture(
         is_local_maintenance_idle=lambda: maintenance_idle,
         is_shutdown=lambda: False,
     )
+    _REGRESSION_RESTORE_PROBES.append(probe)
     return {
         "store": store,
         "session": session,
@@ -26958,10 +27188,480 @@ def _check_operblock_offline_acceptance_runner_rc_scenarios(temp_root: str) -> t
     return True, "ok"
 
 
+def _extract_worker_report(output: str) -> dict[str, Any] | None:
+    marker = '{\n  "total"'
+    start = output.rfind(marker)
+    if start < 0:
+        return None
+    try:
+        payload = json.loads(output[start:])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _terminate_worker_process(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    else:
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _looks_like_native_worker_crash(return_code: int | None, stderr: str = "") -> bool:
+    if return_code is None:
+        return False
+    if int(return_code) < 0:
+        return True
+    unsigned_code = int(return_code) & 0xFFFFFFFF
+    if unsigned_code in {
+        0xC0000005,  # access violation
+        0xC000001D,  # illegal instruction
+        0xC0000374,  # heap corruption
+        0xC0000409,  # stack buffer overrun / fail-fast
+    }:
+        return True
+    lowered = str(stderr or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "fatal python error: access violation",
+            "segmentation fault",
+            "stack buffer overrun",
+            "heap corruption",
+        )
+    )
+
+
+def _run_isolated_worker_command(
+    *,
+    command: list[str],
+    shard_index: int,
+    deadline_monotonic: float | None,
+    env: dict[str, str],
+    cleanup_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run one shard process inside the shared fast-profile wall-clock budget."""
+    started = time.monotonic()
+    if deadline_monotonic is not None and started >= deadline_monotonic:
+        cleanup_error = _rmtree_regression_root(cleanup_root) if cleanup_root else ""
+        error = "global regression timeout reached before worker start"
+        if cleanup_error:
+            error = f"{error}; {cleanup_error}"
+        return {
+            "shard_index": shard_index,
+            "exit_code": None,
+            "duration_sec": 0.0,
+            "error": error,
+            "failure_kind": "timeout",
+            "timed_out": True,
+            "crashed": False,
+            "native_crash": False,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "payload": None,
+        }
+
+    proc = subprocess.Popen(
+        command,
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    timed_out = False
+    try:
+        remaining = (
+            None
+            if deadline_monotonic is None
+            else max(0.0, deadline_monotonic - time.monotonic())
+        )
+        stdout, stderr = proc.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate_worker_process(proc)
+        stdout, stderr = proc.communicate()
+
+    payload = None if timed_out else (_extract_worker_report(stdout) or _extract_worker_report(stderr))
+    return_code = proc.returncode
+    crashed = not timed_out and return_code not in (0, 1)
+    native_crash = crashed and _looks_like_native_worker_crash(return_code, stderr)
+    error = ""
+    failure_kind = ""
+    if timed_out:
+        failure_kind = "timeout"
+        error = (
+            f"worker exceeded global regression timeout; exit={return_code}; "
+            f"stdout_tail={stdout[-800:]!r}; stderr_tail={stderr[-800:]!r}"
+        )
+    elif crashed:
+        failure_kind = "native_crash" if native_crash else "abnormal_exit"
+        error = (
+            f"worker {failure_kind}={return_code}; "
+            f"stdout_tail={stdout[-800:]!r}; stderr_tail={stderr[-800:]!r}"
+        )
+    elif payload is None:
+        failure_kind = "invalid_report"
+        error = (
+            f"worker exit={return_code} without valid JSON report; "
+            f"stdout_tail={stdout[-800:]!r}; stderr_tail={stderr[-800:]!r}"
+        )
+    elif return_code == 1:
+        failure_kind = "test_failure"
+
+    cleanup_error = _rmtree_regression_root(cleanup_root) if cleanup_root else ""
+    if cleanup_error:
+        error = "; ".join(item for item in (error, cleanup_error) if item)
+        if not failure_kind or failure_kind == "test_failure":
+            failure_kind = "cleanup"
+
+    return {
+        "shard_index": shard_index,
+        "exit_code": return_code,
+        "duration_sec": round(time.monotonic() - started, 3),
+        "error": error,
+        "failure_kind": failure_kind,
+        "timed_out": timed_out,
+        "crashed": crashed,
+        "native_crash": native_crash,
+        "stdout_tail": stdout[-1600:],
+        "stderr_tail": stderr[-1600:],
+        "payload": payload,
+    }
+
+
+def _run_worker_process(
+    *,
+    shard_index: int,
+    shard_count: int,
+    deadline_monotonic: float | None,
+    temp_root: str,
+) -> dict[str, Any]:
+    _ = temp_root
+    remaining = (
+        0.0
+        if deadline_monotonic is not None and deadline_monotonic <= time.monotonic()
+        else (
+            max(0.001, deadline_monotonic - time.monotonic())
+            if deadline_monotonic is not None
+            else 0.0
+        )
+    )
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--profile",
+        "exhaustive",
+        "--jobs",
+        "1",
+        "--worker-shard-index",
+        str(shard_index),
+        "--worker-shard-count",
+        str(shard_count),
+        "--timeout-s",
+        str(remaining),
+        "--quiet-progress",
+        "--json-detail",
+        "all",
+    ]
+    env = os.environ.copy()
+    short_worker_root = Path(tempfile.gettempdir()) / (
+        f"remcard_regression_checks_w{os.getpid()}_{shard_index}"
+    )
+    env["REMCARD_REGRESSION_TEMP_ROOT"] = str(short_worker_root)
+    return _run_isolated_worker_command(
+        command=command,
+        shard_index=shard_index,
+        deadline_monotonic=deadline_monotonic,
+        env=env,
+        cleanup_root=short_worker_root,
+    )
+
+
+def _worker_report_is_structurally_valid(worker: dict[str, Any]) -> bool:
+    payload = worker.get("payload")
+    checks = payload.get("checks") if isinstance(payload, dict) else None
+    return (
+        worker.get("exit_code") in (0, 1)
+        and isinstance(payload, dict)
+        and isinstance(checks, list)
+        and all(isinstance(item, dict) for item in checks)
+        and not worker.get("error")
+        and not worker.get("timed_out")
+        and not worker.get("crashed")
+    )
+
+
+def _parallel_wait_timeout(deadline_monotonic: float | None) -> float:
+    if deadline_monotonic is None:
+        return 15.0
+    remaining = deadline_monotonic - time.monotonic()
+    return min(15.0, max(0.1, remaining))
+
+
+def _orchestrator_error_worker(
+    *,
+    shard_index: int,
+    started_monotonic: float,
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "shard_index": shard_index,
+        "exit_code": None,
+        "duration_sec": round(time.monotonic() - started_monotonic, 3),
+        "error": f"{type(error).__name__}: {error}",
+        "failure_kind": "orchestrator_error",
+        "timed_out": False,
+        "crashed": False,
+        "native_crash": False,
+        "payload": None,
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+
+def _append_parallel_worker_result(
+    worker: dict[str, Any],
+    *,
+    results: list[dict[str, Any]],
+    worker_meta: list[dict[str, Any]],
+) -> None:
+    worker_meta.append(worker)
+    payload = worker.get("payload")
+    if not isinstance(payload, dict):
+        return
+    worker_checks = payload.get("checks")
+    if isinstance(worker_checks, list):
+        results.extend(item for item in worker_checks if isinstance(item, dict))
+
+
+def _await_parallel_workers(
+    futures: dict[Any, int],
+    *,
+    started_monotonic: float,
+    deadline_monotonic: float | None,
+    shard_count: int,
+    quiet: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    results: list[dict[str, Any]] = []
+    worker_meta: list[dict[str, Any]] = []
+    pending = set(futures)
+    while pending:
+        done, pending = wait(
+            pending,
+            timeout=_parallel_wait_timeout(deadline_monotonic),
+            return_when=FIRST_COMPLETED,
+        )
+        if not done:
+            elapsed = time.monotonic() - started_monotonic
+            _print_progress(
+                f"[regression] shards running={len(pending)}/{shard_count} elapsed={elapsed:.1f}s",
+                quiet=quiet,
+            )
+            continue
+        for future in done:
+            index = futures[future]
+            try:
+                worker = future.result()
+            except Exception as exc:
+                worker = _orchestrator_error_worker(
+                    shard_index=index,
+                    started_monotonic=started_monotonic,
+                    error=exc,
+                )
+            _append_parallel_worker_result(worker, results=results, worker_meta=worker_meta)
+            _print_progress(
+                f"[regression] shard {index + 1}/{shard_count} done "
+                f"exit={worker.get('exit_code')} duration={worker.get('duration_sec')}s",
+                quiet=quiet,
+            )
+    return results, worker_meta
+
+
+def _parallel_coverage(
+    expected_names: list[str],
+    results: list[dict[str, Any]],
+    worker_meta: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[str], list[dict[str, Any]]]:
+    seen_names = [str(item.get("check")) for item in results if item.get("check") != "__timeout__"]
+    missing = sorted(set(expected_names) - set(seen_names))
+    duplicates = sorted(name for name in set(seen_names) if seen_names.count(name) > 1)
+    unexpected = sorted(set(seen_names) - set(expected_names))
+    infrastructure_failures = [
+        {
+            "check": f"__worker_{int(worker['shard_index'])}__",
+            "ok": False,
+            "details": worker.get("error") or "worker returned no valid JSON report",
+            "duration_sec": worker.get("duration_sec", 0.0),
+        }
+        for worker in sorted(worker_meta, key=lambda item: int(item["shard_index"]))
+        if not _worker_report_is_structurally_valid(worker)
+    ]
+    if missing or duplicates or unexpected:
+        infrastructure_failures.append(
+            {
+                "check": "__coverage__",
+                "ok": False,
+                "details": f"missing={missing}; duplicates={duplicates}; unexpected={unexpected}",
+                "duration_sec": 0.0,
+            }
+        )
+    return missing, duplicates, unexpected, infrastructure_failures
+
+
+def _order_parallel_results(
+    expected_names: list[str],
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return sorted(
+        results,
+        key=lambda item: (
+            expected_names.index(str(item.get("check")))
+            if str(item.get("check")) in expected_names
+            else len(expected_names),
+            str(item.get("check")),
+        ),
+    )
+
+
+def _parallel_worker_summary(worker: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "shard_index": worker["shard_index"],
+        "exit_code": worker.get("exit_code"),
+        "duration_sec": worker.get("duration_sec"),
+        "error": worker.get("error", ""),
+        "failure_kind": worker.get("failure_kind", ""),
+        "timed_out": bool(worker.get("timed_out")),
+        "crashed": bool(worker.get("crashed")),
+        "native_crash": bool(worker.get("native_crash")),
+    }
+
+
+def _build_parallel_report(
+    *,
+    checks: list[tuple[str, Any]],
+    expected_names: list[str],
+    ordered_results: list[dict[str, Any]],
+    worker_meta: list[dict[str, Any]],
+    infrastructure_failures: list[dict[str, Any]],
+    missing: list[str],
+    duplicates: list[str],
+    unexpected: list[str],
+    jobs: int,
+    shard_count: int,
+    started_monotonic: float,
+) -> tuple[dict[str, Any], int]:
+    failures = sum(1 for item in ordered_results if not item.get("ok"))
+    report = {
+        "total": len(checks),
+        "failed": failures,
+        "passed": sum(1 for item in ordered_results if item.get("ok")),
+        "duration_sec": round(time.monotonic() - started_monotonic, 3),
+        "timed_out": (
+            any(item.get("check") == "__timeout__" for item in ordered_results)
+            or any(bool(worker.get("timed_out")) for worker in worker_meta)
+        ),
+        "worker_crash": any(bool(worker.get("crashed")) for worker in worker_meta),
+        "native_crash": any(bool(worker.get("native_crash")) for worker in worker_meta),
+        "completed": sum(1 for item in ordered_results if str(item.get("check")) in expected_names),
+        "profile": "fast",
+        "jobs": jobs,
+        "shards": shard_count,
+        "coverage_complete": not missing and not duplicates and not unexpected and not infrastructure_failures,
+        "workers": [
+            _parallel_worker_summary(worker)
+            for worker in sorted(worker_meta, key=lambda item: int(item["shard_index"]))
+        ],
+        "checks": ordered_results,
+    }
+    return report, failures
+
+
+def _run_parallel_profile(
+    checks: list[tuple[str, Any]],
+    *,
+    jobs: int,
+    shard_count: int,
+    timeout_s: float,
+    temp_root: str,
+    quiet: bool,
+    json_detail: str,
+    report_path: str,
+    deadline_monotonic: float | None = None,
+) -> None:
+    started = time.monotonic()
+    if deadline_monotonic is None and timeout_s > 0:
+        deadline_monotonic = started + timeout_s
+    expected_names = [name for name, _fn in checks]
+    shard_count = max(jobs, min(shard_count, len(checks)))
+    _print_progress(
+        f"[regression] fast profile start total={len(checks)} jobs={jobs} shards={shard_count} timeout_s={timeout_s:g}",
+        quiet=quiet,
+    )
+    with ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="RegressionShard") as executor:
+        futures = {
+            executor.submit(
+                _run_worker_process,
+                shard_index=index,
+                shard_count=shard_count,
+                deadline_monotonic=deadline_monotonic,
+                temp_root=temp_root,
+            ): index
+            # The later registry sections contain the expensive emergency/merge
+            # scenarios. Start them first; the executor then backfills short
+            # shards and avoids a long tail without reordering checks in a shard.
+            for index in reversed(range(shard_count))
+        }
+        results, worker_meta = _await_parallel_workers(
+            futures,
+            started_monotonic=started,
+            deadline_monotonic=deadline_monotonic,
+            shard_count=shard_count,
+            quiet=quiet,
+        )
+
+    missing, duplicates, unexpected, infrastructure_failures = _parallel_coverage(
+        expected_names,
+        results,
+        worker_meta,
+    )
+    results.extend(infrastructure_failures)
+    ordered_results = _order_parallel_results(expected_names, results)
+    report, failures = _build_parallel_report(
+        checks=checks,
+        expected_names=expected_names,
+        ordered_results=ordered_results,
+        worker_meta=worker_meta,
+        infrastructure_failures=infrastructure_failures,
+        missing=missing,
+        duplicates=duplicates,
+        unexpected=unexpected,
+        jobs=jobs,
+        shard_count=shard_count,
+        started_monotonic=started,
+    )
+    _emit_regression_report(report, json_detail=json_detail, report_path=report_path)
+    raise SystemExit(1 if failures else 0)
+
+
 def main(argv: list[str] | None = None):
+    _configure_utf8_console()
     args = _parse_args(argv)
     timeout_s = max(0.0, float(args.timeout_s or 0.0))
-    deadline = time.time() + timeout_s if timeout_s > 0 else None
+    deadline_monotonic = time.monotonic() + timeout_s if timeout_s > 0 else None
     if timeout_s > 0:
         faulthandler.enable()
         faulthandler.dump_traceback_later(timeout_s, repeat=False, exit=False)
@@ -27610,6 +28310,40 @@ def main(argv: list[str] | None = None):
         ("card_widgets_use_sync_actions_for_partial_refresh", _check_card_widgets_use_sync_actions_for_partial_refresh),
     ]
 
+    shard_index = args.worker_shard_index
+    shard_count = args.worker_shard_count
+    if (shard_index is None) != (shard_count is None):
+        raise SystemExit("worker shard index and count must be provided together")
+    if shard_index is not None:
+        if shard_count is None or shard_count < 1 or not 0 <= shard_index < shard_count:
+            raise SystemExit("invalid worker shard selection")
+        checks = _select_worker_shard(
+            checks,
+            shard_index=shard_index,
+            shard_count=shard_count,
+        )
+    elif args.profile == "fast":
+        jobs = int(args.jobs or DEFAULT_FAST_JOBS)
+        jobs = max(1, min(jobs, len(checks)))
+        shard_count = int(args.shards or jobs * 4)
+        shard_count = max(jobs, min(shard_count, len(checks)))
+        try:
+            _run_parallel_profile(
+                checks,
+                jobs=jobs,
+                shard_count=shard_count,
+                timeout_s=timeout_s,
+                temp_root=temp_root,
+                quiet=bool(args.quiet_progress),
+                json_detail=str(args.json_detail),
+                report_path=str(args.report_path or ""),
+                deadline_monotonic=deadline_monotonic,
+            )
+        finally:
+            _rmtree_regression_root(temp_root)
+            if timeout_s > 0:
+                faulthandler.cancel_dump_traceback_later()
+
     result_items = []
     failures = 0
     started = time.time()
@@ -27620,7 +28354,7 @@ def main(argv: list[str] | None = None):
             quiet=bool(args.quiet_progress),
         )
         for index, (name, fn) in enumerate(checks, start=1):
-            if deadline is not None and time.time() >= deadline:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 failures += 1
                 result_items.append(
                     {
@@ -27647,6 +28381,11 @@ def main(argv: list[str] | None = None):
             except Exception as exc:
                 ok = False
                 details = f"{type(exc).__name__}: {exc}\n{traceback.format_exc(limit=20)}"
+            finally:
+                cleanup_errors = _cleanup_check_resources()
+            if cleanup_errors:
+                ok = False
+                details = f"{details}; resource cleanup failed: {'; '.join(cleanup_errors)}"
             duration_sec = round(time.time() - check_started, 3)
             result_items.append(
                 {
@@ -27663,7 +28402,7 @@ def main(argv: list[str] | None = None):
                 f"[regression] {index}/{total} {name} {status} {duration_sec:.3f}s",
                 quiet=bool(args.quiet_progress),
             )
-            if deadline is not None and time.time() >= deadline:
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 failures += 1
                 result_items.append(
                     {
@@ -27679,7 +28418,8 @@ def main(argv: list[str] | None = None):
                 )
                 break
     finally:
-        shutil.rmtree(temp_root, ignore_errors=True)
+        _cleanup_check_resources()
+        _rmtree_regression_root(temp_root)
         if timeout_s > 0:
             faulthandler.cancel_dump_traceback_later()
 
@@ -27690,9 +28430,17 @@ def main(argv: list[str] | None = None):
         "duration_sec": round(time.time() - started, 3),
         "timed_out": any(item.get("check") == "__timeout__" for item in result_items),
         "completed": sum(1 for item in result_items if item.get("check") != "__timeout__"),
+        "profile": "worker" if shard_index is not None else "exhaustive",
+        "shards": int(shard_count or 1),
+        "shard_index": shard_index,
+        "coverage_complete": not any(item.get("check") == "__timeout__" for item in result_items),
         "checks": result_items,
     }
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    _emit_regression_report(
+        report,
+        json_detail=str(args.json_detail),
+        report_path=str(args.report_path or ""),
+    )
     raise SystemExit(1 if failures else 0)
 
 

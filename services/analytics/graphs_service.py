@@ -9,6 +9,7 @@ from typing import Sequence
 from xml.sax.saxutils import escape as xml_escape
 
 from rem_card.ui.analytics.chart_renderer import configure_chart_style
+from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.ui.styles.theme import (
     ANALYTICS_CHART_COLORS,
@@ -46,13 +47,16 @@ def build_graphs_html(
         raise ValueError("Выберите хотя бы один график для формирования.")
 
     chart_colors = list(chart_colors or DEFAULT_CHART_COLORS)
+    period = normalize_analytics_period(start_date_str, end_date_str)
+    selected_start_date_str = period.start_date.isoformat()
+    selected_end_date_str = period.end_date.isoformat()
     manager, cleanup = _thread_local_manager(db_manager)
     conn = manager.get_connection()
-    params = (start_date_str, end_date_str)
+    params = period.sql_bounds
     img_paths: list[str] = []
     html_content = (
         "<h2>Графический отчет ОАР №3</h2>"
-        f"<p>Период: {start_date_str.split(' ')[0]} - {end_date_str.split(' ')[0]}</p>"
+        f"<p>Период: {selected_start_date_str} - {selected_end_date_str}</p>"
     )
 
     try:
@@ -80,7 +84,7 @@ def build_graphs_html(
                        outcome, patient_age, patient_age_unit, patient_gender,
                        source_department, diagnosis_code, diagnosis_text
                 FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
+                WHERE admission_datetime >= ? AND admission_datetime < ?
                 """,
                 params,
             )
@@ -94,12 +98,29 @@ def build_graphs_html(
                 img_paths,
                 html_content,
                 include_recovery_beds=include_recovery_beds,
+                period_dates=(selected_start_date_str, selected_end_date_str),
             )
             html_content = generate_g6_g13(
-                selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
+                selected,
+                conn,
+                params,
+                chart_colors,
+                img_paths,
+                adms,
+                selected_start_date_str,
+                selected_end_date_str,
+                html_content,
             )
             html_content = generate_g14_g18(
-                selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
+                selected,
+                conn,
+                params,
+                chart_colors,
+                img_paths,
+                adms,
+                selected_start_date_str,
+                selected_end_date_str,
+                html_content,
             )
             html_content = generate_g19_g22(selected, conn, params, chart_colors, img_paths, adms, html_content)
             html_content = generate_g23_g30(selected, conn, params, chart_colors, img_paths, html_content)
@@ -108,7 +129,15 @@ def build_graphs_html(
             html_content = generate_g41_g45(selected, conn, params, chart_colors, img_paths, html_content)
             html_content = generate_g46_g50(selected, conn, params, chart_colors, img_paths, adms, html_content)
             html_content = generate_g51_g55(
-                selected, conn, params, chart_colors, img_paths, adms, start_date_str, end_date_str, html_content
+                selected,
+                conn,
+                params,
+                chart_colors,
+                img_paths,
+                adms,
+                selected_start_date_str,
+                selected_end_date_str,
+                html_content,
             )
             html_content = generate_g56_g60(selected, conn, params, chart_colors, img_paths, html_content)
             html_content = generate_g61_g65(selected, conn, params, chart_colors, img_paths, html_content)

@@ -9,6 +9,7 @@ from rem_card.app.runtime_paths import (
     get_project_root,
     is_compiled as _runtime_is_compiled,
     resolve_baza_dir,
+    startup_baza_paths_recently_validated,
 )
 
 def is_compiled() -> bool:
@@ -207,11 +208,17 @@ def ensure_directories():
         SETTINGS_BACKUPS_DIR,
     ]
 
-    for directory in shared_dirs:
-        if allow_shared_create:
-            os.makedirs(directory, exist_ok=True)
-        elif not os.path.isdir(directory):
-            raise FileNotFoundError(f"Required shared directory is unavailable: {directory}")
+    shared_dirs = list(dict.fromkeys(shared_dirs))
+    shared_dirs_already_validated = (
+        not allow_shared_create
+        and startup_baza_paths_recently_validated(BAZA_DIR, shared_dirs)
+    )
+    if not shared_dirs_already_validated:
+        for directory in shared_dirs:
+            if allow_shared_create:
+                os.makedirs(directory, exist_ok=True)
+            elif not os.path.isdir(directory):
+                raise FileNotFoundError(f"Required shared directory is unavailable: {directory}")
 
     os.makedirs(LOGS_DIR, exist_ok=True)
     os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)

@@ -1310,15 +1310,94 @@ class RemCardService(QObject):
         РЎРѕР±РёСЂР°РµС‚ РІСЃРµ РґР°С‚С‹, РєРѕРіРґР° Р±С‹Р»Рё РєР°РєРёРµ-Р»РёР±Рѕ Р·Р°РїРёСЃРё РїРѕ РїР°С†РёРµРЅС‚Сѓ (РІРёС‚Р°Р»С‹, Р¶РёРґРєРѕСЃС‚Рё РёР»Рё РЅР°Р·РЅР°С‡РµРЅРёСЏ).
         Р—Р°С‚РµРј РіСЂСѓРїРїРёСЂСѓРµС‚ РёС… РїРѕ РјРµРґРёС†РёРЅСЃРєРёРј СЃСѓС‚РєР°Рј С‡РµСЂРµР· ShiftService.
         """
-        v_dates = self.vitals_dao.get_all_vital_dates(admission_id)
-        o_dates = self.orders_dao.get_all_dates(admission_id)
-        f_dates = self.fluids_dao.get_all_dates(admission_id)
-        diet_dates = self._get_diet_raw_dates(admission_id)
-        lab_dates = self._get_lab_orders_raw_dates(admission_id)
-        
-        # РћР±СЉРµРґРёРЅСЏРµРј РІСЃРµ "СЃС‹СЂС‹Рµ" РґР°С‚С‹ РІ РѕРґРёРЅ СЃРїРёСЃРѕРє
-        raw_dates = list(set(v_dates + o_dates + f_dates + diet_dates + lab_dates))
-        
+        query = """
+            WITH raw(source, dt, strict_parse) AS (
+                SELECT 'vitals', datetime, 1
+                FROM vitals
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT 'orders', datetime, 1
+                FROM orders
+                WHERE admission_id = ?
+                  AND COALESCE(status, '') != 'deleted'
+
+                UNION ALL
+                SELECT 'fluids', datetime, 1
+                FROM fluids
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT 'diet_plan', shift_start, 0
+                FROM diet_plan
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT 'oral_intake_events', event_time, 0
+                FROM oral_intake_events
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT 'lab_orders', COALESCE(scheduled_at, created_at, completed_at), 0
+                FROM lab_orders
+                WHERE admission_id = ?
+            ),
+            typed(source, raw_value, dt_text, strict_parse) AS (
+                SELECT source, dt, CAST(dt AS TEXT), strict_parse
+                FROM raw
+                WHERE dt IS NOT NULL
+            ),
+            classified(source, raw_value, dt_text, strict_parse, shift_day) AS (
+                SELECT
+                    source,
+                    raw_value,
+                    dt_text,
+                    strict_parse,
+                    CASE
+                        WHEN LENGTH(dt_text) >= 10
+                         AND SUBSTR(dt_text, 5, 1) = '-'
+                         AND SUBSTR(dt_text, 8, 1) = '-'
+                         AND (LENGTH(dt_text) = 10 OR SUBSTR(dt_text, 11, 1) IN ('T', ' '))
+                         AND INSTR(SUBSTR(dt_text, 12), '+') = 0
+                         AND INSTR(SUBSTR(dt_text, 12), '-') = 0
+                         AND UPPER(SUBSTR(dt_text, -1, 1)) != 'Z'
+                         AND DATETIME(dt_text) IS NOT NULL
+                        THEN DATE(DATETIME(dt_text), '-8 hours')
+                        ELSE NULL
+                    END
+                FROM typed
+            )
+            SELECT 1 AS is_grouped, '' AS source, shift_day AS value, 0 AS strict_parse
+            FROM classified
+            WHERE shift_day IS NOT NULL
+            GROUP BY shift_day
+
+            UNION ALL
+            SELECT 0 AS is_grouped, source, raw_value AS value, strict_parse
+            FROM classified
+            WHERE shift_day IS NULL
+
+            ORDER BY is_grouped DESC, value ASC
+        """
+        adm_id = int(admission_id)
+        rows = self.orders_dao.db.fetch_all_remcard(query, (adm_id,) * 6)
+        raw_dates: List[datetime] = []
+        for row in rows:
+            value = str(row["value"] or "")
+            if bool(row["is_grouped"]):
+                raw_dates.append(datetime.fromisoformat(value).replace(hour=8))
+                continue
+
+            strict_parse = bool(row["strict_parse"])
+            text = value if strict_parse else value.strip()
+            if not text:
+                continue
+            try:
+                raw_dates.append(datetime.fromisoformat(text.replace(" ", "T")))
+            except Exception:
+                if strict_parse:
+                    raise
+
         return self._shifts.get_all_card_dates(raw_dates)
 
     def get_latest_card_date(self, admission_id: int) -> Optional[datetime]:

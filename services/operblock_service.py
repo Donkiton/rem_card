@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -15,8 +16,17 @@ from typing import Any, Callable, Mapping, Optional
 import uuid
 
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.archive_schema_cache import get_archive_schema
 from rem_card.app.db_cycle_registry import discover_db_cycle_paths
 from rem_card.app.logger import logger
+from rem_card.app.operblock_archive_index_cache import (
+    LEGACY_OPERBLOCK_INDEX_ALIAS,
+    LEGACY_OPERBLOCK_INDEX_NAME,
+    LEGACY_OPERBLOCK_INDEX_TABLE,
+    attach_legacy_operblock_archive_index,
+    operblock_archive_source_fingerprint,
+    source_has_started_at_index,
+)
 from rem_card.app.patient_age import (
     format_patient_age,
     format_patient_age_from_birth_date,
@@ -923,8 +933,63 @@ class OperBlockService:
             case_columns = _sqlite_columns(conn, "operation_cases")
             if "started_at" not in case_columns:
                 return False
+            legacy_index_attached = OperBlockService._begin_external_archive_snapshot(
+                conn,
+                db_path,
+                use_legacy_index=True,
+            )
+            native_started_at_index = (
+                not legacy_index_attached and source_has_started_at_index(conn)
+            )
             join_sql = ""
-            where_sql = "WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
+            if legacy_index_attached:
+                case_source_sql = (
+                    f"{LEGACY_OPERBLOCK_INDEX_ALIAS}.{LEGACY_OPERBLOCK_INDEX_TABLE} AS legacy_idx "
+                    f"INDEXED BY {LEGACY_OPERBLOCK_INDEX_NAME} "
+                    "JOIN operation_cases oc ON oc.id = legacy_idx.operation_case_id"
+                )
+                period_column = "legacy_idx.started_at"
+            else:
+                case_source_sql = "operation_cases oc"
+                period_column = "oc.started_at"
+
+            # Archive selectors pass inclusive wall-clock bounds.  The old
+            # DATETIME(... BETWEEN ...) predicate rounded both sides to whole
+            # seconds, so a row at 23:59:59.900 belonged to an end bound of
+            # 23:59:59.  Express that contract as [start, next-second) for the
+            # canonical sidecar.  For whole-day native archives, date-only
+            # bounds are separator-agnostic (both SQLite's ``T`` and space ISO
+            # forms) and let the real started_at index participate.
+            is_whole_day_period = (
+                start.hour == 0
+                and start.minute == 0
+                and start.second == 0
+                and start.microsecond == 0
+                and end.hour == 23
+                and end.minute == 59
+                and end.second == 59
+            )
+            if legacy_index_attached:
+                start_bound = start.replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+                end_exclusive = (end.replace(microsecond=0) + timedelta(seconds=1)).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                where_sql = f"WHERE {period_column} >= ? AND {period_column} < ?"
+                period_params = (start_bound, end_exclusive)
+            elif native_started_at_index and is_whole_day_period:
+                start_bound = start.date().isoformat()
+                end_exclusive = (end.date() + timedelta(days=1)).isoformat()
+                where_sql = f"WHERE {period_column} >= ? AND {period_column} < ?"
+                period_params = (start_bound, end_exclusive)
+            else:
+                # Preserve SQLite's legacy parsing semantics when no usable
+                # technical/native index is available or the caller supplied
+                # a sub-day interval.
+                where_sql = "WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
+                period_params = (
+                    start.strftime("%Y-%m-%d %H:%M:%S"),
+                    end.strftime("%Y-%m-%d %H:%M:%S"),
+                )
             if "admissions" in tables and "admission_id" in case_columns:
                 admission_columns = _sqlite_columns(conn, "admissions")
                 join_sql = "LEFT JOIN admissions a ON a.id = oc.admission_id"
@@ -935,15 +1000,12 @@ class OperBlockService:
             row = conn.execute(
                 f"""
                 SELECT 1
-                FROM operation_cases oc
+                FROM {case_source_sql}
                 {join_sql}
                 {where_sql}
                 LIMIT 1
                 """,
-                (
-                    start.strftime("%Y-%m-%d %H:%M:%S"),
-                    end.strftime("%Y-%m-%d %H:%M:%S"),
-                ),
+                period_params,
             ).fetchone()
             return bool(row)
         except Exception as exc:
@@ -952,6 +1014,35 @@ class OperBlockService:
         finally:
             if conn is not None:
                 conn.close()
+
+    @staticmethod
+    def _begin_external_archive_snapshot(
+        conn,
+        db_path: str,
+        *,
+        use_legacy_index: bool,
+    ) -> bool:
+        """Pin main DB and an optional local legacy index to the same source revision."""
+        legacy_index = (
+            attach_legacy_operblock_archive_index(conn, db_path)
+            if use_legacy_index
+            else None
+        )
+        conn.execute("BEGIN")
+        # Read main first: an attached local database must not become the first
+        # database whose snapshot is acquired for this transaction.
+        conn.execute("SELECT name FROM main.sqlite_master LIMIT 1").fetchone()
+        if (
+            legacy_index is not None
+            and operblock_archive_source_fingerprint(db_path, conn)
+            != legacy_index.source_fingerprint
+        ):
+            conn.execute("ROLLBACK")
+            conn.execute(f"DETACH DATABASE {LEGACY_OPERBLOCK_INDEX_ALIAS}")
+            conn.execute("BEGIN")
+            conn.execute("SELECT name FROM main.sqlite_master LIMIT 1").fetchone()
+            return False
+        return legacy_index is not None
 
     @staticmethod
     def _build_archive_cases_query(
@@ -968,6 +1059,8 @@ class OperBlockService:
         limit: int | None = 500,
         offset: int = 0,
         count_only: bool = False,
+        end_exclusive: bool = False,
+        legacy_index_attached: bool = False,
     ) -> tuple[str, tuple[Any, ...]]:
         tables = set(tables or {"operating_tables", "admissions", "patients"})
         admission_columns = set(admission_columns or {"unit_scope"})
@@ -984,9 +1077,24 @@ class OperBlockService:
             else ""
         )
         params: list[Any] = []
+        case_source_sql = "operation_cases oc"
+        period_column = "oc.started_at"
+        if legacy_index_attached:
+            case_source_sql = (
+                f"{LEGACY_OPERBLOCK_INDEX_ALIAS}.{LEGACY_OPERBLOCK_INDEX_TABLE} AS legacy_idx "
+                f"INDEXED BY {LEGACY_OPERBLOCK_INDEX_NAME} "
+                "JOIN operation_cases oc ON oc.id = legacy_idx.operation_case_id"
+            )
+            period_column = "legacy_idx.started_at"
         period_clause = ""
         if start_dt and end_dt:
-            period_clause = "AND DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
+            if end_exclusive:
+                period_clause = (
+                    f"AND {period_column} >= ? "
+                    f"AND {period_column} < ?"
+                )
+            else:
+                period_clause = "AND DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)"
             params.extend([start_dt, end_dt])
         table_clause = ""
         clean_table_code = str(table_code or "").strip().lower()
@@ -997,35 +1105,36 @@ class OperBlockService:
         clean_search = str(search_query or "").strip().casefold()
         if clean_search:
             search_expr = (
-                "LOWER(COALESCE(p.full_name, '') || ' ' || "
+                "COALESCE(p.full_name, '') || ' ' || "
                 "COALESCE(a.history_number, '') || ' ' || "
                 "COALESCE(a.diagnosis_code, '') || ' ' || "
                 "COALESCE(a.diagnosis_text, '') || ' ' || "
-                "COALESCE(oc.table_code, ''))"
+                "COALESCE(oc.table_code, '')"
             )
-            search_clause = f"AND {search_expr} LIKE ?"
-            params.append(f"%{clean_search}%")
+            search_clause = f"AND INSTR(CASEFOLD({search_expr}), ?) > 0"
+            params.append(clean_search)
         field_search_clauses: list[str] = []
         clean_name = str(search_name or "").strip().casefold()
         if clean_name:
-            field_search_clauses.append("AND LOWER(COALESCE(p.full_name, '')) LIKE ?")
-            params.append(f"%{clean_name}%")
+            field_search_clauses.append("AND INSTR(CASEFOLD(COALESCE(p.full_name, '')), ?) > 0")
+            params.append(clean_name)
         clean_ib = str(search_ib or "").strip().casefold()
         if clean_ib:
-            field_search_clauses.append("AND LOWER(COALESCE(a.history_number, '')) LIKE ?")
-            params.append(f"%{clean_ib}%")
+            field_search_clauses.append("AND INSTR(CASEFOLD(COALESCE(a.history_number, '')), ?) > 0")
+            params.append(clean_ib)
         clean_diag = str(search_diag or "").strip().casefold()
         if clean_diag:
             field_search_clauses.append(
-                "AND LOWER(COALESCE(a.diagnosis_code, '') || ' ' || COALESCE(a.diagnosis_text, '')) LIKE ?"
+                "AND INSTR(CASEFOLD(COALESCE(a.diagnosis_code, '') || ' ' || "
+                "COALESCE(a.diagnosis_text, '')), ?) > 0"
             )
-            params.append(f"%{clean_diag}%")
+            params.append(clean_diag)
         field_search_sql = "\n              ".join(field_search_clauses)
 
         if count_only:
             query = f"""
             SELECT COUNT(*) AS total_count
-            FROM operation_cases oc
+            FROM {case_source_sql}
             {table_join}
             JOIN admissions a ON a.id = oc.admission_id
             JOIN patients p ON p.id = oc.patient_id
@@ -1062,7 +1171,7 @@ class OperBlockService:
                 a.patient_age_unit,
                 a.diagnosis_code,
                 a.diagnosis_text
-            FROM operation_cases oc
+            FROM {case_source_sql}
             {table_join}
             JOIN admissions a ON a.id = oc.admission_id
             JOIN patients p ON p.id = oc.patient_id
@@ -1132,10 +1241,20 @@ class OperBlockService:
         )
         try:
             configure_connection(conn, readonly=True)
-            tables = _sqlite_table_names(conn)
+            schema = get_archive_schema(
+                conn,
+                db_path,
+                inspect_tables=("admissions",),
+            )
+            tables = schema.tables
             if not {"operation_cases", "admissions", "patients"}.issubset(tables):
                 return []
-            admission_columns = _sqlite_columns(conn, "admissions")
+            legacy_index_attached = OperBlockService._begin_external_archive_snapshot(
+                conn,
+                db_path,
+                use_legacy_index=bool(start_dt and end_dt),
+            )
+            admission_columns = schema.columns.get("admissions", frozenset())
             query, params = OperBlockService._build_archive_cases_query(
                 tables=tables,
                 admission_columns=admission_columns,
@@ -1148,6 +1267,7 @@ class OperBlockService:
                 search_diag=search_diag,
                 limit=limit,
                 offset=offset,
+                legacy_index_attached=legacy_index_attached,
             )
             return [dict(row) for row in conn.execute(query, params).fetchall()]
         finally:
@@ -1176,10 +1296,20 @@ class OperBlockService:
         )
         try:
             configure_connection(conn, readonly=True)
-            tables = _sqlite_table_names(conn)
+            schema = get_archive_schema(
+                conn,
+                db_path,
+                inspect_tables=("admissions",),
+            )
+            tables = schema.tables
             if not {"operation_cases", "admissions", "patients"}.issubset(tables):
                 return 0
-            admission_columns = _sqlite_columns(conn, "admissions")
+            legacy_index_attached = OperBlockService._begin_external_archive_snapshot(
+                conn,
+                db_path,
+                use_legacy_index=bool(start_dt and end_dt),
+            )
+            admission_columns = schema.columns.get("admissions", frozenset())
             query, params = OperBlockService._build_archive_cases_query(
                 tables=tables,
                 admission_columns=admission_columns,
@@ -1191,10 +1321,86 @@ class OperBlockService:
                 search_ib=search_ib,
                 search_diag=search_diag,
                 count_only=True,
+                legacy_index_attached=legacy_index_attached,
             )
             row = conn.execute(query, params).fetchone()
             return int(row["total_count"] or 0) if row else 0
         finally:
+            conn.close()
+
+    @staticmethod
+    def _fetch_archive_case_page_from_db(
+        db_path: str,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        table_code: str | None = None,
+        search_query: str = "",
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+        limit: int | None = 500,
+        offset: int = 0,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        """Fetch count and rows from one readonly archive connection."""
+        if not db_path or not os.path.isfile(db_path):
+            return 0, []
+        conn = sqlite3.connect(
+            f"file:{os.path.abspath(db_path)}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        try:
+            configure_connection(conn, readonly=True)
+            schema = get_archive_schema(
+                conn,
+                db_path,
+                inspect_tables=("admissions",),
+            )
+            tables = schema.tables
+            if not {"operation_cases", "admissions", "patients"}.issubset(tables):
+                return 0, []
+            legacy_index_attached = OperBlockService._begin_external_archive_snapshot(
+                conn,
+                db_path,
+                use_legacy_index=bool(start_dt and end_dt),
+            )
+            query_args = {
+                "tables": tables,
+                "admission_columns": schema.columns.get("admissions", frozenset()),
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "table_code": table_code,
+                "search_query": search_query,
+                "search_name": search_name,
+                "search_ib": search_ib,
+                "search_diag": search_diag,
+                "end_exclusive": True,
+                "legacy_index_attached": legacy_index_attached,
+            }
+            count_query, count_params = OperBlockService._build_archive_cases_query(
+                **query_args,
+                count_only=True,
+            )
+            count_row = conn.execute(count_query, count_params).fetchone()
+            total_count = int(count_row["total_count"] or 0) if count_row else 0
+            if total_count <= 0:
+                return 0, []
+            rows_query, rows_params = OperBlockService._build_archive_cases_query(
+                **query_args,
+                limit=limit,
+                offset=offset,
+            )
+            rows = [dict(row) for row in conn.execute(rows_query, rows_params).fetchall()]
+            return total_count, rows
+        finally:
+            if bool(getattr(conn, "in_transaction", False)):
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             conn.close()
 
     @staticmethod
@@ -1576,7 +1782,10 @@ class OperBlockService:
         total_count = 0
         current_db_path = self._current_db_path()
         current_key = os.path.normcase(current_db_path) if current_db_path else ""
-        db_paths = self.get_archive_db_paths_for_period(start_dt, end_dt) if start_dt and end_dt else self._iter_archive_db_paths(include_current=True)
+        # Period filtering happens in the count/page SQL.  Running the
+        # preselector here would open every archive once for EXISTS and then
+        # reopen matching files for the actual page.
+        db_paths = self._iter_archive_db_paths(include_current=True)
         if not db_paths and current_db_path:
             db_paths = [current_db_path]
         use_global_merge = len(db_paths) > 1
@@ -1586,56 +1795,48 @@ class OperBlockService:
             is_current = bool(current_key) and os.path.normcase(abs_path) == current_key
             try:
                 if is_current:
-                    current_conn = getattr(self.db, "conn", None) or getattr(self.db, "_remcard_conn", None)
-                    tables = (
-                        _sqlite_table_names(current_conn)
-                        if current_conn is not None
-                        else {"operating_tables", "admissions", "patients"}
+                    scope_factory = getattr(self.db, "central_read_snapshot_scope", None)
+                    if not callable(scope_factory):
+                        scope_factory = getattr(self.db, "central_read_scope", None)
+                    read_scope = (
+                        scope_factory("operblock_archive_page")
+                        if callable(scope_factory)
+                        else nullcontext()
                     )
-                    admission_columns = (
-                        _sqlite_columns(current_conn, "admissions")
-                        if current_conn is not None
-                        else {"unit_scope"}
-                    )
-                    count_query, count_params = self._build_archive_cases_query(
-                        tables=tables,
-                        admission_columns=admission_columns,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        table_code=clean_table_code,
-                        search_query=search_query,
-                        search_name=search_name,
-                        search_ib=search_ib,
-                        search_diag=search_diag,
-                        count_only=True,
-                    )
-                    total_count += self._fetch_count_from_manager(count_query, count_params)
-                    query, params = self._build_archive_cases_query(
-                        tables=tables,
-                        admission_columns=admission_columns,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        table_code=clean_table_code,
-                        search_query=search_query,
-                        search_name=search_name,
-                        search_ib=search_ib,
-                        search_diag=search_diag,
-                        limit=fetch_limit if use_global_merge else page_size,
-                        offset=0 if use_global_merge else offset,
-                    )
-                    rows = [_row_to_dict(row) for row in self.db.fetch_all_remcard(query, params)]
+                    with read_scope:
+                        tables = self._current_archive_table_names()
+                        admission_columns = self._current_archive_table_columns("admissions")
+                        count_query, count_params = self._build_archive_cases_query(
+                            tables=tables,
+                            admission_columns=admission_columns,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            table_code=clean_table_code,
+                            search_query=search_query,
+                            search_name=search_name,
+                            search_ib=search_ib,
+                            search_diag=search_diag,
+                            count_only=True,
+                            end_exclusive=True,
+                        )
+                        total_count += self._fetch_count_from_manager(count_query, count_params)
+                        query, params = self._build_archive_cases_query(
+                            tables=tables,
+                            admission_columns=admission_columns,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            table_code=clean_table_code,
+                            search_query=search_query,
+                            search_name=search_name,
+                            search_ib=search_ib,
+                            search_diag=search_diag,
+                            limit=fetch_limit if use_global_merge else page_size,
+                            offset=0 if use_global_merge else offset,
+                            end_exclusive=True,
+                        )
+                        rows = [_row_to_dict(row) for row in self.db.fetch_all_remcard(query, params)]
                 else:
-                    total_count += self._fetch_archive_case_count_from_db(
-                        abs_path,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        table_code=clean_table_code,
-                        search_query=search_query,
-                        search_name=search_name,
-                        search_ib=search_ib,
-                        search_diag=search_diag,
-                    )
-                    rows = self._fetch_archive_case_rows_from_db(
+                    archived_count, rows = self._fetch_archive_case_page_from_db(
                         abs_path,
                         start_dt=start_dt,
                         end_dt=end_dt,
@@ -1647,6 +1848,7 @@ class OperBlockService:
                         limit=fetch_limit if use_global_merge else page_size,
                         offset=0 if use_global_merge else offset,
                     )
+                    total_count += archived_count
                 for row in rows:
                     result.append(
                         self._archive_case_payload(
@@ -1680,6 +1882,46 @@ class OperBlockService:
                 return int(row[0] or 0)
             except Exception:
                 return 0
+
+    def _current_archive_table_names(self) -> set[str]:
+        try:
+            rows = self.db.fetch_all_remcard(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        except Exception:
+            return {"operating_tables", "admissions", "patients", "operation_cases"}
+        result: set[str] = set()
+        for row in rows or []:
+            try:
+                name = row["name"]
+            except Exception:
+                try:
+                    name = row[0]
+                except Exception:
+                    name = None
+            if name:
+                result.add(str(name))
+        return result
+
+    def _current_archive_table_columns(self, table_name: str) -> set[str]:
+        if table_name != "admissions":
+            return set()
+        try:
+            rows = self.db.fetch_all_remcard("PRAGMA table_info(admissions)")
+        except Exception:
+            return {"unit_scope"}
+        result: set[str] = set()
+        for row in rows or []:
+            try:
+                name = row["name"]
+            except Exception:
+                try:
+                    name = row[1]
+                except Exception:
+                    name = None
+            if name:
+                result.add(str(name))
+        return result
 
     @staticmethod
     def _sort_archive_case_payloads(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

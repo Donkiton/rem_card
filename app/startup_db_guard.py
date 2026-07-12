@@ -17,6 +17,7 @@ from rem_card.app.runtime_paths import (
     get_journal_db_path,
     get_required_baza_paths,
     is_compiled,
+    mark_startup_baza_paths_validated,
     resolve_baza_dir,
 )
 from rem_card.app.version import APP_VERSION
@@ -283,14 +284,15 @@ def _ensure_guard_dirs(baza_dir: str):
         os.path.join(baza_dir, "backup_health"),
         os.path.join(baza_dir, "backup_health", "invalid_backups"),
     )
-    required_dirs = [*get_required_baza_paths(baza_dir), *extra_dirs]
+    required_dirs = list(dict.fromkeys([*get_required_baza_paths(baza_dir), *extra_dirs]))
     if is_compiled():
         for path in required_dirs:
             if not os.path.isdir(path):
                 raise FileNotFoundError(f"Required shared directory is unavailable: {path}")
-        return
-    for path in required_dirs:
-        os.makedirs(path, exist_ok=True)
+    else:
+        for path in required_dirs:
+            os.makedirs(path, exist_ok=True)
+    mark_startup_baza_paths_validated(baza_dir, [baza_dir, *required_dirs])
 
 
 def _default_client_policy() -> dict[str, Any]:

@@ -6,6 +6,7 @@ from typing import Iterable, Sequence
 
 from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import configure_connection
+from rem_card.services.analytics.period import normalize_analytics_period
 
 
 TABLE_SPECS: dict[str, dict[str, str | None]] = {
@@ -176,6 +177,10 @@ def create_multi_db_analytics_manager(
     if not valid_paths:
         raise ValueError("No valid DB paths provided for analytics")
 
+    if start_dt and end_dt:
+        period = normalize_analytics_period(start_dt, end_dt)
+        start_dt, end_dt = period.sql_bounds
+
     conn = sqlite3.connect(
         ":memory:",
         check_same_thread=False,
@@ -298,7 +303,7 @@ def _copy_table_rows(
     )
     params: tuple[object, ...] = ()
     if start_dt and end_dt and time_col and time_col in source_cols:
-        query += f' WHERE "{time_col}" BETWEEN ? AND ?'
+        query += f' WHERE "{time_col}" >= ? AND "{time_col}" < ?'
         params = (start_dt, end_dt)
 
     conn.execute(query, params)

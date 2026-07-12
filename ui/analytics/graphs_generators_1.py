@@ -24,6 +24,7 @@ from rem_card.services.analytics.constants import (
     STATISTICAL_BED_COUNT,
     STATISTICAL_HIGH_LOAD_THRESHOLD,
 )
+from rem_card.services.analytics.period import parse_analytics_datetime
 from rem_card.services.analytics.recovery_summary import (
     DURATION_BUCKETS,
     build_recovery_bed_summary,
@@ -37,14 +38,24 @@ def save_plot(title, img_paths, chart_colors=None):
     return _save_plot(title, img_paths)
 
 
-def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content, *, include_recovery_beds=False):
+def generate_g1_g5(
+    selected,
+    conn,
+    params,
+    chart_colors,
+    img_paths,
+    html_content,
+    *,
+    include_recovery_beds=False,
+    period_dates=None,
+):
     """Поток пациентов"""
 
     # 1. Поступления по месяцам
     if "g1" in selected:
         df = pd.read_sql_query(
             "SELECT strftime('%Y-%m', admission_datetime) as month, COUNT(id) as count "
-            "FROM admissions WHERE admission_datetime BETWEEN ? AND ? GROUP BY month ORDER BY month",
+            "FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY month ORDER BY month",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -58,7 +69,7 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
     if "g2" in selected:
         df = pd.read_sql_query(
             "SELECT strftime('%w', admission_datetime) as dow, COUNT(id) as count "
-            "FROM admissions WHERE admission_datetime BETWEEN ? AND ? GROUP BY dow",
+            "FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY dow",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -74,7 +85,7 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
     if "g3" in selected:
         df = pd.read_sql_query(
             "SELECT date(admission_datetime) as day, COUNT(id) as count "
-            "FROM admissions WHERE admission_datetime BETWEEN ? AND ? GROUP BY day",
+            "FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY day",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -88,7 +99,7 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
         # Поскольку source_type нет в таблице, используем source_department
         df = pd.read_sql_query(
             "SELECT source_department, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime BETWEEN ? AND ? GROUP BY source_department",
+            "WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY source_department",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -102,7 +113,7 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
     if "g5" in selected:
         df = pd.read_sql_query(
             "SELECT source_department, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime BETWEEN ? AND ? GROUP BY source_department",
+            "WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY source_department",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -121,7 +132,7 @@ def generate_g1_g5(selected, conn, params, chart_colors, img_paths, html_content
         html_content = _append_recovery_flow_items(
             selected,
             conn,
-            params,
+            period_dates or params,
             chart_colors,
             img_paths,
             html_content,
@@ -255,7 +266,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
             SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
@@ -271,7 +282,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
             SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
@@ -288,7 +299,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
     if "g8" in selected:
         df = pd.read_sql_query(
             "SELECT bed_number, COUNT(id) as count FROM admissions "
-            "WHERE admission_datetime BETWEEN ? AND ? GROUP BY bed_number",
+            "WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY bed_number",
             conn, params=params)
         if not df.empty:
             df['count'] = pd.to_numeric(df['count'], errors='coerce').fillna(0)
@@ -303,7 +314,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
     if "g9" in selected:
         df = pd.read_sql_query(
             "SELECT strftime('%Y-%m', admission_datetime) as month, COUNT(id) as admissions_count "
-            "FROM admissions WHERE admission_datetime BETWEEN ? AND ? GROUP BY month",
+            "FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ? GROUP BY month",
             conn, params=params)
         if not df.empty:
             df['admissions_count'] = pd.to_numeric(df['admissions_count'], errors='coerce').fillna(0)
@@ -342,7 +353,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
     if "g12" in selected:
         df = pd.read_sql_query("""
             SELECT SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as total_bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
         """, conn, params=params)
         if not df.empty and df['total_bed_days'].iloc[0] is not None:
             # Период в днях
@@ -366,7 +377,7 @@ def generate_g6_g13(selected, conn, params, chart_colors, img_paths, adms, start
         df = pd.read_sql_query("""
             SELECT strftime('%Y-%m', admission_datetime) as month,
             SUM(julianday(COALESCE(death_datetime, transfer_datetime, datetime('now'))) - julianday(admission_datetime)) as bed_days
-            FROM admissions WHERE admission_datetime BETWEEN ? AND ?
+            FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY month ORDER BY month
         """, conn, params=params)
         if not df.empty:
@@ -435,13 +446,17 @@ def generate_g14_g18(selected, conn, params, chart_colors, img_paths, adms, star
         for row in adms:
             if row['admission_datetime']:
                 try:
-                    events.append((datetime.strptime(row['admission_datetime'].split('.')[0], "%Y-%m-%d %H:%M:%S"), 1))
+                    event_dt = parse_analytics_datetime(row['admission_datetime'])
+                    if event_dt is not None:
+                        events.append((event_dt, 1))
                 except Exception:
                     pass
             end_dt_str = row['death_datetime'] if row['outcome'] == 'умер' else row['transfer_datetime']
             if end_dt_str:
                 try:
-                    events.append((datetime.strptime(end_dt_str.split('.')[0], "%Y-%m-%d %H:%M:%S"), -1))
+                    event_dt = parse_analytics_datetime(end_dt_str)
+                    if event_dt is not None:
+                        events.append((event_dt, -1))
                 except Exception:
                     pass
         events.sort()
@@ -578,10 +593,14 @@ def _calc_daily_counts(adms, start_date_str, end_date_str):
         count = 0
         for a in adms:
             try:
-                a_start = datetime.strptime(a['admission_datetime'].split('.')[0], "%Y-%m-%d %H:%M:%S")
+                a_start = parse_analytics_datetime(a['admission_datetime'])
+                if a_start is None:
+                    continue
                 a_end_str = a['death_datetime'] if a['outcome'] == 'умер' else a['transfer_datetime']
                 if a_end_str:
-                    a_end = datetime.strptime(a_end_str.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                    a_end = parse_analytics_datetime(a_end_str)
+                    if a_end is None:
+                        continue
                     if a_start.date() <= d.date() <= a_end.date():
                         count += 1
                 else:

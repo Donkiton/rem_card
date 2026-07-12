@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from statistics import median
 from typing import Any
 
+from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.services.patient_bed_management.recovery_beds import RECOVERY_BED_NUMBERS
 
 
@@ -40,12 +41,10 @@ def build_recovery_bed_summary(conn, start_date_str: str, end_date_str: str) -> 
     if conn is None or not _table_exists(conn, "admissions"):
         return RecoveryBedAnalyticsSummary(has_admissions_table=False)
 
-    start_dt = _parse_datetime(start_date_str)
-    end_dt = _parse_datetime(end_date_str)
-    if start_dt is None or end_dt is None:
-        return RecoveryBedAnalyticsSummary()
-    if end_dt < start_dt:
-        start_dt, end_dt = end_dt, start_dt
+    period = normalize_analytics_period(start_date_str, end_date_str)
+    start_dt = period.start_inclusive
+    end_dt = period.end_exclusive
+    duration_end_dt = end_dt - timedelta(seconds=1)
 
     rows = _fetch_admission_rows(conn, start_dt, end_dt)
     total_admissions = len(rows)
@@ -66,7 +65,7 @@ def build_recovery_bed_summary(conn, start_date_str: str, end_date_str: str) -> 
     for row in recovery_rows:
         admission_dt = _parse_datetime(row.get("admission_datetime"))
         if admission_dt is not None:
-            effective_end = _effective_end_datetime(row, admission_dt, end_dt)
+            effective_end = _effective_end_datetime(row, admission_dt, duration_end_dt)
             hours = max(0.0, (effective_end - admission_dt).total_seconds() / 3600.0)
             durations_hours.append(hours)
             _add_duration_bucket(duration_buckets, hours)
@@ -103,12 +102,9 @@ def fetch_recovery_bed_admission_rows(conn, start_date_str: str, end_date_str: s
     if conn is None or not _table_exists(conn, "admissions"):
         return []
 
-    start_dt = _parse_datetime(start_date_str)
-    end_dt = _parse_datetime(end_date_str)
-    if start_dt is None or end_dt is None:
-        return []
-    if end_dt < start_dt:
-        start_dt, end_dt = end_dt, start_dt
+    period = normalize_analytics_period(start_date_str, end_date_str)
+    start_dt = period.start_inclusive
+    end_dt = period.end_exclusive
 
     return [row for row in _fetch_admission_rows(conn, start_dt, end_dt) if _is_recovery_admission(row)]
 
@@ -300,7 +296,7 @@ def _fetch_admission_rows(conn, start_dt: datetime, end_dt: datetime) -> list[di
     query = f"""
         SELECT {', '.join(select_parts)}
         FROM main.admissions
-        WHERE datetime(admission_datetime) BETWEEN datetime(?) AND datetime(?)
+        WHERE admission_datetime >= ? AND admission_datetime < ?
     """
     cursor = conn.execute(
         query,

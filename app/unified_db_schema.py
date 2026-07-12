@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 19
-SCHEMA_MIN_MIGRATION_VERSION = 19
+SCHEMA_FASTPATH_REV = 21
+SCHEMA_MIN_MIGRATION_VERSION = 21
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -19,6 +19,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "clinical_events",
     "devices",
     "respiratory_support",
+    "lab_data",
     "drugs",
     "meta",
     "change_log",
@@ -167,6 +168,13 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_procedure_consents_procedure",
     "idx_procedure_cvc_catheter_status",
     "idx_procedure_transfusion_indication",
+    "idx_vitals_admission_epoch_id",
+    "idx_resp_support_admission_time",
+    "idx_lab_data_admission_time",
+    "idx_devices_admission",
+    "idx_operations_operation_datetime",
+    "idx_transfusions_datetime",
+    "idx_ivl_start_time",
 )
 
 _UPDATED_AT_TRIGGER_TABLES: tuple[str, ...] = (
@@ -305,6 +313,12 @@ def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool
         return False
 
     if not all(_index_exists(conn, name) for name in _FASTPATH_REQUIRED_INDEXES):
+        return False
+
+    if _table_exists(conn, "operation_cases") and not _index_exists(
+        conn,
+        "idx_operation_cases_started_at_id",
+    ):
         return False
 
     if not _all_sqlite_master_objects_exist(conn, "trigger", _FASTPATH_REQUIRED_TRIGGERS):
@@ -1434,16 +1448,46 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_admissions_admission_datetime ON admissions(admission_datetime)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_beds_current_admission ON beds(current_admission_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_operations_admission ON operations(admission_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operations_operation_datetime "
+        "ON operations(operation_datetime)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ivl_admission ON ivl_episodes(admission_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ivl_admission_active_time ON ivl_episodes(admission_id, is_active, start_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ivl_start_time ON ivl_episodes(start_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_transfusions_admission ON transfusions(admission_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_transfusions_datetime ON transfusions(datetime)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_transfusions_source_admin ON transfusions(source, source_admin_id) WHERE source_admin_id IS NOT NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_clinical_events_admission_type_time ON clinical_events(admission_id, event_type, timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_clinical_events_ivl_case_time ON clinical_events(ivl_episode_id, timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_ivl_case_time ON devices(ivl_episode_id, insertion_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_admission ON devices(admission_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_resp_support_ivl_case_time ON respiratory_support(ivl_episode_id, datetime)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_resp_support_admission_time "
+        "ON respiratory_support(admission_id, datetime DESC, id DESC)"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_resp_support_event ON respiratory_support(event_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_vitals_admission ON vitals(admission_id, datetime)")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_vitals_admission_epoch_id
+        ON vitals(
+            admission_id,
+            CAST(STRFTIME('%s', datetime) AS INTEGER) DESC,
+            id DESC
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lab_data_admission_time "
+        "ON lab_data(admission_id, datetime DESC, id DESC)"
+    )
+    if _table_exists(conn, "operation_cases"):
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_operation_cases_started_at_id "
+            "ON operation_cases(started_at, id DESC)"
+        )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fluids_admission ON fluids(admission_id, datetime)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_admission ON orders(admission_id, datetime)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_vitals_updated_at ON vitals(updated_at)")
@@ -1935,5 +1979,9 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
         ),
         use_updated_at_gate=True,
     )
-    _mark_schema_migration(conn, SCHEMA_MIN_MIGRATION_VERSION, "transfusion protocol print tracking")
+    _mark_schema_migration(
+        conn,
+        SCHEMA_MIN_MIGRATION_VERSION,
+        "performance indexes for vitals, outcome reads, and analytics ranges",
+    )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

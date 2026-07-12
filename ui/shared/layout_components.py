@@ -41,6 +41,7 @@ class SectorFactory:
         include_optional_tabs: bool = True,
         role_hint: str = "both",
         include_balance_sections: bool = True,
+        include_w1_sectors: bool = True,
     ):
         from rem_card.ui.rem_card_sectors.sector_1a import Sector1a
         from rem_card.ui.rem_card_sectors.sector_1b import Sector1b
@@ -63,8 +64,8 @@ class SectorFactory:
         normalized_role = str(role_hint or "both").lower().strip()
         if normalized_role not in ("doctor", "nurse", "both", ""):
             normalized_role = "both"
-        use_doctor_w1b = normalized_role in ("doctor", "both", "")
-        use_nurse_w1b = normalized_role in ("nurse", "both", "")
+        use_doctor_w1b = include_w1_sectors and normalized_role in ("doctor", "both", "")
+        use_nurse_w1b = include_w1_sectors and normalized_role in ("nurse", "both", "")
         if use_doctor_w1b:
             from rem_card.ui.rem_card_sectors.sector_w1b import SectorW1b
         if use_nurse_w1b:

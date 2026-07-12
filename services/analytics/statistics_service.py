@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT
 from rem_card.services.analytics.graphs_service import _thread_local_manager
+from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.ui.styles.theme import (
     BG_LIGHT,
     BORDER_LIGHT,
@@ -15,10 +16,13 @@ from rem_card.ui.styles.theme import (
 
 
 def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str:
+    period = normalize_analytics_period(start_dt, end_dt)
     manager, cleanup = _thread_local_manager(db_manager)
     conn = manager.get_connection()
     cursor = conn.cursor()
-    period_params = (start_dt, end_dt)
+    period_params = period.sql_bounds
+    start_bound, end_bound = period_params
+    calculation_end = (period.end_exclusive - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         def _scalar(query: str, params: tuple = period_params):
@@ -29,14 +33,14 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             return row[0]
 
         total_admissions = int(
-            _scalar("SELECT COUNT(*) FROM admissions WHERE admission_datetime BETWEEN ? AND ?", period_params)
+            _scalar("SELECT COUNT(*) FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?", period_params)
         )
         in_department = int(
             _scalar(
                 """
                 SELECT COUNT(*)
                 FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
+                WHERE admission_datetime >= ? AND admission_datetime < ?
                   AND (outcome IS NULL OR TRIM(outcome) = '')
                 """,
                 period_params,
@@ -47,7 +51,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                 """
                 SELECT COUNT(*)
                 FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
+                WHERE admission_datetime >= ? AND admission_datetime < ?
                   AND lower(TRIM(COALESCE(outcome, ''))) = 'переведен'
                 """,
                 period_params,
@@ -58,7 +62,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                 """
                 SELECT COUNT(*)
                 FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
+                WHERE admission_datetime >= ? AND admission_datetime < ?
                   AND lower(TRIM(COALESCE(outcome, ''))) = 'умер'
                 """,
                 period_params,
@@ -84,9 +88,9 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                     0
                 )
                 FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
+                WHERE admission_datetime >= ? AND admission_datetime < ?
                 """,
-                (end_dt, end_dt, end_dt, start_dt, end_dt),
+                (calculation_end, calculation_end, calculation_end, start_bound, end_bound),
             )
         )
         avg_stay = float(
@@ -108,15 +112,20 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                     0
                 )
                 FROM admissions
-                WHERE admission_datetime BETWEEN ? AND ?
+                WHERE admission_datetime >= ? AND admission_datetime < ?
                 """,
-                (end_dt, end_dt, end_dt, start_dt, end_dt),
+                (calculation_end, calculation_end, calculation_end, start_bound, end_bound),
             )
         )
 
-        operations_count = int(_scalar("SELECT COUNT(*) FROM operations WHERE operation_datetime BETWEEN ? AND ?", period_params))
+        operations_count = int(
+            _scalar(
+                "SELECT COUNT(*) FROM operations WHERE operation_datetime >= ? AND operation_datetime < ?",
+                period_params,
+            )
+        )
         cursor.execute(
-            "SELECT COUNT(*), COALESCE(SUM(volume_ml), 0) FROM transfusions WHERE datetime BETWEEN ? AND ?",
+            "SELECT COUNT(*), COALESCE(SUM(volume_ml), 0) FROM transfusions WHERE datetime >= ? AND datetime < ?",
             period_params,
         )
         transfusions_row = cursor.fetchone() or (0, 0)
@@ -137,9 +146,9 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                     0
                 ) AS ivl_hours
             FROM ivl_episodes
-            WHERE start_time BETWEEN ? AND ?
+            WHERE start_time >= ? AND start_time < ?
             """,
-            (end_dt, end_dt, start_dt, end_dt),
+            (calculation_end, calculation_end, start_bound, end_bound),
         )
         ivl_row = cursor.fetchone() or (0, 0)
         ivl_count = int(ivl_row[0] or 0)
@@ -150,7 +159,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             """
             SELECT COALESCE(NULLIF(TRIM(patient_gender), ''), 'Не указано') AS gender, COUNT(*) AS count
             FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
+            WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY COALESCE(NULLIF(TRIM(patient_gender), ''), 'Не указано')
             ORDER BY count DESC, gender
             """,
@@ -161,7 +170,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             """
             SELECT COALESCE(NULLIF(TRIM(source_department), ''), 'Не указано') AS source, COUNT(*) AS count
             FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
+            WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY COALESCE(NULLIF(TRIM(source_department), ''), 'Не указано')
             ORDER BY count DESC, source
             """,
@@ -175,7 +184,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                 COALESCE(NULLIF(TRIM(diagnosis_text), ''), 'Без уточнения') AS diagnosis,
                 COUNT(*) AS count
             FROM admissions
-            WHERE admission_datetime BETWEEN ? AND ?
+            WHERE admission_datetime >= ? AND admission_datetime < ?
             GROUP BY
                 COALESCE(NULLIF(TRIM(diagnosis_code), ''), '-'),
                 COALESCE(NULLIF(TRIM(diagnosis_text), ''), 'Без уточнения')
@@ -185,15 +194,15 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             period_params,
         )
 
-        start_date = _parse_date(start_dt)
-        end_date = _parse_date(end_dt)
+        start_date = period.start_date
+        end_date = period.end_date
         period_days = max(1, (end_date - start_date).days + 1) if start_date and end_date else 1
         bed_capacity_days = STATISTICAL_BED_COUNT * period_days
         occupancy = (bed_days / bed_capacity_days * 100.0) if bed_capacity_days else 0.0
         mortality = (deaths / total_admissions * 100.0) if total_admissions else 0.0
 
-        start_label = start_date.strftime("%d.%m.%Y") if start_date else start_dt.split(" ")[0]
-        end_label = end_date.strftime("%d.%m.%Y") if end_date else end_dt.split(" ")[0]
+        start_label = start_date.strftime("%d.%m.%Y")
+        end_label = end_date.strftime("%d.%m.%Y")
 
         return _render_report(
             start_label=start_label,

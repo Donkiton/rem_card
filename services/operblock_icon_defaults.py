@@ -7,6 +7,8 @@ from typing import Any, Iterable
 
 OPERBLOCK_ICONS_KEY = "operblock_icons"
 MAX_OPERBLOCK_ICON_BLOB_BYTES = 32 * 1024 * 1024
+MAX_OPERBLOCK_ICON_DIMENSION = 4096
+MAX_OPERBLOCK_ICON_PIXELS = 16 * 1024 * 1024
 SUPPORTED_OPERBLOCK_ICON_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".svg"}
 OPERBLOCK_PATIENT_MALE_ICON_KEY = "operblock:patient_photo:male"
 OPERBLOCK_PATIENT_FEMALE_ICON_KEY = "operblock:patient_photo:female"

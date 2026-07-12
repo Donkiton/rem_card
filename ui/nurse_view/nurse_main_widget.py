@@ -125,6 +125,8 @@ class NurseMainWidget(QWidget):
         self._balance_calculator_cls = None
         self._admin_signals_bound = False
         self._archive_signals_bound = False
+        self._bound_archive_widget = None
+        self._bound_admin_widget = None
         self._orders_balance_signals_bound = False
         self._nurse_orders_balance_signals_bound = False
         self.report_controller = None
@@ -1474,16 +1476,33 @@ class NurseMainWidget(QWidget):
         from .nurse_remcard_layout import NurseRemCardLayoutManager
 
         old_shell = getattr(self, "_w1_shell", None)
-        layout = NurseRemCardLayoutManager(
-            patient_service=self.patient_service,
-            remcard_service=self.remcard_service,
-            parent=self.main_stack,
-        )
+        handoff = old_shell.create_layout_handoff() if old_shell is not None else None
+        try:
+            layout = NurseRemCardLayoutManager(
+                patient_service=self.patient_service,
+                remcard_service=self.remcard_service,
+                parent=self.main_stack,
+                w1_handoff=handoff,
+            )
+        except Exception:
+            if old_shell is not None and handoff is not None:
+                old_shell.restore_layout_handoff(handoff)
+            raise
         layout.patient_status_service = self.remcard_service.status_service
         layout.current_admission_id = None
         layout.current_date = self._current_date
         if hasattr(layout, "sector_w1a"):
             layout.sector_w1a.set_service(self.remcard_service)
+
+        if old_shell is not None and handoff is not None:
+            self._disconnect_w1_shell_routing(old_shell)
+            try:
+                old_shell.complete_layout_handoff(handoff)
+            except Exception:
+                old_shell.restore_layout_handoff(handoff)
+                self._connect_w1_shell_routing(old_shell)
+                layout.deleteLater()
+                raise
 
         self.main_stack.addWidget(layout)
         self.layout_manager = layout
@@ -1525,19 +1544,17 @@ class NurseMainWidget(QWidget):
             layout.sector_events.status_changed.connect(self.refresh_data)
 
         layout.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
-        self._archive_signals_bound = False
-        self._admin_signals_bound = False
         self._orders_balance_signals_bound = False
         self._nurse_orders_balance_signals_bound = False
         self._bind_orders_balance_signals()
         self._bind_nurse_orders_balance_signals()
         self._full_layout_static_signals_bound = True
 
-    def _retire_w1_shell(self, shell):
-        if shell is None:
+    def _disconnect_w1_shell_routing(self, shell):
+        if getattr(shell, "_controller_routing_disconnected", False):
             return
         try:
-            if hasattr(shell, "beds_selection_widget"):
+            if hasattr(shell, "beds_selection_widget") and shell.beds_selection_widget is not None:
                 shell.beds_selection_widget.patient_selected.disconnect(self.on_patient_selected)
         except Exception:
             pass
@@ -1546,6 +1563,20 @@ class NurseMainWidget(QWidget):
                 shell.selection_mode_changed.disconnect(self._on_selection_mode_changed)
         except Exception:
             pass
+        shell._controller_routing_disconnected = True
+
+    def _connect_w1_shell_routing(self, shell):
+        if not getattr(shell, "_controller_routing_disconnected", False):
+            return
+        if getattr(shell, "beds_selection_widget", None) is not None:
+            shell.beds_selection_widget.patient_selected.connect(self.on_patient_selected)
+        shell.selection_mode_changed.connect(self._on_selection_mode_changed)
+        shell._controller_routing_disconnected = False
+
+    def _retire_w1_shell(self, shell):
+        if shell is None:
+            return
+        self._disconnect_w1_shell_routing(shell)
         try:
             if hasattr(shell, "shutdown"):
                 shell.shutdown()
@@ -1585,14 +1616,16 @@ class NurseMainWidget(QWidget):
 
     def _wire_dynamic_views(self):
         archive_widget = getattr(self.layout_manager, "archive_widget", None)
-        if archive_widget and not self._archive_signals_bound:
+        if archive_widget and archive_widget is not self._bound_archive_widget:
             archive_widget.back_requested.connect(lambda: self.on_back_clicked())
             archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
+            self._bound_archive_widget = archive_widget
             self._archive_signals_bound = True
 
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
-        if admin_widget and not self._admin_signals_bound:
+        if admin_widget and admin_widget is not self._bound_admin_widget:
             admin_widget.btn_back_to_roles.clicked.connect(self.on_back_clicked)
+            self._bound_admin_widget = admin_widget
             self._admin_signals_bound = True
 
     def _bind_orders_balance_signals(self):

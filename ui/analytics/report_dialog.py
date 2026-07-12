@@ -155,8 +155,8 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
     def _open_graphs_dialog(self):
         if self._closing:
             return
-        start_dt = self.start_date.date().toString("yyyy-MM-dd 00:00:00")
-        end_dt = self.end_date.date().toString("yyyy-MM-dd 23:59:59")
+        start_dt = self.start_date.date().toString("yyyy-MM-dd")
+        end_dt = self.end_date.date().toString("yyyy-MM-dd")
 
         from rem_card.ui.analytics.graphs_dialog import GraphsDialog
         dialog = GraphsDialog(self.db_manager, start_dt, end_dt, self)
@@ -173,8 +173,8 @@ class ReportDialog(SavedFramelessDialogMixin, QDialog):
         if getattr(self, "_stats_worker", None) is not None and self._stats_worker.isRunning():
             return
 
-        start_dt = self.start_date.date().toString("yyyy-MM-dd 00:00:00")
-        end_dt = self.end_date.date().toString("yyyy-MM-dd 23:59:59")
+        start_dt = self.start_date.date().toString("yyyy-MM-dd")
+        end_dt = self.end_date.date().toString("yyyy-MM-dd")
         selected_sections = [key for group in SECTION_GROUPS.values() for key in group.keys()]
         self._set_pdf_busy(True)
         self._stats_worker = AnalyticsWorker(

@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import TYPE_CHECKING
 
 from rem_card.app.logger import logger
@@ -13,6 +14,49 @@ from rem_card.app.paths import (
 
 if TYPE_CHECKING:
     from rem_card.data.dao.db_manager import DatabaseManager
+
+
+class LazyOperBlockServiceProxy:
+    """Thread-safe transparent proxy that defers the heavy operblock import."""
+
+    def __init__(self, db_manager: "DatabaseManager", factory=None):
+        self._db_manager = db_manager
+        self._factory = factory or self._create_service
+        self._instance = None
+        self._resolve_lock = threading.Lock()
+
+    @staticmethod
+    def _create_service(db_manager: "DatabaseManager"):
+        from rem_card.services.operblock_service import OperBlockService
+
+        return OperBlockService(db_manager)
+
+    @property
+    def is_resolved(self) -> bool:
+        return self._instance is not None
+
+    def resolve(self):
+        instance = self._instance
+        if instance is not None:
+            return instance
+        with self._resolve_lock:
+            instance = self._instance
+            if instance is None:
+                instance = self._factory(self._db_manager)
+                if instance is None:
+                    raise RuntimeError("OperBlockService factory returned None")
+                self._instance = instance
+        return instance
+
+    def __getattr__(self, name: str):
+        return getattr(self.resolve(), name)
+
+
+def create_lazy_operblock_service(db_manager: "DatabaseManager", role: str | None, *, factory=None):
+    proxy = LazyOperBlockServiceProxy(db_manager, factory=factory)
+    if is_operblock_role(role):
+        proxy.resolve()
+    return proxy
 
 
 class Container:
@@ -31,7 +75,6 @@ class Container:
             VitalsDAO,
         )
         from rem_card.services.data_service import DataService
-        from rem_card.services.operblock_service import OperBlockService
         from rem_card.services.patient_status_service import PatientStatusService
         from rem_card.services.read_coordinator import ReadCoordinator
         from rem_card.services.remcard_service import PatientService, RemCardService
@@ -82,7 +125,7 @@ class Container:
         self.remcard_service.read_coordinator = self.read_coordinator
         self.remcard_service.read_mode = "live"
         self.remcard_service.source_db_path = "live"
-        self.operblock_service = OperBlockService(db_manager)
+        self.operblock_service = create_lazy_operblock_service(db_manager, role_key)
 
     def _create_emergency_standby_scheduler(self, role: str | None):
         from rem_card.app.emergency_standby_scheduler import create_emergency_standby_scheduler_for_runtime

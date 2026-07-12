@@ -165,7 +165,7 @@ from rem_card.ui.shared.display_settings_storage import (
     role_display_settings_from_payload,
 )
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
-from rem_card.ui.shared.operblock_icon_settings import load_operblock_icon_pixmap
+from rem_card.ui.shared.operblock_icon_settings import request_operblock_icon_pixmap
 from rem_card.ui.shared.pdf_opener import open_pdf_file
 from rem_card.ui.shared.vitals_widget import VitalsWidget
 from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
@@ -6186,9 +6186,14 @@ def _create_gas_dialog_image_icon(
     fallback = str(fallback_file or "").strip()
     if not fallback and isinstance(icon_ref, str) and os.path.splitext(icon_ref)[1]:
         fallback = icon_ref
-    pixmap = load_operblock_icon_pixmap(icon_ref, fallback_file=fallback)
+    pixmap = request_operblock_icon_pixmap(
+        icon_label,
+        icon_ref,
+        fallback_file=fallback,
+        target_size=(icon_size, icon_size),
+    )
     if not pixmap.isNull():
-        icon_label.setPixmap(pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        icon_label.setPixmap(pixmap)
     layout.addWidget(icon_label, 1)
     return frame
 
@@ -6200,9 +6205,14 @@ def _create_gas_dialog_plain_icon(icon_ref, *, icon_size: int, parent=None, fall
     fallback = str(fallback_file or "").strip()
     if not fallback and isinstance(icon_ref, str) and os.path.splitext(icon_ref)[1]:
         fallback = icon_ref
-    pixmap = load_operblock_icon_pixmap(icon_ref, fallback_file=fallback)
+    pixmap = request_operblock_icon_pixmap(
+        icon_label,
+        icon_ref,
+        fallback_file=fallback,
+        target_size=(icon_size, icon_size),
+    )
     if not pixmap.isNull():
-        icon_label.setPixmap(pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        icon_label.setPixmap(pixmap)
     return icon_label
 
 
@@ -15649,13 +15659,16 @@ class OperBlockMainWidget(QWidget):
         icon_size = int(visual.get("icon_size") or 22)
         icon_file = visual.get("icon_file")
         pixmap = (
-            load_operblock_icon_pixmap(icon_file, fallback_file=str(visual.get("icon_fallback_file") or ""))
+            request_operblock_icon_pixmap(
+                icon,
+                icon_file,
+                fallback_file=str(visual.get("icon_fallback_file") or ""),
+                target_size=(icon_size, icon_size),
+            )
             if icon_file
             else QPixmap()
         )
-        if not pixmap.isNull():
-            pixmap = pixmap.scaled(icon_size, icon_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        else:
+        if pixmap.isNull():
             pixmap = self._operblock_ui_icon(str(visual.get("icon") or "syringe_white")).pixmap(icon_size, icon_size)
         if not pixmap.isNull():
             icon.setPixmap(pixmap)
@@ -16224,13 +16237,13 @@ class OperBlockMainWidget(QWidget):
         icon_layout.setContentsMargins(0, 0, 0, 0)
         icon = QLabel()
         icon.setAlignment(Qt.AlignCenter)
-        pixmap = load_operblock_icon_pixmap(
+        pixmap = request_operblock_icon_pixmap(
+            icon,
             self._active_infusion_icon_file(interval),
             fallback_file=OXYGEN_ICON_FILE if _is_oxygen_infusion(interval) else "",
+            target_size=(30, 30),
         )
-        if not pixmap.isNull():
-            pixmap = pixmap.scaled(30, 30, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        else:
+        if pixmap.isNull():
             pixmap = self._operblock_ui_icon("infusion_blue").pixmap(24, 24)
         if not pixmap.isNull():
             icon.setPixmap(pixmap)
@@ -20347,15 +20360,27 @@ class OperBlockMainWidget(QWidget):
             )
             load_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
             target_size = label.size()
-            source_pixmap = (
-                load_operblock_icon_pixmap(icon_key, fallback_file=fallback_file)
-                if icon_key
-                else QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
-            )
-            if source_pixmap.isNull():
+            size_aware_icon_loaded = False
+            if icon_key:
+                source_pixmap = request_operblock_icon_pixmap(
+                    label,
+                    icon_key,
+                    fallback_file=fallback_file,
+                    target_size=target_size,
+                )
+                size_aware_icon_loaded = (
+                    not source_pixmap.isNull()
+                    and target_size.isValid()
+                    and not target_size.isEmpty()
+                )
+            else:
                 source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
             if source_pixmap.isNull():
+                source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", fallback_asset))
+                size_aware_icon_loaded = False
+            if source_pixmap.isNull():
                 source_pixmap = QPixmap(os.path.join(get_patient_assets_dir(), "Patients", "noman.png"))
+                size_aware_icon_loaded = False
             operblock_startup_metrics.record_since(
                 "board_apply_card_photo_pixmap_load_ms",
                 load_started,
@@ -20365,11 +20390,16 @@ class OperBlockMainWidget(QWidget):
             )
             if not source_pixmap.isNull() and target_size.isValid() and not target_size.isEmpty():
                 scale_started = operblock_startup_metrics.timer_start() if apply_metrics is not None else 0.0
-                pixmap = source_pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                pixmap = (
+                    source_pixmap
+                    if size_aware_icon_loaded
+                    else source_pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
                 operblock_startup_metrics.record_since(
                     "board_apply_card_photo_scaled_ms",
                     scale_started,
                     source="operblock_widget",
+                    loader_scaled=int(size_aware_icon_loaded),
                     **metric_fields,
                 )
                 if not pixmap.isNull():

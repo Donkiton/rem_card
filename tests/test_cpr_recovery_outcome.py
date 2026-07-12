@@ -17,6 +17,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog  # noqa: E402
 
 from rem_card.data.dao.patient_status_dao import PatientStatusDAO  # noqa: E402
@@ -28,6 +29,15 @@ from rem_card.ui.rem_card_sectors.outcome_dialogs import (  # noqa: E402
 )
 from rem_card.ui.rem_card_sectors.s_print.death_outcome import build_death_outcome_struct  # noqa: E402
 from rem_card.ui.rem_card_sectors.s_print.movement import build_full_movement_struct  # noqa: E402
+
+
+def _dispose_qt_widget(widget) -> None:
+    widget.close()
+    widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app = QApplication.instance()
+    if app is not None:
+        app.processEvents()
 
 
 class _MemoryDb:
@@ -100,6 +110,78 @@ class _MemoryDb:
                 removed_or_replaced TEXT,
                 removed_at TEXT,
                 revision INTEGER DEFAULT 0
+            );
+            CREATE TABLE vitals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                datetime TEXT
+            );
+            CREATE TABLE fluids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                datetime TEXT
+            );
+            CREATE TABLE oral_intake_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                event_time TEXT
+            );
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER
+            );
+            CREATE TABLE administrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                actual_time TEXT,
+                is_committed INTEGER DEFAULT 0,
+                status TEXT
+            );
+            CREATE TABLE transfusions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                datetime TEXT
+            );
+            CREATE TABLE clinical_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                ivl_episode_id INTEGER,
+                timestamp TEXT,
+                event_type TEXT,
+                mode TEXT,
+                parameters_json TEXT,
+                data TEXT
+            );
+            CREATE TABLE respiratory_support (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                ivl_episode_id INTEGER,
+                datetime TEXT,
+                mode TEXT,
+                parameters_json TEXT,
+                fio2 REAL,
+                peep REAL,
+                tv REAL,
+                rr INTEGER
+            );
+            CREATE TABLE lab_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                datetime TEXT
+            );
+            CREATE TABLE ivl_episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                episode_number INTEGER,
+                start_time TEXT,
+                end_time TEXT,
+                is_active INTEGER
+            );
+            CREATE TABLE devices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admission_id INTEGER,
+                insertion_date TEXT,
+                removal_date TEXT
             );
             """
         )
@@ -440,6 +522,7 @@ class CprRecoveryOutcomeTest(unittest.TestCase):
 
     def test_dialog_recovery_mode_hides_protocol_and_builds_recovery_payload(self):
         dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 12, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
         dialog.clinical_time_picker.set_time("09:45")
         dialog.biological_time_picker.set_time("09:50")
         dialog.outcome_combo.setCurrentIndex(dialog.outcome_combo.findData(DEATH_OUTCOME_RECOVERY))
@@ -459,6 +542,7 @@ class CprRecoveryOutcomeTest(unittest.TestCase):
 
     def test_dialog_submit_failure_does_not_accept_or_drop_payload(self):
         dialog = DeathOutcomeDialog({}, datetime(2025, 1, 1, 12, 0))
+        self.addCleanup(_dispose_qt_widget, dialog)
         dialog.clinical_time_picker.set_time("09:45")
         dialog.biological_time_picker.set_time("09:50")
         captured = []

@@ -9,6 +9,7 @@ from rem_card.ui.shared.display_settings_storage import (
 )
 from rem_card.ui.shared.layout_components import CurrentPageStack, SplitterManager
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
+from rem_card.ui.shared.w1_handoff import W1LayoutHandoff
 
 
 PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
@@ -327,14 +328,97 @@ class LightweightW1Shell(QWidget):
     def prewarm_journal_widget(self):
         return self._ensure_journal_widget()
 
+    def create_layout_handoff(self) -> W1LayoutHandoff:
+        """Snapshot transferable children without stopping their active workers."""
+        return W1LayoutHandoff(
+            role=self.role,
+            beds_view=self.beds_view,
+            beds_selection_widget=self.beds_selection_widget,
+            archive_view=self.archive_view,
+            archive_widget=self.archive_widget,
+            admin_view=self.admin_view,
+            admin_widget=self.admin_widget,
+            journal_view=self.journal_view,
+            journal_widget=self.journal_widget,
+            sector_w1a=self.sector_w1a,
+            sector_w1b=self.sector_w1b,
+            sector_w1b_nurse=self.sector_w1b_nurse,
+            sector_w1c=self.sector_w1c,
+            archive_last_change_id=int(self._archive_last_change_id),
+            current_mode=str(self.current_mode or "beds"),
+            selection_index=int(self.selection_stack.currentIndex()),
+            sector_1a_current_widget=self.sector_1a_stack.currentWidget(),
+        )
+
+    def complete_layout_handoff(self, handoff: W1LayoutHandoff) -> None:
+        """Release Python ownership after the full layout adopted every child."""
+        if handoff.beds_selection_widget is not self.beds_selection_widget:
+            raise RuntimeError("W1 handoff does not belong to this shell")
+        for name in (
+            "beds_view",
+            "beds_selection_widget",
+            "archive_view",
+            "archive_widget",
+            "admin_view",
+            "admin_widget",
+            "journal_view",
+            "journal_widget",
+            "sector_w1a",
+            "sector_w1b",
+            "sector_w1b_nurse",
+            "sector_w1c",
+        ):
+            setattr(self, name, None)
+
+    def restore_layout_handoff(self, handoff: W1LayoutHandoff) -> None:
+        """Put adopted children back if full-layout construction failed."""
+        self.beds_view = handoff.beds_view
+        self.beds_selection_widget = handoff.beds_selection_widget
+        self.archive_view = handoff.archive_view
+        self.archive_widget = handoff.archive_widget
+        self.admin_view = handoff.admin_view
+        self.admin_widget = handoff.admin_widget
+        self.journal_view = handoff.journal_view
+        self.journal_widget = handoff.journal_widget
+        self.sector_w1a = handoff.sector_w1a
+        self.sector_w1b = handoff.sector_w1b
+        self.sector_w1b_nurse = handoff.sector_w1b_nurse
+        self.sector_w1c = handoff.sector_w1c
+        self._archive_last_change_id = int(handoff.archive_last_change_id)
+        self.current_mode = str(handoff.current_mode or "beds")
+
+        for index, widget in enumerate(
+            (
+                handoff.beds_view,
+                handoff.archive_view,
+                handoff.admin_view,
+                handoff.journal_view,
+            ),
+            start=1,
+        ):
+            if widget is not None:
+                self.selection_stack.insertWidget(index, widget)
+
+        if handoff.sector_w1a is not None:
+            self.sector_1a_stack.insertWidget(0, handoff.sector_w1a)
+        if handoff.sector_w1c is not None:
+            self.sector_1a_stack.addWidget(handoff.sector_w1c)
+        if handoff.sector_1a_current_widget is not None:
+            self.sector_1a_stack.setCurrentWidget(handoff.sector_1a_current_widget)
+
+        lower_sector = handoff.sector_w1b_nurse if self.role == "nurse" else handoff.sector_w1b
+        if lower_sector is not None:
+            self.sector_1b_stack.insertWidget(0, lower_sector)
+        self.selection_stack.setCurrentIndex(max(0, min(handoff.selection_index, self.selection_stack.count() - 1)))
+
     def shutdown(self):
         self._is_closing = True
         widgets = (
-            self.beds_selection_widget,
-            self.sector_w1a,
-            self.archive_widget,
-            self.admin_widget,
-            self.journal_widget,
+            getattr(self, "beds_selection_widget", None),
+            getattr(self, "sector_w1a", None),
+            getattr(self, "archive_widget", None),
+            getattr(self, "admin_widget", None),
+            getattr(self, "journal_widget", None),
         )
         for widget in widgets:
             if widget is not None and hasattr(widget, "shutdown"):

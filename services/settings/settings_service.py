@@ -28,6 +28,8 @@ from rem_card.data.settings.settings_db import (
 from rem_card.data.settings.settings_schema import SEED_IMPORT_VERSION, now_text
 from rem_card.services.operblock_icon_defaults import (
     MAX_OPERBLOCK_ICON_BLOB_BYTES,
+    MAX_OPERBLOCK_ICON_DIMENSION,
+    MAX_OPERBLOCK_ICON_PIXELS,
     SEEDED_CUSTOM_ICON_DEFINITIONS,
     SUPPORTED_OPERBLOCK_ICON_EXTENSIONS,
 )
@@ -96,6 +98,14 @@ SEEDED_ICON_DEFINITIONS = (
     *SEEDED_CUSTOM_ICON_DEFINITIONS,
     *REMCARD_ICON_DEFINITIONS,
 )
+
+_OPERBLOCK_ICON_METADATA_COLUMNS = """
+    id, icon_key, category, target_key, name, default_file, value_json,
+    image_mime, image_hash, enabled, sort_order, revision, source,
+    created_at, updated_at,
+    CASE WHEN image_blob IS NULL THEN 0 ELSE 1 END AS has_image_blob
+"""
+_OPERBLOCK_ICON_BLOB_COLUMNS = f"{_OPERBLOCK_ICON_METADATA_COLUMNS}, image_blob"
 
 
 @dataclass(frozen=True)
@@ -2098,7 +2108,14 @@ class SettingsService:
                 ).fetchall()
             elif table == "operblock_icons":
                 rows = cursor.execute(
-                    "SELECT * FROM operblock_icons ORDER BY enabled DESC, sort_order ASC, icon_key ASC"
+                    """
+                    SELECT
+                        id, icon_key, category, target_key, name, default_file,
+                        value_json, image_mime, image_hash, enabled, sort_order,
+                        revision, source, created_at, updated_at
+                    FROM operblock_icons
+                    ORDER BY enabled DESC, sort_order ASC, icon_key ASC
+                    """
                 ).fetchall()
             else:
                 rows = cursor.execute(
@@ -3156,6 +3173,26 @@ class SettingsService:
                 "Файл иконки слишком большой: "
                 f"{size} байт, максимум {MAX_OPERBLOCK_ICON_BLOB_BYTES} байт."
             )
+        try:
+            from PySide6.QtGui import QImageReader
+
+            image_size = QImageReader(path).size()
+        except Exception as exc:
+            raise ValueError("Не удалось проверить размеры изображения.") from exc
+        if not image_size.isValid() or image_size.width() <= 0 or image_size.height() <= 0:
+            raise ValueError("Файл не является поддерживаемым изображением.")
+        width = int(image_size.width())
+        height = int(image_size.height())
+        if (
+            width > MAX_OPERBLOCK_ICON_DIMENSION
+            or height > MAX_OPERBLOCK_ICON_DIMENSION
+            or width * height > MAX_OPERBLOCK_ICON_PIXELS
+        ):
+            raise ValueError(
+                "Изображение слишком большое после декодирования: "
+                f"{width}×{height}, максимум {MAX_OPERBLOCK_ICON_DIMENSION} px по стороне "
+                f"и {MAX_OPERBLOCK_ICON_PIXELS} пикселей."
+            )
         with open(path, "rb") as fh:
             image_blob = fh.read()
         image_mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
@@ -3458,21 +3495,10 @@ class SettingsService:
             )
         return skipped_report
 
-    def list_operblock_icons(self, *, ensure_defaults: bool = True) -> dict[str, dict[str, Any]]:
-        self.ensure_ready()
-        if ensure_defaults:
-            self._ensure_operblock_icons_on_demand()
-        with self.db.read_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT *
-                FROM operblock_icons
-                WHERE enabled = 1
-                ORDER BY sort_order ASC, icon_key ASC
-                """
-            ).fetchall()
+    @staticmethod
+    def _decode_operblock_icon_rows(rows) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
-        for row in rows:
+        for row in rows or ():
             item = dict(row)
             value_json = item.get("value_json")
             value = {}
@@ -3484,17 +3510,124 @@ class SettingsService:
                 except Exception:
                     value = {}
             item["value"] = value
+            item["has_image_blob"] = bool(item.get("has_image_blob", item.get("image_blob")))
             result[str(item.get("icon_key") or "")] = item
         return result
 
-    def list_remcard_icons(self) -> dict[str, dict[str, Any]]:
-        records = self.list_operblock_icons(ensure_defaults=False)
-        remcard_keys = {definition.icon_key for definition in REMCARD_ICON_DEFINITIONS}
-        return {
-            key: record
-            for key, record in records.items()
-            if key in remcard_keys or str(record.get("category") or "").startswith("remcard")
-        }
+    @staticmethod
+    def _icon_catalog_version_from_connection(conn) -> tuple[int, str]:
+        row = conn.execute(
+            "SELECT version, content_hash FROM settings_catalog_versions WHERE catalog_key = ?",
+            (OPERBLOCK_ICONS_KEY,),
+        ).fetchone()
+        if not row:
+            return 0, ""
+        return int(row["version"] or 0), str(row["content_hash"] or "")
+
+    def get_operblock_icon_metadata_snapshot(
+        self,
+        *,
+        ensure_defaults: bool = True,
+        remcard_only: bool = False,
+    ) -> tuple[tuple[int, str], dict[str, dict[str, Any]]]:
+        self.ensure_ready()
+        if ensure_defaults:
+            self._ensure_operblock_icons_on_demand()
+        params: tuple[Any, ...] = ()
+        where_sql = "WHERE enabled = 1"
+        if remcard_only:
+            remcard_keys = tuple(definition.icon_key for definition in REMCARD_ICON_DEFINITIONS)
+            placeholders = ",".join("?" for _ in remcard_keys)
+            where_sql += f" AND (icon_key IN ({placeholders}) OR category LIKE 'remcard%')"
+            params = remcard_keys
+        with self.db.read_connection() as conn:
+            version = self._icon_catalog_version_from_connection(conn)
+            rows = conn.execute(
+                f"""
+                SELECT {_OPERBLOCK_ICON_METADATA_COLUMNS}
+                FROM operblock_icons
+                {where_sql}
+                ORDER BY sort_order ASC, icon_key ASC
+                """,
+                params,
+            ).fetchall()
+        return version, self._decode_operblock_icon_rows(rows)
+
+    def get_operblock_icon_records(
+        self,
+        icon_keys,
+        *,
+        include_blob: bool = True,
+        ensure_defaults: bool = True,
+    ) -> tuple[tuple[int, str], dict[str, dict[str, Any]]]:
+        self.ensure_ready()
+        if ensure_defaults:
+            self._ensure_operblock_icons_on_demand()
+        normalized_keys: list[str] = []
+        source_keys = [icon_keys] if isinstance(icon_keys, str) else icon_keys or ()
+        for key in source_keys:
+            clean_key = str(key or "").strip()
+            if clean_key and clean_key not in normalized_keys:
+                normalized_keys.append(clean_key)
+        with self.db.read_connection() as conn:
+            version = self._icon_catalog_version_from_connection(conn)
+            if not normalized_keys:
+                return version, {}
+            placeholders = ",".join("?" for _ in normalized_keys)
+            columns = _OPERBLOCK_ICON_BLOB_COLUMNS if include_blob else _OPERBLOCK_ICON_METADATA_COLUMNS
+            rows = conn.execute(
+                f"""
+                SELECT {columns}
+                FROM operblock_icons
+                WHERE enabled = 1 AND icon_key IN ({placeholders})
+                ORDER BY sort_order ASC, icon_key ASC
+                """,
+                tuple(normalized_keys),
+            ).fetchall()
+        return version, self._decode_operblock_icon_rows(rows)
+
+    def list_operblock_icon_metadata(self, *, ensure_defaults: bool = True) -> dict[str, dict[str, Any]]:
+        _version, records = self.get_operblock_icon_metadata_snapshot(ensure_defaults=ensure_defaults)
+        return records
+
+    def list_operblock_icons(
+        self,
+        *,
+        ensure_defaults: bool = True,
+        include_blob: bool = True,
+    ) -> dict[str, dict[str, Any]]:
+        self.ensure_ready()
+        if ensure_defaults:
+            self._ensure_operblock_icons_on_demand()
+        with self.db.read_connection() as conn:
+            columns = _OPERBLOCK_ICON_BLOB_COLUMNS if include_blob else _OPERBLOCK_ICON_METADATA_COLUMNS
+            rows = conn.execute(
+                f"""
+                SELECT {columns}
+                FROM operblock_icons
+                WHERE enabled = 1
+                ORDER BY sort_order ASC, icon_key ASC
+                """
+            ).fetchall()
+        return self._decode_operblock_icon_rows(rows)
+
+    def list_remcard_icons(self, *, include_blob: bool = True) -> dict[str, dict[str, Any]]:
+        self.ensure_ready()
+        remcard_keys = tuple(definition.icon_key for definition in REMCARD_ICON_DEFINITIONS)
+        placeholders = ",".join("?" for _ in remcard_keys)
+        columns = _OPERBLOCK_ICON_BLOB_COLUMNS if include_blob else _OPERBLOCK_ICON_METADATA_COLUMNS
+        with self.db.read_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT {columns}
+                FROM operblock_icons
+                WHERE enabled = 1
+                  AND (icon_key IN ({placeholders}) OR category LIKE 'remcard%')
+                ORDER BY sort_order ASC, icon_key ASC
+                """,
+                remcard_keys,
+            ).fetchall()
+        return self._decode_operblock_icon_rows(rows)
 
     def save_operblock_icon(
         self,

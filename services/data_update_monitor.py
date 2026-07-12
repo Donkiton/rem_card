@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -78,6 +79,7 @@ class DataUpdateMonitor(QThread):
         self._last_observed_refresh_seq: int = 0
         self._state_epoch: int = 0
         self._paused = not bool(enabled)
+        self._persistent_read_conn = None
 
     def set_enabled(self, enabled: bool) -> None:
         with self._state_lock:
@@ -149,6 +151,35 @@ class DataUpdateMonitor(QThread):
         self._stop_evt.set()
         self._wake_evt.set()
 
+    def _persistent_read_scope(self):
+        role = str(getattr(self._data_service, "_runtime_role", "") or "").strip().lower()
+        # Only doctor/nurse workstations keep the hot polling connection.  The
+        # admin runtime can rotate the live SQLite file manually; on Windows a
+        # long-lived readonly handle would prevent the atomic rename.
+        if role not in REM_CARD_MONITOR_ROLES:
+            self._close_persistent_read_connection()
+            return nullcontext()
+        db = getattr(self._data_service, "db", None)
+        opener = getattr(db, "open_persistent_readonly_connection", None)
+        scope = getattr(db, "existing_central_read_scope", None)
+        if not callable(opener) or not callable(scope):
+            return nullcontext()
+        if self._persistent_read_conn is None:
+            self._persistent_read_conn = opener(source="data_update_monitor")
+            record_metric("persistent_read_connection_open", 1, component="DataUpdateMonitor")
+        return scope(self._persistent_read_conn, force_central=True)
+
+    def _close_persistent_read_connection(self) -> None:
+        conn = self._persistent_read_conn
+        self._persistent_read_conn = None
+        if conn is None:
+            return
+        try:
+            conn.close()
+            record_metric("persistent_read_connection_close", 1, component="DataUpdateMonitor")
+        except Exception as exc:
+            logger.debug("DataUpdateMonitor readonly connection close failed: %s", exc)
+
     def _is_shutting_down(self) -> bool:
         return self._stop_evt.is_set() or bool(getattr(self._data_service, "_shutting_down", False))
 
@@ -160,44 +191,58 @@ class DataUpdateMonitor(QThread):
         return "database connection is closed" in str(exc).lower()
 
     def run(self):
-        while not self._stop_evt.is_set():
-            force_emit = False
-            force_sources: list[str] = []
-            with self._state_lock:
-                if self._paused:
+        try:
+            while not self._stop_evt.is_set():
+                force_emit = False
+                force_sources: list[str] = []
+                with self._state_lock:
+                    if self._paused:
+                        self._force_emit = False
+                        self._force_sources = []
+                        paused = True
+                    else:
+                        paused = False
+                    force_emit = self._force_emit
+                    force_sources = list(self._force_sources)
                     self._force_emit = False
                     self._force_sources = []
-                    paused = True
-                else:
-                    paused = False
-                force_emit = self._force_emit
-                force_sources = list(self._force_sources)
-                self._force_emit = False
-                self._force_sources = []
 
-            if paused:
-                self._wake_evt.wait()
-                self._wake_evt.clear()
-                continue
+                if paused:
+                    self._close_persistent_read_connection()
+                    self._wake_evt.wait()
+                    self._wake_evt.clear()
+                    continue
 
-            try:
-                self._poll_once(force_emit=force_emit, force_sources=force_sources)
-            except Exception as exc:
-                if self._should_suppress_poll_error(exc):
-                    logger.info("DataUpdateMonitor stopped during shutdown after database connection closed")
+                try:
+                    run_maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
+                    if callable(run_maintenance):
+                        run_maintenance()
+                    with self._persistent_read_scope():
+                        self._poll_once(
+                            force_emit=force_emit,
+                            force_sources=force_sources,
+                            run_maintenance=False,
+                        )
+                except Exception as exc:
+                    self._close_persistent_read_connection()
+                    if self._should_suppress_poll_error(exc):
+                        logger.info("DataUpdateMonitor stopped during shutdown after database connection closed")
+                        return
+                    logger.error("DataUpdateMonitor poll failed: %s", exc, exc_info=True)
+                    self.monitor_error.emit(str(exc))
+
+                if self._stop_evt.is_set():
                     return
-                logger.error("DataUpdateMonitor poll failed: %s", exc, exc_info=True)
-                self.monitor_error.emit(str(exc))
+                if self._wake_evt.wait(self._poll_interval_sec):
+                    self._wake_evt.clear()
+        finally:
+            self._close_persistent_read_connection()
 
-            if self._stop_evt.is_set():
-                return
-            if self._wake_evt.wait(self._poll_interval_sec):
-                self._wake_evt.clear()
-
-    def _poll_once(self, *, force_emit: bool, force_sources: list[str]):
-        run_maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
-        if callable(run_maintenance):
-            run_maintenance()
+    def _poll_once(self, *, force_emit: bool, force_sources: list[str], run_maintenance: bool = True):
+        if run_maintenance:
+            maintenance = getattr(self._data_service, "run_poll_maintenance_tasks", None)
+            if callable(maintenance):
+                maintenance()
 
         if self._stop_evt.is_set():
             return

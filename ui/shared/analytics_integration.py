@@ -45,8 +45,8 @@ def open_analytics_report_dialog(
             from rem_card.ui.analytics.statistics_dialog import StatisticsDialog
 
             now = datetime.now()
-            start_dt = start_dt or (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
-            end_dt = end_dt or now.strftime("%Y-%m-%d 23:59:59")
+            start_dt = start_dt or (now - timedelta(days=30)).strftime("%Y-%m-%d")
+            end_dt = end_dt or now.strftime("%Y-%m-%d")
             dialog = StatisticsDialog(
                 analytics_manager,
                 start_date_str=start_dt,
@@ -80,9 +80,9 @@ def open_analytics_graphs_dialog(
 ):
     now = datetime.now()
     if not start_dt:
-        start_dt = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
+        start_dt = (now - timedelta(days=30)).strftime("%Y-%m-%d")
     if not end_dt:
-        end_dt = now.strftime("%Y-%m-%d 23:59:59")
+        end_dt = now.strftime("%Y-%m-%d")
 
     base_db_manager = _get_base_db_manager(remcard_service=remcard_service, db_manager=db_manager)
     analytics_manager, cleanup = _resolve_analytics_manager(
@@ -112,9 +112,9 @@ def open_operblock_statistics_dialog(
 ):
     now = datetime.now()
     if not start_dt:
-        start_dt = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
+        start_dt = (now - timedelta(days=30)).strftime("%Y-%m-%d")
     if not end_dt:
-        end_dt = now.strftime("%Y-%m-%d 23:59:59")
+        end_dt = now.strftime("%Y-%m-%d")
     if db_manager is None:
         raise ValueError("Не найден менеджер базы данных для статистики оперблока.")
 
