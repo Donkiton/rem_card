@@ -512,8 +512,9 @@ class NurseMainWidget(QWidget):
             except Exception:
                 pass
 
-    def _shutdown_snapshot_worker(self, timeout_ms: int = 1200):
+    def _shutdown_snapshot_worker(self):
         self._snapshot_pending = None
+        self._snapshot_request_id += 1
         worker = self._snapshot_worker
         self._snapshot_worker = None
         if worker is None:
@@ -521,7 +522,6 @@ class NurseMainWidget(QWidget):
         self._disconnect_snapshot_worker(worker)
         if worker.isRunning():
             worker.quit()
-            worker.wait(timeout_ms)
 
     def _request_pending_card_snapshot(self):
         if self._is_closing:

@@ -11906,8 +11906,15 @@ def _check_targeted_async_workers_are_parentless_and_guarded(temp_root: str) -> 
         if helper is not None:
             helper_source = _cached_source_segment(source_text, helper) or ""
         lifecycle_source = shutdown_source + "\n" + helper_source
-        if "disconnect" not in lifecycle_source or ".wait(" not in lifecycle_source:
-            return False, f"{role}: shutdown must disconnect and wait active snapshot workers"
+        if "disconnect" not in lifecycle_source:
+            return False, f"{role}: shutdown must disconnect active snapshot workers"
+        if role == "nurse_card":
+            if ".wait(" in lifecycle_source:
+                return False, "nurse: shutdown must not block the UI thread waiting for a snapshot worker"
+            if "_snapshot_request_id += 1" not in lifecycle_source:
+                return False, "nurse: shutdown must invalidate queued snapshot results"
+        elif ".wait(" not in lifecycle_source:
+            return False, f"{role}: shutdown must wait active snapshot workers"
         if role.endswith("_card") and "clear_drafts()" in shutdown_source:
             return False, f"{role}: shutdown must not enqueue clear_drafts during app close"
 

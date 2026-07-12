@@ -251,6 +251,8 @@ def append_shadow_journal(payload: dict[str, Any], root: str | None = None) -> N
     path = get_operblock_shadow_journal_path(root)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 def _journal_active_case_snapshot(db_manager) -> list[dict[str, Any]]:

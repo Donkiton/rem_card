@@ -391,6 +391,8 @@ def _scenario_precommit_journal_runtime_drop(network_manager, local_manager, _ne
         _require(accepted, "opblock write must be accepted")
         data_service.prepare_runtime_outage_shutdown(timeout=5.0)
         events = _read_shadow_journal(offline_root)
+        intent_events = [event for event in events if event.get("event") == "opblock_write_intent"]
+        committed_events = [event for event in events if event.get("event") == "opblock_write_remote_committed"]
         intent_index = next(
             (index for index, event in enumerate(events) if event.get("event") == "opblock_write_intent"),
             None,
@@ -402,6 +404,13 @@ def _scenario_precommit_journal_runtime_drop(network_manager, local_manager, _ne
         _require(intent_index is not None, "pre-commit intent must be durable before queued write runs", events=events)
         _require(committed_index is not None, "confirmed commit must be marked in local journal", events=events)
         _require(intent_index < committed_index, "intent must be written before remote_committed marker", events=events)
+        _require(len(intent_events) == 1, "queued write must have exactly one durable intent", events=events)
+        _require(len(committed_events) == 1, "confirmed write must have exactly one remote_committed marker", events=events)
+        _require(
+            intent_events[0].get("operation_uuid") == committed_events[0].get("operation_uuid"),
+            "intent and remote_committed marker must use the same operation_uuid",
+            events=events,
+        )
         local_active = _query_one(local_manager.db_path, "SELECT COUNT(*) FROM operation_cases WHERE status = 'active'")
         _require(local_active and int(local_active[0] or 0) == 1, "runtime-drop committed write must be mirrored locally")
     finally:
