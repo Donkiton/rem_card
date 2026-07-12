@@ -219,6 +219,7 @@ class DataService(QObject):
             self._mark_operblock_write_failed(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
             raise
+        self._mark_operblock_write_remote_committed(operation_uuid, description)
         self.write_finished.emit(description)
         self.request_immediate_refresh(force_emit=True, source=description)
         self._mirror_operblock_write_after_commit(
@@ -311,6 +312,30 @@ class DataService(QObject):
             )
         except Exception as journal_exc:
             logger.warning("Operblock failed-write local journal failed for %s: %s", description, journal_exc, exc_info=True)
+
+    def _mark_operblock_write_remote_committed(self, operation_uuid: str | None, description: str) -> bool:
+        if not operation_uuid:
+            return True
+        try:
+            from rem_card.app.operblock_offline_store import mark_operblock_write_remote_committed
+
+            mark_operblock_write_remote_committed(
+                self.db,
+                operation_uuid=operation_uuid,
+                description=str(description or ""),
+            )
+            return True
+        except Exception as journal_exc:
+            self._unknown_active_write = True
+            self._unconfirmed_write_count = max(1, int(self._unconfirmed_write_count or 0))
+            logger.critical(
+                "Committed operblock write could not be confirmed in local journal for %s operation_uuid=%s: %s",
+                description,
+                operation_uuid,
+                journal_exc,
+                exc_info=True,
+            )
+            return False
 
     def get_opblock_shadow_mirror_snapshot(self) -> dict[str, Any]:
         with self._opblock_shadow_mirror_lock:
@@ -470,6 +495,14 @@ class DataService(QObject):
                 attempt=1,
             ),
         )
+        if self._shutting_down:
+            self._run_opblock_shadow_mirror_after_commit(
+                description,
+                operation_uuid=None,
+                context=context,
+                attempt=1,
+            )
+            return
         self._submit_opblock_shadow_mirror_post_commit(
             description,
             operation_uuid=operation_uuid,
@@ -668,18 +701,9 @@ class DataService(QObject):
             **start_fields,
         )
         try:
-            from rem_card.app.operblock_offline_store import (
-                mark_operblock_write_remote_committed,
-                mirror_active_operblock_cases_from_network_db,
-            )
+            from rem_card.app.operblock_offline_store import mirror_active_operblock_cases_from_network_db
 
             mirror_active_operblock_cases_from_network_db(self.db, reason=str(description or ""))
-            if operation_uuid:
-                mark_operblock_write_remote_committed(
-                    self.db,
-                    operation_uuid=operation_uuid,
-                    description=str(description or ""),
-                )
             duration_ms = round((time.perf_counter() - started) * 1000.0, 3)
             success_fields = self._opblock_shadow_mirror_metric_fields(
                 description,
@@ -765,6 +789,7 @@ class DataService(QObject):
                 return operation()
 
         def handle_success(result):
+            self._mark_operblock_write_remote_committed(operation_uuid, description)
             if self._shutting_down:
                 logger.info("Queued write success callbacks skipped during shutdown for %s", description)
                 self._mirror_operblock_write_after_commit(
