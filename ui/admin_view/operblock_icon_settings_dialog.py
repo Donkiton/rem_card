@@ -334,7 +334,7 @@ class OperBlockIconSettingsDialog(BaseStyledDialog):
 
     def _load_icon_records(self) -> dict[str, dict]:
         try:
-            records = get_settings_service().list_operblock_icons()
+            records = get_settings_service().list_operblock_icon_metadata()
         except Exception:
             return {}
         return records if isinstance(records, dict) else {}
@@ -404,7 +404,7 @@ class OperBlockIconSettingsDialog(BaseStyledDialog):
             return None
         for key in descriptor.get("icon_keys") or [descriptor.get("icon_key")]:
             record = self._icon_records.get(str(key or "").strip())
-            if isinstance(record, dict) and record.get("image_blob"):
+            if isinstance(record, dict) and record.get("has_image_blob"):
                 return record
         return None
 

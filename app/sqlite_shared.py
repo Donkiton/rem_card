@@ -382,6 +382,12 @@ def configure_connection(
     settings = _resolve_sqlite_profile_settings(profile)
     with _SQLITE_NATIVE_MAINTENANCE_LOCK:
         conn.row_factory = sqlite3.Row
+        conn.create_function(
+            "CASEFOLD",
+            1,
+            lambda value: "" if value is None else str(value).casefold(),
+            deterministic=True,
+        )
         conn.execute("PRAGMA foreign_keys = ON")
         if readonly:
             conn.execute("PRAGMA query_only = ON")

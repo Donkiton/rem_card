@@ -8,6 +8,7 @@ from typing import Iterable
 
 from rem_card.services.analytics.constants import STATISTICAL_BED_COUNT, STATISTICAL_HIGH_LOAD_THRESHOLD
 from rem_card.services.analytics.graphs_service import _thread_local_manager
+from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.services.analytics.recovery_filter import recovery_bed_analytics_filter
 from rem_card.services.analytics.recovery_summary import (
     build_recovery_bed_summary,
@@ -156,12 +157,20 @@ class DetailedStatisticsReportBuilder:
         include_recovery_beds: bool = False,
     ):
         self.db_manager = db_manager
-        self._start_dt = self._parse_datetime(start_date_str) or (datetime.now() - timedelta(days=30))
-        self._end_dt = self._parse_datetime(end_date_str) or datetime.now()
-        if self._end_dt < self._start_dt:
-            self._start_dt, self._end_dt = self._end_dt, self._start_dt
-        self.start_date_str = self._start_dt.strftime("%Y-%m-%d 00:00:00")
-        self.end_date_str = self._end_dt.strftime("%Y-%m-%d 23:59:59")
+        now = datetime.now()
+        period = normalize_analytics_period(
+            start_date_str,
+            end_date_str,
+            default_start=now - timedelta(days=30),
+            default_end=now,
+        )
+        self._start_dt = period.start_inclusive
+        # Preserve the established report-duration cutoff while the SQL range
+        # itself uses the safe next-midnight exclusive bound.
+        self._end_dt = period.end_exclusive - timedelta(seconds=1)
+        self.start_date_str = period.start_sql
+        self.end_date_str = period.end_exclusive_sql
+        self._selected_end_date_str = period.end_date.isoformat()
         self.section_groups = SECTION_GROUPS
         self.include_recovery_beds = bool(include_recovery_beds)
 
@@ -510,7 +519,7 @@ class DetailedStatisticsReportBuilder:
                         diagnosis_text,
                         {cardiac_measures_expr}
                     FROM admissions
-                    WHERE admission_datetime BETWEEN ? AND ?
+                    WHERE admission_datetime >= ? AND admission_datetime < ?
                     """,
                     period_params,
                 )
@@ -579,7 +588,7 @@ class DetailedStatisticsReportBuilder:
                     """
                     SELECT admission_id
                     FROM operations
-                    WHERE operation_datetime BETWEEN ? AND ?
+                    WHERE operation_datetime >= ? AND operation_datetime < ?
                     """,
                     period_params,
                 )
@@ -590,7 +599,7 @@ class DetailedStatisticsReportBuilder:
                     """
                     SELECT admission_id, type, volume_ml
                     FROM transfusions
-                    WHERE datetime BETWEEN ? AND ?
+                    WHERE datetime >= ? AND datetime < ?
                     """,
                     period_params,
                 )
@@ -611,7 +620,7 @@ class DetailedStatisticsReportBuilder:
                     """
                     SELECT admission_id, start_time, end_time
                     FROM ivl_episodes
-                    WHERE start_time BETWEEN ? AND ?
+                    WHERE start_time >= ? AND start_time < ?
                     """,
                     period_params,
                 )
@@ -699,7 +708,8 @@ class DetailedStatisticsReportBuilder:
             JOIN procedure_cvc c ON c.procedure_id = p.id
             WHERE p.procedure_type = 'CVC'
               AND COALESCE(p.is_deleted, 0) = 0
-              AND DATETIME(COALESCE(p.started_at, p.created_at)) BETWEEN DATETIME(?) AND DATETIME(?)
+              AND COALESCE(p.started_at, p.created_at) >= ?
+              AND COALESCE(p.started_at, p.created_at) < ?
             """,
             (self.start_date_str, self.end_date_str),
         )
@@ -785,7 +795,8 @@ class DetailedStatisticsReportBuilder:
             JOIN procedure_lumbar_puncture lp ON lp.procedure_id = p.id
             WHERE p.procedure_type = 'LUMBAR_PUNCTURE'
               AND COALESCE(p.is_deleted, 0) = 0
-              AND DATETIME(COALESCE(p.started_at, p.created_at)) BETWEEN DATETIME(?) AND DATETIME(?)
+              AND COALESCE(p.started_at, p.created_at) >= ?
+              AND COALESCE(p.started_at, p.created_at) < ?
             """,
             (self.start_date_str, self.end_date_str),
         )
@@ -835,7 +846,8 @@ class DetailedStatisticsReportBuilder:
             JOIN procedure_transfusion t ON t.procedure_id = p.id
             WHERE p.procedure_type = 'TRANSFUSION'
               AND COALESCE(p.is_deleted, 0) = 0
-              AND DATETIME(COALESCE(p.started_at, p.created_at)) BETWEEN DATETIME(?) AND DATETIME(?)
+              AND COALESCE(p.started_at, p.created_at) >= ?
+              AND COALESCE(p.started_at, p.created_at) < ?
             """,
             (self.start_date_str, self.end_date_str),
         )
@@ -1389,7 +1401,7 @@ class DetailedStatisticsReportBuilder:
         manager, cleanup = _thread_local_manager(self.db_manager)
         conn = manager.get_connection()
         try:
-            summary = build_recovery_bed_summary(conn, self.start_date_str, self.end_date_str)
+            summary = build_recovery_bed_summary(conn, self.start_date_str, self._selected_end_date_str)
             return build_recovery_summary_rows(
                 summary,
                 include_recovery_beds=self.include_recovery_beds,

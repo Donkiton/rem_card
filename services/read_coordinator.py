@@ -380,6 +380,8 @@ class ChangeLogApplier:
 class ReadCoordinator:
     """Read-only orchestration layer for immutable snapshots and lightweight caching."""
 
+    _patient_snapshot_epoch_bootstrap_lock = threading.Lock()
+
     def __init__(
         self,
         remcard_service,
@@ -400,6 +402,9 @@ class ReadCoordinator:
         self._patient_scope_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._patient_scope_cache_index: dict[int, OrderedDict[str, None]] = {}
         self._cache_version_validation: dict[tuple, Tuple[int, int]] = {}
+        self._patient_snapshot_epoch_lock = threading.RLock()
+        self._patient_snapshot_admission_epochs: dict[int, int] = {}
+        self._patient_snapshot_key_epochs: dict[tuple[str, tuple], int] = {}
 
         self._orders_tab_cache: "OrderedDict[tuple[str, int, str, str, str, str, str], MappingProxyType]" = OrderedDict()
         self._orders_cache_index: dict[int, OrderedDict[str, None]] = {}
@@ -498,6 +503,7 @@ class ReadCoordinator:
                 )
                 return cached
 
+        load_epoch = self._capture_patient_snapshot_epoch("patient_vitals", cache_key)
         load_strategy = "patient_vitals"
         fallback_used = 0
         try:
@@ -553,8 +559,17 @@ class ReadCoordinator:
         )
 
         if context.mode == "live":
-            self._store_patient_vitals(context, frozen_snapshot)
-            self._mark_cache_validated_by_monitor(cache_key)
+            stored = self._store_patient_vitals(
+                context,
+                frozen_snapshot,
+                expected_epoch=load_epoch,
+            )
+            if stored:
+                self._mark_cache_validated_if_epoch_current(
+                    "patient_vitals",
+                    cache_key,
+                    load_epoch,
+                )
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -612,6 +627,7 @@ class ReadCoordinator:
                 )
                 return cached
 
+        load_epoch = self._capture_patient_snapshot_epoch("patient_card", cache_key)
         snapshot = self.remcard_service.build_full_card_snapshot(
             context.admission_id,
             context.shift_date,
@@ -639,8 +655,17 @@ class ReadCoordinator:
         )
 
         if context.mode == "live":
-            self._store_patient_card(context, frozen_snapshot)
-            self._mark_cache_validated_by_monitor(cache_key)
+            stored = self._store_patient_card(
+                context,
+                frozen_snapshot,
+                expected_epoch=load_epoch,
+            )
+            if stored:
+                self._mark_cache_validated_if_epoch_current(
+                    "patient_card",
+                    cache_key,
+                    load_epoch,
+                )
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -875,6 +900,7 @@ class ReadCoordinator:
                 )
                 return cached
 
+        load_epoch = self._capture_patient_snapshot_epoch("patient_scope", cache_key)
         snapshot = build_snapshot(context)
         frozen_snapshot = self._finalize_snapshot(
             snapshot=snapshot,
@@ -894,8 +920,17 @@ class ReadCoordinator:
         )
 
         if context.mode == "live":
-            self._store_patient_scope(context, frozen_snapshot)
-            self._mark_cache_validated_by_monitor(cache_key)
+            stored = self._store_patient_scope(
+                context,
+                frozen_snapshot,
+                expected_epoch=load_epoch,
+            )
+            if stored:
+                self._mark_cache_validated_if_epoch_current(
+                    "patient_scope",
+                    cache_key,
+                    load_epoch,
+                )
 
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         logger.info(
@@ -1901,6 +1936,103 @@ class ReadCoordinator:
     def _drop_cache_validation(self, cache_key) -> None:
         self._cache_version_validation.pop(cache_key, None)
 
+    def _patient_snapshot_epoch_state(self):
+        """Return lazily initialized epoch state.
+
+        A few regression checks construct the coordinator via ``object.__new__``.
+        Keeping this state lazy preserves those narrow test doubles while normal
+        application instances still initialize it eagerly in ``__init__``.
+        """
+        lock = getattr(self, "_patient_snapshot_epoch_lock", None)
+        if (
+            lock is None
+            or not hasattr(self, "_patient_snapshot_admission_epochs")
+            or not hasattr(self, "_patient_snapshot_key_epochs")
+        ):
+            with self._patient_snapshot_epoch_bootstrap_lock:
+                lock = getattr(self, "_patient_snapshot_epoch_lock", None)
+                if lock is None:
+                    lock = threading.RLock()
+                    self._patient_snapshot_epoch_lock = lock
+                if not hasattr(self, "_patient_snapshot_admission_epochs"):
+                    self._patient_snapshot_admission_epochs = {}
+                if not hasattr(self, "_patient_snapshot_key_epochs"):
+                    self._patient_snapshot_key_epochs = {}
+        return (
+            lock,
+            self._patient_snapshot_admission_epochs,
+            self._patient_snapshot_key_epochs,
+        )
+
+    @staticmethod
+    def _patient_snapshot_epoch_key(namespace: str, cache_key) -> tuple[str, tuple]:
+        return str(namespace), tuple(cache_key)
+
+    @staticmethod
+    def _patient_snapshot_admission_id(cache_key) -> int:
+        try:
+            return int(cache_key[1])
+        except Exception:
+            return 0
+
+    def _capture_patient_snapshot_epoch(self, namespace: str, cache_key) -> tuple[int, int]:
+        lock, admission_epochs, key_epochs = self._patient_snapshot_epoch_state()
+        admission_id = self._patient_snapshot_admission_id(cache_key)
+        epoch_key = self._patient_snapshot_epoch_key(namespace, cache_key)
+        with lock:
+            return (
+                int(admission_epochs.get(admission_id, 0)),
+                int(key_epochs.get(epoch_key, 0)),
+            )
+
+    def _patient_snapshot_epoch_is_current_unlocked(
+        self,
+        namespace: str,
+        cache_key,
+        expected_epoch: tuple[int, int],
+    ) -> bool:
+        _lock, admission_epochs, key_epochs = self._patient_snapshot_epoch_state()
+        admission_id = self._patient_snapshot_admission_id(cache_key)
+        epoch_key = self._patient_snapshot_epoch_key(namespace, cache_key)
+        return expected_epoch == (
+            int(admission_epochs.get(admission_id, 0)),
+            int(key_epochs.get(epoch_key, 0)),
+        )
+
+    def _bump_patient_snapshot_key_epoch_unlocked(self, namespace: str, cache_key) -> None:
+        _lock, _admission_epochs, key_epochs = self._patient_snapshot_epoch_state()
+        epoch_key = self._patient_snapshot_epoch_key(namespace, cache_key)
+        key_epochs[epoch_key] = int(key_epochs.get(epoch_key, 0)) + 1
+
+    def _bump_patient_snapshot_admission_epoch_unlocked(self, admission_id: int) -> None:
+        _lock, admission_epochs, key_epochs = self._patient_snapshot_epoch_state()
+        target_admission_id = int(admission_id)
+        admission_epochs[target_admission_id] = int(admission_epochs.get(target_admission_id, 0)) + 1
+
+        # A new admission epoch supersedes all exact-key tombstones for that
+        # admission, so they can be discarded without admitting an older load.
+        for epoch_key in list(key_epochs):
+            try:
+                key_admission_id = int(epoch_key[1][1])
+            except Exception:
+                continue
+            if key_admission_id == target_admission_id:
+                key_epochs.pop(epoch_key, None)
+
+    def _mark_cache_validated_if_epoch_current(
+        self,
+        namespace: str,
+        cache_key,
+        expected_epoch: tuple[int, int],
+    ) -> None:
+        observed = self._get_observed_change_state()
+        if observed is None:
+            return
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if self._patient_snapshot_epoch_is_current_unlocked(namespace, cache_key, expected_epoch):
+                self._cache_version_validation[cache_key] = observed
+
     @staticmethod
     def _is_current_patient_snapshot_cache(snapshot) -> bool:
         try:
@@ -1921,7 +2053,15 @@ class ReadCoordinator:
         return True
 
     def get_cached_vitals(self, cache_key):
-        snapshot = self._patient_vitals_cache.get(cache_key)
+        read_epoch = self._capture_patient_snapshot_epoch("patient_vitals", cache_key)
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if not self._patient_snapshot_epoch_is_current_unlocked("patient_vitals", cache_key, read_epoch):
+                return None
+            snapshot = self._patient_vitals_cache.get(cache_key)
+            if snapshot is not None:
+                self._patient_vitals_cache.move_to_end(cache_key)
+                return snapshot
         if snapshot is None:
             persisted = persistent_snapshot_cache.load_snapshot("patient_vitals", cache_key)
             if persisted is None:
@@ -1929,15 +2069,20 @@ class ReadCoordinator:
             if self._discard_stale_persistent_patient_snapshot("patient_vitals", cache_key, persisted):
                 return None
             snapshot = MappingProxyType(dict(persisted or {}))
-            self._store_patient_vitals_by_key(cache_key, snapshot, persist=False)
+            if not self._store_patient_vitals_by_key(
+                cache_key,
+                snapshot,
+                persist=False,
+                expected_epoch=read_epoch,
+            ):
+                return None
             logger.info(
                 "[ReadCoordinator] patient_vitals persistent_cache_hit=1 admission_id=%s version=%s",
                 cache_key[1] if len(cache_key) > 1 else "unknown",
                 snapshot.get("version"),
             )
             return snapshot
-        self._patient_vitals_cache.move_to_end(cache_key)
-        return snapshot
+        return None
 
     def get_current_cached_vitals(self, cache_key):
         snapshot = self.get_cached_vitals(cache_key)
@@ -1986,7 +2131,15 @@ class ReadCoordinator:
         return None
 
     def get_cached_card(self, cache_key):
-        snapshot = self._patient_card_cache.get(cache_key)
+        read_epoch = self._capture_patient_snapshot_epoch("patient_card", cache_key)
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if not self._patient_snapshot_epoch_is_current_unlocked("patient_card", cache_key, read_epoch):
+                return None
+            snapshot = self._patient_card_cache.get(cache_key)
+            if snapshot is not None:
+                self._patient_card_cache.move_to_end(cache_key)
+                return snapshot
         if snapshot is None:
             persisted = persistent_snapshot_cache.load_snapshot("patient_card", cache_key)
             if persisted is None:
@@ -1994,15 +2147,20 @@ class ReadCoordinator:
             if self._discard_stale_persistent_patient_snapshot("patient_card", cache_key, persisted):
                 return None
             snapshot = MappingProxyType(dict(persisted or {}))
-            self._store_patient_card_by_key(cache_key, snapshot, persist=False)
+            if not self._store_patient_card_by_key(
+                cache_key,
+                snapshot,
+                persist=False,
+                expected_epoch=read_epoch,
+            ):
+                return None
             logger.info(
                 "[ReadCoordinator] patient_card persistent_cache_hit=1 admission_id=%s version=%s",
                 cache_key[1] if len(cache_key) > 1 else "unknown",
                 snapshot.get("version"),
             )
             return snapshot
-        self._patient_card_cache.move_to_end(cache_key)
-        return snapshot
+        return None
 
     def get_current_cached_card(self, cache_key):
         snapshot = self.get_cached_card(cache_key)
@@ -2051,7 +2209,15 @@ class ReadCoordinator:
         return None
 
     def get_cached_patient_scope(self, cache_key):
-        snapshot = self._patient_scope_cache.get(cache_key)
+        read_epoch = self._capture_patient_snapshot_epoch("patient_scope", cache_key)
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if not self._patient_snapshot_epoch_is_current_unlocked("patient_scope", cache_key, read_epoch):
+                return None
+            snapshot = self._patient_scope_cache.get(cache_key)
+            if snapshot is not None:
+                self._patient_scope_cache.move_to_end(cache_key)
+                return snapshot
         if snapshot is None:
             persisted = persistent_snapshot_cache.load_snapshot("patient_scope", cache_key)
             if persisted is None:
@@ -2059,7 +2225,13 @@ class ReadCoordinator:
             if self._discard_stale_persistent_patient_snapshot("patient_scope", cache_key, persisted):
                 return None
             snapshot = MappingProxyType(dict(persisted or {}))
-            self._store_patient_scope_by_key(cache_key, snapshot, persist=False)
+            if not self._store_patient_scope_by_key(
+                cache_key,
+                snapshot,
+                persist=False,
+                expected_epoch=read_epoch,
+            ):
+                return None
             logger.info(
                 "[ReadCoordinator] patient_scope persistent_cache_hit=1 admission_id=%s scope=%s version=%s",
                 cache_key[1] if len(cache_key) > 1 else "unknown",
@@ -2067,8 +2239,7 @@ class ReadCoordinator:
                 snapshot.get("version"),
             )
             return snapshot
-        self._patient_scope_cache.move_to_end(cache_key)
-        return snapshot
+        return None
 
     def get_current_cached_patient_scope(self, cache_key):
         snapshot = self.get_cached_patient_scope(cache_key)
@@ -2141,29 +2312,39 @@ class ReadCoordinator:
             variant="vitals",
         )
         cache_key = context.cache_key()
-        if cache_key in self._patient_vitals_cache:
-            self._patient_vitals_cache.pop(cache_key, None)
-            self._drop_cache_validation(cache_key)
-            self._drop_patient_cache_index(context)
-            logger.info(
-                "[ReadCoordinator] invalidated patient_vitals cache key=%s context_hash=%s",
-                cache_key,
-                context.hash(),
-            )
-        persistent_snapshot_cache.delete_snapshot("patient_vitals", cache_key)
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            self._bump_patient_snapshot_key_epoch_unlocked("patient_vitals", cache_key)
+            if cache_key in self._patient_vitals_cache:
+                self._patient_vitals_cache.pop(cache_key, None)
+                self._drop_cache_validation(cache_key)
+                self._drop_patient_cache_index(context)
+                logger.info(
+                    "[ReadCoordinator] invalidated patient_vitals cache key=%s context_hash=%s",
+                    cache_key,
+                    context.hash(),
+                )
+            persistent_snapshot_cache.delete_snapshot("patient_vitals", cache_key)
 
     def invalidate_patient_vitals_for_admission(self, admission_id: int, *, reason: str = "") -> int:
         if admission_id is None:
             return 0
         target_admission_id = int(admission_id)
-        removed = 0
-        for cache_key in list(self._patient_vitals_cache.keys()):
-            if int(cache_key[1]) != target_admission_id:
-                continue
-            self._patient_vitals_cache.pop(cache_key, None)
-            self._drop_cache_validation(cache_key)
-            self._drop_cache_index_by_key(self._patient_cache_index, cache_key)
-            removed += 1
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            self._bump_patient_snapshot_admission_epoch_unlocked(target_admission_id)
+            removed = 0
+            for cache_key in list(self._patient_vitals_cache.keys()):
+                if int(cache_key[1]) != target_admission_id:
+                    continue
+                self._patient_vitals_cache.pop(cache_key, None)
+                self._drop_cache_validation(cache_key)
+                self._drop_cache_index_by_key(self._patient_cache_index, cache_key)
+                removed += 1
+            persistent_removed = persistent_snapshot_cache.delete_snapshots_for_admission(
+                "patient_vitals",
+                target_admission_id,
+            )
         if removed:
             logger.info(
                 "[ReadCoordinator] invalidated patient_vitals admission_id=%s entries=%s reason=%s",
@@ -2171,24 +2352,27 @@ class ReadCoordinator:
                 removed,
                 reason or "unknown",
             )
-        persistent_removed = persistent_snapshot_cache.delete_snapshots_for_admission(
-            "patient_vitals",
-            target_admission_id,
-        )
         return removed + persistent_removed
 
     def invalidate_patient_card_for_admission(self, admission_id: int, *, reason: str = "") -> int:
         if admission_id is None:
             return 0
         target_admission_id = int(admission_id)
-        removed = 0
-        for cache_key in list(self._patient_card_cache.keys()):
-            if int(cache_key[1]) != target_admission_id:
-                continue
-            self._patient_card_cache.pop(cache_key, None)
-            self._drop_cache_validation(cache_key)
-            self._drop_cache_index_by_key(self._patient_card_cache_index, cache_key)
-            removed += 1
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            self._bump_patient_snapshot_admission_epoch_unlocked(target_admission_id)
+            removed = 0
+            for cache_key in list(self._patient_card_cache.keys()):
+                if int(cache_key[1]) != target_admission_id:
+                    continue
+                self._patient_card_cache.pop(cache_key, None)
+                self._drop_cache_validation(cache_key)
+                self._drop_cache_index_by_key(self._patient_card_cache_index, cache_key)
+                removed += 1
+            persistent_removed = persistent_snapshot_cache.delete_snapshots_for_admission(
+                "patient_card",
+                target_admission_id,
+            )
         if removed:
             logger.info(
                 "[ReadCoordinator] invalidated patient_card admission_id=%s entries=%s reason=%s",
@@ -2196,10 +2380,6 @@ class ReadCoordinator:
                 removed,
                 reason or "unknown",
             )
-        persistent_removed = persistent_snapshot_cache.delete_snapshots_for_admission(
-            "patient_card",
-            target_admission_id,
-        )
         return removed + persistent_removed
 
     def validate_reload_version(
@@ -2301,65 +2481,149 @@ class ReadCoordinator:
             return logging.INFO
         return logging.WARNING
 
-    def _store_patient_vitals(self, context: PatientSnapshotContext, snapshot) -> None:
-        self._store_patient_vitals_by_key(context.cache_key(), snapshot, persist=True)
+    def _store_patient_vitals(
+        self,
+        context: PatientSnapshotContext,
+        snapshot,
+        *,
+        expected_epoch: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        return self._store_patient_vitals_by_key(
+            context.cache_key(),
+            snapshot,
+            persist=True,
+            expected_epoch=expected_epoch,
+        )
 
-    def _store_patient_vitals_by_key(self, cache_key, snapshot, *, persist: bool) -> None:
-        self._patient_vitals_cache[cache_key] = snapshot
-        self._patient_vitals_cache.move_to_end(cache_key)
-        self._track_patient_cache_key(self._patient_cache_index, cache_key)
-        if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
-            persistent_snapshot_cache.store_snapshot(
+    def _store_patient_vitals_by_key(
+        self,
+        cache_key,
+        snapshot,
+        *,
+        persist: bool,
+        expected_epoch: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if expected_epoch is not None and not self._patient_snapshot_epoch_is_current_unlocked(
                 "patient_vitals",
                 cache_key,
-                dict(snapshot or {}),
-                expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
-            )
-        while len(self._patient_vitals_cache) > self.max_cached_patients:
-            evicted_key, _ = self._patient_vitals_cache.popitem(last=False)
-            self._drop_cache_validation(evicted_key)
-            self._drop_cache_index_by_key(self._patient_cache_index, evicted_key)
-            logger.info("[ReadCoordinator] evicted patient_vitals cache key=%s", evicted_key)
+                expected_epoch,
+            ):
+                logger.info("[ReadCoordinator] rejected stale patient_vitals store key=%s", cache_key)
+                return False
+            self._patient_vitals_cache[cache_key] = snapshot
+            self._patient_vitals_cache.move_to_end(cache_key)
+            self._track_patient_cache_key(self._patient_cache_index, cache_key)
+            if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
+                persistent_snapshot_cache.schedule_store_snapshot(
+                    "patient_vitals",
+                    cache_key,
+                    dict(snapshot or {}),
+                    expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
+                )
+            while len(self._patient_vitals_cache) > self.max_cached_patients:
+                evicted_key, _ = self._patient_vitals_cache.popitem(last=False)
+                self._drop_cache_validation(evicted_key)
+                self._drop_cache_index_by_key(self._patient_cache_index, evicted_key)
+                logger.info("[ReadCoordinator] evicted patient_vitals cache key=%s", evicted_key)
+            return True
 
-    def _store_patient_card(self, context: PatientSnapshotContext, snapshot) -> None:
-        self._store_patient_card_by_key(context.cache_key(), snapshot, persist=True)
+    def _store_patient_card(
+        self,
+        context: PatientSnapshotContext,
+        snapshot,
+        *,
+        expected_epoch: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        return self._store_patient_card_by_key(
+            context.cache_key(),
+            snapshot,
+            persist=True,
+            expected_epoch=expected_epoch,
+        )
 
-    def _store_patient_card_by_key(self, cache_key, snapshot, *, persist: bool) -> None:
-        self._patient_card_cache[cache_key] = snapshot
-        self._patient_card_cache.move_to_end(cache_key)
-        self._track_patient_cache_key(self._patient_card_cache_index, cache_key)
-        if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
-            persistent_snapshot_cache.store_snapshot(
+    def _store_patient_card_by_key(
+        self,
+        cache_key,
+        snapshot,
+        *,
+        persist: bool,
+        expected_epoch: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if expected_epoch is not None and not self._patient_snapshot_epoch_is_current_unlocked(
                 "patient_card",
                 cache_key,
-                dict(snapshot or {}),
-                expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
-            )
-        while len(self._patient_card_cache) > self.max_cached_patients:
-            evicted_key, _ = self._patient_card_cache.popitem(last=False)
-            self._drop_cache_validation(evicted_key)
-            self._drop_cache_index_by_key(self._patient_card_cache_index, evicted_key)
-            logger.info("[ReadCoordinator] evicted patient_card cache key=%s", evicted_key)
+                expected_epoch,
+            ):
+                logger.info("[ReadCoordinator] rejected stale patient_card store key=%s", cache_key)
+                return False
+            self._patient_card_cache[cache_key] = snapshot
+            self._patient_card_cache.move_to_end(cache_key)
+            self._track_patient_cache_key(self._patient_card_cache_index, cache_key)
+            if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
+                persistent_snapshot_cache.schedule_store_snapshot(
+                    "patient_card",
+                    cache_key,
+                    dict(snapshot or {}),
+                    expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
+                )
+            while len(self._patient_card_cache) > self.max_cached_patients:
+                evicted_key, _ = self._patient_card_cache.popitem(last=False)
+                self._drop_cache_validation(evicted_key)
+                self._drop_cache_index_by_key(self._patient_card_cache_index, evicted_key)
+                logger.info("[ReadCoordinator] evicted patient_card cache key=%s", evicted_key)
+            return True
 
-    def _store_patient_scope(self, context: PatientSnapshotContext, snapshot) -> None:
-        self._store_patient_scope_by_key(context.cache_key(), snapshot, persist=True)
+    def _store_patient_scope(
+        self,
+        context: PatientSnapshotContext,
+        snapshot,
+        *,
+        expected_epoch: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        return self._store_patient_scope_by_key(
+            context.cache_key(),
+            snapshot,
+            persist=True,
+            expected_epoch=expected_epoch,
+        )
 
-    def _store_patient_scope_by_key(self, cache_key, snapshot, *, persist: bool) -> None:
-        self._patient_scope_cache[cache_key] = snapshot
-        self._patient_scope_cache.move_to_end(cache_key)
-        self._track_patient_cache_key(self._patient_scope_cache_index, cache_key)
-        if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
-            persistent_snapshot_cache.store_snapshot(
+    def _store_patient_scope_by_key(
+        self,
+        cache_key,
+        snapshot,
+        *,
+        persist: bool,
+        expected_epoch: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        lock, _admission_epochs, _key_epochs = self._patient_snapshot_epoch_state()
+        with lock:
+            if expected_epoch is not None and not self._patient_snapshot_epoch_is_current_unlocked(
                 "patient_scope",
                 cache_key,
-                dict(snapshot or {}),
-                expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
-            )
-        while len(self._patient_scope_cache) > self.max_cached_patients * self.max_tabs_per_patient:
-            evicted_key, _ = self._patient_scope_cache.popitem(last=False)
-            self._drop_cache_validation(evicted_key)
-            self._drop_cache_index_by_key(self._patient_scope_cache_index, evicted_key)
-            logger.info("[ReadCoordinator] evicted patient_scope cache key=%s", evicted_key)
+                expected_epoch,
+            ):
+                logger.info("[ReadCoordinator] rejected stale patient_scope store key=%s", cache_key)
+                return False
+            self._patient_scope_cache[cache_key] = snapshot
+            self._patient_scope_cache.move_to_end(cache_key)
+            self._track_patient_cache_key(self._patient_scope_cache_index, cache_key)
+            if persist and str(cache_key[0]) == "live" and str(cache_key[4]) == "live":
+                persistent_snapshot_cache.schedule_store_snapshot(
+                    "patient_scope",
+                    cache_key,
+                    dict(snapshot or {}),
+                    expires_at=persistent_snapshot_cache.expiry_from_cache_key(cache_key),
+                )
+            while len(self._patient_scope_cache) > self.max_cached_patients * self.max_tabs_per_patient:
+                evicted_key, _ = self._patient_scope_cache.popitem(last=False)
+                self._drop_cache_validation(evicted_key)
+                self._drop_cache_index_by_key(self._patient_scope_cache_index, evicted_key)
+                logger.info("[ReadCoordinator] evicted patient_scope cache key=%s", evicted_key)
+            return True
 
     def _store_orders_tab(self, context: OrdersContext, snapshot) -> None:
         cache_key = context.cache_key()

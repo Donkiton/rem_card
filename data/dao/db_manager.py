@@ -642,6 +642,10 @@ class DatabaseManager:
     def _rotation_blocking_role_lock_paths(self) -> dict[str, str]:
         session_locks_dir = os.path.join(str(getattr(self, "baza_dir", BAZA_DIR)), "session_locks")
         return {
+            # Doctor workstations keep a hot readonly polling handle.  On
+            # Windows that handle prevents the atomic rename used by rotation;
+            # on POSIX it would keep polling the retired inode afterwards.
+            "doctor": os.path.join(session_locks_dir, "doctor.lock"),
             "nurse": os.path.join(session_locks_dir, "nurse.lock"),
             "nurse_emergency": os.path.join(session_locks_dir, "nurse_emergency.lock"),
         }
@@ -1757,6 +1761,8 @@ class DatabaseManager:
             )
 
     def _should_read_from_local(self) -> bool:
+        if bool(getattr(self._thread_state, "force_central_reads", False)):
+            return False
         if not self._local_replica:
             return False
         return time.time() >= self._prefer_central_reads_until
@@ -1909,6 +1915,117 @@ class DatabaseManager:
                         conn.close()
                 except Exception as exc:
                     logger.debug("Failed to close scoped central read connection: %s", exc)
+
+    @contextmanager
+    def central_read_snapshot_scope(self, source: str = "snapshot"):
+        """Route related reads through one SQLite read transaction.
+
+        ``central_read_scope`` intentionally only reuses a connection.  In
+        autocommit mode each SELECT can still observe a newer database state,
+        which is unsuitable for pairs such as archive ``COUNT(*)`` + page
+        rows.  This scope additionally opens a deferred read transaction and
+        therefore pins one SQLite snapshot until the scope exits.
+
+        A surrounding write transaction already provides the required view.
+        Otherwise this scope deliberately reads from the central database,
+        not from the independently refreshed local replica.
+        """
+        if self._in_current_thread_remcard_transaction():
+            yield self
+            return
+
+        state = self._thread_state
+        previous_depth = int(getattr(state, "central_read_scope_depth", 0) or 0)
+        had_connection = hasattr(state, "central_read_scope_conn")
+        previous_connection = getattr(state, "central_read_scope_conn", None)
+        had_force_central = hasattr(state, "force_central_reads")
+        previous_force_central = bool(getattr(state, "force_central_reads", False))
+
+        conn = previous_connection
+        owns_connection = conn is None
+        owns_transaction = False
+        try:
+            if owns_connection:
+                with self._central_io_lock_scope(
+                    "remcard_read_snapshot_open",
+                    source=str(source or "snapshot"),
+                ):
+                    conn = self._open_readonly_central_connection()
+
+            state.central_read_scope_depth = previous_depth + 1
+            state.central_read_scope_conn = conn
+            state.force_central_reads = True
+
+            if not bool(getattr(conn, "in_transaction", False)):
+                conn.execute("BEGIN")
+                owns_transaction = True
+            yield self
+        finally:
+            if owns_transaction and conn is not None:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error as exc:
+                    logger.debug("Failed to finish central read snapshot: %s", exc)
+
+            state.central_read_scope_depth = previous_depth
+            if had_connection:
+                state.central_read_scope_conn = previous_connection
+            elif hasattr(state, "central_read_scope_conn"):
+                delattr(state, "central_read_scope_conn")
+            if had_force_central:
+                state.force_central_reads = previous_force_central
+            elif hasattr(state, "force_central_reads"):
+                delattr(state, "force_central_reads")
+
+            if owns_connection and conn is not None:
+                try:
+                    with self.write_controller.connection_guard(conn):
+                        conn.close()
+                except Exception as exc:
+                    logger.debug("Failed to close central read snapshot connection: %s", exc)
+
+    def open_persistent_readonly_connection(self, *, source: str = "persistent_reader") -> sqlite3.Connection:
+        """Open a readonly connection that must be closed by the calling thread.
+
+        This is intentionally separate from ``_central_read_conns``: long-lived
+        owners such as ``DataUpdateMonitor`` create, use and close the connection
+        in the same thread, avoiding cross-thread sqlite close hazards on Windows.
+        """
+        with self._central_io_lock_scope("remcard_persistent_read_open", source=str(source or "persistent_reader")):
+            return self._open_readonly_central_connection()
+
+    @contextmanager
+    def existing_central_read_scope(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        force_central: bool = True,
+    ):
+        """Route reads in the current thread through an existing connection."""
+        if conn is None:
+            raise ValueError("Existing central read connection is required")
+        state = self._thread_state
+        previous_depth = int(getattr(state, "central_read_scope_depth", 0) or 0)
+        had_connection = hasattr(state, "central_read_scope_conn")
+        previous_connection = getattr(state, "central_read_scope_conn", None)
+        had_force_central = hasattr(state, "force_central_reads")
+        previous_force_central = bool(getattr(state, "force_central_reads", False))
+        state.central_read_scope_depth = previous_depth + 1
+        state.central_read_scope_conn = conn
+        if force_central:
+            state.force_central_reads = True
+        try:
+            yield self
+        finally:
+            state.central_read_scope_depth = previous_depth
+            if had_connection:
+                state.central_read_scope_conn = previous_connection
+            elif hasattr(state, "central_read_scope_conn"):
+                delattr(state, "central_read_scope_conn")
+            if had_force_central:
+                state.force_central_reads = previous_force_central
+            elif hasattr(state, "force_central_reads"):
+                delattr(state, "force_central_reads")
 
     def _scoped_central_read_connection(self) -> Optional[sqlite3.Connection]:
         return getattr(self._thread_state, "central_read_scope_conn", None)

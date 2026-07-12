@@ -152,7 +152,7 @@ class CurrentNurseOrdersWidget(QWidget):
             "version": self._current_change_id(),
             "data": [dict(item) for item in (data_list or [])],
         }
-        persistent_snapshot_cache.store_snapshot(
+        persistent_snapshot_cache.schedule_store_snapshot(
             "current_orders",
             key,
             dict(self._snapshot_cache[key]),

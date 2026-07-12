@@ -10,7 +10,10 @@ from rem_card.services.remcard_icon_defaults import (
     REMCARD_MALE_PATIENT_ICON_KEY,
 )
 from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label
-from rem_card.ui.shared.remcard_icon_settings import load_remcard_icon_pixmap
+from rem_card.ui.shared.remcard_icon_settings import (
+    load_remcard_icon_pixmap,
+    request_remcard_icon_pixmap,
+)
 from rem_card.ui.styles.theme import (
     STYLE_SIDE_PATIENT_ACTION_BUTTON,
     STYLE_SIDE_PATIENT_CARD,
@@ -232,7 +235,7 @@ class SidePatientCard(QFrame):
 
         if not patient or not admission:
             self._set_photo_label_mode(empty_bed=True)
-            self.photo_label.setPixmap(self._get_icon_pixmap(REMCARD_EMPTY_BED_ICON_KEY))
+            self._set_icon_pixmap(REMCARD_EMPTY_BED_ICON_KEY)
             self.photo_label.show()
             self.history_label.hide()
             self.name_label.setText(format_patient_bed_label(bed_number, numbered=True, uppercase=True))
@@ -256,11 +259,9 @@ class SidePatientCard(QFrame):
             birth_date = getattr(patient, "birth_date", None)
             reference_date = admission.admission_datetime
 
-            self.photo_label.setPixmap(
-                self._get_icon_pixmap(
-                    self._photo_key_for_admission(admission),
-                    patient_frame=True,
-                )
+            self._set_icon_pixmap(
+                self._photo_key_for_admission(admission),
+                patient_frame=True,
             )
 
             self.age_label.show()
@@ -288,20 +289,54 @@ class SidePatientCard(QFrame):
         self.update_info(self.current_bed_number, self._current_patient, self._current_admission)
 
     def _get_icon_pixmap(self, icon_key: str, *, patient_frame: bool = False):
-        pix = load_remcard_icon_pixmap(icon_key)
+        aspect_mode = Qt.KeepAspectRatioByExpanding if patient_frame else Qt.KeepAspectRatio
+        pix = load_remcard_icon_pixmap(
+            icon_key,
+            target_size=(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE),
+            aspect_mode=aspect_mode,
+        )
         if pix.isNull():
             return QPixmap()
         if patient_frame:
-            return self._circular_patient_photo(pix)
-        return self._empty_bed_photo(pix)
+            return self._circular_patient_photo(pix, prescaled=True)
+        return self._empty_bed_photo(pix, prescaled=True)
+
+    def _set_icon_pixmap(self, icon_key: str, *, patient_frame: bool = False) -> None:
+        aspect_mode = Qt.KeepAspectRatioByExpanding if patient_frame else Qt.KeepAspectRatio
+
+        def apply(label, pixmap):
+            if pixmap.isNull():
+                return
+            styled = (
+                self._circular_patient_photo(pixmap, prescaled=True)
+                if patient_frame
+                else self._empty_bed_photo(pixmap, prescaled=True)
+            )
+            label.setPixmap(styled)
+
+        immediate = request_remcard_icon_pixmap(
+            self.photo_label,
+            icon_key,
+            target_size=(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE),
+            aspect_mode=aspect_mode,
+            apply=apply,
+        )
+        if immediate.isNull():
+            self.photo_label.setPixmap(QPixmap())
+            return
+        apply(self.photo_label, immediate)
 
     @staticmethod
-    def _empty_bed_photo(pixmap: QPixmap) -> QPixmap:
-        scaled = pixmap.scaled(
-            PATIENT_PHOTO_SIZE,
-            PATIENT_PHOTO_SIZE,
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+    def _empty_bed_photo(pixmap: QPixmap, *, prescaled: bool = False) -> QPixmap:
+        scaled = (
+            pixmap
+            if prescaled
+            else pixmap.scaled(
+                PATIENT_PHOTO_SIZE,
+                PATIENT_PHOTO_SIZE,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
         )
         result = QPixmap(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE)
         result.fill(Qt.transparent)
@@ -315,12 +350,16 @@ class SidePatientCard(QFrame):
         return result
 
     @staticmethod
-    def _circular_patient_photo(pixmap: QPixmap) -> QPixmap:
-        scaled = pixmap.scaled(
-            PATIENT_PHOTO_SIZE,
-            PATIENT_PHOTO_SIZE,
-            Qt.KeepAspectRatioByExpanding,
-            Qt.SmoothTransformation,
+    def _circular_patient_photo(pixmap: QPixmap, *, prescaled: bool = False) -> QPixmap:
+        scaled = (
+            pixmap
+            if prescaled
+            else pixmap.scaled(
+                PATIENT_PHOTO_SIZE,
+                PATIENT_PHOTO_SIZE,
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation,
+            )
         )
         x = max(0, (scaled.width() - PATIENT_PHOTO_SIZE) // 2)
         y = max(0, (scaled.height() - PATIENT_PHOTO_SIZE) // 2)

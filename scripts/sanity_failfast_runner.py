@@ -54,19 +54,18 @@ def _extract_last_json_dict(text: str) -> dict[str, Any] | None:
         return None
     decoder = json.JSONDecoder()
     best_obj: dict[str, Any] | None = None
-    best_end = -1
-    for idx, ch in enumerate(text):
-        if ch != "{":
-            continue
+    idx = text.rfind("{")
+    while idx >= 0:
         try:
             obj, end = decoder.raw_decode(text[idx:])
         except Exception:
+            idx = text.rfind("{", 0, idx)
             continue
         if isinstance(obj, dict):
-            absolute_end = idx + int(end)
-            if absolute_end >= best_end:
-                best_end = absolute_end
-                best_obj = obj
+            best_obj = obj
+            if not text[idx + int(end):].strip():
+                return obj
+        idx = text.rfind("{", 0, idx)
     return best_obj
 
 
@@ -293,10 +292,14 @@ def _validate_regression(exit_code: int, payload: dict[str, Any] | None) -> tupl
     total = int(payload.get("total", 0) or 0)
     failed = int(payload.get("failed", 0) or 0)
     passed = int(payload.get("passed", 0) or 0)
+    completed = int(payload.get("completed", 0) or 0)
     if total <= 0:
         return False, "Regression payload has zero checks"
-    if failed != 0 or passed != total:
-        return False, f"Regression mismatch: passed={passed}, failed={failed}, total={total}"
+    if failed != 0 or passed != total or completed != total or payload.get("coverage_complete") is not True:
+        return False, (
+            f"Regression mismatch: passed={passed}, failed={failed}, "
+            f"completed={completed}, total={total}, coverage={payload.get('coverage_complete')}"
+        )
     return True, f"Passed {passed}/{total}"
 
 
@@ -405,7 +408,13 @@ def main() -> int:
     parser.add_argument("--benchmark-clicks", type=int, default=5, help="Clicks for orders latency benchmark")
     parser.add_argument("--benchmark-timeout-s", type=float, default=120.0, help="Hard timeout for benchmark script")
     parser.add_argument("--quality-timeout-s", type=float, default=60.0, help="Timeout for static quality checks")
-    parser.add_argument("--regression-timeout-s", type=float, default=1200.0, help="Hard timeout for regression checks")
+    parser.add_argument("--regression-timeout-s", type=float, default=600.0, help="Hard timeout for regression checks")
+    parser.add_argument(
+        "--regression-profile",
+        choices=("fast", "exhaustive"),
+        default="fast",
+        help="fast runs all regression contracts in isolated shards; exhaustive preserves historical sequential order",
+    )
     parser.add_argument(
         "--regression-idle-timeout-s",
         type=float,
@@ -440,8 +449,12 @@ def main() -> int:
             "command": [
                 args.python,
                 str(SCRIPT_DIR / "regression_safety_checks.py"),
+                "--profile",
+                str(args.regression_profile),
                 "--timeout-s",
                 str(max(0.0, float(args.regression_timeout_s) - 5.0)),
+                "--json-detail",
+                "summary",
             ],
             "timeout": float(args.regression_timeout_s),
             "idle_timeout": float(args.regression_idle_timeout_s),

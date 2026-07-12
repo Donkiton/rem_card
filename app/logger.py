@@ -6,21 +6,20 @@ import time
 import functools
 from datetime import datetime
 
-from rem_card.app.paths import LOGS_DIR, ensure_directories
+from rem_card.app.paths import LOGS_DIR
 from rem_card.app.runtime_paths import cleanup_old_local_logs, get_log_file_prefix
 
 
 def _ensure_logger_directories() -> str | None:
     try:
-        ensure_directories()
-        return None
-    except (FileNotFoundError, OSError) as exc:
         os.makedirs(LOGS_DIR, exist_ok=True)
+        return None
+    except OSError as exc:
         return str(exc)
 
 
 def setup_logger():
-    shared_dir_warning = _ensure_logger_directories()
+    log_dir_warning = _ensure_logger_directories()
     os.makedirs(LOGS_DIR, exist_ok=True)
     cleanup_old_local_logs(LOGS_DIR)
 
@@ -46,8 +45,8 @@ def setup_logger():
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
     logger._remcard_configured = True
-    if shared_dir_warning:
-        logger.warning("Shared directory unavailable during logger setup; using local logs only: %s", shared_dir_warning)
+    if log_dir_warning:
+        logger.warning("Log directory was unavailable during logger setup: %s", log_dir_warning)
 
     return logger
 

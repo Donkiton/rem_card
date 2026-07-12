@@ -60,8 +60,8 @@ class OperBlockStatisticsDialog(SavedFramelessDialogMixin, QDialog):
         self._end_dt = self._parse_datetime(end_date_str) or datetime.now()
         if self._end_dt < self._start_dt:
             self._start_dt, self._end_dt = self._end_dt, self._start_dt
-        self.start_date_str = self._start_dt.strftime("%Y-%m-%d 00:00:00")
-        self.end_date_str = self._end_dt.strftime("%Y-%m-%d 23:59:59")
+        self.start_date_str = self._start_dt.strftime("%Y-%m-%d")
+        self.end_date_str = self._end_dt.strftime("%Y-%m-%d")
         self._stats_worker = None
         self._stats_pdf_worker = None
         self._closing = False

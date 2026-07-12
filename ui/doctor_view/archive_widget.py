@@ -275,15 +275,38 @@ class ArchiveWidget(QWidget):
             return
 
         self._load_pending = False
-        start_dt, end_dt = self._get_archive_period_bounds()
+        # Qt widgets belong to the GUI thread.  Snapshot every value needed by
+        # the worker before AsyncCallThread starts so the loader stays a pure
+        # service call and never dereferences QLineEdit/QDateEdit off-thread.
+        start_dt, end_dt = self._get_archive_query_period_bounds()
         mode = self.archive_source_mode
         requested_page = max(1, int(self.current_page or 1))
+        page_size = max(1, int(self.page_size or 50))
+        search_name = self.search_name.text()
+        search_ib = self.search_ib.text()
+        search_diag = self.search_diag.text()
         self._load_token += 1
         load_token = self._load_token
         if mode == ARCHIVE_MODE_OPERBLOCK:
-            loader = lambda: self._load_operblock_archive_page(start_dt, end_dt, requested_page)
+            loader = lambda: self._load_operblock_archive_page(
+                start_dt,
+                end_dt,
+                requested_page,
+                page_size=page_size,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+            )
         else:
-            loader = lambda: self._load_rao_archive_page(start_dt, end_dt, requested_page)
+            loader = lambda: self._load_rao_archive_page(
+                start_dt,
+                end_dt,
+                requested_page,
+                page_size=page_size,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
+            )
         worker = AsyncCallThread(
             loader,
             parent=self,
@@ -294,19 +317,29 @@ class ArchiveWidget(QWidget):
         worker.finished.connect(lambda: self._on_load_finished(worker))
         worker.start()
 
-    def _load_rao_archive_page(self, start_dt: str, end_dt: str, page: int) -> dict:
+    def _load_rao_archive_page(
+        self,
+        start_dt: str,
+        end_dt: str,
+        page: int,
+        *,
+        page_size: int,
+        search_name: str,
+        search_ib: str,
+        search_diag: str,
+    ) -> dict:
         if hasattr(self.patient_service, "get_archived_patients_page"):
             return self.patient_service.get_archived_patients_page(
                 start_dt=start_dt,
                 end_dt=end_dt,
                 page=page,
-                page_size=self.page_size,
-                search_name=self.search_name.text(),
-                search_ib=self.search_ib.text(),
-                search_diag=self.search_diag.text(),
+                page_size=page_size,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
             )
         records = self.patient_service.get_archived_patients(start_dt=start_dt, end_dt=end_dt)
-        return {"records": records, "total_count": len(records), "page": 1, "page_size": self.page_size}
+        return {"records": records, "total_count": len(records), "page": 1, "page_size": page_size}
 
     def _apply_loaded_records(self, load_token: int, source_mode: str, payload):
         if load_token != self._load_token or source_mode != self.archive_source_mode:
@@ -450,6 +483,12 @@ class ArchiveWidget(QWidget):
     def _get_archive_period_bounds(self) -> tuple[str, str]:
         start_dt = self.date_from.date().toString("yyyy-MM-dd 00:00:00")
         end_dt = self.date_to.date().toString("yyyy-MM-dd 23:59:59")
+        return start_dt, end_dt
+
+    def _get_archive_query_period_bounds(self) -> tuple[str, str]:
+        """Return a half-open period suitable for SQLite page queries."""
+        start_dt = self.date_from.date().toString("yyyy-MM-dd 00:00:00")
+        end_dt = self.date_to.date().addDays(1).toString("yyyy-MM-dd 00:00:00")
         return start_dt, end_dt
 
     def on_graphs_clicked(self):
@@ -969,21 +1008,31 @@ class ArchiveWidget(QWidget):
             self.table.setHorizontalHeaderLabels(["ФИО", "ИБ №", "Диагноз", "Поступил", "Выписан"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
 
-    def _load_operblock_archive_page(self, start_dt: str, end_dt: str, page: int) -> dict:
+    def _load_operblock_archive_page(
+        self,
+        start_dt: str,
+        end_dt: str,
+        page: int,
+        *,
+        page_size: int,
+        search_name: str,
+        search_ib: str,
+        search_diag: str,
+    ) -> dict:
         if self.operblock_service is None:
-            return {"records": [], "total_count": 0, "page": page, "page_size": self.page_size}
+            return {"records": [], "total_count": 0, "page": page, "page_size": page_size}
         if hasattr(self.operblock_service, "list_archived_operation_cases_page"):
             return self.operblock_service.list_archived_operation_cases_page(
                 start_dt=start_dt,
                 end_dt=end_dt,
                 page=page,
-                page_size=self.page_size,
-                search_name=self.search_name.text(),
-                search_ib=self.search_ib.text(),
-                search_diag=self.search_diag.text(),
+                page_size=page_size,
+                search_name=search_name,
+                search_ib=search_ib,
+                search_diag=search_diag,
             )
         cases = self.operblock_service.list_archived_operation_cases(start_dt=start_dt, end_dt=end_dt)
-        return {"records": list(cases or []), "total_count": len(cases or []), "page": 1, "page_size": self.page_size}
+        return {"records": list(cases or []), "total_count": len(cases or []), "page": 1, "page_size": page_size}
 
     def _render_operblock_case_row(self, row: int, case: dict, selected_key: str = None):
         diagnosis_text = self._record_diagnosis_text(case) or "—"

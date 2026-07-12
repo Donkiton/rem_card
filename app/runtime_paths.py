@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 from typing import Optional
 
@@ -21,6 +22,19 @@ OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
+
+
+def _startup_path_validation_ttl_sec() -> float:
+    try:
+        value = float(os.environ.get("REMCARD_STARTUP_PATH_VALIDATION_TTL_SEC", "30"))
+    except (TypeError, ValueError):
+        value = 30.0
+    return max(1.0, min(120.0, value))
+
+
+STARTUP_PATH_VALIDATION_TTL_SEC = _startup_path_validation_ttl_sec()
+_STARTUP_PATH_VALIDATION_LOCK = threading.Lock()
+_STARTUP_PATH_VALIDATION: dict[str, object] | None = None
 
 REQUIRED_BAZA_DIRS = (
     "archiv",
@@ -309,6 +323,59 @@ def cleanup_old_local_logs(log_dir: str, retention_days: int = LOCAL_LOG_RETENTI
 def get_required_baza_paths(baza_dir: str) -> list[str]:
     root = _normalize_baza_dir(baza_dir)
     return [os.path.join(root, part.replace("/", os.sep)) for part in REQUIRED_BAZA_DIRS]
+
+
+def _startup_path_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.normpath(str(path))))
+
+
+def mark_startup_baza_paths_validated(baza_dir: str, paths: list[str] | tuple[str, ...]) -> None:
+    """Record one successful, process-local startup directory validation."""
+    global _STARTUP_PATH_VALIDATION
+    root_key = _startup_path_key(_normalize_baza_dir(baza_dir))
+    path_keys = {_startup_path_key(path) for path in paths if path}
+    path_keys.add(root_key)
+    token = {
+        "root_key": root_key,
+        "path_keys": frozenset(path_keys),
+        "validated_at": time.monotonic(),
+    }
+    with _STARTUP_PATH_VALIDATION_LOCK:
+        _STARTUP_PATH_VALIDATION = token
+
+
+def startup_baza_paths_recently_validated(
+    baza_dir: str,
+    required_paths: list[str] | tuple[str, ...],
+    *,
+    max_age_sec: float | None = None,
+) -> bool:
+    """Return True only for a fresh token covering this root and every path."""
+    ttl = STARTUP_PATH_VALIDATION_TTL_SEC if max_age_sec is None else max(0.0, float(max_age_sec))
+    root_key = _startup_path_key(_normalize_baza_dir(baza_dir))
+    required_keys = {_startup_path_key(path) for path in required_paths if path}
+    required_keys.add(root_key)
+    with _STARTUP_PATH_VALIDATION_LOCK:
+        token = _STARTUP_PATH_VALIDATION
+        if token is None:
+            return False
+        token_root = token.get("root_key")
+        token_paths = token.get("path_keys")
+        validated_at = token.get("validated_at")
+    if token_root != root_key or not isinstance(token_paths, frozenset):
+        return False
+    try:
+        age_sec = time.monotonic() - float(validated_at)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= age_sec <= ttl and required_keys.issubset(token_paths)
+
+
+def clear_startup_baza_path_validation() -> None:
+    """Clear the process token; primarily useful for isolated startup tests."""
+    global _STARTUP_PATH_VALIDATION
+    with _STARTUP_PATH_VALIDATION_LOCK:
+        _STARTUP_PATH_VALIDATION = None
 
 
 def get_journal_db_path(baza_dir: str) -> str:

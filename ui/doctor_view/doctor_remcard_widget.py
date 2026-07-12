@@ -101,6 +101,8 @@ class DoctorRemCardWidget(QWidget):
         self._balance_calculator_cls = None
         self._archive_signals_bound = False
         self._admin_signals_bound = False
+        self._bound_archive_widget = None
+        self._bound_admin_widget = None
         self._orders_widget_signals_bound = False
         self._nurse_orders_balance_signals_bound = False
         self.report_controller = None
@@ -2208,18 +2210,35 @@ class DoctorRemCardWidget(QWidget):
         from ..shared.remcard_layout import RemCardLayoutManager
 
         old_shell = getattr(self, "_w1_shell", None)
-        layout = RemCardLayoutManager(
-            role="Врач",
-            patient_service=self.patient_service,
-            remcard_service=self.service,
-            parent=self.content_stack,
-            operblock_service=self.operblock_service,
-        )
+        handoff = old_shell.create_layout_handoff() if old_shell is not None else None
+        try:
+            layout = RemCardLayoutManager(
+                role="Врач",
+                patient_service=self.patient_service,
+                remcard_service=self.service,
+                parent=self.content_stack,
+                operblock_service=self.operblock_service,
+                w1_handoff=handoff,
+            )
+        except Exception:
+            if old_shell is not None and handoff is not None:
+                old_shell.restore_layout_handoff(handoff)
+            raise
         layout.patient_status_service = self.service.status_service
         layout.current_admission_id = self.admission_id
         layout.current_date = self._current_date
         layout.remcard_service = self.service
         layout.operblock_service = self.operblock_service
+
+        if old_shell is not None and handoff is not None:
+            self._disconnect_w1_shell_routing(old_shell)
+            try:
+                old_shell.complete_layout_handoff(handoff)
+            except Exception:
+                old_shell.restore_layout_handoff(handoff)
+                self._connect_w1_shell_routing(old_shell)
+                layout.deleteLater()
+                raise
 
         self.content_stack.addWidget(layout)
         self.layout_manager = layout
@@ -2282,16 +2301,14 @@ class DoctorRemCardWidget(QWidget):
             s4v.full_report_requested.connect(self.on_full_report_clicked)
             s4v.daily_report_requested.connect(self.on_daily_report_clicked)
 
-        self._archive_signals_bound = False
-        self._admin_signals_bound = False
         self._wire_dynamic_views()
         self._full_layout_static_signals_bound = True
 
-    def _retire_w1_shell(self, shell):
-        if shell is None:
+    def _disconnect_w1_shell_routing(self, shell):
+        if getattr(shell, "_controller_routing_disconnected", False):
             return
         try:
-            if hasattr(shell, "beds_selection_widget"):
+            if hasattr(shell, "beds_selection_widget") and shell.beds_selection_widget is not None:
                 shell.beds_selection_widget.patient_selected.disconnect(self.on_patient_selected_from_list)
         except Exception:
             pass
@@ -2300,6 +2317,20 @@ class DoctorRemCardWidget(QWidget):
                 shell.selection_mode_changed.disconnect(self._on_selection_mode_changed)
         except Exception:
             pass
+        shell._controller_routing_disconnected = True
+
+    def _connect_w1_shell_routing(self, shell):
+        if not getattr(shell, "_controller_routing_disconnected", False):
+            return
+        if getattr(shell, "beds_selection_widget", None) is not None:
+            shell.beds_selection_widget.patient_selected.connect(self.on_patient_selected_from_list)
+        shell.selection_mode_changed.connect(self._on_selection_mode_changed)
+        shell._controller_routing_disconnected = False
+
+    def _retire_w1_shell(self, shell):
+        if shell is None:
+            return
+        self._disconnect_w1_shell_routing(shell)
         try:
             if hasattr(shell, "shutdown"):
                 shell.shutdown()
@@ -2315,17 +2346,19 @@ class DoctorRemCardWidget(QWidget):
 
     def _wire_dynamic_views(self):
         archive_widget = getattr(self.layout_manager, "archive_widget", None)
-        if archive_widget and not self._archive_signals_bound:
+        if archive_widget and archive_widget is not self._bound_archive_widget:
             archive_widget.back_requested.connect(lambda: self.on_back_clicked())
             archive_widget.patient_selected.connect(self.on_patient_selected_from_archive)
             archive_widget.edit_requested.connect(self.on_patient_edit_requested_from_archive)
             if hasattr(archive_widget, "operblock_case_selected"):
                 archive_widget.operblock_case_selected.connect(self.on_operblock_case_selected_from_archive)
+            self._bound_archive_widget = archive_widget
             self._archive_signals_bound = True
 
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
-        if admin_widget and not self._admin_signals_bound:
+        if admin_widget and admin_widget is not self._bound_admin_widget:
             admin_widget.btn_back_to_roles.clicked.connect(lambda: self.on_back_clicked())
+            self._bound_admin_widget = admin_widget
             self._admin_signals_bound = True
 
     def _close_operblock_archive_viewer(self):

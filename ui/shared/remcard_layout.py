@@ -10,6 +10,7 @@ from rem_card.ui.shared.display_settings_storage import (
     w1b_lower_sector_enabled,
 )
 from .layout_components import CurrentPageStack, SectorFactory, SplitterManager
+from .w1_handoff import W1LayoutHandoff
 import time
 
 
@@ -38,16 +39,31 @@ def _tab_foreground_activity_name(tab_name: str) -> str:
 class RemCardLayoutManager(QWidget):
     selection_mode_changed = Signal(str)
 
-    def __init__(self, role="Врач", patient_service=None, remcard_service=None, parent=None, operblock_service=None):
+    def __init__(
+        self,
+        role="Врач",
+        patient_service=None,
+        remcard_service=None,
+        parent=None,
+        operblock_service=None,
+        w1_handoff: W1LayoutHandoff | None = None,
+    ):
         super().__init__(parent)
+        if w1_handoff is not None and w1_handoff.role != "doctor":
+            raise ValueError("Doctor layout received a non-doctor W1 handoff")
         self.role = role
         self.patient_service = patient_service
         self.remcard_service = remcard_service
         self.operblock_service = operblock_service
+        self._w1_handoff = w1_handoff
         self.current_admission_id = None
         self.current_date = None
         self.current_mode = "normal"
-        self._archive_last_change_id = -1
+        self._archive_last_change_id = (
+            int(w1_handoff.archive_last_change_id)
+            if w1_handoff is not None
+            else -1
+        )
         self._first_card_mode_switch_done = False
         self._events_status_handlers = []
         self._events_patient_context = None
@@ -90,10 +106,13 @@ class RemCardLayoutManager(QWidget):
             include_optional_tabs=False,
             role_hint="doctor",
             include_balance_sections=False,
+            include_w1_sectors=self._w1_handoff is None,
         )
             
         for name, instance in sectors.items():
             setattr(self, name, instance)
+        if self._w1_handoff is not None:
+            self.sector_w1b = self._w1_handoff.sector_w1b
 
         from ..rem_card_sectors.sector_7tab_b import (
             Sector7anal_b,
@@ -303,44 +322,63 @@ class RemCardLayoutManager(QWidget):
         self.selection_stack.addWidget(self.right_area)
         
         # 1. Слой списка коек (W1)
-        self.beds_view = QWidget()
-        beds_layout = QVBoxLayout(self.beds_view)
-        beds_layout.setContentsMargins(0, 0, 0, 0)
-        from ...app.logger import logger
-        logger.debug(f"RemCardLayoutManager init_ui: patient_service={self.patient_service}")
-        if self.patient_service:
-            # Передаем оба сервиса в BedsSelectionWidget
-            # remcard_service может прийти как аргумент init или быть установлен позже
-            from ..doctor_view.components.beds_selection_widget import BedsSelectionWidget
-            self.beds_selection_widget = BedsSelectionWidget(
-                self.patient_service,
-                self.remcard_service,
-                auto_initial_refresh=False,
-            )
-            beds_layout.addWidget(self.beds_selection_widget)
+        if self._w1_handoff is not None:
+            self.beds_view = self._w1_handoff.beds_view
+            self.beds_selection_widget = self._w1_handoff.beds_selection_widget
         else:
-            logger.warning("RemCardLayoutManager init_ui: NO patient_service PROVIDED!")
+            self.beds_view = QWidget()
+            beds_layout = QVBoxLayout(self.beds_view)
+            beds_layout.setContentsMargins(0, 0, 0, 0)
+            from ...app.logger import logger
+            logger.debug(f"RemCardLayoutManager init_ui: patient_service={self.patient_service}")
+            if self.patient_service:
+                # Передаем оба сервиса в BedsSelectionWidget
+                # remcard_service может прийти как аргумент init или быть установлен позже
+                from ..doctor_view.components.beds_selection_widget import BedsSelectionWidget
+                self.beds_selection_widget = BedsSelectionWidget(
+                    self.patient_service,
+                    self.remcard_service,
+                    auto_initial_refresh=False,
+                )
+                beds_layout.addWidget(self.beds_selection_widget)
+            else:
+                logger.warning("RemCardLayoutManager init_ui: NO patient_service PROVIDED!")
         self.selection_stack.addWidget(self.beds_view)
             
         # 2. Слой общего архива
-        self.archive_view = QWidget()
-        self._archive_layout = QVBoxLayout(self.archive_view)
-        self._archive_layout.setContentsMargins(0, 0, 0, 0)
-        self.archive_widget = None
+        if self._w1_handoff is not None:
+            self.archive_view = self._w1_handoff.archive_view
+            self._archive_layout = self.archive_view.layout()
+            self.archive_widget = self._w1_handoff.archive_widget
+        else:
+            self.archive_view = QWidget()
+            self._archive_layout = QVBoxLayout(self.archive_view)
+            self._archive_layout.setContentsMargins(0, 0, 0, 0)
+            self.archive_widget = None
         self.selection_stack.addWidget(self.archive_view)
             
         # 3. Слой админ-панели
-        self.admin_view = QWidget()
-        self._admin_layout = QVBoxLayout(self.admin_view)
-        self._admin_layout.setContentsMargins(0, 0, 0, 0)
-        self.admin_widget = None
+        if self._w1_handoff is not None:
+            self.admin_view = self._w1_handoff.admin_view
+            self._admin_layout = self.admin_view.layout()
+            self.admin_widget = self._w1_handoff.admin_widget
+        else:
+            self.admin_view = QWidget()
+            self._admin_layout = QVBoxLayout(self.admin_view)
+            self._admin_layout.setContentsMargins(0, 0, 0, 0)
+            self.admin_widget = None
         self.selection_stack.addWidget(self.admin_view)
 
         # 4. Слой встроенного журнала
-        self.journal_view = QWidget()
-        self._journal_layout = QVBoxLayout(self.journal_view)
-        self._journal_layout.setContentsMargins(0, 0, 0, 0)
-        self.journal_widget = None
+        if self._w1_handoff is not None:
+            self.journal_view = self._w1_handoff.journal_view
+            self._journal_layout = self.journal_view.layout()
+            self.journal_widget = self._w1_handoff.journal_widget
+        else:
+            self.journal_view = QWidget()
+            self._journal_layout = QVBoxLayout(self.journal_view)
+            self._journal_layout.setContentsMargins(0, 0, 0, 0)
+            self.journal_widget = None
         self.selection_stack.addWidget(self.journal_view)
 
         self.lower_area = SplitterManager.create_splitter(Qt.Horizontal)
@@ -352,12 +390,18 @@ class RemCardLayoutManager(QWidget):
         
         # Контейнер для 1а / W1а (как у медсестры)
         self.sector_1a_stack = CurrentPageStack()
-        from ..rem_card_sectors.sector_w1a import SectorW1a
-        self.sector_w1a = SectorW1a(self.remcard_service, role="doctor", auto_initial_refresh=False)
-        self.sector_w1c = None
+        if self._w1_handoff is not None:
+            self.sector_w1a = self._w1_handoff.sector_w1a
+            self.sector_w1c = self._w1_handoff.sector_w1c
+        else:
+            from ..rem_card_sectors.sector_w1a import SectorW1a
+            self.sector_w1a = SectorW1a(self.remcard_service, role="doctor", auto_initial_refresh=False)
+            self.sector_w1c = None
         
         self.sector_1a_stack.addWidget(self.sector_1a)  # index 0: 1а (карта)
         self.sector_1a_stack.addWidget(self.sector_w1a) # index 1: W1а (койки)
+        if self.sector_w1c is not None:
+            self.sector_1a_stack.addWidget(self.sector_w1c)
         
         self.l_layout.addWidget(self.sector_1a_stack, 1)
         

@@ -13,11 +13,21 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from rem_card.ui.admin_view import drugs_dict_widget as drugs_module  # noqa: E402
 from rem_card.ui.admin_view import templates_dict_widget as templates_module  # noqa: E402
 from rem_card.ui.shared.custom_message_box import CustomMessageBox  # noqa: E402
+
+
+def _dispose_qt_widget(widget) -> None:
+    widget.close()
+    widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app = QApplication.instance()
+    if app is not None:
+        app.processEvents()
 
 
 class _FakeEngine:
@@ -158,9 +168,7 @@ class DrugTemplateDilutionReplaceDialogTest(unittest.TestCase):
             self.assertFalse(dialog.btn_apply.isEnabled())
         finally:
             if dialog is not None:
-                dialog.close()
-                dialog.deleteLater()
-                self.app.processEvents()
+                _dispose_qt_widget(dialog)
             drugs_module.CustomMessageBox.question = original_question
             drugs_module.engine = original_engine
 
@@ -194,9 +202,7 @@ class DrugTemplateDilutionReplaceDialogTest(unittest.TestCase):
             self.assertFalse(dialog.btn_apply.isEnabled())
         finally:
             if dialog is not None:
-                dialog.close()
-                dialog.deleteLater()
-                self.app.processEvents()
+                _dispose_qt_widget(dialog)
             templates_module.CustomMessageBox.question = original_question
             templates_module.engine = original_engine
 

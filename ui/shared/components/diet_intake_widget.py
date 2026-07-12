@@ -427,7 +427,7 @@ class DietIntakeWidget(QWidget):
             "plan": self._plan,
             "events": list(self._events or []),
         }
-        persistent_snapshot_cache.store_snapshot(
+        persistent_snapshot_cache.schedule_store_snapshot(
             "diet",
             key,
             dict(self._snapshot_cache[key]),

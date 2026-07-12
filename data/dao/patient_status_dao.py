@@ -37,6 +37,13 @@ class PatientStatusDAO:
 
     def get_admission_outcome_context(self, admission_id: int) -> Dict[str, Any]:
         """Возвращает поля госпитализации, нужные для диалогов исхода."""
+        read_scope = getattr(self.db, "central_read_scope", None)
+        if callable(read_scope):
+            with read_scope("admission_outcome_context"):
+                return self._build_admission_outcome_context(admission_id)
+        return self._build_admission_outcome_context(admission_id)
+
+    def _build_admission_outcome_context(self, admission_id: int) -> Dict[str, Any]:
         row = self.db.fetch_one_remcard(
             """
             SELECT
@@ -103,93 +110,93 @@ class PatientStatusDAO:
 
     def get_latest_patient_activity_datetime(self, admission_id: int, cursor=None) -> Optional[datetime]:
         """Возвращает последнюю фактическую запись пациента, которая не должна быть позже исхода."""
-        queries = [
-            (
-                "latest vital",
-                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM vitals WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest fluid",
-                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM fluids WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest oral intake",
-                "SELECT MAX(DATETIME(event_time)) AS latest_dt FROM oral_intake_events WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest actual administration",
-                """
-                SELECT MAX(DATETIME(a.actual_time)) AS latest_dt
+        query = """
+            SELECT MAX(latest_dt) AS latest_dt
+            FROM (
+                SELECT MAX(DATETIME(datetime)) AS latest_dt
+                FROM vitals
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(DATETIME(datetime))
+                FROM fluids
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(DATETIME(event_time))
+                FROM oral_intake_events
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(DATETIME(a.actual_time))
                 FROM administrations a
                 JOIN orders o ON o.id = a.order_id
                 WHERE o.admission_id = ?
                   AND a.actual_time IS NOT NULL
                   AND COALESCE(a.is_committed, 0) = 1
                   AND COALESCE(a.status, '') != 'deleted'
-                """,
-                (admission_id,),
-            ),
-            (
-                "latest transfusion",
-                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM transfusions WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest clinical event",
-                "SELECT MAX(DATETIME(timestamp)) AS latest_dt FROM clinical_events WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest respiratory support",
-                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM respiratory_support WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest lab data",
-                "SELECT MAX(DATETIME(datetime)) AS latest_dt FROM lab_data WHERE admission_id = ?",
-                (admission_id,),
-            ),
-            (
-                "latest ivl boundary",
-                """
-                SELECT MAX(dt) AS latest_dt
-                FROM (
-                    SELECT DATETIME(start_time) AS dt FROM ivl_episodes WHERE admission_id = ? AND start_time IS NOT NULL
-                    UNION ALL
-                    SELECT DATETIME(end_time) AS dt FROM ivl_episodes WHERE admission_id = ? AND end_time IS NOT NULL
-                )
-                """,
-                (admission_id, admission_id),
-            ),
-            (
-                "latest device boundary",
-                """
-                SELECT MAX(dt) AS latest_dt
-                FROM (
-                    SELECT DATETIME(insertion_date) AS dt FROM devices WHERE admission_id = ? AND insertion_date IS NOT NULL
-                    UNION ALL
-                    SELECT DATETIME(removal_date) AS dt FROM devices WHERE admission_id = ? AND removal_date IS NOT NULL
-                )
-                """,
-                (admission_id, admission_id),
-            ),
-        ]
 
-        latest: Optional[datetime] = None
-        for label, query, params in queries:
-            try:
-                row = cursor.execute(query, params).fetchone() if cursor is not None else self.db.fetch_one_remcard(query, params)
-            except Exception as exc:
-                logger.debug("[StatusDAO] Optional latest activity query failed (%s): %s", label, exc)
-                continue
-            value = row["latest_dt"] if row and row["latest_dt"] else None
-            parsed = self._parse_sqlite_dt(str(value)) if value else None
-            if parsed and (latest is None or parsed > latest):
-                latest = parsed
-        return latest
+                UNION ALL
+                SELECT MAX(DATETIME(datetime))
+                FROM transfusions
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(DATETIME(timestamp))
+                FROM clinical_events
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(DATETIME(datetime))
+                FROM respiratory_support
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(DATETIME(datetime))
+                FROM lab_data
+                WHERE admission_id = ?
+
+                UNION ALL
+                SELECT MAX(dt)
+                FROM (
+                    SELECT DATETIME(start_time) AS dt
+                    FROM ivl_episodes
+                    WHERE admission_id = ? AND start_time IS NOT NULL
+                    UNION ALL
+                    SELECT DATETIME(end_time)
+                    FROM ivl_episodes
+                    WHERE admission_id = ? AND end_time IS NOT NULL
+                ) AS ivl_activity
+
+                UNION ALL
+                SELECT MAX(dt)
+                FROM (
+                    SELECT DATETIME(insertion_date) AS dt
+                    FROM devices
+                    WHERE admission_id = ? AND insertion_date IS NOT NULL
+                    UNION ALL
+                    SELECT DATETIME(removal_date)
+                    FROM devices
+                    WHERE admission_id = ? AND removal_date IS NOT NULL
+                ) AS device_activity
+            ) AS activity
+        """
+        params = (int(admission_id),) * 12
+        try:
+            row = (
+                cursor.execute(query, params).fetchone()
+                if cursor is not None
+                else self.db.fetch_one_remcard(query, params)
+            )
+        except Exception:
+            logger.exception(
+                "[StatusDAO] Failed to load latest patient activity for admission %s",
+                admission_id,
+            )
+            raise
+
+        value = row["latest_dt"] if row and row["latest_dt"] else None
+        return self._parse_sqlite_dt(str(value)) if value else None
 
     @staticmethod
     def _active_cvc_outcome_candidate_ids(cursor, admission_id: int) -> List[int]:

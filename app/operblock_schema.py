@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1009
+OPERBLOCK_SCHEMA_VERSION = 1010
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -101,6 +101,8 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
     if not _index_exists(conn, "idx_operation_cases_one_active_per_table"):
         return False
     if not _index_exists(conn, "idx_operation_cases_protocol_sequence"):
+        return False
+    if not _index_exists(conn, "idx_operation_cases_started_at_id"):
         return False
     if not _index_exists(conn, "idx_operation_assignments_one_active_per_table"):
         return False
@@ -333,6 +335,10 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_operation_cases_updated ON operation_cases(updated_at, id)"
     )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_operation_cases_started_at_id "
+        "ON operation_cases(started_at, id DESC)"
+    )
     _backfill_anesthesia_protocol_numbers(cursor)
     cursor.execute(
         """
@@ -446,7 +452,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         """
     )
     _create_updated_at_trigger(conn, "opblock_offline_case_map")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock planned anesthesia assistance type")
+    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock archive started-at index")
 
 
 def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:

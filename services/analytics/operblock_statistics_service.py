@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping
 
 from rem_card.app.logger import logger
 from rem_card.services.analytics.graphs_service import _thread_local_manager
+from rem_card.services.analytics.period import normalize_analytics_period
 from rem_card.services.operblock_route_settings import operblock_route_from_comment
 from rem_card.services.operblock_timeline import parse_operblock_medication_text
 from rem_card.ui.styles.theme import (
@@ -190,12 +191,19 @@ class OperBlockStatisticsReportBuilder:
         db_paths: Iterable[str] | None = None,
     ):
         self.db_manager = db_manager
-        self._start_dt = self._parse_datetime(start_date_str) or (datetime.now() - timedelta(days=30))
-        self._end_dt = self._parse_datetime(end_date_str) or datetime.now()
-        if self._end_dt < self._start_dt:
-            self._start_dt, self._end_dt = self._end_dt, self._start_dt
-        self.start_date_str = self._start_dt.strftime("%Y-%m-%d 00:00:00")
-        self.end_date_str = self._end_dt.strftime("%Y-%m-%d 23:59:59")
+        now = datetime.now()
+        period = normalize_analytics_period(
+            start_date_str,
+            end_date_str,
+            default_start=now - timedelta(days=30),
+            default_end=now,
+        )
+        self._start_dt = period.start_inclusive
+        # Preserve the established duration calculations; selection uses the
+        # separate next-midnight exclusive SQL boundary below.
+        self._end_dt = period.end_exclusive - timedelta(seconds=1)
+        self.start_date_str = period.start_sql
+        self.end_date_str = period.end_exclusive_sql
         self.db_paths = self._normalize_db_paths(db_paths or [])
 
     @staticmethod
@@ -748,7 +756,7 @@ class OperBlockStatisticsReportBuilder:
             LEFT JOIN operating_tables t ON t.code = oc.table_code
             LEFT JOIN admissions a ON a.id = oc.admission_id
             LEFT JOIN patients p ON p.id = oc.patient_id
-            WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+            WHERE oc.started_at >= ? AND oc.started_at < ?
               AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
             ORDER BY DATETIME(oc.started_at), oc.id
             """,
@@ -764,7 +772,7 @@ class OperBlockStatisticsReportBuilder:
                 SELECT e.*
                 FROM operblock_timeline_events e
                 JOIN operation_cases oc ON oc.id = e.operation_case_id
-                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+                WHERE oc.started_at >= ? AND oc.started_at < ?
                   AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
                   AND COALESCE(e.status, '') NOT IN ('deleted', 'cancelled')
                 ORDER BY e.operation_case_id, DATETIME(e.event_time), e.id
@@ -789,7 +797,7 @@ class OperBlockStatisticsReportBuilder:
                     o.comment
                 FROM operation_cases oc
                 JOIN orders o ON o.admission_id = oc.admission_id
-                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+                WHERE oc.started_at >= ? AND oc.started_at < ?
                   AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
                   AND COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
                 ORDER BY oc.id, DATETIME(o.datetime), o.id
@@ -817,7 +825,7 @@ class OperBlockStatisticsReportBuilder:
                     v.cvp
                 FROM operation_cases oc
                 JOIN vitals v ON v.admission_id = oc.admission_id
-                WHERE DATETIME(oc.started_at) BETWEEN DATETIME(?) AND DATETIME(?)
+                WHERE oc.started_at >= ? AND oc.started_at < ?
                   AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
                 ORDER BY oc.id, DATETIME(v.datetime), v.id
                 """,

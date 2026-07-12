@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from contextlib import nullcontext
 from typing import List, Optional
 from datetime import datetime, timedelta
 from ..dto.remcard_dto import PatientDTO
@@ -9,6 +10,7 @@ from rem_card.app.patient_age import parse_date_value
 from rem_card.services.shift_service import ShiftService
 from ...app.logger import logger
 from ...app.db_cycle_registry import discover_db_cycle_paths, select_db_paths_for_period
+from ...app.archive_schema_cache import get_archive_schema
 from ...app.sqlite_shared import configure_connection
 
 class PatientDAO:
@@ -109,7 +111,7 @@ class PatientDAO:
                 logger.warning("Skipping archived DB %s due to read error: %s", archived_db_path, exc)
 
         patients = self._map_patients(rows)
-        patients.sort(key=lambda p: p.admission_datetime or datetime.min, reverse=True)
+        patients.sort(key=self._archived_patient_sort_key, reverse=True)
         return patients
 
     def get_archived_patients_page(
@@ -129,10 +131,10 @@ class PatientDAO:
         fetch_limit = offset + page_size
 
         current_db_path = os.path.abspath(str(getattr(self.db, "db_path", "") or ""))
-        if start_dt and end_dt:
-            db_paths = self.get_archive_db_paths_for_period(start_dt, end_dt)
-        else:
-            db_paths = self._iter_archived_db_paths(current_db_path, include_current=True)
+        # The page queries already apply the period.  Preselecting through
+        # select_db_paths_for_period would open and aggregate every archive
+        # first, then open matching files again for count+rows.
+        db_paths = self._iter_archived_db_paths(current_db_path, include_current=True)
         current_key = os.path.normcase(current_db_path)
         use_global_merge = len(db_paths) > 1
 
@@ -143,47 +145,50 @@ class PatientDAO:
                 abs_path = os.path.abspath(archived_db_path)
                 is_current = bool(current_key) and os.path.normcase(abs_path) == current_key
                 if is_current:
-                    tables = self._get_current_table_names()
-                    patient_columns = self._get_current_table_columns("patients")
-                    admission_columns = self._get_current_table_columns("admissions")
-                    count_query, count_params = self._build_archived_patients_query(
-                        patient_columns=patient_columns,
-                        admission_columns=admission_columns,
-                        has_operations_table="operations" in tables,
-                        has_operation_cases_table="operation_cases" in tables,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        search_name=search_name,
-                        search_ib=search_ib,
-                        search_diag=search_diag,
-                        count_only=True,
+                    scope_factory = getattr(self.db, "central_read_snapshot_scope", None)
+                    if not callable(scope_factory):
+                        scope_factory = getattr(self.db, "central_read_scope", None)
+                    read_scope = (
+                        scope_factory("patient_archive_page")
+                        if callable(scope_factory)
+                        else nullcontext()
                     )
-                    total_count += self._fetch_count_from_manager(count_query, count_params)
-                    query, params = self._build_archived_patients_query(
-                        patient_columns=patient_columns,
-                        admission_columns=admission_columns,
-                        has_operations_table="operations" in tables,
-                        has_operation_cases_table="operation_cases" in tables,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        search_name=search_name,
-                        search_ib=search_ib,
-                        search_diag=search_diag,
-                        limit=fetch_limit if use_global_merge else page_size,
-                        offset=0 if use_global_merge else offset,
-                    )
-                    archived_rows = [dict(row) for row in self.db.fetch_all_remcard(query, params)]
+                    with read_scope:
+                        tables = self._get_current_table_names()
+                        patient_columns = self._get_current_table_columns("patients")
+                        admission_columns = self._get_current_table_columns("admissions")
+                        count_query, count_params = self._build_archived_patients_query(
+                            patient_columns=patient_columns,
+                            admission_columns=admission_columns,
+                            has_operations_table="operations" in tables,
+                            has_operation_cases_table="operation_cases" in tables,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            search_name=search_name,
+                            search_ib=search_ib,
+                            search_diag=search_diag,
+                            count_only=True,
+                            end_exclusive=True,
+                        )
+                        total_count += self._fetch_count_from_manager(count_query, count_params)
+                        query, params = self._build_archived_patients_query(
+                            patient_columns=patient_columns,
+                            admission_columns=admission_columns,
+                            has_operations_table="operations" in tables,
+                            has_operation_cases_table="operation_cases" in tables,
+                            start_dt=start_dt,
+                            end_dt=end_dt,
+                            search_name=search_name,
+                            search_ib=search_ib,
+                            search_diag=search_diag,
+                            limit=fetch_limit if use_global_merge else page_size,
+                            offset=0 if use_global_merge else offset,
+                            end_exclusive=True,
+                        )
+                        archived_rows = [dict(row) for row in self.db.fetch_all_remcard(query, params)]
                     is_external = False
                 else:
-                    total_count += self._fetch_archived_count_from_db(
-                        abs_path,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                        search_name=search_name,
-                        search_ib=search_ib,
-                        search_diag=search_diag,
-                    )
-                    archived_rows = self._fetch_archived_rows_from_db(
+                    archived_count, archived_rows = self._fetch_archived_page_from_db(
                         abs_path,
                         start_dt=start_dt,
                         end_dt=end_dt,
@@ -193,6 +198,7 @@ class PatientDAO:
                         limit=fetch_limit if use_global_merge else page_size,
                         offset=0 if use_global_merge else offset,
                     )
+                    total_count += archived_count
                     is_external = True
                 for data in archived_rows:
                     data["source_db_path"] = abs_path
@@ -204,7 +210,7 @@ class PatientDAO:
                 logger.warning("Skipping archived DB %s due to paged read error: %s", archived_db_path, exc)
 
         patients = self._map_patients(rows)
-        patients.sort(key=lambda p: p.admission_datetime or datetime.min, reverse=True)
+        patients.sort(key=self._archived_patient_sort_key, reverse=True)
         if use_global_merge:
             patients = patients[offset : offset + page_size]
         return {
@@ -226,6 +232,20 @@ class PatientDAO:
                 return int(row[0] or 0)
             except Exception:
                 return 0
+
+    @staticmethod
+    def _archived_patient_sort_key(patient: PatientDTO) -> tuple:
+        source_path = os.path.normcase(
+            os.path.abspath(str(getattr(patient, "source_db_path", "") or ""))
+        )
+        source_id = getattr(patient, "source_admission_id", None)
+        if source_id is None:
+            source_id = getattr(patient, "id", 0)
+        return (
+            patient.admission_datetime or datetime.min,
+            source_path,
+            int(source_id or 0),
+        )
 
     def _get_current_table_names(self) -> set[str]:
         try:
@@ -553,6 +573,7 @@ class PatientDAO:
         limit: int | None = None,
         offset: int = 0,
         count_only: bool = False,
+        end_exclusive: bool = False,
     ) -> tuple[str, tuple]:
         patient_columns = patient_columns or {"last_name", "first_name", "middle_name", "full_name", "birth_date"}
         admission_columns = admission_columns or {
@@ -601,11 +622,21 @@ class PatientDAO:
         else:
             operation_expr = operation_subquery
 
-        order_expr = "a.admission_datetime DESC" if "admission_datetime" in admission_columns else "a.id DESC"
+        order_expr = (
+            "DATETIME(a.admission_datetime) DESC, a.id DESC"
+            if "admission_datetime" in admission_columns
+            else "a.id DESC"
+        )
         where_parts: list[str] = []
         params: list = []
         if start_dt and end_dt and "admission_datetime" in admission_columns:
-            where_parts.append("a.admission_datetime BETWEEN ? AND ?")
+            if end_exclusive:
+                where_parts.append(
+                    "a.admission_datetime >= ? "
+                    "AND a.admission_datetime < ?"
+                )
+            else:
+                where_parts.append("a.admission_datetime BETWEEN ? AND ?")
             params.extend((start_dt, end_dt))
 
         if "unit_scope" in admission_columns:
@@ -617,23 +648,23 @@ class PatientDAO:
                 "NOT EXISTS (SELECT 1 FROM operation_cases oc WHERE oc.admission_id = a.id)"
             )
 
-        clean_name = str(search_name or "").strip().lower()
+        clean_name = str(search_name or "").strip().casefold()
         if clean_name:
             name_expr = (
-                f"LOWER(COALESCE({p_col('full_name')}, '') || ' ' || "
+                f"COALESCE({p_col('full_name')}, '') || ' ' || "
                 f"COALESCE({p_col('last_name')}, '') || ' ' || "
                 f"COALESCE({p_col('first_name')}, '') || ' ' || "
-                f"COALESCE({p_col('middle_name')}, ''))"
+                f"COALESCE({p_col('middle_name')}, '')"
             )
-            where_parts.append(f"{name_expr} LIKE ?")
-            params.append(f"%{clean_name}%")
+            where_parts.append(f"INSTR(CASEFOLD({name_expr}), ?) > 0")
+            params.append(clean_name)
 
-        clean_ib = str(search_ib or "").strip().lower()
+        clean_ib = str(search_ib or "").strip().casefold()
         if clean_ib and "history_number" in admission_columns:
-            where_parts.append("LOWER(COALESCE(a.history_number, '')) LIKE ?")
-            params.append(f"%{clean_ib}%")
+            where_parts.append("INSTR(CASEFOLD(COALESCE(a.history_number, '')), ?) > 0")
+            params.append(clean_ib)
 
-        clean_diag = str(search_diag or "").strip().lower()
+        clean_diag = str(search_diag or "").strip().casefold()
         if clean_diag:
             diag_parts = []
             if "diagnosis_text" in admission_columns:
@@ -642,8 +673,8 @@ class PatientDAO:
                 diag_parts.append("COALESCE(a.diagnosis_code, '')")
             if diag_parts:
                 diag_expr = " || ' ' || ".join(diag_parts)
-                where_parts.append(f"LOWER({diag_expr}) LIKE ?")
-                params.append(f"%{clean_diag}%")
+                where_parts.append(f"INSTR(CASEFOLD({diag_expr}), ?) > 0")
+                params.append(clean_diag)
 
         where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
 
@@ -720,21 +751,17 @@ class PatientDAO:
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
             configure_connection(conn, readonly=True)
-            tables = {
-                row[0]
-                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            }
+            schema = get_archive_schema(
+                conn,
+                db_path,
+                inspect_tables=("patients", "admissions"),
+            )
+            tables = schema.tables
             if "patients" not in tables or "admissions" not in tables:
                 return []
 
-            patient_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(patients)").fetchall()
-            }
-            admission_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(admissions)").fetchall()
-            }
+            patient_columns = schema.columns.get("patients", frozenset())
+            admission_columns = schema.columns.get("admissions", frozenset())
             has_operations = "operations" in tables
             has_operation_cases = "operation_cases" in tables
 
@@ -769,21 +796,17 @@ class PatientDAO:
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
             configure_connection(conn, readonly=True)
-            tables = {
-                row[0]
-                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-            }
+            schema = get_archive_schema(
+                conn,
+                db_path,
+                inspect_tables=("patients", "admissions"),
+            )
+            tables = schema.tables
             if "patients" not in tables or "admissions" not in tables:
                 return 0
 
-            patient_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(patients)").fetchall()
-            }
-            admission_columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(admissions)").fetchall()
-            }
+            patient_columns = schema.columns.get("patients", frozenset())
+            admission_columns = schema.columns.get("admissions", frozenset())
             query, params = self._build_archived_patients_query(
                 patient_columns=patient_columns,
                 admission_columns=admission_columns,
@@ -799,4 +822,66 @@ class PatientDAO:
             row = conn.execute(query, params).fetchone()
             return int(row["total_count"] or 0) if row else 0
         finally:
+            conn.close()
+
+    def _fetch_archived_page_from_db(
+        self,
+        db_path: str,
+        *,
+        start_dt: str | None = None,
+        end_dt: str | None = None,
+        search_name: str = "",
+        search_ib: str = "",
+        search_diag: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        """Fetch count and rows from one readonly archive connection."""
+        uri = f"file:{db_path}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
+        try:
+            configure_connection(conn, readonly=True)
+            schema = get_archive_schema(
+                conn,
+                db_path,
+                inspect_tables=("patients", "admissions"),
+            )
+            tables = schema.tables
+            if not {"patients", "admissions"}.issubset(tables):
+                return 0, []
+            conn.execute("BEGIN")
+            conn.execute("SELECT name FROM main.sqlite_master LIMIT 1").fetchone()
+            query_args = {
+                "patient_columns": schema.columns.get("patients", frozenset()),
+                "admission_columns": schema.columns.get("admissions", frozenset()),
+                "has_operations_table": "operations" in tables,
+                "has_operation_cases_table": "operation_cases" in tables,
+                "start_dt": start_dt,
+                "end_dt": end_dt,
+                "search_name": search_name,
+                "search_ib": search_ib,
+                "search_diag": search_diag,
+                "end_exclusive": True,
+            }
+            count_query, count_params = self._build_archived_patients_query(
+                **query_args,
+                count_only=True,
+            )
+            count_row = conn.execute(count_query, count_params).fetchone()
+            total_count = int(count_row["total_count"] or 0) if count_row else 0
+            if total_count <= 0:
+                return 0, []
+            rows_query, rows_params = self._build_archived_patients_query(
+                **query_args,
+                limit=limit,
+                offset=offset,
+            )
+            rows = [dict(row) for row in conn.execute(rows_query, rows_params).fetchall()]
+            return total_count, rows
+        finally:
+            if bool(getattr(conn, "in_transaction", False)):
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
             conn.close()
