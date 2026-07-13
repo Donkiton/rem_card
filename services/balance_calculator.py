@@ -215,9 +215,10 @@ class BalanceCalculator:
         return daily_limit
 
     @classmethod
-    def calculate(cls, orders: List[OrderDTO], current_time: datetime, end_of_card: datetime, 
+    def calculate(cls, orders: List[OrderDTO], current_time: datetime, end_of_card: datetime,
                   transfer_time: Optional[datetime] = None, active_intervals: List[Tuple[datetime, datetime]] = None,
-                  outcome_time: Optional[datetime] = None) -> Dict[str, Dict[str, float]]:
+                  outcome_time: Optional[datetime] = None,
+                  committed_orders: Optional[List[OrderDTO]] = None) -> Dict[str, Dict[str, float]]:
         """
         Р¤РРќРђР›Р¬РќР«Р™ РњР•РўРћР” Р РђРЎР§Р•РўРђ:
         1. Р’ Current (РЅР° С‚РµРєСѓС‰РёР№ С‡Р°СЃ) - С‚РѕР»СЊРєРѕ С„Р°РєС‚ (executed) РїСЂРѕРїРѕСЂС†РёРѕРЅР°Р»СЊРЅРѕ.
@@ -232,7 +233,17 @@ class BalanceCalculator:
 
         cls._maybe_reload_engine()
 
-        for order in orders:
+        # ``orders`` is the effective plan shown by the doctor, including a local
+        # draft.  When ``committed_orders`` is supplied, it is an immutable DB
+        # baseline used for the actual input.  Keeping both sources prevents an
+        # unsaved dose edit or deletion from rewriting already administered fluid.
+        separate_committed_fact = committed_orders is not None
+        effective_fact = {
+            "current": {"infusion": 0.0, "preparats": 0.0, "blood": 0.0, "plasma": 0.0, "total": 0.0},
+            "daily": {"infusion": 0.0, "preparats": 0.0, "blood": 0.0, "plasma": 0.0, "total": 0.0},
+        }
+
+        for order in orders or []:
             if order.status in (OrderStatus.DELETED, OrderStatus.CANCELLED): continue
             
             inf_v, prep_v, cat = cls.get_order_volumes(order)
@@ -262,13 +273,63 @@ class BalanceCalculator:
 
             # 2. Р РђРЎР§Р•Рў CURRENT (РќР° С‚РµРєСѓС‰РёР№ РјРѕРјРµРЅС‚)
             # РўРѕР»СЊРєРѕ РїРѕРґС‚РІРµСЂР¶РґРµРЅРЅС‹Р№ С„Р°РєС‚ (executed) РёР»Рё РЅРёС‡РµРіРѕ РµСЃР»Рё С‡РµСЂРЅРѕРІРёРє/РїР»Р°РЅ.
-            if not is_draft:
+            current_target = effective_fact if separate_committed_fact else res
+            if separate_committed_fact or not is_draft:
                 for admin in singles:
-                    cls._process_item_current(res, order, admin, inf_v, prep_v, total_v_order, cat, current_time, daily_limit)
+                    cls._process_item_current(current_target, order, admin, inf_v, prep_v, total_v_order, cat, current_time, daily_limit)
                 
                 for chain_id, admins in chains.items():
                     admins.sort(key=lambda x: x.planned_time)
-                    cls._process_chain_current(res, order, admins, inf_v, prep_v, total_v_order, cat, current_time, daily_limit, end_of_card)
+                    cls._process_chain_current(current_target, order, admins, inf_v, prep_v, total_v_order, cat, current_time, daily_limit, end_of_card)
+
+        if separate_committed_fact:
+            committed_fact = {
+                "current": {"infusion": 0.0, "preparats": 0.0, "blood": 0.0, "plasma": 0.0, "total": 0.0},
+                "daily": {"infusion": 0.0, "preparats": 0.0, "blood": 0.0, "plasma": 0.0, "total": 0.0},
+            }
+            for order in committed_orders or []:
+                if order.status in (OrderStatus.DELETED, OrderStatus.CANCELLED):
+                    continue
+                if getattr(order, "is_committed", 1) == 0:
+                    continue
+
+                inf_v, prep_v, cat = cls.get_order_volumes(order)
+                total_v_order = inf_v + prep_v
+                if total_v_order <= 0:
+                    continue
+
+                chains = {}
+                singles = []
+                for admin in order.administrations:
+                    if admin.status in ("deleted", "cancelled"):
+                        continue
+                    if admin.big_chain_id:
+                        chains.setdefault(admin.big_chain_id, []).append(admin)
+                    else:
+                        singles.append(admin)
+
+                for admin in singles:
+                    cls._process_item_current(
+                        committed_fact, order, admin, inf_v, prep_v, total_v_order,
+                        cat, current_time, daily_limit,
+                    )
+                for admins in chains.values():
+                    admins.sort(key=lambda x: x.planned_time)
+                    cls._process_chain_current(
+                        committed_fact, order, admins, inf_v, prep_v,
+                        total_v_order, cat, current_time, daily_limit, end_of_card,
+                    )
+
+            for key in ("infusion", "preparats", "blood", "plasma"):
+                committed_value = committed_fact["current"][key]
+                effective_value = effective_fact["current"][key]
+                res["current"][key] = committed_value
+                # Effective daily contains the local plan with its own already
+                # executed portion. Replace that portion with the committed fact.
+                res["daily"][key] = max(
+                    0.0,
+                    res["daily"][key] - effective_value + committed_value,
+                )
 
         for p in ("current", "daily"):
             for k in ["infusion", "preparats", "blood", "plasma"]: res[p][k] = round(res[p][k], 1)

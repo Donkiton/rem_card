@@ -8,7 +8,7 @@ from rem_card.data.dao.sync_cursor import normalize_sync_cursor
 from rem_card.services.order_domain_service import OrderDomainService
 from rem_card.services.shift_service import ShiftService
 
-from ..data.dto.remcard_dto import OrderDTO, OrderType, OrderStatus
+from ..data.dto.remcard_dto import AdministrationDTO, OrderDTO, OrderType, OrderStatus
 from ..data.dao.orders_dao import OrdersDAO
 
 
@@ -80,6 +80,444 @@ class OrderService:
         if expected_revision is None:
             return
         self._assert_order_revisions(cursor, {int(order_id): int(expected_revision)})
+
+    @staticmethod
+    def _draft_admin_shape(value) -> tuple | None:
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            getter = value.get
+        elif hasattr(value, "keys"):
+            getter = lambda name, default=None: value[name] if name in value.keys() else default
+        else:
+            getter = lambda name, default=None: getattr(value, name, default)
+        try:
+            volume_ml = float(getter("volume_ml", 0.0) or 0.0)
+        except Exception:
+            volume_ml = 0.0
+        return (
+            str(getter("status", "") or ""),
+            str(getter("cell_role", "") or ""),
+            str(getter("big_chain_id", "") or ""),
+            volume_ml,
+        )
+
+    @staticmethod
+    def _draft_admin_token(value) -> tuple | None:
+        if value is None:
+            return None
+        if isinstance(value, Mapping):
+            getter = value.get
+        elif hasattr(value, "keys"):
+            getter = lambda name, default=None: value[name] if name in value.keys() else default
+        else:
+            getter = lambda name, default=None: getattr(value, name, default)
+        actual_time = getter("actual_time")
+        if isinstance(actual_time, datetime):
+            actual_time = actual_time.isoformat()
+        elif actual_time:
+            actual_time = datetime.fromisoformat(str(actual_time).replace(" ", "T")).isoformat()
+        return (
+            None if getter("id") is None else int(getter("id")),
+            int(getter("version", 0) or 0),
+            *OrderService._draft_admin_shape(value),
+            str(getter("comment", "") or ""),
+            actual_time or None,
+            None if getter("performer_id") is None else int(getter("performer_id")),
+        )
+
+    @staticmethod
+    def _draft_admin_key(order_id, planned_time) -> tuple[int, str]:
+        planned = planned_time
+        if isinstance(planned, datetime):
+            planned = planned.isoformat()
+        else:
+            planned = datetime.fromisoformat(str(planned).replace(" ", "T")).isoformat()
+        return int(order_id), planned
+
+    @staticmethod
+    def _order_status_value(order: OrderDTO, *, pending_delete: bool) -> str:
+        if pending_delete:
+            return OrderStatus.DELETED.value
+        raw = getattr(getattr(order, "status", None), "value", getattr(order, "status", None))
+        if str(raw or "") in {OrderStatus.DELETED.value, OrderStatus.CANCELLED.value}:
+            return str(raw)
+        return OrderStatus.ACTIVE.value
+
+    @staticmethod
+    def _order_row_matches_effective(row, order: OrderDTO, *, sort_order: int, status: str) -> bool:
+        if row is None:
+            return False
+        try:
+            current_times = tuple(json.loads(row["specific_times"] or "[]"))
+        except Exception:
+            current_times = ()
+        return (
+            row["drug_key"] == order.drug_key
+            and row["latin"] == order.latin
+            and str(row["type"] or "") == str(getattr(order.type, "value", order.type) or "")
+            and str(row["status"] or "") == status
+            and float(row["dose_value"] or 0.0) == float(order.dose_value or 0.0)
+            and str(row["dose_unit"] or "") == str(order.dose_unit or "")
+            and int(row["is_per_kg"] or 0) == (1 if order.is_per_kg else 0)
+            and int(row["frequency"] or 0) == int(order.frequency or 0)
+            and current_times == tuple(order.specific_times or [])
+            and (None if row["rate_ml_h"] is None else float(row["rate_ml_h"])) == OrderService._nullable_float(order.rate_ml_h)
+            and (None if row["volume_total"] is None else float(row["volume_total"])) == OrderService._nullable_float(order.volume_total)
+            and (None if row["duration_min"] is None else int(row["duration_min"])) == (
+                None if order.duration_min is None else int(order.duration_min)
+            )
+            and int(row["sort_order"] or 0) == int(sort_order)
+            and int(row["is_committed"] or 0) == 1
+            and str(row["comment"] or "") == str(order.comment or "")
+            and row["draft_sort_order"] is None
+        )
+
+    @staticmethod
+    def _order_row_matches_clinical_fields(row, order: OrderDTO) -> bool:
+        if row is None:
+            return False
+        try:
+            current_times = tuple(json.loads(row["specific_times"] or "[]"))
+        except Exception:
+            current_times = ()
+        return (
+            row["drug_key"] == order.drug_key
+            and row["latin"] == order.latin
+            and str(row["type"] or "") == str(getattr(order.type, "value", order.type) or "")
+            and float(row["dose_value"] or 0.0) == float(order.dose_value or 0.0)
+            and str(row["dose_unit"] or "") == str(order.dose_unit or "")
+            and int(row["is_per_kg"] or 0) == (1 if order.is_per_kg else 0)
+            and int(row["frequency"] or 0) == int(order.frequency or 0)
+            and current_times == tuple(order.specific_times or [])
+            and (None if row["rate_ml_h"] is None else float(row["rate_ml_h"])) == OrderService._nullable_float(order.rate_ml_h)
+            and (None if row["volume_total"] is None else float(row["volume_total"])) == OrderService._nullable_float(order.volume_total)
+            and (None if row["duration_min"] is None else int(row["duration_min"])) == (
+                None if order.duration_min is None else int(order.duration_min)
+            )
+            and str(row["comment"] or "") == str(order.comment or "")
+        )
+
+    @staticmethod
+    def _fetch_latest_committed_admins(cursor, order_ids: Sequence[int], start: datetime, end: datetime) -> dict:
+        normalized_ids = sorted({int(value) for value in order_ids if value is not None and int(value) > 0})
+        if not normalized_ids:
+            return {}
+        placeholders = ",".join("?" for _ in normalized_ids)
+        cursor.execute(
+            f"""
+            SELECT a.*
+            FROM administrations a
+            WHERE a.order_id IN ({placeholders})
+              AND a.planned_time >= ? AND a.planned_time < ?
+              AND a.is_committed = 1
+              AND a.id = (
+                  SELECT MAX(a2.id)
+                  FROM administrations a2
+                  WHERE a2.order_id = a.order_id
+                    AND a2.planned_time = a.planned_time
+                    AND a2.is_committed = 1
+              )
+            """,
+            (*normalized_ids, start.isoformat(), end.isoformat()),
+        )
+        result = {}
+        for row in cursor.fetchall():
+            planned_key = datetime.fromisoformat(str(row["planned_time"]).replace(" ", "T")).isoformat()
+            result[(int(row["order_id"]), planned_key)] = row
+        return result
+
+    def commit_local_draft(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        orders: Sequence[OrderDTO],
+        admin_map: Mapping[tuple, AdministrationDTO],
+        dirty_admin_keys: Sequence[tuple],
+        baseline_admin_map: Mapping[tuple, AdministrationDTO],
+        expected_revisions=None,
+        expected_active_order_ids: Optional[Sequence[int]] = None,
+    ) -> dict[int, int]:
+        """Apply the doctor's in-memory draft as one central transaction.
+
+        Intermediate clicks never reach SQLite.  Only the final effective order
+        list and the final shape of changed cells are persisted here.
+        """
+        with self.dao.db.remcard_transaction(source="orders_commit_local_draft") as cursor:
+            start, end = self._resolve_shift_bounds(cursor, admission_id, shift_date)
+            self._assert_order_revisions(cursor, expected_revisions)
+            if expected_active_order_ids is not None:
+                expected_ids = {
+                    int(order_id)
+                    for order_id in expected_active_order_ids
+                    if order_id is not None and int(order_id) > 0
+                }
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM orders
+                    WHERE admission_id = ?
+                      AND datetime >= ? AND datetime < ?
+                      AND is_committed = 1
+                      AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
+                    """,
+                    (int(admission_id), start.isoformat(), end.isoformat()),
+                )
+                current_ids = {int(row["id"]) for row in cursor.fetchall()}
+                if current_ids != expected_ids:
+                    self._raise_order_conflict()
+
+            effective_orders = [order for order in (orders or []) if order is not None]
+            existing_ids = sorted(
+                {
+                    int(order.id)
+                    for order in effective_orders
+                    if getattr(order, "id", None) is not None and int(order.id) > 0
+                }
+            )
+            current_orders = {}
+            if existing_ids:
+                placeholders = ",".join("?" for _ in existing_ids)
+                cursor.execute(
+                    f"SELECT * FROM orders WHERE id IN ({placeholders})",
+                    tuple(existing_ids),
+                )
+                current_orders = {int(row["id"]): row for row in cursor.fetchall()}
+
+            order_id_map: dict[int, int] = {}
+            for position, order in enumerate(effective_orders):
+                raw_order_id = getattr(order, "id", None)
+                if raw_order_id is None:
+                    raise ValueError("Local draft order has no temporary identifier")
+                local_order_id = int(raw_order_id)
+                desired_sort_order = int(getattr(order, "sort_order", position) or 0)
+                pending_delete = bool(getattr(order, "_pending_delete", False))
+                status = self._order_status_value(order, pending_delete=pending_delete)
+
+                if local_order_id <= 0:
+                    if pending_delete or status in {OrderStatus.DELETED.value, OrderStatus.CANCELLED.value}:
+                        continue
+                    created_at = getattr(order, "created_at", None) or start
+                    cursor.execute(
+                        """
+                        INSERT INTO orders (
+                            admission_id, datetime, text, drug_key, latin, type, status,
+                            dose_value, dose_unit, is_per_kg, frequency, specific_times,
+                            rate_ml_h, volume_total, duration_min, sort_order, draft_sort_order,
+                            is_committed, created_at, comment, last_modified_by, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?, 'doctor',
+                                  STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                        """,
+                        (
+                            int(admission_id),
+                            created_at.isoformat(),
+                            f"{order.latin} {float(order.dose_value or 0):g} {order.dose_unit or ''}".strip(),
+                            order.drug_key,
+                            order.latin,
+                            getattr(order.type, "value", order.type),
+                            OrderStatus.ACTIVE.value,
+                            float(order.dose_value or 0.0),
+                            order.dose_unit,
+                            1 if order.is_per_kg else 0,
+                            int(order.frequency or 0),
+                            json.dumps(order.specific_times or []),
+                            order.rate_ml_h,
+                            order.volume_total,
+                            order.duration_min,
+                            desired_sort_order,
+                            created_at.isoformat(),
+                            order.comment or "",
+                        ),
+                    )
+                    real_order_id = int(cursor.lastrowid)
+                    order_id_map[local_order_id] = real_order_id
+                    continue
+
+                current = current_orders.get(local_order_id)
+                if current is None or int(current["admission_id"] or 0) != int(admission_id):
+                    self._raise_order_conflict(local_order_id)
+                current_dt = datetime.fromisoformat(str(current["datetime"]).replace(" ", "T"))
+                if not (start <= current_dt < end):
+                    self._raise_order_conflict(local_order_id)
+                clinical_fields_changed = not self._order_row_matches_clinical_fields(current, order)
+                if pending_delete or clinical_fields_changed:
+                    cursor.execute(
+                        """
+                        SELECT 1
+                        FROM administrations current_admin
+                        WHERE current_admin.order_id = ?
+                          AND current_admin.is_committed = 1
+                          AND current_admin.comment IN ('nurse_executed', 'nurse_not_executed')
+                          AND current_admin.id = (
+                              SELECT MAX(latest_admin.id)
+                              FROM administrations latest_admin
+                              WHERE latest_admin.order_id = current_admin.order_id
+                                AND latest_admin.planned_time = current_admin.planned_time
+                                AND latest_admin.is_committed = 1
+                          )
+                        LIMIT 1
+                        """,
+                        (local_order_id,),
+                    )
+                    if cursor.fetchone() is not None:
+                        self._raise_order_conflict(local_order_id)
+
+                if not self._order_row_matches_effective(current, order, sort_order=desired_sort_order, status=status):
+                    cursor.execute(
+                        """
+                        UPDATE orders
+                        SET text = ?, drug_key = ?, latin = ?, type = ?, status = ?,
+                            dose_value = ?, dose_unit = ?, is_per_kg = ?, frequency = ?,
+                            specific_times = ?, rate_ml_h = ?, volume_total = ?, duration_min = ?,
+                            sort_order = ?, draft_sort_order = NULL, is_committed = 1,
+                            comment = ?, last_modified_by = 'doctor',
+                            revision = COALESCE(revision, 0) + 1,
+                            updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
+                        WHERE id = ?
+                        """,
+                        (
+                            f"{order.latin} {float(order.dose_value or 0):g} {order.dose_unit or ''}".strip(),
+                            order.drug_key,
+                            order.latin,
+                            getattr(order.type, "value", order.type),
+                            status,
+                            float(order.dose_value or 0.0),
+                            order.dose_unit,
+                            1 if order.is_per_kg else 0,
+                            int(order.frequency or 0),
+                            json.dumps(order.specific_times or []),
+                            order.rate_ml_h,
+                            order.volume_total,
+                            order.duration_min,
+                            desired_sort_order,
+                            order.comment or "",
+                            local_order_id,
+                        ),
+                    )
+                order_id_map[local_order_id] = local_order_id
+
+            current_admins = self._fetch_latest_committed_admins(cursor, existing_ids, start, end)
+            normalized_baseline = {
+                self._draft_admin_key(key[0], key[1]): value
+                for key, value in (baseline_admin_map or {}).items()
+                if key and len(key) >= 2 and int(key[0]) > 0
+            }
+            normalized_desired = {
+                self._draft_admin_key(key[0], key[1]): value
+                for key, value in (admin_map or {}).items()
+                if key and len(key) >= 2
+            }
+            normalized_dirty = {
+                self._draft_admin_key(key[0], key[1])
+                for key in (dirty_admin_keys or [])
+                if key and len(key) >= 2
+            }
+
+            temporary_chain_groups: dict[tuple[int, str], list[tuple[datetime, str]]] = {}
+            for local_order_id, planned_key in normalized_dirty:
+                desired = normalized_desired.get((local_order_id, planned_key))
+                if desired is None:
+                    continue
+                desired_status = str(getattr(desired, "status", "") or "")
+                if desired_status in {"deleted", "cancelled"}:
+                    continue
+                planned_dt = datetime.fromisoformat(str(planned_key).replace(" ", "T"))
+                if not (start <= planned_dt < end):
+                    raise ValueError("Draft administration is outside the selected shift")
+                chain_value = str(getattr(desired, "big_chain_id", "") or "")
+                if chain_value.startswith(("optimistic:", "local-copy:")):
+                    temporary_chain_groups.setdefault((local_order_id, chain_value), []).append(
+                        (planned_dt, str(getattr(desired, "cell_role", "single") or "single"))
+                    )
+
+            for chain_items in temporary_chain_groups.values():
+                chain_items.sort(key=lambda item: item[0])
+                roles = [item[1] for item in chain_items]
+                if len(chain_items) == 1:
+                    if roles != ["single"]:
+                        raise ValueError("Invalid single-cell administration chain")
+                    continue
+                if roles[0] != "start" or roles[-1] != "end" or any(
+                    role != "body" for role in roles[1:-1]
+                ):
+                    raise ValueError("Invalid administration chain roles")
+                if any(
+                    current_time - previous_time != timedelta(hours=1)
+                    for (previous_time, _), (current_time, _) in zip(chain_items, chain_items[1:])
+                ):
+                    raise ValueError("Administration chain must be continuous")
+
+            temporary_chain_map = {
+                group_key: str(uuid.uuid4())
+                for group_key in temporary_chain_groups
+            }
+
+            for local_order_id, planned_key in sorted(normalized_dirty, key=lambda item: (item[0], item[1])):
+                real_order_id = order_id_map.get(local_order_id)
+                if real_order_id is None:
+                    continue
+                desired = normalized_desired.get((local_order_id, planned_key))
+                current = current_admins.get((real_order_id, planned_key))
+
+                if local_order_id > 0:
+                    baseline = normalized_baseline.get((local_order_id, planned_key))
+                    if self._draft_admin_token(current) != self._draft_admin_token(baseline):
+                        self._raise_order_conflict(local_order_id)
+
+                desired_status = str(getattr(desired, "status", "deleted") or "deleted") if desired else "deleted"
+                desired_role = str(getattr(desired, "cell_role", "single") or "single") if desired else str(
+                    (current["cell_role"] if current is not None else "single") or "single"
+                )
+                desired_chain = getattr(desired, "big_chain_id", None) if desired else (
+                    current["big_chain_id"] if current is not None else None
+                )
+                temporary_chain_key = (local_order_id, str(desired_chain or ""))
+                if temporary_chain_key in temporary_chain_map:
+                    desired_chain = temporary_chain_map[temporary_chain_key]
+                desired_volume = float(getattr(desired, "volume_ml", 0.0) or 0.0) if desired else float(
+                    (current["volume_ml"] if current is not None else 0.0) or 0.0
+                )
+
+                current_mark = str((current["comment"] if current is not None else "") or "")
+                if desired_status in {"deleted", "cancelled"} and current_mark in {
+                    "nurse_executed", "nurse_not_executed"
+                }:
+                    self._raise_order_conflict(local_order_id)
+
+                target_shape = (desired_status, desired_role, str(desired_chain or ""), desired_volume)
+                if self._draft_admin_shape(current) == target_shape:
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT INTO administrations (
+                        order_id, chain_id, big_chain_id, cell_role, planned_time,
+                        actual_time, performer_id, status, version, comment,
+                        dose_given, volume_ml, is_committed, last_modified_by, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'doctor',
+                              STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+                    """,
+                    (
+                        real_order_id,
+                        getattr(desired, "chain_id", None) if desired else (
+                            current["chain_id"] if current is not None else None
+                        ),
+                        desired_chain,
+                        desired_role,
+                        planned_key,
+                        current["actual_time"] if current is not None else None,
+                        current["performer_id"] if current is not None else None,
+                        desired_status,
+                        int((current["version"] if current is not None else -1) or 0) + 1,
+                        current_mark,
+                        current["dose_given"] if current is not None else None,
+                        desired_volume,
+                    ),
+                )
+
+            self._domain_service.sync_transfusions_for_admission(cursor, int(admission_id))
+            return order_id_map
 
     def add_order(self, dto: OrderDTO):
         with self.dao.db.remcard_transaction():
@@ -917,7 +1355,7 @@ class OrderService:
     def find_recent_orders_source(self, admission_id: int, shift_date: datetime, max_days_back: int = 3):
         for days_back in range(1, max_days_back + 1):
             check_date = shift_date - timedelta(days=days_back)
-            orders = self.get_orders(admission_id, check_date)
+            orders = self.get_orders(admission_id, check_date, only_committed=True)
             if orders:
                 return orders, check_date
         return [], None

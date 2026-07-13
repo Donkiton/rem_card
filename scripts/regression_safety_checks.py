@@ -5760,6 +5760,13 @@ def _assert_committed_long_infusion_delete_marks_draft(doctor_widget, doctor_mod
         doctor_model.admin_map[(3, slot.isoformat())] = admin_row
         committed_chain.append(admin_row)
 
+    doctor_widget._draft_baseline_admin_map.update(
+        {
+            (3, admin_row.planned_time.isoformat()): admin_row
+            for admin_row in committed_chain
+        }
+    )
+
     doctor_model.has_any_draft = False
     doctor_widget._cached_has_drafts = False
     committed_long_delete = doctor_widget._apply_optimistic_cell(
@@ -5841,8 +5848,8 @@ def _assert_orders_same_cell_fast_click_guard(
             deferred_service.apply_order_left_click,
         )
         pending_admin = model.data(index, qt.UserRole)
-        if len(deferred_service.queued_writes) != 1:
-            return False, f"first click should enqueue one write, got {len(deferred_service.queued_writes)}"
+        if deferred_service.queued_writes:
+            return False, f"local draft click must not enqueue writes: {len(deferred_service.queued_writes)}"
         if pending_admin is None or pending_admin.status != "planned":
             return False, f"first click did not leave planned optimistic cell: {pending_admin}"
 
@@ -5851,24 +5858,21 @@ def _assert_orders_same_cell_fast_click_guard(
             "orders_left_click",
             deferred_service.apply_order_left_click,
         )
-        if len(deferred_service.queued_writes) != 1:
-            return False, "second click on pending cell must not enqueue inverse write"
+        if deferred_service.queued_writes:
+            return False, "repeat local click unexpectedly enqueued a write"
         pending_admin = model.data(index, qt.UserRole)
         if pending_admin is None or pending_admin.status != "planned":
             return False, "second click on pending cell removed optimistic value"
 
-        write = deferred_service.queued_writes[0]
-        write["operation"]()
-        write["on_success"](None)
-        if len(deferred_service.left_click_calls) != 1:
-            return False, f"pending-cell guard called service unexpectedly: {deferred_service.left_click_calls}"
+        if deferred_service.left_click_calls:
+            return False, f"local draft click called persistence service: {deferred_service.left_click_calls}"
 
         widget._handle_cell_action(
             index,
             "orders_left_click",
             deferred_service.apply_order_left_click,
         )
-        if len(deferred_service.queued_writes) != 1:
+        if deferred_service.queued_writes:
             return False, "repeat-click debounce must suppress immediate post-success click"
 
         cell_key = widget._admin_cell_write_key(order.id, slot)
@@ -5878,8 +5882,12 @@ def _assert_orders_same_cell_fast_click_guard(
             "orders_left_click",
             deferred_service.apply_order_left_click,
         )
-        if len(deferred_service.queued_writes) != 2:
-            return False, "same cell should accept a normal later click after debounce window"
+        if deferred_service.queued_writes:
+            return False, "later local click unexpectedly enqueued a write"
+        if model.data(index, qt.UserRole) is not None:
+            return False, "later local click should toggle the cell back to baseline"
+        if widget.has_drafts():
+            return False, "toggle back to baseline must collapse the local draft to a no-op"
     finally:
         widget.close()
 
@@ -5937,13 +5945,14 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
 
         doctor_widget._mark_local_order_row_deleted(0, doctor_order, was_committed=True)
         app.processEvents()
-        if len(doctor_model.orders) != 1:
-            return False, "doctor order row was removed before delete commit"
-        if not getattr(doctor_model.orders[0], "_pending_delete", False):
-            return False, "doctor order row was not marked as pending-delete"
+        if len(doctor_model.orders) != 0:
+            return False, "doctor order row did not disappear from the local overlay"
+        deleted_entry = doctor_widget._local_deleted_orders.get(1)
+        if not deleted_entry or not getattr(deleted_entry[1], "_pending_delete", False):
+            return False, "doctor order tombstone was not retained for Save"
         doctor_widget._clear_local_order_row_pending_delete(1)
-        if getattr(doctor_model.orders[0], "_pending_delete", False):
-            return False, "doctor order row pending-delete marker was not cleared on error"
+        if len(doctor_model.orders) != 1 or getattr(doctor_model.orders[0], "_pending_delete", False):
+            return False, "doctor order row was not restored after local delete rollback"
 
         index = doctor_model.index(0, 1)
         pending = doctor_widget._apply_pending_cell(index, doctor_order, None, doctor_model.time_slots[0], "orders_left_click")
@@ -5994,7 +6003,9 @@ def _check_orders_pending_states_before_commit(temp_root: str) -> tuple[bool, st
             is_committed=1,
             comment="",
         )
-        doctor_model.admin_map[(1, doctor_model.time_slots[0].isoformat())] = committed_admin
+        committed_key = (1, doctor_model.time_slots[0].isoformat())
+        doctor_model.admin_map[committed_key] = committed_admin
+        doctor_widget._draft_baseline_admin_map = {committed_key: committed_admin}
         doctor_model.has_any_draft = False
         doctor_widget._cached_has_drafts = False
         repaint_events = []
@@ -9212,7 +9223,7 @@ def _check_orders_tab_targeted_diagnostics_performance(temp_root: str) -> tuple[
             shift_date=shift_date,
             role="doctor",
             mode="live",
-            variant="full",
+            variant="committed",
         )
         first = coordinator.load_orders_tab(context, source="user", priority="HIGH", force_refresh=True)
         if not backup_deferral_seen or not backup_deferral_seen[0][0]:
@@ -10491,6 +10502,8 @@ def _check_doctor_orders_late_model_binding(temp_root: str) -> tuple[bool, str]:
         widget._mark_local_order_row_deleted(0, order, was_committed=True)
         if not widget.has_drafts() or not draft_events or draft_events[-1] is not True:
             return False, "local row delete did not emit active draft state"
+        if widget.model.rowCount() != 0 or int(order.id) not in widget._local_deleted_orders:
+            return False, "local row delete did not hide the row while retaining its tombstone"
         return True, "ok"
     finally:
         widget.close()
@@ -10528,7 +10541,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             shift_date=shift_date,
             role="doctor",
             mode="live",
-            variant="full",
+            variant="committed",
         )
         context_key = context.cache_key()
         context_hash = context.hash()
@@ -10545,7 +10558,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
         snapshot = {
             "admission_id": 1,
             "shift_date": shift_date,
-            "only_committed": False,
+            "only_committed": True,
             "orders": [
                 OrderDTO(
                     id=10,
@@ -10596,7 +10609,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             shift_date=shift_date,
             role="doctor",
             mode="live",
-            variant="full",
+            variant="committed",
         )
         current_context = service.read_coordinator.make_orders_context(
             source_db="live",
@@ -10604,7 +10617,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
             shift_date=shift_date,
             role="doctor",
             mode="live",
-            variant="full",
+            variant="committed",
         )
         widget.admission_id = 5
         widget.shift_date = shift_date
@@ -10614,7 +10627,7 @@ def _check_orders_widget_skips_duplicate_snapshot(temp_root: str) -> tuple[bool,
         drift_snapshot = {
             "admission_id": 5,
             "shift_date": shift_date,
-            "only_committed": False,
+            "only_committed": True,
             "orders": [],
             "admin_rows": [],
             "has_any_draft": False,
@@ -11717,8 +11730,8 @@ def _check_doctor_load_patient_card_refactor_path(temp_root: str) -> tuple[bool,
         "_sync_orders_widget_context_for_patient_open": (
             "ow.set_context(",
             "ow.service = self.service",
-            "if not self._archive_read_only_mode and not orders_context_unchanged:",
-            "ow.clear_drafts()",
+            "ow.admission_id = admission_id",
+            "ow.shift_date = date",
         ),
         "_schedule_patient_card_snapshots": (
             "if not request_snapshot:",
@@ -12091,17 +12104,19 @@ def _check_orders_fast_click_path_stays_local(temp_root: str) -> tuple[bool, str
         return False, "doctor: OrdersWidget class not found"
 
     methods = {node.name: node for node in class_defs[0].body if isinstance(node, ast.FunctionDef)}
-    for method_name in ("_enqueue_cell_write", "_emit_admin_cell_changes"):
+    for method_name in ("_handle_cell_action", "_emit_admin_cell_changes"):
         if method_name not in methods:
             return False, f"doctor: {method_name} not found"
 
-    enqueue_source = _cached_source_segment(source_text, methods["_enqueue_cell_write"]) or ""
-    if "_defer_snapshot_request" in enqueue_source or "_request_snapshot" in enqueue_source:
-        return False, "doctor: cell write success must not start an immediate orders snapshot"
-    if "_schedule_fast_sync" not in enqueue_source:
-        return False, "doctor: cell write success must debounce the quiet orders sync"
-    if "_schedule_state_sync" not in enqueue_source:
-        return False, "doctor: cell write success must keep state buttons in sync"
+    click_source = _cached_source_segment(source_text, methods["_handle_cell_action"]) or ""
+    if "_apply_optimistic_cell" not in click_source:
+        return False, "doctor: cell click must update the local overlay"
+    if "_enqueue_cell_write" in click_source or "_enqueue_write(" in click_source:
+        return False, "doctor: draft cell click must not enqueue persistence"
+    if "service_action(" in click_source:
+        return False, "doctor: draft cell click must not call the persistence service"
+    if "_request_snapshot" in click_source or "_schedule_fast_sync" in click_source:
+        return False, "doctor: draft cell click must not start a network refresh"
 
     emit_source = _cached_source_segment(source_text, methods["_emit_admin_cell_changes"]) or ""
     if ".viewport().update(" in emit_source or "viewport().update()" in emit_source:
@@ -12229,8 +12244,10 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
         return False, "doctor patient open must track unchanged orders context"
     if "if not self._archive_read_only_mode:\n                ow.clear_drafts()" in patient_open_orders_source:
         return False, "doctor patient reopen must not clear drafts again for unchanged orders context"
-    if "if not self._archive_read_only_mode and not orders_context_unchanged:" not in patient_open_orders_source:
+    if "if orders_widget is not None and not self._archive_read_only_mode and not orders_context_unchanged:" not in patient_open_orders_source:
         return False, "doctor patient open clear_drafts must be guarded by orders_context_unchanged"
+    if "orders_widget.has_drafts()" not in patient_open_orders_source or "CustomMessageBox.No" not in patient_open_orders_source:
+        return False, "doctor patient switch must protect a local draft from silent discard"
 
     orders_path = root / "ui/doctor_view/orders_widget.py"
     orders_text = orders_path.read_text(encoding="utf-8")
@@ -12243,24 +12260,18 @@ def _check_performance_a_guards_present(temp_root: str) -> tuple[bool, str]:
     if not orders_classes:
         return False, "OrdersWidget class not found"
     orders_methods = {node.name: node for node in orders_classes[0].body if isinstance(node, ast.FunctionDef)}
-    guard_method = orders_methods.get("_known_current_context_without_drafts")
-    source_probe_method = orders_methods.get("_source_has_order_drafts")
     clear_method = orders_methods.get("clear_drafts")
-    if guard_method is None or source_probe_method is None or clear_method is None:
-        return False, "orders clear-drafts guard methods are missing"
-    guard_source = _cached_source_segment(orders_text, guard_method) or ""
-    source_probe_source = _cached_source_segment(orders_text, source_probe_method) or ""
+    restore_method = orders_methods.get("_restore_local_draft_baseline")
+    if restore_method is None or clear_method is None:
+        return False, "orders local draft restore methods are missing"
     clear_source = _cached_source_segment(orders_text, clear_method) or ""
-    if "self.model.admission_id != self.admission_id" not in guard_source:
-        return False, "clear-drafts guard must not skip when model context is different"
-    if "_last_applied_snapshot_signature" not in guard_source:
-        return False, "clear-drafts guard must require a known loaded snapshot/local model"
-    if "has_order_drafts" not in source_probe_source:
-        return False, "clear-drafts guard must use a cheap source draft probe when local state is unknown"
-    if "_known_current_context_without_drafts" not in clear_source:
-        return False, "clear_drafts must skip known no-op clears"
-    if "_source_has_order_drafts" not in clear_source:
-        return False, "clear_drafts must skip source-confirmed no-op clears"
+    if "_has_local_draft_changes" not in clear_source:
+        return False, "clear_drafts must skip a clean local overlay"
+    if "_restore_local_draft_baseline" not in clear_source:
+        return False, "clear_drafts must restore the immutable local baseline"
+    if "clear_order_drafts" in clear_source or "_enqueue_write" in clear_source:
+        if "_legacy_central_draft_detected" not in clear_source or "orders_discard_legacy" not in clear_source:
+            return False, "clear_drafts may write only for an explicitly detected legacy central draft"
 
     diet_path = root / "ui/shared/components/diet_intake_widget.py"
     diet_text = diet_path.read_text(encoding="utf-8")
