@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, Qt
 from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
@@ -40,6 +40,8 @@ class AdminMainWidget(QWidget):
         self.emergency_password_dialog = None
         self.db_rotation_dialog = None
         self.settings_import_dialog = None
+        self._settings_import_worker = None
+        self._settings_import_loading_key = None
         self.decor_settings_dialog = None
 
         self.setup_ui()
@@ -615,7 +617,11 @@ class AdminMainWidget(QWidget):
     def open_settings_import(self):
         from rem_card.services.settings.settings_service import get_settings_service
         from rem_card.ui.shared.custom_message_box import CustomMessageBox
-        from .settings_import_dialog import SettingsImportPathDialog, SettingsImportPreviewDialog
+        from .settings_import_dialog import SettingsImportPathDialog
+
+        worker = self._settings_import_worker
+        if worker is not None:
+            return
 
         answer = CustomMessageBox.question(
             self,
@@ -631,14 +637,108 @@ class AdminMainWidget(QWidget):
             return
 
         settings_service = get_settings_service()
-        loading_key = self._show_settings_loading("Загрузка настроек из базы...", key="settings-import-preview", auto_hide_ms=60000)
-        try:
-            preview = settings_service.preview_external_settings_import(path_dialog.selected_path)
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Загрузить настройки", f"Не удалось загрузить настройки:\n{exc}")
+        source_path = str(path_dialog.selected_path)
+        self._start_settings_import_stage(
+            lambda: settings_service.preview_external_settings_import(source_path),
+            message="Загрузка настроек из базы...",
+            key="settings-import-preview",
+            error_message="Не удалось загрузить настройки",
+            on_success=lambda preview: self._on_settings_import_preview_ready(settings_service, preview),
+        )
+
+    def _start_settings_import_stage(
+        self,
+        operation,
+        *,
+        message: str,
+        key: str,
+        error_message: str,
+        on_success,
+    ) -> None:
+        from rem_card.ui.shared.async_call import AsyncCallThread
+
+        active_worker = self._settings_import_worker
+        if active_worker is not None:
             return
-        finally:
-            self._hide_settings_loading(loading_key)
+
+        loading_key = self._show_settings_loading(message, key=key, auto_hide_ms=300000)
+        worker = AsyncCallThread(operation)
+        worker._settings_import_loading_key = loading_key
+        worker._settings_import_error_message = str(error_message)
+        worker._settings_import_on_success = on_success
+        self._settings_import_worker = worker
+        self._settings_import_loading_key = loading_key
+        self.btn_import_settings.setEnabled(False)
+        self.menu_widget.setEnabled(False)
+        worker.succeeded.connect(self._on_settings_import_worker_succeeded, Qt.QueuedConnection)
+        worker.failed.connect(self._on_settings_import_worker_failed, Qt.QueuedConnection)
+        worker.finished.connect(self._on_settings_import_worker_finished, Qt.QueuedConnection)
+        try:
+            worker.start()
+        except Exception as exc:
+            self._handle_settings_import_stage_failed(worker, exc)
+
+    def _finish_settings_import_stage(self, worker, loading_key: str | None) -> bool:
+        if self._settings_import_worker is not worker:
+            return False
+        self._settings_import_worker = None
+        self._settings_import_loading_key = None
+        self.btn_import_settings.setEnabled(True)
+        self.menu_widget.setEnabled(True)
+        self._hide_settings_loading(loading_key)
+        return True
+
+    def _on_settings_import_worker_succeeded(self, result) -> None:
+        worker = self.sender()
+        if worker is None:
+            return
+        loading_key = getattr(worker, "_settings_import_loading_key", None)
+        on_success = getattr(worker, "_settings_import_on_success", None)
+        if not self._finish_settings_import_stage(worker, loading_key):
+            return
+        if self._settings_import_ui_is_closing():
+            return
+        if callable(on_success):
+            on_success(result)
+
+    def _on_settings_import_worker_failed(self, exc: Exception) -> None:
+        worker = self.sender()
+        if worker is not None:
+            self._handle_settings_import_stage_failed(worker, exc)
+
+    def _handle_settings_import_stage_failed(self, worker, exc: Exception) -> None:
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        loading_key = getattr(worker, "_settings_import_loading_key", None)
+        error_message = str(getattr(worker, "_settings_import_error_message", "Не удалось выполнить операцию"))
+        if not self._finish_settings_import_stage(worker, loading_key):
+            return
+        if self._settings_import_ui_is_closing():
+            return
+        CustomMessageBox.warning(self, "Загрузить настройки", f"{error_message}:\n{exc}")
+
+    def _on_settings_import_worker_finished(self) -> None:
+        worker = self.sender()
+        if worker is not None:
+            self._finish_settings_import_stage(
+                worker,
+                getattr(worker, "_settings_import_loading_key", None),
+            )
+
+    def _settings_import_ui_is_closing(self) -> bool:
+        if QCoreApplication.closingDown():
+            return True
+        try:
+            window = self.window()
+            if bool(getattr(window, "_is_closing", False)):
+                return True
+            return bool(window is not self and window.isVisible() and not self.isVisible())
+        except RuntimeError:
+            return True
+
+    def _on_settings_import_preview_ready(self, settings_service, preview) -> None:
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from .settings_import_dialog import SettingsImportPreviewDialog
 
         if not preview.changes:
             CustomMessageBox.information(self, "Загрузить настройки", "Отличий между dev и выбранной БД не найдено.")
@@ -648,14 +748,18 @@ class AdminMainWidget(QWidget):
         if self.settings_import_dialog.exec() != QDialog.Accepted:
             return
         selected_ids = self.settings_import_dialog.selected_change_ids()
-        loading_key = self._show_settings_loading("Применение настроек...", key="settings-import-apply", auto_hide_ms=60000)
-        try:
-            report = settings_service.apply_external_settings_import(preview.source_db_path, selected_ids)
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Загрузить настройки", f"Не удалось применить настройки:\n{exc}")
-            return
-        finally:
-            self._hide_settings_loading(loading_key)
+        source_db_path = str(preview.source_db_path)
+        selected_ids = tuple(selected_ids)
+        self._start_settings_import_stage(
+            lambda: settings_service.apply_external_settings_import(source_db_path, selected_ids),
+            message="Применение настроек...",
+            key="settings-import-apply",
+            error_message="Не удалось применить настройки",
+            on_success=self._on_settings_import_applied,
+        )
+
+    def _on_settings_import_applied(self, report) -> None:
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
         loading_key = self._show_settings_loading("Обновление настроек интерфейса...", key="settings-import-refresh", auto_hide_ms=30000)
         self._refresh_after_settings_import()

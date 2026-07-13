@@ -154,7 +154,7 @@ class PatientBedManagementWidget(QWidget):
 
     def _init_bed_widgets(self):
         for bed_number in range(1, NUM_BEDS + 1):
-            bed_widget = BedWidget(bed_number, "FREE", None, self)
+            bed_widget = BedWidget(bed_number, "FREE", 0, self)
             bed_widget.clicked.connect(self._on_bed_clicked)
             index = bed_number - 1
             self.grid_layout.addWidget(bed_widget, index // BED_GRID_COLUMNS, index % BED_GRID_COLUMNS)
@@ -414,6 +414,8 @@ class PatientBedManagementWidget(QWidget):
         for bed_widget in self.bed_widgets:
             bed_data = by_bed.get(int(bed_widget.bed_number))
             if not bed_data:
+                bed_widget.set_status("FREE", 0)
+                bed_widget.set_patient_info("")
                 continue
             admission_id = bed_data["current_admission_id"] if bed_data["current_admission_id"] is not None else 0
             bed_widget.set_status(bed_data["status"], admission_id)
@@ -430,8 +432,12 @@ class PatientBedManagementWidget(QWidget):
         self._pending_side_card_update = None
         if pending_side_update:
             bed_number, expected_admission_id = pending_side_update
-            self._update_side_card_from_snapshot(bed_number, expected_admission_id=expected_admission_id)
-            current_id = self._row_admission_id(by_bed.get(int(bed_number)))
+            pending_row = by_bed.get(int(bed_number))
+            if pending_row is None:
+                self.side_card.update_info(int(bed_number), None, None)
+            else:
+                self._update_side_card_from_snapshot(bed_number, expected_admission_id=expected_admission_id)
+            current_id = self._row_admission_id(pending_row)
             logger.info(
                 "patient_form_refresh_end role=%s bed=%s admission_id=%s current_admission_id=%s",
                 _current_role(),
@@ -442,7 +448,10 @@ class PatientBedManagementWidget(QWidget):
         elif self.bed_widgets:
             current_bed = getattr(self.side_card, "current_bed_number", None)
             target_bed = int(current_bed) if current_bed else int(self.bed_widgets[0].bed_number)
-            self._update_side_card_from_snapshot(target_bed)
+            if by_bed.get(target_bed) is None:
+                self.side_card.update_info(target_bed, None, None)
+            else:
+                self._update_side_card_from_snapshot(target_bed)
 
         logger.info("patient_beds_refresh_end role=%s rows=%s", _current_role(), len(rows))
 

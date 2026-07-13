@@ -14,11 +14,11 @@ from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_lab
 class BedWidget(QFrame):
     clicked = Signal(int, int)
 
-    def __init__(self, bed_number: int, status: str, current_admission_id: int = None, parent=None):
+    def __init__(self, bed_number: int, status: str, current_admission_id: int | None = 0, parent=None):
         super().__init__(parent)
-        self.bed_number = bed_number
+        self.bed_number = int(bed_number)
         self.status = status
-        self.current_admission_id = current_admission_id
+        self.current_admission_id = int(current_admission_id or 0)
         self.parent_window = parent
 
         self.setFixedSize(250, 190)
@@ -99,12 +99,13 @@ class BedWidget(QFrame):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.drag_start_position = event.pos()
+            self.drag_start_position = event.position().toPoint()
 
     def mouseMoveEvent(self, event):
         if not (event.buttons() & Qt.LeftButton): return
         if not hasattr(self, 'drag_start_position'): return
-        if (event.pos() - self.drag_start_position).manhattanLength() < 10: return
+        event_position = event.position().toPoint()
+        if (event_position - self.drag_start_position).manhattanLength() < 10: return
         if self.status == "FREE": return
 
         drag = QDrag(self)
@@ -113,13 +114,14 @@ class BedWidget(QFrame):
         drag.setMimeData(mime_data)
         pixmap = self.grab()
         drag.setPixmap(pixmap)
-        drag.setHotSpot(event.pos())
+        drag.setHotSpot(event_position)
         drag.exec(Qt.MoveAction)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            if hasattr(self, 'drag_start_position') and (event.pos() - self.drag_start_position).manhattanLength() < 10:
-                self.clicked.emit(self.bed_number, self.current_admission_id)
+            event_position = event.position().toPoint()
+            if hasattr(self, 'drag_start_position') and (event_position - self.drag_start_position).manhattanLength() < 10:
+                self.clicked.emit(self.bed_number, int(self.current_admission_id or 0))
         super().mouseReleaseEvent(event)
 
     def dragEnterEvent(self, event):
@@ -168,7 +170,7 @@ class BedWidget(QFrame):
         event.acceptProposedAction()
         self._update_display()
 
-    def set_status(self, status: str, current_admission_id: int = None):
+    def set_status(self, status: str, current_admission_id: int | None = 0):
         self.status = status
-        self.current_admission_id = current_admission_id
+        self.current_admission_id = int(current_admission_id or 0)
         self._update_display()
