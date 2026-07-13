@@ -8,7 +8,6 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from rem_card.app.db_lifecycle import (
@@ -41,7 +40,12 @@ from rem_card.app.paths import (
     LOCAL_REMCARD_OUTBOX_PATH,
     LOCAL_REMCARD_REPLICA_PATH,
 )
+from rem_card.app.runtime_paths import (
+    get_existing_sqlite_rw_uri,
+    is_selected_dev_database_file,
+)
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.startup_db_guard import (
     is_confirmed_db_corruption_reason,
     is_retryable_db_availability_reason,
@@ -780,7 +784,18 @@ class DatabaseManager:
 
     def _init_connections(self):
         logger.info("Initializing unified DB connection at %s", self.db_path)
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        existing_only = is_selected_dev_database_file(
+            self.db_path,
+            "archiv",
+            "rao_journal.db",
+        )
+        if existing_only:
+            if not os.path.isfile(self.db_path):
+                raise FileNotFoundError(
+                    f"Сохранённая dev-база больше недоступна: {self.db_path}"
+                )
+        else:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         profile_lock = FileWriteLock(
             getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
             stale_timeout_sec=10 * 60,
@@ -792,8 +807,14 @@ class DatabaseManager:
             if self._startup_pre_connect_fingerprint is None:
                 self._startup_pre_connect_fingerprint = self._startup_db_fingerprint()
             connect_started = time.perf_counter()
+            connect_target = (
+                get_existing_sqlite_rw_uri(self.db_path)
+                if existing_only
+                else self.db_path
+            )
             conn = sqlite3.connect(
-                self.db_path,
+                connect_target,
+                uri=existing_only,
                 check_same_thread=False,
                 isolation_level=None,
                 timeout=5.0,
@@ -1812,16 +1833,7 @@ class DatabaseManager:
         return dict(metadata or {}) if isinstance(metadata, dict) else {}
 
     def _readonly_db_uri(self) -> str:
-        db_path = str(self.db_path)
-        if db_path.startswith("\\\\"):
-            # sqlite3 on Windows rejects Path.as_uri() UNC authorities
-            # (file://server/share/...), while file:\\server\share works.
-            return f"file:{db_path}?mode=ro"
-        try:
-            path_uri = Path(db_path).as_uri()
-        except ValueError:
-            path_uri = Path(os.path.abspath(db_path)).as_uri()
-        return f"{path_uri}?mode=ro"
+        return build_sqlite_file_uri(self.db_path, mode="ro")
 
     def _open_readonly_central_connection(self) -> sqlite3.Connection:
         if self._closed or self._remcard_conn is None:

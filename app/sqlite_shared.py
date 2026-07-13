@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.db_availability import DatabaseClosedError
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 NETWORK_SAFE_DB_PROFILE = "network_safe_v1"
 SQLITE_BUSY_TIMEOUT_MS = max(100, int(os.environ.get("REMCARD_SQLITE_BUSY_TIMEOUT_MS", "10000")))
@@ -689,7 +690,7 @@ def validate_sqlite_file(file_path: str) -> tuple[bool, str]:
 
     conn = None
     try:
-        uri = f"file:{file_path}?mode=ro"
+        uri = build_sqlite_file_uri(file_path, mode="ro")
         conn = sqlite3.connect(
             uri,
             uri=True,

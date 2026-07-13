@@ -308,6 +308,11 @@ class EmergencyRestoreProbe:
     ) -> None:
         if self.role != "nurse":
             return
+        from rem_card.app.runtime_paths import is_compiled
+
+        if not is_compiled():
+            self.release_network_emergency_role_marker()
+            return
         lock_path = os.path.join(context.session_locks_dir, EMERGENCY_NURSE_ROLE_LOCK_FILE_NAME)
         current_lock = self._network_emergency_role_lock
         if current_lock is not None and getattr(current_lock, "lock_path", "") == lock_path:

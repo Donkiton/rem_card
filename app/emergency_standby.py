@@ -34,6 +34,7 @@ from rem_card.app.emergency_validation import (
     validate_settings_db_snapshot,
 )
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import backup_connection, configure_connection
 from rem_card.data.settings import settings_schema
 from rem_card.app.version import APP_VERSION
@@ -481,7 +482,7 @@ class EmergencyStandbyManager:
         conn = None
         try:
             conn = sqlite3.connect(
-                f"file:{os.path.abspath(source_path)}?mode=ro",
+                build_sqlite_file_uri(source_path, mode="ro"),
                 uri=True,
                 check_same_thread=False,
                 isolation_level=None,

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from typing import Optional
 
 from rem_card.app.roles import (
@@ -15,11 +16,16 @@ from rem_card.app.roles import (
     ROLE_OPERBLOCK_PLANNED,
     is_operblock_role,
 )
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
 OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в текущей папке базы"
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
+DEV_DATABASE_CONFIG_ENV = "REMCARD_DEV_DATABASE_CONFIG"
+DEV_DATABASE_CONFIG_NAME = "dev_database_paths.json"
+DEV_RUNTIME_BAZA_PIN_ENV = "REMCARD_INTERNAL_DEV_BAZA_PIN"
+DEV_EXISTING_BAZA_ONLY_ENV = "REMCARD_DEV_EXISTING_BAZA_ONLY"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
 
@@ -147,11 +153,306 @@ def get_dev_baza_dir() -> str:
     if override:
         return _normalize_baza_dir(override)
 
+    configured = read_dev_database_config().get("active_baza_dir")
+    if configured:
+        return _normalize_baza_dir(str(configured))
+
     return os.path.join(get_project_root(), BAZA_DIR_NAME)
 
 
 def _normalize_baza_dir(path: str) -> str:
     return os.path.abspath(os.path.normpath(str(path or "").strip().strip('"')))
+
+
+def get_dev_database_config_path() -> str:
+    override = os.environ.get(DEV_DATABASE_CONFIG_ENV)
+    if override:
+        return os.path.abspath(os.path.normpath(override))
+
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        base_dir = os.path.join(local_appdata, "RemCard")
+    else:
+        base_dir = os.path.join(os.path.expanduser("~"), ".remcard")
+    return os.path.join(base_dir, DEV_DATABASE_CONFIG_NAME)
+
+
+def get_dev_local_operation_lock_path(lock_key: str) -> str:
+    """Keep dev-only operation mutexes away from a selected production database."""
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        base_dir = os.path.join(local_appdata, "RemCard", "dev_operation_locks")
+    else:
+        base_dir = os.path.join(os.path.expanduser("~"), ".remcard", "dev_operation_locks")
+    safe_key = "".join(
+        char if char.isalnum() or char in ("-", "_") else "_"
+        for char in str(lock_key or "operation").lower()
+    )
+    return os.path.join(base_dir, f"{safe_key or 'operation'}.lock")
+
+
+def _normalize_dev_baza_dirs(paths) -> list[str]:
+    if isinstance(paths, (str, bytes, os.PathLike)):
+        paths = [paths]
+
+    normalized_paths: list[str] = []
+    seen: set[str] = set()
+    for raw_path in paths or ():
+        if not str(raw_path or "").strip().strip('"'):
+            continue
+        normalized = _normalize_baza_dir(os.fsdecode(raw_path))
+        key = os.path.normcase(normalized)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_paths.append(normalized)
+    return normalized_paths
+
+
+@contextmanager
+def _dev_database_config_guard(timeout_sec: float = 5.0):
+    config_path = get_dev_database_config_path()
+    lock_path = f"{config_path}.lock"
+    token = f"{os.getpid()}:{threading.get_ident()}:{time.time_ns()}"
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        while True:
+            try:
+                fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    if time.time() - os.path.getmtime(lock_path) > 60.0:
+                        os.remove(lock_path)
+                        continue
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    pass
+                if time.monotonic() >= deadline:
+                    raise DataPathConfigurationError(
+                        "Локальные настройки списка dev-баз временно заняты другим процессом."
+                    )
+                time.sleep(0.05)
+                continue
+
+            try:
+                payload = token.encode("utf-8")
+                offset = 0
+                try:
+                    while offset < len(payload):
+                        written = os.write(fd, payload[offset:])
+                        if written <= 0:
+                            raise OSError("Не удалось записать токен блокировки dev-настроек")
+                        offset += written
+                finally:
+                    os.close(fd)
+            except Exception:
+                # The O_EXCL file belongs to this process.  Do not leave a
+                # minute-long orphan if token persistence itself fails.
+                try:
+                    os.remove(lock_path)
+                except Exception:
+                    pass
+                raise
+            break
+    except Exception as exc:
+        if isinstance(exc, DataPathConfigurationError):
+            raise
+        raise DataPathConfigurationError(
+            f"Не удалось заблокировать локальные настройки dev-базы: {exc}"
+        ) from exc
+
+    try:
+        yield
+    finally:
+        try:
+            with open(lock_path, "r", encoding="utf-8") as fh:
+                is_ours = fh.read() == token
+        except FileNotFoundError:
+            is_ours = False
+        except Exception:
+            is_ours = False
+        if is_ours:
+            for attempt in range(10):
+                try:
+                    os.remove(lock_path)
+                    break
+                except FileNotFoundError:
+                    break
+                except PermissionError:
+                    if attempt >= 9:
+                        break
+                    time.sleep(0.03)
+
+
+def _read_dev_database_config_unlocked() -> dict[str, object]:
+    """Read the developer-local database selection and its saved path list."""
+    config_path = get_dev_database_config_path()
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return {"active_baza_dir": None, "saved_baza_dirs": []}
+    except Exception as exc:
+        _quarantine_broken_dev_database_config(config_path)
+        return {
+            "active_baza_dir": None,
+            "saved_baza_dirs": [],
+            "load_error": f"Не удалось прочитать {config_path}: {exc}",
+        }
+
+    if not isinstance(payload, dict):
+        _quarantine_broken_dev_database_config(config_path)
+        return {
+            "active_baza_dir": None,
+            "saved_baza_dirs": [],
+            "load_error": f"Некорректный формат файла настроек dev-базы: {config_path}",
+        }
+
+    try:
+        raw_active = (
+            payload.get("active_baza_dir")
+            or payload.get("active_path")
+            or payload.get("baza_dir")
+        )
+        if raw_active is not None and not isinstance(raw_active, str):
+            raise TypeError("active_baza_dir должен быть строкой")
+        active = None
+        if str(raw_active or "").strip().strip('"'):
+            active = _normalize_baza_dir(str(raw_active))
+
+        raw_saved = payload.get("saved_baza_dirs")
+        if raw_saved is None:
+            raw_saved = payload.get("saved_paths") or []
+        if not isinstance(raw_saved, list) or any(
+            not isinstance(path, str) for path in raw_saved
+        ):
+            raise TypeError("saved_baza_dirs должен быть списком строк")
+        saved = _normalize_dev_baza_dirs(raw_saved)
+    except Exception as exc:
+        _quarantine_broken_dev_database_config(config_path)
+        return {
+            "active_baza_dir": None,
+            "saved_baza_dirs": [],
+            "load_error": f"Некорректное содержимое {config_path}: {exc}",
+        }
+
+    if active:
+        active_key = os.path.normcase(active)
+        saved = [active] + [path for path in saved if os.path.normcase(path) != active_key]
+
+    return {
+        "active_baza_dir": active,
+        "saved_baza_dirs": saved,
+    }
+
+
+def read_dev_database_config() -> dict[str, object]:
+    with _dev_database_config_guard():
+        return _read_dev_database_config_unlocked()
+
+
+def _quarantine_broken_dev_database_config(config_path: str) -> Optional[str]:
+    if not os.path.isfile(config_path):
+        return None
+    quarantine_path = f"{config_path}.broken.{int(time.time())}"
+    try:
+        os.replace(config_path, quarantine_path)
+        return quarantine_path
+    except Exception:
+        return None
+
+
+def _write_dev_database_config_unlocked(
+    active_baza_dir: str,
+    saved_baza_dirs=(),
+) -> str:
+    """Atomically persist the active dev database outside every database folder."""
+    if not str(active_baza_dir or "").strip().strip('"'):
+        raise DataPathConfigurationError("Выберите папку базы данных.")
+
+    active = _normalize_baza_dir(active_baza_dir)
+    active_key = os.path.normcase(active)
+    saved = [
+        path
+        for path in _normalize_dev_baza_dirs(saved_baza_dirs)
+        if os.path.normcase(path) != active_key
+    ]
+    saved.insert(0, active)
+
+    config_path = get_dev_database_config_path()
+    config_dir = os.path.dirname(config_path)
+    os.makedirs(config_dir, exist_ok=True)
+    payload = {
+        "version": 1,
+        "active_baza_dir": active,
+        "saved_baza_dirs": saved,
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    tmp_path = f"{config_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, config_path)
+    except Exception as exc:
+        raise DataPathConfigurationError(f"Не удалось сохранить {config_path}: {exc}") from exc
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+    return config_path
+
+
+def write_dev_database_config(
+    active_baza_dir: str,
+    saved_baza_dirs=(),
+) -> str:
+    with _dev_database_config_guard():
+        return _write_dev_database_config_unlocked(active_baza_dir, saved_baza_dirs)
+
+
+def _default_dev_baza_dir_without_config() -> str:
+    return _normalize_baza_dir(
+        os.environ.get("REMCARD_BAZA_DIR")
+        or os.environ.get(DEV_BAZA_DIR_ENV)
+        or os.path.join(get_project_root(), BAZA_DIR_NAME)
+    )
+
+
+def save_dev_baza_dir(baza_dir: str) -> str:
+    with _dev_database_config_guard():
+        config = _read_dev_database_config_unlocked()
+        return _write_dev_database_config_unlocked(
+            baza_dir,
+            config.get("saved_baza_dirs") or [],
+        )
+
+
+def add_saved_dev_baza_dir(baza_dir: str) -> str:
+    with _dev_database_config_guard():
+        config = _read_dev_database_config_unlocked()
+        active = str(config.get("active_baza_dir") or _default_dev_baza_dir_without_config())
+        saved = list(config.get("saved_baza_dirs") or [])
+        saved.append(baza_dir)
+        return _write_dev_database_config_unlocked(active, saved)
+
+
+def remove_saved_dev_baza_dir(baza_dir: str) -> str:
+    with _dev_database_config_guard():
+        config = _read_dev_database_config_unlocked()
+        active = str(config.get("active_baza_dir") or _default_dev_baza_dir_without_config())
+        remove_key = os.path.normcase(_normalize_baza_dir(baza_dir))
+        saved = [
+            path
+            for path in (config.get("saved_baza_dirs") or [])
+            if os.path.normcase(_normalize_baza_dir(str(path))) != remove_key
+        ]
+        return _write_dev_database_config_unlocked(active, saved)
 
 
 def get_operblock_test_baza_dir() -> str:
@@ -382,6 +683,104 @@ def get_journal_db_path(baza_dir: str) -> str:
     return os.path.join(_normalize_baza_dir(baza_dir), "archiv", "rao_journal.db")
 
 
+def get_existing_sqlite_rw_uri(db_path: str) -> str:
+    """Return a writable SQLite URI that refuses to create a missing file."""
+    return build_sqlite_file_uri(db_path, mode="rw")
+
+
+def is_selected_dev_database_file(db_path: str, *relative_parts: str) -> bool:
+    """Whether *db_path* belongs to the saved dev root opened existing-only."""
+    if is_compiled() or os.environ.get(DEV_EXISTING_BAZA_ONLY_ENV) != "1":
+        return False
+    selected_root = str(os.environ.get("REMCARD_BAZA_DIR") or "").strip()
+    if not selected_root:
+        return False
+    expected = os.path.join(_normalize_baza_dir(selected_root), *relative_parts)
+    actual_key = os.path.normcase(os.path.abspath(os.path.normpath(str(db_path))))
+    expected_key = os.path.normcase(os.path.abspath(os.path.normpath(expected)))
+    return actual_key == expected_key
+
+
+def validate_dev_baza_dir(baza_dir: str) -> tuple[bool, str]:
+    """Validate a dev database selection without touching session role locks."""
+    if not str(baza_dir or "").strip().strip('"'):
+        return False, "Укажите папку базы данных."
+
+    normalized = _normalize_baza_dir(baza_dir)
+    if not os.path.isdir(normalized):
+        return False, f"Папка базы недоступна: {normalized}"
+
+    db_path = get_journal_db_path(normalized)
+    if not os.path.isfile(db_path):
+        return False, f"В выбранной папке не найдена база данных: {db_path}"
+
+    ok, message = _validate_existing_sqlite_schema(
+        db_path,
+        required_tables={"patients", "admissions", "beds"},
+        label="Основная база данных",
+    )
+    if not ok:
+        return False, message
+
+    settings_db_path = os.path.join(normalized, "settings", "remcard_settings.db")
+    if not os.path.isfile(settings_db_path):
+        return False, f"В выбранной папке не найдена база настроек: {settings_db_path}"
+    ok, message = _validate_existing_sqlite_schema(
+        settings_db_path,
+        required_tables={"settings_meta", "app_settings"},
+        label="База настроек",
+    )
+    if not ok:
+        return False, message
+
+    missing_dirs = [
+        path for path in get_required_baza_paths(normalized)
+        if not os.path.isdir(path)
+    ]
+    if missing_dirs:
+        relative_dirs = [os.path.relpath(path, normalized) for path in missing_dirs]
+        shown = ", ".join(relative_dirs[:6])
+        suffix = f" и ещё {len(relative_dirs) - 6}" if len(relative_dirs) > 6 else ""
+        return False, f"В папке базы не хватает служебных каталогов: {shown}{suffix}"
+
+    return True, "ok"
+
+
+def _validate_existing_sqlite_schema(
+    db_path: str,
+    *,
+    required_tables: set[str],
+    label: str,
+) -> tuple[bool, str]:
+    conn = None
+    try:
+        db_uri = get_existing_sqlite_rw_uri(db_path)
+        conn = sqlite3.connect(
+            db_uri,
+            uri=True,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=5.0,
+        )
+        conn.execute("PRAGMA query_only = ON")
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        actual_tables = {str(row[0]) for row in rows if row and row[0]}
+        missing = sorted(required_tables - actual_tables)
+        if missing:
+            return False, f"{label} не похожа на RemCard: нет таблиц {', '.join(missing)}"
+    except Exception as exc:
+        return False, f"{label} недоступна для работы: {exc}"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return True, "ok"
+
+
 def _probe_writable_dir(directory: str) -> tuple[bool, str]:
     try:
         os.makedirs(directory, exist_ok=True)
@@ -466,7 +865,7 @@ def validate_baza_dir_for_runtime(baza_dir: Optional[str] = None) -> tuple[bool,
     try:
         from rem_card.app.sqlite_shared import configure_connection, run_quick_check
 
-        uri = f"file:{db_path}?mode=rw"
+        uri = build_sqlite_file_uri(db_path, mode="rw")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
         configure_connection(conn, profile="network")
         ok, result = run_quick_check(conn)

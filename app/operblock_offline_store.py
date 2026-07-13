@@ -14,6 +14,7 @@ from typing import Any
 from rem_card.app.db_runtime_context import DbRuntimeContext, build_operblock_offline_runtime_context
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import configure_connection, run_quick_check
 
 
@@ -181,7 +182,12 @@ def _base_remote_last_change_id(db_path: str | None) -> int | None:
         return None
     conn = None
     try:
-        conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, isolation_level=None, timeout=2.0)
+        conn = sqlite3.connect(
+            build_sqlite_file_uri(db_path, mode="ro"),
+            uri=True,
+            isolation_level=None,
+            timeout=2.0,
+        )
         configure_connection(conn, readonly=True, profile="network")
         row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()
         return int(row[0] or 0) if row else 0
@@ -345,7 +351,12 @@ def mark_operblock_write_failed(
 
 
 def _connect_local_readonly(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, isolation_level=None, timeout=2.0)
+    conn = sqlite3.connect(
+        build_sqlite_file_uri(db_path, mode="ro"),
+        uri=True,
+        isolation_level=None,
+        timeout=2.0,
+    )
     configure_connection(conn, readonly=True, profile="network")
     return conn
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rem_card.app.paths import LOCAL_CACHE_DIR
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
 LEGACY_OPERBLOCK_INDEX_ALIAS = "operblock_legacy_idx"
@@ -103,8 +104,7 @@ def source_has_started_at_index(conn) -> bool:
 
 
 def _readonly_uri(path: str) -> str:
-    normalized = os.path.abspath(path).replace("\\", "/")
-    return f"file:{normalized}?mode=ro&immutable=1"
+    return build_sqlite_file_uri(path, mode="ro", immutable=True)
 
 
 def _fingerprint_text(fingerprint: tuple) -> str:

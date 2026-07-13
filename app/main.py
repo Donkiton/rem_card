@@ -546,6 +546,101 @@ def _launch_exit_update_if_needed() -> bool:
         return False
 
 
+def _configure_dev_runtime_baza_pin() -> Optional[str]:
+    """Freeze this dev process on the database selected at its own startup."""
+    if is_compiled():
+        return None
+
+    from rem_card.app.runtime_paths import (
+        BAZA_DIR_NAME,
+        DEV_BAZA_DIR_ENV,
+        DEV_EXISTING_BAZA_ONLY_ENV,
+        DEV_RUNTIME_BAZA_PIN_ENV,
+        get_dev_baza_dir,
+        get_dev_database_config_path,
+        get_project_root,
+        read_dev_database_config,
+        validate_dev_baza_dir,
+    )
+
+    current_pid = str(os.getpid())
+    pin_owner = str(os.environ.get(DEV_RUNTIME_BAZA_PIN_ENV) or "")
+    if pin_owner and pin_owner != current_pid:
+        # A child relaunch inherited a pin belonging to the previous process.
+        os.environ.pop("REMCARD_BAZA_DIR", None)
+        os.environ.pop(DEV_RUNTIME_BAZA_PIN_ENV, None)
+        os.environ.pop(DEV_EXISTING_BAZA_ONLY_ENV, None)
+        pin_owner = ""
+    if pin_owner == current_pid and os.environ.get("REMCARD_BAZA_DIR"):
+        return os.path.abspath(os.path.normpath(os.environ["REMCARD_BAZA_DIR"]))
+
+    # A genuine REMCARD_BAZA_DIR remains an explicit external override.
+    if os.environ.get("REMCARD_BAZA_DIR"):
+        return os.path.abspath(os.path.normpath(os.environ["REMCARD_BAZA_DIR"]))
+
+    if os.environ.get(DEV_BAZA_DIR_ENV):
+        config = {"active_baza_dir": None}
+        selected_path = get_dev_baza_dir()
+    else:
+        config = read_dev_database_config()
+        load_error = str(config.get("load_error") or "").strip()
+        if load_error:
+            raise DataPathConfigurationError(
+                "Не удалось безопасно прочитать сохранённый выбор dev-базы.\n\n"
+                f"{load_error}\n\n"
+                "Запуск остановлен, чтобы приложение не подключилось незаметно к другой базе. "
+                f"Исправьте или удалите локальный файл:\n{get_dev_database_config_path()}"
+            )
+        selected_path = str(
+            config.get("active_baza_dir")
+            or os.path.join(get_project_root(), BAZA_DIR_NAME)
+        )
+        selected_path = os.path.abspath(os.path.normpath(selected_path))
+    uses_saved_selection = bool(config.get("active_baza_dir"))
+    if uses_saved_selection:
+        ok, message = validate_dev_baza_dir(selected_path)
+        if not ok:
+            raise DataPathConfigurationError(
+                f"Сохранённая dev-база недоступна или имеет неверную структуру.\n\n"
+                f"{message}\n\n"
+                f"Исправьте путь или удалите локальный файл:\n{get_dev_database_config_path()}"
+            )
+        os.environ[DEV_EXISTING_BAZA_ONLY_ENV] = "1"
+
+    os.environ["REMCARD_BAZA_DIR"] = selected_path
+    os.environ[DEV_RUNTIME_BAZA_PIN_ENV] = current_pid
+    return selected_path
+
+
+def _launch_requested_dev_restart() -> bool:
+    if is_compiled():
+        return False
+
+    try:
+        from PySide6.QtCore import QProcess
+        from rem_card.app.runtime_paths import (
+            DEV_EXISTING_BAZA_ONLY_ENV,
+            DEV_RUNTIME_BAZA_PIN_ENV,
+        )
+
+        if not sys.argv or not str(sys.argv[0]).strip():
+            return False
+        if os.environ.get(DEV_RUNTIME_BAZA_PIN_ENV) == str(os.getpid()):
+            os.environ.pop("REMCARD_BAZA_DIR", None)
+            os.environ.pop(DEV_RUNTIME_BAZA_PIN_ENV, None)
+            os.environ.pop(DEV_EXISTING_BAZA_ONLY_ENV, None)
+        program = sys.executable
+        arguments = [os.path.abspath(sys.argv[0]), *[str(arg) for arg in sys.argv[1:]]]
+
+        result = QProcess.startDetached(program, arguments, os.getcwd())
+        if isinstance(result, tuple):
+            return bool(result[0])
+        return bool(result)
+    except Exception as exc:
+        _write_startup_local_log(f"dev restart launch failed: {exc}")
+        return False
+
+
 def _startup_block_requires_update(message: str, technical_reason: str = "") -> bool:
     text = f"{message}\n{technical_reason}".lower()
     markers = (
@@ -1320,6 +1415,12 @@ def _notify_existing_instance(QLocalSocket, server_name: str, role_suffix: str) 
     return True
 
 
+def _single_instance_server_name(role: Optional[str]) -> str:
+    role_suffix = role if role else "default"
+    instance_scope = role_suffix if is_compiled() else f"dev_{role_suffix}"
+    return f"rem_card_single_instance_server_{instance_scope}"
+
+
 def _acquire_initial_role_lock(role: Optional[str]):
     if role not in ROLE_KEYS:
         return None
@@ -1465,6 +1566,9 @@ def _acquire_role_lock_for_startup(
 ):
     if role not in ROLE_KEYS or emergency_runtime_context is not None:
         return None
+    if not is_compiled():
+        # Dev sessions deliberately stay invisible to production role locks.
+        return None
     role_lock = _acquire_initial_role_lock(role)
     if role_lock is None:
         close_startup_splash()
@@ -1553,6 +1657,10 @@ def _window_exit_role(window, startup_role: Optional[str]) -> str:
 
 
 def _run_doctor_exit_db_rotation(window, startup_role: Optional[str], logger) -> None:
+    if not is_compiled():
+        # A dev session may be attached to the production database without a
+        # role marker, so it must never initiate production rotation on exit.
+        return
     if _window_exit_role(window, startup_role) != "doctor":
         return
     container = getattr(window, "container", None) if window is not None else None
@@ -1769,6 +1877,12 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     args.role = _resolve_startup_role(args.role, forced_role)
     _opblock_startup_metrics_reset(args.role, startup_started_at)
     path_setup = bool(path_setup or args.path_setup)
+    if not path_setup:
+        try:
+            _configure_dev_runtime_baza_pin()
+        except DataPathConfigurationError as exc:
+            _show_native_warning("Dev-база недоступна", str(exc))
+            sys.exit(1)
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
     path_setup = _configure_operblock_startup_path(args.role, path_setup)
     preselected_runtime_context, preselected_runtime_reason = (
@@ -1810,7 +1924,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, close_startup_splash)
 
     role_suffix = args.role if args.role else "default"
-    server_name = f"rem_card_single_instance_server_{role_suffix}"
+    server_name = _single_instance_server_name(args.role)
 
     if _notify_existing_instance(QLocalSocket, server_name, role_suffix):
         close_startup_splash()
@@ -1826,6 +1940,9 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
     window = None
     logger = None
+    server = None
+    server_listening = False
+    restart_requested = False
     exit_code = 1
     try:
         from rem_card.app.logger import log_exception, logger as _logger, init_crash_handler
@@ -1838,7 +1955,18 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         _startup_trace(logger, startup_started_at, "qt_ready", role=args.role or "default")
 
         server = QLocalServer()
-        server.listen(server_name)
+        server_listening = bool(server.listen(server_name))
+        if not server_listening:
+            close_startup_splash()
+            if _notify_existing_instance(QLocalSocket, server_name, role_suffix):
+                exit_code = 0
+                sys.exit(0)
+            _show_native_warning(
+                "Запуск RemCard",
+                "Не удалось зарегистрировать локальный экземпляр приложения. "
+                "Закройте другие dev-окна этой роли и повторите запуск.",
+            )
+            sys.exit(1)
         pending_single_instance_clients = []
 
         container = None
@@ -1992,6 +2120,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         server.newConnection.connect(on_new_connection)
 
         exit_code = app.exec()
+        restart_requested = bool(app.property("remcard_restart_requested"))
         logger.info("Application exiting with code %s", exit_code)
     except Exception as exc:
         close_startup_splash()
@@ -2013,6 +2142,12 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         if window and logger:
             resources_shutdown_ok = _shutdown_window_resources(window, logger)
         try:
+            if server is not None and server_listening:
+                server.close()
+                QLocalServer.removeServer(server_name)
+        except Exception:
+            pass
+        try:
             if window and hasattr(window, "release_role_lock"):
                 window.release_role_lock()
             elif role_lock:
@@ -2030,6 +2165,20 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 logger.warning("Crash handler finalization failed: %s", exc)
         if exit_code == 0:
             _launch_exit_update_if_needed()
+
+    if restart_requested and exit_code == 0:
+        if not resources_shutdown_ok:
+            _show_native_warning(
+                "Смена базы",
+                "Путь к новой базе сохранён, но часть ресурсов старой базы не успела "
+                "штатно завершиться. Запустите dev-версию вручную после её полного закрытия.",
+            )
+        elif not _launch_requested_dev_restart():
+            _show_native_warning(
+                "Смена базы",
+                "Путь к новой базе сохранён, но автоматически перезапустить dev-версию не удалось. "
+                "Запустите её вручную.",
+            )
 
     sys.exit(exit_code)
 

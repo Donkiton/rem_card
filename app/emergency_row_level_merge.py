@@ -12,6 +12,7 @@ from rem_card.app.emergency_merge_mode_a import EmergencyModeAMergeService
 from rem_card.app.emergency_metadata import EmergencySessionMetadata, atomic_write_json
 from rem_card.app.emergency_paths import active_session_dir
 from rem_card.app.emergency_validation import validate_medical_db_snapshot
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import configure_connection, restore_database, run_integrity_check, run_quick_check
 
 
@@ -903,7 +904,7 @@ def _remapped_row(row: dict[str, Any], id_map: dict[tuple[str, Any], Any]) -> di
 
 def _connect(path: str, *, readonly: bool) -> sqlite3.Connection:
     if readonly:
-        uri = f"file:{os.path.abspath(path)}?mode=ro"
+        uri = build_sqlite_file_uri(path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=10.0)
     else:
         conn = sqlite3.connect(os.path.abspath(path), check_same_thread=False, isolation_level=None, timeout=10.0)

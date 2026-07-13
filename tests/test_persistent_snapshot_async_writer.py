@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from _local_rem_card_bootstrap import build_local_python_subprocess_env
 from rem_card.services import persistent_snapshot_cache as cache
 
 
@@ -504,8 +505,7 @@ key = ("live", identifier, "2026-07-12T08:00:00")
 if not cache.store_snapshot("multiprocess_manifest", key, {"id": identifier}):
     raise RuntimeError("store failed")
 """
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.fspath(Path(__file__).resolve().parents[2])
+    env = build_local_python_subprocess_env()
     processes = [
         subprocess.Popen(
             [
@@ -583,8 +583,7 @@ if not cache.schedule_store_snapshot(namespace, key, {"stale": True}):
 if not cache.flush(20.0):
     raise RuntimeError("flush timed out")
 """
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.fspath(Path(__file__).resolve().parents[2])
+    env = build_local_python_subprocess_env()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -666,8 +665,7 @@ cache.delete_snapshots_for_admission("cross_process_legacy_epoch", 211)
 if not cache.flush(20.0):
     raise RuntimeError("flush timed out")
 """
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.fspath(Path(__file__).resolve().parents[2])
+    env = build_local_python_subprocess_env()
     process = subprocess.Popen(
         [
             sys.executable,
@@ -749,8 +747,7 @@ key = ("live", 103, "2026-07-12T08:00:00")
 if not cache.store_snapshot("external_content_dedupe", key, {"version": "B"}):
     raise RuntimeError("external store failed")
 """
-    env = os.environ.copy()
-    env["PYTHONPATH"] = os.fspath(Path(__file__).resolve().parents[2])
+    env = build_local_python_subprocess_env()
     completed = subprocess.run(
         [sys.executable, "-c", script, os.fspath(cache.PERSISTENT_SNAPSHOT_CACHE_DIR)],
         env=env,

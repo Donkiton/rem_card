@@ -3,6 +3,7 @@ import shutil
 import sys
 
 from rem_card.app.runtime_paths import (
+    DEV_EXISTING_BAZA_ONLY_ENV,
     get_dev_baza_dir,
     get_executable_dir,
     get_local_logs_dir,
@@ -183,7 +184,10 @@ def get_role_lock_path(role: str) -> str:
 
 # Убедимся, что папки существуют
 def ensure_directories():
-    allow_shared_create = (not is_compiled()) or os.environ.get("REMCARD_PATH_SETUP_MODE") == "1"
+    allow_shared_create = (
+        (not is_compiled() and os.environ.get(DEV_EXISTING_BAZA_ONLY_ENV) != "1")
+        or os.environ.get("REMCARD_PATH_SETUP_MODE") == "1"
+    )
     shared_dirs = [
         BAZA_DIR,
         BAZA_LOGS_DIR,

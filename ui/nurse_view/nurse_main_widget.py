@@ -169,9 +169,16 @@ class NurseMainWidget(QWidget):
             QTimer.singleShot(JOURNAL_PREWARM_DELAY_MS, self._schedule_journal_prewarm)
 
     def _build_add_patient_lock(self) -> RoleSessionLock:
+        from rem_card.app.runtime_paths import get_dev_local_operation_lock_path, is_compiled
+
         owner_id = f"{socket.gethostname()}:{os.getpid()}:nurse_add_patient"
+        lock_path = (
+            get_role_lock_path(ADD_PATIENT_LOCK_KEY)
+            if is_compiled()
+            else get_dev_local_operation_lock_path(ADD_PATIENT_LOCK_KEY)
+        )
         return RoleSessionLock(
-            lock_path=get_role_lock_path(ADD_PATIENT_LOCK_KEY),
+            lock_path=lock_path,
             role=ADD_PATIENT_LOCK_KEY,
             owner_id=owner_id,
             stale_timeout_sec=60.0,

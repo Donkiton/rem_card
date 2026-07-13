@@ -143,6 +143,7 @@ def test_dialog_collects_snapshot_outside_gui_thread():
     main_thread_id = threading.get_ident()
     loader_thread_ids = []
     apply_thread_ids = []
+    finished_workers = []
 
     def loader():
         loader_thread_ids.append(threading.get_ident())
@@ -156,6 +157,9 @@ def test_dialog_collects_snapshot_outside_gui_thread():
         original_apply_snapshot(snapshot)
 
     dialog._apply_snapshot = apply_snapshot
+    # Намеренно не завершаем UI из finished: успешный результат обязан сам
+    # перевести окно в готовое состояние, даже если finished придёт позднее.
+    dialog._on_load_finished = finished_workers.append
     dialog.reload_info()
 
     assert _process_events_until(app, lambda: dialog._snapshot is not None)
@@ -163,6 +167,30 @@ def test_dialog_collects_snapshot_outside_gui_thread():
     assert loader_thread_ids[0] != main_thread_id
     assert apply_thread_ids == [main_thread_id]
     assert dialog.refresh_button.isEnabled()
+    assert dialog._worker is None
+    assert _process_events_until(app, lambda: bool(finished_workers))
+    dialog.close()
+    app.processEvents()
+
+
+def test_dialog_failed_load_is_ready_without_finished_callback():
+    app = application()
+    finished_workers = []
+
+    def loader():
+        raise RuntimeError("test failure")
+
+    dialog = DatabaseInfoDialog(snapshot_loader=loader, auto_load=False)
+    dialog._on_load_finished = finished_workers.append
+    dialog.reload_info()
+
+    assert _process_events_until(
+        app,
+        lambda: "test failure" in dialog.status_label.text(),
+    )
+    assert dialog.refresh_button.isEnabled()
+    assert dialog._worker is None
+    assert _process_events_until(app, lambda: bool(finished_workers))
     dialog.close()
     app.processEvents()
 

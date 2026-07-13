@@ -1,5 +1,10 @@
 import sqlite3
 
+from _local_rem_card_bootstrap import bootstrap_local_rem_card
+
+
+bootstrap_local_rem_card()
+
 from rem_card.app.paths import (
     BAZA_DIR,
     BACKUPS_VALID_DIR,
