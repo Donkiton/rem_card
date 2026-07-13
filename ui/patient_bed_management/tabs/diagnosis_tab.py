@@ -110,6 +110,11 @@ class DiagnosisTabWidget(QWidget):
         self.manual_counter_label.setStyleSheet("color: #7c8da7; font-size: 13px; font-weight: 700;")
         manual_text_layout.addWidget(self.manual_counter_label)
         self.main_layout.addWidget(self.manual_text_frame, 1)
+        self._set_manual_diagnosis_enabled(
+            False,
+            clear=True,
+            placeholder="Сначала введите код МКБ-10",
+        )
 
         self.info_frame = QFrame()
         self.info_frame.setFixedHeight(56)
@@ -126,7 +131,7 @@ class DiagnosisTabWidget(QWidget):
         info_layout.setContentsMargins(13, 0, 13, 0)
         info_layout.setSpacing(12)
         info_layout.addWidget(IconBadge("info", "#3b82f6", "transparent", side=20, icon_size=18))
-        info_text = QLabel("Если код диагноза неизвестен, оставьте поле пустым\nи укажите диагноз вручную.")
+        info_text = QLabel("Введите код МКБ-10. Если код не найден,\nручной ввод диагноза станет доступен.")
         info_text.setStyleSheet("color: #253858; font-size: 13px; font-weight: 400;")
         info_text.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         info_layout.addWidget(info_text, 1)
@@ -207,22 +212,54 @@ class DiagnosisTabWidget(QWidget):
 
         self.diagnosis_code_input.setStyleSheet("")
         self.diagnosis_text_label.setText("")
+        self._set_manual_diagnosis_enabled(
+            False,
+            clear=True,
+            placeholder="Сначала введите код МКБ-10",
+        )
+
+    def _set_manual_diagnosis_enabled(
+        self,
+        enabled: bool,
+        *,
+        clear: bool = False,
+        text: str | None = None,
+        placeholder: str = "Введите диагноз вручную",
+    ):
+        self.diagnosis_text_input.setEnabled(True)
+        self.diagnosis_text_input.setReadOnly(not bool(enabled))
+        self.diagnosis_text_input.setPlaceholderText(placeholder)
+        if text is not None:
+            self.diagnosis_text_input.setPlainText(text)
+        elif clear:
+            self.diagnosis_text_input.clear()
+        self._on_manual_text_changed()
 
     def _on_diagnosis_code_validation(self):
         code = self.diagnosis_code_input.text().strip()
         if not code:
-            self._on_code_typing(code)
             self.diagnosis_text_label.setText("")
             self.diagnosis_code_input.setStyleSheet("")
-            return
+            return False
 
         diagnosis_name = self.mkb_service.get_diagnosis_by_code(code)
         if diagnosis_name:
             self.diagnosis_text_label.setText(diagnosis_name)
             self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_VALID_FIELD)
+            self._set_manual_diagnosis_enabled(
+                False,
+                text=diagnosis_name,
+                placeholder="Диагноз из МКБ-10",
+            )
+            return True
         else:
             self.diagnosis_text_label.setText("Код не найден")
             self.diagnosis_code_input.setStyleSheet(STYLE_PATIENT_FORM_INVALID_FIELD)
+            self._set_manual_diagnosis_enabled(
+                True,
+                clear=self.diagnosis_text_input.isReadOnly(),
+            )
+            return False
 
     def _on_manual_text_changed(self):
         text = self.diagnosis_text_input.toPlainText()
@@ -269,19 +306,9 @@ class DiagnosisTabWidget(QWidget):
         })
 
     def get_data(self):
-        manual_text = self.diagnosis_text_input.toPlainText().strip()
-        if manual_text:
-            final_diagnosis_text = manual_text
-        else:
-            label_text = self.diagnosis_text_label.text()
-            if label_text and "Код не найден" not in label_text:
-                final_diagnosis_text = label_text
-            else:
-                final_diagnosis_text = ""
-
         return {
             "diagnosis_code": self.diagnosis_code_input.text().strip() or None,
-            "diagnosis_text": final_diagnosis_text
+            "diagnosis_text": self.diagnosis_text_input.toPlainText().strip(),
         }
 
     def get_operations(self):
@@ -302,13 +329,15 @@ class DiagnosisTabWidget(QWidget):
         if admission:
             if admission.diagnosis_code:
                 self.diagnosis_code_input.setText(admission.diagnosis_code)
-                self._on_diagnosis_code_validation()
-
-            diagnosis_from_code = self.mkb_service.get_diagnosis_by_code(admission.diagnosis_code) if admission.diagnosis_code else None
-            if admission.diagnosis_text:
-                if not diagnosis_from_code or diagnosis_from_code != admission.diagnosis_text:
+                diagnosis_from_code = self._on_diagnosis_code_validation()
+                if not diagnosis_from_code and admission.diagnosis_text:
                     self.diagnosis_text_input.setPlainText(admission.diagnosis_text)
                     self._on_manual_text_changed()
+            else:
+                self._set_manual_diagnosis_enabled(
+                    True,
+                    text=admission.diagnosis_text or "",
+                )
 
         if not self.show_operations:
             return

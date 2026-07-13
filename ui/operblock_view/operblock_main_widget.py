@@ -1961,12 +1961,6 @@ class OperBlockSector8Panel(QWidget):
         self.layout.setContentsMargins(10, 0, 10, 0)
         self.layout.setSpacing(10)
 
-        self.title_label = QLabel("Оперблок")
-        self.title_label.setStyleSheet(
-            f"font-size: 14px; font-weight: 800; color: {COLOR_PRIMARY_DARK}; "
-            "background: transparent; border: none;"
-        )
-
         self.btn_archive = self._button(" Архив", "binder.png")
         self.btn_refresh = self._button(" Обновить", "refresh.png")
         self.btn_user_report = self._button(" Репорт", "warning.png")
@@ -1988,9 +1982,6 @@ class OperBlockSector8Panel(QWidget):
         self._reports_count_timer.start(60000)
         self.apply_display_settings()
         QTimer.singleShot(0, self.refresh_user_reports_count)
-
-    def set_title(self, title: str):
-        self.title_label.setText(str(title or "Оперблок"))
 
     def _button(self, text: str, icon_name: str) -> QPushButton:
         button = QPushButton(text, self)
@@ -2040,7 +2031,6 @@ class OperBlockSector8Panel(QWidget):
         }
 
         self._clear_layout()
-        self.layout.addWidget(self.title_label)
         for button in self._button_widgets.values():
             button.setVisible(False)
         for button_id in left_order:
@@ -9389,8 +9379,6 @@ class OperBlockMainWidget(QWidget):
         self.sector_8 = Sector8()
         self.sector_8.setFixedHeight(38)
         self.sector_8_panel = OperBlockSector8Panel()
-        if self._table_filter_name:
-            self.sector_8_panel.set_title(self._table_filter_name)
         self.sector_8_panel.btn_archive.clicked.connect(self._show_operblock_archive)
         self.sector_8_panel.btn_refresh.clicked.connect(lambda: self.auto_refresh(force=True))
         self.sector_8_panel.btn_user_report.clicked.connect(self._open_user_report_dialog)

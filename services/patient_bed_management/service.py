@@ -105,6 +105,17 @@ class PatientBedManagementService:
     def get_bed_by_number(self, bed_number: int):
         return self.db.fetch_one_remcard("SELECT * FROM beds WHERE bed_number = ?", (int(bed_number),))
 
+    @staticmethod
+    def _ensure_bed_exists(cursor, bed_number: int) -> None:
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO beds (
+                bed_number, status, current_admission_id, revision
+            ) VALUES (?, 'FREE', NULL, 0)
+            """,
+            (int(bed_number),),
+        )
+
     def get_patient_with_current_admission(self, bed_number: int) -> tuple[Optional[PatientRecord], Optional[AdmissionRecord]]:
         row = self.db.fetch_one_remcard(
             """
@@ -231,6 +242,7 @@ class PatientBedManagementService:
             bed_number = int(admission_data["bed_number"])
             admission_dt_text = self._to_sql_dt(admission_data.get("admission_datetime"))
             recovery_bed_stay = 1 if is_recovery_bed_number(bed_number) else 0
+            self._ensure_bed_exists(cursor, bed_number)
             cursor.execute(
                 "INSERT INTO patients (full_name, admission_uid, birth_date) VALUES (?, ?, ?)",
                 (full_name, admission_uid, birth_date),
@@ -382,8 +394,11 @@ class PatientBedManagementService:
 
         def operation(cursor):
             source = cursor.execute("SELECT * FROM beds WHERE bed_number = ?", (source_bed,)).fetchone()
+            if not source or source["status"] == "FREE" or source["current_admission_id"] is None:
+                return False
+            self._ensure_bed_exists(cursor, target_bed)
             target = cursor.execute("SELECT * FROM beds WHERE bed_number = ?", (target_bed,)).fetchone()
-            if not source or not target or source["status"] == "FREE" or source["current_admission_id"] is None:
+            if not target:
                 return False
             source_is_recovery = is_recovery_bed_number(source_bed)
             target_is_recovery = is_recovery_bed_number(target_bed)
