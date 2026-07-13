@@ -27,6 +27,7 @@ class _FakeService:
         self.add_calls = 0
         self.has_dates = []
         self.add_dates = []
+        self.queue_calls = 0
 
     def get_vital_settings_cached(self, _admission_id: int, _date: datetime):
         return dict(self.settings)
@@ -42,6 +43,7 @@ class _FakeService:
         return type("Order", (), {"latin": CVP_QUICK_ORDER_TEXT})(), True
 
     def enqueue_write(self, *, description, operation, on_success=None, on_error=None):
+        self.queue_calls += 1
         try:
             result = operation()
         except Exception as exc:
@@ -59,11 +61,24 @@ class VitalSettingsDialogCvpButtonTest(unittest.TestCase):
 
     def test_cvp_button_depends_on_switch_and_existing_order(self):
         service = _FakeService(cvp_enabled=0)
-        dialog = VitalSettingsDialog(service, 1, "2025-01-01")
+        local_state = {"exists": False, "add_calls": 0}
+
+        def add_local_cvp():
+            local_state["add_calls"] += 1
+            local_state["exists"] = True
+            return type("Order", (), {"latin": CVP_QUICK_ORDER_TEXT})(), True
+
+        dialog = VitalSettingsDialog(
+            service,
+            1,
+            "2025-01-01",
+            cvp_order_exists=lambda: local_state["exists"],
+            cvp_order_adder=add_local_cvp,
+        )
 
         self.assertFalse(dialog.btn_cvp_order.isEnabled())
         self.assertEqual(dialog.btn_cvp_order.sizePolicy().horizontalPolicy(), QSizePolicy.Expanding)
-        self.assertEqual(service.has_dates[-1].hour, 8)
+        self.assertEqual(service.has_dates, [])
 
         dialog.switches["cvp"].setChecked(True)
         self.assertTrue(dialog.btn_cvp_order.isEnabled())
@@ -72,15 +87,22 @@ class VitalSettingsDialogCvpButtonTest(unittest.TestCase):
         dialog.cvp_order_changed.connect(lambda: changed.append(True))
         dialog.btn_cvp_order.click()
 
-        self.assertEqual(service.add_calls, 1)
-        self.assertEqual(service.add_dates[-1].hour, 8)
-        self.assertTrue(service.cvp_exists)
+        self.assertEqual(local_state["add_calls"], 1)
+        self.assertTrue(local_state["exists"])
+        self.assertEqual(service.add_calls, 0)
+        self.assertEqual(service.queue_calls, 0)
         self.assertFalse(dialog.btn_cvp_order.isEnabled())
         self.assertEqual(changed, [True])
 
     def test_cvp_button_disabled_when_order_already_exists(self):
         service = _FakeService(cvp_enabled=1, cvp_exists=True)
-        dialog = VitalSettingsDialog(service, 1, "2025-01-01")
+        dialog = VitalSettingsDialog(
+            service,
+            1,
+            "2025-01-01",
+            cvp_order_exists=lambda: True,
+            cvp_order_adder=lambda: None,
+        )
 
         self.assertFalse(dialog.btn_cvp_order.isEnabled())
 

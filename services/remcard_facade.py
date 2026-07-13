@@ -1632,6 +1632,29 @@ class RemCardService(QObject):
             expected_revisions=expected_revisions,
         )
 
+    def commit_local_order_draft(
+        self,
+        admission_id: int,
+        shift_date: datetime,
+        *,
+        orders,
+        admin_map,
+        dirty_admin_keys,
+        baseline_admin_map,
+        expected_revisions=None,
+        expected_active_order_ids=None,
+    ):
+        return self._orders.commit_local_draft(
+            admission_id,
+            shift_date,
+            orders=orders,
+            admin_map=admin_map,
+            dirty_admin_keys=dirty_admin_keys,
+            baseline_admin_map=baseline_admin_map,
+            expected_revisions=expected_revisions,
+            expected_active_order_ids=expected_active_order_ids,
+        )
+
     def save_order_draft_sort(self, admission_id: int, shift_date: datetime, ordered_order_ids, expected_revisions=None):
         self._orders.save_draft_order_sort(
             admission_id,

@@ -2,7 +2,7 @@ from rem_card.ui.shared.custom_message_box import CustomMessageBox
 import os
 import sqlite3
 import time
-from copy import copy
+from copy import copy, deepcopy
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableView, 
     QHeaderView, QAbstractItemView, QFrame, QPushButton, QSizePolicy, QApplication
@@ -54,6 +54,7 @@ class OrdersWidget(QWidget):
     administrationStatusChanged = Signal(bool)
     ordersPresenceChanged = Signal(bool)
     localBalanceChanged = Signal()
+    localDraftResolutionFinished = Signal(bool)
     _LOCAL_SILENT_FORCE_PREFIXES = (
         "orders_add_input:",
         "orders_add_cvp:",
@@ -154,6 +155,15 @@ class OrdersWidget(QWidget):
         self._perf_next_click_id = 0
         self._perf_clicks = {}
         self._pending_reorder_order_ids = []
+        self._draft_baseline_snapshot = None
+        self._draft_baseline_admin_map = {}
+        self._local_draft_dirty_order_ids = set()
+        self._local_draft_dirty_admin_keys = set()
+        self._local_deleted_orders = {}
+        self._local_draft_save_pending = False
+        self._legacy_central_draft_detected = False
+        self._next_local_order_id = -1
+        self._next_local_admin_id = -1
         self._row_drag_state = None
         self._row_drag_ghost = None
         self._row_drag_indicator = None
@@ -180,10 +190,329 @@ class OrdersWidget(QWidget):
         self._cached_has_administrations = False
         self._cached_has_orders = False
         self._last_applied_snapshot_signature = None
+        self._legacy_central_draft_detected = False
         self._pending_admin_cell_write_keys.clear()
         self._recent_admin_cell_clicks.clear()
         self._discard_deferred_forced_reload_after_guard(discard_reason="context_reset")
         self._clear_local_cell_draft_guard()
+        self._reset_local_draft_tracking(clear_baseline=True)
+
+    def _reset_local_draft_tracking(self, *, clear_baseline: bool = False):
+        self._local_draft_dirty_order_ids.clear()
+        self._local_draft_dirty_admin_keys.clear()
+        self._local_deleted_orders.clear()
+        self._next_local_order_id = -1
+        self._next_local_admin_id = -1
+        if clear_baseline:
+            self._draft_baseline_snapshot = None
+            self._draft_baseline_admin_map = {}
+
+    def _capture_local_draft_baseline(self, snapshot):
+        if self._has_local_draft_changes() or self.model is None or self._legacy_central_draft_detected:
+            return
+        baseline = dict(snapshot or {})
+        baseline["orders"] = deepcopy(list(snapshot.get("orders") or []))
+        baseline["admin_rows"] = [dict(row) for row in (snapshot.get("admin_rows") or [])]
+        baseline["has_any_draft"] = False
+        baseline["only_committed"] = True
+        self._draft_baseline_snapshot = baseline
+        self._draft_baseline_admin_map = {
+            key: deepcopy(value)
+            for key, value in getattr(self.model, "admin_map", {}).items()
+        }
+        self._reset_local_draft_tracking(clear_baseline=False)
+
+    def _has_local_draft_changes(self) -> bool:
+        return bool(
+            self._local_draft_dirty_order_ids
+            or self._local_draft_dirty_admin_keys
+            or self._pending_reorder_order_ids
+        )
+
+    def _allocate_local_order_id(self) -> int:
+        value = int(self._next_local_order_id)
+        self._next_local_order_id -= 1
+        return value
+
+    def _allocate_local_admin_id(self) -> int:
+        value = int(self._next_local_admin_id)
+        self._next_local_admin_id -= 1
+        return value
+
+    def _mark_local_order_dirty(self, order_id):
+        if order_id is None:
+            return
+        self._local_draft_dirty_order_ids.add(int(order_id))
+        self._cached_has_drafts = True
+        if self.model is not None:
+            self.model._set_has_any_draft(True, emit_order_column=True)
+        self._local_cell_draft_guard = True
+        self.check_drafts()
+
+    def _mark_local_admin_dirty(self, keys):
+        for key in keys or ():
+            if key is None:
+                continue
+            normalized_key = (int(key[0]), str(key[1]))
+            current = self.model.admin_map.get(normalized_key) if self.model is not None else None
+            baseline = self._draft_baseline_admin_map.get(normalized_key)
+
+            def shape(admin):
+                if admin is None:
+                    return None
+                status = str(getattr(admin, "status", "") or "")
+                if status in {"deleted", "cancelled"} and baseline is None:
+                    return None
+                return (
+                    status,
+                    str(getattr(admin, "cell_role", "") or ""),
+                    str(getattr(admin, "big_chain_id", "") or ""),
+                    float(getattr(admin, "volume_ml", 0.0) or 0.0),
+                )
+
+            if shape(current) == shape(baseline):
+                self._local_draft_dirty_admin_keys.discard(normalized_key)
+                if self.model is not None:
+                    if baseline is None:
+                        self.model.admin_map.pop(normalized_key, None)
+                    else:
+                        self.model.admin_map[normalized_key] = deepcopy(baseline)
+                continue
+            self._local_draft_dirty_admin_keys.add(normalized_key)
+        if self._local_draft_dirty_admin_keys:
+            self._cached_has_drafts = True
+            self._local_cell_draft_guard = True
+
+    def _build_local_draft_payload(self):
+        if self.model is None:
+            return None
+        deleted_orders = [
+            deepcopy(entry[1])
+            for entry in self._local_deleted_orders.values()
+        ]
+        expected_revisions = self._visible_order_revision_map()
+        for deleted_order in deleted_orders:
+            order_id = int(getattr(deleted_order, "id", 0) or 0)
+            if order_id > 0:
+                expected_revisions[order_id] = int(getattr(deleted_order, "revision", 0) or 0)
+        return {
+            "orders": deepcopy(list(self.model.orders)) + deleted_orders,
+            "admin_map": deepcopy(dict(self.model.admin_map)),
+            "dirty_admin_keys": tuple(sorted(self._local_draft_dirty_admin_keys)),
+            "baseline_admin_map": deepcopy(dict(self._draft_baseline_admin_map)),
+            "expected_revisions": expected_revisions,
+            "expected_active_order_ids": tuple(sorted(
+                int(order.id)
+                for order in (self._draft_baseline_snapshot or {}).get("orders", ())
+                if order is not None
+                and getattr(order, "id", None) is not None
+                and int(order.id) > 0
+                and self._is_committed_value(getattr(order, "is_committed", 0))
+                and getattr(order, "status", None) not in {OrderStatus.DELETED, OrderStatus.CANCELLED}
+            )),
+        }
+
+    def is_draft_save_pending(self) -> bool:
+        return bool(self._local_draft_save_pending)
+
+    def _restore_local_draft_baseline(self) -> bool:
+        if self.model is None or not self._draft_baseline_snapshot:
+            return False
+        scroll_value = self._capture_table_scroll()
+        self.model.apply_snapshot(deepcopy(self._draft_baseline_snapshot))
+        self._clear_pending_reorder()
+        self._reset_local_draft_tracking(clear_baseline=False)
+        self._cached_has_drafts = False
+        self._cached_has_administrations = self._model_has_administrations()
+        self._cached_has_orders = any(
+            order and order.status != OrderStatus.DELETED
+            for order in self.model.orders
+        )
+        self._clear_local_cell_draft_guard()
+        self._restore_table_scroll(scroll_value)
+        self.check_drafts()
+        self.localBalanceChanged.emit()
+        return True
+
+    def _order_has_committed_execution(self, order_id) -> bool:
+        if self.model is None or order_id is None:
+            return False
+        for (candidate_id, _planned), admin in self.model.admin_map.items():
+            if int(candidate_id) != int(order_id) or admin is None:
+                continue
+            if not self._is_committed_value(getattr(admin, "is_committed", 0)):
+                continue
+            if str(getattr(admin, "comment", "") or "") in {
+                NURSE_MARK_EXECUTED,
+                NURSE_MARK_NOT_EXECUTED,
+            }:
+                return True
+        return False
+
+    def _clone_order_as_local_draft(self, source: OrderDTO, *, created_at: datetime | None = None) -> OrderDTO:
+        order = deepcopy(source)
+        order.id = self._allocate_local_order_id()
+        order.admission_id = int(self.admission_id)
+        order.is_committed = 0
+        order.revision = 0
+        order.draft_sort_order = None
+        order.status = OrderStatus.ACTIVE
+        order.created_at = created_at or getattr(order, "created_at", None) or datetime.now()
+        order.administrations = []
+        if hasattr(order, "_pending_delete"):
+            delattr(order, "_pending_delete")
+        return order
+
+    def _insert_local_orders_batch(
+        self,
+        orders,
+        *,
+        replace_existing: bool = False,
+        source_admin_rows=None,
+        source_shift_date: datetime | None = None,
+    ):
+        self._ensure_model_initialized()
+        if self.model is None:
+            return False
+        if replace_existing:
+            blocked = [
+                order for order in self.model.orders
+                if order is not None
+                and int(getattr(order, "id", 0) or 0) > 0
+                and self._order_has_committed_execution(order.id)
+            ]
+            if blocked:
+                self._show_warning(
+                    "Лист содержит уже выполненные назначения. Они сохранены как медицинский факт; "
+                    "удалите только будущие ячейки или добавьте назначения без полной замены листа."
+                )
+                return False
+            for row in range(len(self.model.orders) - 1, -1, -1):
+                order = self.model.orders[row]
+                if order is not None:
+                    self._mark_local_order_row_deleted(
+                        row,
+                        order,
+                        was_committed=self._is_committed_value(getattr(order, "is_committed", 0)),
+                    )
+
+        start, end = self.service.get_day_period(self.shift_date)
+        now = datetime.now()
+        created_at = now if start <= now < end else start
+        source_to_local_order_id = {}
+        for source in orders or []:
+            local_order = self._clone_order_as_local_draft(source, created_at=created_at)
+            source_to_local_order_id[int(source.id)] = int(local_order.id)
+            self._insert_local_order_after_add(local_order)
+
+        copied_admin_keys = []
+        if source_admin_rows and source_shift_date is not None:
+            source_start, _ = self.service.get_day_period(source_shift_date)
+            time_diff = start - source_start
+            copied_chain_ids = {}
+
+            def row_value(row, name, default=None):
+                if isinstance(row, dict):
+                    return row.get(name, default)
+                try:
+                    return row[name]
+                except Exception:
+                    return getattr(row, name, default)
+
+            for source_admin in source_admin_rows:
+                source_order_id = int(row_value(source_admin, "order_id", 0) or 0)
+                local_order_id = source_to_local_order_id.get(source_order_id)
+                if local_order_id is None:
+                    continue
+                source_planned = datetime.fromisoformat(
+                    str(row_value(source_admin, "planned_time")).replace(" ", "T")
+                )
+                local_planned = source_planned + time_diff
+                if not (start <= local_planned < end):
+                    continue
+                source_chain_id = str(row_value(source_admin, "big_chain_id", "") or "")
+                local_chain_id = None
+                if source_chain_id:
+                    chain_key = (source_order_id, source_chain_id)
+                    local_chain_id = copied_chain_ids.setdefault(
+                        chain_key,
+                        f"local-copy:{local_order_id}:{len(copied_chain_ids) + 1}",
+                    )
+                admin = AdministrationDTO(
+                    id=self._allocate_local_admin_id(),
+                    order_id=local_order_id,
+                    big_chain_id=local_chain_id,
+                    cell_role=str(row_value(source_admin, "cell_role", "single") or "single"),
+                    planned_time=local_planned,
+                    status=str(row_value(source_admin, "status", "planned") or "planned"),
+                    is_committed=0,
+                    comment="",
+                    volume_ml=float(row_value(source_admin, "volume_ml", 0.0) or 0.0),
+                )
+                key = (local_order_id, local_planned.isoformat())
+                self.model.admin_map[key] = admin
+                copied_admin_keys.append(key)
+            if copied_admin_keys:
+                self._mark_local_admin_dirty(copied_admin_keys)
+                self._emit_admin_cell_changes(copied_admin_keys)
+                self.localBalanceChanged.emit()
+        return True
+
+    def _clear_local_times(self):
+        if self.model is None:
+            return
+        changed_keys = []
+        preserved_fact = False
+        for key, admin in list(self.model.admin_map.items()):
+            if admin is None or str(getattr(admin, "status", "") or "") in {"deleted", "cancelled"}:
+                continue
+            if (
+                self._is_committed_value(getattr(admin, "is_committed", 0))
+                and str(getattr(admin, "comment", "") or "") in {NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED}
+            ):
+                preserved_fact = True
+                continue
+            baseline = self._draft_baseline_admin_map.get(key)
+            if baseline is None:
+                self.model.admin_map.pop(key, None)
+            else:
+                tombstone = deepcopy(admin)
+                tombstone.id = self._allocate_local_admin_id()
+                tombstone.status = "deleted"
+                tombstone.is_committed = 0
+                tombstone.comment = ""
+                tombstone.actual_time = None
+                tombstone.performer_id = None
+                self.model.admin_map[key] = tombstone
+            changed_keys.append(key)
+        if changed_keys:
+            self._emit_admin_cell_changes(changed_keys)
+        if preserved_fact:
+            self._show_warning(
+                "Выполненные и отмеченные как невыполненные ячейки оставлены как медицинский факт."
+            )
+
+    def _clear_local_orders(self):
+        if self.model is None:
+            return
+        blocked = False
+        for row in range(len(self.model.orders) - 1, -1, -1):
+            order = self.model.orders[row]
+            if order is None or getattr(order, "_pending_delete", False):
+                continue
+            if int(getattr(order, "id", 0) or 0) > 0 and self._order_has_committed_execution(order.id):
+                blocked = True
+                continue
+            self._mark_local_order_row_deleted(
+                row,
+                order,
+                was_committed=self._is_committed_value(getattr(order, "is_committed", 0)),
+            )
+        if blocked:
+            self._show_warning(
+                "Назначения с выполненными введениями оставлены как медицинский факт. "
+                "Для них можно убрать только будущие ячейки."
+            )
 
     def _reset_pending_snapshot_request(self):
         self._snapshot_pending = False
@@ -509,6 +838,9 @@ class OrdersWidget(QWidget):
         )
 
     def _should_preserve_local_cell_draft(self, snapshot) -> bool:
+        if self._has_local_draft_changes():
+            self._local_cell_draft_guard = True
+            return True
         if not self._local_cell_draft_guard:
             return False
         if self._snapshot_matches_local_cell_guard(snapshot):
@@ -528,18 +860,22 @@ class OrdersWidget(QWidget):
         В данной версии редактирование назначений врачом разрешено ВСЕГДА, 
         независимо от статуса пациента (в т.ч. при Исходе).
         """
-        return bool(self._forced_read_only)
+        return bool(self._forced_read_only or self._legacy_central_draft_detected)
 
     def set_forced_read_only(self, enabled: bool):
         self._forced_read_only = bool(enabled)
         if hasattr(self, "input_widget") and self.input_widget is not None:
-            self.input_widget.setEnabled(not self._forced_read_only)
+            self.input_widget.setEnabled(not self._forced_read_only and not self._legacy_central_draft_detected)
         if hasattr(self, "table_view") and self.table_view is not None:
             self.table_view.viewport().update()
 
     def has_drafts(self) -> bool:
         if self.model is not None:
-            return bool(self._cached_has_drafts or getattr(self.model, "has_any_draft", False))
+            return bool(
+                self._has_local_draft_changes()
+                or self._cached_has_drafts
+                or getattr(self.model, "has_any_draft", False)
+            )
         return False
 
     def has_administrations(self) -> bool:
@@ -619,6 +955,8 @@ class OrdersWidget(QWidget):
             if order_id is None:
                 continue
             order_id = int(order_id)
+            if order_id <= 0:
+                continue
             if allowed is not None and order_id not in allowed:
                 continue
             revisions[order_id] = int(getattr(order, "revision", 0) or 0)
@@ -640,6 +978,7 @@ class OrdersWidget(QWidget):
 
     def _mark_local_reorder_draft(self):
         self._pending_reorder_order_ids = self._visible_order_ids()
+        self._local_draft_dirty_order_ids.update(self._pending_reorder_order_ids)
         self._cached_has_drafts = True
         if self.model is not None:
             if hasattr(self.model, "_set_has_any_draft"):
@@ -649,25 +988,9 @@ class OrdersWidget(QWidget):
         self.check_drafts()
 
     def _persist_reorder_draft(self):
-        if not self._pending_reorder_order_ids or not self.admission_id or not self.shift_date:
-            return
-        ordered_order_ids = list(self._pending_reorder_order_ids)
-        expected_revisions = self._visible_order_revision_map(ordered_order_ids)
-        if not hasattr(self.service, "save_order_draft_sort"):
-            return
-        self._enqueue_write(
-            f"orders_reorder_draft:{self.admission_id}",
-            operation=lambda ids=ordered_order_ids: self.service.save_order_draft_sort(
-                self.admission_id,
-                self.shift_date,
-                ids,
-                expected_revisions=expected_revisions,
-            ),
-            on_success=lambda: self._schedule_state_sync(),
-            on_error=lambda _exc: self.request_refresh(force=True),
-            block_ui=False,
-            show_error=False,
-        )
+        # Reordering is part of the in-memory overlay.  The final order is
+        # persisted together with the rest of the draft by finalize_card().
+        return
 
     def _apply_pending_reorder_to_model(self):
         if not self._pending_reorder_order_ids or not self.model:
@@ -683,38 +1006,82 @@ class OrdersWidget(QWidget):
         if not self.model or row < 0 or row >= len(self.model.orders):
             return
 
-        setattr(self.model.orders[row], "_pending_delete", True)
-        if was_committed:
-            if hasattr(self.model, "_set_has_any_draft"):
-                self.model._set_has_any_draft(True, emit_order_column=True)
-            else:
-                self.model.has_any_draft = True
-            self._cached_has_drafts = True
-        elif hasattr(self.model, "_recompute_draft_flag"):
-            self.model._recompute_draft_flag(emit_order_column=True)
-            self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
-        idx_left = self.model.index(row, 0)
-        idx_right = self.model.index(row, max(0, self.model.columnCount() - 1))
-        self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
+        order_id = int(getattr(order, "id"))
+        tombstone = deepcopy(order)
+        setattr(tombstone, "_pending_delete", True)
+
+        self.model.beginRemoveRows(QModelIndex(), row, row)
+        try:
+            self.model.orders.pop(row)
+        finally:
+            self.model.endRemoveRows()
+
+        self._pending_reorder_order_ids = [
+            candidate_id
+            for candidate_id in self._pending_reorder_order_ids
+            if int(candidate_id) != order_id
+        ]
+        removed_admin_keys = [
+            key for key in self.model.admin_map
+            if int(key[0]) == order_id
+        ]
+        for key in removed_admin_keys:
+            self.model.admin_map.pop(key, None)
+            self._local_draft_dirty_admin_keys.discard((int(key[0]), str(key[1])))
+        if order_id > 0:
+            self._local_deleted_orders[order_id] = (row, tombstone)
+            self._local_draft_dirty_order_ids.add(order_id)
+        else:
+            self._local_deleted_orders.pop(order_id, None)
+            self._local_draft_dirty_order_ids.discard(order_id)
+
+        has_local_draft = self._has_local_draft_changes()
+        if hasattr(self.model, "_set_has_any_draft"):
+            self.model._set_has_any_draft(has_local_draft, emit_order_column=True)
+        else:
+            self.model.has_any_draft = has_local_draft
+        self._cached_has_drafts = has_local_draft
+        self._cached_has_orders = any(
+            item is not None and item.status != OrderStatus.DELETED
+            for item in self.model.orders
+        )
+        self._cached_has_administrations = self._model_has_administrations()
         self.check_drafts()
         self.localBalanceChanged.emit()
 
     def _clear_local_order_row_pending_delete(self, order_id):
         if self.model is None:
             return
-        for row, item in enumerate(self.model.orders):
-            if getattr(item, "id", None) == order_id:
-                if hasattr(item, "_pending_delete"):
-                    delattr(item, "_pending_delete")
-                if hasattr(self.model, "_recompute_draft_flag"):
-                    self.model._recompute_draft_flag(emit_order_column=True)
-                    self._cached_has_drafts = bool(self.model.has_any_draft or self._pending_reorder_order_ids)
-                idx_left = self.model.index(row, 0)
-                idx_right = self.model.index(row, max(0, self.model.columnCount() - 1))
-                self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
-                self.check_drafts()
-                self.localBalanceChanged.emit()
-                return
+        entry = self._local_deleted_orders.pop(int(order_id), None)
+        if entry is None:
+            return
+        original_row, order = entry
+        if hasattr(order, "_pending_delete"):
+            delattr(order, "_pending_delete")
+        insert_row = max(0, min(int(original_row), len(self.model.orders)))
+        self.model.beginInsertRows(QModelIndex(), insert_row, insert_row)
+        try:
+            self.model.orders.insert(insert_row, order)
+        finally:
+            self.model.endInsertRows()
+        restored_admin_keys = []
+        for key, admin in self._draft_baseline_admin_map.items():
+            if int(key[0]) != int(order_id):
+                continue
+            self.model.admin_map[key] = deepcopy(admin)
+            restored_admin_keys.append(key)
+        if restored_admin_keys:
+            self._emit_admin_cell_changes(restored_admin_keys, mark_draft=False)
+        self._local_draft_dirty_order_ids.discard(int(order_id))
+        has_local_draft = self._has_local_draft_changes()
+        if hasattr(self.model, "_set_has_any_draft"):
+            self.model._set_has_any_draft(has_local_draft, emit_order_column=True)
+        else:
+            self.model.has_any_draft = has_local_draft
+        self._cached_has_drafts = has_local_draft
+        self._cached_has_orders = bool(self.model.orders)
+        self.check_drafts()
+        self.localBalanceChanged.emit()
 
     def _mark_pending_structure_sync(self, change_id: int):
         try:
@@ -814,7 +1181,7 @@ class OrdersWidget(QWidget):
             shift_date=self.shift_date,
             role="doctor",
             mode=self._resolve_read_mode(),
-            variant="full",
+            variant="full" if self._legacy_central_draft_detected else "committed",
         )
 
     def _current_context_key(self):
@@ -1630,6 +1997,16 @@ class OrdersWidget(QWidget):
             scroll_value,
         )
         self._apply_full_snapshot_to_model(snapshot)
+        legacy_preflight_detected = bool(
+            snapshot.get("only_committed", False)
+            and snapshot.get("has_any_draft", False)
+            and not self._has_local_draft_changes()
+        )
+        if legacy_preflight_detected:
+            self._legacy_central_draft_detected = True
+        elif not snapshot.get("has_any_draft", False):
+            self._legacy_central_draft_detected = False
+        self.set_forced_read_only(self._forced_read_only)
         self._apply_pending_reorder_to_model()
         self._restore_table_scroll(scroll_value)
         self._cached_has_drafts = bool(snapshot.get("has_any_draft", False)) or bool(self._pending_reorder_order_ids)
@@ -1658,6 +2035,16 @@ class OrdersWidget(QWidget):
             snapshot.get("version"),
         )
         self._last_applied_snapshot_signature = snapshot_signature
+        if legacy_preflight_detected:
+            QTimer.singleShot(
+                0,
+                lambda: self._request_snapshot(
+                    force=True,
+                    source="legacy_central_draft_review",
+                    priority="HIGH",
+                    invalidate_reason="legacy_central_draft_review",
+                ) if not self._is_closing and self._legacy_central_draft_detected else None,
+            )
         return True
 
     def _try_apply_admin_only_snapshot(
@@ -1754,6 +2141,7 @@ class OrdersWidget(QWidget):
                 sorting_enabled = False
         try:
             self.model.apply_snapshot(snapshot)
+            self._capture_local_draft_baseline(snapshot)
         finally:
             if table is not None:
                 try:
@@ -2372,10 +2760,12 @@ class OrdersWidget(QWidget):
         # На ошибке возвращаемся к source-of-truth из БД.
         self.request_refresh(force=True)
 
-    def _emit_admin_cell_changes(self, changed_keys):
+    def _emit_admin_cell_changes(self, changed_keys, *, mark_draft: bool = True):
         if self.model is None or not changed_keys:
             return
         changed_keys = list(dict.fromkeys(changed_keys))
+        if mark_draft:
+            self._mark_local_admin_dirty(changed_keys)
         if hasattr(self.model, "_recompute_draft_flag"):
             self.model._recompute_draft_flag(emit_order_column=True)
         self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
@@ -2417,7 +2807,8 @@ class OrdersWidget(QWidget):
             else:
                 self.model.admin_map.pop(key, None)
             changed_keys.append(key)
-        self._emit_admin_cell_changes(changed_keys)
+        self._mark_local_admin_dirty(changed_keys)
+        self._emit_admin_cell_changes(changed_keys, mark_draft=False)
 
     @staticmethod
     def _admin_key_from_admin(admin):
@@ -2446,7 +2837,7 @@ class OrdersWidget(QWidget):
         pending_admin.actual_time = datetime.now() if mark else None
         setattr(pending_admin, "_pending_mark", mark or "")
         self.model.admin_map[key] = pending_admin
-        self._emit_admin_cell_changes([key])
+        self._emit_admin_cell_changes([key], mark_draft=False)
         return {key: (previous is not None, previous)}
 
     def _apply_committed_order_mark(self, index, admin, mark: str):
@@ -2461,7 +2852,7 @@ class OrdersWidget(QWidget):
         if hasattr(committed_admin, "_pending_mark"):
             delattr(committed_admin, "_pending_mark")
         self.model.admin_map[key] = committed_admin
-        self._emit_admin_cell_changes([key])
+        self._emit_admin_cell_changes([key], mark_draft=False)
 
     def _apply_pending_cell(
         self,
@@ -2568,7 +2959,7 @@ class OrdersWidget(QWidget):
         previous_admin: AdministrationDTO | None = None,
     ) -> AdministrationDTO:
         return AdministrationDTO(
-            id=-1,
+            id=self._allocate_local_admin_id(),
             order_id=order.id,
             big_chain_id=chain_id,
             cell_role=role,
@@ -2918,70 +3309,135 @@ class OrdersWidget(QWidget):
             self._perf_clicks.pop(click_id, None)
 
     def finalize_card(self):
-        if not self.admission_id or self._is_read_only(): return
+        if not self.admission_id or self._forced_read_only: return
+        if self._local_draft_save_pending:
+            return
+        if not self._has_local_draft_changes():
+            if self._legacy_central_draft_detected:
+                target_admission_id = self.admission_id
+                target_shift_date = self.shift_date
+
+                def legacy_success():
+                    self._local_draft_save_pending = False
+                    if not self._is_current_context(target_admission_id, target_shift_date):
+                        return
+                    self._legacy_central_draft_detected = False
+                    self._cached_has_drafts = False
+                    self._refresh_model(source="post_finalize")
+                    self.localDraftResolutionFinished.emit(True)
+
+                def legacy_error(_exc):
+                    self._local_draft_save_pending = False
+                    self.check_drafts()
+                    self.localDraftResolutionFinished.emit(False)
+
+                self._local_draft_save_pending = True
+                try:
+                    self._enqueue_write(
+                        f"orders_finalize_legacy:{target_admission_id}",
+                        operation=lambda: self.service.finalize_order_card(
+                            target_admission_id,
+                            shift_date=target_shift_date,
+                            expected_revisions=self._visible_order_revision_map(),
+                        ),
+                        on_success=legacy_success,
+                        on_error=legacy_error,
+                    )
+                except Exception:
+                    self._local_draft_save_pending = False
+                    raise
+            return
         target_admission_id = self.admission_id
         target_shift_date = self.shift_date
-        ordered_order_ids = list(self._pending_reorder_order_ids or [])
-        expected_revisions = self._visible_order_revision_map()
+        payload = self._build_local_draft_payload()
+        if not payload:
+            return
 
         def after_success():
+            self._local_draft_save_pending = False
             if not self._is_current_context(target_admission_id, target_shift_date):
                 return
             from rem_card.app.logger import logger
             logger.info(f"Карта назначений для ID {target_admission_id} успешно сохранена")
+            self._reset_local_draft_tracking(clear_baseline=True)
+            self._cached_has_drafts = False
+            if self.model is not None:
+                self.model._set_has_any_draft(False, emit_order_column=True)
+            self._discard_deferred_forced_reload_after_guard(discard_reason="post_finalize")
             self._clear_local_cell_draft_guard()
             self._admin_only_snapshot_until = 0.0
             self._clear_pending_reorder()
             self._post_finalize_retry_count = 0
             self._refresh_model(source="post_finalize")
+            self.localDraftResolutionFinished.emit(True)
 
-        self._enqueue_write(
-            f"orders_finalize:{target_admission_id}",
-            operation=lambda ids=ordered_order_ids: self.service.finalize_order_card(
-                target_admission_id,
-                shift_date=target_shift_date,
-                ordered_order_ids=ids,
-                expected_revisions=expected_revisions,
-            ),
-            on_success=after_success,
-        )
+        def after_error(_exc):
+            self._local_draft_save_pending = False
+            self.check_drafts()
+            self.localDraftResolutionFinished.emit(False)
+
+        self._local_draft_save_pending = True
+        try:
+            self._enqueue_write(
+                f"orders_finalize:{target_admission_id}",
+                operation=lambda data=payload: self.service.commit_local_order_draft(
+                    target_admission_id,
+                    target_shift_date,
+                    orders=data["orders"],
+                    admin_map=data["admin_map"],
+                    dirty_admin_keys=data["dirty_admin_keys"],
+                    baseline_admin_map=data["baseline_admin_map"],
+                    expected_revisions=data["expected_revisions"],
+                    expected_active_order_ids=data["expected_active_order_ids"],
+                ),
+                on_success=after_success,
+                on_error=after_error,
+            )
+        except Exception:
+            self._local_draft_save_pending = False
+            raise
 
     def clear_drafts(self):
-        if not self.admission_id or self._is_read_only(): return
-        if self._known_current_context_without_drafts():
-            logger.info(
-                "[OrdersClick] clear_drafts_skip_noop role=doctor admission_id=%s",
-                self.admission_id,
-            )
+        if not self.admission_id or self._forced_read_only: return
+        if self._local_draft_save_pending:
             return
-        source_has_drafts = self._source_has_order_drafts()
-        if source_has_drafts is False:
-            logger.info(
-                "[OrdersClick] clear_drafts_skip_source_noop role=doctor admission_id=%s",
-                self.admission_id,
-            )
+        if not self._has_local_draft_changes():
+            if self._legacy_central_draft_detected:
+                target_admission_id = self.admission_id
+                target_shift_date = self.shift_date
+
+                def legacy_success():
+                    self._local_draft_save_pending = False
+                    if not self._is_current_context(target_admission_id, target_shift_date):
+                        return
+                    self._legacy_central_draft_detected = False
+                    self._cached_has_drafts = False
+                    self._refresh_model(source="orders_discard_legacy_draft")
+                    self.localDraftResolutionFinished.emit(True)
+
+                def legacy_error(_exc):
+                    self._local_draft_save_pending = False
+                    self.check_drafts()
+                    self.localDraftResolutionFinished.emit(False)
+
+                self._local_draft_save_pending = True
+                try:
+                    self._enqueue_write(
+                        f"orders_discard_legacy:{target_admission_id}",
+                        operation=lambda: self.service.clear_order_drafts(
+                            target_admission_id,
+                            target_shift_date,
+                            expected_revisions=self._visible_order_revision_map(),
+                        ),
+                        on_success=legacy_success,
+                        on_error=legacy_error,
+                    )
+                except Exception:
+                    self._local_draft_save_pending = False
+                    raise
             return
-        target_admission_id = self.admission_id
-        target_shift_date = self.shift_date
-        expected_revisions = self._visible_order_revision_map()
-
-        def after_success():
-            if not self._is_current_context(target_admission_id, target_shift_date):
-                return
-            self._clear_local_cell_draft_guard()
-            self._admin_only_snapshot_until = 0.0
-            self._clear_pending_reorder()
-            self._refresh_model()
-
-        self._enqueue_write(
-            f"orders_clear_drafts:{target_admission_id}",
-            operation=lambda: self.service.clear_order_drafts(
-                target_admission_id,
-                target_shift_date,
-                expected_revisions=expected_revisions,
-            ),
-            on_success=after_success,
-        )
+        if not self._restore_local_draft_baseline():
+            self.request_refresh(force=True, source="orders_discard_local_draft", priority="HIGH")
 
     def setup_data(self):
         """Обновление только данных (без пересоздания виджетов)."""
@@ -3146,10 +3602,14 @@ class OrdersWidget(QWidget):
         scroll_value = self._capture_table_scroll()
         row = len(self.model.orders)
         draft_changed = False
+        local_order = copy(order)
+        local_order.sort_order = max(
+            (int(getattr(existing, "sort_order", 0) or 0) for existing in self.model.orders if existing is not None),
+            default=-1,
+        ) + 1
         self.model.beginInsertRows(QModelIndex(), row, row)
         try:
-            self.model.orders.append(copy(order))
-            self.model._renumber_local_sort_order()
+            self.model.orders.append(local_order)
             if hasattr(self.model, "_recompute_draft_flag"):
                 draft_changed = bool(self.model._recompute_draft_flag())
         finally:
@@ -3166,8 +3626,8 @@ class OrdersWidget(QWidget):
         self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
         self._apply_table_header_layout()
         self._restore_table_scroll(scroll_value)
+        self._mark_local_order_dirty(order_id)
         self.check_drafts()
-        self._schedule_fast_sync()
         self.localBalanceChanged.emit()
 
     def _replace_local_order_after_edit(self, row: int, order_id: int, updated_order: OrderDTO):
@@ -3194,6 +3654,7 @@ class OrdersWidget(QWidget):
         local_order.id = order_id
         local_order.admission_id = self.admission_id
         self.model.orders[target_row] = local_order
+        self._mark_local_order_dirty(order_id)
         if hasattr(self.model, "_recompute_draft_flag"):
             self.model._recompute_draft_flag(emit_order_column=True)
         self._cached_has_drafts = bool(getattr(self.model, "has_any_draft", False))
@@ -3207,7 +3668,6 @@ class OrdersWidget(QWidget):
         idx_right = self.model.index(target_row, max(0, self.model.columnCount() - 1))
         self.model.dataChanged.emit(idx_left, idx_right, [Qt.UserRole])
         self.check_drafts()
-        self._schedule_fast_sync()
         self.localBalanceChanged.emit()
 
     def on_prescription_input(self, text):
@@ -3217,57 +3677,97 @@ class OrdersWidget(QWidget):
         target_admission_id = self.admission_id
         target_shift_date = self.shift_date
         new_order = OrderInputHandler.parse_input_to_dto(text, self.admission_id)
+        new_order.id = self._allocate_local_order_id()
         new_order.is_committed = 0
         now = datetime.now()
         start, end = self.service.get_day_period(self.shift_date)
         new_order.created_at = now if start <= now < end else start
 
-        self._enqueue_write(
-            f"orders_add_input:{target_admission_id}",
-            operation=lambda: self.service.add_order(new_order),
-            on_success=lambda: (
-                self._insert_local_order_after_add(new_order)
-                if self._is_current_context(target_admission_id, target_shift_date)
-                else None
-            ),
+        if self._is_current_context(target_admission_id, target_shift_date):
+            self._insert_local_order_after_add(new_order)
+
+    def has_cvp_order(self) -> bool:
+        from rem_card.services.order_service import CVP_QUICK_ORDER_KEY, OrderService
+
+        model_has_cvp = self.model is not None and any(
+            str(getattr(order, "drug_key", "") or "") == CVP_QUICK_ORDER_KEY
+            or OrderService._is_cvp_order_text(getattr(order, "latin", ""))
+            or OrderService._is_cvp_order_text(getattr(order, "_order_text", ""))
+            for order in self.model.orders
+            if order is not None
         )
+        if model_has_cvp:
+            return True
+        if self._draft_baseline_snapshot is not None:
+            return False
+        coordinator = self._get_read_coordinator()
+        if coordinator is not None:
+            try:
+                cached_snapshot = coordinator.get_cached_tab(self._build_orders_context())
+            except Exception:
+                cached_snapshot = None
+            if cached_snapshot is not None:
+                return any(
+                    str(getattr(order, "drug_key", "") or "") == CVP_QUICK_ORDER_KEY
+                    or OrderService._is_cvp_order_text(getattr(order, "latin", ""))
+                    or OrderService._is_cvp_order_text(getattr(order, "_order_text", ""))
+                    for order in (cached_snapshot.get("orders") or [])
+                    if order is not None
+                )
+        checker = getattr(self.service, "has_cvp_order", None)
+        if not callable(checker) or not self.admission_id or not self.shift_date:
+            return False
+        try:
+            return bool(checker(self.admission_id, self.shift_date))
+        except Exception as exc:
+            logger.warning("CVP order fallback probe failed: %s", exc)
+            return False
 
     def add_cvp_order_if_missing(self):
         if self._is_read_only() or not self.service or not self.admission_id or not self.shift_date:
-            return
-        if not hasattr(self.service, "add_cvp_order_if_missing"):
-            self._show_warning("Сервис быстрого назначения ЦВД недоступен.")
-            return
+            return None, False
+        from rem_card.services.order_service import CVP_QUICK_ORDER_KEY, CVP_QUICK_ORDER_TEXT, OrderService
 
-        target_admission_id = self.admission_id
-        target_shift_date = self.shift_date
-        result_holder = {}
-
-        def operation():
-            result_holder["result"] = self.service.add_cvp_order_if_missing(
-                target_admission_id,
-                target_shift_date,
+        self._ensure_model_initialized()
+        if self.model is not None:
+            existing = next(
+                (
+                    order
+                    for order in self.model.orders
+                    if order is not None
+                    and (
+                        str(getattr(order, "drug_key", "") or "") == CVP_QUICK_ORDER_KEY
+                        or OrderService._is_cvp_order_text(getattr(order, "latin", ""))
+                        or OrderService._is_cvp_order_text(getattr(order, "_order_text", ""))
+                    )
+                ),
+                None,
             )
+            if existing is not None:
+                return existing, False
+        if self._draft_baseline_snapshot is None and self.has_cvp_order():
+            return None, False
 
-        def after_success():
-            if not self._is_current_context(target_admission_id, target_shift_date):
-                return
-            order, created = result_holder.get("result") or (None, False)
-            if created and order is not None:
-                self._insert_local_order_after_add(order)
-                return
-            if order is not None and self.model is not None:
-                order_id = getattr(order, "id", None)
-                if any(getattr(existing, "id", None) == order_id for existing in self.model.orders):
-                    self.check_drafts()
-                    return
-            self.request_refresh(force=True, source="orders_add_cvp", priority="HIGH")
-
-        self._enqueue_write(
-            f"orders_add_cvp:{target_admission_id}",
-            operation=operation,
-            on_success=after_success,
+        now = datetime.now()
+        start, end = self.service.get_day_period(self.shift_date)
+        created_at = now if start <= now < end else start
+        order = OrderDTO(
+            id=self._allocate_local_order_id(),
+            admission_id=int(self.admission_id),
+            drug_key=CVP_QUICK_ORDER_KEY,
+            latin=CVP_QUICK_ORDER_TEXT,
+            type=OrderType.MEDICATION,
+            status=OrderStatus.ACTIVE,
+            dose_value=0.0,
+            dose_unit="",
+            frequency=1,
+            duration_min=0,
+            is_committed=0,
+            created_at=created_at,
+            last_modified_by="doctor",
         )
+        self._insert_local_order_after_add(order)
+        return order, True
 
     def _build_order_edit_dialog(self, order: OrderDTO):
         from .administration_dialog import (
@@ -3310,6 +3810,12 @@ class OrdersWidget(QWidget):
         if order_id is None:
             self._show_warning("Назначение еще не сохранено. Обновите список и повторите редактирование.")
             return
+        if int(order_id) > 0 and self._order_has_committed_execution(order_id):
+            self._show_warning(
+                "Назначение уже имеет выполненные введения. Чтобы не изменить медицинский факт, "
+                "создайте новое назначение и скорректируйте только будущие ячейки."
+            )
+            return
 
         dialog = self._build_order_edit_dialog(order)
         if not dialog.exec():
@@ -3324,36 +3830,9 @@ class OrdersWidget(QWidget):
         edited_order.sort_order = getattr(order, "sort_order", 0) or 0
         edited_order.draft_sort_order = getattr(order, "draft_sort_order", None)
         edited_order.created_at = getattr(order, "created_at", None) or datetime.now()
-        edited_order.revision = int(getattr(order, "revision", 0) or 0) + 1
+        edited_order.revision = int(getattr(order, "revision", 0) or 0)
         edited_order.last_modified_by = "doctor"
-
-        expected_revision = getattr(order, "revision", None)
-        target_admission_id = self.admission_id
-        target_shift_date = self.shift_date
-        updated_holder = {}
-
-        def operation():
-            updated_holder["order"] = self.service.update_order(
-                int(order_id),
-                edited_order,
-                expected_revision=expected_revision,
-            )
-
-        def on_success():
-            if not self._is_current_context(target_admission_id, target_shift_date):
-                return
-            self._replace_local_order_after_edit(
-                row,
-                int(order_id),
-                updated_holder.get("order") or edited_order,
-            )
-
-        self._enqueue_write(
-            f"orders_edit_input:{target_admission_id}:{order_id}",
-            operation=operation,
-            on_success=on_success,
-            on_error=lambda _exc: self.request_refresh(force=True),
-        )
+        self._replace_local_order_after_edit(row, int(order_id), edited_order)
         
     def update_now_marker(self):
         if hasattr(self, 'table_view'): self.table_view.viewport().update()
@@ -3514,25 +3993,13 @@ class OrdersWidget(QWidget):
                     order = self.model.orders[row]
                     was_committed = self._is_committed_value(getattr(order, "is_committed", 0))
                     order_id = order.id
-                    expected_revision = getattr(order, "revision", None)
+                    if int(order_id) > 0 and self._order_has_committed_execution(order_id):
+                        self._show_warning(
+                            "Назначение уже имеет выполненные введения и не может быть удалено целиком. "
+                            "Скорректируйте только будущие ячейки."
+                        )
+                        return True
                     self._mark_local_order_row_deleted(row, order, was_committed=was_committed)
-
-                    def on_delete_error(exc, oid=order_id):
-                        self._clear_local_order_row_pending_delete(oid)
-                        self._on_cell_write_failed(exc)
-
-                    target_admission_id = self.admission_id
-                    target_shift_date = self.shift_date
-                    self._enqueue_write(
-                        f"orders_soft_delete_row:{order_id}",
-                        operation=lambda oid=order_id, rev=expected_revision: self.service.soft_delete_order_row(
-                            oid,
-                            was_committed,
-                            expected_revision=rev,
-                        ),
-                        on_success=lambda aid=target_admission_id, sd=target_shift_date: self._refresh_model_if_current(aid, sd),
-                        on_error=on_delete_error,
-                    )
                     return True
                 if index.column() > 0:
                     if event.button() == Qt.LeftButton and event.modifiers() == Qt.NoModifier:
@@ -3703,6 +4170,15 @@ class OrdersWidget(QWidget):
         order = self.model.orders[row]
         admin = self.model.data(index, Qt.UserRole)
         planned_time = self.model.time_slots[time_slot_idx]
+        if (
+            admin is not None
+            and self._is_committed_value(getattr(admin, "is_committed", 0))
+            and str(getattr(admin, "comment", "") or "") in {NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED}
+        ):
+            self._show_warning(
+                "Ячейка уже содержит отметку выполнения и сохранена как медицинский факт."
+            )
+            return
         cell_key = self._admin_cell_write_key(getattr(order, "id", None), planned_time)
         skip_reason = self._skip_reason_for_admin_cell_click(cell_key)
         if skip_reason:
@@ -3734,16 +4210,15 @@ class OrdersWidget(QWidget):
             getattr(admin, "comment", None),
         )
         perf_click_id = self._perf_start_click(index, op_prefix)
-        self._enqueue_cell_write(
-            f"{op_prefix}:{order.id}:{planned_time.isoformat()}:seq={click_seq}",
-            operation=lambda: service_action(order, admin, planned_time),
-            index=index,
-            order=order,
-            admin=admin,
-            planned_time=planned_time,
-            op_prefix=op_prefix,
+        self._apply_optimistic_cell(
+            index,
+            order,
+            admin,
+            planned_time,
+            op_prefix,
             perf_click_id=perf_click_id,
         )
+        self._perf_mark_click(perf_click_id, "write_ok", extra="local_draft")
             
     def stop_timer(self):
         if hasattr(self, 'timer') and self.timer.isActive():
@@ -3760,35 +4235,11 @@ class OrdersWidget(QWidget):
         
     def clear_all_times(self):
         if not self.admission_id or self._is_read_only(): return
-        target_admission_id = self.admission_id
-        target_shift_date = self.shift_date
-        self._enqueue_write(
-            f"orders_clear_times:{target_admission_id}",
-            operation=lambda: self.service.clear_order_times(target_admission_id, target_shift_date),
-            on_success=lambda: self._refresh_model_if_current(target_admission_id, target_shift_date),
-        )
+        self._clear_local_times()
 
     def clear_all_orders(self):
         if not self.admission_id or self._is_read_only(): return
-        target_admission_id = self.admission_id
-        target_shift_date = self.shift_date
-        expected_revisions = self._visible_order_revision_map()
-
-        def after_success():
-            if not self._is_current_context(target_admission_id, target_shift_date):
-                return
-            self._clear_pending_reorder()
-            self._refresh_model()
-
-        self._enqueue_write(
-            f"orders_clear_all:{target_admission_id}",
-            operation=lambda: self.service.clear_order_list(
-                target_admission_id,
-                target_shift_date,
-                expected_revisions=expected_revisions,
-            ),
-            on_success=after_success,
-        )
+        self._clear_local_orders()
 
     def open_template_dialog(self):
         if self._is_read_only(): return
@@ -3808,49 +4259,29 @@ class OrdersWidget(QWidget):
                 )
 
             replace_existing = False
-            expected_revisions = {}
             if self.has_orders() or self.has_drafts():
                 reply = self._show_question("Лист назначений не пуст. Вы уверены, что хотите заменить текущий лист назначения?\nВсе текущие назначения будут переведены в черновики на удаление.")
                 if reply != CustomMessageBox.Yes: return
                 replace_existing = True
-                expected_revisions = self._visible_order_revision_map()
-                
-            def operation():
-                now = datetime.now()
-                start, end = self.service.get_day_period(self.shift_date)
-                base_time = now if start <= now < end else start
 
-                orders_to_add = build_orders_from_template(
-                    template=template,
-                    engine=engine,
-                    admission_id=self.admission_id,
-                    base_time=base_time,
-                )
-
-                if replace_existing:
-                    self.service.clear_order_list(
-                        self.admission_id,
-                        self.shift_date,
-                        expected_revisions=expected_revisions,
-                    )
-                self.service.add_orders_batch(orders_to_add)
-
-            def after_success():
-                self._clear_pending_reorder()
-                self._refresh_model()
-                if legacy_complex_mode:
-                    self._show_info(
-                        f"Шаблон '{template.get('name', t_key)}' загружен в простом режиме "
-                        f"(без автозаполнения временных ячеек)."
-                    )
-                    return
-                self._show_info(f"Шаблон '{template.get('name', t_key)}' успешно загружен как черновик.")
-
-            self._enqueue_write(
-                f"orders_load_template:{self.admission_id}",
-                operation=operation,
-                on_success=after_success,
+            now = datetime.now()
+            start, end = self.service.get_day_period(self.shift_date)
+            base_time = now if start <= now < end else start
+            orders_to_add = build_orders_from_template(
+                template=template,
+                engine=engine,
+                admission_id=self.admission_id,
+                base_time=base_time,
             )
+            if not self._insert_local_orders_batch(orders_to_add, replace_existing=replace_existing):
+                return
+            if legacy_complex_mode:
+                self._show_info(
+                    f"Шаблон '{template.get('name', t_key)}' загружен в простом режиме "
+                    f"(без автозаполнения временных ячеек)."
+                )
+                return
+            self._show_info(f"Шаблон '{template.get('name', t_key)}' успешно загружен как черновик.")
 
     def load_yesterday_orders(self):
         if self._is_closing or not self.admission_id or not self.service or self._is_read_only(): return
@@ -3873,10 +4304,23 @@ class OrdersWidget(QWidget):
                 shift_date,
                 max_days_back=3,
             )
+            admin_rows = []
+            if orders and found_date:
+                source_start, source_end = self.service.get_day_period(found_date)
+                admin_rows = self.service.get_latest_administrations_for_order_ids(
+                    [int(order.id) for order in orders if getattr(order, "id", None) is not None],
+                    source_start,
+                    source_end,
+                    only_committed=True,
+                    include_deleted=False,
+                    include_cancelled=False,
+                    include_deleted_orders=False,
+                )
             return {
                 "admission_id": admission_id,
                 "shift_date": shift_date,
                 "orders": orders,
+                "admin_rows": [dict(row) for row in admin_rows],
                 "found_date": found_date,
             }
 
@@ -3904,26 +4348,13 @@ class OrdersWidget(QWidget):
             if self._show_question(f"Найдены назначения за {found_date.strftime('%d.%m.%Y')}. Загрузить?") == CustomMessageBox.No:
                 return
 
-        expected_revisions = self._visible_order_revision_map()
-        target_admission_id = self.admission_id
-        target_shift_date = self.shift_date
-
-        def after_success():
-            if not self._is_current_context(target_admission_id, target_shift_date):
-                return
-            self._clear_pending_reorder()
-            self._refresh_model()
-
-        self._enqueue_write(
-            f"orders_load_yesterday:{target_admission_id}",
-            operation=lambda: self.service.replace_orders_from_date(
-                admission_id=target_admission_id,
-                target_shift_date=target_shift_date,
-                source_shift_date=found_date,
-                source_orders=yesterday_orders,
-                expected_revisions=expected_revisions,
-            ),
-            on_success=after_success,
+        if self._has_local_draft_changes():
+            self._restore_local_draft_baseline()
+        self._insert_local_orders_batch(
+            yesterday_orders,
+            replace_existing=True,
+            source_admin_rows=payload.get("admin_rows") or [],
+            source_shift_date=found_date,
         )
 
     def _on_load_yesterday_failed(self, exc):

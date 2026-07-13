@@ -23,24 +23,16 @@ class OrdersDAO:
             end_dt = start_dt + timedelta(days=1)
 
             if only_committed:
-                # Специальная логика для медсестры и печати:
-                # - показываем сохраненные активные назначения
-                # - плюс записи с черновиком, у которых есть коммиченные administrations
+                # Nurse/print/committed baselines must never see a doctor's
+                # unsaved row.  The local-overlay architecture keeps edits out
+                # of this table until Save, and this strict predicate also closes
+                # the legacy leak of edited text/dose into committed readers.
                 query = f"""
                     SELECT {select_clause} FROM orders
                     WHERE admission_id = ?
                     AND datetime >= ? AND datetime < ?
-                    AND (
-                        (is_committed = 1 AND COALESCE(status, '') NOT IN ('deleted', 'cancelled'))
-                        OR
-                        (is_committed = 0 AND EXISTS (
-                            SELECT 1
-                            FROM administrations a
-                            WHERE a.order_id = orders.id
-                              AND a.is_committed = 1
-                              AND COALESCE(a.status, '') NOT IN ('deleted', 'cancelled')
-                        ))
-                    )
+                    AND is_committed = 1
+                    AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 """
             else:
                 # Логика для врача: показываем активные/черновые, скрываем удаленные.
@@ -56,17 +48,8 @@ class OrdersDAO:
                 query = f"""
                     SELECT {select_clause} FROM orders
                     WHERE admission_id = ?
-                    AND (
-                        (is_committed = 1 AND COALESCE(status, '') != 'deleted')
-                        OR
-                        (is_committed = 0 AND EXISTS (
-                            SELECT 1
-                            FROM administrations a
-                            WHERE a.order_id = orders.id
-                              AND a.is_committed = 1
-                              AND COALESCE(a.status, '') NOT IN ('deleted', 'cancelled')
-                        ))
-                    )
+                    AND is_committed = 1
+                    AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 """
             else:
                 query = f"SELECT {select_clause} FROM orders WHERE admission_id = ? AND COALESCE(status, '') != 'deleted'"
@@ -196,17 +179,8 @@ class OrdersDAO:
                 FROM orders
                 WHERE admission_id = ?
                   AND datetime >= ? AND datetime < ?
-                  AND (
-                      (is_committed = 1 AND COALESCE(status, '') NOT IN ('deleted', 'cancelled'))
-                      OR
-                      (is_committed = 0 AND EXISTS (
-                          SELECT 1
-                          FROM administrations a
-                          WHERE a.order_id = orders.id
-                            AND a.is_committed = 1
-                            AND COALESCE(a.status, '') NOT IN ('deleted', 'cancelled')
-                      ))
-                  )
+                  AND is_committed = 1
+                  AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 ORDER BY COALESCE(sort_order, 0) ASC, created_at ASC, id ASC
             """
         else:

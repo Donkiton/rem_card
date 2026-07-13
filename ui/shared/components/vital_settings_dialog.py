@@ -66,7 +66,16 @@ class VitalSettingsDialog(QDialog):
     settings_saved = Signal()
     cvp_order_changed = Signal()
 
-    def __init__(self, remcard_service, admission_id, date_str, parent=None):
+    def __init__(
+        self,
+        remcard_service,
+        admission_id,
+        date_str,
+        parent=None,
+        *,
+        cvp_order_exists=None,
+        cvp_order_adder=None,
+    ):
         super().__init__(parent)
         self.service = remcard_service
         self.admission_id = admission_id
@@ -74,6 +83,8 @@ class VitalSettingsDialog(QDialog):
         self._loaded_settings = {}
         self._cvp_order_exists = False
         self._cvp_write_in_progress = False
+        self._cvp_order_exists_callback = cvp_order_exists
+        self._cvp_order_adder_callback = cvp_order_adder
         
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
@@ -253,8 +264,8 @@ class VitalSettingsDialog(QDialog):
 
     def _refresh_cvp_order_state(self):
         try:
-            checker = getattr(self.service, "has_cvp_order", None)
-            self._cvp_order_exists = bool(checker(self.admission_id, self._shift_date())) if callable(checker) else False
+            checker = self._cvp_order_exists_callback
+            self._cvp_order_exists = bool(checker()) if callable(checker) else False
         except Exception as exc:
             print(f"Error checking CVP order: {exc}")
             self._cvp_order_exists = False
@@ -264,7 +275,12 @@ class VitalSettingsDialog(QDialog):
         if not hasattr(self, "btn_cvp_order"):
             return
         cvp_enabled = self._is_cvp_switch_checked()
-        can_add = cvp_enabled and not self._cvp_order_exists and not self._cvp_write_in_progress
+        can_add = (
+            cvp_enabled
+            and callable(self._cvp_order_adder_callback)
+            and not self._cvp_order_exists
+            and not self._cvp_write_in_progress
+        )
         self.btn_cvp_order.setEnabled(can_add)
         if self._cvp_write_in_progress:
             tooltip = "Назначение ЦВД добавляется"
@@ -280,22 +296,22 @@ class VitalSettingsDialog(QDialog):
         if not self._is_cvp_switch_checked() or self._cvp_order_exists or self._cvp_write_in_progress:
             self._update_cvp_button_state()
             return
-        adder = getattr(self.service, "add_cvp_order_if_missing", None)
+        adder = self._cvp_order_adder_callback
         if not callable(adder):
-            CustomMessageBox.warning(self, "Предупреждение", "Сервис быстрого назначения ЦВД недоступен.")
+            CustomMessageBox.warning(self, "Предупреждение", "Локальный лист назначений недоступен.")
             return
 
         self._cvp_write_in_progress = True
         self._update_cvp_button_state()
 
-        def operation():
-            return adder(self.admission_id, self._shift_date())
-
         def on_success(result):
             self._cvp_write_in_progress = False
             order, _created = result or (None, False)
-            self._cvp_order_exists = bool(order)
-            self._update_cvp_button_state()
+            if order is None:
+                self._refresh_cvp_order_state()
+            else:
+                self._cvp_order_exists = True
+                self._update_cvp_button_state()
             if order is not None:
                 self.cvp_order_changed.emit()
 
@@ -304,19 +320,10 @@ class VitalSettingsDialog(QDialog):
             self._refresh_cvp_order_state()
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось добавить назначение ЦВД: {exc}")
 
-        enqueue = getattr(self.service, "enqueue_write", None)
-        if callable(enqueue):
-            enqueue(
-                description=f"orders_add_cvp:{self.admission_id}",
-                operation=operation,
-                on_success=on_success,
-                on_error=on_error,
-            )
-        else:
-            try:
-                on_success(operation())
-            except Exception as exc:
-                on_error(exc)
+        try:
+            on_success(adder())
+        except Exception as exc:
+            on_error(exc)
 
     def save_settings(self):
         new_settings = {}

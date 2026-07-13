@@ -710,7 +710,7 @@ class DoctorRemCardWidget(QWidget):
                     request["shift_date"],
                     include_change_cursor=True,
                     include_balance=True,
-                    balance_only_committed=False,
+                    balance_only_committed=True,
                     ensure_initial_status=request["ensure_initial_status"],
                 )
         elif load_scope in {"patient_open_card", "full"}:
@@ -723,7 +723,7 @@ class DoctorRemCardWidget(QWidget):
                     mode="archive" if self._archive_read_only_mode else "live",
                     source_db=self._archive_source_db_path if self._archive_read_only_mode else "live",
                     ensure_initial_status=request["ensure_initial_status"],
-                    balance_only_committed=False,
+                    balance_only_committed=True,
                     force_refresh=False,
                 )
             else:
@@ -732,7 +732,7 @@ class DoctorRemCardWidget(QWidget):
                     request["shift_date"],
                     include_change_cursor=True,
                     include_balance=True,
-                    balance_only_committed=False,
+                    balance_only_committed=True,
                     ensure_initial_status=request["ensure_initial_status"],
                 )
         else:
@@ -741,7 +741,7 @@ class DoctorRemCardWidget(QWidget):
                 request["shift_date"],
                 include_change_cursor=True,
                 include_balance=True,
-                balance_only_committed=False,
+                balance_only_committed=True,
                 ensure_initial_status=request["ensure_initial_status"],
             )
         request["snapshot"] = snapshot
@@ -1096,7 +1096,7 @@ class DoctorRemCardWidget(QWidget):
                     role="doctor",
                     mode="archive" if self._archive_read_only_mode else "live",
                     source_db=self._archive_source_db_path if self._archive_read_only_mode else "live",
-                    balance_only_committed=False,
+                    balance_only_committed=True,
                     force_refresh=True,
                 )
             elif hasattr(self.service, "build_balance_snapshot"):
@@ -1104,7 +1104,7 @@ class DoctorRemCardWidget(QWidget):
                     self.admission_id,
                     self._current_date,
                     include_change_cursor=True,
-                    balance_only_committed=False,
+                    balance_only_committed=True,
                 )
 
             if snapshot:
@@ -1793,8 +1793,6 @@ class DoctorRemCardWidget(QWidget):
             auto_hide_ms=10000,
             process_events=True,
         )
-        self._patient_open_generation += 1
-        patient_open_generation = self._patient_open_generation
         if not self._ensure_full_layout(reason="patient_open"):
             if open_loading_key:
                 hide_app_loading(self, open_loading_key, delay_ms=350)
@@ -1804,9 +1802,14 @@ class DoctorRemCardWidget(QWidget):
         from rem_card.app.logger import logger
         logger.info(f"[DOCTOR_VIEW] Loading patient card. AdmID: {admission_id}, Date: {date}")
 
-        self._balance_update_timer.stop()
-
         orders_context_unchanged = self._prepare_patient_card_orders_context(admission_id, date)
+        if orders_context_unchanged is None:
+            if open_loading_key:
+                hide_app_loading(self, open_loading_key, delay_ms=0)
+            return
+        self._patient_open_generation += 1
+        patient_open_generation = self._patient_open_generation
+        self._balance_update_timer.stop()
         (
             card_start_dt,
             card_end_dt,
@@ -1850,7 +1853,7 @@ class DoctorRemCardWidget(QWidget):
         if open_loading_key:
             hide_app_loading(self, open_loading_key, delay_ms=600)
 
-    def _prepare_patient_card_orders_context(self, admission_id, date) -> bool:
+    def _prepare_patient_card_orders_context(self, admission_id, date) -> bool | None:
         orders_widget = self._ensure_orders_widget()
         orders_context_unchanged = False
         if orders_widget is not None:
@@ -1862,7 +1865,27 @@ class DoctorRemCardWidget(QWidget):
             except Exception:
                 orders_context_unchanged = False
         if orders_widget is not None and not self._archive_read_only_mode and not orders_context_unchanged:
+            if getattr(orders_widget, "is_draft_save_pending", lambda: False)():
+                CustomMessageBox.warning(
+                    self,
+                    "Сохранение назначений",
+                    "Дождитесь завершения сохранения листа назначений перед переходом к другому пациенту.",
+                )
+                return None
+            if orders_widget.has_drafts():
+                reply = CustomMessageBox.question(
+                    self,
+                    "Несохраненные назначения",
+                    "На текущем листе назначений есть несохраненный черновик. "
+                    "Перейти к другому пациенту и отменить этот черновик?",
+                    CustomMessageBox.Yes | CustomMessageBox.No,
+                    CustomMessageBox.No,
+                )
+                if reply != CustomMessageBox.Yes:
+                    return None
             orders_widget.clear_drafts()
+            if getattr(orders_widget, "is_draft_save_pending", lambda: False)():
+                return None
         return orders_context_unchanged
 
     def _reset_patient_card_context_state(self, admission_id, date, balance_patient_period_manual_mode):
@@ -1940,8 +1963,6 @@ class DoctorRemCardWidget(QWidget):
                 ow.service = self.service
                 ow.admission_id = admission_id
                 ow.shift_date = date
-            if not self._archive_read_only_mode and not orders_context_unchanged:
-                ow.clear_drafts()
 
     def _schedule_patient_card_snapshots(
         self,
@@ -3180,21 +3201,31 @@ class DoctorRemCardWidget(QWidget):
         runtime = self._balance_runtime_cache or {}
         if not runtime:
             return
+        committed_orders = runtime.get("orders") or []
         local_orders = build_balance_orders_from_orders_widget(
             getattr(self.layout_manager, "orders_widget", None),
             self.admission_id,
             self._current_date,
             tab_active=self._is_orders_tab_active(),
         )
-        orders = local_orders if local_orders is not None else (runtime.get("orders") or [])
+        orders = local_orders if local_orders is not None else committed_orders
+        nurse_orders_widget = getattr(self.layout_manager, "nurse_orders_manager", None)
         panel_orders = apply_current_order_mark_overrides(
             orders,
-            getattr(self.layout_manager, "nurse_orders_manager", None),
+            nurse_orders_widget,
             self.admission_id,
             self._current_date,
         )
         if panel_orders is not None:
             orders = panel_orders
+        panel_committed_orders = apply_current_order_mark_overrides(
+            committed_orders,
+            nurse_orders_widget,
+            self.admission_id,
+            self._current_date,
+        )
+        if panel_committed_orders is not None:
+            committed_orders = panel_committed_orders
 
         now = datetime.now()
         start = runtime.get("start_dt")
@@ -3207,6 +3238,7 @@ class DoctorRemCardWidget(QWidget):
             transfer_time=runtime.get("transfer_time"),
             active_intervals=runtime.get("active_intervals") or [],
             outcome_time=runtime.get("outcome_time"),
+            committed_orders=committed_orders,
         )
         
         cur, day = calc_res["current"], calc_res["daily"]
@@ -3364,7 +3396,6 @@ class DoctorRemCardWidget(QWidget):
         ):
             self._return_from_operblock_archive_viewer()
             return
-        self._balance_update_timer.stop()
         current_idx = self.layout_manager.selection_stack.currentIndex()
         journal_idx = -1
         if hasattr(self.layout_manager, "journal_view"):
@@ -3374,6 +3405,32 @@ class DoctorRemCardWidget(QWidget):
         if hasattr(self.layout_manager, "admin_view"):
             admin_idx = self.layout_manager.selection_stack.indexOf(self.layout_manager.admin_view)
 
+        if current_idx == 0 and not self._archive_read_only_mode:
+            orders_widget = getattr(self.layout_manager, "orders_widget", None)
+            if orders_widget is not None:
+                if getattr(orders_widget, "is_draft_save_pending", lambda: False)():
+                    CustomMessageBox.warning(
+                        self,
+                        "Сохранение назначений",
+                        "Дождитесь завершения сохранения листа назначений перед выходом из карты.",
+                    )
+                    return
+                if orders_widget.has_drafts():
+                    reply = CustomMessageBox.question(
+                        self,
+                        "Несохранённые назначения",
+                        "В листе назначений есть несохранённый черновик. Выйти из карты и отменить его?",
+                        CustomMessageBox.Yes | CustomMessageBox.No,
+                        CustomMessageBox.No,
+                    )
+                    if reply != CustomMessageBox.Yes:
+                        return
+                    orders_widget.clear_drafts()
+                    if getattr(orders_widget, "is_draft_save_pending", lambda: False)():
+                        return
+
+        self._balance_update_timer.stop()
+
         if current_idx == admin_idx and admin_idx != -1:
             admin_widget = getattr(self.layout_manager, "admin_widget", None)
             if admin_widget is not None and hasattr(admin_widget, "go_back") and admin_widget.go_back():
@@ -3382,8 +3439,6 @@ class DoctorRemCardWidget(QWidget):
                 return
 
         if current_idx == 0 and self._card_return_mode == "archive":
-            if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
-                self.layout_manager.orders_widget.clear_drafts()
             self.admission_id = None
             self._release_add_patient_lock()
             self._exit_archive_read_only_mode()
@@ -3393,8 +3448,6 @@ class DoctorRemCardWidget(QWidget):
             self._wire_dynamic_views()
             self.layout_manager.bottom_row.hide()
         elif current_idx == 0:
-            if hasattr(self.layout_manager, 'orders_widget') and not self._archive_read_only_mode:
-                self.layout_manager.orders_widget.clear_drafts()
             self.admission_id = None
             self._release_add_patient_lock()
             self._exit_archive_read_only_mode()

@@ -2030,7 +2030,103 @@ class MainWindow(QMainWindow):
             self._is_custom_maximized = False
             self.title_bar.on_maximize_restore()
 
+    def _doctor_orders_widget_for_close(self):
+        doctor_main = getattr(self, "doctor_main", None)
+        remcard_widget = getattr(doctor_main, "remcard_widget", None)
+        layout = getattr(remcard_widget, "layout_manager", None)
+        return getattr(layout, "orders_widget", None)
+
+    def _on_orders_draft_resolution_for_close(self, success: bool):
+        orders_widget = getattr(self, "_orders_draft_close_widget", None)
+        if orders_widget is not None:
+            try:
+                orders_widget.localDraftResolutionFinished.disconnect(
+                    self._on_orders_draft_resolution_for_close
+                )
+            except Exception:
+                pass
+        self._orders_draft_close_widget = None
+        self._orders_draft_close_waiting = False
+        if success:
+            self._orders_draft_close_approved = True
+            QTimer.singleShot(0, self.close)
+
+    def _connect_orders_draft_close_waiter(self, orders_widget):
+        try:
+            orders_widget.localDraftResolutionFinished.disconnect(
+                self._on_orders_draft_resolution_for_close
+            )
+        except Exception:
+            pass
+        orders_widget.localDraftResolutionFinished.connect(
+            self._on_orders_draft_resolution_for_close
+        )
+        self._orders_draft_close_widget = orders_widget
+        self._orders_draft_close_waiting = True
+
+    def _prepare_orders_draft_for_close(self, event) -> bool:
+        if getattr(self, "_orders_draft_close_approved", False):
+            return True
+        orders_widget = self._doctor_orders_widget_for_close()
+        if orders_widget is None or not orders_widget.has_drafts():
+            return True
+        if (
+            getattr(self, "_orders_draft_close_waiting", False)
+            or getattr(orders_widget, "is_draft_save_pending", lambda: False)()
+        ):
+            from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+            CustomMessageBox.warning(
+                self,
+                "Сохранение назначений",
+                "Дождитесь завершения сохранения или отмены черновика назначений.",
+            )
+            if event is not None:
+                event.ignore()
+            return False
+
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        action = CustomMessageBox.warning_with_actions(
+            self,
+            "Несохранённые назначения",
+            "В листе назначений есть несохранённый черновик. Что сделать перед закрытием RemCard?",
+            [
+                ("Сохранить и выйти", 1),
+                ("Отменить черновик и выйти", 2),
+                ("Не закрывать", 0),
+            ],
+        )
+        if int(action or 0) == 1:
+            self._connect_orders_draft_close_waiter(orders_widget)
+            orders_widget.finalize_card()
+            if event is not None:
+                event.ignore()
+            return False
+        if int(action or 0) == 2:
+            self._connect_orders_draft_close_waiter(orders_widget)
+            orders_widget.clear_drafts()
+            if getattr(orders_widget, "is_draft_save_pending", lambda: False)():
+                if event is not None:
+                    event.ignore()
+                return False
+            try:
+                orders_widget.localDraftResolutionFinished.disconnect(
+                    self._on_orders_draft_resolution_for_close
+                )
+            except Exception:
+                pass
+            self._orders_draft_close_widget = None
+            self._orders_draft_close_waiting = False
+            self._orders_draft_close_approved = True
+            return True
+        if event is not None:
+            event.ignore()
+        return False
+
     def closeEvent(self, event):
+        if not self._prepare_orders_draft_for_close(event):
+            return
         self._is_closing = True
         exit_role = self._current_role_key()
         if exit_role not in ("doctor", "nurse"):

@@ -162,15 +162,36 @@ class ControlPanel(QWidget):
 
             if service and adm_id and curr_date:
                 from rem_card.ui.shared.components.vital_settings_dialog import VitalSettingsDialog
+                orders_widget = None
+                ensure_orders_widget = getattr(parent, "_ensure_orders_widget", None)
+                if callable(ensure_orders_widget):
+                    orders_widget = ensure_orders_widget()
+                if orders_widget is None:
+                    orders_widget = getattr(getattr(parent, "layout_manager", None), "orders_widget", None)
+                if orders_widget is not None and hasattr(orders_widget, "set_context"):
+                    orders_widget.set_context(
+                        service=service,
+                        admission_id=adm_id,
+                        shift_date=curr_date,
+                    )
                 dialog = VitalSettingsDialog(
                     service, 
                     adm_id, 
                     curr_date.strftime('%Y-%m-%d'), 
-                    self
+                    self,
+                    cvp_order_exists=(
+                        orders_widget.has_cvp_order
+                        if orders_widget is not None and hasattr(orders_widget, "has_cvp_order")
+                        else None
+                    ),
+                    cvp_order_adder=(
+                        orders_widget.add_cvp_order_if_missing
+                        if orders_widget is not None and hasattr(orders_widget, "add_cvp_order_if_missing")
+                        else None
+                    ),
                 )
                 if hasattr(parent, 'refresh_data'):
                     dialog.settings_saved.connect(parent.refresh_data)
-                    dialog.cvp_order_changed.connect(parent.refresh_data)
                 dialog.exec()
                 break
             parent = parent.parent()
