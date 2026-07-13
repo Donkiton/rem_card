@@ -54,6 +54,9 @@ class AsyncCallThread(QObject):
     def quit(self):
         self._cancel_requested.set()
 
+    def is_cancel_requested(self) -> bool:
+        return self._cancel_requested.is_set()
+
     def wait(self, timeout_ms: int | None = None) -> bool:
         with self._state_lock:
             thread = self._thread

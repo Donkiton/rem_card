@@ -39,6 +39,7 @@ class AdminMainWidget(QWidget):
         self.operblock_team_dialog = None
         self.emergency_password_dialog = None
         self.db_rotation_dialog = None
+        self.database_info_dialog = None
         self.settings_import_dialog = None
         self._settings_import_worker = None
         self._settings_import_loading_key = None
@@ -86,6 +87,7 @@ class AdminMainWidget(QWidget):
         self.btn_operblock_team = QPushButton("Опер. бригада")
         self.btn_emergency_password = QPushButton("Аварийный пароль")
         self.btn_db_rotation = QPushButton("Ручная ротация БД")
+        self.btn_database_info = QPushButton("Информация о БД")
         self.btn_import_settings = QPushButton("Загрузить настройки")
         self.btn_backup_settings = QPushButton("Сделать бекап настроек")
         self.btn_backup_main_db = QPushButton("Создать бекап основной бд")
@@ -122,6 +124,7 @@ class AdminMainWidget(QWidget):
             self.btn_print,
         ]
         maintenance_buttons = [
+            self.btn_database_info,
             self.btn_backup_settings,
             self.btn_backup_main_db,
         ]
@@ -213,6 +216,7 @@ class AdminMainWidget(QWidget):
         self.btn_operblock_team.clicked.connect(self.open_operblock_team_settings)
         self.btn_emergency_password.clicked.connect(self.open_emergency_password)
         self.btn_db_rotation.clicked.connect(self.open_db_rotation)
+        self.btn_database_info.clicked.connect(self.open_database_info)
         self.btn_import_settings.clicked.connect(self.open_settings_import)
         self.btn_backup_settings.clicked.connect(self.create_settings_backup)
         self.btn_backup_main_db.clicked.connect(self.create_main_db_backup)
@@ -577,6 +581,22 @@ class AdminMainWidget(QWidget):
         finally:
             self._hide_settings_loading(loading_key)
         self.db_rotation_dialog.exec()
+
+    def open_database_info(self):
+        from .database_info_dialog import DatabaseInfoDialog
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+
+        try:
+            db_manager = self._resolve_db_manager()
+        except Exception as exc:
+            CustomMessageBox.warning(
+                self,
+                "Информация о БД",
+                f"Не удалось открыть сведения о базах данных:\n{exc}",
+            )
+            return
+        self.database_info_dialog = DatabaseInfoDialog(db_manager, parent=self)
+        self.database_info_dialog.exec()
 
     def create_settings_backup(self):
         from rem_card.services.settings.settings_service import get_settings_service
