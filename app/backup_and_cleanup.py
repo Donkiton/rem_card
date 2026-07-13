@@ -19,6 +19,7 @@ from rem_card.app.paths import (
     REPORT_DIR,
     ensure_directories,
 )
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
     backup_meta_path,
@@ -515,7 +516,7 @@ def _primary_db_health_status(db_path: str) -> dict:
 
     conn = None
     try:
-        uri = f"file:{db_path}?mode=ro"
+        uri = build_sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         configure_connection(conn, readonly=True)
         ok, result = run_quick_check(conn)
@@ -618,7 +619,7 @@ def _create_safe_sqlite_backup(
     lock_wait_sec: float = 60.0,
 ):
     os.makedirs(os.path.dirname(backup_file_path), exist_ok=True)
-    uri = f"file:{db_path}?mode=ro"
+    uri = build_sqlite_file_uri(db_path, mode="ro")
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=5.0)
     try:
         configure_connection(conn, readonly=True)

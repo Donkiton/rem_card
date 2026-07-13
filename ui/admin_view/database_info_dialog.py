@@ -233,13 +233,42 @@ class DatabaseInfoDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         worker = AsyncCallThread(load_snapshot, parent=self)
         worker_ref["worker"] = worker
         self._worker = worker
-        worker.succeeded.connect(self._apply_snapshot, Qt.QueuedConnection)
-        worker.failed.connect(self._on_load_failed, Qt.QueuedConnection)
+        worker.succeeded.connect(
+            lambda snapshot, current=worker: self._on_load_succeeded(current, snapshot),
+            Qt.QueuedConnection,
+        )
+        worker.failed.connect(
+            lambda error, current=worker: self._on_worker_failed(current, error),
+            Qt.QueuedConnection,
+        )
         worker.finished.connect(
             lambda current=worker: self._on_load_finished(current),
             Qt.QueuedConnection,
         )
         worker.start()
+
+    def _on_load_succeeded(
+        self,
+        worker: AsyncCallThread,
+        snapshot: DatabaseInfoSnapshot,
+    ) -> None:
+        if self._worker is not worker:
+            return
+        try:
+            self._apply_snapshot(snapshot)
+        finally:
+            # Результат уже полностью обработан в GUI-потоке. Не оставляем окно
+            # в состоянии «загрузка» до прихода отдельного queued finished:
+            # между этими двумя сигналами пользователь уже видит готовые данные.
+            self._complete_load(worker)
+
+    def _on_worker_failed(self, worker: AsyncCallThread, error: object) -> None:
+        if self._worker is not worker:
+            return
+        try:
+            self._on_load_failed(error)
+        finally:
+            self._complete_load(worker)
 
     def _apply_snapshot(self, snapshot: DatabaseInfoSnapshot) -> None:
         self._snapshot = snapshot
@@ -270,6 +299,11 @@ class DatabaseInfoDialog(SavedFramelessDialogMixin, BaseStyledDialog):
         self.status_label.setToolTip(str(error))
 
     def _on_load_finished(self, worker: AsyncCallThread) -> None:
+        # Идемпотентный fallback: succeeded/failed завершают состояние окна
+        # атомарно со своим результатом, а finished освобождает keepalive worker.
+        self._complete_load(worker)
+
+    def _complete_load(self, worker: AsyncCallThread) -> None:
         if self._worker is worker:
             self._worker = None
             self.refresh_button.setEnabled(True)

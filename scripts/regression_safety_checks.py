@@ -3,7 +3,6 @@ r"""
 Regression checks for SQLite safety, local replica hygiene and backup cleanup gating.
 
 Usage:
-  set PYTHONPATH=C:\Project
   python %REMCARD_PROJECT_ROOT%\scripts\regression_safety_checks.py
 """
 
@@ -386,11 +385,16 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
     from rem_card.app import runtime_paths
 
     saved_env = os.environ.get(runtime_paths.DEV_BAZA_DIR_ENV)
+    saved_dev_config = os.environ.get(runtime_paths.DEV_DATABASE_CONFIG_ENV)
     saved_data_path_config = os.environ.get("REMCARD_DATA_PATH_CONFIG")
     original_get_project_root = runtime_paths.get_project_root
     try:
         os.environ.pop(runtime_paths.DEV_BAZA_DIR_ENV, None)
         os.environ.pop("REMCARD_DATA_PATH_CONFIG", None)
+        os.environ[runtime_paths.DEV_DATABASE_CONFIG_ENV] = os.path.join(
+            temp_root,
+            "dev_database_paths.json",
+        )
         project_root = os.path.join(temp_root, "project_root")
         expected = os.path.join(project_root, runtime_paths.BAZA_DIR_NAME)
         legacy = os.path.join(project_root, "rework_baza")
@@ -408,6 +412,11 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
         if os.path.abspath(resolved_configured) != os.path.abspath(expected):
             return False, f"dev baza dir must ignore remcard_data_path.json, got: {resolved_configured}"
 
+        saved_dev_baza = os.path.join(temp_root, "saved_dev_baza")
+        runtime_paths.write_dev_database_config(saved_dev_baza, [saved_dev_baza, expected])
+        if os.path.abspath(runtime_paths.get_dev_baza_dir()) != os.path.abspath(saved_dev_baza):
+            return False, "saved dev database selection was not honored"
+
         override = os.path.join(temp_root, "explicit_dev_override")
         os.environ[runtime_paths.DEV_BAZA_DIR_ENV] = override
         if os.path.abspath(runtime_paths.get_dev_baza_dir()) != os.path.abspath(override):
@@ -423,6 +432,10 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
             os.environ.pop("REMCARD_DATA_PATH_CONFIG", None)
         else:
             os.environ["REMCARD_DATA_PATH_CONFIG"] = saved_data_path_config
+        if saved_dev_config is None:
+            os.environ.pop(runtime_paths.DEV_DATABASE_CONFIG_ENV, None)
+        else:
+            os.environ[runtime_paths.DEV_DATABASE_CONFIG_ENV] = saved_dev_config
 
 
 def _check_arbitrary_baza_dir_name_allowed(temp_root: str) -> tuple[bool, str]:
@@ -20429,11 +20442,29 @@ def _check_restore_probe_checks_session_locks(temp_root: str) -> tuple[bool, str
 
 
 def _check_restore_probe_marks_network_emergency_nurse_role(temp_root: str) -> tuple[bool, str]:
+    from rem_card.app import runtime_paths
     from rem_card.app.role_session_lock import RoleSessionLock
 
-    fixture = _prepare_restore_probe_fixture(temp_root)
+    dev_fixture = _prepare_restore_probe_fixture(os.path.join(temp_root, "dev"))
+    dev_marker_path = os.path.join(
+        dev_fixture["network_baza"],
+        "session_locks",
+        "nurse_emergency.lock",
+    )
+    dev_status = dev_fixture["probe"].run_probe_once()
+    if dev_status.get("status") != "merge_ready_mode_a":
+        return False, f"dev restore probe did not reach network marker path: {dev_status}"
+    if os.path.exists(dev_marker_path):
+        return False, "dev restore probe must not create a network role marker"
+
+    fixture = _prepare_restore_probe_fixture(os.path.join(temp_root, "compiled"))
     marker_path = os.path.join(fixture["network_baza"], "session_locks", "nurse_emergency.lock")
-    status = fixture["probe"].run_probe_once()
+    original_is_compiled = runtime_paths.is_compiled
+    try:
+        runtime_paths.is_compiled = lambda: True
+        status = fixture["probe"].run_probe_once()
+    finally:
+        runtime_paths.is_compiled = original_is_compiled
     if status.get("status") != "merge_ready_mode_a":
         return False, f"restore probe did not reach network marker path: {status}"
     if not os.path.isfile(marker_path):

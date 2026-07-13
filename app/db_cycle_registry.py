@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from rem_card.app.db_lifecycle import DB_CYCLE_META_KEY
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import configure_connection, validate_sqlite_file
 
 
@@ -170,7 +171,7 @@ def inspect_db_cycle(
 
     conn = None
     try:
-        uri = f"file:{path}?mode=ro"
+        uri = build_sqlite_file_uri(path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
         configure_connection(conn, readonly=True)
         tables = _table_names(conn)

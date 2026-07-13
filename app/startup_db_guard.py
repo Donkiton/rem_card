@@ -20,6 +20,7 @@ from rem_card.app.runtime_paths import (
     mark_startup_baza_paths_validated,
     resolve_baza_dir,
 )
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.version import APP_VERSION
 from rem_card.app.sqlite_shared import (
     NETWORK_SAFE_DB_PROFILE,
@@ -514,7 +515,7 @@ def _check_quick(db_path: str) -> tuple[bool, str, bool]:
         return False, "database file does not exist", False
     conn = None
     try:
-        uri = f"file:{db_path}?mode=ro"
+        uri = build_sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=5.0)
         configure_connection(conn, readonly=True, profile="network")
         ok, result = run_quick_check(conn)
@@ -558,7 +559,7 @@ def _check_quick_with_retries(
 def _apply_network_safe_profile(db_path: str) -> dict[str, Any]:
     conn = None
     try:
-        uri = f"file:{db_path}?mode=rw"
+        uri = build_sqlite_file_uri(db_path, mode="rw")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, isolation_level=None, timeout=10.0)
         configure_connection(conn, profile="network")
         journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]

@@ -21,6 +21,11 @@ from rem_card.app.settings_db_paths import (
     get_settings_dir,
     get_settings_lock_path,
 )
+from rem_card.app.runtime_paths import (
+    get_existing_sqlite_rw_uri,
+    is_selected_dev_database_file,
+)
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import (
     FileWriteLock,
     SQLiteWriteController,
@@ -193,12 +198,23 @@ class SettingsDatabase:
 
         started = time.perf_counter()
         created = False
-        try:
-            os.makedirs(self.settings_dir, exist_ok=True)
-        except Exception as exc:
-            raise SettingsDbError(
-                f"Не удалось создать папку БД настроек: {self.settings_dir} ({exc})"
-            ) from exc
+        existing_only = is_selected_dev_database_file(
+            self.db_path,
+            "settings",
+            "remcard_settings.db",
+        )
+        if existing_only:
+            if not os.path.isfile(self.db_path):
+                raise SettingsDbError(
+                    f"Сохранённая dev-база настроек больше недоступна: {self.db_path}"
+                )
+        else:
+            try:
+                os.makedirs(self.settings_dir, exist_ok=True)
+            except Exception as exc:
+                raise SettingsDbError(
+                    f"Не удалось создать папку БД настроек: {self.settings_dir} ({exc})"
+                ) from exc
 
         created = not os.path.exists(self.db_path)
         schema_status = settings_schema.SettingsSchemaStatus(False, "missing_db")
@@ -430,11 +446,27 @@ class SettingsDatabase:
         if self.settings_readonly and not readonly:
             raise SettingsDbError("БД настроек открыта в режиме только чтения. Изменения запрещены.")
         if readonly:
-            uri = f"file:{self.db_path}?mode=ro"
+            uri = build_sqlite_file_uri(self.db_path, mode="ro")
             conn = sqlite3.connect(uri, uri=True, check_same_thread=True, isolation_level=None, timeout=5.0)
             configure_connection(conn, readonly=True, profile="network")
             return conn
-        conn = sqlite3.connect(self.db_path, check_same_thread=True, isolation_level=None, timeout=5.0)
+        existing_only = is_selected_dev_database_file(
+            self.db_path,
+            "settings",
+            "remcard_settings.db",
+        )
+        connect_target = (
+            get_existing_sqlite_rw_uri(self.db_path)
+            if existing_only
+            else self.db_path
+        )
+        conn = sqlite3.connect(
+            connect_target,
+            uri=existing_only,
+            check_same_thread=True,
+            isolation_level=None,
+            timeout=5.0,
+        )
         configure_connection(conn, profile="network")
         return conn
 

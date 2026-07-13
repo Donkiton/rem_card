@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import configure_connection, run_quick_check
 from rem_card.data.settings import settings_schema
 
@@ -45,7 +46,7 @@ def compute_file_hash(path: str) -> str:
 
 
 def _readonly_uri(path: str) -> str:
-    return f"file:{os.path.abspath(path)}?mode=ro"
+    return build_sqlite_file_uri(path, mode="ro")
 
 
 def _open_readonly(path: str) -> sqlite3.Connection:

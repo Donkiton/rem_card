@@ -25,17 +25,16 @@ from typing import Any, Iterable, List
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_PARENT = PROJECT_ROOT.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from _local_rem_card_bootstrap import bootstrap_local_rem_card
+from _local_rem_card_bootstrap import (
+    bootstrap_local_rem_card,
+    build_local_python_subprocess_env,
+)
 
-    bootstrap_local_rem_card()
-except Exception:
-    if str(PROJECT_PARENT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_PARENT))
+
+bootstrap_local_rem_card()
 
 
 @dataclass
@@ -550,8 +549,7 @@ def _parse_child_json(stdout: str) -> dict:
 
 
 def _run_child(args: argparse.Namespace, run_index: int) -> dict:
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(PROJECT_PARENT) + os.pathsep + env.get("PYTHONPATH", "")
+    env = build_local_python_subprocess_env()
     env["REMCARD_OPERBLOCK_STARTUP_METRICS"] = "1" if args.role == "operblock" else env.get(
         "REMCARD_OPERBLOCK_STARTUP_METRICS",
         "",

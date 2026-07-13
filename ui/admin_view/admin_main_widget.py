@@ -1,5 +1,5 @@
 from PySide6.QtCore import QCoreApplication, Qt
-from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 
@@ -41,6 +41,7 @@ class AdminMainWidget(QWidget):
         self.db_rotation_dialog = None
         self.database_info_dialog = None
         self.settings_import_dialog = None
+        self.dev_database_switch_dialog = None
         self._settings_import_worker = None
         self._settings_import_loading_key = None
         self.decor_settings_dialog = None
@@ -89,6 +90,7 @@ class AdminMainWidget(QWidget):
         self.btn_db_rotation = QPushButton("Ручная ротация БД")
         self.btn_database_info = QPushButton("Информация о БД")
         self.btn_import_settings = QPushButton("Загрузить настройки")
+        self.btn_switch_database = QPushButton("Смена базы")
         self.btn_backup_settings = QPushButton("Сделать бекап настроек")
         self.btn_backup_main_db = QPushButton("Создать бекап основной бд")
 
@@ -135,6 +137,7 @@ class AdminMainWidget(QWidget):
         except Exception:
             is_dev_version = False
         if is_dev_version:
+            maintenance_buttons.append(self.btn_switch_database)
             maintenance_buttons.append(self.btn_import_settings)
         if self.role == "doctor":
             maintenance_buttons.append(self.btn_emergency_password)
@@ -217,6 +220,7 @@ class AdminMainWidget(QWidget):
         self.btn_emergency_password.clicked.connect(self.open_emergency_password)
         self.btn_db_rotation.clicked.connect(self.open_db_rotation)
         self.btn_database_info.clicked.connect(self.open_database_info)
+        self.btn_switch_database.clicked.connect(self.open_dev_database_switch)
         self.btn_import_settings.clicked.connect(self.open_settings_import)
         self.btn_backup_settings.clicked.connect(self.create_settings_backup)
         self.btn_backup_main_db.clicked.connect(self.create_main_db_backup)
@@ -633,6 +637,79 @@ class AdminMainWidget(QWidget):
             "Бекап основной БД",
             f"Бекап основной БД создан.\n\nФайл:\n{backup_path}",
         )
+
+    def open_dev_database_switch(self):
+        import os
+
+        from rem_card.app.runtime_paths import DEV_RUNTIME_BAZA_PIN_ENV, is_compiled
+        from rem_card.ui.shared.custom_message_box import CustomMessageBox
+        from .dev_database_switch_dialog import DevDatabaseSwitchDialog
+
+        if is_compiled():
+            CustomMessageBox.warning(
+                self,
+                "Смена базы",
+                "Смена базы через настройки доступна только в dev-версии.",
+            )
+            return
+
+        self.dev_database_switch_dialog = DevDatabaseSwitchDialog(parent=self)
+        if self.dev_database_switch_dialog.exec() != QDialog.Accepted:
+            return
+
+        dialog = self.dev_database_switch_dialog
+        if dialog.environment_override and dialog.active_changed:
+            CustomMessageBox.warning(
+                self,
+                "Смена базы",
+                "Путь сохранён, но сейчас база задаётся переменной окружения. "
+                "Сохранённый выбор начнёт применяться после удаления этой переменной "
+                "из конфигурации запуска.",
+            )
+            return
+
+        if not dialog.active_changed:
+            CustomMessageBox.information(
+                self,
+                "Смена базы",
+                "Этот путь уже используется. Он сохранён в списке баз.",
+            )
+            return
+
+        # The selected path is already persisted for the next launch. Pin all
+        # dynamic path lookups in this process to its current database until
+        # shutdown, so declining an immediate restart cannot mix two bases.
+        os.environ["REMCARD_BAZA_DIR"] = dialog.current_path
+        os.environ[DEV_RUNTIME_BAZA_PIN_ENV] = str(os.getpid())
+
+        answer = CustomMessageBox.question(
+            self,
+            "Смена базы",
+            f"Новая база сохранена:\n{dialog.selected_path}\n\n"
+            "Для безопасного переключения нужно полностью перезапустить dev-версию. "
+            "Перезапустить сейчас?",
+        )
+        if answer != CustomMessageBox.Yes:
+            CustomMessageBox.information(
+                self,
+                "Смена базы",
+                "Новая база будет подключена при следующем запуске dev-версии.",
+            )
+            return
+
+        app = QApplication.instance()
+        if app is not None:
+            app.setProperty("remcard_restart_requested", True)
+            top_level = self.window()
+            if top_level is not None and top_level is not self:
+                closed = bool(top_level.close())
+                waiting_for_draft = bool(
+                    getattr(top_level, "_orders_draft_close_waiting", False)
+                )
+                if not closed and not waiting_for_draft:
+                    app.setProperty("remcard_restart_requested", False)
+            else:
+                app.quit()
 
     def open_settings_import(self):
         from rem_card.services.settings.settings_service import get_settings_service

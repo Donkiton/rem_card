@@ -31,6 +31,7 @@ from rem_card.app.emergency_validation import (
     validate_medical_db_snapshot,
     validate_settings_db_snapshot,
 )
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import NETWORK_SAFE_DB_PROFILE, configure_connection
 from rem_card.app.startup_db_guard import _compare_client_versions
 from rem_card.app.version import APP_VERSION
@@ -833,7 +834,12 @@ def _change_log_summary(db_path: str, base_last_change_id: int) -> tuple[dict[st
 
 
 def _open_readonly(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{os.path.abspath(path)}?mode=ro", uri=True, isolation_level=None, timeout=5.0)
+    conn = sqlite3.connect(
+        build_sqlite_file_uri(path, mode="ro"),
+        uri=True,
+        isolation_level=None,
+        timeout=5.0,
+    )
     configure_connection(conn, readonly=True, profile="network")
     return conn
 

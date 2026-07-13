@@ -1338,6 +1338,13 @@ class MainWindow(QMainWindow):
     def _acquire_role_lock(self, role_key: str) -> bool:
         if role_key not in ROLE_KEYS:
             return True
+        from rem_card.app.runtime_paths import is_compiled
+
+        if not is_compiled():
+            # Dev may inspect a live production database, but must neither
+            # honor nor create its role ownership markers.
+            self._last_active_role_key = role_key
+            return True
         if self._is_emergency_runtime():
             self._last_active_role_key = role_key
             return True
@@ -2050,6 +2057,10 @@ class MainWindow(QMainWindow):
         if success:
             self._orders_draft_close_approved = True
             QTimer.singleShot(0, self.close)
+        else:
+            app = QApplication.instance()
+            if app is not None:
+                app.setProperty("remcard_restart_requested", False)
 
     def _connect_orders_draft_close_waiter(self, orders_widget):
         try:

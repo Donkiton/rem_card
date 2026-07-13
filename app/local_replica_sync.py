@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Optional
 
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import configure_connection
 
 
@@ -85,7 +86,7 @@ class LocalReplicaSync:
                 self.last_sync_error = f"central DB missing: {self.central_db_path}"
                 return False
 
-            uri = f"file:{self.central_db_path}?mode=ro"
+            uri = build_sqlite_file_uri(self.central_db_path, mode="ro")
             central_conn = sqlite3.connect(
                 uri,
                 uri=True,

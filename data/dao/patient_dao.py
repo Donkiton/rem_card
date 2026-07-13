@@ -11,6 +11,7 @@ from rem_card.services.shift_service import ShiftService
 from ...app.logger import logger
 from ...app.db_cycle_registry import discover_db_cycle_paths, select_db_paths_for_period
 from ...app.archive_schema_cache import get_archive_schema
+from ...app.sqlite_uri import build_sqlite_file_uri
 from ...app.sqlite_shared import configure_connection
 
 class PatientDAO:
@@ -747,7 +748,7 @@ class PatientDAO:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[dict]:
-        uri = f"file:{db_path}?mode=ro"
+        uri = build_sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
             configure_connection(conn, readonly=True)
@@ -792,7 +793,7 @@ class PatientDAO:
         search_ib: str = "",
         search_diag: str = "",
     ) -> int:
-        uri = f"file:{db_path}?mode=ro"
+        uri = build_sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
             configure_connection(conn, readonly=True)
@@ -837,7 +838,7 @@ class PatientDAO:
         offset: int = 0,
     ) -> tuple[int, list[dict]]:
         """Fetch count and rows from one readonly archive connection."""
-        uri = f"file:{db_path}?mode=ro"
+        uri = build_sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=4.0)
         try:
             configure_connection(conn, readonly=True)

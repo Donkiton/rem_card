@@ -40,6 +40,7 @@ from rem_card.app.emergency_validation import (
     validate_settings_db_snapshot,
 )
 from rem_card.app.runtime_outage import runtime_outage_startup_request_path
+from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import FileWriteLock, backup_connection, configure_connection, run_integrity_check
 from rem_card.app.startup_db_guard import _compare_client_versions
 from rem_card.app.version import APP_VERSION
@@ -856,7 +857,7 @@ class EmergencyModeAMergeService:
         conn = None
         try:
             conn = sqlite3.connect(
-                f"file:{os.path.abspath(source_path)}?mode=ro",
+                build_sqlite_file_uri(source_path, mode="ro"),
                 uri=True,
                 check_same_thread=False,
                 isolation_level=None,
@@ -1258,7 +1259,7 @@ def _run_integrity_check_path(path: str) -> tuple[bool, str]:
     conn = None
     try:
         conn = sqlite3.connect(
-            f"file:{os.path.abspath(path)}?mode=ro",
+            build_sqlite_file_uri(path, mode="ro"),
             uri=True,
             check_same_thread=False,
             isolation_level=None,

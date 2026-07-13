@@ -8,7 +8,6 @@ Scenario:
 - Reports propagation latency from writer commit to reader-visible state.
 
 Usage:
-  set PYTHONPATH=C:\Project
   python %REMCARD_PROJECT_ROOT%\scripts\multi_client_stress.py --operations 200
 """
 

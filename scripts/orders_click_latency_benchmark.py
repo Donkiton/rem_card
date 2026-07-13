@@ -7,7 +7,6 @@ Measures:
 2) click -> DB commit (new latest administration row for that cell)
 
 Usage:
-  set PYTHONPATH=C:\Project
   python %REMCARD_PROJECT_ROOT%\scripts\orders_click_latency_benchmark.py --clicks 40
 """
 
