@@ -5,6 +5,7 @@ import sys
 from rem_card.app.runtime_paths import (
     DEV_EXISTING_BAZA_ONLY_ENV,
     get_dev_baza_dir,
+    get_required_baza_paths,
     get_executable_dir,
     get_local_logs_dir,
     get_project_root,
@@ -188,29 +189,7 @@ def ensure_directories():
         (not is_compiled() and os.environ.get(DEV_EXISTING_BAZA_ONLY_ENV) != "1")
         or os.environ.get("REMCARD_PATH_SETUP_MODE") == "1"
     )
-    shared_dirs = [
-        BAZA_DIR,
-        BAZA_LOGS_DIR,
-        ARCHIV_DIR,
-        REM_CARD_DIR,
-        REPORT_DIR,
-        BACKUPS_RC_DIR,
-        BACKUPS_VALID_DIR,
-        SNAPSHOTS_DIR,
-        CORRUPTED_DB_DIR,
-        BACKUP_HEALTH_DIR,
-        BACKUP_VALIDATION_REPORTS_DIR,
-        INVALID_BACKUPS_DIR,
-        CONFIG_DIR,
-        LOCKS_DIR,
-        QUARANTINE_DIR,
-        SHARED_DB_QUARANTINE_DIR,
-        SNAPSHOT_QUARANTINE_DIR,
-        ROLE_LOCKS_DIR,
-        DB_CYCLE_ARCHIVE_DIR,
-        SETTINGS_DIR,
-        SETTINGS_BACKUPS_DIR,
-    ]
+    shared_dirs = [BAZA_DIR, *get_required_baza_paths(BAZA_DIR)]
 
     shared_dirs = list(dict.fromkeys(shared_dirs))
     shared_dirs_already_validated = (

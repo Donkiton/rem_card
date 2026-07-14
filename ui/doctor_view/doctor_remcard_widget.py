@@ -2385,7 +2385,6 @@ class DoctorRemCardWidget(QWidget):
 
         admin_widget = getattr(self.layout_manager, "admin_widget", None)
         if admin_widget and admin_widget is not self._bound_admin_widget:
-            admin_widget.btn_back_to_roles.clicked.connect(lambda: self.on_back_clicked())
             self._bound_admin_widget = admin_widget
             self._admin_signals_bound = True
 

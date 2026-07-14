@@ -7,6 +7,7 @@ import re
 import socket
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -41,6 +42,9 @@ STATUS_LABELS = {
 _LOG_TIMESTAMP_RE = re.compile(
     r"^(?P<stamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})(?:[,.](?P<fraction>\d{1,6}))?"
 )
+_ATOMIC_REPLACE_ATTEMPTS = 20
+_ATOMIC_REPLACE_RETRY_SECONDS = 0.05
+_TRANSIENT_REPLACE_WINERRORS = {5, 32}
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,24 @@ def report_status_label(value: Any) -> str:
     return STATUS_LABELS.get(normalize_report_status(value), str(value or ""))
 
 
+def _replace_with_retry(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    """Replace a file after short-lived Windows/SMB reader locks clear."""
+    for attempt in range(_ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt >= _ATOMIC_REPLACE_ATTEMPTS - 1:
+                raise
+        except OSError as exc:
+            if (
+                getattr(exc, "winerror", None) not in _TRANSIENT_REPLACE_WINERRORS
+                or attempt >= _ATOMIC_REPLACE_ATTEMPTS - 1
+            ):
+                raise
+        time.sleep(_ATOMIC_REPLACE_RETRY_SECONDS)
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -96,7 +118,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
+        _replace_with_retry(tmp_name, path)
     except Exception:
         try:
             os.remove(tmp_name)
@@ -115,7 +137,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
                 fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
+        _replace_with_retry(tmp_name, path)
     except Exception:
         try:
             os.remove(tmp_name)

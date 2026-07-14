@@ -75,8 +75,9 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
         root.setSpacing(12)
 
         explanation = QLabel(
-            "Выберите папку базы RemCard. Путь будет сохранён локально на этом компьютере "
-            "и применится после полного перезапуска dev-версии."
+            "Выберите папку базы RemCard. «Добавить в список» только запоминает путь. "
+            "Для переключения нажмите «Сделать активной» — выбор применится после "
+            "полного перезапуска dev-версии."
         )
         explanation.setWordWrap(True)
         root.addWidget(explanation)
@@ -117,7 +118,7 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
         saved_header = QHBoxLayout()
         saved_header.addWidget(QLabel("Сохранённые пути:"))
         saved_header.addStretch()
-        self.save_path_button = QPushButton("Сохранить путь")
+        self.save_path_button = QPushButton("Добавить в список")
         self.save_path_button.setObjectName("DialogOkBtn")
         self.save_path_button.clicked.connect(self._save_path)
         self.remove_path_button = QPushButton("Удалить из списка")
@@ -315,7 +316,7 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
             return
         self._reload_saved_paths(select_path=candidate)
         self.path_edit.setText(candidate)
-        self.status_label.setText("Путь сохранён. Чтобы подключить эту базу, сделайте её активной.")
+        self.status_label.setText("Путь добавлен в список. Чтобы подключить эту базу, сделайте её активной.")
 
     def _remove_selected_path(self) -> None:
         item = self.saved_paths_list.currentItem()

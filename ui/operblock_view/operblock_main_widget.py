@@ -9488,7 +9488,6 @@ class OperBlockMainWidget(QWidget):
             from rem_card.ui.admin_view.admin_main_widget import AdminMainWidget
 
             self.settings_page = AdminMainWidget(service=self.remcard_service, role="doctor", parent=self.stack)
-            self.settings_page.btn_back_to_roles.clicked.connect(self._on_settings_back_clicked)
             self.stack.addWidget(self.settings_page)
             return True
         except Exception as exc:

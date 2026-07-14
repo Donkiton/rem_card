@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -101,6 +103,36 @@ class UserReportsServiceTest(unittest.TestCase):
 
             original = json.loads(result.report_path.read_text(encoding="utf-8"))
             self.assertEqual(original["status"], STATUS_NEW)
+
+    def test_status_update_retries_transient_windows_replace_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = UserReportsService(reports_root=Path(tmp) / "users-reports", logs_dirs=[])
+            result = service.submit_report(
+                report_type=REPORT_TYPE_SUGGESTION,
+                text="Проверить повтор записи статуса при временной блокировке файла.",
+                role="doctor",
+                created_at=datetime(2026, 7, 7, 12, 0, 0),
+            )
+            real_replace = os.replace
+            replace_attempts = 0
+
+            def flaky_replace(source, target):
+                nonlocal replace_attempts
+                replace_attempts += 1
+                if replace_attempts < 3:
+                    raise PermissionError(13, "simulated Windows sharing lock")
+                return real_replace(source, target)
+
+            with (
+                mock.patch("rem_card.services.user_reports.os.replace", side_effect=flaky_replace),
+                mock.patch("rem_card.services.user_reports.time.sleep") as sleep_mock,
+            ):
+                closed = service.update_status(result.directory, STATUS_CLOSED, role="doctor")
+
+            self.assertEqual(closed["status"], STATUS_CLOSED)
+            self.assertEqual(replace_attempts, 3)
+            self.assertEqual(sleep_mock.call_count, 2)
+            self.assertEqual(list(result.directory.glob(".status.json.*.tmp")), [])
 
 
 if __name__ == "__main__":

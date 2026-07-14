@@ -21,7 +21,7 @@ from rem_card.services.read_coordinator import OrdersRefreshCancelled
 from rem_card.services.orders_sync_observability import record_orders_sync_event
 from rem_card.services.order_domain_service import NURSE_MARK_EXECUTED, NURSE_MARK_NOT_EXECUTED
 from ..styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY, TEXT_SECONDARY,
-                            BORDER_COLOR, BG_LIGHT)
+                            BORDER_COLOR, BG_LIGHT, STYLE_ORDERS_VERTICAL_SCROLLBAR)
 
 ORDERS_CELL_REPEAT_GUARD_SEC = max(
     0.15,
@@ -1952,14 +1952,12 @@ class OrdersWidget(QWidget):
                 snapshot.get("version"),
             )
             snapshot_source = str(snapshot.get("source") or "refresh").strip().lower()
-            if snapshot_source in {"user", "click"}:
-                metric_source = "click"
-            elif snapshot_source == "post_finalize":
-                metric_source = "post_finalize"
-            elif snapshot_source == "cache":
-                metric_source = "cache"
-            else:
-                metric_source = "monitor"
+            metric_source = {
+                "user": "click",
+                "click": "click",
+                "post_finalize": "post_finalize",
+                "cache": "cache",
+            }.get(snapshot_source, "monitor")
             record_metric(
                 "orders_snapshot_apply_skipped",
                 1,
@@ -3532,7 +3530,11 @@ class OrdersWidget(QWidget):
         self.table_view.clicked.connect(self.on_cell_clicked)
         self.table_view.viewport().installEventFilter(self)
         
-        self.table_view.setStyleSheet(f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}")
+        self.table_view.setStyleSheet(
+            f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
+            f"QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}"
+            + STYLE_ORDERS_VERTICAL_SCROLLBAR
+        )
         self.table_clip_layout.addWidget(self.table_view)
 
         self.bottom_footer = QWidget()
