@@ -26,6 +26,7 @@ SKIP_DIR_NAMES = {
     ".git",
     ".mypy_cache",
     ".pytest_cache",
+    ".remcard",
     ".remcard_patch_cache",
     ".ruff_cache",
     ".venv",
@@ -76,7 +77,7 @@ def _run_flake8_f821() -> dict[str, Any]:
         "flake8",
         ".",
         "--select=F821",
-        "--exclude=.git,__pycache__,build,dist,tmp,.venv,venv,.pytest_cache,.mypy_cache,.remcard_patch_cache,.ruff_cache",
+        "--exclude=.git,__pycache__,build,dist,tmp,.venv,venv,.pytest_cache,.mypy_cache,.remcard,.remcard_patch_cache,.ruff_cache",
     ]
     started = time.perf_counter()
     proc = subprocess.run(

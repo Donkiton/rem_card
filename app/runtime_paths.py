@@ -24,6 +24,8 @@ OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DEV_DATABASE_CONFIG_ENV = "REMCARD_DEV_DATABASE_CONFIG"
 DEV_DATABASE_CONFIG_NAME = "dev_database_paths.json"
+DEV_DATABASE_CONFIG_DIR_NAME = ".remcard"
+DEV_DATABASE_MIGRATION_MARKER_NAME = "dev_database_paths.migration-v1.json"
 DEV_RUNTIME_BAZA_PIN_ENV = "REMCARD_INTERNAL_DEV_BAZA_PIN"
 DEV_EXISTING_BAZA_ONLY_ENV = "REMCARD_DEV_EXISTING_BAZA_ONLY"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
@@ -52,7 +54,6 @@ REQUIRED_BAZA_DIRS = (
     "backups/valid",
     "config",
     "corrupted_db",
-    "database",
     "locks",
     "logs",
     "quarantine",
@@ -130,6 +131,23 @@ def _copy_file_atomic(source_path: str, target_path: str) -> None:
             pass
 
 
+def _write_json_atomic(path: str, payload: dict[str, object]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 def sync_external_settings_from_bundle() -> int:
     """
     Runtime-настройки хранятся в центральной settings DB.
@@ -164,17 +182,97 @@ def _normalize_baza_dir(path: str) -> str:
     return os.path.abspath(os.path.normpath(str(path or "").strip().strip('"')))
 
 
+def get_dev_checkout_root() -> str:
+    """Return the source checkout that owns developer-only local settings."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _get_local_remcard_dir() -> str:
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        return os.path.join(local_appdata, "RemCard")
+    return os.path.join(os.path.expanduser("~"), ".remcard")
+
+
+def get_legacy_dev_database_config_path() -> str:
+    """Return the pre-checkout-scoping config path used by older dev versions."""
+    return os.path.join(_get_local_remcard_dir(), DEV_DATABASE_CONFIG_NAME)
+
+
 def get_dev_database_config_path() -> str:
     override = os.environ.get(DEV_DATABASE_CONFIG_ENV)
     if override:
         return os.path.abspath(os.path.normpath(override))
+    return os.path.join(
+        get_dev_checkout_root(),
+        DEV_DATABASE_CONFIG_DIR_NAME,
+        DEV_DATABASE_CONFIG_NAME,
+    )
 
-    local_appdata = os.environ.get("LOCALAPPDATA")
-    if local_appdata:
-        base_dir = os.path.join(local_appdata, "RemCard")
-    else:
-        base_dir = os.path.join(os.path.expanduser("~"), ".remcard")
-    return os.path.join(base_dir, DEV_DATABASE_CONFIG_NAME)
+
+def get_dev_database_migration_marker_path() -> str:
+    return os.path.join(
+        os.path.dirname(get_dev_database_config_path()),
+        DEV_DATABASE_MIGRATION_MARKER_NAME,
+    )
+
+
+def _mark_dev_database_migration_decided_unlocked(
+    *,
+    status: str,
+    legacy_path: str | None = None,
+) -> None:
+    if os.environ.get(DEV_DATABASE_CONFIG_ENV):
+        return
+    marker_path = get_dev_database_migration_marker_path()
+    if os.path.isfile(marker_path):
+        return
+    _write_json_atomic(
+        marker_path,
+        {
+            "version": 1,
+            "status": status,
+            "legacy_config_path": legacy_path,
+            "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+
+
+def _migrate_legacy_dev_database_config_unlocked() -> Optional[str]:
+    """Seed this checkout once from the former user-global dev config."""
+    if os.environ.get(DEV_DATABASE_CONFIG_ENV):
+        return None
+
+    config_path = get_dev_database_config_path()
+    marker_path = get_dev_database_migration_marker_path()
+    legacy_path = get_legacy_dev_database_config_path()
+    if os.path.isfile(config_path):
+        try:
+            _mark_dev_database_migration_decided_unlocked(
+                status="scoped_config_exists",
+                legacy_path=legacy_path,
+            )
+        except Exception:
+            pass
+        return None
+    if os.path.isfile(marker_path):
+        return None
+
+    imported_path = None
+    if os.path.isfile(legacy_path):
+        _copy_file_atomic(legacy_path, config_path)
+        imported_path = legacy_path
+
+    try:
+        _mark_dev_database_migration_decided_unlocked(
+            status="legacy_imported" if imported_path else "no_legacy_config",
+            legacy_path=legacy_path,
+        )
+    except Exception:
+        # The scoped config remains authoritative once copied. A marker write
+        # failure must not invalidate an otherwise usable selection.
+        pass
+    return imported_path
 
 
 def get_dev_local_operation_lock_path(lock_key: str) -> str:
@@ -290,6 +388,7 @@ def _read_dev_database_config_unlocked() -> dict[str, object]:
     """Read the developer-local database selection and its saved path list."""
     config_path = get_dev_database_config_path()
     try:
+        _migrate_legacy_dev_database_config_unlocked()
         with open(config_path, "r", encoding="utf-8") as fh:
             payload = json.load(fh)
     except FileNotFoundError:
@@ -365,66 +464,51 @@ def _quarantine_broken_dev_database_config(config_path: str) -> Optional[str]:
 
 
 def _write_dev_database_config_unlocked(
-    active_baza_dir: str,
+    active_baza_dir: str | None,
     saved_baza_dirs=(),
 ) -> str:
     """Atomically persist the active dev database outside every database folder."""
-    if not str(active_baza_dir or "").strip().strip('"'):
-        raise DataPathConfigurationError("Выберите папку базы данных.")
+    active = None
+    if str(active_baza_dir or "").strip().strip('"'):
+        active = _normalize_baza_dir(str(active_baza_dir))
 
-    active = _normalize_baza_dir(active_baza_dir)
-    active_key = os.path.normcase(active)
-    saved = [
-        path
-        for path in _normalize_dev_baza_dirs(saved_baza_dirs)
-        if os.path.normcase(path) != active_key
-    ]
-    saved.insert(0, active)
+    saved = _normalize_dev_baza_dirs(saved_baza_dirs)
+    if active:
+        active_key = os.path.normcase(active)
+        saved = [path for path in saved if os.path.normcase(path) != active_key]
+        saved.insert(0, active)
 
     config_path = get_dev_database_config_path()
     config_dir = os.path.dirname(config_path)
     os.makedirs(config_dir, exist_ok=True)
     payload = {
-        "version": 1,
+        "version": 2,
         "active_baza_dir": active,
         "saved_baza_dirs": saved,
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    tmp_path = f"{config_path}.{os.getpid()}.tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp_path, config_path)
+        _write_json_atomic(config_path, payload)
     except Exception as exc:
         raise DataPathConfigurationError(f"Не удалось сохранить {config_path}: {exc}") from exc
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
+    try:
+        _mark_dev_database_migration_decided_unlocked(status="scoped_config_written")
+    except Exception:
+        pass
     return config_path
 
 
 def write_dev_database_config(
-    active_baza_dir: str,
+    active_baza_dir: str | None,
     saved_baza_dirs=(),
 ) -> str:
     with _dev_database_config_guard():
         return _write_dev_database_config_unlocked(active_baza_dir, saved_baza_dirs)
 
 
-def _default_dev_baza_dir_without_config() -> str:
-    return _normalize_baza_dir(
-        os.environ.get("REMCARD_BAZA_DIR")
-        or os.environ.get(DEV_BAZA_DIR_ENV)
-        or os.path.join(get_project_root(), BAZA_DIR_NAME)
-    )
-
-
 def save_dev_baza_dir(baza_dir: str) -> str:
+    if not str(baza_dir or "").strip().strip('"'):
+        raise DataPathConfigurationError("Выберите папку базы данных.")
     with _dev_database_config_guard():
         config = _read_dev_database_config_unlocked()
         return _write_dev_database_config_unlocked(
@@ -436,7 +520,7 @@ def save_dev_baza_dir(baza_dir: str) -> str:
 def add_saved_dev_baza_dir(baza_dir: str) -> str:
     with _dev_database_config_guard():
         config = _read_dev_database_config_unlocked()
-        active = str(config.get("active_baza_dir") or _default_dev_baza_dir_without_config())
+        active = config.get("active_baza_dir")
         saved = list(config.get("saved_baza_dirs") or [])
         saved.append(baza_dir)
         return _write_dev_database_config_unlocked(active, saved)
@@ -445,7 +529,7 @@ def add_saved_dev_baza_dir(baza_dir: str) -> str:
 def remove_saved_dev_baza_dir(baza_dir: str) -> str:
     with _dev_database_config_guard():
         config = _read_dev_database_config_unlocked()
-        active = str(config.get("active_baza_dir") or _default_dev_baza_dir_without_config())
+        active = config.get("active_baza_dir")
         remove_key = os.path.normcase(_normalize_baza_dir(baza_dir))
         saved = [
             path

@@ -37,6 +37,17 @@ def process_events_until(app: QApplication, predicate, timeout: float = 3.0) -> 
     return bool(predicate())
 
 
+def test_embedded_settings_do_not_create_bottom_back_button():
+    application()
+    doctor_widget = AdminMainWidget(role="doctor")
+    nurse_widget = AdminMainWidget(role="nurse")
+    standalone_admin_widget = AdminMainWidget(role="admin")
+
+    assert doctor_widget.btn_back_to_roles is None
+    assert nurse_widget.btn_back_to_roles is None
+    assert standalone_admin_widget.btn_back_to_roles is not None
+
+
 def test_settings_import_stage_runs_outside_gui_thread(monkeypatch):
     app = application()
     widget = AdminMainWidget(role="admin")

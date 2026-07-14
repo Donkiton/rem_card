@@ -224,6 +224,45 @@ STYLE_ARCHIVE_TABLE = f"""
 """
 STYLE_ARCHIVE_PAGE_INFO = f"border: none; color: {TEXT_SECONDARY}; font-weight: 600;"
 
+# Полоса прокрутки листа назначений задаётся непосредственно встроенному
+# QScrollBar таблицы. Это не даёт Windows подменить её нативным оформлением,
+# когда локальный стиль QTableView перекрывает стиль приложения.
+STYLE_ORDERS_VERTICAL_SCROLLBAR = f"""
+    QScrollBar:vertical {{
+        background: {BG_LIGHT};
+        width: 11px;
+        margin: 1px;
+        border: none;
+        border-radius: 5px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {BORDER_COLOR};
+        min-height: 28px;
+        border: none;
+        border-radius: 4px;
+    }}
+    QScrollBar::handle:vertical:hover,
+    QScrollBar::handle:vertical:pressed {{
+        background: {COLOR_PRIMARY};
+    }}
+    QScrollBar::add-line:vertical,
+    QScrollBar::sub-line:vertical {{
+        height: 0px;
+        background: transparent;
+        border: none;
+    }}
+    QScrollBar::up-arrow:vertical,
+    QScrollBar::down-arrow:vertical {{
+        width: 0px;
+        height: 0px;
+        background: transparent;
+    }}
+    QScrollBar::add-page:vertical,
+    QScrollBar::sub-page:vertical {{
+        background: transparent;
+    }}
+"""
+
 # --- ОКНА АНАЛИТИКИ И ОТЧЕТОВ ---
 STYLE_ANALYTICS_DIALOG_CONTAINER = f"""
     QWidget#bg_container, QWidget#container {{

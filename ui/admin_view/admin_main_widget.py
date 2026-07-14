@@ -42,6 +42,7 @@ class AdminMainWidget(QWidget):
         self.database_info_dialog = None
         self.settings_import_dialog = None
         self.dev_database_switch_dialog = None
+        self.btn_back_to_roles = None
         self._settings_import_worker = None
         self._settings_import_loading_key = None
         self.decor_settings_dialog = None
@@ -186,13 +187,14 @@ class AdminMainWidget(QWidget):
         menu_layout.addLayout(columns_layout, 1)
         menu_layout.addStretch()
 
-        nav_layout = QHBoxLayout()
-        self.btn_back_to_roles = QPushButton("← Назад")
-        self.btn_back_to_roles.setObjectName("DialogOkBtn")
-        self.btn_back_to_roles.setFixedSize(250, 40)
-        nav_layout.addWidget(self.btn_back_to_roles)
-        nav_layout.addStretch()
-        menu_layout.addLayout(nav_layout)
+        if self.role == "admin":
+            nav_layout = QHBoxLayout()
+            self.btn_back_to_roles = QPushButton("← Назад")
+            self.btn_back_to_roles.setObjectName("DialogOkBtn")
+            self.btn_back_to_roles.setFixedSize(250, 40)
+            nav_layout.addWidget(self.btn_back_to_roles)
+            nav_layout.addStretch()
+            menu_layout.addLayout(nav_layout)
 
         self.stack.addWidget(self.menu_widget)
         self.stack.setCurrentWidget(self.menu_widget)

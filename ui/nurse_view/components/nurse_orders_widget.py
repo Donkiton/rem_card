@@ -14,7 +14,7 @@ from ...shared.async_call import AsyncCallThread
 from rem_card.data.dto.remcard_dto import OrderStatus
 from rem_card.app.logger import logger
 from ...styles.theme import (BG_MAIN, BG_CARD, BG_ALT_ROW, TEXT_PRIMARY,
-                            BORDER_COLOR, BG_LIGHT)
+                            BORDER_COLOR, BG_LIGHT, STYLE_ORDERS_VERTICAL_SCROLLBAR)
 from PySide6.QtGui import QColor
 from ...shared.custom_message_box import CustomMessageBox
 from rem_card.app.local_metrics import record_metric
@@ -1648,7 +1648,11 @@ class NurseOrdersWidget(QWidget):
         self.table_view.setFocusPolicy(Qt.NoFocus)
         self.table_view.setShowGrid(False)
         
-        self.table_view.setStyleSheet(f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}")
+        self.table_view.setStyleSheet(
+            f"QTableView {{ border: none; background-color: {BG_CARD}; alternate-background-color: {BG_ALT_ROW}; font-size: 9pt; }} "
+            f"QHeaderView::section {{ background-color: {BG_LIGHT}; padding: 4px; border: 1 solid {BORDER_COLOR}; font-weight: bold; color: {TEXT_PRIMARY}; font-size: 9pt; }}"
+            + STYLE_ORDERS_VERTICAL_SCROLLBAR
+        )
         self.table_clip_layout.addWidget(self.table_view)
 
         self.bottom_footer = QWidget()

@@ -112,6 +112,120 @@ def test_dev_database_config_persists_normalized_deduplicated_paths(monkeypatch,
     }
 
 
+def test_first_saved_path_keeps_active_unset(monkeypatch, tmp_path):
+    isolate_dev_database_config(monkeypatch, tmp_path)
+    project_root = tmp_path / "project"
+    candidate = tmp_path / "network_database"
+    monkeypatch.setattr(runtime_paths, "get_project_root", lambda: str(project_root))
+
+    runtime_paths.add_saved_dev_baza_dir(str(candidate))
+
+    assert runtime_paths.read_dev_database_config() == {
+        "active_baza_dir": None,
+        "saved_baza_dirs": [normalized(candidate)],
+    }
+    assert runtime_paths.get_dev_baza_dir() == normalized(
+        project_root / runtime_paths.BAZA_DIR_NAME
+    )
+
+    runtime_paths.remove_saved_dev_baza_dir(str(candidate))
+    assert runtime_paths.read_dev_database_config() == {
+        "active_baza_dir": None,
+        "saved_baza_dirs": [],
+    }
+
+
+def test_default_dev_database_config_is_scoped_to_checkout(monkeypatch, tmp_path):
+    monkeypatch.delenv(runtime_paths.DEV_DATABASE_CONFIG_ENV, raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local_appdata"))
+    checkout = {"root": tmp_path / "checkout_a"}
+    checkout["root"].mkdir()
+    monkeypatch.setattr(
+        runtime_paths,
+        "get_dev_checkout_root",
+        lambda: str(checkout["root"]),
+    )
+
+    first_path = Path(runtime_paths.get_dev_database_config_path())
+    assert first_path == checkout["root"] / ".remcard" / "dev_database_paths.json"
+    runtime_paths.write_dev_database_config(str(tmp_path / "baza_a"), [])
+
+    checkout["root"] = tmp_path / "checkout_b"
+    checkout["root"].mkdir()
+    second_path = Path(runtime_paths.get_dev_database_config_path())
+    assert second_path == checkout["root"] / ".remcard" / "dev_database_paths.json"
+    assert second_path != first_path
+    assert runtime_paths.read_dev_database_config() == {
+        "active_baza_dir": None,
+        "saved_baza_dirs": [],
+    }
+    runtime_paths.write_dev_database_config(str(tmp_path / "baza_b"), [])
+
+    checkout["root"] = tmp_path / "checkout_a"
+    assert runtime_paths.read_dev_database_config()["active_baza_dir"] == normalized(
+        tmp_path / "baza_a"
+    )
+
+
+def test_legacy_global_dev_config_is_imported_only_once(monkeypatch, tmp_path):
+    monkeypatch.delenv(runtime_paths.DEV_DATABASE_CONFIG_ENV, raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local_appdata"))
+    checkout_root = tmp_path / "checkout"
+    checkout_root.mkdir()
+    monkeypatch.setattr(runtime_paths, "get_dev_checkout_root", lambda: str(checkout_root))
+    legacy_path = Path(runtime_paths.get_legacy_dev_database_config_path())
+    legacy_path.parent.mkdir(parents=True)
+    legacy_active = tmp_path / "legacy_active"
+    legacy_payload = {
+        "version": 1,
+        "active_baza_dir": str(legacy_active),
+        "saved_baza_dirs": [str(legacy_active)],
+    }
+    legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    assert runtime_paths.read_dev_database_config()["active_baza_dir"] == normalized(
+        legacy_active
+    )
+    scoped_path = Path(runtime_paths.get_dev_database_config_path())
+    marker_path = Path(runtime_paths.get_dev_database_migration_marker_path())
+    assert scoped_path.is_file()
+    assert marker_path.is_file()
+    assert json.loads(legacy_path.read_text(encoding="utf-8")) == legacy_payload
+
+    scoped_path.unlink()
+    replacement = tmp_path / "changed_legacy_active"
+    legacy_payload["active_baza_dir"] = str(replacement)
+    legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+    assert runtime_paths.read_dev_database_config() == {
+        "active_baza_dir": None,
+        "saved_baza_dirs": [],
+    }
+    assert not scoped_path.exists()
+
+
+def test_explicit_dev_config_override_does_not_import_legacy(monkeypatch, tmp_path):
+    override_path = isolate_dev_database_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local_appdata"))
+    legacy_path = Path(runtime_paths.get_legacy_dev_database_config_path())
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "active_baza_dir": str(tmp_path / "legacy"),
+                "saved_baza_dirs": [str(tmp_path / "legacy")],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert runtime_paths.read_dev_database_config() == {
+        "active_baza_dir": None,
+        "saved_baza_dirs": [],
+    }
+    assert not override_path.exists()
+
+
 def test_save_and_remove_dev_baza_dir_update_persisted_selection(monkeypatch, tmp_path):
     isolate_dev_database_config(monkeypatch, tmp_path)
     first = tmp_path / "first_database"
@@ -209,6 +323,8 @@ def test_validate_dev_baza_dir_checks_real_sqlite_database(tmp_path):
     missing_root = tmp_path / "missing"
     missing_root.mkdir()
 
+    assert "database" not in runtime_paths.REQUIRED_BAZA_DIRS
+    assert not (valid_root / "database").exists()
     assert runtime_paths.validate_dev_baza_dir(str(valid_root)) == (True, "ok")
     ok, message = runtime_paths.validate_dev_baza_dir(str(missing_root))
     assert not ok
@@ -253,6 +369,7 @@ def test_switch_dialog_saves_paths_and_changes_active_database(monkeypatch, tmp_
 
     dialog = DevDatabaseSwitchDialog()
     assert dialog.current_path == normalized(first)
+    assert dialog.save_path_button.text() == "Добавить в список"
     dialog.path_edit.setText(str(second))
     dialog._save_path()
     wait_for_dialog_validation(app, dialog)
@@ -356,6 +473,43 @@ def test_dev_process_pins_startup_database_and_drops_inherited_pin(monkeypatch, 
     assert app_main._configure_dev_runtime_baza_pin() == normalized(second)
     assert os.environ["REMCARD_BAZA_DIR"] == normalized(second)
     assert os.environ[runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV] == str(os.getpid())
+
+
+def test_save_only_does_not_change_database_after_dev_restart(monkeypatch, tmp_path):
+    isolate_dev_database_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_main, "is_compiled", lambda: False)
+    project_root = tmp_path / "project"
+    fallback = create_baza(project_root / runtime_paths.BAZA_DIR_NAME)
+    candidate = create_baza(tmp_path / "network_database")
+    monkeypatch.setattr(runtime_paths, "get_project_root", lambda: str(project_root))
+    monkeypatch.delenv("REMCARD_BAZA_DIR", raising=False)
+    monkeypatch.delenv(runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV, raising=False)
+    monkeypatch.delenv(runtime_paths.DEV_EXISTING_BAZA_ONLY_ENV, raising=False)
+
+    assert app_main._configure_dev_runtime_baza_pin() == normalized(fallback)
+    runtime_paths.add_saved_dev_baza_dir(str(candidate))
+    monkeypatch.setenv(runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV, "previous-process")
+
+    assert app_main._configure_dev_runtime_baza_pin() == normalized(fallback)
+    assert runtime_paths.read_dev_database_config() == {
+        "active_baza_dir": None,
+        "saved_baza_dirs": [normalized(candidate)],
+    }
+    assert runtime_paths.DEV_EXISTING_BAZA_ONLY_ENV not in os.environ
+
+
+def test_dev_startup_accepts_saved_baza_without_legacy_database_dir(monkeypatch, tmp_path):
+    isolate_dev_database_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(app_main, "is_compiled", lambda: False)
+    monkeypatch.delenv("REMCARD_BAZA_DIR", raising=False)
+    monkeypatch.delenv(runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV, raising=False)
+    monkeypatch.delenv(runtime_paths.DEV_EXISTING_BAZA_ONLY_ENV, raising=False)
+    selected = create_baza(tmp_path / "selected")
+    assert not (selected / "database").exists()
+    runtime_paths.write_dev_database_config(str(selected), [str(selected)])
+
+    assert app_main._configure_dev_runtime_baza_pin() == normalized(selected)
+    assert os.environ[runtime_paths.DEV_EXISTING_BAZA_ONLY_ENV] == "1"
 
 
 def test_dev_startup_refuses_missing_saved_database_without_creating_it(monkeypatch, tmp_path):
