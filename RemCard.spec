@@ -17,6 +17,14 @@ SETTINGS_TARGET = os.path.join("rem_card", "settings")
 SETTINGS_RELEASE_TARGET = os.path.join("rem_card", "settings_release")
 PACKAGE_DIRS = ("app", "data", "services", "standalone", "ui")
 ALIAS_RESOURCE_DIRS = ("icon",)
+ENTRYPOINT_FILES = (
+    "run_doctor.py",
+    "run_nurse.py",
+    "run_operblock_emergency.py",
+    "run_operblock_planned.py",
+    "run_path_setup.py",
+    "run_updater.py",
+)
 ALIAS_ROOT = os.path.join(APP_ROOT, "build", "pyinstaller_package_alias")
 ALIAS_PACKAGE_ROOT = os.path.join(ALIAS_ROOT, "rem_card")
 PYINSTALLER_HOOKS_DIR = os.path.join(APP_ROOT, "scripts", "pyinstaller_hooks")
@@ -60,6 +68,16 @@ def _prepare_package_alias():
                 source_dir,
                 os.path.join(ALIAS_PACKAGE_ROOT, resource_dir),
             )
+    # Analysis prepends every entry script's directory to sys.path.  If the
+    # scripts are taken from APP_ROOT, the source-checkout rem_card shim wins
+    # over ALIAS_PACKAGE_ROOT and PyInstaller silently omits rem_card.* from
+    # PYZ.  Keep entry scripts beside the generated package so the frozen
+    # module graph resolves the real alias package first.
+    for entrypoint in ENTRYPOINT_FILES:
+        source_path = os.path.join(APP_ROOT, entrypoint)
+        if not os.path.isfile(source_path):
+            raise RuntimeError(f"Entry point not found: {source_path}")
+        shutil.copy2(source_path, os.path.join(ALIAS_ROOT, entrypoint))
     for current_dir, _dir_names, _file_names in os.walk(ALIAS_PACKAGE_ROOT):
         init_path = os.path.join(current_dir, "__init__.py")
         if not os.path.exists(init_path):
@@ -241,12 +259,7 @@ def _settings_release_snapshot_datas():
 
 a = Analysis(
     [
-        os.path.join(APP_ROOT, 'run_doctor.py'),
-        os.path.join(APP_ROOT, 'run_nurse.py'),
-        os.path.join(APP_ROOT, 'run_operblock_emergency.py'),
-        os.path.join(APP_ROOT, 'run_operblock_planned.py'),
-        os.path.join(APP_ROOT, 'run_path_setup.py'),
-        os.path.join(APP_ROOT, 'run_updater.py'),
+        *[os.path.join(ALIAS_ROOT, entrypoint) for entrypoint in ENTRYPOINT_FILES],
     ],
     pathex=[ALIAS_ROOT, APP_ROOT, PROJECT_ROOT],
     binaries=[],
@@ -398,15 +411,10 @@ coll = COLLECT(
 
 # === POST BUILD ===
 
-print("===> Post-build: Moving files to target directory <===")
+print("===> Post-build: Preparing the local full-update package <===")
 
-build_root = os.path.dirname(globals().get('WARNFILE', os.path.join(PROJECT_ROOT, 'build', 'RemCard', 'warn-RemCard.txt')))
 dist_root = globals().get('DISTPATH', os.path.join(APP_ROOT, 'dist'))
 dist_dir = os.path.join(dist_root, 'Prog')
-target_dir = os.path.abspath(
-    os.environ.get('REMCARD_BUILD_TARGET_DIR')
-    or os.path.join(PROJECT_ROOT, 'Baza_rao3_jurnal', 'UPD')
-)
 
 
 def _read_release_info():
@@ -435,7 +443,6 @@ def _write_update_manifest(directory):
         "version": version,
         "min_client_version": version,
         "prog_dir": ".",
-        "patch_update_capable": True,
         "source_commit": _current_git_commit(),
         "built_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "release_info": release_info,
@@ -443,36 +450,14 @@ def _write_update_manifest(directory):
     with open(os.path.join(directory, 'manifest.json'), 'w', encoding='utf-8') as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2)
 
-if os.path.exists(dist_dir):
-    os.makedirs(target_dir, exist_ok=True)
+if not os.path.isdir(dist_dir):
+    raise RuntimeError(f"PyInstaller output directory not found: {dist_dir}")
 
-    print(f"Moving contents of {dist_dir} to {target_dir}...")
-
-    ready_path = os.path.join(target_dir, 'ready.ok')
-    if os.path.exists(ready_path):
-        os.remove(ready_path)
-
-    for name in os.listdir(target_dir):
-        path = os.path.join(target_dir, name)
-        if os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
-        else:
-            try:
-                os.remove(path)
-            except FileNotFoundError:
-                pass
-
-    # копирование с перезаписью
-    shutil.copytree(dist_dir, target_dir, dirs_exist_ok=True)
-    _write_update_manifest(target_dir)
-    with open(ready_path, 'w', encoding='utf-8') as fh:
-        fh.write(datetime.now().astimezone().isoformat(timespec="seconds") + "\n")
-
-    # очистка
-    shutil.rmtree(os.path.dirname(build_root), ignore_errors=True)
-    shutil.rmtree(dist_root, ignore_errors=True)
-    shutil.rmtree(os.path.join(APP_ROOT, '__pycache__'), ignore_errors=True)
-
-    print(f"===> Success! The update package is ready in {target_dir} <===")
-else:
-    print("Error: dist folder not found")
+# RemCard.spec intentionally does not publish anything to UPD. build_release.py
+# validates this directory, verifies the release commit on origin and only then
+# publishes it atomically with ready.ok written as the final step.
+ready_path = os.path.join(dist_dir, 'ready.ok')
+if os.path.exists(ready_path):
+    os.remove(ready_path)
+_write_update_manifest(dist_dir)
+print(f"===> Full-update package built for validation: {dist_dir} <===")

@@ -75,6 +75,22 @@ python run_operblock_planned.py
 
 В настройках dev-версии доступна кнопка «Смена базы». Она позволяет сохранить несколько папок баз и выбрать активную; выбор хранится отдельно для каждого checkout в `.remcard/dev_database_paths.json` и применяется после безопасного перезапуска приложения. Старый общий файл `%LOCALAPPDATA%\RemCard\dev_database_paths.json` один раз копируется как начальная настройка и остаётся нетронутым для старых веток. Выбранная существующая база проверяется и открывается без права создать вместо пропавшего файла пустую БД. Dev-сеанс не проверяет и не создаёт файловый role-lock роли, поэтому может подключаться к рабочей базе параллельно с release-клиентами. Кратковременные блокировки транзакций и служебных операций SQLite при этом остаются включёнными для защиты данных.
 
+### Как устроена установленная production-версия
+
+Пользователь может положить полную папку программы на любой локальный диск и в любую папку. Установленная программа определяет свой каталог по запущенному EXE, поэтому updater не зависит от `C:` или заранее заданного пути установки.
+
+Рядом с EXE находится `remcard_data_path.json`, который создаёт `RemCardPathSetup.exe`. В нём хранится путь к общей `Baza_rao3_jurnal`. Сама база и каталог обновлений находятся в сетевой папке:
+
+```text
+<сетевая Baza_rao3_jurnal>\UPD\releases\<версия>
+```
+
+Compiled-клиент проверяет full-update при запуске и после штатного закрытия. При запуске новая версия устанавливается первой, после чего снова открывается тот же EXE; после закрытия обновление ставится без повторного открытия программы.
+
+Рабочий релиз собирается командой `.\.venv\Scripts\python.exe scripts\build_release.py`. Она запускает обязательные проверки, собирает и smoke-проверяет все EXE, делает обязательный `git push` точного release-коммита и помещает готовый пакет только в локальный тестовый `UPD`. Приёмка выполняется на отдельной локальной/тестовой базе. Лишь после неё релиз вручную переносится в сетевую production-базу через `scripts\publish_full_update.py`, который создаёт `ready.ok` последним.
+
+Важно: после появления `ready.ok` в production релиз доступен сразу всем клиентам этой сетевой базы. Проверять новую версию «сначала на одном production-компьютере» уже поздно — такую проверку нужно выполнить на тестовой базе до публикации. Механизм patch-обновлений удалён; любое значение SemVer, включая уровень `PATCH`, распространяется полной сборкой.
+
 ## Как работает
 
 ```mermaid
@@ -107,7 +123,7 @@ flowchart LR
 - PDF/HTML-отчеты и печатные формы.
 - Оперблок: экстренная и плановая операционные.
 - Центральная settings DB для справочников, тем, фонов и настроек.
-- Автообновление full/patch-пакетами.
+- Автообновление проверенными полными сборками при запуске и штатном закрытии.
 - Аварийный режим и offline-сценарии для части workflow.
 
 ## Структура проекта
@@ -149,7 +165,7 @@ rem_card/
 - `paths.py`, `runtime_paths.py`, `db_runtime_context.py` - где искать `Baza_rao3_jurnal`, БД, логи, backup, настройки и runtime-файлы.
 - `sqlite_shared.py`, `unified_db_schema.py` - общий SQLite-профиль, schema init, миграционные инварианты.
 - `startup_db_guard.py`, `db_lifecycle.py`, `db_availability.py` - проверки старта, доступность БД, recovery/rotation logic.
-- `updater_main.py`, `update_package.py`, `version.py` - обновление, manifest, версия приложения.
+- `update_checker.py`, `update_launcher.py`, `updater_main.py`, `full_update_manifest.py`, `version.py` - поиск и установка full-update, manifest и версия приложения.
 
 ### data
 
@@ -190,7 +206,7 @@ rem_card/
 
 ### scripts и docs
 
-- `scripts/` - проверки, benchmarks, release/patch build, backup validation, restore drill, network acceptance. Это техническая зона сопровождения проекта.
+- `scripts/` - проверки, benchmarks, full release build/publish, backup validation, restore drill, network acceptance. Это техническая зона сопровождения проекта.
 - `scripts/pyinstaller_hooks/` - локальные hooks для PyInstaller.
 - `docs/` - регламенты и контекст: DB safety, обновления, acceptance, emergency mode, checkpoint для будущей разработки.
 - `docs/assets/readme/` - реальные скриншоты, которые отображаются в README.
@@ -231,9 +247,11 @@ rem_card/
 - [docs/README.md](docs/README.md) - карта документации.
 - [docs/db_safety_contract.md](docs/db_safety_contract.md) - правила безопасности БД.
 - [docs/versioning.md](docs/versioning.md) - версии, changelog и релизы.
-- [docs/auto_update.md](docs/auto_update.md) - full/patch автообновление.
+- [docs/auto_update.md](docs/auto_update.md) - full-update, сборка и безопасная публикация.
+- [docs/how_to_build_and_update.md](docs/how_to_build_and_update.md) - короткая инструкция «как собрать и выложить обновление».
+- [docs/updater_optimization_plan.md](docs/updater_optimization_plan.md) - план оптимизации full-only процесса и оставшиеся шаги.
 - [docs/operational_acceptance.md](docs/operational_acceptance.md) - приемочные проверки.
-- [docs/project_checkpoint/00_MASTER_CONTEXT_FOR_CHATGPT.md](docs/project_checkpoint/00_MASTER_CONTEXT_FOR_CHATGPT.md) - большой архитектурный снимок.
+- [docs/project_checkpoint/00_MASTER_CONTEXT_FOR_CHATGPT.md](docs/project_checkpoint/00_MASTER_CONTEXT_FOR_CHATGPT.md) - исторический архитектурный снимок от 2026-05-12; release-процесс брать только из актуальных документов выше.
 
 ## Связь
 

@@ -657,12 +657,10 @@ def _find_startup_update_candidate():
         return None
     try:
         from rem_card.app.update_checker import find_best_update
-        from rem_card.app.update_launcher import is_update_in_progress
 
-        if is_update_in_progress():
-            _write_startup_local_log("startup update required, but update is already in progress")
-            return None
-
+        # The caller already performed the user-facing active-lock check.
+        # launch_update performs the final race-safe check immediately before
+        # creating the starting lock, so an extra SMB lock scan here is redundant.
         candidate = find_best_update()
         if candidate:
             _write_startup_local_log(
@@ -671,7 +669,7 @@ def _find_startup_update_candidate():
             )
         else:
             _write_startup_local_log(
-                f"startup update required, but no update package found: current={APP_VERSION}"
+                f"startup update not found: current={APP_VERSION}"
             )
         return candidate
     except Exception as exc:
@@ -685,7 +683,12 @@ def _launch_startup_update(candidate, *, role: Optional[str], reason: str) -> bo
     try:
         from rem_card.app.update_launcher import launch_update
 
-        launched = launch_update(candidate, restart_exe=None, wait_for_parent=True)
+        # The installed executable is the only reliable source of the install
+        # directory: users may place RemCard on any local disk.  The updater
+        # receives that exact path from update_launcher and restarts the same
+        # role after the full package has been installed.
+        restart_exe = os.path.abspath(sys.executable)
+        launched = launch_update(candidate, restart_exe=restart_exe, wait_for_parent=True)
         _write_startup_local_log(
             f"startup update launch {'ok' if launched else 'failed'}: "
             f"role={role}; current={APP_VERSION}; target={candidate.version}; "
@@ -707,6 +710,20 @@ def _launch_startup_update(candidate, *, role: Optional[str], reason: str) -> bo
             "Повторите запуск программы через минуту. Если сообщение повторяется, сообщите ответственному.",
         )
         return False
+
+
+def _launch_regular_startup_update_if_needed(role: Optional[str]) -> bool:
+    """Install a published full update before the regular compiled startup."""
+    if not is_compiled():
+        return False
+    candidate = _find_startup_update_candidate()
+    if not candidate:
+        return False
+    return _launch_startup_update(
+        candidate,
+        role=role,
+        reason="regular_startup_scan",
+    )
 
 
 def _run_path_setup():
@@ -1873,7 +1890,10 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     parser.add_argument("--role", choices=list(ROLE_KEYS), help="Начальная роль пользователя")
     parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
     parser.add_argument("--emergency-startup-request", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--compiled-smoke", action="store_true", help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args()
+    if args.compiled_smoke:
+        return
     args.role = _resolve_startup_role(args.role, forced_role)
     _opblock_startup_metrics_reset(args.role, startup_started_at)
     path_setup = bool(path_setup or args.path_setup)
@@ -1889,8 +1909,14 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         _preselect_operblock_offline_context_before_network_probe(args.role)
     )
 
-    if _show_update_in_progress_if_needed():
-        sys.exit(0)
+    # An active local operblock case must reach its offline UI without touching
+    # the unavailable network Baza/UPD or its lock files.
+    if preselected_runtime_context is None:
+        if _show_update_in_progress_if_needed():
+            sys.exit(0)
+
+        if _launch_regular_startup_update_if_needed(args.role):
+            sys.exit(0)
 
     _sync_release_settings_if_needed()
 

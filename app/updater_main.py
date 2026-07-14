@@ -32,16 +32,17 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.process_launch import hidden_window_creationflags, hidden_window_startupinfo, popen_hidden
-from rem_card.app.update_checker import get_update_lock_path, update_lock_scope_id
-from rem_card.app.update_package import (
-    PACKAGE_TYPE_PATCH,
-    UpdatePackageError,
-    compute_sha256,
+from rem_card.app.full_update_manifest import (
+    FullUpdateManifestError,
+    PACKAGE_TYPE_FULL,
+    get_manifest_schema_version,
     get_package_type,
-    patch_payload_path,
-    safe_join_install_root,
-    validate_patch_manifest,
-    validate_relative_payload_path,
+    verify_file_inventory,
+)
+from rem_card.app.update_checker import (
+    TERMINAL_UPDATE_LOCK_STATES,
+    get_update_lock_path,
+    update_lock_scope_id,
 )
 
 # Обновлятор запускается из пакета в UPD. Общую тему приложения сюда не
@@ -112,7 +113,6 @@ REQUIRED_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
-LOCAL_RUNNER_PREFIX = "remcard_update_runner_"
 MANAGED_ROOT_FILES = (
     "RemCard.exe",
     "RemCardDoctor.exe",
@@ -128,10 +128,9 @@ MANAGED_ROOT_FILES = (
 )
 MANAGED_ROOT_DIRS = ("_internal",)
 UPDATE_DIR_NAME = "UPD"
-DEFAULT_TARGET_DIR_NAME = "Prog"
 BAZA_DIR_NAME = "Baza_rao3_jurnal"
 DIRECT_TARGET_DIR_ENV = "REMCARD_UPDATE_TARGET_DIR"
-UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_", LOCAL_RUNNER_PREFIX)
+UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_")
 UPDATE_CLEANUP_ATTEMPTS = 60
 UPDATE_CLEANUP_DELAY_SEC = 0.5
 STALE_UPDATE_CLEANUP_ATTEMPTS = 10
@@ -139,27 +138,44 @@ STALE_UPDATE_CLEANUP_DELAY_SEC = 0.2
 DEFERRED_CLEANUP_ARG = "--cleanup-leftovers"
 DEFERRED_CLEANUP_ATTEMPTS = 600
 DEFERRED_CLEANUP_DELAY_SEC = 1.0
-PRESERVED_PATCH_PATH_PREFIXES = (
-    "crash/",
-    "crashes/",
-    "emergency/",
-    "fault/",
-    "faults/",
-    "local/",
-    "logs/",
-    "rem_card/data/dictionaries/",
-    "settings/",
-)
-PRESERVED_PATCH_PATHS = {
-    "remcard_data_path.json",
-}
-PRESERVED_PATCH_PATH_SUFFIXES = (
-    ".log",
-)
+UPDATE_LOCK_RELEASE_ATTEMPTS = 7
+UPDATE_LOCK_RELEASE_INITIAL_DELAY_SEC = 0.1
+UPDATE_LOCK_RELEASE_MAX_DELAY_SEC = 0.8
+UPDATE_LOCK_TERMINAL_WRITE_ATTEMPTS = 3
+UPDATE_LOCK_HEARTBEAT_STOP_TIMEOUT_SEC = 5.0
 
 
 class UpdateAlreadyRunning(RuntimeError):
     pass
+
+
+class UpdateLockReleaseError(RuntimeError):
+    pass
+
+
+def _remove_lock_file_with_backoff(
+    path: str,
+    *,
+    attempts: int,
+    initial_delay_sec: float,
+    max_delay_sec: float,
+) -> tuple[bool, Optional[Exception]]:
+    total_attempts = max(1, int(attempts))
+    delay = max(0.0, float(initial_delay_sec))
+    max_delay = max(delay, float(max_delay_sec))
+    last_exc: Optional[Exception] = None
+    for attempt in range(total_attempts):
+        try:
+            os.remove(path)
+            return True, None
+        except FileNotFoundError:
+            return True, None
+        except Exception as exc:
+            last_exc = exc
+        if attempt < total_attempts - 1 and delay > 0:
+            time.sleep(delay)
+            delay = min(max_delay, delay * 2.0)
+    return False, last_exc
 
 
 class UpdateLock:
@@ -173,6 +189,7 @@ class UpdateLock:
     def acquire(self):
         os.makedirs(os.path.dirname(self.lock_path), exist_ok=True)
         self._remove_stale_if_needed()
+        self.payload["state"] = "active"
         raw = json.dumps(self.payload, ensure_ascii=True, indent=2).encode("utf-8")
         try:
             fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -187,19 +204,92 @@ class UpdateLock:
         self._thread = threading.Thread(target=self._heartbeat, name="RemCardUpdateLock", daemon=True)
         self._thread.start()
 
-    def release(self):
+    def release(
+        self,
+        *,
+        completed: bool = False,
+        attempts: int = UPDATE_LOCK_RELEASE_ATTEMPTS,
+        initial_delay_sec: float = UPDATE_LOCK_RELEASE_INITIAL_DELAY_SEC,
+        max_delay_sec: float = UPDATE_LOCK_RELEASE_MAX_DELAY_SEC,
+    ) -> None:
+        """Release the lock or persist a confirmed terminal state after success.
+
+        A normal return guarantees that the lock was physically removed or,
+        only after a completed replacement, atomically marked ``completed``.
+        Launchers treat that terminal marker as inactive.  Otherwise an
+        UpdateLockReleaseError is raised and a restart must not be attempted.
+        """
         self._stop.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=UPDATE_LOCK_HEARTBEAT_STOP_TIMEOUT_SEC)
+        if self._thread and self._thread.is_alive():
+            raise UpdateLockReleaseError(
+                "Не удалось остановить heartbeat блокировки обновления; перезапуск запрещён."
+            )
         if not self._acquired:
             return
-        try:
-            os.remove(self.lock_path)
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
-        self._acquired = False
+
+        removed, remove_exc = _remove_lock_file_with_backoff(
+            self.lock_path,
+            attempts=attempts,
+            initial_delay_sec=initial_delay_sec,
+            max_delay_sec=max_delay_sec,
+        )
+        if removed:
+            self._acquired = False
+            return
+
+        terminal_exc: Optional[Exception] = None
+        if completed:
+            terminal_written, terminal_exc = self._persist_completed_state(
+                attempts=UPDATE_LOCK_TERMINAL_WRITE_ATTEMPTS,
+                initial_delay_sec=initial_delay_sec,
+                max_delay_sec=max_delay_sec,
+            )
+            if terminal_written:
+                self._acquired = False
+                return
+
+        suffix = f" Ошибка terminal marker: {terminal_exc}." if terminal_exc else ""
+        raise UpdateLockReleaseError(
+            f"Не удалось снять блокировку обновления {self.lock_path}: {remove_exc}.{suffix}"
+        )
+
+    def _persist_completed_state(
+        self,
+        *,
+        attempts: int,
+        initial_delay_sec: float,
+        max_delay_sec: float,
+    ) -> tuple[bool, Optional[Exception]]:
+        payload = dict(self.payload)
+        payload["state"] = "completed"
+        payload["timestamp"] = time.time()
+        payload["completed_at"] = _now_text()
+        raw = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
+        total_attempts = max(1, int(attempts))
+        delay = max(0.0, float(initial_delay_sec))
+        max_delay = max(delay, float(max_delay_sec))
+        last_exc: Optional[Exception] = None
+        for attempt in range(total_attempts):
+            tmp_path = f"{self.lock_path}.{os.getpid()}.completed.tmp"
+            try:
+                with open(tmp_path, "wb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                os.replace(tmp_path, self.lock_path)
+                self.payload = payload
+                return True, None
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            if attempt < total_attempts - 1 and delay > 0:
+                time.sleep(delay)
+                delay = min(max_delay, delay * 2.0)
+        return False, last_exc
 
     def _read_existing(self) -> Optional[dict[str, Any]]:
         try:
@@ -214,6 +304,15 @@ class UpdateLock:
     def _remove_stale_if_needed(self):
         payload = self._read_existing()
         if not payload:
+            return
+        state = str(payload.get("state") or "").strip().lower()
+        if state in TERMINAL_UPDATE_LOCK_STATES:
+            _remove_lock_file_with_backoff(
+                self.lock_path,
+                attempts=UPDATE_LOCK_RELEASE_ATTEMPTS,
+                initial_delay_sec=UPDATE_LOCK_RELEASE_INITIAL_DELAY_SEC,
+                max_delay_sec=UPDATE_LOCK_RELEASE_MAX_DELAY_SEC,
+            )
             return
         ts = payload.get("timestamp")
         if isinstance(ts, (int, float)):
@@ -396,31 +495,22 @@ def _validate_source(source_dir: str) -> dict[str, Any]:
     manifest = _read_json(manifest_path)
     if not manifest:
         raise RuntimeError("Не удалось прочитать manifest.json пакета обновления.")
-    if get_package_type(manifest) == PACKAGE_TYPE_PATCH:
-        return _validate_patch_source(source, manifest)
+    try:
+        get_manifest_schema_version(manifest)
+    except FullUpdateManifestError as exc:
+        raise RuntimeError(str(exc)) from exc
+    package_type = get_package_type(manifest)
+    if package_type != PACKAGE_TYPE_FULL:
+        raise RuntimeError(
+            f"Неподдерживаемый тип пакета обновления: {package_type or '<empty>'}. "
+            "Требуется полная сборка."
+        )
     for exe_name in REQUIRED_EXES:
         if not os.path.isfile(os.path.join(source, exe_name)):
             raise RuntimeError(f"В пакете обновления отсутствует {exe_name}.")
     if not os.path.isdir(os.path.join(source, "_internal")):
         raise RuntimeError("В пакете обновления отсутствует папка _internal.")
     return manifest
-
-
-def _validate_patch_source(source_dir: str, manifest: dict[str, Any]) -> dict[str, Any]:
-    try:
-        normalized = validate_patch_manifest(manifest)
-    except UpdatePackageError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-    for entry in normalized["files"]:
-        source_path = patch_payload_path(source_dir, entry["path"])
-        if not os.path.isfile(source_path):
-            raise RuntimeError(f"В patch-пакете отсутствует payload-файл: {entry['path']}")
-        if os.path.getsize(source_path) != int(entry["size"]):
-            raise RuntimeError(f"Размер payload-файла не совпадает с manifest: {entry['path']}")
-        if compute_sha256(source_path) != str(entry["sha256"]).lower():
-            raise RuntimeError(f"SHA-256 payload-файла не совпадает с manifest: {entry['path']}")
-    return normalized
 
 
 def _make_path_writable_and_retry(func: Callable[[str], None], path: str, _exc_info):
@@ -568,20 +658,6 @@ def _spawn_deferred_cleanup(
         return False
 
 
-def _cleanup_runner_dir_later(
-    runner_dir: str,
-    target_dir: str,
-    log: Optional[Callable[[str], None]] = None,
-) -> None:
-    runner = str(runner_dir or "").strip()
-    if not runner:
-        return
-    cleanup_executable = os.path.join(os.path.abspath(target_dir), "RemCardUpdater.exe")
-    if not os.path.isfile(cleanup_executable):
-        cleanup_executable = None
-    _spawn_deferred_cleanup([runner], log=log, cleanup_executable=cleanup_executable)
-
-
 def _run_cleanup_mode(args: argparse.Namespace) -> int:
     try:
         parent_pid = int(args.parent_pid or 0)
@@ -626,6 +702,20 @@ def _retry(action: Callable[[], None], description: str, attempts: int = 50, del
     raise RuntimeError(f"{description}: {last_exc}") from last_exc
 
 
+def _log_phase_duration(
+    log: Optional[Callable[[str], None]],
+    phase: str,
+    started_at: float,
+) -> None:
+    if not log:
+        return
+    try:
+        duration_sec = max(0.0, time.monotonic() - started_at)
+        log(f"update phase={phase} duration_sec={duration_sec:.3f}")
+    except Exception:
+        pass
+
+
 def _copy_source_to_staging(source_dir: str, staging_dir: str):
     ignored = {READY_FILE_NAME}
 
@@ -636,225 +726,37 @@ def _copy_source_to_staging(source_dir: str, staging_dir: str):
     shutil.copytree(source_dir, staging_dir, ignore=ignore)
 
 
-def _patch_path_is_preserved(relative_path: str) -> bool:
+def _validate_installable_inventory(inventory: list[dict[str, Any]]) -> None:
+    managed_root_files = {name.casefold() for name in MANAGED_ROOT_FILES}
+    managed_root_dirs = {name.casefold() for name in MANAGED_ROOT_DIRS}
+    unsupported: list[str] = []
+    for entry in inventory:
+        relative = str(entry.get("path") or "")
+        parts = relative.split("/")
+        if len(parts) == 1:
+            if parts[0].casefold() not in managed_root_files:
+                unsupported.append(relative)
+        elif parts[0].casefold() not in managed_root_dirs:
+            unsupported.append(relative)
+    if unsupported:
+        raise RuntimeError(
+            "Full-manifest содержит файлы, которые текущий апдейтер не устанавливает: "
+            + ", ".join(unsupported[:10])
+        )
+
+
+def _canonical_real_path(path: str) -> str:
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
+def _paths_overlap_by_realpath(left: str, right: str) -> bool:
+    left_real = _canonical_real_path(left)
+    right_real = _canonical_real_path(right)
     try:
-        normalized = validate_relative_payload_path(relative_path).casefold()
-    except UpdatePackageError as exc:
-        raise RuntimeError(str(exc)) from exc
-    return normalized in PRESERVED_PATCH_PATHS or any(
-        normalized.startswith(prefix) for prefix in PRESERVED_PATCH_PATH_PREFIXES
-    ) or any(
-        normalized.endswith(suffix) for suffix in PRESERVED_PATCH_PATH_SUFFIXES
-    )
-
-
-def _ensure_patch_path_allowed(relative_path: str) -> None:
-    normalized = relative_path.replace("\\", "/").casefold()
-    if normalized in {"manifest.json", "ready.ok"}:
-        raise RuntimeError(f"Patch не должен напрямую менять служебный файл {relative_path}.")
-    if _patch_path_is_preserved(relative_path):
-        raise RuntimeError(f"Patch не должен менять локальный файл рабочей папки: {relative_path}.")
-
-
-def _write_json_atomic(path: str, payload: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.{os.getpid()}.tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-        os.replace(tmp_path, path)
-    finally:
-        _remove_file_quietly(tmp_path)
-
-
-def _backup_existing_file(target: str, backup: str, relative_path: str) -> bool:
-    target_path = safe_join_install_root(target, relative_path)
-    if not os.path.exists(target_path):
+        common = os.path.normcase(os.path.commonpath((left_real, right_real)))
+    except ValueError:
         return False
-    if not os.path.isfile(target_path):
-        raise RuntimeError(f"Patch может менять только файлы: {relative_path}")
-    backup_path = safe_join_install_root(backup, relative_path)
-    os.makedirs(os.path.dirname(backup_path), exist_ok=True)
-    _retry(
-        lambda target_path=target_path, backup_path=backup_path: shutil.move(target_path, backup_path),
-        f"Не удалось зарезервировать {relative_path}",
-    )
-    return True
-
-
-def _restore_patch_backup(target: str, backup: str) -> None:
-    if not os.path.isdir(backup):
-        return
-    for current_dir, _dir_names, file_names in os.walk(backup):
-        for file_name in file_names:
-            backup_path = os.path.join(current_dir, file_name)
-            relative_path = os.path.relpath(backup_path, backup).replace(os.sep, "/")
-            target_path = safe_join_install_root(target, relative_path)
-            try:
-                os.makedirs(os.path.dirname(target_path), exist_ok=True)
-                if os.path.exists(target_path):
-                    _remove_path(target_path)
-                shutil.move(backup_path, target_path)
-            except Exception:
-                pass
-
-
-def _remove_installed_patch_files(target: str, relative_paths: list[str]) -> None:
-    for relative_path in reversed(relative_paths):
-        try:
-            target_path = safe_join_install_root(target, relative_path)
-            if os.path.isfile(target_path):
-                _remove_path(target_path)
-        except Exception:
-            pass
-
-
-def _validate_patch_base_version(manifest: dict[str, Any], target: str, current_version: str) -> None:
-    base_version = str(manifest.get("base_version") or "").strip()
-    installed_version = str(current_version or "").strip() or _read_version_from_dir(target)
-    if not installed_version:
-        raise RuntimeError("Не удалось определить установленную версию для применения patch.")
-    if base_version != installed_version:
-        raise RuntimeError(
-            f"Патч предназначен для версии {base_version}, установлена {installed_version}. Нужен полный релиз."
-        )
-
-
-def _validate_patch_target_hashes(target: str, manifest: dict[str, Any]) -> None:
-    for entry in manifest["files"]:
-        _ensure_patch_path_allowed(entry["path"])
-        target_path = safe_join_install_root(target, entry["path"])
-        expected = entry.get("old_sha256")
-        expected_new = str(entry["sha256"]).lower()
-        if expected is None:
-            if os.path.exists(target_path):
-                if os.path.isfile(target_path) and compute_sha256(target_path) == expected_new:
-                    continue
-                raise RuntimeError(f"Patch ожидал новый файл, но он уже существует с другим содержимым: {entry['path']}")
-            continue
-        if not os.path.isfile(target_path):
-            raise RuntimeError(f"Patch не может проверить старый файл: {entry['path']}")
-        actual = compute_sha256(target_path)
-        if actual == str(expected).lower() or actual == expected_new:
-            continue
-        raise RuntimeError(
-            "SHA-256 установленного файла не совпадает с manifest: "
-            f"{entry['path']} (actual={actual[:12]}, expected_old={str(expected).lower()[:12]}, "
-            f"expected_new={expected_new[:12]})"
-        )
-
-    for entry in manifest["delete"]:
-        _ensure_patch_path_allowed(entry["path"])
-        target_path = safe_join_install_root(target, entry["path"])
-        if not os.path.isfile(target_path):
-            continue
-        actual = compute_sha256(target_path)
-        expected = str(entry["old_sha256"]).lower()
-        if actual != expected:
-            raise RuntimeError(
-                "SHA-256 удаляемого файла не совпадает с manifest: "
-                f"{entry['path']} (actual={actual[:12]}, expected_old={expected[:12]})"
-            )
-
-
-def _patch_file_already_current(target: str, entry: dict[str, Any]) -> bool:
-    target_path = safe_join_install_root(target, entry["path"])
-    return os.path.isfile(target_path) and compute_sha256(target_path) == str(entry["sha256"]).lower()
-
-
-def _stage_patch_payload(source: str, staging: str, manifest: dict[str, Any]) -> None:
-    _remove_path(staging)
-    os.makedirs(staging, exist_ok=True)
-    for entry in manifest["files"]:
-        source_path = patch_payload_path(source, entry["path"])
-        staged_path = safe_join_install_root(staging, entry["path"])
-        os.makedirs(os.path.dirname(staged_path), exist_ok=True)
-        shutil.copy2(source_path, staged_path)
-        if compute_sha256(staged_path) != str(entry["sha256"]).lower():
-            raise RuntimeError(f"Staging SHA-256 не совпадает с manifest: {entry['path']}")
-
-
-def _apply_patch_package(
-    *,
-    source_dir: str,
-    target_dir: str,
-    manifest: dict[str, Any],
-    current_version: str,
-    status: Callable[[str, int], None],
-    log: Optional[Callable[[str], None]] = None,
-) -> tuple[str, str]:
-    source = os.path.abspath(source_dir)
-    target = os.path.abspath(target_dir)
-    if os.path.normcase(source) == os.path.normcase(target):
-        raise RuntimeError("Источник обновления совпадает с рабочей папкой программы.")
-    if not os.path.isdir(target):
-        raise RuntimeError(f"Рабочая папка программы не найдена: {target}")
-
-    normalized = _validate_patch_source(source, manifest)
-    _validate_patch_base_version(normalized, target, current_version)
-    _validate_patch_target_hashes(target, normalized)
-
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    staging = os.path.join(target, f"__upd_new_{stamp}_{os.getpid()}")
-    backup = os.path.join(target, f"__upd_old_{stamp}_{os.getpid()}")
-    installed_paths: list[str] = []
-    try:
-        status("Подготовка patch-файлов...", 25)
-        _stage_patch_payload(source, staging, normalized)
-        os.makedirs(backup, exist_ok=True)
-
-        status("Проверка и резервирование файлов...", 42)
-        for entry in normalized["files"]:
-            if _patch_file_already_current(target, entry):
-                continue
-            if _backup_existing_file(target, backup, entry["path"]):
-                pass
-        for entry in normalized["delete"]:
-            _backup_existing_file(target, backup, entry["path"])
-        _backup_existing_file(target, backup, MANIFEST_FILE_NAME)
-
-        status("Применение patch-файлов...", 65)
-        for entry in normalized["files"]:
-            if _patch_file_already_current(target, entry):
-                continue
-            staged_path = safe_join_install_root(staging, entry["path"])
-            target_path = safe_join_install_root(target, entry["path"])
-            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-            installed_paths.append(entry["path"])
-            _retry(
-                lambda staged_path=staged_path, target_path=target_path: shutil.copy2(staged_path, target_path),
-                f"Не удалось установить patch-файл {entry['path']}",
-            )
-
-        manifest_target = safe_join_install_root(target, MANIFEST_FILE_NAME)
-        _write_json_atomic(manifest_target, normalized)
-        installed_paths.append(MANIFEST_FILE_NAME)
-
-        status("Очистка временных файлов...", 92)
-        pending_cleanup: list[str] = []
-        if not _remove_update_tree_with_retry(backup, "резервная папка patch", log=log):
-            pending_cleanup.append(backup)
-        if not _remove_update_tree_with_retry(staging, "staging patch", log=log):
-            pending_cleanup.append(staging)
-        pending_cleanup.extend(
-            _cleanup_stale_update_dirs(
-                target,
-                exclude={backup, staging},
-                log=log,
-            )
-        )
-        _spawn_deferred_cleanup(pending_cleanup, log=log)
-        return staging, backup
-    except Exception:
-        _remove_installed_patch_files(target, installed_paths)
-        _restore_patch_backup(target, backup)
-        try:
-            if os.path.isdir(staging):
-                _remove_update_tree_with_retry(staging, "staging patch после ошибки", log=log)
-        except Exception:
-            pass
-        raise
+    return common in {left_real, right_real}
 
 
 def _replace_program_dir(
@@ -863,11 +765,16 @@ def _replace_program_dir(
     target_dir: str,
     status: Callable[[str, int], None],
     log: Optional[Callable[[str], None]] = None,
+    expected_manifest: Optional[dict[str, Any]] = None,
 ) -> tuple[str, str]:
-    source = os.path.abspath(source_dir)
-    target = os.path.abspath(target_dir)
-    if os.path.normcase(source) == os.path.normcase(target):
-        raise RuntimeError("Источник обновления совпадает с рабочей папкой программы.")
+    source = os.path.realpath(os.path.abspath(source_dir))
+    target = os.path.realpath(os.path.abspath(target_dir))
+    if _paths_overlap_by_realpath(source, target):
+        raise RuntimeError(
+            "Источник обновления и рабочая папка программы совпадают или вложены друг в друга."
+        )
+    if not os.path.isdir(source):
+        raise RuntimeError(f"Источник обновления не найден: {source}")
     if not os.path.isdir(target):
         raise RuntimeError(f"Рабочая папка программы не найдена: {target}")
 
@@ -875,112 +782,164 @@ def _replace_program_dir(
     staging = os.path.join(target, f"__upd_new_{stamp}_{os.getpid()}")
     backup = os.path.join(target, f"__upd_old_{stamp}_{os.getpid()}")
 
-    status("Подготовка файлов обновления...", 25)
-    _copy_source_to_staging(source, staging)
+    try:
+        status("Подготовка файлов обновления...", 25)
+        phase_started = time.monotonic()
+        try:
+            _copy_source_to_staging(source, staging)
+        finally:
+            _log_phase_duration(log, "source_to_staging", phase_started)
 
-    for exe_name in REQUIRED_EXES:
-        if not os.path.isfile(os.path.join(staging, exe_name)):
-            raise RuntimeError(f"Подготовленная сборка неполная: нет {exe_name}.")
+        staged_manifest = _read_json(os.path.join(staging, MANIFEST_FILE_NAME))
+        if not staged_manifest:
+            raise RuntimeError("Не удалось прочитать manifest.json после копирования пакета обновления.")
+        if expected_manifest is not None and staged_manifest != expected_manifest:
+            raise RuntimeError(
+                "manifest.json пакета обновления изменился во время сетевого копирования. "
+                "Текущая версия программы не изменялась."
+            )
+        try:
+            schema_version = get_manifest_schema_version(staged_manifest)
+        except FullUpdateManifestError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if schema_version == 2 or "files" in staged_manifest:
+            status("Проверка целостности полной сборки...", 34)
+            phase_started = time.monotonic()
+            try:
+                inventory = verify_file_inventory(staging, staged_manifest.get("files"))
+                _validate_installable_inventory(inventory)
+            finally:
+                _log_phase_duration(log, "inventory_verify", phase_started)
 
-    os.makedirs(backup, exist_ok=True)
+        for exe_name in REQUIRED_EXES:
+            if not os.path.isfile(os.path.join(staging, exe_name)):
+                raise RuntimeError(f"Подготовленная сборка неполная: нет {exe_name}.")
+    except Exception:
+        try:
+            if os.path.isdir(staging):
+                _remove_update_tree_with_retry(staging, "неполный staging", log=log)
+        except Exception:
+            pass
+        raise
+
     installed_paths: list[str] = []
     try:
+        os.makedirs(backup, exist_ok=True)
         status("Резервирование старой версии...", 42)
-        for name in MANAGED_ROOT_FILES:
-            current = os.path.join(target, name)
-            if os.path.isfile(current):
+        phase_started = time.monotonic()
+        try:
+            for name in MANAGED_ROOT_FILES:
+                current = os.path.join(target, name)
+                if os.path.isfile(current):
+                    _retry(
+                        lambda current=current, name=name: shutil.move(current, os.path.join(backup, name)),
+                        f"Не удалось зарезервировать {name}",
+                    )
+
+            for name in MANAGED_ROOT_DIRS:
+                current = os.path.join(target, name)
+                if os.path.isdir(current):
+                    _retry(
+                        lambda current=current, name=name: shutil.move(current, os.path.join(backup, name)),
+                        f"Не удалось зарезервировать {name}",
+                    )
+        finally:
+            _log_phase_duration(log, "backup", phase_started)
+
+        status("Установка новой версии...", 65)
+        phase_started = time.monotonic()
+        try:
+            for name in MANAGED_ROOT_FILES:
+                source_path = os.path.join(staging, name)
+                if not os.path.isfile(source_path):
+                    continue
+                target_path = os.path.join(target, name)
                 _retry(
-                    lambda current=current, name=name: shutil.move(current, os.path.join(backup, name)),
-                    f"Не удалось зарезервировать {name}",
+                    lambda source_path=source_path, target_path=target_path: shutil.move(source_path, target_path),
+                    f"Не удалось установить {name}",
                 )
+                installed_paths.append(target_path)
 
-        for name in MANAGED_ROOT_DIRS:
-            current = os.path.join(target, name)
-            if os.path.isdir(current):
+            for name in MANAGED_ROOT_DIRS:
+                source_path = os.path.join(staging, name)
+                if not os.path.isdir(source_path):
+                    continue
+                target_path = os.path.join(target, name)
                 _retry(
-                    lambda current=current, name=name: shutil.move(current, os.path.join(backup, name)),
-                    f"Не удалось зарезервировать {name}",
+                    lambda source_path=source_path, target_path=target_path: shutil.move(source_path, target_path),
+                    f"Не удалось установить {name}",
                 )
-
-        status("Копирование новой версии...", 65)
-        for name in MANAGED_ROOT_FILES:
-            source_path = os.path.join(staging, name)
-            if not os.path.isfile(source_path):
-                continue
-            target_path = os.path.join(target, name)
-            _retry(
-                lambda source_path=source_path, target_path=target_path: shutil.copy2(source_path, target_path),
-                f"Не удалось скопировать {name}",
-            )
-            installed_paths.append(target_path)
-
-        for name in MANAGED_ROOT_DIRS:
-            source_path = os.path.join(staging, name)
-            if not os.path.isdir(source_path):
-                continue
-            target_path = os.path.join(target, name)
-            _retry(
-                lambda source_path=source_path, target_path=target_path: shutil.copytree(source_path, target_path),
-                f"Не удалось скопировать {name}",
-            )
-            installed_paths.append(target_path)
+                installed_paths.append(target_path)
+        finally:
+            _log_phase_duration(log, "install_move", phase_started)
 
         status("Очистка временных файлов...", 92)
+        phase_started = time.monotonic()
         pending_cleanup: list[str] = []
-        if not _remove_update_tree_with_retry(backup, "резервная папка старой версии", log=log):
-            pending_cleanup.append(backup)
-        if not _remove_update_tree_with_retry(staging, "staging новой версии", log=log):
-            pending_cleanup.append(staging)
-        pending_cleanup.extend(
-            _cleanup_stale_update_dirs(
-                target,
-                exclude={backup, staging},
-                log=log,
+        try:
+            if not _remove_update_tree_with_retry(backup, "резервная папка старой версии", log=log):
+                pending_cleanup.append(backup)
+            if not _remove_update_tree_with_retry(staging, "staging новой версии", log=log):
+                pending_cleanup.append(staging)
+            pending_cleanup.extend(
+                _cleanup_stale_update_dirs(
+                    target,
+                    exclude={backup, staging},
+                    log=log,
+                )
             )
-        )
-        _spawn_deferred_cleanup(pending_cleanup, log=log)
+            _spawn_deferred_cleanup(pending_cleanup, log=log)
+        finally:
+            _log_phase_duration(log, "cleanup", phase_started)
         return staging, backup
-    except Exception:
+    except Exception as install_exc:
+        rollback_errors: list[str] = []
         for path in reversed(installed_paths):
             try:
                 _remove_path(path)
-            except Exception:
-                pass
-        for name in MANAGED_ROOT_FILES:
-            try:
-                _remove_path(os.path.join(target, name))
-            except Exception:
-                pass
-        for name in MANAGED_ROOT_DIRS:
-            try:
-                _remove_path(os.path.join(target, name))
-            except Exception:
-                pass
+            except Exception as exc:
+                rollback_errors.append(f"не удалось удалить установленный путь {path}: {exc}")
         for name in MANAGED_ROOT_FILES:
             saved = os.path.join(backup, name)
             if os.path.isfile(saved):
                 try:
+                    _remove_path(os.path.join(target, name))
                     shutil.move(saved, os.path.join(target, name))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    rollback_errors.append(f"не удалось восстановить {name}: {exc}")
         for name in MANAGED_ROOT_DIRS:
             saved = os.path.join(backup, name)
             if os.path.isdir(saved):
                 try:
+                    _remove_path(os.path.join(target, name))
                     shutil.move(saved, os.path.join(target, name))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    rollback_errors.append(f"не удалось восстановить {name}: {exc}")
         try:
             if os.path.isdir(staging):
                 _remove_update_tree_with_retry(staging, "staging после ошибки", log=log)
         except Exception:
             pass
-        raise
+        if rollback_errors:
+            details = "; ".join(rollback_errors)
+            raise RuntimeError(
+                "Не удалось установить обновление, и автоматическое восстановление старой версии "
+                "выполнено не полностью. Не запускайте программу и передайте администратору это "
+                f"сообщение. Резервная копия сохранена: {backup}. "
+                f"Ошибка установки: {install_exc}. Ошибки восстановления: {details}"
+            ) from install_exc
+
+        if os.path.isdir(backup):
+            _remove_update_tree_with_retry(backup, "резервная папка после успешного восстановления", log=log)
+        raise RuntimeError(
+            f"Не удалось установить обновление. Старая версия восстановлена. Причина: {install_exc}"
+        ) from install_exc
 
 
 class UpdateWorker(QObject):
     status_changed = Signal(str, int)
     failed = Signal(str)
+    restart_warning = Signal(str)
     succeeded = Signal(str)
 
     def __init__(self, args: argparse.Namespace):
@@ -990,6 +949,8 @@ class UpdateWorker(QObject):
     @Slot()
     def run(self):
         lock = None
+        replacement_completed = False
+        baza_dir = ""
         try:
             source = os.path.abspath(self.args.source)
             target = os.path.abspath(self.args.target)
@@ -1023,32 +984,44 @@ class UpdateWorker(QObject):
 
             _wait_for_parent(int(self.args.parent_pid or 0), self._status)
             _wait_for_active_sessions(baza_dir, self._status)
-            if get_package_type(manifest) == PACKAGE_TYPE_PATCH:
-                _apply_patch_package(
-                    source_dir=source,
-                    target_dir=target,
-                    manifest=manifest,
-                    current_version=str(self.args.current_version or ""),
-                    status=self._status,
-                    log=lambda message: _write_log(baza_dir, message),
-                )
-            else:
-                _replace_program_dir(
-                    source_dir=source,
-                    target_dir=target,
-                    status=self._status,
-                    log=lambda message: _write_log(baza_dir, message),
-                )
+            _replace_program_dir(
+                source_dir=source,
+                target_dir=target,
+                status=self._status,
+                log=lambda message: _write_log(baza_dir, message),
+                expected_manifest=manifest,
+            )
+            replacement_completed = True
 
             self._status("Обновление завершено.", 100)
             _write_log(baza_dir, f"update finished version={payload['target_version']}")
+
+            # On return release() guarantees either physical deletion or a
+            # persisted terminal marker that launchers treat as inactive.
+            lock.release(completed=True)
+            lock = None
 
             restart_exe = str(self.args.restart_exe or "").strip()
             if restart_exe:
                 restart_path = os.path.join(target, restart_exe)
                 if os.path.isfile(restart_path):
                     self._status("Запуск новой версии...", 100)
-                    popen_hidden([restart_path], cwd=target)
+                    try:
+                        popen_hidden([restart_path], cwd=target)
+                    except Exception as exc:
+                        warning = (
+                            "Обновление установлено, но автоматически запустить новую версию "
+                            "не удалось. Запустите РЕМКАРТА вручную."
+                        )
+                        _write_log(baza_dir, f"update restart failed path={restart_path}: {exc}")
+                        self.restart_warning.emit(warning)
+                else:
+                    warning = (
+                        "Обновление установлено, но файл для автоматического запуска не найден. "
+                        "Запустите РЕМКАРТА вручную."
+                    )
+                    _write_log(baza_dir, f"update restart target missing path={restart_path}")
+                    self.restart_warning.emit(warning)
             self.succeeded.emit(str(payload["target_version"] or ""))
         except UpdateAlreadyRunning as exc:
             self.failed.emit(str(exc))
@@ -1060,13 +1033,15 @@ class UpdateWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             _remove_file_quietly(str(self.args.starting_lock or ""))
-            _cleanup_runner_dir_later(
-                str(getattr(self.args, "runner_dir", "") or ""),
-                os.path.abspath(self.args.target),
-                log=lambda message: _write_log(os.path.abspath(self.args.baza_dir), message),
-            )
             if lock:
-                lock.release()
+                try:
+                    lock.release(completed=replacement_completed)
+                except UpdateLockReleaseError as exc:
+                    try:
+                        if baza_dir:
+                            _write_log(baza_dir, f"update lock release failed: {exc}")
+                    except Exception:
+                        pass
 
     def _status(self, text: str, progress: int):
         self.status_changed.emit(text, max(0, min(100, int(progress))))
@@ -1138,6 +1113,7 @@ class UpdateWindow(QDialog):
         self._started_at = 0.0
         self._target_progress = 1
         self._displayed_progress = 1
+        self._restart_warning = ""
         self._progress_timer = QTimer(self)
         self._progress_timer.setInterval(80)
         self._progress_timer.timeout.connect(self._tick_progress)
@@ -1256,6 +1232,7 @@ class UpdateWindow(QDialog):
         self._thread.started.connect(self._worker.run)
         self._worker.status_changed.connect(self._on_status)
         self._worker.failed.connect(self._on_failed)
+        self._worker.restart_warning.connect(self._on_restart_warning)
         self._worker.succeeded.connect(self._on_succeeded)
         self._worker.failed.connect(self._thread.quit)
         self._worker.succeeded.connect(self._thread.quit)
@@ -1313,12 +1290,19 @@ class UpdateWindow(QDialog):
         self._target_progress = max(self._target_progress, max(1, min(100, int(progress))))
 
     @Slot(str)
+    def _on_restart_warning(self, message: str):
+        self._restart_warning = str(message or "").strip()
+
+    @Slot(str)
     def _on_failed(self, message: str):
         self._finished = True
         self._target_progress = max(self._displayed_progress, self._target_progress)
         self.title_label.setText("Обновление не выполнено")
         self.status_label.setText(message)
-        self.hint_label.setText("Старая версия программы оставлена без изменений.")
+        self.hint_label.setText(
+            "Проверьте текст ошибки. Если восстановление выполнено не полностью, "
+            "не запускайте программу и обратитесь к администратору."
+        )
         self.close_button.setVisible(True)
 
     @Slot(str)
@@ -1327,9 +1311,10 @@ class UpdateWindow(QDialog):
         self._target_progress = 100
         self.title_label.setText("Обновление завершено")
         self.status_label.setText(f"Установлена версия {version}.")
-        self.hint_label.setText("Можно запускать программу.")
+        self.hint_label.setText(self._restart_warning or "Можно запускать программу.")
         self.close_button.setVisible(True)
-        QTimer.singleShot(2500, self.accept)
+        if not self._restart_warning:
+            QTimer.singleShot(2500, self.accept)
 
 
 def _path_key(path: str) -> str:
@@ -1368,7 +1353,19 @@ def _load_direct_release(executable_dir: str) -> Optional[tuple[str, str, dict[s
         if str(manifest.get("app") or "rem_card") != "rem_card":
             continue
         prog_dir_name = str(manifest.get("prog_dir") or ".").strip() or "."
-        source_dir = os.path.abspath(os.path.join(release_dir, prog_dir_name))
+        try:
+            schema_version = get_manifest_schema_version(manifest)
+        except FullUpdateManifestError:
+            continue
+        if schema_version == 2 and prog_dir_name != ".":
+            continue
+        release_root = os.path.realpath(os.path.abspath(release_dir))
+        source_dir = os.path.realpath(os.path.abspath(os.path.join(release_root, prog_dir_name)))
+        try:
+            if os.path.normcase(os.path.commonpath((release_root, source_dir))) != os.path.normcase(release_root):
+                continue
+        except ValueError:
+            continue
         if not _same_path(source_dir, exe_dir):
             continue
         if not os.path.isfile(os.path.join(source_dir, READY_FILE_NAME)):
@@ -1421,19 +1418,16 @@ def _resolve_direct_baza_dir(release_dir: str, source_dir: str) -> str:
     )
 
 
-def _resolve_direct_target_dir(baza_dir: str, release_dir: str, source_dir: str) -> str:
+def _resolve_direct_target_dir(_baza_dir: str, _release_dir: str, _source_dir: str) -> str:
     env_target = os.environ.get(DIRECT_TARGET_DIR_ENV)
     if env_target:
         return os.path.abspath(os.path.normpath(env_target.strip().strip('"')))
-
-    update_root = _find_update_root(source_dir) or _find_update_root(release_dir)
-    if update_root:
-        update_parent = os.path.dirname(update_root)
-        if _same_path(update_parent, baza_dir):
-            return os.path.abspath(os.path.join(os.path.dirname(baza_dir), DEFAULT_TARGET_DIR_NAME))
-        return os.path.abspath(os.path.join(update_parent, DEFAULT_TARGET_DIR_NAME))
-
-    return os.path.abspath(os.path.join(os.path.dirname(baza_dir), DEFAULT_TARGET_DIR_NAME))
+    raise RuntimeError(
+        "Нельзя безопасно определить папку установленной программы из сетевого пакета. "
+        "Запустите установленную РЕМКАРТА или её RemCardUpdater.exe: "
+        "штатный автоапдейтер сам передаст точную папку. "
+        f"Для служебного запуска задайте {DIRECT_TARGET_DIR_ENV}."
+    )
 
 
 def _read_version_from_dir(directory: str) -> str:
@@ -1520,16 +1514,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--lock", required=True)
     parser.add_argument("--starting-lock", default="")
     parser.add_argument("--parent-pid", default="0")
+    # Старые full-only launcher-сборки передают этот аргумент. Он намеренно
+    # принимается для совместимости, но больше не влияет на установку.
     parser.add_argument("--current-version", default="")
     parser.add_argument("--target-version", default="")
     parser.add_argument("--restart-exe", default="")
     parser.add_argument("--launcher-host", default="")
-    parser.add_argument("--runner-dir", default="")
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args == ["--compiled-smoke"]:
+        return 0
     if raw_args and raw_args[0] == DEFERRED_CLEANUP_ARG:
         return _run_cleanup_mode(_parse_cleanup_args(raw_args[1:]))
     if raw_args:

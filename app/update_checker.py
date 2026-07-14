@@ -9,14 +9,11 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 
 from rem_card.app.runtime_paths import resolve_baza_dir
-from rem_card.app.update_package import (
+from rem_card.app.full_update_manifest import (
+    FullUpdateManifestError,
     PACKAGE_TYPE_FULL,
-    PACKAGE_TYPE_PATCH,
-    UpdatePackageError,
-    compute_sha256,
+    get_manifest_schema_version,
     get_package_type,
-    patch_payload_path,
-    validate_patch_manifest,
 )
 from rem_card.app.version import APP_VERSION
 
@@ -37,6 +34,7 @@ REQUIRED_RELEASE_EXES = (
     "RemCardPathSetup.exe",
     "RemCardUpdater.exe",
 )
+TERMINAL_UPDATE_LOCK_STATES = frozenset({"completed", "released"})
 
 
 def _normalize_target_path(path: str) -> str:
@@ -165,11 +163,6 @@ def get_update_root(baza_dir: Optional[str] = None) -> str:
     return os.path.join(os.path.abspath(root), UPDATE_DIR_NAME)
 
 
-def get_legacy_update_root(baza_dir: Optional[str] = None) -> str:
-    root = baza_dir or resolve_baza_dir()
-    return os.path.join(os.path.dirname(os.path.abspath(root)), UPDATE_DIR_NAME)
-
-
 def get_update_lock_path(
     baza_dir: Optional[str] = None,
     *,
@@ -192,19 +185,38 @@ def get_update_starting_lock_path(
     return os.path.join(os.path.abspath(root), "locks", file_name)
 
 
-def _release_dirs(update_root: str) -> Iterable[str]:
+def _release_dirs(
+    update_root: str,
+    *,
+    current_version: str,
+) -> Iterable[tuple[str, Optional[str]]]:
     direct_manifest = os.path.join(update_root, MANIFEST_FILE_NAME)
     if os.path.isfile(direct_manifest):
-        yield update_root
+        # Compatibility with the old full-package layout directly under UPD.
+        yield update_root, None
 
     releases_dir = os.path.join(update_root, RELEASES_DIR_NAME)
     if not os.path.isdir(releases_dir):
         return
 
-    for name in sorted(os.listdir(releases_dir)):
-        path = os.path.join(releases_dir, name)
-        if os.path.isdir(path):
-            yield path
+    try:
+        with os.scandir(releases_dir) as entries:
+            versioned_entries = [
+                entry
+                for entry in entries
+                if entry.is_dir() and is_valid_version(entry.name)
+            ]
+    except OSError:
+        return
+
+    # Release directories are immutable and named by version.  Filtering by
+    # the directory name before opening ready/manifest/EXE files avoids many
+    # SMB round trips once releases accumulate in the network folder.
+    versioned_entries.sort(key=lambda entry: _version_tuple(entry.name), reverse=True)
+    for entry in versioned_entries:
+        if compare_versions(entry.name, current_version) <= 0:
+            continue
+        yield entry.path, entry.name
 
 
 def _load_candidate(release_dir: str) -> Optional[UpdateCandidate]:
@@ -229,13 +241,23 @@ def _load_candidate(release_dir: str) -> Optional[UpdateCandidate]:
     if not is_valid_version(version):
         return None
 
-    if package_type == PACKAGE_TYPE_PATCH:
-        return _load_patch_candidate(release_dir, manifest_path, manifest, version)
     if package_type != PACKAGE_TYPE_FULL:
         return None
 
     prog_dir_name = str(manifest.get("prog_dir") or DEFAULT_PROG_DIR_NAME).strip() or DEFAULT_PROG_DIR_NAME
-    prog_dir = os.path.abspath(os.path.join(release_dir, prog_dir_name))
+    try:
+        schema_version = get_manifest_schema_version(manifest)
+    except FullUpdateManifestError:
+        return None
+    if schema_version == 2 and prog_dir_name != DEFAULT_PROG_DIR_NAME:
+        return None
+    release_root = os.path.realpath(os.path.abspath(release_dir))
+    prog_dir = os.path.realpath(os.path.abspath(os.path.join(release_root, prog_dir_name)))
+    try:
+        if os.path.normcase(os.path.commonpath((release_root, prog_dir))) != os.path.normcase(release_root):
+            return None
+    except ValueError:
+        return None
     if not os.path.isdir(prog_dir):
         return None
 
@@ -253,38 +275,6 @@ def _load_candidate(release_dir: str) -> Optional[UpdateCandidate]:
     )
 
 
-def _load_patch_candidate(
-    release_dir: str,
-    manifest_path: str,
-    manifest: dict[str, Any],
-    version: str,
-) -> Optional[UpdateCandidate]:
-    try:
-        normalized = validate_patch_manifest(manifest)
-        for entry in normalized["files"]:
-            path = patch_payload_path(release_dir, entry["path"])
-            if not os.path.isfile(path):
-                return None
-            try:
-                if os.path.getsize(path) != int(entry["size"]):
-                    return None
-            except Exception:
-                return None
-            if compute_sha256(path) != str(entry["sha256"]).lower():
-                return None
-    except (OSError, UpdatePackageError):
-        return None
-
-    return UpdateCandidate(
-        version=version,
-        release_dir=os.path.abspath(release_dir),
-        prog_dir=os.path.abspath(release_dir),
-        manifest_path=os.path.abspath(manifest_path),
-        manifest=normalized,
-        package_type=PACKAGE_TYPE_PATCH,
-    )
-
-
 def _find_available_updates_with_reasons(
     *,
     current_version: str = APP_VERSION,
@@ -297,20 +287,17 @@ def _find_available_updates_with_reasons(
         if not os.path.isdir(root):
             continue
 
-        for release_dir in _release_dirs(root):
+        for release_dir, directory_version in _release_dirs(
+            root,
+            current_version=current_version,
+        ):
             candidate = _load_candidate(release_dir)
             if not candidate:
                 continue
+            if directory_version and candidate.version != directory_version:
+                continue
             if compare_versions(candidate.version, current_version) <= 0:
                 continue
-            if candidate.package_type == PACKAGE_TYPE_PATCH:
-                base_version = str(candidate.manifest.get("base_version") or "").strip()
-                if base_version != current_version:
-                    reasons.append(
-                        f"Патч предназначен для версии {base_version}, "
-                        f"установлена {current_version}. Нужен полный релиз."
-                    )
-                    continue
             candidates.append(candidate)
 
     return UpdateScanResult(
@@ -354,13 +341,7 @@ def find_best_update_with_reason(
 
 
 def _default_update_roots() -> list[str]:
-    roots = [get_update_root(), get_legacy_update_root()]
-    result: list[str] = []
-    seen: set[str] = set()
-    for root in roots:
-        normalized = os.path.normcase(os.path.abspath(root))
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(os.path.abspath(root))
-    return result
+    # Production JSON points to the database root and updates live strictly in
+    # <BAZA_DIR>\UPD.  Do not probe the former sibling UPD on every startup and
+    # clean exit: on SMB that was an unnecessary network operation.
+    return [get_update_root()]

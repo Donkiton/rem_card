@@ -1,5 +1,7 @@
 # Tests and release checklist
 
+> **Исторический checklist.** Актуальный release/update-порядок находится в `docs/how_to_build_and_update.md` и `docs/release_update_regламент.md`.
+
 ## 1. Быстрая проверка перед любым changeset
 
 ```powershell
@@ -140,7 +142,7 @@ Manual test: на копии Baza поднять `config/client_policy.json.min_
 4. Safety gates passed.
 5. Network acceptance passed.
 6. `client_policy.json.min_client_version` соответствует release plan.
-7. Update package has `manifest.json`, `ready.ok`, four EXE and `_internal`.
+7. Full-update package has `manifest.json`, `ready.ok`, six EXE and `_internal`.
 8. Старые клиенты блокируются после несовместимой migration.
 9. Второй клиент открывается после migration.
 10. Не менялись `journal_mode=DELETE`, `synchronous=EXTRA`, `mmap_size=0`.

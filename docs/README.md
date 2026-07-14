@@ -1,12 +1,17 @@
 # Документация
 
-Обновлено: 2026-06-30.
+Обновлено: 2026-07-14.
 
 ## Действующие регламенты
 
-- `versioning.md` - версия, changelog, release- и patch-сборки.
-- `auto_update.md` - full/patch update package, публикация в `UPD`, правила updater.
+- `versioning.md` - версия, changelog и full release-сборка.
+- `auto_update.md` - full-update, безопасная публикация в локальный и сетевой `UPD`, правила updater.
+- `how_to_build_and_update.md` - простая пошаговая инструкция сборки и публикации для владельца проекта.
 - `release_update_regламент.md` - порядок обновления клиентов и блокировка старых версий.
+- `updater_optimization_plan.md` - выполненные и оставшиеся шаги оптимизации full-only обновлений.
+- `updater_optimization_report_2026-07-14.md` - итог реализованной оптимизации, эффект и оставшиеся ограничения.
+- `updater_test_report_2026-07-14.md` - результаты regression, PyInstaller и compiled smoke.
+- `updater_visible_chat_2026-07-14.md` - стенограмма видимой переписки и журнал решений по задаче.
 - `settings_db.md` - центральная settings DB, release snapshot и legacy import настроек.
 - `db_safety_contract.md` - инварианты сетевой SQLite-БД, backup, миграции, recovery.
 - `architecture_guardrails.md` и `code_quality.md` - статические safety/quality gates.
@@ -14,6 +19,8 @@
 - `emergency_runbook.md` и `emergency_mode_smoke_checklist.md` - аварийный режим и ручной smoke.
 - `backup_restore_drill.md`, `network_stress_test_plan.md`, `performance_a_baseline.md` - проверки эксплуатации и производительности.
 - `operblock_ui_standards.md` - UI-стандарты оперблока.
+
+Критичное правило release-процесса: вся приёмка выполняется на локальной/изолированной тестовой базе до сетевой production-публикации. После создания production `ready.ok` релиз доступен сразу всем клиентам этой базы; отдельного канареечного этапа внутри production нет.
 
 ## Исторические документы
 
