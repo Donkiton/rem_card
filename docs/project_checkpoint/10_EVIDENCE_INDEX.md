@@ -1,5 +1,7 @@
 # Evidence index
 
+> **Исторический индекс.** Для актуального release/update-процесса используйте `docs/how_to_build_and_update.md` и `docs/release_update_regламент.md`.
+
 | Тема | Утверждение | Файлы/классы/функции | Уверенность | Комментарий |
 |---|---|---|---|---|
 | DB profile | Network DB uses `journal_mode=DELETE`, `synchronous=EXTRA`, `mmap_mb=0`. | `app/sqlite_shared.py:_resolve_sqlite_profile_settings` lines 44-52, 103-107; `scripts/architecture_safety_check.py:87-102` | высокая | Env overrides принудительно сбрасываются для network. |
@@ -29,7 +31,7 @@
 | tests | Architecture safety gate blocks dangerous UI/DB patterns. | `scripts/architecture_safety_check.py:77-160` | высокая | Narrow static checks. |
 | tests | Regression suite covers DB/recovery/sync/W1a/workers/medical audit. | `scripts/regression_safety_checks.py:8538-8675` | высокая | Large safety suite. |
 | tests | Network acceptance uses temp Baza, not production DB. | `scripts/network_acceptance_runner.py:1-8`, `283-405` | высокая | Creates temp root and isolated env. |
-| release/build | PyInstaller builds four EXE and writes manifest/ready.ok. | `RemCard.spec:116-183`, `214-252` | высокая | `ready.ok` written last. |
+| release/build | PyInstaller builds six EXE in `dist\\Prog`; production publication is a separate validated step. | `RemCard.spec`; `scripts/build_release.py`; `scripts/publish_full_update.py` | высокая | `ready.ok` is created last by the publisher, not by PyInstaller. |
 | updater | Updater validates ready/manifest/exe and rollback old files on failure. | `app/update_checker.py:192-228`; `app/updater_main.py:338-351`, `405-505` | высокая | Waits active local sessions. |
 | medical audit | `medical_audit_log` is separate from `change_log`. | `app/unified_db_schema.py:430-520`, `920-932`; `docs/medical_audit_log.md:3` | высокая | Audit triggers cover listed domains. |
 | medical audit | `role` and `client_id` columns are not present. | `app/unified_db_schema.py:920-932` | высокая | НЕ НАЙДЕНО В КОДЕ; only `changed_by`, `operation_id`. |

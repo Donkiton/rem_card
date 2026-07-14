@@ -1,5 +1,7 @@
 # Рем Карта — master context
 
+> **Исторический снимок.** Release/update-раздел этого файла устарел. Актуальный full-only процесс описан в `docs/how_to_build_and_update.md` и `docs/release_update_regламент.md`; `RemCard.spec` больше не публикует в `UPD` и не создаёт `ready.ok`.
+
 Документ собран по текущему коду репозитория `C:\Project\rem_card` на 2026-05-12. Если утверждение не подтверждено кодом, оно помечено как `НЕ НАЙДЕНО В КОДЕ`, `ТРЕБУЕТ УТОЧНЕНИЯ` или `ПРЕДПОЛОЖЕНИЕ, НУЖНА ПРОВЕРКА`.
 
 Актуальность: исходный checkpoint остается снимком от 2026-05-12. Entry point'ы и сборка ниже частично уточнены по текущему коду на 2026-06-30; line refs могут отставать и требуют сверки перед изменениями.
@@ -282,7 +284,7 @@ Shutdown:
 
 ## 15. Сборка, обновление, релиз
 
-PyInstaller spec `RemCard.spec` собирает шесть EXE: `RemCardDoctor`, `RemCardNurse`, `RemCardOperBlockEmergency`, `RemCardOperBlockPlanned`, `RemCardPathSetup`, `RemCardUpdater`. `COLLECT` кладёт сборку в `Prog`. Post-build копирует в target update package, создаёт `manifest.json`, затем последним пишет `ready.ok`.
+PyInstaller spec `RemCard.spec` собирает шесть EXE: `RemCardDoctor`, `RemCardNurse`, `RemCardOperBlockEmergency`, `RemCardOperBlockPlanned`, `RemCardPathSetup`, `RemCardUpdater`. `COLLECT` кладёт проверяемую сборку в `dist\Prog`, но ничего не публикует в `UPD` и не создаёт `ready.ok`. Актуальную локальную и production-публикацию выполняют `scripts/build_release.py` и `scripts/publish_full_update.py`.
 
 Updater:
 

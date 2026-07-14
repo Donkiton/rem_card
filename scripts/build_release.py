@@ -1,10 +1,26 @@
 import argparse
+import ctypes
+import hashlib
+import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
+SOURCE_ROOT = Path(__file__).resolve().parents[1]
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from app.full_update_manifest import (
+    FULL_MANIFEST_SCHEMA_VERSION,
+    FullUpdateManifestError,
+    build_file_inventory,
+    normalize_file_inventory,
+    verify_file_inventory,
+)
 from bump_version import (
     BUMP_LEVELS,
     bump_version,
@@ -20,6 +36,22 @@ from bump_version import (
 RELEASE_LEVELS = ("auto", *BUMP_LEVELS)
 VERSIONED_FILES = ("VERSION", "CHANGELOG.md", "app/release_info.json")
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
+MANIFEST_FILE_NAME = "manifest.json"
+READY_FILE_NAME = "ready.ok"
+RELEASES_DIR_NAME = "releases"
+REQUIRED_RELEASE_EXES = (
+    "RemCardDoctor.exe",
+    "RemCardNurse.exe",
+    "RemCardOperBlockEmergency.exe",
+    "RemCardOperBlockPlanned.exe",
+    "RemCardPathSetup.exe",
+    "RemCardUpdater.exe",
+)
+SETTINGS_RELEASE_DIR = Path("_internal") / "rem_card" / "settings_release"
+SETTINGS_RELEASE_SNAPSHOT_FILE = "settings_release_snapshot.json"
+SETTINGS_RELEASE_MANIFEST_FILE = "settings_release_manifest.json"
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COMPILED_SMOKE_TIMEOUT_SECONDS = 30
 
 CHANGELOG_SUBJECT_TRANSLATIONS = {
     "Optimize cached vitals card reopen": (
@@ -230,8 +262,95 @@ def has_staged_or_unstaged_release_file_changes(root: Path) -> bool:
     return bool(status)
 
 
-def run_build(root: Path) -> None:
+def run_build(root: Path) -> Path:
+    if os.environ.get("REMCARD_SKIP_SETTINGS_RELEASE_EXPORT") == "1":
+        raise RuntimeError(
+            "REMCARD_SKIP_SETTINGS_RELEASE_EXPORT=1 запрещён для release-сборки: "
+            "production-пакет обязан содержать snapshot настроек."
+        )
+    package_dir = root / "dist" / "Prog"
+    if package_dir.exists():
+        shutil.rmtree(package_dir)
     run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)
+    if not package_dir.is_dir():
+        raise RuntimeError(f"PyInstaller не создал пакет: {package_dir}")
+    return package_dir
+
+
+def run_release_checks(root: Path) -> None:
+    """Run the mandatory gates for the exact commit that is about to be pushed."""
+    checks = (
+        (
+            "architecture safety",
+            [sys.executable, str(root / "scripts" / "architecture_safety_check.py")],
+        ),
+        (
+            "fast regression",
+            [
+                sys.executable,
+                str(root / "scripts" / "regression_safety_checks.py"),
+                "--profile",
+                "fast",
+                "--quiet-progress",
+                "--json-detail",
+                "summary",
+            ],
+        ),
+        (
+            "flake8 F821",
+            [
+                sys.executable,
+                "-m",
+                "flake8",
+                ".",
+                "--select=F821",
+                "--exclude=.git,__pycache__,build,dist,tmp,.venv,venv,.pytest_cache,.mypy_cache,.ruff_cache",
+            ],
+        ),
+    )
+    for name, command in checks:
+        print(f"Обязательная проверка перед push: {name}...")
+        try:
+            run(command, cwd=root)
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"Проверка перед push не пройдена ({name}), код {exc.returncode}. "
+                "Git push и публикация остановлены."
+            ) from exc
+    print("Все обязательные проверки перед push пройдены.")
+
+
+def run_compiled_smoke(package_dir: Path) -> None:
+    """Prove that every shipped role starts its frozen entrypoint successfully."""
+    for exe_name in REQUIRED_RELEASE_EXES:
+        executable = package_dir / exe_name
+        print(f"Smoke-тест собранного EXE: {exe_name}...")
+        try:
+            result = subprocess.run(
+                [str(executable), "--compiled-smoke"],
+                cwd=str(package_dir),
+                check=False,
+                timeout=COMPILED_SMOKE_TIMEOUT_SECONDS,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Smoke-тест {exe_name} не завершился за "
+                f"{COMPILED_SMOKE_TIMEOUT_SECONDS} секунд. Git push остановлен."
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(f"Не удалось запустить smoke-тест {exe_name}: {exc}") from exc
+        if result.returncode != 0:
+            stdout = (result.stdout or b"").decode("utf-8", errors="replace").strip()
+            stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+            details = "\n".join(value for value in (stdout, stderr) if value)
+            suffix = f"\n{details}" if details else ""
+            raise RuntimeError(
+                f"Smoke-тест {exe_name} завершился с кодом {result.returncode}. "
+                f"Git push остановлен.{suffix}"
+            )
+    print("Smoke-тест всех шести EXE пройден.")
 
 
 def commit_release(root: Path, version: str) -> None:
@@ -239,11 +358,530 @@ def commit_release(root: Path, version: str) -> None:
     run(["git", "commit", "-m", f"Релиз {version}"], cwd=root)
 
 
-def push_current_branch(root: Path) -> None:
+def push_current_branch(root: Path) -> str:
     branch = git_output(root, ["branch", "--show-current"])
     if not branch:
         raise RuntimeError("Не удалось определить текущую ветку для push.")
     run(["git", "push", "origin", branch], cwd=root)
+    local_commit = head_commit(root)
+    remote_ref = f"refs/heads/{branch}"
+    raw_remote = git_output(root, ["ls-remote", "--heads", "origin", remote_ref])
+    remote_commit = ""
+    for line in raw_remote.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == remote_ref:
+            remote_commit = parts[0]
+            break
+    if remote_commit != local_commit:
+        raise RuntimeError(
+            "Push не подтверждён: origin/"
+            f"{branch} указывает не на текущий коммит {local_commit}. "
+            "Локальный update-пакет не будет опубликован."
+        )
+    print(f"Git push подтверждён: origin/{branch} = {local_commit}")
+    return local_commit
+
+
+def _read_json_object(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось прочитать {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{path} должен содержать JSON-объект.")
+    return payload
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _settings_snapshot_content_hash(snapshot: dict) -> str:
+    payload = {
+        "schema_version": snapshot.get("schema_version"),
+        "tables": snapshot.get("tables") or {},
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _validate_settings_media(value: object, settings_dir: Path) -> None:
+    if isinstance(value, list):
+        for item in value:
+            _validate_settings_media(item, settings_dir)
+        return
+    if not isinstance(value, dict):
+        return
+
+    relative = value.get("__blob_file__")
+    if relative is not None:
+        normalized = str(relative or "").strip().replace("\\", "/")
+        parts = normalized.split("/")
+        if not normalized or normalized.startswith("/") or any(part in ("", ".", "..") for part in parts):
+            raise RuntimeError(
+                "Snapshot настроек содержит небезопасный путь media-файла: "
+                f"{relative!r}."
+            )
+        media_path = settings_dir.joinpath(*parts).resolve()
+        settings_root = settings_dir.resolve()
+        try:
+            media_path.relative_to(settings_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Media-файл snapshot настроек находится вне каталога settings_release: {relative!r}."
+            ) from exc
+        if not media_path.is_file():
+            raise RuntimeError(f"В snapshot настроек отсутствует media-файл: {relative}.")
+        expected_hash = str(value.get("sha256") or "").lower()
+        if not SHA256_RE.fullmatch(expected_hash):
+            raise RuntimeError(f"У media-файла snapshot нет корректного sha256: {relative}.")
+        try:
+            expected_size = int(value.get("size"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"У media-файла snapshot нет корректного размера: {relative}.") from exc
+        if expected_size < 0 or media_path.stat().st_size != expected_size:
+            raise RuntimeError(f"Размер media-файла snapshot не совпадает: {relative}.")
+        if _sha256_file(media_path) != expected_hash:
+            raise RuntimeError(f"SHA-256 media-файла snapshot не совпадает: {relative}.")
+
+    for item in value.values():
+        _validate_settings_media(item, settings_dir)
+
+
+def validate_settings_release_snapshot(
+    package_dir: Path,
+    *,
+    version: str,
+    source_commit: str,
+    package_manifest: dict,
+    require_manifest_entry: bool,
+) -> dict:
+    settings_dir = package_dir / SETTINGS_RELEASE_DIR
+    snapshot_path = settings_dir / SETTINGS_RELEASE_SNAPSHOT_FILE
+    settings_manifest_path = settings_dir / SETTINGS_RELEASE_MANIFEST_FILE
+    snapshot = _read_json_object(snapshot_path)
+    settings_manifest = _read_json_object(settings_manifest_path)
+
+    if snapshot.get("schema_version") != 1:
+        raise RuntimeError("Snapshot настроек имеет неподдерживаемую schema_version.")
+    expected_snapshot_fields = {
+        "release_version": version,
+        "release_commit": source_commit,
+    }
+    mismatches = [
+        f"{name}={snapshot.get(name)!r}, ожидалось {expected!r}"
+        for name, expected in expected_snapshot_fields.items()
+        if snapshot.get(name) != expected
+    ]
+    if mismatches:
+        raise RuntimeError("Snapshot настроек не соответствует релизу: " + "; ".join(mismatches))
+
+    content_hash = str(snapshot.get("content_hash") or "").lower()
+    if not SHA256_RE.fullmatch(content_hash):
+        raise RuntimeError("Snapshot настроек не содержит корректный content_hash.")
+    actual_hash = _settings_snapshot_content_hash(snapshot)
+    if content_hash != actual_hash:
+        raise RuntimeError(
+            "Snapshot настроек повреждён: content_hash не совпадает "
+            f"({content_hash} != {actual_hash})."
+        )
+    _validate_settings_media(snapshot.get("tables") or {}, settings_dir)
+
+    expected_settings_manifest = {
+        "schema_version": 1,
+        "snapshot_schema_version": 1,
+        "snapshot_file": SETTINGS_RELEASE_SNAPSHOT_FILE,
+        "content_hash": content_hash,
+        "release_version": version,
+        "release_commit": source_commit,
+        "exported_at": snapshot.get("exported_at"),
+        "row_counts": snapshot.get("row_counts") or {},
+    }
+    settings_mismatches = [
+        f"{name}={settings_manifest.get(name)!r}, ожидалось {expected!r}"
+        for name, expected in expected_settings_manifest.items()
+        if settings_manifest.get(name) != expected
+    ]
+    if settings_mismatches:
+        raise RuntimeError(
+            "settings_release_manifest.json не соответствует snapshot: "
+            + "; ".join(settings_mismatches)
+        )
+
+    metadata = {
+        "manifest_schema_version": 1,
+        "snapshot_schema_version": 1,
+        "snapshot_file": SETTINGS_RELEASE_SNAPSHOT_FILE,
+        "content_hash": content_hash,
+        "release_version": version,
+        "release_commit": source_commit,
+    }
+    manifest_metadata = package_manifest.get("settings_release")
+    if require_manifest_entry and manifest_metadata != metadata:
+        raise RuntimeError(
+            "Full-manifest не содержит точную метаинформацию settings_release "
+            "для этого релиза."
+        )
+    if manifest_metadata is not None and manifest_metadata != metadata:
+        raise RuntimeError("Метаинформация settings_release в full-manifest повреждена.")
+    return metadata
+
+
+def validate_full_package(
+    package_dir: Path,
+    *,
+    version: str,
+    source_commit: str,
+    allow_ready: bool = False,
+    require_inventory: bool = False,
+) -> dict:
+    if not package_dir.is_dir():
+        raise RuntimeError(f"Каталог full-пакета не найден: {package_dir}")
+
+    manifest_path = package_dir / MANIFEST_FILE_NAME
+    if not manifest_path.is_file():
+        raise RuntimeError(f"В full-пакете нет {MANIFEST_FILE_NAME}: {package_dir}")
+    manifest = _read_json_object(manifest_path)
+
+    expected = {
+        "app": "rem_card",
+        "package_type": "full",
+        "version": version,
+        "prog_dir": ".",
+        "source_commit": source_commit,
+    }
+    mismatches = [
+        f"{name}={manifest.get(name)!r}, ожидалось {value!r}"
+        for name, value in expected.items()
+        if manifest.get(name) != value
+    ]
+    if mismatches:
+        raise RuntimeError("Неверный manifest full-пакета: " + "; ".join(mismatches))
+
+    validate_settings_release_snapshot(
+        package_dir,
+        version=version,
+        source_commit=source_commit,
+        package_manifest=manifest,
+        require_manifest_entry=require_inventory,
+    )
+
+    schema_version = manifest.get("schema_version")
+    if require_inventory and schema_version != FULL_MANIFEST_SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Неверная схема full-manifest: {schema_version!r}, "
+            f"ожидалась {FULL_MANIFEST_SCHEMA_VERSION}."
+        )
+    try:
+        inventory = normalize_file_inventory(
+            manifest.get("files"),
+            required=require_inventory,
+        )
+    except FullUpdateManifestError as exc:
+        raise RuntimeError(f"Неверный inventory full-пакета: {exc}") from exc
+    if require_inventory and not inventory:
+        raise RuntimeError("Inventory full-пакета пуст.")
+    if require_inventory:
+        try:
+            verify_file_inventory(package_dir, inventory, reject_extra=True)
+        except FullUpdateManifestError as exc:
+            raise RuntimeError(f"Full-пакет не прошёл SHA-256 проверку: {exc}") from exc
+
+    missing = [name for name in REQUIRED_RELEASE_EXES if not (package_dir / name).is_file()]
+    if missing:
+        raise RuntimeError("В full-пакете нет обязательных EXE: " + ", ".join(missing))
+    if not (package_dir / "_internal").is_dir():
+        raise RuntimeError("В full-пакете нет каталога _internal.")
+    if not allow_ready and (package_dir / READY_FILE_NAME).exists():
+        raise RuntimeError(
+            f"{READY_FILE_NAME} не должен появляться до проверки и публикации пакета."
+        )
+    return manifest
+
+
+def local_update_root(root: Path) -> Path:
+    override = str(os.environ.get("REMCARD_BUILD_TARGET_DIR") or "").strip()
+    if override:
+        value = Path(override).expanduser()
+        if not value.is_absolute():
+            value = root / value
+    else:
+        value = root.parent / "Baza_rao3_jurnal" / "UPD"
+    if _is_network_path(value):
+        raise RuntimeError(
+            "build_release.py публикует релиз только в локальный UPD. "
+            f"Сетевой путь запрещён: {value}"
+        )
+    return value.resolve()
+
+
+def _is_network_path(path: Path) -> bool:
+    raw = str(path)
+    if raw.startswith("\\\\"):
+        return True
+    if os.name != "nt" or not path.drive:
+        return False
+    try:
+        drive_root = path.drive + "\\"
+        return int(ctypes.windll.kernel32.GetDriveTypeW(drive_root)) == 4
+    except Exception:
+        return False
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left_resolved = left.resolve()
+    right_resolved = right.resolve()
+    try:
+        common = Path(os.path.commonpath((str(left_resolved), str(right_resolved))))
+    except ValueError:
+        return False
+    common_key = os.path.normcase(str(common))
+    return common_key in {
+        os.path.normcase(str(left_resolved)),
+        os.path.normcase(str(right_resolved)),
+    }
+
+
+def _write_ready_last(path: Path) -> None:
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        with temp_path.open("x", encoding="utf-8") as fh:
+            fh.write(datetime.now().astimezone().isoformat(timespec="seconds") + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        with temp_path.open("x", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def write_staged_full_manifest(
+    staging_dir: Path,
+    *,
+    version: str,
+    source_commit: str,
+    file_inventory: list[dict],
+) -> dict:
+    manifest_path = staging_dir / MANIFEST_FILE_NAME
+    manifest = _read_json_object(manifest_path)
+    settings_release = validate_settings_release_snapshot(
+        staging_dir,
+        version=version,
+        source_commit=source_commit,
+        package_manifest=manifest,
+        require_manifest_entry=False,
+    )
+    manifest.update(
+        {
+            "schema_version": FULL_MANIFEST_SCHEMA_VERSION,
+            "app": "rem_card",
+            "package_type": "full",
+            "version": version,
+            "prog_dir": ".",
+            "source_commit": source_commit,
+            "settings_release": settings_release,
+            "files": normalize_file_inventory(file_inventory, required=True),
+        }
+    )
+    _write_json_atomic(manifest_path, manifest)
+    return manifest
+
+
+def publish_local_release(
+    root: Path,
+    package_dir: Path,
+    *,
+    version: str,
+    source_commit: str,
+) -> Path:
+    """Publish only to the local test UPD; network deployment stays manual."""
+    parse_version(version)
+    validate_full_package(package_dir, version=version, source_commit=source_commit)
+
+    releases_dir = local_update_root(root) / RELEASES_DIR_NAME
+    if _paths_overlap(package_dir, releases_dir):
+        raise RuntimeError(
+            "Каталог сборки dist\\Prog и локальный UPD\\releases не должны "
+            f"совпадать или быть вложены друг в друга: {package_dir} <-> {releases_dir}"
+        )
+    # Hash the source before copy. The staging verification below then proves
+    # end-to-end that copytree transferred exactly those bytes.
+    source_inventory = build_file_inventory(package_dir)
+    releases_dir.mkdir(parents=True, exist_ok=True)
+    final_dir = releases_dir / version
+    ready_path = final_dir / READY_FILE_NAME
+
+    if final_dir.exists() and ready_path.is_file():
+        existing_manifest = validate_full_package(
+            final_dir,
+            version=version,
+            source_commit=source_commit,
+            allow_ready=True,
+            require_inventory=True,
+        )
+        existing_inventory = normalize_file_inventory(
+            existing_manifest.get("files"),
+            required=True,
+        )
+        if existing_inventory != source_inventory:
+            raise RuntimeError(
+                f"Локальный релиз {version} уже существует, но его inventory "
+                "отличается от текущей сборки. Автоматическая перезапись запрещена."
+            )
+        print(f"Локальный релиз уже опубликован и не перезаписан: {final_dir}")
+        return final_dir
+
+    if final_dir.exists():
+        # A directory without ready.ok cannot be consumed by clients and is a
+        # safe-to-replace remainder of an interrupted local publication.
+        shutil.rmtree(final_dir)
+
+    staging_dir = releases_dir / f".staging-{version}-{os.getpid()}"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+
+    try:
+        shutil.copytree(package_dir, staging_dir)
+        staging_ready = staging_dir / READY_FILE_NAME
+        if staging_ready.exists():
+            staging_ready.unlink()
+        write_staged_full_manifest(
+            staging_dir,
+            version=version,
+            source_commit=source_commit,
+            file_inventory=source_inventory,
+        )
+        validate_full_package(
+            staging_dir,
+            version=version,
+            source_commit=source_commit,
+            require_inventory=True,
+        )
+        staging_dir.rename(final_dir)
+        _write_ready_last(ready_path)
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+    # staging_dir and final_dir are on the same local volume. rename() preserves
+    # the bytes already hash-verified above, so do not hash the whole build a
+    # second time after the atomic rename.
+    validate_full_package(
+        final_dir,
+        version=version,
+        source_commit=source_commit,
+        allow_ready=True,
+        require_inventory=False,
+    )
+    if not ready_path.is_file():
+        raise RuntimeError(f"Публикация не завершена: нет {ready_path}")
+    return final_dir
+
+
+def publish_built_release(
+    root: Path,
+    package_dir: Path,
+    *,
+    version: str,
+    source_commit: str,
+) -> Path:
+    published_dir = publish_local_release(
+        root,
+        package_dir,
+        version=version,
+        source_commit=source_commit,
+    )
+    print(f"Полный update-пакет готов: {published_dir}")
+    print(
+        "Для безопасной публикации в сетевой UPD используйте "
+        f"scripts\\publish_full_update.py --source \"{published_dir}\" "
+        "--config <путь к remcard_data_path.json>."
+    )
+    return published_dir
+
+
+def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
+    if args.no_commit:
+        if not args.skip_build:
+            package_dir = run_build(root)
+            source_commit = head_commit(root)
+            validate_full_package(
+                package_dir,
+                version=version,
+                source_commit=source_commit,
+            )
+            run_compiled_smoke(package_dir)
+            print(
+                f"Тестовая сборка без release-коммита создана только в {package_dir}. "
+                f"В UPD она не публикуется и {READY_FILE_NAME} не создаётся."
+            )
+        else:
+            print("Файлы релиза не закоммичены; сборка и публикация пропущены.")
+        return
+
+    if has_staged_or_unstaged_release_file_changes(root):
+        commit_release(root, version)
+    ensure_clean_tree(root)
+    source_commit = head_commit(root)
+    if args.skip_build:
+        raise RuntimeError(
+            "--skip-build запрещён для release-коммита: перед обязательным push "
+            "нужно собрать и smoke-проверить все шесть EXE."
+        )
+
+    # First prove that the exact release commit can produce a complete package.
+    # Only a successful build may be pushed and made visible in the local UPD.
+    run_release_checks(root)
+    ensure_clean_tree(root)
+    package_dir = run_build(root)
+    validate_full_package(package_dir, version=version, source_commit=source_commit)
+    run_compiled_smoke(package_dir)
+    ensure_clean_tree(root)
+    pushed_commit = push_current_branch(root)
+    if pushed_commit != source_commit:
+        raise RuntimeError("Во время release-сборки изменился git HEAD; публикация остановлена.")
+    publish_built_release(
+        root,
+        package_dir,
+        version=version,
+        source_commit=source_commit,
+    )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -267,9 +905,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=[],
         help="Добавить пункт в changelog вручную. Можно указать несколько раз.",
     )
-    parser.add_argument("--skip-build", action="store_true", help="Только обновить версию и changelog, без PyInstaller.")
-    parser.add_argument("--no-commit", action="store_true", help="Не создавать release-коммит после сборки.")
-    parser.add_argument("--push", action="store_true", help="Отправить текущую ветку в origin после сборки/коммита.")
+    parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Допустим только с --no-commit: не запускать тестовую PyInstaller-сборку.",
+    )
+    parser.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="Собрать только dist\\Prog без release-коммита, push и публикации в UPD.",
+    )
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="Совместимый флаг: push теперь всегда обязателен перед публикацией full-релиза.",
+    )
     parser.add_argument("--allow-empty", action="store_true", help="Разрешить релиз без новых git-коммитов.")
     return parser.parse_args(argv)
 
@@ -278,6 +928,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(list(sys.argv[1:] if argv is None else argv))
     if args.push and args.no_commit:
         raise SystemExit("--push нельзя использовать вместе с --no-commit")
+    if args.skip_build and not args.no_commit:
+        raise SystemExit(
+            "--skip-build разрешён только вместе с --no-commit; "
+            "production-релиз обязан пройти сборку и smoke-тест всех EXE."
+        )
 
     root = project_root()
     ensure_git_repo(root)
@@ -300,14 +955,7 @@ def main(argv: list[str] | None = None) -> int:
             f"Новых коммитов после версии {current_version} нет: "
             "версия уже подготовлена, собираю текущий релиз без поднятия версии."
         )
-        if not args.skip_build:
-            run_build(root)
-        if args.no_commit:
-            print("Файлы релиза не закоммичены, потому что указан --no-commit.")
-        elif has_staged_or_unstaged_release_file_changes(root):
-            commit_release(root, current_version)
-        if args.push:
-            push_current_branch(root)
+        finish_release(root, current_version, args)
         print("Релизная сборка завершена.")
         return 0
 
@@ -316,10 +964,7 @@ def main(argv: list[str] | None = None) -> int:
             f"Новых коммитов после версии {current_version} нет: "
             "собираю текущий релиз без поднятия версии."
         )
-        if not args.skip_build:
-            run_build(root)
-        if args.push:
-            push_current_branch(root)
+        finish_release(root, current_version, args)
         print("Релизная сборка завершена.")
         return 0
     if not changes:
@@ -333,15 +978,7 @@ def main(argv: list[str] | None = None) -> int:
     for change in changes:
         print(f"  - {change}")
 
-    if not args.skip_build:
-        run_build(root)
-
-    if args.no_commit:
-        print("Файлы релиза не закоммичены, потому что указан --no-commit.")
-    else:
-        commit_release(root, next_version)
-        if args.push:
-            push_current_branch(root)
+    finish_release(root, next_version, args)
 
     print("Релизная сборка завершена.")
     return 0
