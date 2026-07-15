@@ -151,7 +151,12 @@ def test_collects_working_databases_cycles_backups_and_history(tmp_path):
     ]
     assert snapshot.databases[0].schema_version == "17"
     assert snapshot.databases[1].schema_version == "9"
-    assert snapshot.databases[1].created_at == datetime(2026, 1, 2, 3, 4, 5)
+    expected_settings_created_at = (
+        datetime.fromisoformat("2026-01-02T03:04:05+10:00")
+        .astimezone()
+        .replace(tzinfo=None)
+    )
+    assert snapshot.databases[1].created_at == expected_settings_created_at
     assert len(snapshot.cycles) == 2
     assert snapshot.cycles[0].is_current
     assert snapshot.cycles[1].path == str(archive_path)
