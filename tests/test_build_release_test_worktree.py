@@ -12,6 +12,21 @@ if str(SCRIPTS_DIR) not in sys.path:
 from scripts import build_release, publish_full_update
 
 
+def test_publisher_rejects_local_windows_device_paths_as_network() -> None:
+    assert not publish_full_update._is_network_path(
+        Path(r"\\?\C:\Project\Baza_rao3_jurnal")
+    )
+    assert not publish_full_update._is_network_path(
+        Path(r"\\.\C:\Project\Baza_rao3_jurnal")
+    )
+    assert publish_full_update._is_network_path(
+        Path(r"\\server\share\Baza_rao3_jurnal")
+    )
+    assert publish_full_update._is_network_path(
+        Path(r"\\?\UNC\server\share\Baza_rao3_jurnal")
+    )
+
+
 def _forbidden(name: str):
     def fail(*_args, **_kwargs):
         pytest.fail(f"{name} не должен вызываться в режиме --test-worktree")

@@ -343,7 +343,12 @@ def _ensure_source_commit_is_pushed(manifest: dict[str, Any]) -> None:
 
 
 def _is_network_path(path: Path) -> bool:
-    raw = str(path)
+    raw = str(path).replace("/", "\\")
+    folded = raw.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        return True
+    if folded.startswith(("\\\\?\\", "\\\\.\\")):
+        return False
     if raw.startswith("\\\\"):
         return True
     if os.name != "nt" or not path.drive:
