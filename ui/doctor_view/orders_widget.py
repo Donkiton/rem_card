@@ -374,6 +374,9 @@ class OrdersWidget(QWidget):
         self._ensure_model_initialized()
         if self.model is None:
             return False
+        sources = list(orders or ())
+        if not sources:
+            return False
         if replace_existing:
             blocked = [
                 order for order in self.model.orders
@@ -387,25 +390,20 @@ class OrdersWidget(QWidget):
                     "удалите только будущие ячейки или добавьте назначения без полной замены листа."
                 )
                 return False
-            for row in range(len(self.model.orders) - 1, -1, -1):
-                order = self.model.orders[row]
-                if order is not None:
-                    self._mark_local_order_row_deleted(
-                        row,
-                        order,
-                        was_committed=self._is_committed_value(getattr(order, "is_committed", 0)),
-                    )
 
         start, end = self.service.get_day_period(self.shift_date)
         now = datetime.now()
         created_at = now if start <= now < end else start
         source_to_local_order_id = {}
-        for source in orders or []:
+        local_orders = []
+        for source in sources:
             local_order = self._clone_order_as_local_draft(source, created_at=created_at)
-            source_to_local_order_id[int(source.id)] = int(local_order.id)
-            self._insert_local_order_after_add(local_order)
+            source_id = getattr(source, "id", None)
+            if source_id is not None:
+                source_to_local_order_id[int(source_id)] = int(local_order.id)
+            local_orders.append(local_order)
 
-        copied_admin_keys = []
+        local_admin_rows = []
         if source_admin_rows and source_shift_date is not None:
             source_start, _ = self.service.get_day_period(source_shift_date)
             time_diff = start - source_start
@@ -450,12 +448,31 @@ class OrdersWidget(QWidget):
                     volume_ml=float(row_value(source_admin, "volume_ml", 0.0) or 0.0),
                 )
                 key = (local_order_id, local_planned.isoformat())
-                self.model.admin_map[key] = admin
-                copied_admin_keys.append(key)
-            if copied_admin_keys:
-                self._mark_local_admin_dirty(copied_admin_keys)
-                self._emit_admin_cell_changes(copied_admin_keys)
-                self.localBalanceChanged.emit()
+                local_admin_rows.append((key, admin))
+
+        # Сначала полностью подготавливаем новый пакет. Так ошибка в исходных
+        # данных не оставит текущий лист частично помеченным на удаление.
+        if replace_existing:
+            for row in range(len(self.model.orders) - 1, -1, -1):
+                order = self.model.orders[row]
+                if order is not None:
+                    self._mark_local_order_row_deleted(
+                        row,
+                        order,
+                        was_committed=self._is_committed_value(getattr(order, "is_committed", 0)),
+                    )
+
+        for local_order in local_orders:
+            self._insert_local_order_after_add(local_order)
+
+        copied_admin_keys = []
+        for key, admin in local_admin_rows:
+            self.model.admin_map[key] = admin
+            copied_admin_keys.append(key)
+        if copied_admin_keys:
+            self._mark_local_admin_dirty(copied_admin_keys)
+            self._emit_admin_cell_changes(copied_admin_keys)
+            self.localBalanceChanged.emit()
         return True
 
     def _clear_local_times(self):
@@ -4260,12 +4277,6 @@ class OrdersWidget(QWidget):
                     f"[OrdersWidget] Loading legacy template '{t_key}' type='{template_type}' as simple draft list"
                 )
 
-            replace_existing = False
-            if self.has_orders() or self.has_drafts():
-                reply = self._show_question("Лист назначений не пуст. Вы уверены, что хотите заменить текущий лист назначения?\nВсе текущие назначения будут переведены в черновики на удаление.")
-                if reply != CustomMessageBox.Yes: return
-                replace_existing = True
-
             now = datetime.now()
             start, end = self.service.get_day_period(self.shift_date)
             base_time = now if start <= now < end else start
@@ -4275,6 +4286,16 @@ class OrdersWidget(QWidget):
                 admission_id=self.admission_id,
                 base_time=base_time,
             )
+            if not orders_to_add:
+                self._show_warning("В выбранном шаблоне нет назначений для добавления.")
+                return
+
+            replace_existing = False
+            if self.has_orders() or self.has_drafts():
+                reply = self._show_question("Лист назначений не пуст. Вы уверены, что хотите заменить текущий лист назначения?\nВсе текущие назначения будут переведены в черновики на удаление.")
+                if reply != CustomMessageBox.Yes: return
+                replace_existing = True
+
             if not self._insert_local_orders_batch(orders_to_add, replace_existing=replace_existing):
                 return
             if legacy_complex_mode:

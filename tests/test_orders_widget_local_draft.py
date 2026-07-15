@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QApplication
 
 from rem_card.data.dto.remcard_dto import OrderDTO, OrderStatus, OrderType
 from rem_card.services.order_service import OrderConflictError
+from rem_card.ui.doctor_view.components.order_template_builder import build_orders_from_template
 from rem_card.ui.doctor_view.orders_widget import OrdersWidget
 from rem_card.ui.shared.components.vital_settings_dialog import VitalSettingsDialog
 from rem_card.ui.shared.orders_model import OrdersModel
@@ -248,6 +249,62 @@ def test_24_hour_chain_is_built_entirely_in_memory():
         assert roles[0] == "start"
         assert roles[-1] == "end"
         assert set(roles[1:-1]) == {"body"}
+    finally:
+        widget.shutdown()
+
+
+def test_template_batch_accepts_orders_without_source_ids():
+    widget, service = _make_widget()
+    try:
+        template_engine = SimpleNamespace(
+            drugs={
+                "template_drug": {
+                    "latin": "Medicamentum",
+                    "default_dose": 10,
+                    "unit": "mg",
+                    "admin_type": "bolus",
+                }
+            },
+            forms={},
+            admin_types={"bolus": {"name_ru": "в/в болюсно"}},
+            dilutions={},
+        )
+        template_orders = build_orders_from_template(
+            template={
+                "template_type": "simple",
+                "drugs": [{"drug": "template_drug", "dose": 20, "unit": "mg"}],
+            },
+            engine=template_engine,
+            admission_id=1,
+            base_time=widget.shift_date,
+        )
+
+        assert len(template_orders) == 1
+        assert template_orders[0].id is None
+        assert widget._insert_local_orders_batch(template_orders)
+
+        inserted = widget.model.orders[-1]
+        assert inserted.id < 0
+        assert inserted.drug_key == "template_drug"
+        assert inserted.dose_value == 20
+        assert inserted.is_committed == 0
+        assert template_orders[0].id is None
+        assert widget.has_drafts()
+        assert service.commit_calls == 0
+    finally:
+        widget.shutdown()
+
+
+def test_empty_batch_does_not_replace_existing_orders():
+    widget, _service = _make_widget()
+    try:
+        original_order_ids = [order.id for order in widget.model.orders]
+
+        assert not widget._insert_local_orders_batch([], replace_existing=True)
+
+        assert [order.id for order in widget.model.orders] == original_order_ids
+        assert widget._local_deleted_orders == {}
+        assert not widget.has_drafts()
     finally:
         widget.shutdown()
 
