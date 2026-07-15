@@ -4,7 +4,7 @@ pyqtgraph==0.14.0
 numpy==2.4.3
 
 # Reports, PDF and analytics
-reportlab==4.5.0
+reportlab==5.0.0
 pypdf==6.14.2
 matplotlib==3.10.8
 pandas==3.0.1
