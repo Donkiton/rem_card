@@ -3,6 +3,18 @@
 changed_files="$(git diff --cached --name-only --diff-filter=ACMR)"
 
 has_version=0
+PYTHON_CMD=""
+
+resolve_python() {
+    if command -v python >/dev/null 2>&1; then
+        PYTHON_CMD="python"
+    elif command -v py >/dev/null 2>&1; then
+        PYTHON_CMD="py -3"
+    else
+        echo "Python не найден, проверки перед коммитом выполнить невозможно."
+        exit 1
+    fi
+}
 
 for file in $changed_files; do
     case "$file" in
@@ -13,17 +25,18 @@ for file in $changed_files; do
 done
 
 if [ "$has_version" = "1" ]; then
-    if command -v python >/dev/null 2>&1; then
-        PYTHON_CMD="python"
-    elif command -v py >/dev/null 2>&1; then
-        PYTHON_CMD="py -3"
-    else
-        echo "Python не найден, не могу синхронизировать app/release_info.json."
-        exit 1
-    fi
-
+    resolve_python
     $PYTHON_CMD scripts/bump_version.py --sync-only || exit 1
     git add app/release_info.json
+fi
+
+git diff --cached --check || exit 1
+
+if [ -f scripts/security_repo_check.py ]; then
+    if [ -z "$PYTHON_CMD" ]; then
+        resolve_python
+    fi
+    $PYTHON_CMD scripts/security_repo_check.py --staged || exit 1
 fi
 
 exit 0

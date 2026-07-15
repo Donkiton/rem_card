@@ -14,6 +14,10 @@ from typing import Any, Optional
 
 from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app import operblock_startup_metrics
+from rem_card.app.emergency_password_storage import (
+    DEFAULT_EMERGENCY_PASSWORD,
+    create_emergency_password_record,
+)
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
 from rem_card.app.sqlite_shared import describe_sqlite_lock_holder, run_integrity_check, run_quick_check
@@ -48,6 +52,7 @@ DECOR_SETTINGS_APP_KEY = "decor_settings"
 BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
 EMERGENCY_PASSWORD_KEY = "emergency_password"
+EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY = "emergency_password_change_required"
 EMERGENCY_PASSWORD_CATALOG_KEY = "emergency_password"
 OPERBLOCK_ICONS_KEY = "operblock_icons"
 OPERBLOCK_SETTINGS_KEY = "operblock_settings"
@@ -73,7 +78,6 @@ OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS = (
     OPERBLOCK_QUICK_ORDERS_APP_KEY,
     OPERBLOCK_MEDICATION_PRESETS_APP_KEY,
 )
-DEFAULT_EMERGENCY_PASSWORD = "2u1x8dxgeD"
 MIN_EMERGENCY_PASSWORD_LENGTH = 6
 MAX_BACKGROUND_IMAGE_BLOB_BYTES = 32 * 1024 * 1024
 PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
@@ -183,7 +187,10 @@ APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
     DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns", DECOR_SETTINGS_APP_KEY),
     BACKGROUND_SETTINGS_KEY: ("background_settings",),
     STYLE_SETTINGS_KEY: ("style_settings",),
-    EMERGENCY_PASSWORD_CATALOG_KEY: (EMERGENCY_PASSWORD_KEY,),
+    EMERGENCY_PASSWORD_CATALOG_KEY: (
+        EMERGENCY_PASSWORD_KEY,
+        EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,
+    ),
     OPERBLOCK_SETTINGS_KEY: OPERBLOCK_APP_SETTING_KEYS,
 }
 
@@ -642,15 +649,30 @@ class SettingsService:
                 catalog_key=DISPLAY_SETTINGS_KEY,
                 log_change=False,
             )
-            self._write_app_setting_in_tx(
+            existing_emergency_password = self._select_app_setting(
                 cursor,
                 "shared",
                 EMERGENCY_PASSWORD_KEY,
-                DEFAULT_EMERGENCY_PASSWORD,
-                changed_by_role="system",
-                catalog_key=EMERGENCY_PASSWORD_CATALOG_KEY,
-                log_change=False,
             )
+            if existing_emergency_password is None:
+                self._write_app_setting_in_tx(
+                    cursor,
+                    "shared",
+                    EMERGENCY_PASSWORD_KEY,
+                    create_emergency_password_record(DEFAULT_EMERGENCY_PASSWORD),
+                    changed_by_role="system",
+                    catalog_key=EMERGENCY_PASSWORD_CATALOG_KEY,
+                    log_change=False,
+                )
+                self._write_app_setting_in_tx(
+                    cursor,
+                    "shared",
+                    EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,
+                    True,
+                    changed_by_role="system",
+                    catalog_key=EMERGENCY_PASSWORD_CATALOG_KEY,
+                    log_change=False,
+                )
             for catalog_key in (
                 DRUG_CATALOG_KEY,
                 ORDER_TEMPLATES_KEY,
@@ -2990,6 +3012,73 @@ class SettingsService:
                 changed_by_user=changed_by_user,
                 before=before,
                 after=value,
+            )
+
+    def set_emergency_password_config(
+        self,
+        password_record: dict[str, Any],
+        *,
+        change_required: bool,
+        operation: str = "update",
+        changed_by_role: str | None = "doctor",
+        changed_by_user: str | None = None,
+    ) -> None:
+        """Atomically store a password verifier and its first-change state.
+
+        Audit entries intentionally contain only state metadata, never the
+        legacy plaintext value or the new verifier material.
+        """
+        self.ensure_ready()
+        with self.db.transaction("settings_emergency_password_update") as cursor:
+            before_password = self._select_app_setting(cursor, "shared", EMERGENCY_PASSWORD_KEY)
+            before_required_row = self._select_app_setting(
+                cursor,
+                "shared",
+                EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,
+            )
+            before_required = False
+            if before_required_row:
+                try:
+                    before_required = bool(json.loads(before_required_row["value_json"]))
+                except Exception:
+                    before_required = False
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                EMERGENCY_PASSWORD_KEY,
+                password_record,
+                changed_by_role=changed_by_role,
+                changed_by_user=changed_by_user,
+                catalog_key=EMERGENCY_PASSWORD_CATALOG_KEY,
+                log_change=False,
+            )
+            self._write_app_setting_in_tx(
+                cursor,
+                "shared",
+                EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,
+                bool(change_required),
+                changed_by_role=changed_by_role,
+                changed_by_user=changed_by_user,
+                catalog_key=EMERGENCY_PASSWORD_CATALOG_KEY,
+                log_change=False,
+            )
+            self._bump_catalog_version(
+                cursor,
+                EMERGENCY_PASSWORD_CATALOG_KEY,
+                "app_settings",
+                f"shared:{EMERGENCY_PASSWORD_KEY}",
+                operation,
+                changed_by_role=changed_by_role,
+                changed_by_user=changed_by_user,
+                before={
+                    "configured": before_password is not None,
+                    "change_required": before_required,
+                },
+                after={
+                    "configured": True,
+                    "change_required": bool(change_required),
+                    "format": str(password_record.get("format") or ""),
+                },
             )
 
     def _select_app_setting(self, cursor, scope: str, key: str) -> dict[str, Any] | None:

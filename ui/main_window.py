@@ -893,9 +893,6 @@ class MainWindow(QMainWindow):
             return False
 
     def _confirm_emergency_password_for_transition(self, settings_db_path: str) -> bool:
-        if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
-            return True
-
         from rem_card.app.emergency_password import verify_emergency_password_for_offline_startup
         from rem_card.ui.shared.emergency_dialogs import EmergencyPasswordDialog
 
@@ -1090,9 +1087,6 @@ class MainWindow(QMainWindow):
             return False
 
     def _confirm_emergency_password_for_exit(self, title: str, message: str) -> bool:
-        if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
-            return True
-
         from rem_card.app.emergency_password import verify_emergency_password
         from rem_card.ui.shared.emergency_dialogs import EmergencyPasswordDialog
 

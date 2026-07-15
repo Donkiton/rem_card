@@ -3,23 +3,31 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton
 
-from rem_card.app.emergency_password import get_emergency_password, set_emergency_password, validate_emergency_password_value
+from rem_card.app.emergency_password import set_emergency_password, validate_emergency_password_value
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
 
 
 class EmergencyPasswordSettingsDialog(BaseStyledDialog):
-    def __init__(self, parent=None):
-        super().__init__("Аварийный пароль", parent=parent)
+    def __init__(self, parent=None, *, force_change: bool = False):
+        self.force_change = bool(force_change)
+        dialog_title = "Обязательная смена аварийного пароля" if self.force_change else "Аварийный пароль"
+        super().__init__(dialog_title, parent=parent)
         self.setModal(True)
         self.setMinimumWidth(430)
 
-        title = QLabel("Текущий аварийный пароль")
+        title_text = (
+            "При первом запуске установлен временный пароль 123456.\n"
+            "Задайте новый пароль, чтобы открыть остальные настройки."
+            if self.force_change
+            else "Смена аварийного пароля"
+        )
+        title = QLabel(title_text)
         title.setObjectName("DialogMessageText")
+        title.setWordWrap(True)
         self.content_layout.addWidget(title)
 
-        self.current_password_label = QLabel("")
-        self.current_password_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.current_password_label = QLabel("Текущее значение пароля скрыто.")
         self.current_password_label.setAlignment(Qt.AlignCenter)
         self.current_password_label.setStyleSheet(
             "font-size: 18px; font-weight: 700; padding: 10px 14px; "
@@ -62,14 +70,7 @@ class EmergencyPasswordSettingsDialog(BaseStyledDialog):
         buttons_layout.addWidget(self.cancel_button)
         self.content_layout.addWidget(buttons_frame)
 
-        self.load_current_password()
-
-    def load_current_password(self) -> None:
-        try:
-            self.current_password_label.setText(get_emergency_password())
-        except Exception as exc:
-            self.current_password_label.setText("Недоступен")
-            self._show_error(f"Не удалось прочитать текущий пароль: {exc}")
+        self.new_password_edit.setFocus(Qt.OtherFocusReason)
 
     def save_password(self) -> None:
         first = self.new_password_edit.text().strip()
@@ -83,7 +84,7 @@ class EmergencyPasswordSettingsDialog(BaseStyledDialog):
         except Exception as exc:
             self._show_error(str(exc))
             return
-        self.current_password_label.setText(first)
+        self.current_password_label.setText("Пароль установлен. Значение скрыто.")
         self.new_password_edit.clear()
         self.repeat_password_edit.clear()
         CustomMessageBox.information(self, "Аварийный пароль", "Пароль сохранён.")

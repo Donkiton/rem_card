@@ -20,7 +20,7 @@
 
 ## Шаг 1. Собрать локальный full-релиз
 
-Откройте PowerShell в `C:\Test\remcard` и выполните:
+Откройте PowerShell в `C:\Test\rem_card` и выполните:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\build_release.py
