@@ -39,6 +39,9 @@ VERSIONED_FILES = ("VERSION", "CHANGELOG.md", "app/release_info.json")
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 MANIFEST_FILE_NAME = "manifest.json"
 READY_FILE_NAME = "ready.ok"
+TEST_WORKTREE_MARKER_NAME = "TEST_WORKTREE_ONLY.txt"
+PROGRESS_JSON_PREFIX = "REMCARD_PROGRESS_JSON:"
+PROGRESS_JSON_SCHEMA_VERSION = 1
 RELEASES_DIR_NAME = "releases"
 REQUIRED_RELEASE_EXES = (
     "RemCardDoctor.exe",
@@ -55,6 +58,47 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMPILED_SMOKE_TIMEOUT_SECONDS = 30
 BUILD_ARTIFACT_DIR_NAMES = ("build", "dist")
 BUILD_ARTIFACT_CLEANUP_DELAYS = (0.0, 0.25, 0.75)
+
+
+def _progress_mode(args: argparse.Namespace) -> str:
+    if bool(getattr(args, "test_worktree", False)):
+        return "test_worktree"
+    if bool(getattr(args, "no_commit", False)):
+        return "no_commit"
+    return "release"
+
+
+def emit_progress(
+    args: argparse.Namespace,
+    *,
+    stage: str,
+    status: str,
+    progress: int,
+    message: str,
+    path: Path | None = None,
+) -> None:
+    """Emit one machine-readable UTF-8 JSON line without hiding normal logs."""
+    if not bool(getattr(args, "progress_json", False)):
+        return
+    payload: dict[str, object] = {
+        "schema_version": PROGRESS_JSON_SCHEMA_VERSION,
+        "mode": _progress_mode(args),
+        "stage": str(stage),
+        "status": str(status),
+        "progress": max(0, min(100, int(progress))),
+        "message": str(message),
+    }
+    if path is not None:
+        payload["path"] = str(path.resolve())
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    line = f"{PROGRESS_JSON_PREFIX}{serialized}\n"
+    binary_stream = getattr(sys.stdout, "buffer", None)
+    if binary_stream is not None:
+        sys.stdout.flush()
+        binary_stream.write(line.encode("utf-8"))
+        binary_stream.flush()
+    else:
+        print(line, end="", flush=True)
 
 CHANGELOG_SUBJECT_TRANSLATIONS = {
     "Optimize cached vitals card reopen": (
@@ -875,18 +919,221 @@ def publish_built_release(
     return published_dir
 
 
+def write_test_worktree_marker(package_dir: Path, *, source_commit: str) -> Path:
+    """Mark a dirty-worktree package as test-only and never as updater-ready."""
+    ready_path = package_dir / READY_FILE_NAME
+    if ready_path.exists():
+        raise RuntimeError(
+            f"Тестовая сборка не может содержать {READY_FILE_NAME}: {ready_path}"
+        )
+    marker_path = package_dir / TEST_WORKTREE_MARKER_NAME
+    marker_path.write_text(
+        "ТЕСТОВАЯ СБОРКА — НЕ ДЛЯ ПУБЛИКАЦИИ\n"
+        "Пакет собран из текущего рабочего дерева и может содержать "
+        "незакоммиченные изменения.\n"
+        f"Git HEAD: {source_commit}\n"
+        f"Время сборки: {datetime.now().astimezone().isoformat(timespec='seconds')}\n"
+        "Не публикуйте этот каталог как production-релиз.\n",
+        encoding="utf-8",
+    )
+    return marker_path
+
+
+def build_test_worktree(root: Path, args: argparse.Namespace) -> Path:
+    """Build and validate the current worktree without changing release state."""
+    version = read_version(root)
+    source_commit = head_commit(root)
+    package_dir: Path | None = None
+    completed = False
+    try:
+        emit_progress(
+            args,
+            stage="checks",
+            status="started",
+            progress=5,
+            message="Запуск обязательных проверок.",
+        )
+        run_release_checks(root)
+        emit_progress(
+            args,
+            stage="checks",
+            status="completed",
+            progress=25,
+            message="Обязательные проверки пройдены.",
+        )
+
+        emit_progress(
+            args,
+            stage="build",
+            status="started",
+            progress=25,
+            message="Запуск PyInstaller.",
+        )
+        package_dir = run_build(root)
+        emit_progress(
+            args,
+            stage="build",
+            status="completed",
+            progress=60,
+            message="PyInstaller завершил сборку.",
+            path=package_dir,
+        )
+
+        emit_progress(
+            args,
+            stage="validate",
+            status="started",
+            progress=60,
+            message="Проверка полного пакета.",
+        )
+        validate_full_package(
+            package_dir,
+            version=version,
+            source_commit=source_commit,
+        )
+        emit_progress(
+            args,
+            stage="validate",
+            status="completed",
+            progress=72,
+            message="Полный пакет проверен.",
+        )
+
+        emit_progress(
+            args,
+            stage="smoke",
+            status="started",
+            progress=72,
+            message="Запуск smoke-тестов собранных EXE.",
+        )
+        run_compiled_smoke(package_dir)
+        emit_progress(
+            args,
+            stage="smoke",
+            status="completed",
+            progress=90,
+            message="Smoke-тесты пройдены.",
+        )
+
+        emit_progress(
+            args,
+            stage="marker",
+            status="started",
+            progress=90,
+            message="Маркировка тестового пакета.",
+        )
+        marker_path = write_test_worktree_marker(
+            package_dir,
+            source_commit=source_commit,
+        )
+        if (package_dir / READY_FILE_NAME).exists():
+            raise RuntimeError(
+                f"Тестовая сборка ошибочно содержит {READY_FILE_NAME}: {package_dir}"
+            )
+        emit_progress(
+            args,
+            stage="marker",
+            status="completed",
+            progress=96,
+            message=f"Создан маркер {marker_path.name}.",
+            path=marker_path,
+        )
+        completed = True
+    finally:
+        emit_progress(
+            args,
+            stage="cleanup",
+            status="started",
+            progress=96,
+            message="Очистка временного каталога build.",
+        )
+        cleanup_build_artifacts(root, remove_dist=not completed)
+        emit_progress(
+            args,
+            stage="cleanup",
+            status="completed",
+            progress=99,
+            message=(
+                "Временный каталог build удалён; dist\\Prog сохранён."
+                if completed
+                else "Неуспешные артефакты сборки удалены."
+            ),
+        )
+
+    if package_dir is None:
+        raise RuntimeError("PyInstaller не вернул каталог тестовой сборки.")
+    exact_path = package_dir.resolve()
+    print(f"Тестовая сборка рабочего дерева готова: {exact_path}")
+    print(
+        f"Пакет помечен файлом {TEST_WORKTREE_MARKER_NAME}; "
+        f"в UPD он не опубликован и {READY_FILE_NAME} не создан."
+    )
+    emit_progress(
+        args,
+        stage="completed",
+        status="completed",
+        progress=100,
+        message="Тестовая сборка рабочего дерева завершена.",
+        path=exact_path,
+    )
+    return exact_path
+
+
 def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
     if args.no_commit:
         try:
             if not args.skip_build:
+                emit_progress(
+                    args,
+                    stage="build",
+                    status="started",
+                    progress=15,
+                    message="Запуск тестовой PyInstaller-сборки без release-коммита.",
+                )
                 package_dir = run_build(root)
+                emit_progress(
+                    args,
+                    stage="build",
+                    status="completed",
+                    progress=60,
+                    message="PyInstaller завершил сборку.",
+                    path=package_dir,
+                )
                 source_commit = head_commit(root)
+                emit_progress(
+                    args,
+                    stage="validate",
+                    status="started",
+                    progress=60,
+                    message="Проверка полного пакета.",
+                )
                 validate_full_package(
                     package_dir,
                     version=version,
                     source_commit=source_commit,
                 )
+                emit_progress(
+                    args,
+                    stage="validate",
+                    status="completed",
+                    progress=72,
+                    message="Полный пакет проверен.",
+                )
+                emit_progress(
+                    args,
+                    stage="smoke",
+                    status="started",
+                    progress=72,
+                    message="Запуск smoke-тестов собранных EXE.",
+                )
                 run_compiled_smoke(package_dir)
+                emit_progress(
+                    args,
+                    stage="smoke",
+                    status="completed",
+                    progress=95,
+                    message="Smoke-тесты пройдены.",
+                )
                 print(
                     f"Тестовая сборка без release-коммита создана только в {package_dir}. "
                     f"В UPD она не публикуется и {READY_FILE_NAME} не создаётся."
@@ -896,7 +1143,21 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
         finally:
             # A completed --no-commit build leaves dist\Prog for inspection;
             # --skip-build has no newly built output worth preserving.
+            emit_progress(
+                args,
+                stage="cleanup",
+                status="started",
+                progress=95,
+                message="Очистка временных артефактов сборки.",
+            )
             cleanup_build_artifacts(root, remove_dist=bool(args.skip_build))
+            emit_progress(
+                args,
+                stage="cleanup",
+                status="completed",
+                progress=99,
+                message="Очистка временных артефактов завершена.",
+            )
         return
 
     try:
@@ -912,23 +1173,123 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
 
         # First prove that the exact release commit can produce a complete package.
         # Only a successful build may be pushed and made visible in the local UPD.
+        emit_progress(
+            args,
+            stage="checks",
+            status="started",
+            progress=10,
+            message="Запуск обязательных проверок.",
+        )
         run_release_checks(root)
+        emit_progress(
+            args,
+            stage="checks",
+            status="completed",
+            progress=25,
+            message="Обязательные проверки пройдены.",
+        )
         ensure_clean_tree(root)
+        emit_progress(
+            args,
+            stage="build",
+            status="started",
+            progress=25,
+            message="Запуск PyInstaller.",
+        )
         package_dir = run_build(root)
+        emit_progress(
+            args,
+            stage="build",
+            status="completed",
+            progress=55,
+            message="PyInstaller завершил сборку.",
+            path=package_dir,
+        )
+        emit_progress(
+            args,
+            stage="validate",
+            status="started",
+            progress=55,
+            message="Проверка полного пакета.",
+        )
         validate_full_package(package_dir, version=version, source_commit=source_commit)
+        emit_progress(
+            args,
+            stage="validate",
+            status="completed",
+            progress=65,
+            message="Полный пакет проверен.",
+        )
+        emit_progress(
+            args,
+            stage="smoke",
+            status="started",
+            progress=65,
+            message="Запуск smoke-тестов собранных EXE.",
+        )
         run_compiled_smoke(package_dir)
+        emit_progress(
+            args,
+            stage="smoke",
+            status="completed",
+            progress=78,
+            message="Smoke-тесты пройдены.",
+        )
         ensure_clean_tree(root)
+        emit_progress(
+            args,
+            stage="push",
+            status="started",
+            progress=78,
+            message="Отправка release-коммита в GitHub.",
+        )
         pushed_commit = push_current_branch(root)
         if pushed_commit != source_commit:
             raise RuntimeError("Во время release-сборки изменился git HEAD; публикация остановлена.")
-        publish_built_release(
+        emit_progress(
+            args,
+            stage="push",
+            status="completed",
+            progress=88,
+            message="Git push подтверждён.",
+        )
+        emit_progress(
+            args,
+            stage="publish",
+            status="started",
+            progress=88,
+            message="Публикация в локальный UPD.",
+        )
+        published_dir = publish_built_release(
             root,
             package_dir,
             version=version,
             source_commit=source_commit,
         )
+        emit_progress(
+            args,
+            stage="publish",
+            status="completed",
+            progress=96,
+            message="Локальный full-релиз опубликован.",
+            path=published_dir,
+        )
     finally:
+        emit_progress(
+            args,
+            stage="cleanup",
+            status="started",
+            progress=96,
+            message="Очистка временных артефактов сборки.",
+        )
         cleanup_build_artifacts(root)
+        emit_progress(
+            args,
+            stage="cleanup",
+            status="completed",
+            progress=99,
+            message="Очистка временных артефактов завершена.",
+        )
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -942,7 +1303,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "level",
         nargs="?",
         choices=RELEASE_LEVELS,
-        default="auto",
+        default=None,
         help="auto, patch, minor или major. По умолчанию auto.",
     )
     parser.add_argument("--set", dest="set_version", help="Задать точную версию MAJOR.MINOR.PATCH")
@@ -968,11 +1329,51 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Совместимый флаг: push теперь всегда обязателен перед публикацией full-релиза.",
     )
     parser.add_argument("--allow-empty", action="store_true", help="Разрешить релиз без новых git-коммитов.")
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--test-worktree",
+        action="store_true",
+        help=(
+            "Собрать текущее рабочее дерево, включая незакоммиченные изменения, "
+            "без изменения версии, commit, push и публикации в UPD."
+        ),
+    )
+    parser.add_argument(
+        "--progress-json",
+        action="store_true",
+        help=(
+            f"Дополнительно печатать однострочные JSON-события прогресса с префиксом "
+            f"{PROGRESS_JSON_PREFIX}"
+        ),
+    )
+    args = parser.parse_args(argv)
+    args.level_was_explicit = args.level is not None
+    if args.level is None:
+        args.level = "auto"
+    return args
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(list(sys.argv[1:] if argv is None else argv))
+def validate_cli_args(args: argparse.Namespace) -> None:
+    if args.test_worktree:
+        conflicts: list[str] = []
+        if bool(getattr(args, "level_was_explicit", False)):
+            conflicts.append("позиционный level")
+        if args.no_commit:
+            conflicts.append("--no-commit")
+        if args.skip_build:
+            conflicts.append("--skip-build")
+        if args.push:
+            conflicts.append("--push")
+        if args.set_version:
+            conflicts.append("--set")
+        if args.change:
+            conflicts.append("--change")
+        if args.allow_empty:
+            conflicts.append("--allow-empty")
+        if conflicts:
+            raise SystemExit(
+                "--test-worktree нельзя сочетать со следующими аргументами: "
+                + ", ".join(conflicts)
+            )
     if args.push and args.no_commit:
         raise SystemExit("--push нельзя использовать вместе с --no-commit")
     if args.skip_build and not args.no_commit:
@@ -981,12 +1382,8 @@ def main(argv: list[str] | None = None) -> int:
             "production-релиз обязан пройти сборку и smoke-тест всех EXE."
         )
 
-    root = project_root()
-    ensure_git_repo(root)
-    if not args.no_commit:
-        cleanup_build_artifacts(root)
-    ensure_clean_tree(root)
 
+def _run_release_main(root: Path, args: argparse.Namespace) -> int:
     previous_release_commit = latest_version_commit(root)
     current_head = head_commit(root)
     subjects = collect_commit_subjects(root, previous_release_commit)
@@ -1031,6 +1428,58 @@ def main(argv: list[str] | None = None) -> int:
 
     print("Релизная сборка завершена.")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(list(sys.argv[1:] if argv is None else argv))
+    validate_cli_args(args)
+    emit_progress(
+        args,
+        stage="start",
+        status="started",
+        progress=0,
+        message=(
+            "Запуск тестовой сборки рабочего дерева."
+            if args.test_worktree
+            else "Запуск релизной сборки."
+        ),
+    )
+    try:
+        root = project_root()
+        ensure_git_repo(root)
+        if args.test_worktree:
+            build_test_worktree(root, args)
+            return 0
+
+        if not args.no_commit:
+            cleanup_build_artifacts(root)
+        ensure_clean_tree(root)
+        emit_progress(
+            args,
+            stage="prepare",
+            status="completed",
+            progress=10,
+            message="Git-репозиторий и рабочее дерево проверены.",
+        )
+        result = _run_release_main(root, args)
+    except Exception as exc:
+        emit_progress(
+            args,
+            stage="failed",
+            status="failed",
+            progress=100,
+            message=str(exc),
+        )
+        raise
+    if not args.test_worktree:
+        emit_progress(
+            args,
+            stage="completed",
+            status="completed",
+            progress=100,
+            message="Релизная сборка завершена.",
+        )
+    return result
 
 
 if __name__ == "__main__":
