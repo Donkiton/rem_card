@@ -68,6 +68,14 @@ def _progress_mode(args: argparse.Namespace) -> str:
     return "release"
 
 
+def _current_progress(args: argparse.Namespace) -> int:
+    try:
+        value = int(getattr(args, "_last_progress", 0))
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, min(99, value))
+
+
 def emit_progress(
     args: argparse.Namespace,
     *,
@@ -78,6 +86,14 @@ def emit_progress(
     path: Path | None = None,
 ) -> None:
     """Emit one machine-readable UTF-8 JSON line without hiding normal logs."""
+    previous_progress = _current_progress(args)
+    requested_progress = max(0, min(100, int(progress)))
+    event_progress = (
+        previous_progress
+        if status == "failed"
+        else max(previous_progress, requested_progress)
+    )
+    setattr(args, "_last_progress", event_progress)
     if not bool(getattr(args, "progress_json", False)):
         return
     payload: dict[str, object] = {
@@ -85,7 +101,7 @@ def emit_progress(
         "mode": _progress_mode(args),
         "stage": str(stage),
         "status": str(status),
-        "progress": max(0, min(100, int(progress))),
+        "progress": event_progress,
         "message": str(message),
     }
     if path is not None:
@@ -814,6 +830,11 @@ def publish_local_release(
     source_commit: str,
 ) -> Path:
     """Publish only to the local test UPD; network deployment stays manual."""
+    test_marker = package_dir / TEST_WORKTREE_MARKER_NAME
+    if test_marker.exists():
+        raise RuntimeError(
+            f"Публикация тестовой сборки запрещена: найден {test_marker}"
+        )
     parse_version(version)
     validate_full_package(package_dir, version=version, source_commit=source_commit)
 
@@ -944,6 +965,7 @@ def build_test_worktree(root: Path, args: argparse.Namespace) -> Path:
     version = read_version(root)
     source_commit = head_commit(root)
     package_dir: Path | None = None
+    build_started = False
     completed = False
     try:
         emit_progress(
@@ -969,6 +991,7 @@ def build_test_worktree(root: Path, args: argparse.Namespace) -> Path:
             progress=25,
             message="Запуск PyInstaller.",
         )
+        build_started = True
         package_dir = run_build(root)
         emit_progress(
             args,
@@ -1040,25 +1063,27 @@ def build_test_worktree(root: Path, args: argparse.Namespace) -> Path:
         )
         completed = True
     finally:
-        emit_progress(
-            args,
-            stage="cleanup",
-            status="started",
-            progress=96,
-            message="Очистка временного каталога build.",
-        )
-        cleanup_build_artifacts(root, remove_dist=not completed)
-        emit_progress(
-            args,
-            stage="cleanup",
-            status="completed",
-            progress=99,
-            message=(
-                "Временный каталог build удалён; dist\\Prog сохранён."
-                if completed
-                else "Неуспешные артефакты сборки удалены."
-            ),
-        )
+        if build_started:
+            cleanup_progress = 96 if completed else _current_progress(args)
+            emit_progress(
+                args,
+                stage="cleanup",
+                status="started",
+                progress=cleanup_progress,
+                message="Очистка временного каталога build.",
+            )
+            cleanup_build_artifacts(root, remove_dist=not completed)
+            emit_progress(
+                args,
+                stage="cleanup",
+                status="completed",
+                progress=99 if completed else cleanup_progress,
+                message=(
+                    "Временный каталог build удалён; dist\\Prog сохранён."
+                    if completed
+                    else "Неуспешные артефакты сборки удалены."
+                ),
+            )
 
     if package_dir is None:
         raise RuntimeError("PyInstaller не вернул каталог тестовой сборки.")
@@ -1081,6 +1106,7 @@ def build_test_worktree(root: Path, args: argparse.Namespace) -> Path:
 
 def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
     if args.no_commit:
+        no_commit_completed = False
         try:
             if not args.skip_build:
                 emit_progress(
@@ -1140,14 +1166,16 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
                 )
             else:
                 print("Файлы релиза не закоммичены; сборка и публикация пропущены.")
+            no_commit_completed = True
         finally:
             # A completed --no-commit build leaves dist\Prog for inspection;
             # --skip-build has no newly built output worth preserving.
+            cleanup_progress = 95 if no_commit_completed else _current_progress(args)
             emit_progress(
                 args,
                 stage="cleanup",
                 status="started",
-                progress=95,
+                progress=cleanup_progress,
                 message="Очистка временных артефактов сборки.",
             )
             cleanup_build_artifacts(root, remove_dist=bool(args.skip_build))
@@ -1155,11 +1183,12 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
                 args,
                 stage="cleanup",
                 status="completed",
-                progress=99,
+                progress=99 if no_commit_completed else cleanup_progress,
                 message="Очистка временных артефактов завершена.",
             )
         return
 
+    release_completed = False
     try:
         if has_staged_or_unstaged_release_file_changes(root):
             commit_release(root, version)
@@ -1274,12 +1303,14 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
             message="Локальный full-релиз опубликован.",
             path=published_dir,
         )
+        release_completed = True
     finally:
+        cleanup_progress = 96 if release_completed else _current_progress(args)
         emit_progress(
             args,
             stage="cleanup",
             status="started",
-            progress=96,
+            progress=cleanup_progress,
             message="Очистка временных артефактов сборки.",
         )
         cleanup_build_artifacts(root)
@@ -1287,7 +1318,7 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
             args,
             stage="cleanup",
             status="completed",
-            progress=99,
+            progress=99 if release_completed else cleanup_progress,
             message="Очистка временных артефактов завершена.",
         )
 
@@ -1467,7 +1498,7 @@ def main(argv: list[str] | None = None) -> int:
             args,
             stage="failed",
             status="failed",
-            progress=100,
+            progress=_current_progress(args),
             message=str(exc),
         )
         raise

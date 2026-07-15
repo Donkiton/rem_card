@@ -33,6 +33,7 @@ from app.full_update_manifest import (  # noqa: E402
 APP_ID = "rem_card"
 MANIFEST_FILE_NAME = "manifest.json"
 READY_FILE_NAME = "ready.ok"
+TEST_WORKTREE_MARKER_NAME = "TEST_WORKTREE_ONLY.txt"
 RELEASES_DIR_NAME = "releases"
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -234,6 +235,11 @@ def _resolve_production_baza(args: argparse.Namespace) -> Path:
 def _validate_release(source: Path) -> tuple[dict[str, Any], str]:
     if not source.is_dir():
         raise PublishError(f"Локальный full-релиз не найден: {source}")
+    test_marker = source / TEST_WORKTREE_MARKER_NAME
+    if test_marker.exists():
+        raise PublishError(
+            f"Production-публикация тестовой сборки запрещена: найден {test_marker}"
+        )
     if not (source / READY_FILE_NAME).is_file():
         raise PublishError(f"Локальный релиз не готов: отсутствует {source / READY_FILE_NAME}")
 

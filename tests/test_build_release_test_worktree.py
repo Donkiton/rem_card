@@ -9,7 +9,7 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from scripts import build_release
+from scripts import build_release, publish_full_update
 
 
 def _forbidden(name: str):
@@ -193,6 +193,51 @@ def test_failed_test_worktree_removes_build_and_dist(
     assert events[-1]["stage"] == "failed"
     assert events[-1]["status"] == "failed"
     assert events[-1]["message"] == "smoke не пройден"
+    assert events[-1]["progress"] == 72
+    assert events[-1]["progress"] < 100
+    cleanup_events = [event for event in events if event["stage"] == "cleanup"]
+    assert cleanup_events
+    assert {event["progress"] for event in cleanup_events} == {72}
+
+
+def test_failed_checks_preserve_existing_dist_and_current_progress(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    _prepare_release_files(tmp_path)
+    existing_dist_file = tmp_path / "dist" / "Prog" / "previous-build.bin"
+    existing_build_file = tmp_path / "build" / "previous-state.bin"
+    existing_dist_file.parent.mkdir(parents=True)
+    existing_build_file.parent.mkdir(parents=True)
+    existing_dist_file.write_bytes(b"previous dist")
+    existing_build_file.write_bytes(b"previous build")
+
+    monkeypatch.setattr(build_release, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(build_release, "ensure_git_repo", lambda _root: None)
+    monkeypatch.setattr(build_release, "head_commit", lambda _root: "d" * 40)
+
+    def fail_checks(_root: Path) -> None:
+        raise RuntimeError("обязательная проверка не пройдена")
+
+    monkeypatch.setattr(build_release, "run_release_checks", fail_checks)
+    monkeypatch.setattr(build_release, "run_build", _forbidden("run_build"))
+
+    with pytest.raises(RuntimeError, match="обязательная проверка не пройдена"):
+        build_release.main(["--test-worktree", "--progress-json"])
+
+    assert existing_dist_file.read_bytes() == b"previous dist"
+    assert existing_build_file.read_bytes() == b"previous build"
+    output = capsys.readouterr().out
+    events = [
+        json.loads(line.removeprefix(build_release.PROGRESS_JSON_PREFIX))
+        for line in output.splitlines()
+        if line.startswith(build_release.PROGRESS_JSON_PREFIX)
+    ]
+    assert not any(event["stage"] == "cleanup" for event in events)
+    assert events[-1]["stage"] == "failed"
+    assert events[-1]["progress"] == 5
+    assert all(event["progress"] < 100 for event in events)
 
 
 def test_test_marker_rejects_ready_ok(tmp_path: Path) -> None:
@@ -207,6 +252,39 @@ def test_test_marker_rejects_ready_ok(tmp_path: Path) -> None:
         )
 
     assert not (package_dir / build_release.TEST_WORKTREE_MARKER_NAME).exists()
+
+
+def test_local_release_publisher_rejects_test_worktree_marker(tmp_path: Path) -> None:
+    package_dir = tmp_path / "dist" / "Prog"
+    package_dir.mkdir(parents=True)
+    marker = package_dir / build_release.TEST_WORKTREE_MARKER_NAME
+    marker.write_text("test only", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Публикация тестовой сборки запрещена") as exc_info:
+        build_release.publish_local_release(
+            tmp_path,
+            package_dir,
+            version="3.15.0",
+            source_commit="e" * 40,
+        )
+
+    assert str(marker) in str(exc_info.value)
+
+
+def test_production_publisher_rejects_test_worktree_marker(tmp_path: Path) -> None:
+    source = tmp_path / "3.15.0"
+    source.mkdir()
+    marker = source / publish_full_update.TEST_WORKTREE_MARKER_NAME
+    marker.write_text("test only", encoding="utf-8")
+    (source / publish_full_update.READY_FILE_NAME).write_text("ready", encoding="utf-8")
+
+    with pytest.raises(
+        publish_full_update.PublishError,
+        match="Production-публикация тестовой сборки запрещена",
+    ) as exc_info:
+        publish_full_update._validate_release(source)
+
+    assert str(marker) in str(exc_info.value)
 
 
 def test_regular_release_emits_progress_for_all_pipeline_stages(
