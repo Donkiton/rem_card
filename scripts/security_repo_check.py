@@ -45,6 +45,18 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 
 MARKDOWN_INTERNAL_PATH_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
+        "email-address",
+        re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    ),
+    (
+        "known-private-identity",
+        re.compile(r"\b(?:Битюцк|Bityutskiy)", re.IGNORECASE),
+    ),
+    (
+        "private-organization-domain",
+        re.compile(r"\bacrb-amursk\.ru\b", re.IGNORECASE),
+    ),
+    (
         "internal-unc-fqdn",
         re.compile(
             r"\\\\(?!(?:server|test-fileserver)(?:\\|\.example\.test\\))"
