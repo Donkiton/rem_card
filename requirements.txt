@@ -1,21 +1,21 @@
 # Runtime UI and chart stack
-PySide6==6.10.2
+PySide6==6.11.1
 pyqtgraph==0.14.0
-numpy==2.4.3
+numpy==2.5.1
 
 # Reports, PDF and analytics
 reportlab==4.5.0
 pypdf==6.14.2
-matplotlib==3.10.8
-pandas==3.0.1
+matplotlib==3.11.0
+pandas==3.0.3
 pillow==12.3.0
 
 # Windows integration used by shortcuts/window helpers
 pywin32==311; platform_system == "Windows"
 
 # Build and local verification tools
-pyinstaller==6.20.0
-pyinstaller-hooks-contrib==2026.4
+pyinstaller==6.21.0
+pyinstaller-hooks-contrib==2026.6
 pytest==9.1.1
 flake8==7.3.0
 radon==6.0.1
