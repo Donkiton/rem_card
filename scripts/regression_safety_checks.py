@@ -14009,6 +14009,12 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
     ):
         if required_sql not in service_source:
             return False, f"W1a read model must keep optimized active-admission SQL: {required_sql}"
+    for visibility_sql in (
+        "COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')",
+        "OR COALESCE(o.is_committed, 0) = 0",
+    ):
+        if service_source.count(visibility_sql) < 2:
+            return False, f"current/W1a read models must hide committed deleted orders: {visibility_sql}"
 
     nurse_card_source = (root / "ui" / "shared" / "components" / "nurse_order_card.py").read_text(encoding="utf-8")
     for forbidden_marker in (
@@ -15189,6 +15195,10 @@ def _check_visible_section_cache_keys_use_shift_context(temp_root: str) -> tuple
     orders_persisted = persistent_snapshot_cache.load_snapshot("current_orders", orders_widget._cache_key())
     if not orders_persisted or orders_persisted.get("data", [{}])[0].get("id") != 1:
         return False, f"current orders persistent cache was not stored: {orders_persisted}"
+    if not CurrentNurseOrdersWidget._is_cache_snapshot_compatible(orders_persisted):
+        return False, f"current orders persistent cache format is stale: {orders_persisted}"
+    if CurrentNurseOrdersWidget._is_cache_snapshot_compatible({"version": 5, "data": []}):
+        return False, "current orders cache accepted a pre-fix snapshot without format version"
 
     diet.service = FakeService()
     diet._snapshot_cache = OrderedDict()

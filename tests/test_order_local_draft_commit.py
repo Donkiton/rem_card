@@ -150,6 +150,62 @@ def draft_context():
     return db, OrderService(OrdersDAO(db)), shift, baseline_order, baseline_admin
 
 
+def _prepare_upcoming_read_model(db, service):
+    db.conn.executescript(
+        """
+        CREATE TABLE patients (
+            id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            last_name TEXT,
+            first_name TEXT,
+            middle_name TEXT
+        );
+        CREATE TABLE admissions (
+            id INTEGER PRIMARY KEY,
+            patient_id INTEGER,
+            outcome TEXT,
+            transfer_datetime TEXT,
+            death_datetime TEXT
+        );
+        CREATE TABLE beds (
+            id INTEGER PRIMARY KEY,
+            bed_number TEXT,
+            current_admission_id INTEGER,
+            status TEXT
+        );
+        CREATE TABLE patient_status_events (
+            id INTEGER PRIMARY KEY,
+            admission_id INTEGER,
+            end_time TEXT,
+            status TEXT
+        );
+
+        INSERT INTO patients(id, full_name, last_name, first_name, middle_name)
+        VALUES (1, 'Тестовый Пациент', 'Тестовый', 'Пациент', '');
+        INSERT INTO admissions(id, patient_id, outcome, transfer_datetime, death_datetime)
+        VALUES (1, 1, '', NULL, NULL);
+        INSERT INTO beds(id, bed_number, current_admission_id, status)
+        VALUES (1, '1', 1, 'OCCUPIED');
+        """
+    )
+    db.conn.commit()
+    service._domain_service._legacy_statuses_sanitized = True
+    service._domain_service._load_groups_priority = lambda: {}
+    service._domain_service._load_drugs_groups = lambda: {}
+
+
+def _read_model_order_ids(service, admission_id, shift):
+    current_ids = {
+        int(row["order_id"])
+        for row in service.get_nurse_orders_data(admission_id, shift)
+    }
+    upcoming_ids = {
+        int(row["order_id"])
+        for row in service.get_upcoming_orders_across_active_admissions(shift)
+    }
+    return current_ids, upcoming_ids
+
+
 def test_local_patch_uses_one_transaction_and_writes_only_final_state(draft_context):
     db, service, shift, baseline_order, baseline_admin = draft_context
     baseline_counts = tuple(
@@ -549,3 +605,74 @@ def test_delete_tombstone_is_applied_only_by_atomic_orders_save(draft_context):
     assert int(saved["is_committed"]) == 1
     assert OrdersDAO(db).get_orders(1, shift, only_committed=True) == []
     assert db.transaction_count == 1
+
+
+def test_atomic_order_replacement_hides_committed_deleted_order_from_upcoming_read_models(draft_context):
+    db, service, shift, baseline_order, baseline_admin = draft_context
+    _prepare_upcoming_read_model(db, service)
+
+    deleted_order = deepcopy(baseline_order)
+    deleted_order._pending_delete = True
+    new_order = OrderDTO(
+        id=-1,
+        admission_id=1,
+        drug_key="replacement",
+        latin="Replacement",
+        type=OrderType.MEDICATION,
+        status=OrderStatus.ACTIVE,
+        dose_value=1,
+        dose_unit="ml",
+        is_committed=0,
+        created_at=shift,
+    )
+    new_time = baseline_admin.planned_time + timedelta(minutes=10)
+    new_admin = AdministrationDTO(
+        id=-1,
+        order_id=-1,
+        cell_role="single",
+        planned_time=new_time,
+        status="planned",
+        version=0,
+        is_committed=0,
+    )
+
+    order_id_map = service.commit_local_draft(
+        1,
+        shift,
+        orders=[deleted_order, new_order],
+        admin_map={(-1, new_time.isoformat()): new_admin},
+        dirty_admin_keys=[(-1, new_time.isoformat())],
+        baseline_admin_map={(baseline_order.id, baseline_admin.planned_time.isoformat()): baseline_admin},
+        expected_revisions={baseline_order.id: baseline_order.revision},
+        expected_active_order_ids=[baseline_order.id],
+    )
+
+    replacement_id = int(order_id_map[-1])
+    saved_old = db.conn.execute(
+        "SELECT status, is_committed FROM orders WHERE id = ?",
+        (baseline_order.id,),
+    ).fetchone()
+    saved_old_admin = db.conn.execute(
+        "SELECT status, is_committed FROM administrations WHERE id = ?",
+        (baseline_admin.id,),
+    ).fetchone()
+    assert dict(saved_old) == {"status": "deleted", "is_committed": 1}
+    assert dict(saved_old_admin) == {"status": "planned", "is_committed": 1}
+
+    current_ids, upcoming_ids = _read_model_order_ids(service, 1, shift)
+    assert current_ids == {replacement_id}
+    assert upcoming_ids == {replacement_id}
+
+
+def test_legacy_uncommitted_order_delete_stays_visible_until_save(draft_context):
+    db, service, shift, baseline_order, _baseline_admin = draft_context
+    _prepare_upcoming_read_model(db, service)
+    db.conn.execute(
+        "UPDATE orders SET status = 'deleted', is_committed = 0 WHERE id = ?",
+        (baseline_order.id,),
+    )
+    db.conn.commit()
+
+    current_ids, upcoming_ids = _read_model_order_ids(service, 1, shift)
+    assert current_ids == {baseline_order.id}
+    assert upcoming_ids == {baseline_order.id}

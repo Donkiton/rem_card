@@ -14,6 +14,7 @@ SECTOR_1A_BEFORE_MIN = 60
 SECTOR_1A_AFTER_MIN = 180
 TIME_TIMER_MAX_MS = 60 * 60 * 1000
 CURRENT_ORDERS_CACHE_LIMIT = 10
+CURRENT_ORDERS_CACHE_FORMAT_VERSION = 2
 CURRENT_ORDERS_REFRESH_ENTITIES = {
     "orders",
     "administrations",
@@ -126,10 +127,24 @@ class CurrentNurseOrdersWidget(QWidget):
             if snapshot is None:
                 return False
             self._snapshot_cache[key] = snapshot
+        if not self._is_cache_snapshot_compatible(snapshot):
+            self._snapshot_cache.pop(key, None)
+            persistent_snapshot_cache.delete_snapshot("current_orders", key)
+            return False
         self._snapshot_cache.move_to_end(key)
         self._all_data = self._apply_pending_marks(list(snapshot.get("data") or []))
         self._render_from_cache()
         return True
+
+    @staticmethod
+    def _is_cache_snapshot_compatible(snapshot) -> bool:
+        if not isinstance(snapshot, dict):
+            return False
+        try:
+            version = int(snapshot.get("cache_format_version") or 0)
+        except (TypeError, ValueError):
+            return False
+        return version == CURRENT_ORDERS_CACHE_FORMAT_VERSION
 
     def _is_cached_snapshot_current(self) -> bool:
         key = self._cache_key()
@@ -149,6 +164,7 @@ class CurrentNurseOrdersWidget(QWidget):
         if key is None:
             return
         self._snapshot_cache[key] = {
+            "cache_format_version": CURRENT_ORDERS_CACHE_FORMAT_VERSION,
             "version": self._current_change_id(),
             "data": [dict(item) for item in (data_list or [])],
         }

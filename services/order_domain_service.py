@@ -995,8 +995,12 @@ class OrderDomainService:
               )
               AND NULLIF(TRIM(COALESCE(adm.transfer_datetime, '')), '') IS NULL
               AND NULLIF(TRIM(COALESCE(adm.death_datetime, '')), '') IS NULL
-              /* Убрано AND COALESCE(o.status, '') != 'deleted', чтобы сектора 1а/5
-                 не реагировали на черновики удаления до нажатия Сохранить */
+              /* Скрываем только уже сохранённое удаление назначения. Legacy-черновик
+                 с is_committed = 0 остаётся видимым до нажатия «Сохранить». */
+              AND (
+                  COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
+                  OR COALESCE(o.is_committed, 0) = 0
+              )
         """
         rows = self.db.fetch_all_remcard(query, (admission_id, start_dt.isoformat(), end_dt.isoformat()))
 
@@ -1105,8 +1109,12 @@ class OrderDomainService:
               )
               AND NULLIF(TRIM(COALESCE(adm.transfer_datetime, '')), '') IS NULL
               AND NULLIF(TRIM(COALESCE(adm.death_datetime, '')), '') IS NULL
-              /* Mirrors sector 1a: committed administrations stay visible while
-                 an unsaved doctor delete draft is pending on the order row. */
+              /* Mirrors the patient-card read model: keep a legacy unsaved delete
+                 visible, but exclude a committed deleted/cancelled order. */
+              AND (
+                  COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
+                  OR COALESCE(o.is_committed, 0) = 0
+              )
             ORDER BY CAST(b.bed_number AS INTEGER) ASC, b.bed_number ASC, a.planned_time ASC, a.id ASC
         """
         rows = self.db.fetch_all_remcard(
