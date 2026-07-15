@@ -148,6 +148,10 @@ def test_settings_import_stage_failure_restores_menu(monkeypatch):
 
 
 def test_destroyed_admin_widget_ignores_late_worker_result(monkeypatch):
+    monkeypatch.setattr(
+        "rem_card.app.emergency_password.is_emergency_password_change_required",
+        lambda: False,
+    )
     app = application()
     widget = AdminMainWidget(role="admin")
     operation_started = threading.Event()
@@ -197,6 +201,10 @@ def test_destroyed_admin_widget_ignores_late_worker_result(monkeypatch):
 
 
 def test_hidden_admin_widget_does_not_open_late_result(monkeypatch):
+    monkeypatch.setattr(
+        "rem_card.app.emergency_password.is_emergency_password_change_required",
+        lambda: False,
+    )
     app = application()
     host = QWidget()
     widget = AdminMainWidget(role="admin", parent=host)

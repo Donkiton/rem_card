@@ -1,4 +1,4 @@
-from PySide6.QtCore import QCoreApplication, Qt
+from PySide6.QtCore import QCoreApplication, QTimer, Qt
 from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
@@ -15,6 +15,8 @@ class AdminMainWidget(QWidget):
         self.service = service
         self.role = role
         self._pending_print_context = None
+        self._emergency_password_change_required = False
+        self._emergency_password_prompt_active = False
 
         self.drugs_widget = None
         self.groups_widget = None
@@ -65,6 +67,18 @@ class AdminMainWidget(QWidget):
         title.setProperty("heading", "true")
         title.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         menu_layout.addWidget(title)
+
+        self.emergency_password_notice = QLabel(
+            "Перед доступом к остальным настройкам необходимо заменить временный аварийный пароль 123456."
+        )
+        self.emergency_password_notice.setObjectName("DialogMessageText")
+        self.emergency_password_notice.setWordWrap(True)
+        self.emergency_password_notice.setStyleSheet(
+            "color: #8A3B00; font-weight: 700; padding: 8px 10px; "
+            "border: 1px solid #D99B5E; border-radius: 6px; background: #FFF4E8;"
+        )
+        self.emergency_password_notice.hide()
+        menu_layout.addWidget(self.emergency_password_notice)
 
         self.btn_drugs = QPushButton("Справочник препаратов")
         self.btn_groups = QPushButton("Группы препаратов")
@@ -140,8 +154,9 @@ class AdminMainWidget(QWidget):
         if is_dev_version:
             maintenance_buttons.append(self.btn_switch_database)
             maintenance_buttons.append(self.btn_import_settings)
-        if self.role == "doctor":
+        if self.role in {"doctor", "admin"}:
             maintenance_buttons.append(self.btn_emergency_password)
+        if self.role == "doctor":
             maintenance_buttons.append(self.btn_db_rotation)
         operblock_buttons = [
             self.btn_operblock_icon_settings,
@@ -161,6 +176,12 @@ class AdminMainWidget(QWidget):
         ]
         if self.role != "nurse":
             categories.append(("Оперблок", operblock_buttons))
+
+        self._settings_menu_buttons = [
+            button
+            for _category_name, category_buttons in categories
+            for button in category_buttons
+        ]
 
         columns_layout = QGridLayout()
         columns_layout.setHorizontalSpacing(22)
@@ -226,6 +247,41 @@ class AdminMainWidget(QWidget):
         self.btn_import_settings.clicked.connect(self.open_settings_import)
         self.btn_backup_settings.clicked.connect(self.create_settings_backup)
         self.btn_backup_main_db.clicked.connect(self.create_main_db_backup)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.role not in {"doctor", "admin"}:
+            return
+        self._refresh_emergency_password_gate(prompt=True)
+
+    def _set_emergency_password_gate(self, required: bool) -> None:
+        self._emergency_password_change_required = bool(required)
+        self.emergency_password_notice.setVisible(bool(required))
+        for button in self._settings_menu_buttons:
+            if button is self.btn_emergency_password:
+                button.setEnabled(True)
+            else:
+                button.setEnabled(not required)
+
+    def _refresh_emergency_password_gate(self, *, prompt: bool = False) -> None:
+        try:
+            from rem_card.app.emergency_password import is_emergency_password_change_required
+
+            required = is_emergency_password_change_required()
+        except Exception as exc:
+            required = True
+            self.emergency_password_notice.setText(
+                "Не удалось проверить состояние аварийного пароля. "
+                f"Остальные настройки временно заблокированы: {exc}"
+            )
+        self._set_emergency_password_gate(required)
+        if prompt and required and not self._emergency_password_prompt_active:
+            QTimer.singleShot(0, self._prompt_required_emergency_password_change)
+
+    def _prompt_required_emergency_password_change(self) -> None:
+        if not self._emergency_password_change_required or self._emergency_password_prompt_active:
+            return
+        self.open_emergency_password(force_change=True)
 
     def _show_settings_loading(
         self,
@@ -558,15 +614,25 @@ class AdminMainWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось сохранить опер. бригаду: {exc}")
 
-    def open_emergency_password(self):
-        loading_key = self._show_settings_loading("Загрузка аварийного пароля...", key="emergency-password")
+    def open_emergency_password(self, *_args, force_change: bool | None = None):
+        if force_change is None:
+            force_change = self._emergency_password_change_required
+        self._emergency_password_prompt_active = True
         try:
-            from .emergency_password_dialog import EmergencyPasswordSettingsDialog
+            loading_key = self._show_settings_loading("Загрузка аварийного пароля...", key="emergency-password")
+            try:
+                from .emergency_password_dialog import EmergencyPasswordSettingsDialog
 
-            self.emergency_password_dialog = EmergencyPasswordSettingsDialog(parent=self)
+                self.emergency_password_dialog = EmergencyPasswordSettingsDialog(
+                    parent=self,
+                    force_change=bool(force_change),
+                )
+            finally:
+                self._hide_settings_loading(loading_key)
+            return self.emergency_password_dialog.exec()
         finally:
-            self._hide_settings_loading(loading_key)
-        self.emergency_password_dialog.exec()
+            self._emergency_password_prompt_active = False
+            self._refresh_emergency_password_gate()
 
     def open_db_rotation(self):
         loading_key = self._show_settings_loading("Загрузка управления БД...", key="db-rotation")

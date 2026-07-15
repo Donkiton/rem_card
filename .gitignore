@@ -24,6 +24,22 @@ tmp/
 /.remcard/
 scripts/bench_results/
 *.log
+*.jsonl
+crash.txt
+remcard_data_path.json
+
+# Рабочие медицинские БД, резервные копии и runtime-каталоги.
+# Справочная data/mkb/mkb10.db уже отслеживается Git и не затрагивается.
+Baza_rao3_jurnal/
+**/Baza_rao3_jurnal/
+**/archiv/rao_journal*.db
+**/settings/remcard_settings.db
+**/backups/**/*.db
+**/backup_health/**/*.db
+**/rem_cards_data.db
+**/remcard_outbox*.db
+**/rao_journal_local_replica*.db
+remcard_update*.lock
 
 # Локальные настройки цветовой схемы рабочего места
 settings/color_scheme/style_settings.json

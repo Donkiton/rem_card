@@ -2,7 +2,7 @@
 
 Дата: 2026-07-14
 
-Проект: `C:\Test\remcard`
+Проект: `C:\Test\rem_card`
 
 Результат: updater переведён на один full-only контур; patch-механизм удалён.
 
@@ -57,7 +57,7 @@
 Коротко:
 
 1. Завершить изменения рабочим git-коммитом и оставить worktree чистым.
-2. В `C:\Test\remcard` запустить:
+2. В `C:\Test\rem_card` запустить:
 
    ```powershell
    .\.venv\Scripts\python.exe scripts\build_release.py

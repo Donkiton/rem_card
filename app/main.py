@@ -921,10 +921,6 @@ def _show_active_emergency_startup_choice(message: str, *, network_available: bo
 
 
 def _show_emergency_startup_password(settings_db_path: str | None) -> bool:
-    if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
-        return True
-    if os.environ.get("REMCARD_EMERGENCY_STARTUP_AUTO_ACCEPT") == "1":
-        return True
     try:
         from PySide6.QtWidgets import QApplication
 
@@ -946,8 +942,6 @@ def _show_emergency_startup_password(settings_db_path: str | None) -> bool:
 
 
 def _show_emergency_network_transition_password(settings_db_path: str | None) -> bool:
-    if os.environ.get("REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT") == "1":
-        return True
     try:
         from PySide6.QtWidgets import QApplication
 

@@ -16018,40 +16018,67 @@ def _check_settings_service_context_reset_prevents_network_singleton_reuse(temp_
 
 def _check_emergency_password_defaults_and_catalog(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.emergency_password import (
-        get_emergency_password,
+        is_emergency_password_change_required,
         set_emergency_password,
         validate_emergency_password_value,
         verify_emergency_password,
+        verify_emergency_password_for_offline_startup,
     )
+    from rem_card.app.emergency_password_storage import is_emergency_password_record
     from rem_card.data.settings.settings_db import SettingsDatabase
     from rem_card.services.settings.settings_service import (
         DEFAULT_EMERGENCY_PASSWORD,
         EMERGENCY_PASSWORD_CATALOG_KEY,
+        EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,
         EMERGENCY_PASSWORD_KEY,
         SettingsService,
     )
 
     service = SettingsService(SettingsDatabase(baza_dir=os.path.join(temp_root, "Baza")))
     service.ensure_ready()
-    if get_emergency_password(service) != DEFAULT_EMERGENCY_PASSWORD:
-        return False, "default emergency password was not readable from settings service"
+    if DEFAULT_EMERGENCY_PASSWORD != "123456":
+        return False, "first-run emergency password is not 123456"
+    if not is_emergency_password_change_required(service):
+        return False, "first-run emergency password change is not required"
     with service.db.read_connection() as conn:
         row = conn.execute(
             "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = ?",
             (EMERGENCY_PASSWORD_KEY,),
         ).fetchone()
+        required_row = conn.execute(
+            "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = ?",
+            (EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,),
+        ).fetchone()
         version_row = conn.execute(
             "SELECT version, content_hash FROM settings_catalog_versions WHERE catalog_key = ?",
             (EMERGENCY_PASSWORD_CATALOG_KEY,),
         ).fetchone()
-    if not row or json.loads(row["value_json"]) != DEFAULT_EMERGENCY_PASSWORD:
-        return False, "default emergency password was not persisted in app_settings"
+    stored_value = json.loads(row["value_json"]) if row else None
+    if not is_emergency_password_record(stored_value):
+        return False, "default emergency password was not persisted as a verifier"
+    if DEFAULT_EMERGENCY_PASSWORD in str(row["value_json"]):
+        return False, "default emergency password leaked into app_settings"
+    if not required_row or json.loads(required_row["value_json"]) is not True:
+        return False, "first-run emergency password change marker is missing"
     if not version_row or int(version_row["version"] or 0) < 1 or not str(version_row["content_hash"] or ""):
         return False, "emergency password catalog version/hash is missing"
     if not verify_emergency_password(DEFAULT_EMERGENCY_PASSWORD, service):
         return False, "default emergency password verification failed"
+    if not verify_emergency_password_for_offline_startup(
+        DEFAULT_EMERGENCY_PASSWORD,
+        settings_db_path=service.db.db_path,
+    ):
+        return False, "default emergency password verification by settings snapshot failed"
+    if verify_emergency_password_for_offline_startup(DEFAULT_EMERGENCY_PASSWORD):
+        return False, "default emergency password was accepted without a settings snapshot"
     if verify_emergency_password("wrong-password", service):
         return False, "wrong emergency password was accepted"
+    try:
+        set_emergency_password(DEFAULT_EMERGENCY_PASSWORD, service)
+    except ValueError:
+        pass
+    else:
+        return False, "first-run password was accepted as its own replacement"
 
     for bad_value in ("", "12345", None):
         try:
@@ -16064,14 +16091,39 @@ def _check_emergency_password_defaults_and_catalog(temp_root: str) -> tuple[bool
     changed = set_emergency_password("new-safe-password", service, changed_by_user="regression")
     if not changed.changed or changed.length != len("new-safe-password"):
         return False, "emergency password change result is incorrect"
+    if is_emergency_password_change_required(service):
+        return False, "emergency password change marker was not cleared"
     if not verify_emergency_password("new-safe-password", service):
         return False, "changed emergency password verification failed"
     if not verify_emergency_password("new-safe-password", settings_db_path=service.db.db_path, readonly=True):
         return False, "emergency password verification by readonly settings path failed"
+
+    legacy_password = "existing-user-password"
+    with service.db.transaction("regression_emergency_password_legacy") as cursor:
+        cursor.execute(
+            "UPDATE app_settings SET value_json = ? WHERE scope = 'shared' AND key = ?",
+            (json.dumps(legacy_password), EMERGENCY_PASSWORD_KEY),
+        )
+        cursor.execute(
+            "DELETE FROM app_settings WHERE scope = 'shared' AND key = ?",
+            (EMERGENCY_PASSWORD_CHANGE_REQUIRED_KEY,),
+        )
+    if is_emergency_password_change_required(service):
+        return False, "existing installation was incorrectly marked for a forced password reset"
+    if not verify_emergency_password(legacy_password, service):
+        return False, "existing plaintext password stopped working"
+    with service.db.read_connection() as conn:
+        migrated_row = conn.execute(
+            "SELECT value_json FROM app_settings WHERE scope = 'shared' AND key = ?",
+            (EMERGENCY_PASSWORD_KEY,),
+        ).fetchone()
+    migrated_value = json.loads(migrated_row["value_json"]) if migrated_row else None
+    if not is_emergency_password_record(migrated_value) or legacy_password in str(migrated_row["value_json"]):
+        return False, "existing plaintext password was not migrated to a verifier"
     with service.db.read_connection() as conn:
         audit_row = conn.execute(
             """
-            SELECT id FROM settings_audit_log
+            SELECT id, before_json, after_json FROM settings_audit_log
             WHERE entity_type = 'app_settings'
               AND entity_id = ?
               AND operation = 'update'
@@ -16092,12 +16144,14 @@ def _check_emergency_password_defaults_and_catalog(temp_root: str) -> tuple[bool
         ).fetchone()
     if not audit_row or not change_row:
         return False, "emergency password change was not audited"
+    if "new-safe-password" in str(audit_row["before_json"] or "") + str(audit_row["after_json"] or ""):
+        return False, "emergency password leaked into the settings audit log"
     return True, "ok"
 
 
 def _check_emergency_password_readonly_snapshot(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.db_runtime_context import build_settings_snapshot_context
-    from rem_card.app.emergency_password import get_emergency_password, set_emergency_password
+    from rem_card.app.emergency_password import set_emergency_password, verify_emergency_password
     from rem_card.data.settings.settings_db import SettingsDatabase, SettingsDbError
     from rem_card.services.settings.settings_service import SettingsService
 
@@ -16110,8 +16164,8 @@ def _check_emergency_password_readonly_snapshot(temp_root: str) -> tuple[bool, s
     os.makedirs(os.path.dirname(ctx.settings_db_path), exist_ok=True)
     shutil.copy2(source_service.db.db_path, ctx.settings_db_path)
     snapshot_service = SettingsService(SettingsDatabase(context=ctx))
-    if get_emergency_password(snapshot_service, readonly=True) != "snapshot-password":
-        return False, "readonly settings snapshot did not expose emergency password"
+    if not verify_emergency_password("snapshot-password", snapshot_service, readonly=True):
+        return False, "readonly settings snapshot did not verify emergency password"
     try:
         set_emergency_password("another-password", snapshot_service)
     except SettingsDbError:
@@ -16145,8 +16199,9 @@ def _check_emergency_password_doctor_settings_ui(temp_root: str) -> tuple[bool, 
         "Аварийный пароль",
         "open_emergency_password",
         "EmergencyPasswordSettingsDialog",
-        "get_emergency_password",
+        "is_emergency_password_change_required",
         "set_emergency_password",
+        "force_change",
         "new_password_edit",
         "repeat_password_edit",
     )
@@ -16155,18 +16210,19 @@ def _check_emergency_password_doctor_settings_ui(temp_root: str) -> tuple[bool, 
         return False, f"emergency password settings UI tokens missing: {missing}"
 
     app = QApplication.instance() or QApplication([])
-    saved_get = dialog_module.get_emergency_password
     saved_set = dialog_module.set_emergency_password
     saved_info = dialog_module.CustomMessageBox.__dict__["information"]
     saved_passwords: list[str] = []
     try:
-        dialog_module.get_emergency_password = lambda: "2u1x8dxgeD"
         dialog_module.set_emergency_password = lambda value, **kwargs: saved_passwords.append(str(value))
         dialog_module.CustomMessageBox.information = staticmethod(lambda *args, **kwargs: None)
         widget = AdminMainWidget(role="doctor")
         if not hasattr(widget, "btn_emergency_password") or widget.btn_emergency_password.text() != "Аварийный пароль":
             return False, "doctor settings panel does not expose emergency password button"
-        dialog = dialog_module.EmergencyPasswordSettingsDialog()
+        widget._set_emergency_password_gate(True)
+        if widget.btn_drugs.isEnabled() or not widget.btn_emergency_password.isEnabled():
+            return False, "first-run password gate does not block other settings"
+        dialog = dialog_module.EmergencyPasswordSettingsDialog(force_change=True)
         dialog.new_password_edit.setText("new-doctor-password")
         dialog.repeat_password_edit.setText("new-doctor-password")
         dialog.save_password()
@@ -16174,7 +16230,6 @@ def _check_emergency_password_doctor_settings_ui(temp_root: str) -> tuple[bool, 
         if saved_passwords != ["new-doctor-password"]:
             return False, f"dialog did not save the repeated new password: {saved_passwords}"
     finally:
-        dialog_module.get_emergency_password = saved_get
         dialog_module.set_emergency_password = saved_set
         dialog_module.CustomMessageBox.information = saved_info
     return True, "ok"
@@ -19773,10 +19828,11 @@ def _check_emergency_startup_password_gate_before_activation(temp_root: str) -> 
         "EmergencyPasswordDialog.verify",
         "verify_emergency_password_for_offline_startup",
         "settings_db_path=settings_db_path",
-        "REMCARD_EMERGENCY_PASSWORD_AUTO_ACCEPT",
     ):
         if token not in password_body:
             return False, f"password prompt token missing: {token}"
+    if "AUTO_ACCEPT" in password_body:
+        return False, "emergency password prompt still has an environment bypass"
 
     flow_start = main_text.find("def _try_emergency_startup_after_network_failure(")
     flow_end = main_text.find("\ndef ", flow_start + 1)

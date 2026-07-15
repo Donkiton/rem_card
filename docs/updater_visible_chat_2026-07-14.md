@@ -43,33 +43,33 @@
 Да, существенные оптимизации есть. Главная проблема — многократное чтение больших PyInstaller-файлов, особенно через сетевой `UPD`. Код не менял.
 
 1. **Patch читается по сети до четырёх раз.**
-   При поиске обновления payload полностью хешируется ещё до проверки версии и `base_version`: [update_checker.py](C:/Test/remcard/app/update_checker.py:232), фильтрация выполняется позже — [update_checker.py](C:/Test/remcard/app/update_checker.py:300). Поэтому даже уже обновлённый ПК повторно читает текущий patch при каждом штатном выходе приложения — [main.py](C:/Test/remcard/app/main.py:2158).
+   При поиске обновления payload полностью хешируется ещё до проверки версии и `base_version`: [update_checker.py](C:/Test/rem_card/app/update_checker.py:232), фильтрация выполняется позже — [update_checker.py](C:/Test/rem_card/app/update_checker.py:300). Поэтому даже уже обновлённый ПК повторно читает текущий patch при каждом штатном выходе приложения — [main.py](C:/Test/rem_card/app/main.py:2158).
 
-   При установке следуют ещё две проверки SHA и копирование в staging: [updater_main.py](C:/Test/remcard/app/updater_main.py:401), [updater_main.py](C:/Test/remcard/app/updater_main.py:786), [updater_main.py](C:/Test/remcard/app/updater_main.py:758). Для patch размером 1 ГБ это потенциально около 4 ГБ сетевого чтения на один ПК.
+   При установке следуют ещё две проверки SHA и копирование в staging: [updater_main.py](C:/Test/rem_card/app/updater_main.py:401), [updater_main.py](C:/Test/rem_card/app/updater_main.py:786), [updater_main.py](C:/Test/rem_card/app/updater_main.py:758). Для patch размером 1 ГБ это потенциально около 4 ГБ сетевого чтения на один ПК.
 
    Самое приоритетное ускорение: при поиске читать только `ready.ok`, manifest и размеры; SHA считать один раз во время копирования в локальный staging. Проверка целостности при этом сохраняется.
 
 2. **Full-релиз копируется дважды целиком.**
-   Сначала `UPD → staging`, затем `staging → Prog`, включая весь `_internal`: [updater_main.py](C:/Test/remcard/app/updater_main.py:621), [updater_main.py](C:/Test/remcard/app/updater_main.py:870), [updater_main.py](C:/Test/remcard/app/updater_main.py:897). После этого синхронно удаляются и staging, и старая версия.
+   Сначала `UPD → staging`, затем `staging → Prog`, включая весь `_internal`: [updater_main.py](C:/Test/rem_card/app/updater_main.py:621), [updater_main.py](C:/Test/rem_card/app/updater_main.py:870), [updater_main.py](C:/Test/rem_card/app/updater_main.py:897). После этого синхронно удаляются и staging, и старая версия.
 
    Поскольку staging расположен на том же томе, его содержимое можно переносить через rename/move вместо второй полной копии. Очистку старой версии — отдавать уже существующему фоновому cleaner. Это уберёт один полный проход размером с релиз и заметно сократит этап «92% — очистка».
 
-   Дополнительно текущий retry для `_internal` после частичного `copytree` фактически не восстанавливается: каталог уже существует, и updater около 25 секунд повторяет `FileExistsError`: [updater_main.py](C:/Test/remcard/app/updater_main.py:609), [updater_main.py](C:/Test/remcard/app/updater_main.py:909).
+   Дополнительно текущий retry для `_internal` после частичного `copytree` фактически не восстанавливается: каталог уже существует, и updater около 25 секунд повторяет `FileExistsError`: [updater_main.py](C:/Test/rem_card/app/updater_main.py:609), [updater_main.py](C:/Test/rem_card/app/updater_main.py:909).
 
 3. **Перед каждым patch копируется весь установленный `_internal`.**
-   До появления окна updater создаётся локальная копия `RemCardUpdater.exe` и всего общего runtime: [update_launcher.py](C:/Test/remcard/app/update_launcher.py:269). Это не минимальный updater, а общий PyInstaller runtime с PySide6, NumPy, Pandas, Matplotlib и прочими зависимостями.
+   До появления окна updater создаётся локальная копия `RemCardUpdater.exe` и всего общего runtime: [update_launcher.py](C:/Test/rem_card/app/update_launcher.py:269). Это не минимальный updater, а общий PyInstaller runtime с PySide6, NumPy, Pandas, Matplotlib и прочими зависимостями.
 
-   Причём копирование выполняется до получения starting-lock: [update_launcher.py](C:/Test/remcard/app/update_launcher.py:318). При гонке двух клиентов проигравший сначала копирует весь runtime, затем возвращает `False` и оставляет копию до следующей очистки.
+   Причём копирование выполняется до получения starting-lock: [update_launcher.py](C:/Test/rem_card/app/update_launcher.py:318). При гонке двух клиентов проигравший сначала копирует весь runtime, затем возвращает `False` и оставляет копию до следующей очистки.
 
    Минимум: сначала захватывать lock и удалять runner при любом раннем выходе. Максимальный выигрыш даст отдельная компактная сборка updater либо безопасный hardlink/versioned-runner.
 
 4. **Сетевые lock-файлы могут тормозить каждый запуск.**
-   До создания Qt-интерфейса синхронно проверяются до четырёх lock-файлов в сетевой Baza: [main.py](C:/Test/remcard/app/main.py:1884), [update_launcher.py](C:/Test/remcard/app/update_launcher.py:121). При здоровом SMB это мелочь, но при недоступной сети Windows timeout способен задержать даже offline-запуск оперблока и `PathSetup`. Здесь нужен локальный scoped-lock или ограниченный по времени сетевой probe.
+   До создания Qt-интерфейса синхронно проверяются до четырёх lock-файлов в сетевой Baza: [main.py](C:/Test/rem_card/app/main.py:1884), [update_launcher.py](C:/Test/rem_card/app/update_launcher.py:121). При здоровом SMB это мелочь, но при недоступной сети Windows timeout способен задержать даже offline-запуск оперблока и `PathSetup`. Здесь нужен локальный scoped-lock или ограниченный по времени сетевой probe.
 
 5. **Сборка релиза также делает много лишней работы.**
-   После каждого запуска удаляется кеш PyInstaller, поэтому full и patch всегда собираются «с нуля»: [RemCard.spec](C:/Test/remcard/RemCard.spec:471). Кроме того, `tree_hashes.json` записывается, но нигде не читается, а `raw_full_tree` хранит невостребованную вторую копию полной сборки: [build_patch_update.py](C:/Test/remcard/scripts/build_patch_update.py:211), [build_patch_update.py](C:/Test/remcard/scripts/build_patch_update.py:400). Это можно существенно ускорить и почти вдвое уменьшить patch-cache.
+   После каждого запуска удаляется кеш PyInstaller, поэтому full и patch всегда собираются «с нуля»: [RemCard.spec](C:/Test/rem_card/RemCard.spec:471). Кроме того, `tree_hashes.json` записывается, но нигде не читается, а `raw_full_tree` хранит невостребованную вторую копию полной сборки: [build_patch_update.py](C:/Test/rem_card/scripts/build_patch_update.py:211), [build_patch_update.py](C:/Test/rem_card/scripts/build_patch_update.py:400). Это можно существенно ускорить и почти вдвое уменьшить patch-cache.
 
-Отдельно обнаружен риск надёжности: full-сборка очищает и публикует `UPD` до release-коммита и push — [RemCard.spec](C:/Test/remcard/RemCard.spec:446), [build_release.py](C:/Test/remcard/scripts/build_release.py:336). Безопаснее собирать в отдельную versioned-папку, проверять, делать commit/push и только затем атомарно публиковать. Это также защитит уже запущенный updater от удаления пакета во время чтения.
+Отдельно обнаружен риск надёжности: full-сборка очищает и публикует `UPD` до release-коммита и push — [RemCard.spec](C:/Test/rem_card/RemCard.spec:446), [build_release.py](C:/Test/rem_card/scripts/build_release.py:336). Безопаснее собирать в отдельную versioned-папку, проверять, делать commit/push и только затем атомарно публиковать. Это также защитит уже запущенный updater от удаления пакета во время чтения.
 
 Что уже сделано правильно: постоянного тяжёлого polling нет, `ready.ok` создаётся последним, patch привязан к точной базовой версии, есть SHA старых/новых файлов и rollback. Эти проверки убирать не нужно — достаточно перенести их в один проход.
 
@@ -85,7 +85,7 @@
 
 ### 9. Codex, commentary
 
-Документы сформированы. Сейчас проверяю, что все файлы действительно записались на диск `Z:`, читаются в UTF‑8 и содержат не только итог, но и технический журнал, ограничения, тестовый результат и приоритетный план внедрения.
+Документы сформированы. Сейчас проверяю, что все файлы действительно записались на тестовый диск `T:`, читаются в UTF‑8 и содержат не только итог, но и технический журнал, ограничения, тестовый результат и приоритетный план внедрения.
 
 ### 10. Codex, final_answer
 
