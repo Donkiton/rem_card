@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -52,6 +53,8 @@ SETTINGS_RELEASE_SNAPSHOT_FILE = "settings_release_snapshot.json"
 SETTINGS_RELEASE_MANIFEST_FILE = "settings_release_manifest.json"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMPILED_SMOKE_TIMEOUT_SECONDS = 30
+BUILD_ARTIFACT_DIR_NAMES = ("build", "dist")
+BUILD_ARTIFACT_CLEANUP_DELAYS = (0.0, 0.25, 0.75)
 
 CHANGELOG_SUBJECT_TRANSLATIONS = {
     "Optimize cached vitals card reopen": (
@@ -262,18 +265,54 @@ def has_staged_or_unstaged_release_file_changes(root: Path) -> bool:
     return bool(status)
 
 
+def _remove_build_artifact(path: Path) -> None:
+    last_error: OSError | None = None
+    for delay in BUILD_ARTIFACT_CLEANUP_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink(missing_ok=True)
+            elif path.exists():
+                shutil.rmtree(path)
+            return
+        except OSError as exc:
+            last_error = exc
+    raise RuntimeError(f"Не удалось удалить временный артефакт сборки {path}: {last_error}")
+
+
+def cleanup_build_artifacts(root: Path, *, remove_dist: bool = True) -> None:
+    """Remove generated PyInstaller state without touching published releases."""
+    names = BUILD_ARTIFACT_DIR_NAMES if remove_dist else ("build",)
+    removed: list[str] = []
+    for name in names:
+        path = root / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        _remove_build_artifact(path)
+        removed.append(name)
+    if removed:
+        print(f"Удалены временные артефакты сборки: {', '.join(removed)}.")
+
+
 def run_build(root: Path) -> Path:
     if os.environ.get("REMCARD_SKIP_SETTINGS_RELEASE_EXPORT") == "1":
         raise RuntimeError(
             "REMCARD_SKIP_SETTINGS_RELEASE_EXPORT=1 запрещён для release-сборки: "
             "production-пакет обязан содержать snapshot настроек."
         )
+    cleanup_build_artifacts(root)
     package_dir = root / "dist" / "Prog"
-    if package_dir.exists():
-        shutil.rmtree(package_dir)
-    run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)
-    if not package_dir.is_dir():
-        raise RuntimeError(f"PyInstaller не создал пакет: {package_dir}")
+    try:
+        run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)
+        if not package_dir.is_dir():
+            raise RuntimeError(f"PyInstaller не создал пакет: {package_dir}")
+    except BaseException:
+        try:
+            cleanup_build_artifacts(root)
+        except RuntimeError as cleanup_exc:
+            print(f"Предупреждение: {cleanup_exc}", file=sys.stderr)
+        raise
     return package_dir
 
 
@@ -838,50 +877,58 @@ def publish_built_release(
 
 def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
     if args.no_commit:
-        if not args.skip_build:
-            package_dir = run_build(root)
-            source_commit = head_commit(root)
-            validate_full_package(
-                package_dir,
-                version=version,
-                source_commit=source_commit,
-            )
-            run_compiled_smoke(package_dir)
-            print(
-                f"Тестовая сборка без release-коммита создана только в {package_dir}. "
-                f"В UPD она не публикуется и {READY_FILE_NAME} не создаётся."
-            )
-        else:
-            print("Файлы релиза не закоммичены; сборка и публикация пропущены.")
+        try:
+            if not args.skip_build:
+                package_dir = run_build(root)
+                source_commit = head_commit(root)
+                validate_full_package(
+                    package_dir,
+                    version=version,
+                    source_commit=source_commit,
+                )
+                run_compiled_smoke(package_dir)
+                print(
+                    f"Тестовая сборка без release-коммита создана только в {package_dir}. "
+                    f"В UPD она не публикуется и {READY_FILE_NAME} не создаётся."
+                )
+            else:
+                print("Файлы релиза не закоммичены; сборка и публикация пропущены.")
+        finally:
+            # A completed --no-commit build leaves dist\Prog for inspection;
+            # --skip-build has no newly built output worth preserving.
+            cleanup_build_artifacts(root, remove_dist=bool(args.skip_build))
         return
 
-    if has_staged_or_unstaged_release_file_changes(root):
-        commit_release(root, version)
-    ensure_clean_tree(root)
-    source_commit = head_commit(root)
-    if args.skip_build:
-        raise RuntimeError(
-            "--skip-build запрещён для release-коммита: перед обязательным push "
-            "нужно собрать и smoke-проверить все шесть EXE."
-        )
+    try:
+        if has_staged_or_unstaged_release_file_changes(root):
+            commit_release(root, version)
+        ensure_clean_tree(root)
+        source_commit = head_commit(root)
+        if args.skip_build:
+            raise RuntimeError(
+                "--skip-build запрещён для release-коммита: перед обязательным push "
+                "нужно собрать и smoke-проверить все шесть EXE."
+            )
 
-    # First prove that the exact release commit can produce a complete package.
-    # Only a successful build may be pushed and made visible in the local UPD.
-    run_release_checks(root)
-    ensure_clean_tree(root)
-    package_dir = run_build(root)
-    validate_full_package(package_dir, version=version, source_commit=source_commit)
-    run_compiled_smoke(package_dir)
-    ensure_clean_tree(root)
-    pushed_commit = push_current_branch(root)
-    if pushed_commit != source_commit:
-        raise RuntimeError("Во время release-сборки изменился git HEAD; публикация остановлена.")
-    publish_built_release(
-        root,
-        package_dir,
-        version=version,
-        source_commit=source_commit,
-    )
+        # First prove that the exact release commit can produce a complete package.
+        # Only a successful build may be pushed and made visible in the local UPD.
+        run_release_checks(root)
+        ensure_clean_tree(root)
+        package_dir = run_build(root)
+        validate_full_package(package_dir, version=version, source_commit=source_commit)
+        run_compiled_smoke(package_dir)
+        ensure_clean_tree(root)
+        pushed_commit = push_current_branch(root)
+        if pushed_commit != source_commit:
+            raise RuntimeError("Во время release-сборки изменился git HEAD; публикация остановлена.")
+        publish_built_release(
+            root,
+            package_dir,
+            version=version,
+            source_commit=source_commit,
+        )
+    finally:
+        cleanup_build_artifacts(root)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -936,6 +983,8 @@ def main(argv: list[str] | None = None) -> int:
 
     root = project_root()
     ensure_git_repo(root)
+    if not args.no_commit:
+        cleanup_build_artifacts(root)
     ensure_clean_tree(root)
 
     previous_release_commit = latest_version_commit(root)

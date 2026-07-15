@@ -1222,6 +1222,70 @@ def _check_full_update_publisher_requires_explicit_accepted_source(temp_root: st
     return True, "ok"
 
 
+def _check_build_release_cleanup_source_contract(
+    text: str,
+    functions: dict[str, ast.FunctionDef],
+    finish_source: str,
+    publication_position: int,
+) -> tuple[bool, str]:
+    cleanup_position = finish_source.find("cleanup_build_artifacts(root)", publication_position)
+    if cleanup_position < publication_position:
+        return False, "production build/dist cleanup is missing after local release publication"
+
+    run_build_source = (
+        _cached_source_segment(text, functions["run_build"])
+        if "run_build" in functions
+        else ""
+    ) or ""
+    initial_cleanup_position = run_build_source.find("cleanup_build_artifacts(root)")
+    pyinstaller_position = run_build_source.find('run([sys.executable, "-m", "PyInstaller", "RemCard.spec"]')
+    if (
+        initial_cleanup_position < 0
+        or pyinstaller_position < 0
+        or initial_cleanup_position > pyinstaller_position
+    ):
+        return False, "PyInstaller build does not start from clean build/dist directories"
+
+    main_source = (
+        _cached_source_segment(text, functions["main"])
+        if "main" in functions
+        else ""
+    ) or ""
+    startup_cleanup_position = main_source.find("cleanup_build_artifacts(root)")
+    clean_tree_position = main_source.find("ensure_clean_tree(root)")
+    if (
+        startup_cleanup_position < 0
+        or clean_tree_position < 0
+        or startup_cleanup_position > clean_tree_position
+    ):
+        return False, "production release does not remove stale build/dist before preflight"
+    return True, "ok"
+
+
+def _check_build_release_cleanup_behavior(temp_root: str, build_release: Any) -> tuple[bool, str]:
+    cleanup_root = Path(temp_root, "build_artifact_cleanup")
+    for name in build_release.BUILD_ARTIFACT_DIR_NAMES:
+        artifact_file = cleanup_root / name / "nested" / "artifact.bin"
+        artifact_file.parent.mkdir(parents=True, exist_ok=True)
+        artifact_file.write_bytes(b"stale")
+    build_release.cleanup_build_artifacts(cleanup_root)
+    leftovers = [
+        name
+        for name in build_release.BUILD_ARTIFACT_DIR_NAMES
+        if (cleanup_root / name).exists()
+    ]
+    if leftovers:
+        return False, f"release cleanup left generated directories behind: {leftovers}"
+
+    preserved_dist = cleanup_root / "dist" / "Prog"
+    preserved_dist.mkdir(parents=True, exist_ok=True)
+    (cleanup_root / "build" / "temporary").mkdir(parents=True, exist_ok=True)
+    build_release.cleanup_build_artifacts(cleanup_root, remove_dist=False)
+    if (cleanup_root / "build").exists() or not preserved_dist.is_dir():
+        return False, "--no-commit cleanup did not preserve dist while removing build"
+    return True, "ok"
+
+
 def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, str]:
     _ = temp_root
     text = Path(PROJECT_ROOT, "scripts", "build_release.py").read_text(encoding="utf-8")
@@ -1242,6 +1306,7 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
         "source_inventory = build_file_inventory(package_dir)",
         "file_inventory=source_inventory",
         "if _paths_overlap(package_dir, releases_dir):",
+        "cleanup_build_artifacts(root)",
     )
     missing = [token for token in required_tokens if token not in text]
     if missing:
@@ -1262,6 +1327,14 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
     ]
     if any(position < 0 for position in positions) or positions != sorted(positions):
         return False, f"required release order checks -> build -> smoke -> push -> publish is broken: {positions}"
+    cleanup_source_ok, cleanup_source_detail = _check_build_release_cleanup_source_contract(
+        text,
+        functions,
+        finish_source,
+        positions[-1],
+    )
+    if not cleanup_source_ok:
+        return False, cleanup_source_detail
 
     validate_source = (
         _cached_source_segment(text, functions["validate_full_package"])
@@ -1301,6 +1374,13 @@ def _check_build_release_full_pipeline_contract(temp_root: str) -> tuple[bool, s
         return False, "local publisher did not detect nested package/release paths"
     if build_release._paths_overlap(package_dir, separate_releases):
         return False, "local publisher rejected independent package/release paths"
+
+    cleanup_behavior_ok, cleanup_behavior_detail = _check_build_release_cleanup_behavior(
+        temp_root,
+        build_release,
+    )
+    if not cleanup_behavior_ok:
+        return False, cleanup_behavior_detail
 
     saved_skip = os.environ.get("REMCARD_SKIP_SETTINGS_RELEASE_EXPORT")
     os.environ["REMCARD_SKIP_SETTINGS_RELEASE_EXPORT"] = "1"
