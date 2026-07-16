@@ -1385,7 +1385,19 @@ def _show_compiled_startup_splash(app, QPixmap, QSplashScreen, Qt):
     try:
         from rem_card.app.paths import get_icon_dir
 
-        icon_path = os.path.join(get_icon_dir(), "remcardicon.ico")
+        icon_dir = get_icon_dir()
+        video_path = os.path.join(icon_dir, "startup_heartbeat.webm")
+        if os.path.isfile(video_path):
+            try:
+                from rem_card.app.startup_splash import StartupVideoSplash
+
+                splash = StartupVideoSplash(video_path)
+                splash.show_and_start(app)
+                return splash
+            except Exception:
+                pass
+
+        icon_path = os.path.join(icon_dir, "remcardicon.ico")
         splash_pix = QPixmap(icon_path).scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         splash = QSplashScreen(splash_pix, Qt.WindowStaysOnTopHint)
         splash.show()
