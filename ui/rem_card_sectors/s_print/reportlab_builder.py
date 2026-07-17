@@ -572,7 +572,7 @@ class ReportLabReportBuilder:
 
     @classmethod
     def _transfusion_protocol_flowables(cls, data) -> list:
-        protocols = cls._resolve_pending_transfusion_protocols(data)
+        protocols = cls._resolve_transfusion_protocols(data)
         if not protocols:
             return []
         from rem_card.services.procedures_reportlab_builder import ProcedureReportLabBuilder
@@ -590,13 +590,21 @@ class ReportLabReportBuilder:
         return flowables
 
     @staticmethod
-    def _resolve_pending_transfusion_protocols(data) -> list:
+    def _resolve_transfusion_protocols(data) -> list:
         if isinstance(data, list):
             protocols = []
             for day in data:
-                protocols.extend(list((day or {}).get("pending_transfusion_protocols") or []))
+                day = day or {}
+                current = day.get("transfusion_protocols")
+                if current is None:
+                    current = day.get("pending_transfusion_protocols")
+                protocols.extend(list(current or []))
             return protocols
-        return list((data or {}).get("pending_transfusion_protocols") or [])
+        data = data or {}
+        current = data.get("transfusion_protocols")
+        if current is None:
+            current = data.get("pending_transfusion_protocols")
+        return list(current or [])
 
     @classmethod
     def _style(

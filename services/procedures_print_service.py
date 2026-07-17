@@ -316,6 +316,23 @@ class ProceduresPrintService:
             start_dt=start_dt,
             end_dt=end_dt,
         )
+        return self._transfusion_protocols_for_ids(procedure_ids)
+
+    def completed_transfusion_protocols(
+        self,
+        admission_id: int,
+        *,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        procedure_ids = self.dao.list_completed_transfusion_ids(
+            int(admission_id),
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+        return self._transfusion_protocols_for_ids(procedure_ids)
+
+    def _transfusion_protocols_for_ids(self, procedure_ids) -> list[dict[str, Any]]:
         protocols: list[dict[str, Any]] = []
         for procedure_id in procedure_ids:
             bundle = self.dao.get_bundle(int(procedure_id))

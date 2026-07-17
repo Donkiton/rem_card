@@ -1806,6 +1806,7 @@ class SettingsService:
             "death_protocol": True,
             "transfusion_registration": True,
             "outcome_report_reminder": False,
+            "transfusion_protocols": False,
         }
         self._write_app_setting_in_tx(
             cursor,
