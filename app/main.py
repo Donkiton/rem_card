@@ -45,6 +45,13 @@ EMERGENCY_STARTUP_ENTER_PROGRAM_TEXT = "Войти в программу"
 EMERGENCY_STARTUP_PASSWORD_TEXT = "Ввести аварийный пароль"
 EMERGENCY_STARTUP_SWITCH_TO_NETWORK_TEXT = "Перейти на основную БД"
 EMERGENCY_STARTUP_CANCEL_TEXT = "Отмена"
+SINGLE_INSTANCE_NOT_FOUND = "not_found"
+SINGLE_INSTANCE_SHOWN = "shown"
+SINGLE_INSTANCE_UNRESPONSIVE = "unresponsive"
+SINGLE_INSTANCE_ACQUIRED = "acquired"
+SINGLE_INSTANCE_ERROR = "error"
+SINGLE_INSTANCE_ACK = "SHOWN"
+_PENDING_OPERBLOCK_OFFLINE_RUNTIME = object()
 
 ACTIVE_EMERGENCY_SESSION_NETWORK_AVAILABLE_MESSAGE = (
     "На этом ПК есть активная аварийная сессия RemCard.\n\n"
@@ -1019,7 +1026,6 @@ def _try_operblock_offline_startup_after_network_failure(
 
     try:
         from rem_card.app.operblock_offline_store import (
-            OPERBLOCK_OFFLINE_WARNING,
             start_or_resume_operblock_offline_session,
         )
         from rem_card.app.runtime_paths import get_journal_db_path, resolve_baza_dir
@@ -1032,12 +1038,16 @@ def _try_operblock_offline_startup_after_network_failure(
     except Exception:
         network_db_path = None
 
-    _call_startup_message_callback(before_user_message)
-    _show_custom_warning("Оперблок: локальный режим", OPERBLOCK_OFFLINE_WARNING)
-    return start_or_resume_operblock_offline_session(
+    session = start_or_resume_operblock_offline_session(
         reason=reason or technical or category or "network_unavailable",
         network_db_path=network_db_path,
     )
+    _write_startup_local_log(
+        "operblock offline selected: "
+        f"role={role or ''}; reason={reason or category or 'network_unavailable'}; "
+        f"local_db={session.runtime_context.medical_db_path}"
+    )
+    return session
 
 
 def _try_emergency_startup_after_network_failure(
@@ -1420,16 +1430,78 @@ def _close_startup_splash(app, splash):
     return None
 
 
-def _notify_existing_instance(QLocalSocket, server_name: str, role_suffix: str) -> bool:
+def _notify_existing_instance(QLocalSocket, server_name: str, role_suffix: str) -> str:
     socket_client = QLocalSocket()
     socket_client.connectToServer(server_name)
     if not socket_client.waitForConnected(500):
+        return SINGLE_INSTANCE_NOT_FOUND
+    try:
+        if int(socket_client.write(b"SHOW")) < 0 or not socket_client.waitForBytesWritten(500):
+            return SINGLE_INSTANCE_UNRESPONSIVE
+        if not socket_client.waitForReadyRead(1500):
+            return SINGLE_INSTANCE_UNRESPONSIVE
+        response = bytes(socket_client.readAll()).decode("utf-8", errors="replace").strip().upper()
+        if response != SINGLE_INSTANCE_ACK:
+            return SINGLE_INSTANCE_UNRESPONSIVE
+        print(f"Приложение с ролью '{role_suffix}' уже запущено. Окно развернуто.")
+        return SINGLE_INSTANCE_SHOWN
+    finally:
+        try:
+            socket_client.disconnectFromServer()
+        except RuntimeError:
+            pass
+
+
+def _prepare_single_instance_server(QLocalSocket, QLocalServer, server_name: str, role_suffix: str):
+    probe_status = _notify_existing_instance(QLocalSocket, server_name, role_suffix)
+    _write_startup_local_log(
+        f"single-instance probe: role={role_suffix}; server={server_name}; status={probe_status}"
+    )
+    if probe_status != SINGLE_INSTANCE_NOT_FOUND:
+        return None, False, probe_status
+
+    QLocalServer.removeServer(server_name)
+    server = QLocalServer()
+    if server.listen(server_name):
+        _write_startup_local_log(
+            f"single-instance acquired: role={role_suffix}; server={server_name}"
+        )
+        return server, True, SINGLE_INSTANCE_ACQUIRED
+
+    retry_status = _notify_existing_instance(QLocalSocket, server_name, role_suffix)
+    _write_startup_local_log(
+        f"single-instance listen failed: role={role_suffix}; server={server_name}; "
+        f"retry_status={retry_status}"
+    )
+    if retry_status != SINGLE_INSTANCE_NOT_FOUND:
+        return server, False, retry_status
+    return server, False, SINGLE_INSTANCE_ERROR
+
+
+def _show_unresponsive_single_instance_warning(role_suffix: str) -> None:
+    _show_startup_warning_without_settings(
+        "Запуск RemCard",
+        f"Предыдущий экземпляр роли «{role_display_name(role_suffix)}» найден, "
+        "но не отвечает на команду показа окна.\n\n"
+        "Завершите зависший процесс RemCard через Диспетчер задач и повторите запуск. "
+        "Локальный режим не был открыт, чтобы два процесса не записывали данные одновременно.",
+    )
+
+
+def _handle_single_instance_show_request(client, window, Qt) -> bool:
+    if not client.waitForReadyRead(500):
         return False
-    socket_client.write(b"SHOW")
-    if not socket_client.waitForBytesWritten(500):
+    data = bytes(client.readAll()).decode("utf-8", errors="replace")
+    if data != "SHOW":
         return False
-    print(f"Приложение с ролью '{role_suffix}' уже запущено. Окно будет развернуто.")
-    return True
+    if window.isMinimized():
+        window.showNormal()
+    window.setWindowState(window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
+    window.activateWindow()
+    window.raise_()
+    if int(client.write(SINGLE_INSTANCE_ACK.encode("ascii"))) < 0:
+        return False
+    return bool(client.waitForBytesWritten(500))
 
 
 def _single_instance_server_name(role: Optional[str]) -> str:
@@ -1521,35 +1593,46 @@ def _resolve_startup_role(parsed_role: Optional[str], forced_role: Optional[str]
     return parsed_role or None
 
 
-def _preselect_operblock_offline_context_before_network_probe(role: Optional[str]) -> tuple[object | None, str]:
+def _has_active_local_operblock_case_before_network_probe(role: Optional[str]) -> bool:
     if not is_operblock_role(role):
+        return False
+    try:
+        from rem_card.app.operblock_offline_store import has_active_local_operblock_case
+
+        return bool(has_active_local_operblock_case())
+    except Exception:
+        return False
+
+
+def _start_preselected_operblock_offline_context(
+    role: Optional[str],
+    *,
+    active_local_case: bool,
+) -> tuple[object | None, str]:
+    if not is_operblock_role(role) or not active_local_case:
         return None, ""
     try:
-        from rem_card.app.operblock_offline_store import (
-            has_active_local_operblock_case,
-            start_or_resume_operblock_offline_session,
-        )
+        from rem_card.app.operblock_offline_store import start_or_resume_operblock_offline_session
 
-        if not has_active_local_operblock_case():
-            return None, ""
         session = start_or_resume_operblock_offline_session(reason="active_local_case_blocks_network_probe")
         return session.runtime_context, "active_local_case"
     except Exception:
         return None, ""
 
 
-def _show_preselected_operblock_offline_notice(
-    reason: str,
-    close_startup_splash: Callable[[], None],
-) -> None:
-    if reason != "active_local_case":
+def _schedule_operblock_offline_notice_after_window(runtime_context, reason: str, QTimer) -> None:
+    if getattr(runtime_context, "mode", "") != "opblock_offline":
         return
-    close_startup_splash()
-    _show_custom_warning(
-        "Оперблок: локальный режим",
-        "На этом ПК есть незавершённый локальный случай оперблока. "
-        "Оперблок открыт в локальном режиме без проверки сетевой базы.",
-    )
+    if reason == "active_local_case":
+        message = (
+            "На этом ПК есть незавершённый локальный случай оперблока. "
+            "Оперблок открыт в локальном режиме без проверки сетевой базы."
+        )
+    else:
+        from rem_card.app.operblock_offline_store import OPERBLOCK_OFFLINE_WARNING
+
+        message = OPERBLOCK_OFFLINE_WARNING
+    QTimer.singleShot(0, partial(_show_custom_warning, "Оперблок: локальный режим", message))
 
 
 def _validate_compiled_startup_unless_runtime_preselected(
@@ -1905,8 +1988,9 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             sys.exit(1)
     os.environ.pop(STARTUP_GUARD_QUICKCHECK_ENV, None)
     path_setup = _configure_operblock_startup_path(args.role, path_setup)
-    preselected_runtime_context, preselected_runtime_reason = (
-        _preselect_operblock_offline_context_before_network_probe(args.role)
+    active_local_operblock_case = _has_active_local_operblock_case_before_network_probe(args.role)
+    preselected_runtime_context = (
+        _PENDING_OPERBLOCK_OFFLINE_RUNTIME if active_local_operblock_case else None
     )
 
     # An active local operblock case must reach its offline UI without touching
@@ -1929,8 +2013,35 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         nonlocal splash
         splash = _close_startup_splash(app, splash)
 
+    role_suffix = args.role if args.role else "default"
+    server_name = _single_instance_server_name(args.role)
+    server, server_listening, single_instance_status = _prepare_single_instance_server(
+        QLocalSocket,
+        QLocalServer,
+        server_name,
+        role_suffix,
+    )
+    if single_instance_status == SINGLE_INSTANCE_SHOWN:
+        close_startup_splash()
+        sys.exit(0)
+    if single_instance_status == SINGLE_INSTANCE_UNRESPONSIVE:
+        close_startup_splash()
+        _show_unresponsive_single_instance_warning(role_suffix)
+        sys.exit(1)
+    if single_instance_status != SINGLE_INSTANCE_ACQUIRED:
+        close_startup_splash()
+        _show_native_warning(
+            "Запуск RemCard",
+            "Не удалось зарегистрировать локальный экземпляр приложения. "
+            "Повторите запуск или перезагрузите ПК.",
+        )
+        sys.exit(1)
+
+    preselected_runtime_context, preselected_runtime_reason = _start_preselected_operblock_offline_context(
+        args.role,
+        active_local_case=active_local_operblock_case,
+    )
     emergency_startup_state = {"runtime_context": preselected_runtime_context}
-    _show_preselected_operblock_offline_notice(preselected_runtime_reason, close_startup_splash)
 
     if not _validate_compiled_startup_unless_runtime_preselected(
         args.role,
@@ -1949,15 +2060,6 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     )
     _run_pending_emergency_merge_after_startup_guard(emergency_runtime_context, close_startup_splash)
 
-    role_suffix = args.role if args.role else "default"
-    server_name = _single_instance_server_name(args.role)
-
-    if _notify_existing_instance(QLocalSocket, server_name, role_suffix):
-        close_startup_splash()
-        sys.exit(0)
-
-    QLocalServer.removeServer(server_name)
-
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if BASE_DIR not in sys.path:
         sys.path.insert(0, BASE_DIR)
@@ -1966,8 +2068,6 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
 
     window = None
     logger = None
-    server = None
-    server_listening = False
     restart_requested = False
     exit_code = 1
     try:
@@ -1980,24 +2080,15 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         init_crash_handler()
         _startup_trace(logger, startup_started_at, "qt_ready", role=args.role or "default")
 
-        server = QLocalServer()
-        server_listening = bool(server.listen(server_name))
-        if not server_listening:
-            close_startup_splash()
-            if _notify_existing_instance(QLocalSocket, server_name, role_suffix):
-                exit_code = 0
-                sys.exit(0)
-            _show_native_warning(
-                "Запуск RemCard",
-                "Не удалось зарегистрировать локальный экземпляр приложения. "
-                "Закройте другие dev-окна этой роли и повторите запуск.",
-            )
-            sys.exit(1)
         pending_single_instance_clients = []
 
         container = None
         if args.role in ROLE_KEYS:
             bootstrap_started = time.perf_counter()
+            _write_startup_local_log(
+                "bootstrap starting: "
+                f"role={args.role}; runtime={getattr(emergency_runtime_context, 'mode', 'network')}"
+            )
             container, emergency_runtime_context, role_lock = _bootstrap_container_with_emergency_fallback(
                 bootstrap,
                 role=args.role,
@@ -2103,6 +2194,11 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         if splash is not None:
             splash.finish(window)
         window.show()
+        _schedule_operblock_offline_notice_after_window(
+            getattr(container, "runtime_context", emergency_runtime_context),
+            preselected_runtime_reason,
+            QTimer,
+        )
         _opblock_startup_record_window_shown(args.role, initial_role_prepared, QTimer)
         if container is not None:
             QTimer.singleShot(
@@ -2121,14 +2217,8 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                 pending_single_instance_clients.append(client)
                 try:
                     client.setParent(server)
-                    if client.waitForReadyRead(500):
-                        data = bytes(client.readAll()).decode("utf-8", errors="replace")
-                        if data == "SHOW":
-                            if window.isMinimized():
-                                window.showNormal()
-                            window.setWindowState(window.windowState() & ~Qt.WindowMinimized | Qt.WindowActive)
-                            window.activateWindow()
-                            window.raise_()
+                    if not _handle_single_instance_show_request(client, window, Qt):
+                        logger.warning("Single-instance SHOW request was not acknowledged")
                 except RuntimeError as exc:
                     logger.warning("Single-instance socket handling failed: %s", exc)
                 finally:
@@ -2144,12 +2234,19 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
                         pass
 
         server.newConnection.connect(on_new_connection)
+        if server.hasPendingConnections():
+            QTimer.singleShot(0, on_new_connection)
 
         exit_code = app.exec()
         restart_requested = bool(app.property("remcard_restart_requested"))
         logger.info("Application exiting with code %s", exit_code)
     except Exception as exc:
         close_startup_splash()
+        _write_startup_local_log(
+            "critical startup/runtime error: "
+            f"role={args.role or ''}; runtime={getattr(emergency_runtime_context, 'mode', 'network')}; "
+            f"error={exc!r}"
+        )
         if logger:
             logger.critical("Critical error during startup/runtime: %s", exc, exc_info=True)
         else:
