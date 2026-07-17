@@ -30,6 +30,31 @@ def _movement_comment_text(status_value, reason_text):
     return movement_comment_text(status_value, reason_text)
 
 
+def _get_transfusion_protocols_for_report(
+    remcard_service,
+    admission_id: int,
+    config: dict,
+    *,
+    start_dt=None,
+    end_dt=None,
+):
+    include_all = bool(config.get("transfusion_protocols", False))
+    method_name = (
+        "get_completed_transfusion_protocols"
+        if include_all
+        else "get_unprinted_completed_transfusion_protocols"
+    )
+    getter = getattr(remcard_service, method_name, None)
+    if not callable(getter):
+        return []
+    kwargs = {}
+    if start_dt is not None:
+        kwargs["start_dt"] = start_dt
+    if end_dt is not None:
+        kwargs["end_dt"] = end_dt
+    return list(getter(admission_id, **kwargs) or [])
+
+
 class PrintConfig:
     def __init__(self):
         self.version = "1.0"
@@ -37,7 +62,7 @@ class PrintConfig:
     def save(self, vitals: bool, balance: bool, prescriptions: bool, events: bool,
              ventilation: bool, labs: bool, procedures: bool, death_outcome: bool = None,
              death_protocol: bool = None, transfusion_registration: bool = None,
-             outcome_report_reminder: bool = None):
+             outcome_report_reminder: bool = None, transfusion_protocols: bool = None):
         current = self.load()
         if death_outcome is None:
             death_outcome = current.get("death_outcome", True)
@@ -47,6 +72,8 @@ class PrintConfig:
             transfusion_registration = current.get("transfusion_registration", True)
         if outcome_report_reminder is None:
             outcome_report_reminder = current.get("outcome_report_reminder", False)
+        if transfusion_protocols is None:
+            transfusion_protocols = current.get("transfusion_protocols", False)
         from rem_card.services.settings.settings_service import PRINT_SETTINGS_KEY, get_settings_service
 
         payload = {
@@ -61,6 +88,7 @@ class PrintConfig:
             "death_protocol": bool(death_protocol),
             "transfusion_registration": bool(transfusion_registration),
             "outcome_report_reminder": bool(outcome_report_reminder),
+            "transfusion_protocols": bool(transfusion_protocols),
         }
         get_settings_service().set_app_setting(
             "doctor",
@@ -86,6 +114,7 @@ class PrintConfig:
             "death_protocol": True,
             "transfusion_registration": True,
             "outcome_report_reminder": False,
+            "transfusion_protocols": False,
         }
         payload = get_settings_service().get_app_setting("doctor", "print_config", default=default)
         if not isinstance(payload, dict):
@@ -123,9 +152,11 @@ class FullReportWorker(QThread):
                 results[0]["transfusion_registration_all"] = self.remcard_service.get_transfusion_registration_sheet(
                     self.admission_id
                 )
-            if results and hasattr(self.remcard_service, "get_unprinted_completed_transfusion_protocols"):
-                results[0]["pending_transfusion_protocols"] = (
-                    self.remcard_service.get_unprinted_completed_transfusion_protocols(self.admission_id)
+            if results:
+                results[0]["transfusion_protocols"] = _get_transfusion_protocols_for_report(
+                    self.remcard_service,
+                    self.admission_id,
+                    self.config,
                 )
 
             self.finished.emit(results)
@@ -533,14 +564,13 @@ class DataCollectorWorker(QThread):
                     start_dt=start_dt,
                     end_dt=end_dt,
                 )
-            if hasattr(self.remcard_service, "get_unprinted_completed_transfusion_protocols"):
-                data["pending_transfusion_protocols"] = (
-                    self.remcard_service.get_unprinted_completed_transfusion_protocols(
-                        self.admission_id,
-                        start_dt=start_dt,
-                        end_dt=end_dt,
-                    )
-                )
+            data["transfusion_protocols"] = _get_transfusion_protocols_for_report(
+                self.remcard_service,
+                self.admission_id,
+                self.config,
+                start_dt=start_dt,
+                end_dt=end_dt,
+            )
             self.finished.emit(data)
         except Exception as e:
             logger.error(f"Error in Print DataCollector: {str(e)}")
@@ -586,6 +616,7 @@ class SectorPrint(BaseSectorWidget):
         self.cb_procedures = QCheckBox("Процедуры")
         self.cb_procedures.setEnabled(False)
         self.cb_transfusion_registration = QCheckBox("Лист регистрации трансфузий")
+        self.cb_transfusion_protocols = QCheckBox("Протоколы гемотрансфузии")
         
         for cb in [
             self.cb_vitals,
@@ -594,6 +625,7 @@ class SectorPrint(BaseSectorWidget):
             self.cb_ventilation,
             self.cb_events,
             self.cb_transfusion_registration,
+            self.cb_transfusion_protocols,
             self.cb_labs,
             self.cb_procedures,
         ]:
@@ -639,7 +671,7 @@ class SectorPrint(BaseSectorWidget):
         self.set_content(main_frame)
         self.last_generated_pdf = None
         self.pdf_worker = None
-        self._pending_transfusion_protocol_ids = []
+        self._transfusion_protocol_ids_to_mark = []
 
     def set_context(self, remcard_service, admission_id, date):
         self.remcard_service, self.admission_id, self.card_date = remcard_service, admission_id, date
@@ -652,6 +684,7 @@ class SectorPrint(BaseSectorWidget):
         self.cb_events.setChecked(cfg["events"])
         self.cb_ventilation.setChecked(cfg.get("ventilation", False))
         self.cb_transfusion_registration.setChecked(cfg.get("transfusion_registration", True))
+        self.cb_transfusion_protocols.setChecked(cfg.get("transfusion_protocols", False))
 
     def save_settings(self):
         self.config.save(
@@ -663,6 +696,7 @@ class SectorPrint(BaseSectorWidget):
             False,
             False,
             transfusion_registration=self.cb_transfusion_registration.isChecked(),
+            transfusion_protocols=self.cb_transfusion_protocols.isChecked(),
         )
 
     def _get_context_from_parents(self):
@@ -734,7 +768,7 @@ class SectorPrint(BaseSectorWidget):
         from rem_card.ui.shared.pdf_build_worker import PdfBuildWorker
 
         self.status_label.setText("Сборка PDF...")
-        self._pending_transfusion_protocol_ids = self._collect_pending_transfusion_protocol_ids(data)
+        self._transfusion_protocol_ids_to_mark = self._collect_transfusion_protocol_ids(data)
         self.pdf_worker = PdfBuildWorker(data, cfg, pdf_path, parent=self)
         self.pdf_worker.completed.connect(lambda path: self._on_pdf_ready(path, open_after=open_after, ready_text=ready_text))
         self.pdf_worker.error.connect(self.on_error)
@@ -745,7 +779,7 @@ class SectorPrint(BaseSectorWidget):
         self.last_generated_pdf = pathlib.Path(pdf_path)
         self.status_label.setText(ready_text)
         self.btn_open.setEnabled(True)
-        self._mark_pending_transfusion_protocols_printed()
+        self._mark_transfusion_protocols_printed()
         if open_after:
             self.open_pdf()
 
@@ -757,11 +791,15 @@ class SectorPrint(BaseSectorWidget):
             open_pdf_file(self.last_generated_pdf, parent=self)
 
     @staticmethod
-    def _collect_pending_transfusion_protocol_ids(data) -> list[int]:
+    def _collect_transfusion_protocol_ids(data) -> list[int]:
         sources = data if isinstance(data, list) else [data]
         result: list[int] = []
         for item in sources:
-            for protocol in (item or {}).get("pending_transfusion_protocols") or []:
+            item = item or {}
+            protocols = item.get("transfusion_protocols")
+            if protocols is None:
+                protocols = item.get("pending_transfusion_protocols")
+            for protocol in protocols or []:
                 try:
                     procedure_id = int(protocol.get("procedure_id") or 0)
                 except Exception:
@@ -770,9 +808,9 @@ class SectorPrint(BaseSectorWidget):
                     result.append(procedure_id)
         return sorted(set(result))
 
-    def _mark_pending_transfusion_protocols_printed(self):
-        ids = list(self._pending_transfusion_protocol_ids or [])
-        self._pending_transfusion_protocol_ids = []
+    def _mark_transfusion_protocols_printed(self):
+        ids = list(self._transfusion_protocol_ids_to_mark or [])
+        self._transfusion_protocol_ids_to_mark = []
         if not ids or not self.remcard_service or not hasattr(self.remcard_service, "mark_transfusion_protocols_printed"):
             return
         try:

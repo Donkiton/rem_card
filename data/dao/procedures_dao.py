@@ -235,6 +235,35 @@ class ProceduresDAO:
         start_dt: Optional[datetime] = None,
         end_dt: Optional[datetime] = None,
     ) -> list[int]:
+        return self._list_completed_transfusion_ids(
+            admission_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            only_unprinted=True,
+        )
+
+    def list_completed_transfusion_ids(
+        self,
+        admission_id: int,
+        *,
+        start_dt: Optional[datetime] = None,
+        end_dt: Optional[datetime] = None,
+    ) -> list[int]:
+        return self._list_completed_transfusion_ids(
+            admission_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            only_unprinted=False,
+        )
+
+    def _list_completed_transfusion_ids(
+        self,
+        admission_id: int,
+        *,
+        start_dt: Optional[datetime],
+        end_dt: Optional[datetime],
+        only_unprinted: bool,
+    ) -> list[int]:
         params: list[Any] = [
             ProcedureType.TRANSFUSION.value,
             ProcedureStatus.COMPLETED.value,
@@ -244,9 +273,10 @@ class ProceduresDAO:
             "p.procedure_type = ?",
             "p.status = ?",
             "p.admission_id = ?",
-            "p.protocol_printed_at IS NULL",
             "COALESCE(p.is_deleted, 0) = 0",
         ]
+        if only_unprinted:
+            where.append("p.protocol_printed_at IS NULL")
         if start_dt is not None:
             where.append("DATETIME(p.started_at) >= DATETIME(?)")
             params.append(self._dt_value(start_dt))

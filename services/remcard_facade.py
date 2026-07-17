@@ -2534,6 +2534,14 @@ class RemCardService(QObject):
             end_dt=end_dt,
         )
 
+    def get_completed_transfusion_protocols(self, admission_id: int, *, start_dt=None, end_dt=None):
+        self._procedures.refresh_transfusion_statuses(admission_id)
+        return self._procedures_print.completed_transfusion_protocols(
+            admission_id,
+            start_dt=start_dt,
+            end_dt=end_dt,
+        )
+
     def mark_transfusion_protocols_printed(self, procedure_ids):
         return self._procedures.mark_protocols_printed([int(value) for value in procedure_ids if value])
 

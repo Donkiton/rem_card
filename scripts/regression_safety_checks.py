@@ -24083,6 +24083,8 @@ def _check_print_config_outcome_report_reminder(temp_root: str) -> tuple[bool, s
             return False, "print config does not expose outcome_report_reminder"
         if loaded.get("outcome_report_reminder") is not False:
             return False, f"outcome report reminder default must be disabled: {loaded!r}"
+        if loaded.get("transfusion_protocols") is not False:
+            return False, f"transfusion protocols default must be disabled: {loaded!r}"
 
         config.save(
             loaded["vitals"],
@@ -24096,10 +24098,13 @@ def _check_print_config_outcome_report_reminder(temp_root: str) -> tuple[bool, s
             loaded["death_protocol"],
             loaded["transfusion_registration"],
             outcome_report_reminder=True,
+            transfusion_protocols=True,
         )
         enabled = config.load()
         if enabled.get("outcome_report_reminder") is not True:
             return False, f"outcome report reminder was not saved enabled: {enabled!r}"
+        if enabled.get("transfusion_protocols") is not True:
+            return False, f"transfusion protocols setting was not saved enabled: {enabled!r}"
 
         config.save(
             enabled["vitals"],
@@ -24113,10 +24118,13 @@ def _check_print_config_outcome_report_reminder(temp_root: str) -> tuple[bool, s
             enabled["death_protocol"],
             enabled["transfusion_registration"],
             outcome_report_reminder=False,
+            transfusion_protocols=False,
         )
         disabled = config.load()
         if disabled.get("outcome_report_reminder") is not False:
             return False, f"outcome report reminder was not saved disabled: {disabled!r}"
+        if disabled.get("transfusion_protocols") is not False:
+            return False, f"transfusion protocols setting was not saved disabled: {disabled!r}"
         return True, "ok"
     finally:
         reset_settings_service()
