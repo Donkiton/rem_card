@@ -103,6 +103,7 @@ def test_stale_native_session_creates_one_native_report_without_generic_duplicat
 
 def test_database_outage_is_deduplicated_per_process(tmp_path, monkeypatch):
     monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(tmp_path / "spool"))
+    monkeypatch.setattr(crash_reports.time, "monotonic", lambda: 15.0)
     crash_reports._DATABASE_LAST_REPORTED.clear()
     first = crash_reports.capture_database_failure(
         "network_unavailable",
@@ -142,6 +143,7 @@ def test_crash_atomic_write_retries_transient_windows_replace_lock(tmp_path, mon
 
 
 def test_failed_database_report_does_not_poison_deduplication(monkeypatch):
+    monkeypatch.setattr(crash_reports.time, "monotonic", lambda: 15.0)
     crash_reports._DATABASE_LAST_REPORTED.clear()
     expected = Path("retry.json")
     results = iter([None, expected])
