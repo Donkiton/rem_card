@@ -128,7 +128,6 @@ MANAGED_ROOT_FILES = (
 )
 MANAGED_ROOT_DIRS = ("_internal",)
 UPDATE_DIR_NAME = "UPD"
-BAZA_DIR_NAME = "Baza_rao3_jurnal"
 DIRECT_TARGET_DIR_ENV = "REMCARD_UPDATE_TARGET_DIR"
 UPDATE_TEMP_DIR_PREFIXES = ("__upd_old_", "__upd_new_")
 UPDATE_CLEANUP_ATTEMPTS = 60
@@ -1383,13 +1382,6 @@ def _find_update_root(path: str) -> Optional[str]:
     return None
 
 
-def _looks_like_baza_dir(path: str) -> bool:
-    if os.path.basename(os.path.abspath(path)) == BAZA_DIR_NAME:
-        return True
-    markers = ("locks", "session_locks", "database", "archiv")
-    return any(os.path.isdir(os.path.join(path, marker)) for marker in markers)
-
-
 def _resolve_direct_baza_dir(release_dir: str, source_dir: str) -> str:
     env_baza = os.environ.get("REMCARD_BAZA_DIR")
     if env_baza:
@@ -1397,13 +1389,10 @@ def _resolve_direct_baza_dir(release_dir: str, source_dir: str) -> str:
 
     update_root = _find_update_root(source_dir) or _find_update_root(release_dir)
     if update_root:
-        update_parent = os.path.dirname(update_root)
-        if _looks_like_baza_dir(update_parent):
-            return os.path.abspath(update_parent)
-
-        sibling_baza = os.path.join(update_parent, BAZA_DIR_NAME)
-        if os.path.isdir(sibling_baza):
-            return os.path.abspath(sibling_baza)
+        # A validated direct package under <data-root>\UPD is sufficient to
+        # identify its data root.  The root name and the presence of optional
+        # runtime subdirectories must not affect updater routing.
+        return os.path.abspath(os.path.dirname(update_root))
 
     try:
         from rem_card.app.runtime_paths import resolve_baza_dir

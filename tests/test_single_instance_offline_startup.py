@@ -57,6 +57,12 @@ class FakeSocket:
         self.disconnected = True
 
 
+@pytest.fixture(autouse=True)
+def configured_compiled_data_root(monkeypatch):
+    """Keep single-instance scenarios focused on an already configured install."""
+    monkeypatch.setattr(app_main, "_ensure_compiled_data_path_configured", lambda: True)
+
+
 def test_single_instance_probe_reports_missing_server():
     class MissingSocket(FakeSocket):
         connected = False

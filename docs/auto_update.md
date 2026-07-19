@@ -12,10 +12,10 @@
 <папка программы>\remcard_data_path.json
 ```
 
-Его создаёт `RemCardPathSetup.exe`. JSON хранит путь к общей `Baza_rao3_jurnal`. Обновления ищутся внутри этой же базы:
+Его создаёт первый запуск ролевого EXE или `RemCardPathSetup.exe`. JSON хранит точный путь к выбранной папке данных. Обновления ищутся внутри неё:
 
 ```text
-<сетевая Baza_rao3_jurnal>\UPD
+<выбранная сетевая папка данных>\UPD
 ```
 
 `remcard_data_path.json`, локальные логи и пользовательские каталоги не входят в заменяемую часть программы и сохраняются при обновлении.
@@ -68,7 +68,7 @@ Release-скрипт:
 6. Только после успешного push публикует готовый пакет в локальный тестовый `UPD`:
 
 ```text
-C:\Project\Baza_rao3_jurnal\UPD\releases\<версия>
+C:\Project\RemCardTestData\UPD\releases\<версия>
 ```
 
 Путь можно изменить переменной `REMCARD_BUILD_TARGET_DIR`, но он должен оставаться локальным. Release-сборка не публикует файлы напрямую в сетевую production-базу.
@@ -77,7 +77,7 @@ C:\Project\Baza_rao3_jurnal\UPD\releases\<версия>
 
 ## Обязательная приёмка до production
 
-Готовый локальный пакет проверяется на отдельной тестовой установке, которая указывает на локальную или изолированную тестовую `Baza_rao3_jurnal`. До сетевой публикации нужно проверить:
+Готовый локальный пакет проверяется на отдельной тестовой установке, которая указывает на локальную или изолированную тестовую папку данных. До сетевой публикации нужно проверить:
 
 - обновление при запуске;
 - обновление после штатного закрытия;
@@ -96,7 +96,7 @@ Production-папка не используется как канареечна�
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\publish_full_update.py `
-  --source "C:\Project\Baza_rao3_jurnal\UPD\releases\<проверенная версия>" `
+  --source "C:\Project\RemCardTestData\UPD\releases\<проверенная версия>" `
   --config "D:\RemCard\remcard_data_path.json"
 ```
 
@@ -104,8 +104,8 @@ Production-папка не используется как канареечна�
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\publish_full_update.py `
-  --source "C:\Project\Baza_rao3_jurnal\UPD\releases\<проверенная версия>" `
-  --baza-dir "\\SERVER\Share\Baza_rao3_jurnal"
+  --source "C:\Project\RemCardTestData\UPD\releases\<проверенная версия>" `
+  --baza-dir "\\SERVER\Share\RemCardProductionData"
 ```
 
 `--source` обязателен и должен указывать именно на принятую версию. Это исключает случайную публикацию следующей сборки, если файл `VERSION` уже изменился.
@@ -136,7 +136,7 @@ Publisher не восстановит удалённый marker молча. Дл
 ## Установка на новый компьютер
 
 1. Скопируйте полную папку программы на любой локальный диск.
-2. Запустите `RemCardPathSetup.exe` и выберите общую сетевую `Baza_rao3_jurnal`.
+2. Запустите любой ролевой EXE и выберите общую сетевую папку данных; для последующей смены пути используйте `RemCardPathSetup.exe`.
 3. Убедитесь, что рядом с EXE создан `remcard_data_path.json`.
 4. Запустите нужную роль. Дальнейшие обновления будут устанавливаться в эту же локальную папку автоматически.
 

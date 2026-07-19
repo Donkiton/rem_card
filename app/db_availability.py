@@ -74,6 +74,22 @@ def notify_database_unavailable(
     wrapped = to_database_unavailable_error(exc)
     active_logger = logger or logging.getLogger("RemCard")
     active_logger.error("%s unavailable: %s", context, exc, exc_info=True)
+    try:
+        from rem_card.services.crash_reports import capture_database_failure, flush_local_crash_outbox
+
+        report_path = capture_database_failure(
+            "runtime_unavailable",
+            phase="runtime",
+            check_result="runtime_database_unavailable",
+        )
+        if report_path is not None:
+            threading.Thread(
+                target=flush_local_crash_outbox,
+                name="CrashReportDatabaseDelivery",
+                daemon=True,
+            ).start()
+    except Exception:
+        pass
     _show_warning_throttled()
     return wrapped
 

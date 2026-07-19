@@ -52,8 +52,8 @@
   - on startup quick-check failure, runtime DB is auto-restored from first healthy source:
     - preferred local replica (if valid),
     - then newest valid backup from `backups/`.
-  - corrupted primary DB is quarantined to dedicated folder `Baza_rao3_jurnal/corrupted_db` with `*.reason.txt` metadata and healthy copy becomes primary automatically.
+  - corrupted primary DB is quarantined to dedicated folder `<data-root>/corrupted_db` with `*.reason.txt` metadata and healthy copy becomes primary automatically.
 - Backup validation automation script (implemented):
   - `scripts/validate_backups.py` validates backup files (`quick_check` + `integrity_check`),
-  - writes JSON reports to `Baza_rao3_jurnal/backup_health/reports`,
-  - can optionally move invalid backup files to `Baza_rao3_jurnal/backup_health/invalid_backups`.
+  - writes JSON reports to `<data-root>/backup_health/reports`,
+  - can optionally move invalid backup files to `<data-root>/backup_health/invalid_backups`.
