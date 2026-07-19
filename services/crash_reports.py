@@ -291,8 +291,8 @@ def capture_database_failure(
     fingerprint = _fingerprint(event_type, "", [], _allowed_details(details))
     now = time.monotonic()
     with _STATE_LOCK:
-        last_reported = _DATABASE_LAST_REPORTED.get(fingerprint, 0.0)
-        if now - last_reported < DATABASE_DEDUP_SECONDS:
+        last_reported = _DATABASE_LAST_REPORTED.get(fingerprint)
+        if last_reported is not None and now - last_reported < DATABASE_DEDUP_SECONDS:
             return None
         _DATABASE_LAST_REPORTED[fingerprint] = now
     report_path = capture_crash_event(event_type, role=role, details=details)
