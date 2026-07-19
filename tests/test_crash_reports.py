@@ -123,6 +123,34 @@ def test_database_outage_is_deduplicated_per_process(tmp_path, monkeypatch):
     assert r"Z:\secret" not in json.dumps(payload, ensure_ascii=False)
 
 
+def test_crash_atomic_write_retries_transient_windows_replace_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(tmp_path / "spool"))
+    original_replace = crash_reports.os.replace
+    attempts = {"count": 0}
+
+    def transient_replace(source, target):
+        if attempts["count"] == 0:
+            attempts["count"] += 1
+            raise PermissionError("simulated antivirus lock")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(crash_reports.os, "replace", transient_replace)
+    path = crash_reports.capture_crash_event("previous_session_unclean")
+
+    assert attempts["count"] == 1
+    assert path is not None and path.is_file()
+
+
+def test_failed_database_report_does_not_poison_deduplication(monkeypatch):
+    crash_reports._DATABASE_LAST_REPORTED.clear()
+    expected = Path("retry.json")
+    results = iter([None, expected])
+    monkeypatch.setattr(crash_reports, "capture_crash_event", lambda *_args, **_kwargs: next(results))
+
+    assert crash_reports.capture_database_failure("network_unavailable", phase="runtime") is None
+    assert crash_reports.capture_database_failure("network_unavailable", phase="runtime") == expected
+
+
 def test_runtime_logs_directory_uses_selected_root_name(tmp_path, monkeypatch):
     from rem_card.app import runtime_paths
 
