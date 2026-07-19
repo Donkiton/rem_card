@@ -7,7 +7,7 @@ from rem_card.app.runtime_paths import (
     get_dev_baza_dir,
     get_required_baza_paths,
     get_executable_dir,
-    get_local_logs_dir,
+    get_runtime_logs_dir,
     get_project_root,
     is_compiled as _runtime_is_compiled,
     resolve_baza_dir,
@@ -126,13 +126,11 @@ if _BAZA_DIR_OVERRIDE:
     BAZA_DIR = os.path.abspath(os.path.normpath(_BAZA_DIR_OVERRIDE.strip().strip('"')))
 elif is_compiled():
     BAZA_DIR = resolve_baza_dir()
-elif not is_compiled():
-    BAZA_DIR = get_dev_baza_dir()
 else:
-    BAZA_DIR = os.path.join(NETWORK_ROOT, "Baza_rao3_jurnal")
+    BAZA_DIR = get_dev_baza_dir()
 
 BAZA_LOGS_DIR = os.path.join(BAZA_DIR, "logs")
-LOGS_DIR = get_local_logs_dir()
+LOGS_DIR = get_runtime_logs_dir()
 ARCHIV_DIR = os.path.join(BAZA_DIR, "archiv")
 REM_CARD_DIR = os.path.join(BAZA_DIR, "rem_card")
 REPORT_DIR = os.path.join(BAZA_DIR, "report")

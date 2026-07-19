@@ -482,7 +482,14 @@ def _infer_baza_dir_for_audit(path: str) -> Optional[str]:
     try:
         current = os.path.abspath(os.path.dirname(path))
         while current and os.path.dirname(current) != current:
-            if os.path.basename(current) == "Baza_rao3_jurnal":
+            if (
+                os.path.isfile(os.path.join(current, "archiv", "rao_journal.db"))
+                or (
+                    os.path.isdir(os.path.join(current, "archiv"))
+                    and os.path.isdir(os.path.join(current, "backups"))
+                    and os.path.isdir(os.path.join(current, "settings"))
+                )
+            ):
                 return current
             current = os.path.dirname(current)
     except Exception:

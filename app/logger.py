@@ -1,6 +1,5 @@
 import logging
 import os
-import socket
 import sys
 import time
 import functools
@@ -54,148 +53,40 @@ def setup_logger():
 logger = setup_logger()
 
 import threading
-import faulthandler
-
-
-_FAULT_LOCK = threading.Lock()
-_FAULT_FILE = None
-_FAULT_LOG_PATH = None
-
-def _extract_fault_payload(content: str) -> str:
-    payload_lines = []
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("--- SESSION START:") and stripped.endswith("---"):
-            continue
-        if stripped.startswith("--- SESSION END:") and stripped.endswith("---"):
-            continue
-        payload_lines.append(line)
-    if not payload_lines:
-        return ""
-    return "\n".join(payload_lines[-40:])
-
-
-def _archive_fault_log(fault_log_path: str, content: str, *, suffix: str = "") -> str:
-    suffix_part = f"_{suffix}" if suffix else ""
-    archive_name = f"faults_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}{suffix_part}.log"
-    archive_path = os.path.join(os.path.dirname(fault_log_path), archive_name)
-    with open(archive_path, "w", encoding="utf-8") as archive_file:
-        archive_file.write(content)
-    return archive_path
-
-
-def init_crash_handler():
-    """Инициализация расширенного перехватчика фатальных сбоев (C++ и Python)."""
-    global _FAULT_FILE, _FAULT_LOG_PATH
-    _ensure_logger_directories()
-        
-    fault_log_path = os.path.join(LOGS_DIR, "faults.log")
-    reset_fault_log = True
-    
-    # 1. Проверяем, были ли сбои в прошлом сеансе
-    if os.path.exists(fault_log_path) and os.path.getsize(fault_log_path) > 0:
-        reset_fault_log = False
-        try:
-            with open(fault_log_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                payload = _extract_fault_payload(content)
-                if payload:
-                    archive_path = _archive_fault_log(fault_log_path, content)
-                    logger.warning(
-                        "Обнаружен журнал аварийного завершения прошлого запуска; архив: %s",
-                        archive_path,
-                    )
-                reset_fault_log = True
-        except Exception as exc:
-            logger.warning("Failed to inspect previous crash log %s: %s", fault_log_path, exc)
-            
-    # 2. Настраиваем faulthandler (запись низкоуровневых ошибок Qt/C++)
+def init_crash_handler(role: str | None = None):
+    """Start the local-first crash session without touching patient data."""
     try:
-        with _FAULT_LOCK:
-            if _FAULT_FILE is not None:
-                try:
-                    faulthandler.disable()
-                except Exception:
-                    pass
-                try:
-                    _FAULT_FILE.close()
-                except Exception:
-                    pass
-                _FAULT_FILE = None
-            fault_file = open(fault_log_path, "w" if reset_fault_log else "a", encoding="utf-8")
-            # Записываем разделитель сеанса
-            fault_file.write(
-                "\n--- SESSION START: "
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
-                f"pid={os.getpid()} role={get_log_file_prefix()} host={socket.gethostname()} ---\n"
-            )
-            fault_file.flush()
-            faulthandler.enable(file=fault_file)
-            _FAULT_FILE = fault_file
-            _FAULT_LOG_PATH = fault_log_path
-    except Exception as e:
-        logger.error(f"Failed to enable faulthandler: {e}")
+        from rem_card.services.crash_reports import initialize_crash_session
+
+        return initialize_crash_session(role=role)
+    except Exception as exc:
+        logger.error("Failed to initialize crash reporting: %s", exc)
+        return ""
 
 
 def finalize_crash_handler(exit_code: int | None = None):
-    """
-    Завершает текущий faulthandler-сеанс.
-
-    Если Windows/PySide успел записать native fault, но приложение затем
-    завершилось штатно, переносим payload в архив и оставляем чистый marker.
-    Так `faults.log` не выглядит как новая ошибка на следующей проверке.
-    """
-    global _FAULT_FILE, _FAULT_LOG_PATH
-    with _FAULT_LOCK:
-        fault_log_path = _FAULT_LOG_PATH or os.path.join(LOGS_DIR, "faults.log")
-        fault_file = _FAULT_FILE
-        _FAULT_FILE = None
-        _FAULT_LOG_PATH = None
-
-        try:
-            faulthandler.disable()
-        except Exception:
-            pass
-        try:
-            if fault_file is not None:
-                fault_file.flush()
-                fault_file.close()
-        except Exception:
-            pass
-
     try:
-        with open(fault_log_path, "r", encoding="utf-8") as fh:
-            content = fh.read()
-    except FileNotFoundError:
-        return
-    except Exception as exc:
-        logger.warning("Failed to finalize crash log %s: %s", fault_log_path, exc)
-        return
+        from rem_card.services.crash_reports import finalize_crash_session
 
-    payload = _extract_fault_payload(content)
-    archived_to = ""
-    if payload:
+        finalize_crash_session(exit_code=exit_code)
+    except Exception as exc:
+        logger.warning("Failed to finalize crash reporting: %s", exc)
+
+
+def flush_crash_reports_async():
+    def worker():
         try:
-            archived_to = _archive_fault_log(fault_log_path, content, suffix="graceful")
-            logger.warning(
-                "Fault handler captured native fault payload during a session that reached shutdown; archived to %s",
-                archived_to,
-            )
+            from rem_card.services.crash_reports import flush_local_crash_outbox
+
+            result = flush_local_crash_outbox()
+            if result.get("delivered") or result.get("failed"):
+                logger.info("Crash report delivery result: %s", result)
         except Exception as exc:
-            logger.warning("Failed to archive finalized crash log %s: %s", fault_log_path, exc)
+            logger.warning("Crash report delivery failed: %s", exc)
 
-    try:
-        with open(fault_log_path, "w", encoding="utf-8") as fh:
-            fh.write(
-                "\n--- SESSION END: "
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
-                f"pid={os.getpid()} exit_code={exit_code if exit_code is not None else 'unknown'} "
-                f"archived={archived_to or 'none'} ---\n"
-            )
-    except Exception as exc:
-        logger.warning("Failed to reset finalized crash log %s: %s", fault_log_path, exc)
+    thread = threading.Thread(target=worker, name="CrashReportDelivery", daemon=True)
+    thread.start()
+    return thread
 
 
 def log_exception(exc_type, exc_value, exc_traceback):
@@ -205,7 +96,19 @@ def log_exception(exc_type, exc_value, exc_traceback):
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
         
-    # Формируем детальное сообщение об ошибке
+    try:
+        from rem_card.services.crash_reports import capture_exception
+
+        capture_exception(
+            "unhandled_python_exception",
+            exc_type,
+            exc_value,
+            exc_traceback,
+        )
+    except Exception:
+        pass
+
+    # Общий лог сохраняется для локального расследования.
     import traceback
     tb_text = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
     
@@ -236,6 +139,18 @@ def log_execution_time(threshold_ms=50):
 
 def _log_thread_exception(args):
     """Глобальный перехватчик исключений для потоков."""
+    try:
+        from rem_card.services.crash_reports import capture_exception
+
+        capture_exception(
+            "unhandled_thread_exception",
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+            thread_name=args.thread.name if args.thread else "unknown",
+        )
+    except Exception:
+        pass
     logger.critical(
         f"--- UNCAUGHT THREAD EXCEPTION ({args.thread.name if args.thread else 'unknown'}) ---\n"
         f"Type: {args.exc_type.__name__ if args.exc_type else 'Unknown'}\n"

@@ -21,7 +21,7 @@ class StartupPathValidationTest(unittest.TestCase):
         runtime_paths.clear_startup_baza_path_validation()
 
     def test_process_token_requires_same_root_complete_coverage_and_fresh_age(self):
-        root = os.path.abspath(os.path.join("X:\\", "Baza_rao3_jurnal"))
+        root = os.path.abspath(os.path.join("X:\\", "ArbitraryDataRoot"))
         first = os.path.join(root, "archiv")
         second = os.path.join(root, "settings")
         with patch.object(runtime_paths.time, "monotonic", return_value=100.0):
@@ -53,7 +53,7 @@ class StartupPathValidationTest(unittest.TestCase):
             self.assertEqual(runtime_paths._startup_path_validation_ttl_sec(), 30.0)
 
     def test_guard_deduplicates_paths_before_compiled_network_checks(self):
-        root = os.path.abspath(os.path.join("X:\\", "Baza_rao3_jurnal"))
+        root = os.path.abspath(os.path.join("X:\\", "ArbitraryDataRoot"))
         duplicate = os.path.join(root, "config")
         with (
             patch.object(startup_db_guard, "get_required_baza_paths", return_value=[duplicate, duplicate]),
@@ -69,7 +69,7 @@ class StartupPathValidationTest(unittest.TestCase):
         mark.assert_called_once()
 
     def test_failed_guard_does_not_publish_a_validation_token(self):
-        root = os.path.abspath(os.path.join("X:\\", "Baza_rao3_jurnal"))
+        root = os.path.abspath(os.path.join("X:\\", "ArbitraryDataRoot"))
         required = os.path.join(root, "archiv")
         with (
             patch.object(startup_db_guard, "get_required_baza_paths", return_value=[required]),
