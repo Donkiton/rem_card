@@ -81,6 +81,21 @@ def ensure_shared_crash_directories(data_root: str | os.PathLike[str] | None = N
     return result
 
 
+def _replace_with_retry(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    last_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            os.replace(source, target)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt >= 7:
+                break
+            time.sleep(0.02 * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
@@ -90,7 +105,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             fh.write("\n")
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
+        _replace_with_retry(tmp_name, path)
     finally:
         try:
             if os.path.exists(tmp_name):
@@ -280,7 +295,12 @@ def capture_database_failure(
         if now - last_reported < DATABASE_DEDUP_SECONDS:
             return None
         _DATABASE_LAST_REPORTED[fingerprint] = now
-    return capture_crash_event(event_type, role=role, details=details)
+    report_path = capture_crash_event(event_type, role=role, details=details)
+    if report_path is None:
+        with _STATE_LOCK:
+            if _DATABASE_LAST_REPORTED.get(fingerprint) == now:
+                _DATABASE_LAST_REPORTED.pop(fingerprint, None)
+    return report_path
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -469,7 +489,7 @@ def flush_local_crash_outbox(data_root: str | os.PathLike[str] | None = None) ->
                     fh.write(raw)
                     fh.flush()
                     os.fsync(fh.fileno())
-                os.replace(tmp_name, target)
+                _replace_with_retry(tmp_name, target)
             finally:
                 try:
                     if os.path.exists(tmp_name):
