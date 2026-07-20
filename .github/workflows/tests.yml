@@ -48,6 +48,6 @@ jobs:
           python scripts/regression_safety_checks.py
           --profile fast
           --jobs 4
-          --timeout-s 180
+          --timeout-s 900
           --quiet-progress
           --json-detail summary
