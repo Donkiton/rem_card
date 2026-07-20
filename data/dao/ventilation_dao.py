@@ -92,7 +92,7 @@ class VentilationDAO:
             """
             SELECT * FROM ivl_episodes
             WHERE admission_id = ?
-            ORDER BY start_time DESC, id DESC
+            ORDER BY DATETIME(start_time) DESC, id DESC
             LIMIT 1
             """,
             (admission_id,),
@@ -105,7 +105,7 @@ class VentilationDAO:
             SELECT * FROM ivl_episodes
             WHERE admission_id = ?
               AND (is_active = 1 OR (is_active IS NULL AND end_time IS NULL))
-            ORDER BY start_time DESC, id DESC
+            ORDER BY DATETIME(start_time) DESC, id DESC
             LIMIT 1
             """,
             (admission_id,),
@@ -117,7 +117,7 @@ class VentilationDAO:
             """
             SELECT * FROM ivl_episodes
             WHERE admission_id = ?
-            ORDER BY start_time ASC, id ASC
+            ORDER BY DATETIME(start_time) ASC, id ASC
             """,
             (admission_id,),
         )
@@ -128,7 +128,7 @@ class VentilationDAO:
             """
             SELECT * FROM clinical_events
             WHERE ivl_episode_id = ?
-            ORDER BY timestamp DESC, id DESC
+            ORDER BY DATETIME(timestamp) DESC, id DESC
             LIMIT 1
             """,
             (case_id,),
@@ -147,7 +147,7 @@ class VentilationDAO:
             WHERE ivl_episode_id = ?
               AND event_type = 'EXTUBATION'
               AND author = ?
-            ORDER BY timestamp DESC, id DESC
+            ORDER BY DATETIME(timestamp) DESC, id DESC
             LIMIT 1
             """,
             (case_id, author),
@@ -159,7 +159,7 @@ class VentilationDAO:
             """
             SELECT * FROM clinical_events
             WHERE ivl_episode_id = ?
-            ORDER BY timestamp ASC, id ASC
+            ORDER BY DATETIME(timestamp) ASC, id ASC
             """,
             (case_id,),
         )

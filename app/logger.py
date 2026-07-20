@@ -1,12 +1,19 @@
 import logging
 import os
 import sys
+import tempfile
 import time
 import functools
 from datetime import datetime
 
-from rem_card.app.paths import LOGS_DIR
-from rem_card.app.runtime_paths import cleanup_old_local_logs, get_log_file_prefix
+from rem_card.app.runtime_paths import (
+    cleanup_old_local_logs,
+    get_log_file_prefix,
+    get_runtime_logs_dir,
+)
+
+
+LOGS_DIR = get_runtime_logs_dir()
 
 
 def _ensure_logger_directories() -> str | None:
@@ -17,13 +24,43 @@ def _ensure_logger_directories() -> str | None:
         return str(exc)
 
 
-def setup_logger():
-    log_dir_warning = _ensure_logger_directories()
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    cleanup_old_local_logs(LOGS_DIR)
+def _logger_directory_candidates() -> tuple[str, ...]:
+    fallback = os.path.join(tempfile.gettempdir(), "RemCard", "logs")
+    unique: list[str] = []
+    for candidate in (LOGS_DIR, fallback):
+        normalized = os.path.abspath(candidate)
+        if normalized not in unique:
+            unique.append(normalized)
+    return tuple(unique)
 
-    log_file = os.path.join(LOGS_DIR, f"{get_log_file_prefix()}_{datetime.now().strftime('%Y%m%d')}.log")
-    
+
+def _create_file_handler(formatter: logging.Formatter):
+    warnings: list[str] = []
+    for log_dir in _logger_directory_candidates():
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except OSError as exc:
+            warnings.append(f"{log_dir}: {exc}")
+            continue
+        try:
+            cleanup_old_local_logs(log_dir)
+        except OSError as exc:
+            warnings.append(f"cleanup {log_dir}: {exc}")
+        log_file = os.path.join(
+            log_dir,
+            f"{get_log_file_prefix()}_{datetime.now().strftime('%Y%m%d')}.log",
+        )
+        try:
+            handler = logging.FileHandler(log_file, encoding="utf-8")
+        except OSError as exc:
+            warnings.append(f"{log_file}: {exc}")
+            continue
+        handler.setFormatter(formatter)
+        return handler, warnings
+    return None, warnings
+
+
+def setup_logger():
     logger = logging.getLogger("RemCard")
     if getattr(logger, "_remcard_configured", False):
         return logger
@@ -34,18 +71,21 @@ def setup_logger():
     # Формат логирования
     formatter = logging.Formatter('%(asctime)s | %(levelname)-8s | %(name)s | %(message)s')
 
-    # Handler для файла
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-
     # Handler для консоли
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
+
+    # Файл всегда локальный. Если профиль пользователя недоступен, используем
+    # системную temp-папку; полный отказ файловой системы не блокирует запуск.
+    file_handler, file_warnings = _create_file_handler(formatter)
+    if file_handler is not None:
+        logger.addHandler(file_handler)
     logger._remcard_configured = True
-    if log_dir_warning:
-        logger.warning("Log directory was unavailable during logger setup: %s", log_dir_warning)
+    for warning in file_warnings:
+        logger.warning("Log file is unavailable; fallback was attempted: %s", warning)
+    if file_handler is None:
+        logger.error("All local log files are unavailable; continuing with console logging only")
 
     return logger
 
@@ -64,11 +104,11 @@ def init_crash_handler(role: str | None = None):
         return ""
 
 
-def finalize_crash_handler(exit_code: int | None = None):
+def finalize_crash_handler(exit_code: int | None = None, *, crash_recorded: bool = False):
     try:
         from rem_card.services.crash_reports import finalize_crash_session
 
-        finalize_crash_session(exit_code=exit_code)
+        finalize_crash_session(exit_code=exit_code, crash_recorded=crash_recorded)
     except Exception as exc:
         logger.warning("Failed to finalize crash reporting: %s", exc)
 

@@ -2137,6 +2137,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     logger = None
     restart_requested = False
     exit_code = 1
+    structured_crash_recorded = False
     try:
         from rem_card.app.logger import (
             flush_crash_reports_async,
@@ -2314,6 +2315,20 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         restart_requested = bool(app.property("remcard_restart_requested"))
         logger.info("Application exiting with code %s", exit_code)
     except Exception as exc:
+        try:
+            from rem_card.services.crash_reports import capture_exception
+
+            structured_crash_recorded = capture_exception(
+                "unhandled_python_exception",
+                type(exc),
+                exc,
+                exc.__traceback__,
+                role=args.role,
+            ) is not None
+        except Exception:
+            # Crash reporting is a direct best-effort spool write. It must never
+            # recursively fail through the application logger.
+            structured_crash_recorded = False
         close_startup_splash()
         _write_startup_local_log(
             "critical startup/runtime error: "
@@ -2356,7 +2371,10 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             try:
                 from rem_card.app.logger import finalize_crash_handler
 
-                finalize_crash_handler(exit_code=exit_code)
+                finalize_crash_handler(
+                    exit_code=exit_code,
+                    crash_recorded=structured_crash_recorded,
+                )
             except Exception as exc:
                 logger.warning("Crash handler finalization failed: %s", exc)
         if exit_code == 0:

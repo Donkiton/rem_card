@@ -190,8 +190,8 @@ def inspect_db_cycle(
             row = conn.execute(
                 """
                 SELECT
-                    MIN(admission_datetime),
-                    MAX(admission_datetime),
+                    MIN(DATETIME(admission_datetime)),
+                    MAX(DATETIME(admission_datetime)),
                     COUNT(*),
                     COUNT(DISTINCT patient_id),
                     SUM(CASE WHEN lower(TRIM(COALESCE(outcome, ''))) = 'переведен' THEN 1 ELSE 0 END),

@@ -341,6 +341,26 @@ def _remove_file(path: Path | None) -> None:
         pass
 
 
+def _trusted_marker_native_path(marker_path: Path, marker: dict[str, Any]) -> Path | None:
+    """Accept only the native trace paired with this marker inside crash-spool."""
+    raw_path = marker.get("native_path")
+    if not raw_path:
+        return None
+    try:
+        native_dir = (get_local_crash_spool_dir() / "native").resolve()
+        expected = (native_dir / f"{marker_path.stem}.log").resolve()
+        candidate = Path(str(raw_path)).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    try:
+        candidate.relative_to(native_dir)
+    except ValueError:
+        return None
+    if os.path.normcase(str(candidate)) != os.path.normcase(str(expected)):
+        return None
+    return candidate
+
+
 def _process_stale_sessions() -> None:
     sessions_dir = get_local_crash_spool_dir() / "sessions"
     if not sessions_dir.is_dir():
@@ -356,7 +376,7 @@ def _process_stale_sessions() -> None:
             marker_pid = 0
         if _pid_is_running(marker_pid):
             continue
-        native_path = Path(str(marker.get("native_path") or "")) if marker.get("native_path") else None
+        native_path = _trusted_marker_native_path(marker_path, marker)
         native_content = ""
         if native_path is not None:
             try:
@@ -421,7 +441,7 @@ def initialize_crash_session(role: str | None = None) -> str:
         return session_id
 
 
-def finalize_crash_session(exit_code: int | None = None) -> None:
+def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool = False) -> None:
     global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID
     with _STATE_LOCK:
         fault_file = _FAULT_FILE
@@ -455,7 +475,7 @@ def finalize_crash_session(exit_code: int | None = None) -> None:
             details={"native_trace": _native_trace_payload(native_content)},
             session_id=session_id,
         )
-    elif exit_code not in (None, 0):
+    elif exit_code not in (None, 0) and not crash_recorded:
         capture_crash_event(
             "previous_session_unclean",
             details={"previous_session_unclean": True},

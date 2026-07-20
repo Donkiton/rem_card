@@ -33,14 +33,17 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             return row[0]
 
         total_admissions = int(
-            _scalar("SELECT COUNT(*) FROM admissions WHERE admission_datetime >= ? AND admission_datetime < ?", period_params)
+            _scalar(
+                "SELECT COUNT(*) FROM admissions WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)",
+                period_params,
+            )
         )
         in_department = int(
             _scalar(
                 """
                 SELECT COUNT(*)
                 FROM admissions
-                WHERE admission_datetime >= ? AND admission_datetime < ?
+                WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
                   AND (outcome IS NULL OR TRIM(outcome) = '')
                 """,
                 period_params,
@@ -51,7 +54,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                 """
                 SELECT COUNT(*)
                 FROM admissions
-                WHERE admission_datetime >= ? AND admission_datetime < ?
+                WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
                   AND lower(TRIM(COALESCE(outcome, ''))) = 'переведен'
                 """,
                 period_params,
@@ -62,7 +65,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                 """
                 SELECT COUNT(*)
                 FROM admissions
-                WHERE admission_datetime >= ? AND admission_datetime < ?
+                WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
                   AND lower(TRIM(COALESCE(outcome, ''))) = 'умер'
                 """,
                 period_params,
@@ -78,8 +81,8 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                             0,
                             julianday(
                                 CASE
-                                    WHEN death_datetime IS NOT NULL AND death_datetime < ? THEN death_datetime
-                                    WHEN transfer_datetime IS NOT NULL AND transfer_datetime < ? THEN transfer_datetime
+                                    WHEN death_datetime IS NOT NULL AND DATETIME(death_datetime) < DATETIME(?) THEN death_datetime
+                                    WHEN transfer_datetime IS NOT NULL AND DATETIME(transfer_datetime) < DATETIME(?) THEN transfer_datetime
                                     ELSE ?
                                 END
                             ) - julianday(admission_datetime)
@@ -88,7 +91,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                     0
                 )
                 FROM admissions
-                WHERE admission_datetime >= ? AND admission_datetime < ?
+                WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
                 """,
                 (calculation_end, calculation_end, calculation_end, start_bound, end_bound),
             )
@@ -102,8 +105,8 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                             0,
                             julianday(
                                 CASE
-                                    WHEN death_datetime IS NOT NULL AND death_datetime < ? THEN death_datetime
-                                    WHEN transfer_datetime IS NOT NULL AND transfer_datetime < ? THEN transfer_datetime
+                                    WHEN death_datetime IS NOT NULL AND DATETIME(death_datetime) < DATETIME(?) THEN death_datetime
+                                    WHEN transfer_datetime IS NOT NULL AND DATETIME(transfer_datetime) < DATETIME(?) THEN transfer_datetime
                                     ELSE ?
                                 END
                             ) - julianday(admission_datetime)
@@ -112,7 +115,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                     0
                 )
                 FROM admissions
-                WHERE admission_datetime >= ? AND admission_datetime < ?
+                WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
                 """,
                 (calculation_end, calculation_end, calculation_end, start_bound, end_bound),
             )
@@ -120,12 +123,12 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
 
         operations_count = int(
             _scalar(
-                "SELECT COUNT(*) FROM operations WHERE operation_datetime >= ? AND operation_datetime < ?",
+                "SELECT COUNT(*) FROM operations WHERE DATETIME(operation_datetime) >= DATETIME(?) AND DATETIME(operation_datetime) < DATETIME(?)",
                 period_params,
             )
         )
         cursor.execute(
-            "SELECT COUNT(*), COALESCE(SUM(volume_ml), 0) FROM transfusions WHERE datetime >= ? AND datetime < ?",
+            "SELECT COUNT(*), COALESCE(SUM(volume_ml), 0) FROM transfusions WHERE DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)",
             period_params,
         )
         transfusions_row = cursor.fetchone() or (0, 0)
@@ -140,13 +143,13 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                     SUM(
                         MAX(
                             0,
-                            (julianday(CASE WHEN end_time IS NOT NULL AND end_time < ? THEN end_time ELSE ? END) - julianday(start_time)) * 24.0
+                            (julianday(CASE WHEN end_time IS NOT NULL AND DATETIME(end_time) < DATETIME(?) THEN end_time ELSE ? END) - julianday(start_time)) * 24.0
                         )
                     ),
                     0
                 ) AS ivl_hours
             FROM ivl_episodes
-            WHERE start_time >= ? AND start_time < ?
+            WHERE DATETIME(start_time) >= DATETIME(?) AND DATETIME(start_time) < DATETIME(?)
             """,
             (calculation_end, calculation_end, start_bound, end_bound),
         )
@@ -159,7 +162,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             """
             SELECT COALESCE(NULLIF(TRIM(patient_gender), ''), 'Не указано') AS gender, COUNT(*) AS count
             FROM admissions
-            WHERE admission_datetime >= ? AND admission_datetime < ?
+            WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
             GROUP BY COALESCE(NULLIF(TRIM(patient_gender), ''), 'Не указано')
             ORDER BY count DESC, gender
             """,
@@ -170,7 +173,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
             """
             SELECT COALESCE(NULLIF(TRIM(source_department), ''), 'Не указано') AS source, COUNT(*) AS count
             FROM admissions
-            WHERE admission_datetime >= ? AND admission_datetime < ?
+            WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
             GROUP BY COALESCE(NULLIF(TRIM(source_department), ''), 'Не указано')
             ORDER BY count DESC, source
             """,
@@ -184,7 +187,7 @@ def build_statistical_report_html(db_manager, start_dt: str, end_dt: str) -> str
                 COALESCE(NULLIF(TRIM(diagnosis_text), ''), 'Без уточнения') AS diagnosis,
                 COUNT(*) AS count
             FROM admissions
-            WHERE admission_datetime >= ? AND admission_datetime < ?
+            WHERE DATETIME(admission_datetime) >= DATETIME(?) AND DATETIME(admission_datetime) < DATETIME(?)
             GROUP BY
                 COALESCE(NULLIF(TRIM(diagnosis_code), ''), '-'),
                 COALESCE(NULLIF(TRIM(diagnosis_text), ''), 'Без уточнения')

@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+import logging
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -134,6 +136,30 @@ class StartupPathValidationTest(unittest.TestCase):
             self.assertIsNone(app_logger._ensure_logger_directories())
 
         makedirs.assert_called_once_with(app_logger.LOGS_DIR, exist_ok=True)
+
+    def test_logger_file_handler_falls_back_to_temp_directory(self):
+        primary = os.path.abspath(os.path.join("X:\\", "unavailable", "logs"))
+        fallback = os.path.abspath(os.path.join("C:\\", "Temp", "RemCard", "logs"))
+        def makedirs(path, exist_ok=False):
+            _ = exist_ok
+            if os.path.abspath(path) == primary:
+                raise OSError("network unavailable")
+            return None
+
+        with (
+            patch.object(app_logger, "_logger_directory_candidates", return_value=(primary, fallback)),
+            patch.object(app_logger.os, "makedirs", side_effect=makedirs),
+            patch.object(app_logger, "cleanup_old_local_logs", return_value=0),
+            patch.object(app_logger.logging, "FileHandler") as file_handler_class,
+        ):
+            handler, warnings = app_logger._create_file_handler(logging.Formatter("%(message)s"))
+
+        self.assertIs(handler, file_handler_class.return_value)
+        file_handler_class.assert_called_once_with(
+            os.path.join(fallback, f"{app_logger.get_log_file_prefix()}_{datetime.now().strftime('%Y%m%d')}.log"),
+            encoding="utf-8",
+        )
+        self.assertTrue(any("network unavailable" in warning for warning in warnings))
 
 
 if __name__ == "__main__":

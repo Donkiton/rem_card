@@ -13989,7 +13989,7 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         "JOIN patients p ON p.id = adm.patient_id",
         "b.bed_number AS bed_number",
         "ORDER BY CAST(b.bed_number AS INTEGER) ASC",
-        "GROUP BY a2.order_id, a2.planned_time",
+        "GROUP BY a2.order_id, DATETIME(a2.planned_time)",
     ):
         if required_sql not in service_source:
             return False, f"W1a read model must keep optimized active-admission SQL: {required_sql}"

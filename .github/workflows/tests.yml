@@ -36,3 +36,18 @@ jobs:
 
       - name: Запустить тесты
         run: python -m pytest -q
+
+      - name: Проверить качество исходного кода
+        run: python scripts/code_quality_checks.py
+
+      - name: Проверить архитектурные ограничения
+        run: python scripts/architecture_safety_check.py
+
+      - name: Запустить расширенные safety-проверки
+        run: >-
+          python scripts/regression_safety_checks.py
+          --profile fast
+          --jobs 4
+          --timeout-s 180
+          --quiet-progress
+          --json-detail summary

@@ -209,13 +209,13 @@ class OrderService:
             SELECT a.*
             FROM administrations a
             WHERE a.order_id IN ({placeholders})
-              AND a.planned_time >= ? AND a.planned_time < ?
+              AND DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
               AND a.is_committed = 1
               AND a.id = (
                   SELECT MAX(a2.id)
                   FROM administrations a2
                   WHERE a2.order_id = a.order_id
-                    AND a2.planned_time = a.planned_time
+                    AND DATETIME(a2.planned_time) = DATETIME(a.planned_time)
                     AND a2.is_committed = 1
               )
             """,
@@ -247,7 +247,7 @@ class OrderService:
             SELECT id
             FROM orders
             WHERE admission_id = ?
-              AND datetime >= ? AND datetime < ?
+              AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
               AND is_committed = 1
               AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
             """,
@@ -345,7 +345,7 @@ class OrderService:
                   SELECT MAX(latest_admin.id)
                   FROM administrations latest_admin
                   WHERE latest_admin.order_id = current_admin.order_id
-                    AND latest_admin.planned_time = current_admin.planned_time
+                    AND DATETIME(latest_admin.planned_time) = DATETIME(current_admin.planned_time)
                     AND latest_admin.is_committed = 1
               )
             LIMIT 1
@@ -897,7 +897,7 @@ class OrderService:
             SELECT latin, text
             FROM orders
             WHERE admission_id = ?
-              AND datetime >= ? AND datetime < ?
+              AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
               AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
             """,
             (int(admission_id), start.isoformat(), end.isoformat()),
@@ -915,9 +915,9 @@ class OrderService:
                 SELECT *
                 FROM orders
                 WHERE admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
-                ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, created_at ASC, id ASC
+                ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, DATETIME(created_at) ASC, id ASC
                 """,
                 (int(admission_id), start.isoformat(), end.isoformat()),
             )
@@ -1004,14 +1004,14 @@ class OrderService:
                 SELECT 1
                 FROM orders
                 WHERE admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND (is_committed = 0 OR draft_sort_order IS NOT NULL)
                 UNION ALL
                 SELECT 1
                 FROM administrations a
                 JOIN orders o ON a.order_id = o.id
                 WHERE o.admission_id = ?
-                  AND a.planned_time >= ? AND a.planned_time < ?
+                  AND DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
                   AND a.is_committed = 0
             )
         """
@@ -1035,7 +1035,7 @@ class OrderService:
                 SELECT 1 FROM administrations a
                 JOIN orders o ON a.order_id = o.id
                 WHERE o.admission_id = ?
-                AND a.planned_time >= ? AND a.planned_time < ?
+                AND DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
                 AND COALESCE(a.status, '') != 'deleted'
             )
         """
@@ -1111,19 +1111,19 @@ class OrderService:
             SELECT a.*
             FROM administrations a
             JOIN orders o ON a.order_id = o.id
-            WHERE a.planned_time >= ? AND a.planned_time < ?
+            WHERE DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
             {join_filter_main}
             AND a.id IN (
                 SELECT MAX(a2.id)
                 FROM administrations a2
                 JOIN orders o2 ON a2.order_id = o2.id
-                WHERE a2.planned_time >= ? AND a2.planned_time < ?
+                WHERE DATETIME(a2.planned_time) >= DATETIME(?) AND DATETIME(a2.planned_time) < DATETIME(?)
                 {join_filter_sub}
         """
 
         if only_committed:
             query += " AND a2.is_committed = 1"
-        query += " GROUP BY a2.order_id, a2.planned_time )"
+        query += " GROUP BY a2.order_id, DATETIME(a2.planned_time) )"
 
         if only_committed:
             query += " AND a.is_committed = 1"
@@ -1150,7 +1150,7 @@ class OrderService:
         if updated_after is not None:
             query += " ORDER BY COALESCE(STRFTIME('%Y-%m-%d %H:%M:%f', a.updated_at), '') ASC, a.id ASC"
         else:
-            query += " ORDER BY a.planned_time ASC, a.id ASC"
+            query += " ORDER BY DATETIME(a.planned_time) ASC, a.id ASC"
 
         final_params: List[object] = [start_dt.isoformat(), end_dt.isoformat(), *params, start_dt.isoformat(), end_dt.isoformat(), *params]
         if updated_after is not None:
@@ -1192,7 +1192,7 @@ class OrderService:
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE id = ?
                   AND admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 """,
                 (position, order_id, admission_id, start.isoformat(), end.isoformat()),
@@ -1250,7 +1250,7 @@ class OrderService:
             WHERE is_committed = 0
               AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
               AND admission_id = ?
-              AND datetime >= ? AND datetime < ?
+              AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
               AND EXISTS (
                   SELECT 1
                   FROM administrations committed_admin
@@ -1270,7 +1270,7 @@ class OrderService:
                 FROM orders draft_orders
                 WHERE draft_orders.is_committed = 0
                   AND draft_orders.admission_id = ?
-                  AND draft_orders.datetime >= ? AND draft_orders.datetime < ?
+                  AND DATETIME(draft_orders.datetime) >= DATETIME(?) AND DATETIME(draft_orders.datetime) < DATETIME(?)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM administrations committed_admin
@@ -1336,7 +1336,7 @@ class OrderService:
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE admission_id = ?
                   AND draft_sort_order IS NOT NULL
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
             )
@@ -1345,7 +1345,7 @@ class OrderService:
                 SELECT id
                 FROM orders
                 WHERE admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND (duration_min = -1 OR duration_min >= 61)
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
@@ -1356,7 +1356,7 @@ class OrderService:
                 """
                 UPDATE administrations SET is_committed = 1, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE is_committed = 0
-                  AND planned_time >= ? AND planned_time < ?
+                  AND DATETIME(planned_time) >= DATETIME(?) AND DATETIME(planned_time) < DATETIME(?)
                   AND order_id IN (SELECT id FROM orders WHERE admission_id = ?)
                 """,
                 (start.isoformat(), end.isoformat(), admission_id),
@@ -1369,7 +1369,7 @@ class OrderService:
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE is_committed = 0
                   AND admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
             )
@@ -1387,7 +1387,7 @@ class OrderService:
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE admission_id = ?
                   AND draft_sort_order IS NOT NULL
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
             )
@@ -1395,7 +1395,7 @@ class OrderService:
                 """
                 DELETE FROM administrations
                 WHERE is_committed = 0
-                  AND planned_time >= ? AND planned_time < ?
+                  AND DATETIME(planned_time) >= DATETIME(?) AND DATETIME(planned_time) < DATETIME(?)
                   AND order_id IN (SELECT id FROM orders WHERE admission_id = ?)
                 """,
                 (start.isoformat(), end.isoformat(), admission_id),
@@ -1410,7 +1410,7 @@ class OrderService:
                 WHERE is_committed = 0
                   AND status = 'deleted'
                   AND admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                 """,
                 (admission_id, start.isoformat(), end.isoformat()),
             )
@@ -1420,7 +1420,7 @@ class OrderService:
                 DELETE FROM orders
                 WHERE is_committed = 0
                   AND admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND NOT EXISTS (
                       SELECT 1
                       FROM administrations remaining_admin
@@ -1461,7 +1461,7 @@ class OrderService:
                       SELECT MAX(a2.id)
                       FROM administrations a2
                       WHERE a2.order_id = ?
-                      GROUP BY a2.planned_time
+                      GROUP BY DATETIME(a2.planned_time)
                   )
             """
             active_admins = self.dao.db.fetch_all_remcard(query_find, (order_id, order_id))
@@ -1504,10 +1504,10 @@ class OrderService:
                 FROM administrations a
                 JOIN orders o ON a.order_id = o.id
                 WHERE o.admission_id = ?
-                  AND a.planned_time >= ? AND a.planned_time < ?
+                  AND DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
                   AND COALESCE(a.status, '') != 'deleted'
                   AND a.id IN (
-                      SELECT MAX(a2.id) FROM administrations a2 GROUP BY a2.order_id, a2.planned_time
+                      SELECT MAX(a2.id) FROM administrations a2 GROUP BY a2.order_id, DATETIME(a2.planned_time)
                   )
             """
             active_admins = self.dao.db.fetch_all_remcard(
@@ -1553,7 +1553,7 @@ class OrderService:
                               SELECT MAX(a2.id)
                               FROM administrations a2
                               WHERE a2.order_id = ?
-                              GROUP BY a2.planned_time
+                              GROUP BY DATETIME(a2.planned_time)
                           )
                     """
                     active_admins = self.dao.db.fetch_all_remcard(query_find, (order.id, order.id))
@@ -1612,7 +1612,7 @@ class OrderService:
                         WHERE order_id = ?
                           AND COALESCE(status, '') != 'deleted'
                           AND id IN (
-                              SELECT MAX(id) FROM administrations WHERE order_id = ? GROUP BY planned_time
+                              SELECT MAX(id) FROM administrations WHERE order_id = ? GROUP BY DATETIME(planned_time)
                           )
                         """,
                         (order.id, order.id),
@@ -1671,7 +1671,7 @@ class OrderService:
                     WHERE order_id = ?
                       AND COALESCE(status, '') != 'deleted'
                       AND id IN (
-                          SELECT MAX(id) FROM administrations WHERE order_id = ? GROUP BY planned_time
+                          SELECT MAX(id) FROM administrations WHERE order_id = ? GROUP BY DATETIME(planned_time)
                       )
                     """,
                     (src_order.id, src_order.id),
@@ -1742,7 +1742,7 @@ class OrderService:
               AND a.id IN (
                   SELECT MAX(id)
                   FROM administrations
-                  GROUP BY order_id, planned_time
+                  GROUP BY order_id, DATETIME(planned_time)
               )
               AND COALESCE(a.status, '') != 'deleted'
               AND COALESCE(o.status, '') != 'deleted'

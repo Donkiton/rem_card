@@ -519,7 +519,8 @@ class DetailedStatisticsReportBuilder:
                         diagnosis_text,
                         {cardiac_measures_expr}
                     FROM admissions
-                    WHERE admission_datetime >= ? AND admission_datetime < ?
+                    WHERE DATETIME(admission_datetime) >= DATETIME(?)
+                      AND DATETIME(admission_datetime) < DATETIME(?)
                     """,
                     period_params,
                 )
@@ -588,7 +589,8 @@ class DetailedStatisticsReportBuilder:
                     """
                     SELECT admission_id
                     FROM operations
-                    WHERE operation_datetime >= ? AND operation_datetime < ?
+                    WHERE DATETIME(operation_datetime) >= DATETIME(?)
+                      AND DATETIME(operation_datetime) < DATETIME(?)
                     """,
                     period_params,
                 )
@@ -599,7 +601,7 @@ class DetailedStatisticsReportBuilder:
                     """
                     SELECT admission_id, type, volume_ml
                     FROM transfusions
-                    WHERE datetime >= ? AND datetime < ?
+                    WHERE DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                     """,
                     period_params,
                 )
@@ -620,7 +622,7 @@ class DetailedStatisticsReportBuilder:
                     """
                     SELECT admission_id, start_time, end_time
                     FROM ivl_episodes
-                    WHERE start_time >= ? AND start_time < ?
+                    WHERE DATETIME(start_time) >= DATETIME(?) AND DATETIME(start_time) < DATETIME(?)
                     """,
                     period_params,
                 )

@@ -7,6 +7,7 @@ from ..data.dao.patient_dao import PatientDAO
 from ..data.dao.vitals_dao import VitalsDAO
 from ..data.dto.remcard_dto import PatientStatus, VitalDTO
 from .shift_service import ShiftService
+from .vital_validation import validate_vital_dto
 
 CHART_LOOKBACK_DAYS = max(0, int(os.environ.get("REMCARD_CHART_LOOKBACK_DAYS", "2")))
 CHART_LOOKAHEAD_DAYS = max(0, int(os.environ.get("REMCARD_CHART_LOOKAHEAD_DAYS", "1")))
@@ -113,6 +114,7 @@ class VitalService:
         force: bool = False,
         expected_revision: Optional[int] = None,
     ):
+        validate_vital_dto(dto)
         is_ok, msg = self.validate_timestamp(dto.admission_id, dto.timestamp, shift_date, force)
         if not is_ok:
             raise ValueError(msg)

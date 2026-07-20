@@ -692,11 +692,11 @@ def resolve_baza_dir() -> str:
 
 
 def get_runtime_logs_dir() -> str:
-    """Return the persistent log directory inside the selected data root."""
+    """Return the local-first log directory that stays available without Baza."""
     override = os.environ.get("REMCARD_LOCAL_LOGS_DIR")
     if override:
         return os.path.abspath(override)
-    return os.path.join(resolve_baza_dir(), "logs")
+    return os.path.join(_get_local_remcard_dir(), "logs")
 
 
 def get_log_file_prefix() -> str:
