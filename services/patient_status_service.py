@@ -164,7 +164,7 @@ class PatientStatusService:
         query = """
             SELECT * FROM patient_status_events 
             WHERE admission_id = ? 
-            ORDER BY start_time DESC
+            ORDER BY DATETIME(start_time) DESC, id DESC
         """
         rows = self.status_dao.db.fetch_all_remcard(query, (admission_id,))
         
@@ -201,18 +201,18 @@ class PatientStatusService:
 
     def get_next_active_event_start(self, admission_id: int, after_time: datetime) -> Optional[datetime]:
         """РќР°С…РѕРґРёС‚ РЅР°С‡Р°Р»Рѕ Р±Р»РёР¶Р°Р№С€РµРіРѕ СЃР»РµРґСѓСЋС‰РµРіРѕ СЃРѕР±С‹С‚РёСЏ ACTIVE РїРѕСЃР»Рµ СѓРєР°Р·Р°РЅРЅРѕРіРѕ РІСЂРµРјРµРЅРё."""
-        ts_str = after_time.isoformat().replace('T', ' ')
         query = """
             SELECT start_time FROM patient_status_events 
             WHERE admission_id = ? 
             AND status = ?
-            AND start_time > ?
-            ORDER BY start_time ASC
+            AND DATETIME(start_time) > DATETIME(?)
+            ORDER BY DATETIME(start_time) ASC, id ASC
             LIMIT 1
         """
-        row = self.status_dao.db.fetch_one_remcard(query, (admission_id, PatientStatus.ACTIVE.value, ts_str))
-        if not row:
-            row = self.status_dao.db.fetch_one_remcard(query, (admission_id, PatientStatus.ACTIVE.value, after_time.isoformat()))
+        row = self.status_dao.db.fetch_one_remcard(
+            query,
+            (admission_id, PatientStatus.ACTIVE.value, after_time.isoformat()),
+        )
             
         if row:
             return datetime.fromisoformat(row['start_time'].replace(' ', 'T'))
@@ -230,7 +230,7 @@ class PatientStatusService:
               AND status = ?
               AND datetime(start_time) <= datetime(?)
               AND (end_time IS NULL OR datetime(end_time) >= datetime(?))
-            ORDER BY start_time ASC
+            ORDER BY DATETIME(start_time) ASC, id ASC
         """
         rows = self.status_dao.db.fetch_all_remcard(
             query,

@@ -153,10 +153,61 @@ def test_failed_database_report_does_not_poison_deduplication(monkeypatch):
     assert crash_reports.capture_database_failure("network_unavailable", phase="runtime") == expected
 
 
-def test_runtime_logs_directory_uses_selected_root_name(tmp_path, monkeypatch):
+def test_runtime_logs_directory_is_local_and_does_not_resolve_selected_root(tmp_path, monkeypatch):
     from rem_card.app import runtime_paths
 
-    selected = tmp_path / "Журнал отделения"
+    local_appdata = tmp_path / "local-appdata"
     monkeypatch.delenv("REMCARD_LOCAL_LOGS_DIR", raising=False)
-    monkeypatch.setattr(runtime_paths, "resolve_baza_dir", lambda: str(selected))
-    assert Path(runtime_paths.get_runtime_logs_dir()) == selected / "logs"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
+    monkeypatch.setattr(
+        runtime_paths,
+        "resolve_baza_dir",
+        lambda: (_ for _ in ()).throw(AssertionError("network data root must not be resolved")),
+    )
+    assert Path(runtime_paths.get_runtime_logs_dir()) == local_appdata / "RemCard" / "logs"
+
+
+def test_stale_marker_cannot_read_or_delete_native_path_outside_spool(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    victim = tmp_path / "patient-archive.db"
+    victim.write_text("must survive", encoding="utf-8")
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports, "_pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(crash_reports.faulthandler, "enable", lambda **_kwargs: None)
+    monkeypatch.setattr(crash_reports.faulthandler, "disable", lambda: None)
+
+    marker = spool / "sessions" / "tampered.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        json.dumps({"session_id": "tampered", "pid": 999999, "native_path": str(victim)}),
+        encoding="utf-8",
+    )
+
+    crash_reports.initialize_crash_session(role="doctor")
+    crash_reports.finalize_crash_session(exit_code=0)
+
+    assert victim.read_text(encoding="utf-8") == "must survive"
+    assert not marker.exists()
+    payloads = _payloads(spool / "outbox")
+    assert [payload["event_type"] for payload in payloads] == ["previous_session_unclean"]
+
+
+def test_recorded_exception_does_not_create_generic_shutdown_duplicate(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv("REMCARD_CRASH_OUTBOX_DIR", str(spool))
+    monkeypatch.setattr(crash_reports.faulthandler, "enable", lambda **_kwargs: None)
+    monkeypatch.setattr(crash_reports.faulthandler, "disable", lambda: None)
+
+    crash_reports.initialize_crash_session(role="doctor")
+    exc_type, exc_value, exc_traceback = _same_failure()
+    recorded = crash_reports.capture_exception(
+        "unhandled_python_exception",
+        exc_type,
+        exc_value,
+        exc_traceback,
+        role="doctor",
+    )
+    crash_reports.finalize_crash_session(exit_code=1, crash_recorded=recorded is not None)
+
+    payloads = _payloads(spool / "outbox")
+    assert [payload["event_type"] for payload in payloads] == ["unhandled_python_exception"]
