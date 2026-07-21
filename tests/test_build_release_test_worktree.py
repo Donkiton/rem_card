@@ -14,16 +14,16 @@ from scripts import build_release, publish_full_update
 
 def test_publisher_rejects_local_windows_device_paths_as_network() -> None:
     assert not publish_full_update._is_network_path(
-        Path(r"\\?\C:\Project\Baza_rao3_jurnal")
+        Path(r"\\?\C:\Project\ArbitraryDataRoot")
     )
     assert not publish_full_update._is_network_path(
-        Path(r"\\.\C:\Project\Baza_rao3_jurnal")
+        Path(r"\\.\C:\Project\ArbitraryDataRoot")
     )
     assert publish_full_update._is_network_path(
-        Path(r"\\server\share\Baza_rao3_jurnal")
+        Path(r"\\server\share\ArbitraryDataRoot")
     )
     assert publish_full_update._is_network_path(
-        Path(r"\\?\UNC\server\share\Baza_rao3_jurnal")
+        Path(r"\\?\UNC\server\share\ArbitraryDataRoot")
     )
 
 

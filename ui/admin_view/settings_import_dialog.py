@@ -51,7 +51,7 @@ class SettingsImportPathDialog(BaseStyledDialog):
 
         path_row = QHBoxLayout()
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText(r"Например: \\server\share\Baza_rao3_jurnal")
+        self.path_edit.setPlaceholderText(r"Например: \\server\share\RemCardData")
         browse_btn = QPushButton("Выбрать")
         browse_btn.setObjectName("DialogOkBtn")
         browse_btn.clicked.connect(self._browse)
@@ -121,7 +121,7 @@ class SettingsImportFolderDialog(BaseStyledDialog):
 
         path_row = QHBoxLayout()
         self.folder_path_edit = QLineEdit()
-        self.folder_path_edit.setPlaceholderText(r"\\server\share\Baza_rao3_jurnal")
+        self.folder_path_edit.setPlaceholderText(r"\\server\share\RemCardData")
         open_btn = QPushButton("Открыть")
         open_btn.setObjectName("DialogOkBtn")
         open_btn.clicked.connect(self._open_typed_path)

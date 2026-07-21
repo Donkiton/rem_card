@@ -801,23 +801,23 @@ class PatientBedManagementService:
             SELECT 1
             WHERE EXISTS (
                 SELECT 1 FROM vitals
-                WHERE admission_id = ? AND datetime >= ? AND datetime < ?
+                WHERE admission_id = ? AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
             )
             OR EXISTS (
                 SELECT 1 FROM fluids
-                WHERE admission_id = ? AND datetime >= ? AND datetime < ?
+                WHERE admission_id = ? AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
             )
             OR EXISTS (
                 SELECT 1 FROM orders
-                WHERE admission_id = ? AND datetime >= ? AND datetime < ?
+                WHERE admission_id = ? AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
             )
             OR EXISTS (
                 SELECT 1 FROM diet_plan
-                WHERE admission_id = ? AND shift_start >= ? AND shift_start < ?
+                WHERE admission_id = ? AND DATETIME(shift_start) >= DATETIME(?) AND DATETIME(shift_start) < DATETIME(?)
             )
             OR EXISTS (
                 SELECT 1 FROM oral_intake_events
-                WHERE admission_id = ? AND event_time >= ? AND event_time < ?
+                WHERE admission_id = ? AND DATETIME(event_time) >= DATETIME(?) AND DATETIME(event_time) < DATETIME(?)
             )
             LIMIT 1
             """,

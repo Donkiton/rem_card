@@ -175,7 +175,7 @@ class FluidService:
                 FROM fluids
                 WHERE admission_id = ?
                   AND STRFTIME('%Y-%m-%d %H', datetime) = ?
-                ORDER BY datetime ASC, id ASC
+                ORDER BY DATETIME(datetime) ASC, id ASC
                 LIMIT 1
                 """,
                 (admission_id, hour_key),

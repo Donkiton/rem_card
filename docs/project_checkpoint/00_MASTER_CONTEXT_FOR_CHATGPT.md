@@ -34,7 +34,7 @@ W1 в текущем коде — режим выбора коек/пациен�
 
 ## 2. Главный архитектурный принцип проекта
 
-Главная схема работы: `ПК врача ↔ сетевая папка Baza_rao3_jurnal со SQLite ↔ ПК медсестры`.
+Главная схема работы: `ПК врача ↔ выбранная сетевая папка данных со SQLite ↔ ПК медсестры`.
 
 Фактическая рабочая БД: `BAZA_DIR\archiv\rao_journal.db`. Путь задаётся в `app/paths.py:122-166`: `BAZA_DIR`, `ARCHIV_DIR`, `JOURNAL_DB_PATH`, `REMCARD_DB_PATH`, `DB_LOCK_PATH`, `RECOVERY_LOCK_PATH`. В dev-режиме база обычно лежит относительно проекта, в compiled-режиме путь выбирается через `app/runtime_paths.py` и `run_path_setup.py`.
 

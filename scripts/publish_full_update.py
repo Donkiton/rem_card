@@ -28,6 +28,7 @@ from app.full_update_manifest import (  # noqa: E402
     release_file_path,
     verify_file_inventory,
 )
+from app.runtime_paths import DEFAULT_DEV_DATA_ROOT_NAME  # noqa: E402
 
 
 APP_ID = "rem_card"
@@ -197,7 +198,7 @@ def _validate_settings_release(
 
 
 def _default_local_baza_dir() -> Path:
-    return PROJECT_ROOT.parent / "Baza_rao3_jurnal"
+    return PROJECT_ROOT.parent / DEFAULT_DEV_DATA_ROOT_NAME
 
 
 def _resolve_source(args: argparse.Namespace) -> Path:
@@ -755,7 +756,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Проверить локальный full-релиз и безопасно опубликовать его "
-            "в сетевой Baza_rao3_jurnal\\UPD."
+            "в UPD выбранной сетевой папки данных RemCard."
         )
     )
     source_selection = parser.add_mutually_exclusive_group(required=True)
@@ -770,12 +771,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--local-baza-dir",
         help=(
-            "Локальная тестовая Baza_rao3_jurnal; по умолчанию "
+            "Локальная тестовая папка данных RemCard; по умолчанию "
             f"{_default_local_baza_dir()}."
         ),
     )
     destination = parser.add_mutually_exclusive_group(required=True)
-    destination.add_argument("--baza-dir", help="Путь к сетевой production Baza_rao3_jurnal.")
+    destination.add_argument("--baza-dir", help="Путь к сетевой production-папке данных RemCard.")
     destination.add_argument(
         "--config",
         help="Путь к production remcard_data_path.json рядом с установленной программой.",

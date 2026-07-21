@@ -251,8 +251,10 @@ class OralIntakeDAO:
             """
             SELECT *
             FROM oral_intake_events
-            WHERE admission_id = ? AND event_time >= ? AND event_time < ?
-            ORDER BY event_time ASC, id ASC
+            WHERE admission_id = ?
+              AND DATETIME(event_time) >= DATETIME(?)
+              AND DATETIME(event_time) < DATETIME(?)
+            ORDER BY DATETIME(event_time) ASC, id ASC
             """,
             (int(admission_id), _dt_to_db(start), _dt_to_db(end)),
         )
@@ -262,7 +264,7 @@ class OralIntakeDAO:
         query = """
             SELECT *
             FROM oral_intake_events
-            WHERE admission_id = ? AND event_time = ?
+            WHERE admission_id = ? AND DATETIME(event_time) = DATETIME(?)
         """
         params = (int(admission_id), _dt_to_db(event_time))
         if cursor:
@@ -339,7 +341,7 @@ class OralIntakeDAO:
         if expected_version is not None and int(expected_version) > 0:
             where_version = " AND version = ?"
             params.append(int(expected_version))
-        query = f"DELETE FROM oral_intake_events WHERE admission_id = ? AND event_time = ?{where_version}"
+        query = f"DELETE FROM oral_intake_events WHERE admission_id = ? AND DATETIME(event_time) = DATETIME(?){where_version}"
         cur = cursor.execute(query, tuple(params)) if cursor else self.db.execute_remcard(query, tuple(params))
         if expected_version is not None and int(expected_version) > 0 and cur.rowcount == 0:
             raise OptimisticLockError("Факт перорального ввода был изменен другим пользователем")
@@ -349,7 +351,9 @@ class OralIntakeDAO:
             """
             SELECT event_time, amount_ml
             FROM oral_intake_events
-            WHERE admission_id = ? AND event_time >= ? AND event_time < ?
+            WHERE admission_id = ?
+              AND DATETIME(event_time) >= DATETIME(?)
+              AND DATETIME(event_time) < DATETIME(?)
             """,
             (int(admission_id), _dt_to_db(start), _dt_to_db(end)),
         )
@@ -359,7 +363,7 @@ class OralIntakeDAO:
         for row in rows:
             amount = float(row["amount_ml"] or 0.0)
             daily += amount
-            if str(row["event_time"]) <= current_limit:
+            if _parse_dt(row["event_time"]) <= _parse_dt(current_limit):
                 current += amount
         return {"current": round(current, 1), "daily": round(daily, 1)}
 

@@ -14,6 +14,7 @@
 - `updater_visible_chat_2026-07-14.md` - стенограмма видимой переписки и журнал решений по задаче.
 - `settings_db.md` - центральная settings DB, release snapshot и legacy import настроек.
 - `db_safety_contract.md` - инварианты сетевой SQLite-БД, backup, миграции, recovery.
+- `crash_reporting.md` - размещение обычных логов, структурированные аварийные отчёты, обработка и срок хранения 180 дней.
 - `architecture_guardrails.md` и `code_quality.md` - статические safety/quality gates.
 - `operational_acceptance.md` - базовая приемка и дополнительные gates по аварийному режиму/оперблоку.
 - `emergency_runbook.md` и `emergency_mode_smoke_checklist.md` - аварийный режим и ручной smoke.

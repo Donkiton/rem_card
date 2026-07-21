@@ -199,7 +199,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             excluded_from_migration INTEGER NOT NULL DEFAULT 0,
             CHECK (table_code IN ('emergency', 'planned')),
             CHECK (status IN ('active', 'closed', 'transferred_to_rao', 'cancelled')),
-            CHECK (ended_at IS NULL OR ended_at >= started_at),
+            CHECK (ended_at IS NULL OR DATETIME(ended_at) >= DATETIME(started_at)),
             FOREIGN KEY (patient_id) REFERENCES patients(id),
             FOREIGN KEY (admission_id) REFERENCES admissions(id),
             FOREIGN KEY (table_code) REFERENCES operating_tables(code),
@@ -251,7 +251,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             last_modified_by TEXT,
             CHECK (table_code IN ('emergency', 'planned')),
             CHECK (status IN ('active', 'released', 'cancelled')),
-            CHECK (released_at IS NULL OR released_at >= assigned_at),
+            CHECK (released_at IS NULL OR DATETIME(released_at) >= DATETIME(assigned_at)),
             FOREIGN KEY (operation_case_id) REFERENCES operation_cases(id),
             FOREIGN KEY (table_code) REFERENCES operating_tables(code)
         )
@@ -290,7 +290,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             CHECK (event_type IN ('bolus', 'infusion_start', 'infusion_change', 'infusion_stop', 'clinical_event', 'note')),
             CHECK (status IN ('active', 'stopped', 'deleted', 'cancelled')),
             CHECK (table_code IS NULL OR table_code IN ('emergency', 'planned')),
-            CHECK (end_time IS NULL OR end_time >= event_time),
+            CHECK (end_time IS NULL OR DATETIME(end_time) >= DATETIME(event_time)),
             FOREIGN KEY (operation_case_id) REFERENCES operation_cases(id),
             FOREIGN KEY (admission_id) REFERENCES admissions(id),
             FOREIGN KEY (source_order_id) REFERENCES orders(id),
@@ -481,7 +481,7 @@ def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:
         SELECT
             oc.id,
             oc.table_code,
-            MIN(ote.event_time) AS first_anesthesia_start
+            MIN(DATETIME(ote.event_time)) AS first_anesthesia_start
         FROM operation_cases oc
         JOIN operblock_timeline_events ote ON ote.operation_case_id = oc.id
         WHERE (oc.anesthesia_protocol_number IS NULL OR oc.anesthesia_protocol_date IS NULL)
@@ -489,7 +489,7 @@ def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:
           AND COALESCE(ote.status, '') NOT IN ('deleted', 'cancelled')
           AND COALESCE(ote.payload_json, '') LIKE '%anesthesia_start%'
         GROUP BY oc.id, oc.table_code
-        ORDER BY oc.table_code, datetime(MIN(ote.event_time)), oc.id
+        ORDER BY oc.table_code, MIN(DATETIME(ote.event_time)), oc.id
         """
     ).fetchall()
 

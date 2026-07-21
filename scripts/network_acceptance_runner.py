@@ -2,7 +2,7 @@
 """
 Isolated network-folder acceptance runner for the shared SQLite workflow.
 
-The runner creates a temporary Baza_rao3_jurnal tree, seeds one active
+The runner creates a temporary arbitrarily named data-root tree, seeds one active
 admission, runs multi-client write/read checks, then validates the resulting DB.
 It never points tests at the user's configured production database.
 """
@@ -286,11 +286,11 @@ def main() -> int:
     parser.add_argument("--benchmark-clicks", type=int, default=3, help="orders click benchmark clicks")
     parser.add_argument("--skip-benchmark", action="store_true", help="skip UI click benchmark")
     parser.add_argument("--timeout-s", type=float, default=240.0, help="timeout budget for each heavy subprocess")
-    parser.add_argument("--keep-temp", action="store_true", help="keep temporary Baza_rao3_jurnal after completion")
+    parser.add_argument("--keep-temp", action="store_true", help="keep the temporary data root after completion")
     args = parser.parse_args()
 
     temp_root = Path(tempfile.mkdtemp(prefix="remcard_network_acceptance_")).resolve()
-    baza_dir = temp_root / "network_share" / "Baza_rao3_jurnal"
+    baza_dir = temp_root / "network_share" / "arbitrary_remcard_data"
     env = _isolated_env(temp_root, baza_dir)
     steps: list[StepResult] = []
     started = time.perf_counter()

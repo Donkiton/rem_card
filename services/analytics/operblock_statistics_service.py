@@ -756,7 +756,7 @@ class OperBlockStatisticsReportBuilder:
             LEFT JOIN operating_tables t ON t.code = oc.table_code
             LEFT JOIN admissions a ON a.id = oc.admission_id
             LEFT JOIN patients p ON p.id = oc.patient_id
-            WHERE oc.started_at >= ? AND oc.started_at < ?
+            WHERE DATETIME(oc.started_at) >= DATETIME(?) AND DATETIME(oc.started_at) < DATETIME(?)
               AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
             ORDER BY DATETIME(oc.started_at), oc.id
             """,
@@ -772,7 +772,7 @@ class OperBlockStatisticsReportBuilder:
                 SELECT e.*
                 FROM operblock_timeline_events e
                 JOIN operation_cases oc ON oc.id = e.operation_case_id
-                WHERE oc.started_at >= ? AND oc.started_at < ?
+                WHERE DATETIME(oc.started_at) >= DATETIME(?) AND DATETIME(oc.started_at) < DATETIME(?)
                   AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
                   AND COALESCE(e.status, '') NOT IN ('deleted', 'cancelled')
                 ORDER BY e.operation_case_id, DATETIME(e.event_time), e.id
@@ -797,7 +797,7 @@ class OperBlockStatisticsReportBuilder:
                     o.comment
                 FROM operation_cases oc
                 JOIN orders o ON o.admission_id = oc.admission_id
-                WHERE oc.started_at >= ? AND oc.started_at < ?
+                WHERE DATETIME(oc.started_at) >= DATETIME(?) AND DATETIME(oc.started_at) < DATETIME(?)
                   AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
                   AND COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
                 ORDER BY oc.id, DATETIME(o.datetime), o.id
@@ -825,7 +825,7 @@ class OperBlockStatisticsReportBuilder:
                     v.cvp
                 FROM operation_cases oc
                 JOIN vitals v ON v.admission_id = oc.admission_id
-                WHERE oc.started_at >= ? AND oc.started_at < ?
+                WHERE DATETIME(oc.started_at) >= DATETIME(?) AND DATETIME(oc.started_at) < DATETIME(?)
                   AND COALESCE(oc.status, '') NOT IN ('cancelled', 'deleted')
                 ORDER BY oc.id, DATETIME(v.datetime), v.id
                 """,
