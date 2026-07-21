@@ -25,7 +25,7 @@ class PatientStatusDAO:
 
     def get_events(self, admission_id: int) -> List[PatientStatusEventDTO]:
         """Возвращает все события статуса для госпитализации, отсортированные по времени."""
-        query = "SELECT * FROM patient_status_events WHERE admission_id = ? ORDER BY start_time ASC"
+        query = "SELECT * FROM patient_status_events WHERE admission_id = ? ORDER BY DATETIME(start_time) ASC, id ASC"
         rows = self.db.fetch_all_remcard(query, (admission_id,))
         return [self._map_row(r) for r in rows]
 
@@ -335,7 +335,7 @@ class PatientStatusDAO:
             FROM ivl_episodes
             WHERE admission_id = ?
               AND (is_active = 1 OR (is_active IS NULL AND end_time IS NULL))
-            ORDER BY start_time DESC, id DESC
+            ORDER BY DATETIME(start_time) DESC, id DESC
             LIMIT 1
             """,
             (admission_id,),
@@ -348,7 +348,7 @@ class PatientStatusDAO:
                 FROM ivl_episodes
                 WHERE admission_id = ?
                   AND end_time IS NULL
-                ORDER BY start_time DESC, id DESC
+                ORDER BY DATETIME(start_time) DESC, id DESC
                 LIMIT 1
                 """,
                 (admission_id,),
@@ -408,7 +408,7 @@ class PatientStatusDAO:
                     SELECT mode, parameters_json, fio2, peep, tv, rr, datetime
                     FROM respiratory_support
                     WHERE ivl_episode_id = ?
-                    ORDER BY datetime DESC, id DESC
+                    ORDER BY DATETIME(datetime) DESC, id DESC
                     LIMIT 1
                     """,
                     (case_id,),
@@ -423,7 +423,7 @@ class PatientStatusDAO:
                     FROM respiratory_support
                     WHERE admission_id = ?
                       AND (? IS NULL OR DATETIME(datetime) >= DATETIME(?))
-                    ORDER BY datetime DESC, id DESC
+                    ORDER BY DATETIME(datetime) DESC, id DESC
                     LIMIT 1
                     """,
                     (admission_id, case_start, case_start),
@@ -435,7 +435,7 @@ class PatientStatusDAO:
                     FROM respiratory_support
                     WHERE admission_id = ?
                       AND (? IS NULL OR DATETIME(datetime) >= DATETIME(?))
-                    ORDER BY datetime DESC, id DESC
+                    ORDER BY DATETIME(datetime) DESC, id DESC
                     LIMIT 1
                     """,
                     (admission_id, case_start, case_start),
@@ -466,7 +466,7 @@ class PatientStatusDAO:
                     WHERE ivl_episode_id = ?
                       AND event_type IN ('START_VENT', 'MODE_CHANGE')
                       AND (mode IS NOT NULL OR parameters_json IS NOT NULL OR data IS NOT NULL)
-                    ORDER BY timestamp DESC, id DESC
+                    ORDER BY DATETIME(timestamp) DESC, id DESC
                     LIMIT 1
                     """,
                     (case_id,),
@@ -482,7 +482,7 @@ class PatientStatusDAO:
                     WHERE admission_id = ?
                       AND (? IS NULL OR DATETIME(timestamp) >= DATETIME(?))
                       AND event_type IN ('START_VENT', 'MODE_CHANGE')
-                    ORDER BY timestamp DESC, id DESC
+                    ORDER BY DATETIME(timestamp) DESC, id DESC
                     LIMIT 1
                     """,
                     (admission_id, case_start, case_start),
@@ -495,7 +495,7 @@ class PatientStatusDAO:
                     WHERE admission_id = ?
                       AND (? IS NULL OR DATETIME(timestamp) >= DATETIME(?))
                       AND event_type IN ('START_VENT', 'MODE_CHANGE')
-                    ORDER BY timestamp DESC, id DESC
+                    ORDER BY DATETIME(timestamp) DESC, id DESC
                     LIMIT 1
                     """,
                     (admission_id, case_start, case_start),
@@ -1363,7 +1363,7 @@ class PatientStatusDAO:
                     SELECT id, status, reason_type
                     FROM patient_status_events
                     WHERE admission_id = ?
-                    ORDER BY start_time DESC, id DESC
+                    ORDER BY DATETIME(start_time) DESC, id DESC
                     LIMIT 1
                     """,
                     (admission_id,),
@@ -1397,7 +1397,7 @@ class PatientStatusDAO:
                       AND id != ?
                       AND status != ?
                       AND COALESCE(reason_type, '') != ?
-                    ORDER BY start_time DESC, id DESC LIMIT 1
+                    ORDER BY DATETIME(start_time) DESC, id DESC LIMIT 1
                 """, (admission_id, current['id'], PatientStatus.CPR.value, CPR_REASON_TYPE))
                 prev = cursor.fetchone()
                 if prev:
@@ -1566,7 +1566,7 @@ class PatientStatusDAO:
                 cursor.execute("""
                     SELECT status, end_time FROM patient_status_events 
                     WHERE admission_id = ? AND DATETIME(start_time) < DATETIME(?) 
-                    ORDER BY start_time DESC LIMIT 1
+                    ORDER BY DATETIME(start_time) DESC, id DESC LIMIT 1
                 """, (admission_id, shift_start_str))
                 last_before = cursor.fetchone()
                 
@@ -1764,7 +1764,7 @@ class PatientStatusDAO:
                     WHERE admission_id = ?
                       AND status != ?
                       AND COALESCE(reason_type, '') != ?
-                    ORDER BY start_time ASC
+                    ORDER BY DATETIME(start_time) ASC, id ASC
                     """,
                     (admission_id, PatientStatus.CPR.value, CPR_REASON_TYPE),
                 )

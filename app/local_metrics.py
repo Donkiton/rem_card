@@ -8,7 +8,7 @@ import atexit
 from datetime import datetime
 from typing import Any
 
-from rem_card.app.runtime_paths import get_local_logs_dir
+from rem_card.app.runtime_paths import get_runtime_logs_dir
 
 
 _METRICS_LOCK = threading.Lock()
@@ -86,7 +86,7 @@ def _metrics_path() -> str:
     with _PATH_LOCK:
         if _CACHED_PATH_DAY == day and _CACHED_PATH:
             return _CACHED_PATH
-        log_dir = get_local_logs_dir()
+        log_dir = get_runtime_logs_dir()
         os.makedirs(log_dir, exist_ok=True)
         _CACHED_PATH_DAY = day
         _CACHED_PATH = os.path.join(log_dir, f"metrics_{day}.jsonl")

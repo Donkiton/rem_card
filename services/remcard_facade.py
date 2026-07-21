@@ -206,27 +206,27 @@ class RemCardService(QObject):
                     WHEN EXISTS (
                         SELECT 1 FROM vitals v
                         WHERE v.admission_id = ids.admission_id
-                          AND v.datetime >= ? AND v.datetime < ?
+                          AND DATETIME(v.datetime) >= DATETIME(?) AND DATETIME(v.datetime) < DATETIME(?)
                     )
                     OR EXISTS (
                         SELECT 1 FROM fluids f
                         WHERE f.admission_id = ids.admission_id
-                          AND f.datetime >= ? AND f.datetime < ?
+                          AND DATETIME(f.datetime) >= DATETIME(?) AND DATETIME(f.datetime) < DATETIME(?)
                     )
                     OR EXISTS (
                         SELECT 1 FROM orders o
                         WHERE o.admission_id = ids.admission_id
-                          AND o.datetime >= ? AND o.datetime < ?
+                          AND DATETIME(o.datetime) >= DATETIME(?) AND DATETIME(o.datetime) < DATETIME(?)
                     )
                     OR EXISTS (
                         SELECT 1 FROM diet_plan dp
                         WHERE dp.admission_id = ids.admission_id
-                          AND dp.shift_start >= ? AND dp.shift_start < ?
+                          AND DATETIME(dp.shift_start) >= DATETIME(?) AND DATETIME(dp.shift_start) < DATETIME(?)
                     )
                     OR EXISTS (
                         SELECT 1 FROM oral_intake_events oi
                         WHERE oi.admission_id = ids.admission_id
-                          AND oi.event_time >= ? AND oi.event_time < ?
+                          AND DATETIME(oi.event_time) >= DATETIME(?) AND DATETIME(oi.event_time) < DATETIME(?)
                     )
                     OR EXISTS (
                         SELECT 1 FROM lab_orders lo
@@ -2212,15 +2212,15 @@ class RemCardService(QObject):
 
         def operation(cursor):
             cursor.execute(
-                "DELETE FROM vitals WHERE admission_id = ? AND datetime >= ? AND datetime < ?",
+                "DELETE FROM vitals WHERE admission_id = ? AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)",
                 (admission_id, start_dt.isoformat(), end_dt.isoformat()),
             )
             cursor.execute(
-                "DELETE FROM fluids WHERE admission_id = ? AND datetime >= ? AND datetime < ?",
+                "DELETE FROM fluids WHERE admission_id = ? AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)",
                 (admission_id, start_dt.isoformat(), end_dt.isoformat()),
             )
             cursor.execute(
-                "DELETE FROM diet_plan WHERE admission_id = ? AND shift_start >= ? AND shift_start < ?",
+                "DELETE FROM diet_plan WHERE admission_id = ? AND DATETIME(shift_start) >= DATETIME(?) AND DATETIME(shift_start) < DATETIME(?)",
                 (
                     admission_id,
                     start_dt.isoformat(timespec="minutes").replace("T", " "),
@@ -2228,7 +2228,7 @@ class RemCardService(QObject):
                 ),
             )
             cursor.execute(
-                "DELETE FROM oral_intake_events WHERE admission_id = ? AND event_time >= ? AND event_time < ?",
+                "DELETE FROM oral_intake_events WHERE admission_id = ? AND DATETIME(event_time) >= DATETIME(?) AND DATETIME(event_time) < DATETIME(?)",
                 (
                     admission_id,
                     start_dt.isoformat(timespec="minutes").replace("T", " "),
@@ -2248,7 +2248,7 @@ class RemCardService(QObject):
                 SET status = 'deleted',
                     updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
                 WHERE order_id IN (SELECT id FROM orders WHERE admission_id = ?)
-                  AND planned_time >= ? AND planned_time < ?
+                  AND DATETIME(planned_time) >= DATETIME(?) AND DATETIME(planned_time) < DATETIME(?)
                 """,
                 (admission_id, start_dt.isoformat(), end_dt.isoformat()),
             )

@@ -1,6 +1,6 @@
 # Smoke-чеклист аварийного режима
 
-1. Подготовить тестовую сетевую папку `Baza_rao3_jurnal` с `archiv/rao_journal.db`, `settings/remcard_settings.db`, `locks`, `session_locks`, `backups/valid`, `backup_health` и `config/client_policy.json`.
+1. Подготовить тестовую сетевую папку данных с произвольным именем и с `archiv/rao_journal.db`, `settings/remcard_settings.db`, `locks`, `session_locks`, `backups/valid`, `backup_health` и `config/client_policy.json`.
 2. Проверить обычный запуск медсестры в сетевом режиме до отключения сети.
 3. Убедиться, что standby-пара медицинской БД и БД настроек существует и проходит `quick_check`.
 4. Смоделировать недоступность сетевой БД без восстановления, repair или замены сетевых файлов.

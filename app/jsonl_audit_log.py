@@ -5,7 +5,7 @@ import socket
 from datetime import datetime
 from typing import Any, Optional
 
-from rem_card.app.runtime_paths import get_local_logs_dir
+from rem_card.app.runtime_paths import get_runtime_logs_dir
 from rem_card.app.version import APP_VERSION
 
 
@@ -52,6 +52,6 @@ def write_audit_event(
         if _append_jsonl(shared_path, payload):
             return
 
-    local_path = os.path.join(get_local_logs_dir(), log_name)
+    local_path = os.path.join(get_runtime_logs_dir(), log_name)
     _append_jsonl(local_path, payload)
 

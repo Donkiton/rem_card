@@ -35,7 +35,7 @@ class PatientDAO:
                 a.emergency_notice_entered_at,
                 COALESCE(
                     a.operation_description,
-                    (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)
+                    (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY DATETIME(o.operation_datetime) DESC, o.id DESC LIMIT 1)
                 ) as operation_info
             FROM admissions a
             JOIN patients p ON a.patient_id = p.id
@@ -60,7 +60,7 @@ class PatientDAO:
                 a.emergency_notice_entered_at,
                 COALESCE(
                     a.operation_description,
-                    (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)
+                    (SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY DATETIME(o.operation_datetime) DESC, o.id DESC LIMIT 1)
                 ) as operation_info
             FROM admissions a
             JOIN patients p ON a.patient_id = p.id
@@ -291,7 +291,7 @@ class PatientDAO:
             operation_expr = (
                 "COALESCE("
                 "a.operation_description,"
-                "(SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY o.operation_datetime DESC LIMIT 1)"
+                "(SELECT o.description FROM operations o WHERE o.admission_id = a.id ORDER BY DATETIME(o.operation_datetime) DESC, o.id DESC LIMIT 1)"
                 ")"
                 if include_operations
                 else "a.operation_description"
@@ -615,7 +615,7 @@ class PatientDAO:
             operation_subquery = (
                 "(SELECT o.description FROM operations o "
                 "WHERE o.admission_id = a.id "
-                "ORDER BY o.operation_datetime DESC LIMIT 1)"
+                "ORDER BY DATETIME(o.operation_datetime) DESC, o.id DESC LIMIT 1)"
             )
 
         if "operation_description" in admission_columns:
@@ -631,13 +631,20 @@ class PatientDAO:
         where_parts: list[str] = []
         params: list = []
         if start_dt and end_dt and "admission_datetime" in admission_columns:
-            if end_exclusive:
-                where_parts.append(
-                    "a.admission_datetime >= ? "
-                    "AND a.admission_datetime < ?"
-                )
-            else:
-                where_parts.append("a.admission_datetime BETWEEN ? AND ?")
+            end_operator = "<" if end_exclusive else "<="
+            where_parts.append(
+                "/* REMCARD_MIXED_DATETIME_INDEXED_RANGE */ ("
+                "(SUBSTR(a.admission_datetime, 11, 1) = ' ' "
+                "AND /* REMCARD_MIXED_DATETIME_INDEXED_RANGE */ "
+                "a.admission_datetime >= REPLACE(?1, 'T', ' ') "
+                f"AND a.admission_datetime {end_operator} REPLACE(?2, 'T', ' ')) "
+                "OR "
+                "(SUBSTR(a.admission_datetime, 11, 1) = 'T' "
+                "AND /* REMCARD_MIXED_DATETIME_INDEXED_RANGE */ "
+                "a.admission_datetime >= REPLACE(?1, ' ', 'T') "
+                f"AND a.admission_datetime {end_operator} REPLACE(?2, ' ', 'T'))"
+                ")"
+            )
             params.extend((start_dt, end_dt))
 
         if "unit_scope" in admission_columns:

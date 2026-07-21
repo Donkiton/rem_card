@@ -22,6 +22,7 @@ from app.full_update_manifest import (
     normalize_file_inventory,
     verify_file_inventory,
 )
+from app.runtime_paths import DEFAULT_DEV_DATA_ROOT_NAME, get_dev_baza_dir
 from bump_version import (
     BUMP_LEVELS,
     bump_version,
@@ -362,6 +363,7 @@ def run_build(root: Path) -> Path:
             "production-пакет обязан содержать snapshot настроек."
         )
     cleanup_build_artifacts(root)
+    os.environ.setdefault("REMCARD_SETTINGS_RELEASE_SOURCE_BAZA", get_dev_baza_dir())
     package_dir = root / "dist" / "Prog"
     try:
         run([sys.executable, "-m", "PyInstaller", "RemCard.spec"], cwd=root)
@@ -715,7 +717,7 @@ def local_update_root(root: Path) -> Path:
         if not value.is_absolute():
             value = root / value
     else:
-        value = root.parent / "Baza_rao3_jurnal" / "UPD"
+        value = root.parent / DEFAULT_DEV_DATA_ROOT_NAME / "UPD"
     if _is_network_path(value):
         raise RuntimeError(
             "build_release.py публикует релиз только в локальный UPD. "

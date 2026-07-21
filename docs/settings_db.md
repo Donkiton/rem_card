@@ -62,7 +62,7 @@ Compiled build не должен создавать или требовать в
 Dev-редактор справочников пишет в dev settings DB:
 
 ```text
-C:\Project\Baza_rao3_jurnal\settings\remcard_settings.db
+C:\Project\RemCardData\settings\remcard_settings.db
 ```
 
 При сборке `RemCard.spec` экспортирует из этой БД встроенный пакет:

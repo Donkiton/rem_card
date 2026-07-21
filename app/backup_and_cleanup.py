@@ -773,7 +773,7 @@ def _prune_change_log_and_maybe_compact(db_path: str, now: datetime):
             cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
             cutoff_by_age = int(
                 conn.execute(
-                    "SELECT COALESCE(MAX(id), 0) FROM change_log WHERE changed_at < ?",
+                    "SELECT COALESCE(MAX(id), 0) FROM change_log WHERE DATETIME(changed_at) < DATETIME(?)",
                     (cutoff_str,),
                 ).fetchone()[0]
                 or 0

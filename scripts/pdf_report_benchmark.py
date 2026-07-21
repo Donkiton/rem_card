@@ -40,10 +40,12 @@ from rem_card.services.remcard_facade import RemCardService
 from rem_card.ui.nurse_view.sectors.nurse_sector_print import DataCollectorWorker as NurseDataCollector
 from rem_card.ui.rem_card_sectors.s_print.full_report_data import collect_full_report_data
 from rem_card.ui.rem_card_sectors.sector_print import DataCollectorWorker as DoctorDataCollector
+from rem_card.app.runtime_paths import get_dev_baza_dir, get_journal_db_path
 
 
-DEFAULT_DB_PATH = Path(r"C:\Project\Baza_rao3_jurnal\archiv\rao_journal.db")
-DEFAULT_OUTPUT_DIR = Path(r"C:\Project\Baza_rao3_jurnal\report\pdf_benchmark")
+_DEFAULT_DATA_ROOT = Path(get_dev_baza_dir())
+DEFAULT_DB_PATH = Path(get_journal_db_path(str(_DEFAULT_DATA_ROOT)))
+DEFAULT_OUTPUT_DIR = _DEFAULT_DATA_ROOT / "report" / "pdf_benchmark"
 
 
 class CountingDatabaseManager(DatabaseManager):

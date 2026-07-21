@@ -18,7 +18,7 @@ def resolve_data_root(data_root_provider: PathLikeProvider = None) -> str:
         raw_root = resolve_baza_dir()
 
     if not raw_root:
-        raise RuntimeError("Не задан путь к Baza_rao3_jurnal.")
+        raise RuntimeError("Не задан путь к папке данных RemCard.")
     return os.path.abspath(os.path.normpath(str(raw_root)))
 
 
