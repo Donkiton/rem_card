@@ -84,7 +84,8 @@ def build_graphs_html(
                        outcome, patient_age, patient_age_unit, patient_gender,
                        source_department, diagnosis_code, diagnosis_text
                 FROM admissions
-                WHERE admission_datetime >= ? AND admission_datetime < ?
+                WHERE DATETIME(admission_datetime) >= DATETIME(?)
+                  AND DATETIME(admission_datetime) < DATETIME(?)
                 """,
                 params,
             )

@@ -56,7 +56,13 @@ class FluidsDAO:
             raise DataConflictError(DATA_CONFLICT_MESSAGE)
 
     def get_fluids(self, admission_id: int, start: datetime, end: datetime) -> List[FluidDTO]:
-        query = "SELECT * FROM fluids WHERE admission_id = ? AND datetime >= ? AND datetime < ? ORDER BY datetime ASC"
+        query = """
+            SELECT * FROM fluids
+            WHERE admission_id = ?
+              AND DATETIME(datetime) >= DATETIME(?)
+              AND DATETIME(datetime) < DATETIME(?)
+            ORDER BY DATETIME(datetime) ASC, id ASC
+        """
         rows = self.db.fetch_all_remcard(query, (admission_id, start.isoformat(), end.isoformat()))
         return [FluidDTO(
             id=r['id'],
@@ -179,7 +185,7 @@ class FluidsDAO:
 
     def get_all_dates(self, admission_id: int) -> List[datetime]:
         """Возвращает все уникальные даты для записей о жидкостях пациента."""
-        query = "SELECT DISTINCT datetime as dt FROM fluids WHERE admission_id = ? ORDER BY datetime ASC"
+        query = "SELECT DISTINCT datetime as dt FROM fluids WHERE admission_id = ? ORDER BY DATETIME(datetime) ASC"
         rows = self.db.fetch_all_remcard(query, (admission_id,))
         dates = []
         for r in rows:

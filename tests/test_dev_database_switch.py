@@ -125,7 +125,7 @@ def test_first_saved_path_keeps_active_unset(monkeypatch, tmp_path):
         "saved_baza_dirs": [normalized(candidate)],
     }
     assert runtime_paths.get_dev_baza_dir() == normalized(
-        project_root / runtime_paths.BAZA_DIR_NAME
+        project_root / runtime_paths.DEFAULT_DEV_DATA_ROOT_NAME
     )
 
     runtime_paths.remove_saved_dev_baza_dir(str(candidate))
@@ -270,7 +270,7 @@ def test_get_dev_baza_dir_falls_back_to_project_database(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_paths, "get_project_root", lambda: str(project_root))
 
     assert runtime_paths.get_dev_baza_dir() == normalized(
-        project_root / runtime_paths.BAZA_DIR_NAME
+        project_root / runtime_paths.DEFAULT_DEV_DATA_ROOT_NAME
     )
 
 
@@ -281,7 +281,7 @@ def test_broken_dev_database_config_is_quarantined_and_falls_back(monkeypatch, t
     config_path.write_text("{broken json", encoding="utf-8")
 
     assert runtime_paths.get_dev_baza_dir() == normalized(
-        project_root / runtime_paths.BAZA_DIR_NAME
+        project_root / runtime_paths.DEFAULT_DEV_DATA_ROOT_NAME
     )
     assert not config_path.exists()
     assert list(tmp_path.glob("dev_database_paths.json.broken.*"))
@@ -479,7 +479,7 @@ def test_save_only_does_not_change_database_after_dev_restart(monkeypatch, tmp_p
     isolate_dev_database_config(monkeypatch, tmp_path)
     monkeypatch.setattr(app_main, "is_compiled", lambda: False)
     project_root = tmp_path / "project"
-    fallback = create_baza(project_root / runtime_paths.BAZA_DIR_NAME)
+    fallback = create_baza(project_root / runtime_paths.DEFAULT_DEV_DATA_ROOT_NAME)
     candidate = create_baza(tmp_path / "network_database")
     monkeypatch.setattr(runtime_paths, "get_project_root", lambda: str(project_root))
     monkeypatch.delenv("REMCARD_BAZA_DIR", raising=False)

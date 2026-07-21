@@ -422,8 +422,8 @@ class DurableSqlOutbox:
                 SELECT
                     status,
                     COUNT(*) AS cnt,
-                    MIN(created_at) AS min_created_at,
-                    MAX(created_at) AS max_created_at
+                    /* REMCARD_NUMERIC_EPOCH_TIME */ MIN(created_at) AS min_created_at,
+                    /* REMCARD_NUMERIC_EPOCH_TIME */ MAX(created_at) AS max_created_at
                 FROM outbox_ops
                 GROUP BY status
                 """

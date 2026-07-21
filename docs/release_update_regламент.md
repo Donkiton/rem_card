@@ -8,8 +8,8 @@
 
 - Программа может быть установлена на любом локальном диске и в любой папке.
 - Updater получает фактическую папку от запущенного EXE и не угадывает путь.
-- `remcard_data_path.json` рядом с EXE указывает на общую `Baza_rao3_jurnal`.
-- Релизы находятся в `<Baza_rao3_jurnal>\UPD\releases\<version>`.
+- `remcard_data_path.json` рядом с EXE указывает на выбранную общую папку данных с произвольным именем.
+- Релизы находятся в `<папка данных>\UPD\releases\<version>`.
 - Git push точного release-коммита обязателен до любой готовой публикации.
 - Production `ready.ok` создаётся последним и сразу открывает релиз всем клиентам этой базы.
 - Каталог опубликованной версии неизменяем; исправление выпускается только новой версией выше.
@@ -20,13 +20,13 @@
 2. Запустить `.\.venv\Scripts\python.exe scripts\build_release.py`.
 3. Дождаться обязательных architecture, fast regression и F821-проверок.
 4. Дождаться PyInstaller-сборки, проверки manifest/inventory/settings snapshot и compiled smoke всех шести EXE.
-5. Убедиться, что release-коммит отправлен в `origin` и локальный пакет появился в `C:\Project\Baza_rao3_jurnal\UPD\releases\<версия>`.
+5. Убедиться, что release-коммит отправлен в `origin` и локальный пакет появился в `C:\Project\RemCardTestData\UPD\releases\<версия>`.
 
 Если любой gate завершился ошибкой, релиз остановлен. Переходить к production-публикации запрещено.
 
 ## Этап 2. Выполнить приёмку на тестовой базе
 
-Тестовая установленная копия должна через свой `remcard_data_path.json` указывать на отдельную локальную или изолированную тестовую `Baza_rao3_jurnal`.
+Тестовая установленная копия должна через свой `remcard_data_path.json` указывать на отдельную локальную или изолированную тестовую папку данных.
 
 До production нужно:
 
@@ -45,14 +45,14 @@ Production share не является канареечной средой. Не
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\publish_full_update.py `
-  --source "C:\Project\Baza_rao3_jurnal\UPD\releases\<проверенная версия>" `
+  --source "C:\Project\RemCardTestData\UPD\releases\<проверенная версия>" `
   --config "<папка production-программы>\remcard_data_path.json"
 ```
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\publish_full_update.py `
-  --source "C:\Project\Baza_rao3_jurnal\UPD\releases\<проверенная версия>" `
-  --baza-dir "\\SERVER\Share\Baza_rao3_jurnal"
+  --source "C:\Project\RemCardTestData\UPD\releases\<проверенная версия>" `
+  --baza-dir "\\SERVER\Share\RemCardProductionData"
 ```
 
 Явный `--source` должен указывать именно на папку версии, которая прошла этап 2. Publisher проверяет актуальные ветки `origin`, manifest, snapshot настроек и SHA-256, копирует пакет в возобновляемый `.staging-*`, затем атомарно завершает каталог и создаёт `ready.ok` последним. Ручное копирование готовой папки вместе с marker запрещено.
@@ -84,7 +84,7 @@ Production share не является канареечной средой. Не
 Для остановки новых установок удалить:
 
 ```text
-<production Baza_rao3_jurnal>\UPD\releases\<версия>\ready.ok
+<production-папка данных>\UPD\releases\<версия>\ready.ok
 ```
 
 Удаление marker:

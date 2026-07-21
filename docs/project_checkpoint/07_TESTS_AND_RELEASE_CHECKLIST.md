@@ -54,7 +54,7 @@ Manual:
 python scripts\network_acceptance_runner.py --operations 24 --benchmark-clicks 3
 ```
 
-Скрипт создаёт временную isolated `Baza_rao3_jurnal`, seed-ит admission, запускает stress/benchmark/restore и валидирует DB (`scripts/network_acceptance_runner.py:1-8`, `283-405`). Он не должен указывать на production DB.
+Скрипт создаёт временную изолированную папку данных с произвольным именем, seed-ит admission, запускает stress/benchmark/restore и валидирует DB (`scripts/network_acceptance_runner.py:1-8`, `283-405`). Он не должен указывать на production DB.
 
 Полезные параметры:
 

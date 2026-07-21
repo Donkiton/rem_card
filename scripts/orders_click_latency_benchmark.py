@@ -4,7 +4,7 @@ Benchmark for doctor orders sheet click latency.
 
 Measures:
 1) click -> model.dataChanged for target cell (UI update intent)
-2) click -> DB commit (new latest administration row for that cell)
+2) explicit draft save -> committed DB state for that cell
 
 Usage:
   python %REMCARD_PROJECT_ROOT%\scripts\orders_click_latency_benchmark.py --clicks 40
@@ -99,6 +99,90 @@ class DataChangedProbe(QObject):
             self.first_change_ms = (time.perf_counter() - self._armed_at) * 1000.0
 
 
+def _db_cell_signature(container, order_id: int, planned_iso: str) -> str:
+    row = container.db_manager.fetch_one_remcard(
+        """
+        SELECT printf(
+            '%d|%s|%d|%d|%s',
+            id,
+            COALESCE(status, ''),
+            COALESCE(is_committed, 0),
+            COALESCE(version, 0),
+            COALESCE(updated_at, '')
+        )
+        FROM administrations
+        WHERE order_id = ? AND planned_time = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (order_id, planned_iso),
+    )
+    return str(row[0]) if row else ""
+
+
+def _benchmark_model_index(orders_widget, order_id: int, planned_iso: str):
+    row_idx = next(
+        (
+            row
+            for row, order in enumerate(orders_widget.model.orders)
+            if int(getattr(order, "id", 0) or 0) == order_id
+        ),
+        None,
+    )
+    if row_idx is None:
+        raise RuntimeError("Benchmark order disappeared from the model")
+    col_idx = next(
+        (
+            col + 1
+            for col, slot in enumerate(orders_widget.model.time_slots)
+            if slot.isoformat() == planned_iso
+        ),
+        None,
+    )
+    if col_idx is None:
+        raise RuntimeError("Benchmark time slot disappeared from the model")
+    index = orders_widget.model.index(row_idx, col_idx)
+    if not index.isValid():
+        raise RuntimeError("Benchmark target index became invalid")
+    return index, row_idx, col_idx
+
+
+def _run_click_iteration(container, orders_widget, app, order_id: int, planned_iso: str, cell_key):
+    guard_waited = None
+    if cell_key is not None:
+        guard_waited = _wait_for(
+            lambda: not orders_widget._skip_reason_for_admin_cell_click(cell_key),
+            app,
+            timeout_sec=2.0,
+        )
+        if guard_waited is None:
+            raise TimeoutError("Orders cell repeat guard did not release before benchmark click")
+
+    index, row_idx, col_idx = _benchmark_model_index(orders_widget, order_id, planned_iso)
+    previous_signature = _db_cell_signature(container, order_id, planned_iso)
+    probe = DataChangedProbe(orders_widget.model)
+    probe.arm(row_idx, col_idx)
+    orders_widget.on_cell_clicked(index)
+
+    ui_waited = _wait_for(lambda: probe.first_change_ms is not None, app, timeout_sec=1.0)
+    ui_sample = probe.first_change_ms if ui_waited is not None else None
+    if not orders_widget._has_local_draft_changes():
+        raise RuntimeError("Accepted benchmark click did not create a local draft")
+
+    orders_widget.finalize_card()
+    db_waited = _wait_for(
+        lambda: (
+            not orders_widget._local_draft_save_pending
+            and not orders_widget._has_local_draft_changes()
+            and _db_cell_signature(container, order_id, planned_iso) != previous_signature
+        ),
+        app,
+        timeout_sec=5.0,
+    )
+    probe.deleteLater()
+    return ui_sample, db_waited, guard_waited
+
+
 def _prepare_target_order(container, clicks: int):
     app = QApplication.instance() or QApplication(sys.argv)
     adm_row = container.db_manager.fetch_one_remcard("SELECT id FROM admissions ORDER BY id DESC LIMIT 1")
@@ -132,7 +216,9 @@ def _prepare_target_order(container, clicks: int):
         frequency=1,
         specific_times=[],
         duration_min=0,
-        is_committed=0,
+        # The benchmark must start from a normal committed order.  Seeding a
+        # central legacy draft makes the current UI intentionally read-only.
+        is_committed=1,
         created_at=datetime.now(),
         comment="",
     )
@@ -186,14 +272,10 @@ def run_benchmark(clicks: int, max_runtime_sec: float = 90.0) -> dict:
         container = bootstrap()
         prepared = _prepare_target_order(container, clicks)
         ow = prepared["orders_widget"]
-        idx = prepared["index"]
-        row_idx = prepared["row_idx"]
-        col_idx = prepared["col_idx"]
         order_id = prepared["order_id"]
         planned_iso = prepared["planned_iso"]
         cell_key = ow._admin_cell_write_key(order_id, datetime.fromisoformat(planned_iso))
 
-        probe = DataChangedProbe(ow.model)
         samples = Samples(ui=[], db=[])
         repeat_guard_waits: list[float] = []
 
@@ -201,41 +283,20 @@ def run_benchmark(clicks: int, max_runtime_sec: float = 90.0) -> dict:
             if (time.perf_counter() - started_at) > max_runtime_sec:
                 raise TimeoutError(f"Benchmark exceeded max runtime ({max_runtime_sec}s)")
             app.processEvents()
-            if cell_key is not None:
-                guard_waited = _wait_for(
-                    lambda: not ow._skip_reason_for_admin_cell_click(cell_key),
-                    app,
-                    timeout_sec=2.0,
-                )
-                if guard_waited is None:
-                    raise TimeoutError("Orders cell repeat guard did not release before benchmark click")
-                repeat_guard_waits.append(guard_waited)
-
-            prev_row = container.db_manager.fetch_one_remcard(
-                "SELECT id FROM administrations WHERE order_id = ? AND planned_time = ? ORDER BY id DESC LIMIT 1",
-                (order_id, planned_iso),
+            ui_sample, db_waited, guard_waited = _run_click_iteration(
+                container,
+                ow,
+                app,
+                order_id,
+                planned_iso,
+                cell_key,
             )
-            prev_admin_id = int(prev_row["id"]) if prev_row else 0
-
-            probe.arm(row_idx, col_idx)
-            ow.on_cell_clicked(idx)
-
-            ui_waited = _wait_for(lambda: probe.first_change_ms is not None, app, timeout_sec=1.0)
-            if ui_waited is not None and probe.first_change_ms is not None:
-                samples.ui.append(probe.first_change_ms)
-
-            def _cell_db_state_changed() -> bool:
-                row = container.db_manager.fetch_one_remcard(
-                    "SELECT id FROM administrations WHERE order_id = ? AND planned_time = ? ORDER BY id DESC LIMIT 1",
-                    (order_id, planned_iso),
-                )
-                if row is None:
-                    return prev_admin_id != 0
-                return int(row["id"]) != prev_admin_id
-
-            db_waited = _wait_for(_cell_db_state_changed, app, timeout_sec=3.0)
+            if ui_sample is not None:
+                samples.ui.append(ui_sample)
             if db_waited is not None:
                 samples.db.append(db_waited)
+            if guard_waited is not None:
+                repeat_guard_waits.append(guard_waited)
 
         result = {
             "admission_id": prepared["admission_id"],
