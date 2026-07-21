@@ -4,7 +4,7 @@
 
 1. Не запускать recovery вручную.
 2. Проверить доступ к сетевой папке.
-3. Проверить права на `Baza_rao3_jurnal/archiv`.
+3. Проверить права на `<папка данных>/archiv`.
 4. Закрыть лишние экземпляры приложения.
 5. Повторить запуск.
 
@@ -30,6 +30,6 @@ Auto-recovery запрещен, если активен второй клиен�
 ## Где искать логи
 
 - локальные метрики: локальная папка логов клиента;
-- backup/recovery audit: `Baza_rao3_jurnal/logs`;
-- backup validation reports: `Baza_rao3_jurnal/backup_health/reports`;
-- invalid backups: `Baza_rao3_jurnal/backup_health/invalid_backups`.
+- backup/recovery audit: `<папка данных>/logs`;
+- backup validation reports: `<папка данных>/backup_health/reports`;
+- invalid backups: `<папка данных>/backup_health/invalid_backups`.

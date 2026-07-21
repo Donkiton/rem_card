@@ -296,7 +296,8 @@ def _fetch_admission_rows(conn, start_dt: datetime, end_dt: datetime) -> list[di
     query = f"""
         SELECT {', '.join(select_parts)}
         FROM main.admissions
-        WHERE admission_datetime >= ? AND admission_datetime < ?
+        WHERE DATETIME(admission_datetime) >= DATETIME(?)
+          AND DATETIME(admission_datetime) < DATETIME(?)
     """
     cursor = conn.execute(
         query,

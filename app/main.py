@@ -21,8 +21,10 @@ from rem_card.app.runtime_paths import (
     cleanup_old_local_logs,
     configure_operblock_runtime_path,
     create_baza_structure_and_db,
-    get_local_logs_dir,
+    data_path_configuration_guard,
+    get_runtime_logs_dir,
     is_compiled,
+    read_configured_baza_dir,
     write_configured_baza_dir,
 )
 from rem_card.app.roles import (
@@ -354,7 +356,7 @@ def _apply_app_theme(app, role: Optional[str] = None):
 
 def _write_startup_local_log(message: str):
     try:
-        log_dir = get_local_logs_dir()
+        log_dir = get_runtime_logs_dir()
         os.makedirs(log_dir, exist_ok=True)
         cleanup_old_local_logs(log_dir)
         path = os.path.join(log_dir, "startup.log")
@@ -559,7 +561,7 @@ def _configure_dev_runtime_baza_pin() -> Optional[str]:
         return None
 
     from rem_card.app.runtime_paths import (
-        BAZA_DIR_NAME,
+        DEFAULT_DEV_DATA_ROOT_NAME,
         DEV_BAZA_DIR_ENV,
         DEV_EXISTING_BAZA_ONLY_ENV,
         DEV_RUNTIME_BAZA_PIN_ENV,
@@ -600,7 +602,7 @@ def _configure_dev_runtime_baza_pin() -> Optional[str]:
             )
         selected_path = str(
             config.get("active_baza_dir")
-            or os.path.join(get_project_root(), BAZA_DIR_NAME)
+            or os.path.join(get_project_root(), DEFAULT_DEV_DATA_ROOT_NAME)
         )
         selected_path = os.path.abspath(os.path.normpath(selected_path))
     uses_saved_selection = bool(config.get("active_baza_dir"))
@@ -733,7 +735,7 @@ def _launch_regular_startup_update_if_needed(role: Optional[str]) -> bool:
     )
 
 
-def _run_path_setup():
+def _configure_data_path_interactively_unlocked(*, first_run: bool = False) -> bool:
     os.environ["REMCARD_PATH_SETUP_MODE"] = "1"
 
     from PySide6.QtWidgets import QApplication, QFileDialog
@@ -744,12 +746,12 @@ def _run_path_setup():
     while True:
         selected = QFileDialog.getExistingDirectory(
             None,
-            "Выберите папку базы RemCard",
+            "Выберите папку данных RemCard",
             os.path.expanduser("~"),
             QFileDialog.Option.ShowDirsOnly,
         )
         if not selected:
-            return 0
+            return False
 
         ok, message = create_baza_structure_and_db(selected)
         if not ok:
@@ -762,11 +764,47 @@ def _run_path_setup():
             _show_custom_warning("Путь не сохранен", str(exc))
             continue
 
-        _show_custom_info(
-            "Путь сохранен",
-            f"Путь к папке базы сохранен.\n\n{selected}\n\nФайл настроек:\n{config_path}",
+        if not first_run:
+            _show_custom_info(
+                "Путь сохранен",
+                f"Путь к папке данных сохранен.\n\n{selected}\n\nФайл настроек:\n{config_path}",
+            )
+        return True
+
+
+def _configure_data_path_interactively(*, first_run: bool = False) -> bool:
+    try:
+        with data_path_configuration_guard():
+            if first_run and read_configured_baza_dir():
+                return True
+            return _configure_data_path_interactively_unlocked(first_run=first_run)
+    except DataPathConfigurationError as exc:
+        _show_native_warning("Настройка папки данных", str(exc))
+        return False
+    finally:
+        if first_run:
+            os.environ.pop("REMCARD_PATH_SETUP_MODE", None)
+
+
+def _ensure_compiled_data_path_configured() -> bool:
+    if not is_compiled():
+        return True
+    try:
+        configured = read_configured_baza_dir()
+    except DataPathConfigurationError as exc:
+        _show_native_warning(
+            "Настройка папки данных",
+            f"Файл пути повреждён или недоступен. Выберите папку данных заново.\n\n{exc}",
         )
-        return 0
+        configured = None
+    if configured:
+        return True
+    return _configure_data_path_interactively(first_run=True)
+
+
+def _run_path_setup():
+    _configure_data_path_interactively(first_run=False)
+    return 0
 
 
 def _remember_startup_guard_quickcheck_ok(result):
@@ -1004,6 +1042,26 @@ def _startup_failure_category(failure: object) -> str:
     except Exception:
         pass
     return ""
+
+
+def _record_startup_database_failure(role: Optional[str], failure: object) -> None:
+    try:
+        from rem_card.services.crash_reports import capture_database_failure, flush_local_crash_outbox
+
+        category = _startup_failure_category(failure) or "unavailable"
+        report_path = capture_database_failure(
+            "corruption" if category == "corruption" else category,
+            role=role,
+            phase="startup",
+            check_result=category,
+        )
+        if report_path is not None:
+            # A broken SQLite file can still live in a writable data root.
+            # Deliver there immediately; the local spool remains the fallback
+            # when the network root itself is unavailable.
+            flush_local_crash_outbox()
+    except Exception:
+        pass
 
 
 def _try_operblock_offline_startup_after_network_failure(
@@ -1340,6 +1398,7 @@ def _validate_compiled_role_startup(
         result = run_startup_db_guard(role=role)
     except Exception as exc:
         _write_startup_local_log(f"startup db guard crashed for role={role}: {exc}")
+        _record_startup_database_failure(role, exc)
         handled = _call_startup_failure_callback(on_failure, exc) if role in ("doctor", "nurse") or is_operblock_role(role) else None
         if handled is not None:
             return handled
@@ -1368,6 +1427,7 @@ def _validate_compiled_role_startup(
     _write_startup_local_log(
         f"startup blocked for role={role}: {result.user_message}; technical={result.technical_reason}"
     )
+    _record_startup_database_failure(role, result)
     handled = _call_startup_failure_callback(on_failure, result) if role in ("doctor", "nurse") or is_operblock_role(role) else None
     if handled is not None:
         return handled
@@ -1956,12 +2016,17 @@ def main(forced_role: Optional[str] = None, path_setup: bool = False):
             forced_role = compiled_role
         _main_impl(forced_role=forced_role, path_setup=path_setup)
     except Exception:
-        import traceback
-
-        crash_path = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "crash.txt")
+        exc_type, exc_value, exc_traceback = sys.exc_info()
         try:
-            with open(crash_path, "w", encoding="utf-8") as fh:
-                fh.write(traceback.format_exc())
+            from rem_card.services.crash_reports import capture_exception
+
+            capture_exception(
+                "unhandled_python_exception",
+                exc_type,
+                exc_value,
+                exc_traceback,
+                role=forced_role,
+            )
         except Exception:
             pass
         sys.exit(1)
@@ -1978,8 +2043,10 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if args.compiled_smoke:
         return
     args.role = _resolve_startup_role(args.role, forced_role)
-    _opblock_startup_metrics_reset(args.role, startup_started_at)
     path_setup = bool(path_setup or args.path_setup)
+    if not path_setup and not _ensure_compiled_data_path_configured():
+        return
+    _opblock_startup_metrics_reset(args.role, startup_started_at)
     if not path_setup:
         try:
             _configure_dev_runtime_baza_pin()
@@ -2070,14 +2137,20 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     logger = None
     restart_requested = False
     exit_code = 1
+    structured_crash_recorded = False
     try:
-        from rem_card.app.logger import log_exception, logger as _logger, init_crash_handler
+        from rem_card.app.logger import (
+            flush_crash_reports_async,
+            init_crash_handler,
+            log_exception,
+            logger as _logger,
+        )
         from rem_card.app.bootstrap import bootstrap
         from rem_card.ui.main_window import MainWindow
 
         logger = _logger
         sys.excepthook = log_exception
-        init_crash_handler()
+        init_crash_handler(role=args.role)
         _startup_trace(logger, startup_started_at, "qt_ready", role=args.role or "default")
 
         pending_single_instance_clients = []
@@ -2207,6 +2280,7 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             )
         if initial_role_prepared and hasattr(window, "wake_initial_role_monitor"):
             QTimer.singleShot(250, window.wake_initial_role_monitor)
+        QTimer.singleShot(1000, flush_crash_reports_async)
         _startup_trace(logger, startup_started_at, "window_shown", role=args.role or "default")
 
         def on_new_connection():
@@ -2241,6 +2315,20 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
         restart_requested = bool(app.property("remcard_restart_requested"))
         logger.info("Application exiting with code %s", exit_code)
     except Exception as exc:
+        try:
+            from rem_card.services.crash_reports import capture_exception
+
+            structured_crash_recorded = capture_exception(
+                "unhandled_python_exception",
+                type(exc),
+                exc,
+                exc.__traceback__,
+                role=args.role,
+            ) is not None
+        except Exception:
+            # Crash reporting is a direct best-effort spool write. It must never
+            # recursively fail through the application logger.
+            structured_crash_recorded = False
         close_startup_splash()
         _write_startup_local_log(
             "critical startup/runtime error: "
@@ -2283,7 +2371,10 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
             try:
                 from rem_card.app.logger import finalize_crash_handler
 
-                finalize_crash_handler(exit_code=exit_code)
+                finalize_crash_handler(
+                    exit_code=exit_code,
+                    crash_recorded=structured_crash_recorded,
+                )
             except Exception as exc:
                 logger.warning("Crash handler finalization failed: %s", exc)
         if exit_code == 0:

@@ -19,7 +19,7 @@ from rem_card.app.roles import (
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 
 
-BAZA_DIR_NAME = "Baza_rao3_jurnal"
+DEFAULT_DEV_DATA_ROOT_NAME = "Baza_rao3_jurnal"
 OPERBLOCK_DB_NOT_FOUND_MESSAGE = "БД оперблока не найдена в текущей папке базы"
 DEV_BAZA_DIR_ENV = "REMCARD_DEV_BAZA_DIR"
 DEV_DATABASE_CONFIG_ENV = "REMCARD_DEV_DATABASE_CONFIG"
@@ -30,6 +30,7 @@ DEV_RUNTIME_BAZA_PIN_ENV = "REMCARD_INTERNAL_DEV_BAZA_PIN"
 DEV_EXISTING_BAZA_ONLY_ENV = "REMCARD_DEV_EXISTING_BAZA_ONLY"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
+CRASH_REPORT_RETENTION_DAYS = 180
 
 
 def _startup_path_validation_ttl_sec() -> float:
@@ -166,6 +167,51 @@ def get_data_path_config_path() -> str:
     return os.path.join(get_executable_dir(), DATA_PATH_CONFIG_NAME)
 
 
+@contextmanager
+def data_path_configuration_guard(timeout_sec: float = 0.5):
+    """Serialize first-run/path-setup changes made by sibling role executables."""
+    config_path = get_data_path_config_path()
+    lock_path = f"{config_path}.setup.lock"
+    token = f"{os.getpid()}:{threading.get_ident()}:{time.time_ns()}"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    deadline = time.monotonic() + max(0.1, float(timeout_sec))
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(fd, token.encode("utf-8"))
+            finally:
+                os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(lock_path) > 10 * 60:
+                    os.remove(lock_path)
+                    continue
+            except FileNotFoundError:
+                continue
+            except Exception:
+                pass
+            if time.monotonic() >= deadline:
+                raise DataPathConfigurationError(
+                    "Папка данных уже настраивается другим запущенным экземпляром RemCard."
+                )
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        try:
+            with open(lock_path, "r", encoding="utf-8") as fh:
+                is_ours = fh.read() == token
+        except Exception:
+            is_ours = False
+        if is_ours:
+            try:
+                os.remove(lock_path)
+            except Exception:
+                pass
+
+
 def get_dev_baza_dir() -> str:
     override = os.environ.get(DEV_BAZA_DIR_ENV)
     if override:
@@ -175,11 +221,14 @@ def get_dev_baza_dir() -> str:
     if configured:
         return _normalize_baza_dir(str(configured))
 
-    return os.path.join(get_project_root(), BAZA_DIR_NAME)
+    return os.path.join(get_project_root(), DEFAULT_DEV_DATA_ROOT_NAME)
 
 
 def _normalize_baza_dir(path: str) -> str:
-    return os.path.abspath(os.path.normpath(str(path or "").strip().strip('"')))
+    raw_path = str(path or "").strip().strip('"')
+    if not raw_path:
+        return ""
+    return os.path.abspath(os.path.normpath(raw_path))
 
 
 def get_dev_checkout_root() -> str:
@@ -587,10 +636,6 @@ def configure_operblock_runtime_path(role: str | None) -> Optional[dict[str, str
     }
 
 
-def is_baza_dir_name(path: str) -> bool:
-    return os.path.basename(_normalize_baza_dir(path)) == BAZA_DIR_NAME
-
-
 def read_configured_baza_dir() -> Optional[str]:
     config_path = get_data_path_config_path()
     try:
@@ -601,9 +646,17 @@ def read_configured_baza_dir() -> Optional[str]:
     except Exception as exc:
         raise DataPathConfigurationError(f"Не удалось прочитать {config_path}: {exc}") from exc
 
+    if not isinstance(payload, dict):
+        raise DataPathConfigurationError(
+            f"Некорректный формат {config_path}: ожидался JSON-объект."
+        )
     raw_path = payload.get("baza_dir") or payload.get("path")
     if not raw_path:
         return None
+    if not isinstance(raw_path, str):
+        raise DataPathConfigurationError(
+            f"Некорректный путь в {config_path}: ожидалась строка."
+        )
     return _normalize_baza_dir(raw_path)
 
 
@@ -618,8 +671,7 @@ def write_configured_baza_dir(baza_dir: str) -> str:
         "baza_dir": normalized,
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    with open(config_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
+    _write_json_atomic(config_path, payload)
     return config_path
 
 
@@ -639,16 +691,12 @@ def resolve_baza_dir() -> str:
     return get_dev_baza_dir()
 
 
-def get_local_logs_dir() -> str:
+def get_runtime_logs_dir() -> str:
+    """Return the local-first log directory that stays available without Baza."""
     override = os.environ.get("REMCARD_LOCAL_LOGS_DIR")
     if override:
         return os.path.abspath(override)
-    if is_compiled():
-        return os.path.join(get_executable_dir(), "logs")
-    baza_override = os.environ.get("REMCARD_BAZA_DIR")
-    if baza_override:
-        return os.path.join(_normalize_baza_dir(baza_override), "logs")
-    return os.path.join(get_dev_baza_dir(), "logs")
+    return os.path.join(_get_local_remcard_dir(), "logs")
 
 
 def get_log_file_prefix() -> str:
@@ -885,6 +933,31 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
         return False, "Выберите папку базы данных."
 
     try:
+        root_existed = os.path.isdir(normalized)
+        existing_entries = set(os.listdir(normalized)) if root_existed else set()
+        db_path = get_journal_db_path(normalized)
+        db_existed = os.path.isfile(db_path)
+
+        if existing_entries and not db_existed:
+            allowed_top_level = {part.split("/", 1)[0] for part in REQUIRED_BAZA_DIRS}
+            foreign_entries = sorted(name for name in existing_entries if name not in allowed_top_level)
+            if foreign_entries:
+                shown = ", ".join(foreign_entries[:6])
+                suffix = f" и ещё {len(foreign_entries) - 6}" if len(foreign_entries) > 6 else ""
+                return False, (
+                    "Выбранная папка не пуста и не похожа на папку данных RemCard. "
+                    f"Посторонние элементы: {shown}{suffix}"
+                )
+
+        if db_existed:
+            ok, message = _validate_existing_sqlite_schema(
+                db_path,
+                required_tables={"patients", "admissions", "beds"},
+                label="Основная база данных",
+            )
+            if not ok:
+                return False, message
+
         os.makedirs(normalized, exist_ok=True)
         for directory in get_required_baza_paths(normalized):
             os.makedirs(directory, exist_ok=True)
@@ -893,7 +966,6 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
         if not ok:
             return False, f"Нет доступа на запись в папку archiv: {reason}"
 
-        db_path = get_journal_db_path(normalized)
         conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None, timeout=5.0)
         try:
             from rem_card.app.sqlite_shared import configure_connection, run_quick_check
@@ -918,6 +990,9 @@ def create_baza_structure_and_db(baza_dir: str) -> tuple[bool, str]:
                 return False, f"Проверка БД не пройдена: {result}"
         finally:
             conn.close()
+        from rem_card.services.crash_reports import ensure_shared_crash_directories
+
+        ensure_shared_crash_directories(normalized)
     except Exception as exc:
         return False, f"Не удалось подготовить папку базы: {exc}"
 

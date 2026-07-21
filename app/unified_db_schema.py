@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 21
-SCHEMA_MIN_MIGRATION_VERSION = 21
+SCHEMA_FASTPATH_REV = 22
+SCHEMA_MIN_MIGRATION_VERSION = 22
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -237,6 +237,7 @@ _FASTPATH_REQUIRED_TRIGGERS: tuple[str, ...] = tuple(
     [f"trg_{table}_updated_at" for table in _UPDATED_AT_TRIGGER_TABLES]
     + [f"trg_{table}_version_{suffix}" for table in _CHANGE_TRIGGER_TABLES for suffix in ("ins", "upd", "del")]
     + [f"trg_{table}_medical_audit_{suffix}" for table in _MEDICAL_AUDIT_TABLES for suffix in ("ins", "upd", "del")]
+    + ["trg_vitals_validate_ins", "trg_vitals_validate_upd"]
 )
 
 
@@ -390,6 +391,32 @@ def _create_updated_at_trigger(conn: sqlite3.Connection, table_name: str):
         END;
         """
     )
+
+
+def _create_vitals_validation_triggers(conn: sqlite3.Connection) -> None:
+    invalid_condition = """
+        (NEW.sys IS NOT NULL AND (TYPEOF(NEW.sys) NOT IN ('integer', 'real') OR NEW.sys < 0 OR NEW.sys > 300 OR NEW.sys != CAST(NEW.sys AS INTEGER)))
+        OR (NEW.dia IS NOT NULL AND (TYPEOF(NEW.dia) NOT IN ('integer', 'real') OR NEW.dia < 0 OR NEW.dia > 300 OR NEW.dia != CAST(NEW.dia AS INTEGER)))
+        OR (NEW.pulse IS NOT NULL AND (TYPEOF(NEW.pulse) NOT IN ('integer', 'real') OR NEW.pulse < 0 OR NEW.pulse > 300 OR NEW.pulse != CAST(NEW.pulse AS INTEGER)))
+        OR (NEW.temp IS NOT NULL AND (TYPEOF(NEW.temp) NOT IN ('integer', 'real') OR NEW.temp < 0 OR NEW.temp > 45))
+        OR (NEW.spo2 IS NOT NULL AND (TYPEOF(NEW.spo2) NOT IN ('integer', 'real') OR NEW.spo2 < 0 OR NEW.spo2 > 100 OR NEW.spo2 != CAST(NEW.spo2 AS INTEGER)))
+        OR (NEW.rr IS NOT NULL AND (TYPEOF(NEW.rr) NOT IN ('integer', 'real') OR NEW.rr < 0 OR NEW.rr > 100 OR NEW.rr != CAST(NEW.rr AS INTEGER)))
+        OR (NEW.cvp IS NOT NULL AND (TYPEOF(NEW.cvp) NOT IN ('integer', 'real') OR NEW.cvp < -1 OR NEW.cvp > 50 OR NEW.cvp != CAST(NEW.cvp AS INTEGER)))
+        OR (NEW.sys IS NOT NULL AND NEW.dia IS NOT NULL AND NEW.dia > NEW.sys)
+    """
+    for suffix, action in (("ins", "INSERT"), ("upd", "UPDATE")):
+        trigger_name = f"trg_vitals_validate_{suffix}"
+        _drop_trigger(conn, trigger_name)
+        conn.execute(
+            f"""
+            CREATE TRIGGER {trigger_name}
+            BEFORE {action} ON vitals
+            WHEN {invalid_condition}
+            BEGIN
+                SELECT RAISE(ABORT, 'invalid vital values');
+            END;
+            """
+        )
 
 
 def _mark_schema_migration(conn: sqlite3.Connection, version: int, note: str):
@@ -973,7 +1000,7 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             last_modified_by TEXT,
             revision INTEGER DEFAULT 0,
             FOREIGN KEY (admission_id) REFERENCES admissions(id),
-            CHECK (end_time IS NULL OR end_time >= start_time)
+            CHECK (end_time IS NULL OR DATETIME(end_time) >= DATETIME(start_time))
         )
         """
     )
@@ -1565,6 +1592,8 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     ):
         _create_updated_at_trigger(conn, table)
 
+    _create_vitals_validation_triggers(conn)
+
     _create_change_triggers(
         conn,
         "vitals",
@@ -1982,6 +2011,6 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(
         conn,
         SCHEMA_MIN_MIGRATION_VERSION,
-        "performance indexes for vitals, outcome reads, and analytics ranges",
+        "domain validation for vital writes",
     )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

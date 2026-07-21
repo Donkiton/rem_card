@@ -119,7 +119,7 @@ class OrderDomainService:
     def _get_last_admin(self, order_id: int, planned_time: datetime) -> Optional[dict]:
         """Возвращает последнюю (Source of Truth) запись для ячейки."""
         return self.db.fetch_one_remcard(
-            "SELECT * FROM administrations WHERE order_id = ? AND planned_time = ? ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM administrations WHERE order_id = ? AND DATETIME(planned_time) = DATETIME(?) ORDER BY id DESC LIMIT 1",
             (order_id, planned_time.isoformat()),
         )
 
@@ -180,9 +180,9 @@ class OrderDomainService:
                   SELECT MAX(a2.id)
                   FROM administrations a2
                   WHERE a2.order_id = a.order_id
-                    AND a2.planned_time = a.planned_time
+                    AND DATETIME(a2.planned_time) = DATETIME(a.planned_time)
               )
-            ORDER BY a.planned_time ASC
+            ORDER BY DATETIME(a.planned_time) ASC, a.id ASC
             """,
             (int(order_id), big_chain_id),
         )
@@ -294,9 +294,9 @@ class OrderDomainService:
                   SELECT MAX(a2.id)
                   FROM administrations a2
                   WHERE a2.order_id = a.order_id
-                    AND a2.planned_time = a.planned_time
+                    AND DATETIME(a2.planned_time) = DATETIME(a.planned_time)
               )
-            ORDER BY COALESCE(a.big_chain_id, ''), a.planned_time ASC
+            ORDER BY COALESCE(a.big_chain_id, ''), DATETIME(a.planned_time) ASC, a.id ASC
             """,
             (int(order_id),),
         )
@@ -376,7 +376,7 @@ class OrderDomainService:
             """
             SELECT *
             FROM administrations
-            WHERE order_id = ? AND planned_time = ?
+            WHERE order_id = ? AND DATETIME(planned_time) = DATETIME(?)
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -390,7 +390,7 @@ class OrderDomainService:
             """
             SELECT *
             FROM administrations
-            WHERE order_id = ? AND planned_time = ? AND is_committed = 1
+            WHERE order_id = ? AND DATETIME(planned_time) = DATETIME(?) AND is_committed = 1
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -407,7 +407,7 @@ class OrderDomainService:
         cursor.execute(
             """
             DELETE FROM administrations
-            WHERE order_id = ? AND planned_time = ? AND is_committed = 0
+            WHERE order_id = ? AND DATETIME(planned_time) = DATETIME(?) AND is_committed = 0
             """,
             (order_id, planned_key),
         )
@@ -427,7 +427,7 @@ class OrderDomainService:
                   SELECT MAX(a2.id)
                   FROM administrations a2
                   WHERE a2.order_id = a.order_id
-                    AND a2.planned_time = a.planned_time
+                    AND DATETIME(a2.planned_time) = DATETIME(a.planned_time)
               )
             """,
             (int(order_id), *planned_keys),
@@ -656,7 +656,7 @@ class OrderDomainService:
             """
             SELECT id, version, status, is_committed
             FROM administrations
-            WHERE order_id = ? AND planned_time = ?
+            WHERE order_id = ? AND DATETIME(planned_time) = DATETIME(?)
               AND is_committed = 1
             ORDER BY id DESC
             LIMIT 1
@@ -867,7 +867,7 @@ class OrderDomainService:
                   JOIN orders o2 ON o2.id = a2.order_id
                   WHERE o2.admission_id = ?
                     AND a2.is_committed = 1
-                  GROUP BY a2.order_id, a2.planned_time
+                  GROUP BY a2.order_id, DATETIME(a2.planned_time)
               )
             """,
             (admission_id, admission_id),
@@ -971,13 +971,13 @@ class OrderDomainService:
             JOIN orders o ON a.order_id = o.id
             JOIN admissions adm ON adm.id = o.admission_id
             WHERE o.admission_id = ?
-              AND a.planned_time >= ? AND a.planned_time < ?
+              AND DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
               AND a.is_committed = 1
               AND a.id IN (
                   SELECT MAX(a2.id)
                   FROM administrations a2
                   WHERE a2.is_committed = 1
-                  GROUP BY a2.order_id, a2.planned_time
+                  GROUP BY a2.order_id, DATETIME(a2.planned_time)
               )
               AND a.cell_role IN ('start', 'single')
               AND COALESCE(a.status, '') = 'planned'
@@ -1083,15 +1083,15 @@ class OrderDomainService:
             JOIN admissions adm ON adm.id = o.admission_id
             JOIN patients p ON p.id = adm.patient_id
             JOIN beds b ON b.current_admission_id = adm.id AND b.status = 'OCCUPIED'
-            WHERE a.planned_time >= ? AND a.planned_time < ?
+            WHERE DATETIME(a.planned_time) >= DATETIME(?) AND DATETIME(a.planned_time) < DATETIME(?)
               AND a.is_committed = 1
               AND a.id IN (
                   SELECT MAX(a2.id)
                   FROM administrations a2
                   JOIN orders o2 ON o2.id = a2.order_id
                   WHERE a2.is_committed = 1
-                    AND a2.planned_time >= ? AND a2.planned_time < ?
-                  GROUP BY a2.order_id, a2.planned_time
+                    AND DATETIME(a2.planned_time) >= DATETIME(?) AND DATETIME(a2.planned_time) < DATETIME(?)
+                  GROUP BY a2.order_id, DATETIME(a2.planned_time)
               )
               AND a.cell_role IN ('start', 'single')
               AND COALESCE(a.status, '') = 'planned'
@@ -1115,7 +1115,7 @@ class OrderDomainService:
                   COALESCE(o.status, '') NOT IN ('deleted', 'cancelled')
                   OR COALESCE(o.is_committed, 0) = 0
               )
-            ORDER BY CAST(b.bed_number AS INTEGER) ASC, b.bed_number ASC, a.planned_time ASC, a.id ASC
+            ORDER BY CAST(b.bed_number AS INTEGER) ASC, b.bed_number ASC, DATETIME(a.planned_time) ASC, a.id ASC
         """
         rows = self.db.fetch_all_remcard(
             query,

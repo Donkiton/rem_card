@@ -107,7 +107,7 @@ class DevDatabaseSwitchDialog(BaseStyledDialog):
         path_row = QHBoxLayout()
         self.path_edit = QLineEdit(self.current_path)
         self.path_edit.setObjectName("DevDatabasePathEdit")
-        self.path_edit.setPlaceholderText(r"Например: \\server\share\Baza_rao3_jurnal")
+        self.path_edit.setPlaceholderText(r"Например: \\server\share\RemCardData")
         self.browse_button = QPushButton("Выбрать папку")
         self.browse_button.setObjectName("DialogOkBtn")
         self.browse_button.clicked.connect(self._browse)

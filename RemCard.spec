@@ -231,10 +231,13 @@ def _settings_release_snapshot_datas():
         export_settings_release_snapshot,
     )
 
-    source_baza = os.path.abspath(
-        os.environ.get("REMCARD_SETTINGS_RELEASE_SOURCE_BAZA")
-        or os.path.join(PROJECT_ROOT, "Baza_rao3_jurnal")
-    )
+    source_baza_value = str(os.environ.get("REMCARD_SETTINGS_RELEASE_SOURCE_BAZA") or "").strip()
+    if not source_baza_value:
+        raise RuntimeError(
+            "REMCARD_SETTINGS_RELEASE_SOURCE_BAZA must point to the selected dev data root. "
+            "Use scripts/build_release.py so the value is configured consistently."
+        )
+    source_baza = os.path.abspath(source_baza_value)
     snapshot_dir = os.path.join(APP_ROOT, "build", "settings_release")
     snapshot_path = os.path.join(snapshot_dir, SETTINGS_RELEASE_SNAPSHOT_FILE)
     report = export_settings_release_snapshot(

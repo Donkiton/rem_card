@@ -331,7 +331,7 @@ def _emit_regression_report(
 def _prepare_import_environment(temp_root: str):
     # Isolate LOCALAPPDATA so tests do not touch real user cache.
     os.environ["LOCALAPPDATA"] = os.path.join(temp_root, "localappdata")
-    os.environ["REMCARD_BAZA_DIR"] = os.path.join(temp_root, "Baza_rao3_jurnal")
+    os.environ["REMCARD_BAZA_DIR"] = os.path.join(temp_root, "regression_data_root")
     os.environ["REMCARD_LOCAL_LOGS_DIR"] = os.path.join(temp_root, "logs")
     os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
     os.environ["REMCARD_LOCAL_SYNC_INTERVAL_SEC"] = "999"
@@ -396,7 +396,7 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
             "dev_database_paths.json",
         )
         project_root = os.path.join(temp_root, "project_root")
-        expected = os.path.join(project_root, runtime_paths.BAZA_DIR_NAME)
+        expected = os.path.join(project_root, runtime_paths.DEFAULT_DEV_DATA_ROOT_NAME)
         legacy = os.path.join(project_root, "rework_baza")
         os.makedirs(expected, exist_ok=True)
         os.makedirs(legacy, exist_ok=True)
@@ -404,7 +404,7 @@ def _check_dev_baza_dir_prefers_project_baza_name(temp_root: str) -> tuple[bool,
 
         resolved = runtime_paths.get_dev_baza_dir()
         if os.path.abspath(resolved) != os.path.abspath(expected):
-            return False, f"dev baza dir should use project Baza_rao3_jurnal, got: {resolved}"
+            return False, f"dev data root did not use the configured default name: {resolved}"
 
         configured = os.path.join(temp_root, "configured_network_baza")
         runtime_paths.write_configured_baza_dir(configured)
@@ -656,7 +656,7 @@ def _check_update_checker_does_not_require_upd_prog_folder(temp_root: str) -> tu
 def _check_update_scan_skips_old_versions_and_sibling_upd(temp_root: str) -> tuple[bool, str]:
     from rem_card.app import update_checker
 
-    baza_dir = Path(temp_root, "Baza_rao3_jurnal_scan")
+    baza_dir = Path(temp_root, "arbitrary_update_scan_root")
     update_root = baza_dir / "UPD"
     releases_dir = update_root / "releases"
     releases_dir.mkdir(parents=True, exist_ok=True)
@@ -1487,7 +1487,7 @@ def _capture_full_update_launch(
 
     update_root = os.path.join(temp_root, f"UPD_full_launch_{suffix}")
     target_dir = os.path.join(temp_root, f"Installed_{suffix}")
-    baza_dir = os.path.join(temp_root, f"Baza_rao3_jurnal_{suffix}")
+    baza_dir = os.path.join(temp_root, f"arbitrary_data_root_{suffix}")
     os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
     os.makedirs(target_dir, exist_ok=True)
     _write_fake_update_package(update_root, version="1.0.1")
@@ -1579,7 +1579,7 @@ def _check_updater_direct_launch_uses_explicit_target(temp_root: str) -> tuple[b
         os.environ.pop("REMCARD_UPDATE_TARGET_DIR", None)
 
         root = os.path.join(temp_root, "share")
-        baza_dir = os.path.join(root, "Baza_rao3_jurnal")
+        baza_dir = os.path.join(root, "arbitrary_data_root")
         upd_dir = os.path.join(baza_dir, "UPD")
         target_dir = os.path.join(temp_root, "ArbitraryInstall", "RemCard")
         os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
@@ -2175,7 +2175,7 @@ def _check_update_locks_are_scoped_to_target(temp_root: str) -> tuple[bool, str]
     saved_env = os.environ.get("REMCARD_BAZA_DIR")
     original_is_compiled = update_launcher.is_compiled
     try:
-        baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal")
+        baza_dir = os.path.join(temp_root, "arbitrary_data_root")
         lock_dir = os.path.join(baza_dir, "locks")
         target_dir = os.path.join(temp_root, "Prog")
         os.makedirs(lock_dir, exist_ok=True)
@@ -2234,7 +2234,7 @@ def _check_update_starting_lock_dead_pid_clears(temp_root: str) -> tuple[bool, s
     saved_env = os.environ.get("REMCARD_BAZA_DIR")
     original_is_compiled = update_launcher.is_compiled
     try:
-        baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal_dead_start")
+        baza_dir = os.path.join(temp_root, "arbitrary_data_root_dead_start")
         target_dir = os.path.join(temp_root, "Prog_dead_start")
         os.makedirs(os.path.join(baza_dir, "locks"), exist_ok=True)
         os.makedirs(target_dir, exist_ok=True)
@@ -3964,9 +3964,9 @@ def _schema_guard_paths(temp_root: str) -> dict[str, str]:
     return {
         "backup_dir": os.path.join(temp_root, "backups", "valid"),
         "invalid_dir": os.path.join(temp_root, "backup_health", "invalid_backups"),
-        "policy_path": os.path.join(temp_root, "Baza_rao3_jurnal", "config", "client_policy.json"),
-        "lock_path": os.path.join(temp_root, "Baza_rao3_jurnal", "archiv", "db.lock"),
-        "baza_dir": os.path.join(temp_root, "Baza_rao3_jurnal"),
+        "policy_path": os.path.join(temp_root, "arbitrary_data_root", "config", "client_policy.json"),
+        "lock_path": os.path.join(temp_root, "arbitrary_data_root", "archiv", "db.lock"),
+        "baza_dir": os.path.join(temp_root, "arbitrary_data_root"),
     }
 
 
@@ -4235,7 +4235,7 @@ def _check_old_client_blocked_by_policy(temp_root: str) -> tuple[bool, str]:
 
 
 def _prepare_recovery_baza(temp_root: str) -> dict[str, str]:
-    baza_dir = os.path.join(temp_root, "Baza_rao3_jurnal")
+    baza_dir = os.path.join(temp_root, "arbitrary_data_root")
     paths = {
         "baza_dir": baza_dir,
         "db_path": os.path.join(baza_dir, "archiv", "rao_journal.db"),
@@ -4712,12 +4712,12 @@ def _check_no_merge_changes(temp_root: str) -> tuple[bool, str]:
 
 def _check_local_metrics_written_locally(temp_root: str) -> tuple[bool, str]:
     from rem_card.app.local_metrics import flush_metrics, record_metric
-    from rem_card.app.runtime_paths import get_local_logs_dir
+    from rem_card.app.runtime_paths import get_runtime_logs_dir
 
     _ = temp_root
     record_metric("regression_metric_probe", 1, component="regression")
     flush_metrics(timeout=1.0)
-    metrics_dir = get_local_logs_dir()
+    metrics_dir = get_runtime_logs_dir()
     files = [
         os.path.join(metrics_dir, name)
         for name in os.listdir(metrics_dir)
@@ -4833,47 +4833,31 @@ def _check_latest_change_metric_throttles_unchanged_values(temp_root: str) -> tu
         local_metrics._LATEST_CHANGE_METRIC_STATE.clear()  # type: ignore[attr-defined]
 
 
-def _check_fault_log_finalize_archives_graceful_payload(temp_root: str) -> tuple[bool, str]:
+def _check_crash_handler_clean_finalize_removes_session_files(temp_root: str) -> tuple[bool, str]:
     from rem_card.app import logger as logger_module
 
-    fault_path = os.path.join(temp_root, "faults.log")
-    Path(fault_path).write_text(
-        "\n--- SESSION START: 2026-05-17 15:22:21 pid=1 role=nurse host=test ---\n"
-        "Windows fatal exception: code 0x8001010d\n"
-        "Current thread 0x00001c94 (most recent call first):\n",
-        encoding="utf-8",
-    )
-    saved_path = getattr(logger_module, "_FAULT_LOG_PATH", None)
-    saved_file = getattr(logger_module, "_FAULT_FILE", None)
+    spool = os.path.join(temp_root, "crash-outbox")
+    saved_spool = os.environ.get("REMCARD_CRASH_OUTBOX_DIR")
     try:
-        logger_module._FAULT_LOG_PATH = fault_path  # type: ignore[attr-defined]
-        logger_module._FAULT_FILE = open(fault_path, "a", encoding="utf-8")  # type: ignore[attr-defined]
+        os.environ["REMCARD_CRASH_OUTBOX_DIR"] = spool
+        session_id = logger_module.init_crash_handler(role="nurse")
+        if not session_id:
+            return False, "crash session was not initialized"
         logger_module.finalize_crash_handler(exit_code=0)
-        current = Path(fault_path).read_text(encoding="utf-8")
-        if "Windows fatal exception" in current:
-            return False, "faults.log still contains finalized native fault payload"
-        if "SESSION END" not in current or "archived=" not in current:
-            return False, f"faults.log final marker missing: {current}"
-        archives = [
-            name
-            for name in os.listdir(temp_root)
-            if name.startswith("faults_") and name.endswith("_graceful.log")
+        remaining = [
+            path.relative_to(spool).as_posix()
+            for path in Path(spool).rglob("*")
+            if path.is_file()
         ]
-        if len(archives) != 1:
-            return False, f"expected one graceful fault archive, got {archives}"
-        archive_text = Path(temp_root, archives[0]).read_text(encoding="utf-8")
-        if "Windows fatal exception: code 0x8001010d" not in archive_text:
-            return False, "graceful fault archive lost native fault payload"
+        if remaining:
+            return False, f"clean crash session left files behind: {remaining}"
         return True, "ok"
     finally:
-        try:
-            current_file = getattr(logger_module, "_FAULT_FILE", None)
-            if current_file is not None and not current_file.closed:
-                current_file.close()
-        except Exception:
-            pass
-        logger_module._FAULT_LOG_PATH = saved_path  # type: ignore[attr-defined]
-        logger_module._FAULT_FILE = saved_file  # type: ignore[attr-defined]
+        logger_module.finalize_crash_handler(exit_code=0)
+        if saved_spool is None:
+            os.environ.pop("REMCARD_CRASH_OUTBOX_DIR", None)
+        else:
+            os.environ["REMCARD_CRASH_OUTBOX_DIR"] = saved_spool
 
 
 def _check_sector_ivl_enqueue_error_refreshes(temp_root: str) -> tuple[bool, str]:
@@ -14005,7 +13989,7 @@ def _check_w1a_w1b_targeted_layout_and_read_model(temp_root: str) -> tuple[bool,
         "JOIN patients p ON p.id = adm.patient_id",
         "b.bed_number AS bed_number",
         "ORDER BY CAST(b.bed_number AS INTEGER) ASC",
-        "GROUP BY a2.order_id, a2.planned_time",
+        "GROUP BY a2.order_id, DATETIME(a2.planned_time)",
     ):
         if required_sql not in service_source:
             return False, f"W1a read model must keep optimized active-admission SQL: {required_sql}"
@@ -14414,8 +14398,8 @@ def _check_pyinstaller_settings_release_snapshot_source(temp_root: str) -> tuple
         return False, "RemCard.spec must keep explicit settings release source override"
     if "from rem_card.app.runtime_paths import get_dev_baza_dir" in source:
         return False, "RemCard.spec must not resolve release settings source through alias runtime_paths"
-    if 'os.path.join(PROJECT_ROOT, "Baza_rao3_jurnal")' not in source:
-        return False, "RemCard.spec must default release settings source to real project Baza_rao3_jurnal"
+    if "REMCARD_SETTINGS_RELEASE_SOURCE_BAZA must point" not in source:
+        return False, "RemCard.spec must require the explicit settings release source root"
     return True, "ok"
 
 
@@ -16394,9 +16378,9 @@ def _build_emergency_standby_metadata(
         standby_id=f"standby_{os.getpid()}",
         created_at=now,
         updated_at=now,
-        source_remote_db_path=r"\\fixture\Baza_rao3_jurnal\archiv\rao_journal.db",
+        source_remote_db_path=r"\\fixture\arbitrary_data_root\archiv\rao_journal.db",
         source_remote_fingerprint=dict(medical_validation.fingerprint),
-        source_settings_db_path=None if settings_path is None else r"\\fixture\Baza_rao3_jurnal\settings\remcard_settings.db",
+        source_settings_db_path=None if settings_path is None else r"\\fixture\arbitrary_data_root\settings\remcard_settings.db",
         source_settings_fingerprint=None if settings_validation is None else dict(settings_validation.fingerprint),
         remote_last_change_id=int(medical_validation.last_change_id or 0),
         schema_version=int(medical_validation.schema_version or 0),
@@ -22073,7 +22057,7 @@ def _compiled_import_probe(temp_root: str, module_name: str) -> tuple[bool, dict
         if key.startswith("REMCARD_"):
             env.pop(key, None)
     env["PYTHONPATH"] = str(PROJECT_ROOT)
-    env["REMCARD_BAZA_DIR"] = os.path.join(probe_root, "Baza_rao3_jurnal")
+    env["REMCARD_BAZA_DIR"] = os.path.join(probe_root, "arbitrary_data_root")
     env["REMCARD_EMERGENCY_DB_ROOT"] = os.path.join(probe_root, "emergency_root")
     env["REMCARD_LOCAL_LOGS_DIR"] = os.path.join(probe_root, "logs")
     env["LOCALAPPDATA"] = os.path.join(probe_root, "localappdata")
@@ -22154,7 +22138,7 @@ def _check_compiled_logger_tolerates_missing_shared_dirs(temp_root: str) -> tupl
         if key.startswith("REMCARD_"):
             env.pop(key, None)
     env["PYTHONPATH"] = str(PROJECT_ROOT)
-    env["REMCARD_BAZA_DIR"] = os.path.join(probe_root, "Baza_rao3_jurnal")
+    env["REMCARD_BAZA_DIR"] = os.path.join(probe_root, "arbitrary_data_root")
     env["REMCARD_LOCAL_LOGS_DIR"] = os.path.join(probe_root, "local_logs")
     env["LOCALAPPDATA"] = os.path.join(probe_root, "localappdata")
     env["REMCARD_FAKE_EXE_DIR"] = probe_root
@@ -22238,7 +22222,7 @@ def _check_nurse_offline_valid_standby_reaches_emergency_when_shared_rem_card_mi
     from rem_card.services.settings.settings_service import reset_settings_service
 
     store, _standby = _prepare_emergency_store_fixture(temp_root)
-    missing_baza = os.path.join(temp_root, "compiled_offline", "Baza_rao3_jurnal")
+    missing_baza = os.path.join(temp_root, "compiled_offline", "arbitrary_data_root")
     for path in get_required_baza_paths(missing_baza):
         if os.path.basename(path).lower() != "rem_card":
             os.makedirs(path, exist_ok=True)
@@ -28243,7 +28227,7 @@ def main(argv: list[str] | None = None):
         ("local_metrics_written_locally", _check_local_metrics_written_locally),
         ("local_metrics_are_buffered", _check_local_metrics_are_buffered),
         ("latest_change_metric_throttles_unchanged_values", _check_latest_change_metric_throttles_unchanged_values),
-        ("fault_log_finalize_archives_graceful_payload", _check_fault_log_finalize_archives_graceful_payload),
+        ("crash_handler_clean_finalize_removes_session_files", _check_crash_handler_clean_finalize_removes_session_files),
         ("sector_ivl_enqueue_error_refreshes", _check_sector_ivl_enqueue_error_refreshes),
         ("balance_controller_enqueue_error_refreshes", _check_balance_controller_enqueue_error_refreshes),
         ("diet_intake_enqueue_error_refreshes", _check_diet_intake_enqueue_error_refreshes),

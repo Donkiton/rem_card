@@ -30,7 +30,7 @@ class OrdersDAO:
                 query = f"""
                     SELECT {select_clause} FROM orders
                     WHERE admission_id = ?
-                    AND datetime >= ? AND datetime < ?
+                    AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                     AND is_committed = 1
                     AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 """
@@ -39,7 +39,7 @@ class OrdersDAO:
                 query = f"""
                     SELECT {select_clause} FROM orders
                     WHERE admission_id = ?
-                    AND datetime >= ? AND datetime < ?
+                    AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                     AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 """
             params = [admission_id, start_dt.isoformat(), end_dt.isoformat()]
@@ -56,9 +56,9 @@ class OrdersDAO:
             params = [admission_id]
 
         if only_committed:
-            query += " ORDER BY COALESCE(sort_order, 0) ASC, created_at ASC, id ASC "
+            query += " ORDER BY COALESCE(sort_order, 0) ASC, DATETIME(created_at) ASC, id ASC "
         else:
-            query += " ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, created_at ASC, id ASC "
+            query += " ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, DATETIME(created_at) ASC, id ASC "
         return query, tuple(params)
 
     def get_next_sort_order(self, admission_id: int, date: Optional[datetime] = None) -> int:
@@ -72,7 +72,7 @@ class OrdersDAO:
                 SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort_order
                 FROM orders
                 WHERE admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
                 """,
                 (admission_id, start_dt.isoformat(), end_dt.isoformat()),
@@ -178,19 +178,19 @@ class OrdersDAO:
                 SELECT *
                 FROM orders
                 WHERE admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND is_committed = 1
                   AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
-                ORDER BY COALESCE(sort_order, 0) ASC, created_at ASC, id ASC
+                ORDER BY COALESCE(sort_order, 0) ASC, DATETIME(created_at) ASC, id ASC
             """
         else:
             query = """
                 SELECT *
                 FROM orders
                 WHERE admission_id = ?
-                  AND datetime >= ? AND datetime < ?
+                  AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
                   AND COALESCE(status, '') NOT IN ('deleted', 'cancelled')
-                ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, created_at ASC, id ASC
+                ORDER BY COALESCE(draft_sort_order, sort_order, 0) ASC, DATETIME(created_at) ASC, id ASC
             """
         rows = self.db.fetch_all_remcard(
             query,
@@ -312,7 +312,7 @@ class OrdersDAO:
 
     def get_all_dates(self, admission_id: int) -> List[datetime]:
         """Возвращает все уникальные даты для назначений пациента."""
-        query = "SELECT DISTINCT datetime as dt FROM orders WHERE admission_id = ? AND COALESCE(status, '') != 'deleted' ORDER BY datetime ASC"
+        query = "SELECT DISTINCT datetime as dt FROM orders WHERE admission_id = ? AND COALESCE(status, '') != 'deleted' ORDER BY DATETIME(datetime) ASC"
         rows = self.db.fetch_all_remcard(query, (admission_id,))
         dates = []
         for r in rows:
@@ -344,7 +344,7 @@ class OrdersDAO:
         self.db.execute_remcard("""
             UPDATE administrations 
             SET status = 'deleted', is_committed = 0, updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
-            WHERE planned_time >= ? AND planned_time < ?
+            WHERE DATETIME(planned_time) >= DATETIME(?) AND DATETIME(planned_time) < DATETIME(?)
               AND order_id IN (SELECT id FROM orders WHERE admission_id = ?)
         """, (start_iso, end_iso, admission_id))
 
@@ -357,7 +357,7 @@ class OrdersDAO:
                 revision = COALESCE(revision, 0) + 1,
                 updated_at = STRFTIME('%Y-%m-%d %H:%M:%f', 'now')
             WHERE admission_id = ?
-              AND datetime >= ? AND datetime < ?
+              AND DATETIME(datetime) >= DATETIME(?) AND DATETIME(datetime) < DATETIME(?)
         """, (admission_id, start_iso, end_iso))
         
         self.soft_delete_all_administrations_for_shift(admission_id, start_iso, end_iso)
