@@ -482,8 +482,8 @@ STYLE_SIDE_PATIENT_ACTION_BUTTON = f"""
 """
 
 FORM_DROPDOWN_ARROW_IMAGE = _icon_qss_url("combo_arrow_down.svg")
-FORM_SPIN_UP_ARROW_IMAGE = _icon_qss_url("decor_arrow_up.svg")
-FORM_SPIN_DOWN_ARROW_IMAGE = _icon_qss_url("decor_arrow_down.svg")
+FORM_SPIN_UP_ARROW_IMAGE = _icon_qss_url("spin_arrow_up.svg")
+FORM_SPIN_DOWN_ARROW_IMAGE = _icon_qss_url("spin_arrow_down.svg")
 
 STYLE_PATIENT_FORM_CONTAINER = """
     QWidget#bg_container {

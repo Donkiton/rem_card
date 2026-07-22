@@ -39,7 +39,7 @@ class PatientFormAdmissionDateTimeTest(unittest.TestCase):
         self.assertIsInstance(widget.admission_time_input, QTimeEdit)
         self.assertEqual(data["admission_datetime"], datetime(2026, 6, 24, 7, 45))
         self.assertIn("combo_arrow_down.svg", widget.admission_date_input.styleSheet())
-        self.assertIn("decor_arrow_up.svg", widget.admission_time_input.styleSheet())
+        self.assertIn("spin_arrow_up.svg", widget.admission_time_input.styleSheet())
 
     def test_loaded_long_patient_name_is_positioned_at_start(self):
         widget = GeneralTabWidget()
