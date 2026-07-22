@@ -89,6 +89,7 @@ SETTINGS_BACKUP_FORCE_SOURCE_PREFIXES = (
     "settings_release_snapshot",
     "settings_legacy_import",
     "settings_legacy_prescription_overrides",
+    "settings_media_blob_migration",
 )
 SETTINGS_AUTO_BACKUPS_ENABLED = os.environ.get("REMCARD_SETTINGS_AUTO_BACKUPS", "").strip().lower() in {
     "1",
