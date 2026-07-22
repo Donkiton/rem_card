@@ -16,7 +16,7 @@ from rem_card.app.logger import logger
 
 DEFAULT_STANDBY_REFRESH_COOLDOWN_SEC = max(
     0.0,
-    float(os.environ.get("REMCARD_EMERGENCY_STANDBY_COOLDOWN_SEC", "60")),
+    float(os.environ.get("REMCARD_EMERGENCY_STANDBY_COOLDOWN_SEC", "3600")),
 )
 DEFAULT_STANDBY_REFRESH_FAILURE_BACKOFF_SEC = max(
     1.0,
@@ -28,7 +28,7 @@ DEFAULT_STANDBY_REFRESH_MAX_BACKOFF_SEC = max(
 )
 DEFAULT_STANDBY_REFRESH_FOREGROUND_IDLE_SEC = max(
     0.0,
-    float(os.environ.get("REMCARD_EMERGENCY_STANDBY_FOREGROUND_IDLE_SEC", "5")),
+    float(os.environ.get("REMCARD_EMERGENCY_STANDBY_FOREGROUND_IDLE_SEC", "300")),
 )
 DEFAULT_STANDBY_DEFERRED_SUMMARY_INTERVAL_SEC = max(
     60.0,
@@ -300,31 +300,6 @@ class EmergencyStandbyScheduler:
         if block_reason:
             return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason=block_reason)
 
-        source_status = self.manager.check_network_sources()
-        if not source_status.ok:
-            return source_status
-
-        remote_last_change_id = int(source_status.medical_validation.last_change_id if source_status.medical_validation else 0)
-        settings_fingerprint = (
-            None
-            if source_status.settings_validation is None
-            else dict(source_status.settings_validation.fingerprint)
-        )
-        source_schema_version = source_status.medical_validation.schema_version if source_status.medical_validation else None
-        if not self.manager.should_refresh_standby(
-            remote_last_change_id,
-            settings_fingerprint=settings_fingerprint,
-            source_schema_version=source_schema_version,
-            forced=forced,
-        ):
-            return EmergencyStandbyRefreshResult(
-                ok=True,
-                status="current",
-                reason="standby is already current",
-                metadata=self.manager.store.get_latest_valid_standby(),
-                medical_validation=source_status.medical_validation,
-                settings_validation=source_status.settings_validation,
-            )
         return self.manager.create_or_refresh_standby(forced=forced)
 
     def _refresh_block_reason(self) -> str:

@@ -16,6 +16,7 @@ from rem_card.app.db_runtime_context import DbRuntimeContext
 from rem_card.app import operblock_startup_metrics
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.logger import logger
+from rem_card.app.settings_db_paths import SETTINGS_ICON_ASSETS_DIR_NAME
 from rem_card.app.sqlite_shared import describe_sqlite_lock_holder, run_integrity_check, run_quick_check
 from rem_card.data.dto.lab_orders_dto import LAB_MATERIAL_LABELS, LabMaterial
 from rem_card.data.dto.remcard_dto import DietTemplateDTO
@@ -44,7 +45,6 @@ DIET_TEMPLATES_KEY = "diet_templates"
 DOCTORS_KEY = "doctors"
 PRINT_SETTINGS_KEY = "print_settings"
 DISPLAY_SETTINGS_KEY = "display_settings"
-DECOR_SETTINGS_APP_KEY = "decor_settings"
 BACKGROUND_SETTINGS_KEY = "background_settings"
 STYLE_SETTINGS_KEY = "style_settings"
 EMERGENCY_PASSWORD_KEY = "emergency_password"
@@ -75,7 +75,6 @@ OPERBLOCK_LEGACY_IMPORT_APP_SETTING_KEYS = (
 )
 DEFAULT_EMERGENCY_PASSWORD = "2u1x8dxgeD"
 MIN_EMERGENCY_PASSWORD_LENGTH = 6
-MAX_BACKGROUND_IMAGE_BLOB_BYTES = 32 * 1024 * 1024
 PROCESS_SOURCE_CLIENT_ID = f"settings:{os.getpid()}:{uuid.uuid4().hex}"
 LEGACY_PRESCRIPTION_OVERRIDE_IMPORT_META_KEY = "prescription_legacy_override_import_hash"
 OPERBLOCK_ICONS_SEED_META_VERSION_KEY = "operblock_icons_seed_version"
@@ -180,7 +179,7 @@ CATALOG_TABLES: dict[str, tuple[tuple[str, str], ...]] = {
 APP_SETTINGS_HASH_KEYS: dict[str, tuple[str, ...]] = {
     LAB_ANALYSIS_KEY: ("lab_materials",),
     PRINT_SETTINGS_KEY: ("print_config",),
-    DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns", DECOR_SETTINGS_APP_KEY),
+    DISPLAY_SETTINGS_KEY: ("display_settings", "lab_orders_columns"),
     BACKGROUND_SETTINGS_KEY: ("background_settings",),
     STYLE_SETTINGS_KEY: ("style_settings",),
     EMERGENCY_PASSWORD_CATALOG_KEY: (EMERGENCY_PASSWORD_KEY,),
@@ -544,10 +543,6 @@ class SettingsService:
             if background_repair_report:
                 info = {**info, "background_settings_repair": background_repair_report}
                 self._add_startup_warning_from_report(startup_warnings, background_repair_report)
-            decor_report = self._ensure_default_decor_settings()
-            if decor_report:
-                info = {**info, "decor_settings_startup": decor_report}
-                self._add_startup_warning_from_report(startup_warnings, decor_report)
             if self._should_prepare_operblock_on_startup():
                 icons_report = self._ensure_default_operblock_icons()
                 if icons_report:
@@ -1066,62 +1061,6 @@ class SettingsService:
             pass
 
         return bool(has_image_blob)
-
-    def _ensure_default_decor_settings(self) -> dict[str, Any] | None:
-        try:
-            from rem_card.ui.shared.decor_settings import default_decor_settings_payload, normalize_decor_settings_payload
-        except Exception:
-            return None
-
-        with self.db.read_connection() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM app_settings WHERE scope = 'shared' AND key = ?",
-                (DECOR_SETTINGS_APP_KEY,),
-            ).fetchone()
-        if row:
-            return None
-
-        payload = normalize_decor_settings_payload(default_decor_settings_payload())
-        lock_report = self._settings_startup_write_precheck_report(
-            source="settings_default_decor_settings",
-            operation_label="подготовка стандартных настроек оформления",
-            created=False,
-        )
-        if lock_report:
-            return lock_report
-        try:
-            with self.db.transaction("settings_default_decor_settings") as cursor:
-                self._write_app_setting_in_tx(
-                    cursor,
-                    "shared",
-                    DECOR_SETTINGS_APP_KEY,
-                    payload,
-                    changed_by_role="system",
-                    catalog_key=DISPLAY_SETTINGS_KEY,
-                    log_change=False,
-                )
-                self._bump_catalog_version(
-                    cursor,
-                    DISPLAY_SETTINGS_KEY,
-                    "decor_settings",
-                    f"shared:{DECOR_SETTINGS_APP_KEY}",
-                    "insert",
-                    changed_by_role="system",
-                    after=payload,
-                )
-        except Exception as exc:
-            if self._is_settings_startup_write_busy(exc):
-                return self._settings_startup_write_skipped_report(
-                    source="settings_default_decor_settings",
-                    operation_label="подготовка стандартных настроек оформления",
-                    exc=exc,
-                    created=False,
-                )
-            raise
-        return {
-            "created": True,
-            "source": "settings_default_decor_settings",
-        }
 
     def _import_legacy_sources(self, cursor) -> dict[str, Any]:
         started = time.perf_counter()
@@ -3083,7 +3022,6 @@ class SettingsService:
             if not key:
                 continue
             file_name = str(raw.get("file") or "")
-            image_blob = None
             image_mime = None
             image_hash = None
             image_path = ""
@@ -3096,21 +3034,9 @@ class SettingsService:
                     image_path = ""
             if image_path and os.path.isfile(image_path):
                 try:
-                    size = os.path.getsize(image_path)
-                    if size <= MAX_BACKGROUND_IMAGE_BLOB_BYTES:
-                        with open(image_path, "rb") as fh:
-                            image_blob = fh.read()
-                        image_hash = hashlib.sha256(image_blob).hexdigest()
-                        image_mime = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
-                    else:
-                        logger.warning(
-                            "Background image is too large for settings DB blob: %s (%s bytes, max %s)",
-                            image_path,
-                            size,
-                            MAX_BACKGROUND_IMAGE_BLOB_BYTES,
-                        )
+                    image_mime = mimetypes.guess_type(image_path)[0] or "application/octet-stream"
                 except Exception:
-                    image_blob = None
+                    image_mime = None
             cursor.execute(
                 """
                 INSERT INTO ui_backgrounds (
@@ -3122,7 +3048,7 @@ class SettingsService:
                     name = excluded.name,
                     kind = excluded.kind,
                     value_json = excluded.value_json,
-                    image_blob = COALESCE(excluded.image_blob, ui_backgrounds.image_blob),
+                    image_blob = ui_backgrounds.image_blob,
                     image_mime = COALESCE(excluded.image_mime, ui_backgrounds.image_mime),
                     image_hash = COALESCE(excluded.image_hash, ui_backgrounds.image_hash),
                     enabled = 1,
@@ -3135,7 +3061,7 @@ class SettingsService:
                     str(raw.get("name") or key),
                     "image" if file_name else "color",
                     _stable_json(raw),
-                    image_blob,
+                    None,
                     image_mime,
                     image_hash,
                     1 if key == active_key else 0,
@@ -3143,6 +3069,13 @@ class SettingsService:
                     now_text(),
                 ),
             )
+            if image_path and os.path.isfile(image_path):
+                # Файл в settings/backgrounds является основным хранилищем.
+                # Старый BLOB очищается без повторного чтения изображения по SMB.
+                cursor.execute(
+                    "UPDATE ui_backgrounds SET image_blob = NULL WHERE background_key = ?",
+                    (key,),
+                )
 
     def materialize_background_image(self, background_key: str, target_path: str) -> bool:
         self.ensure_ready()
@@ -3199,6 +3132,192 @@ class SettingsService:
         image_mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
         image_hash = hashlib.sha256(image_blob).hexdigest()
         return image_blob, image_mime, image_hash
+
+    def _persist_icon_asset(self, icon_key: str, image_blob: bytes, image_mime: str, image_hash: str) -> str:
+        extension = mimetypes.guess_extension(str(image_mime or "")) or ".bin"
+        if extension == ".jpe":
+            extension = ".jpg"
+        safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(icon_key or "icon")).strip("_")[:64] or "icon"
+        file_name = f"{safe_key}_{str(image_hash)[:16]}{extension.lower()}"
+        target_dir = os.path.join(self.db.settings_dir, SETTINGS_ICON_ASSETS_DIR_NAME)
+        target_path = os.path.join(target_dir, file_name)
+        if os.path.isfile(target_path):
+            return file_name
+        os.makedirs(target_dir, exist_ok=True)
+        tmp_path = f"{target_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp_path, "wb") as fh:
+                fh.write(bytes(image_blob))
+            os.replace(tmp_path, target_path)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+        return file_name
+
+    def _attach_icon_asset_blobs(self, records: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        asset_dir = os.path.join(self.db.settings_dir, SETTINGS_ICON_ASSETS_DIR_NAME)
+        for item in records.values():
+            if item.get("image_blob") is not None:
+                continue
+            value = item.get("value") if isinstance(item.get("value"), dict) else {}
+            asset_file = os.path.basename(str(value.get("asset_file") or ""))
+            if asset_file:
+                path = os.path.join(asset_dir, asset_file)
+            elif str(item.get("source") or "") == "seed":
+                from rem_card.app.paths import get_icon_dir
+
+                source_file = os.path.basename(str(value.get("source_file") or item.get("default_file") or ""))
+                path = os.path.join(get_icon_dir(), source_file) if source_file else ""
+            else:
+                path = ""
+            if not path:
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    item["image_blob"] = fh.read()
+            except OSError:
+                item["image_blob"] = None
+        return records
+
+    def _compact_settings_db_after_media_migration(self) -> dict[str, Any]:
+        lock = self.db.write_controller.lock
+        owner_id = f"settings-media-vacuum:{os.getpid()}:{threading.get_ident()}"
+        if not lock.acquire(owner_id, "settings_media_vacuum"):
+            raise SettingsDbError("Не удалось получить блокировку БД настроек для сжатия.")
+        conn = None
+        try:
+            conn = self.db.connect(readonly=False)
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0] or 0)
+            freelist_before = int(conn.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            size_before = os.path.getsize(self.db.db_path)
+            conn.execute("VACUUM")
+            ok, reason = run_quick_check(conn)
+            if not ok:
+                raise SettingsDbError(f"Сжатая БД настроек не прошла quick_check: {reason}")
+            return {
+                "size_before": size_before,
+                "size_after": os.path.getsize(self.db.db_path),
+                "free_bytes_before": page_size * freelist_before,
+            }
+        finally:
+            if conn is not None:
+                conn.close()
+            lock.release()
+
+    def migrate_media_blobs_to_files(self, *, apply: bool = False, compact: bool = False) -> dict[str, Any]:
+        """Однократно выносит старые изображения из SQLite в общие версионированные файлы."""
+        if apply:
+            self.ensure_ready()
+        elif not os.path.isfile(self.db.db_path):
+            raise FileNotFoundError(f"БД настроек не найдена: {self.db.db_path}")
+        with self.db.read_connection() as conn:
+            background_rows = conn.execute(
+                "SELECT background_key, value_json, image_blob, image_mime FROM ui_backgrounds WHERE image_blob IS NOT NULL"
+            ).fetchall()
+            icon_rows = conn.execute(
+                "SELECT icon_key, source, value_json, image_blob, image_mime, image_hash "
+                "FROM operblock_icons WHERE image_blob IS NOT NULL"
+            ).fetchall()
+
+        if not apply:
+            return {
+                "applied": False,
+                "backgrounds_pending": len(background_rows),
+                "icons_pending": len(icon_rows),
+            }
+
+        backgrounds_dir = os.path.join(self.db.settings_dir, "backgrounds")
+        os.makedirs(backgrounds_dir, exist_ok=True)
+        prepared_backgrounds: list[tuple[str, str]] = []
+        for row in background_rows:
+            try:
+                value = json.loads(row["value_json"] or "{}")
+            except Exception:
+                value = {}
+            if not isinstance(value, dict):
+                value = {}
+            file_name = os.path.basename(str(value.get("file") or ""))
+            if not file_name:
+                continue
+            target_path = os.path.join(backgrounds_dir, file_name)
+            if not os.path.isfile(target_path):
+                tmp_path = f"{target_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+                try:
+                    with open(tmp_path, "wb") as fh:
+                        fh.write(bytes(row["image_blob"]))
+                    os.replace(tmp_path, target_path)
+                finally:
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+            prepared_backgrounds.append((str(row["background_key"]), _stable_json(value)))
+
+        prepared_icons: list[tuple[str, str]] = []
+        for row in icon_rows:
+            try:
+                value = json.loads(row["value_json"] or "{}")
+            except Exception:
+                value = {}
+            if not isinstance(value, dict):
+                value = {}
+            if str(row["source"] or "") != "seed":
+                blob = bytes(row["image_blob"])
+                image_hash = str(row["image_hash"] or hashlib.sha256(blob).hexdigest())
+                asset_file = self._persist_icon_asset(
+                    str(row["icon_key"]),
+                    blob,
+                    str(row["image_mime"] or "application/octet-stream"),
+                    image_hash,
+                )
+                value["asset_file"] = asset_file
+            prepared_icons.append((str(row["icon_key"]), _stable_json(value)))
+
+        if prepared_backgrounds or prepared_icons:
+            with self.db.transaction("settings_media_blob_migration") as cursor:
+                for background_key, value_json in prepared_backgrounds:
+                    cursor.execute(
+                        "UPDATE ui_backgrounds SET value_json = ?, image_blob = NULL, revision = revision + 1, "
+                        "updated_at = ? WHERE background_key = ?",
+                        (value_json, now_text(), background_key),
+                    )
+                for icon_key, value_json in prepared_icons:
+                    cursor.execute(
+                        "UPDATE operblock_icons SET value_json = ?, image_blob = NULL, revision = revision + 1, "
+                        "updated_at = ? WHERE icon_key = ?",
+                        (value_json, now_text(), icon_key),
+                    )
+                if prepared_backgrounds:
+                    self._bump_catalog_version(
+                        cursor,
+                        BACKGROUND_SETTINGS_KEY,
+                        "ui_backgrounds",
+                        None,
+                        "externalize_media",
+                        changed_by_role="maintenance",
+                    )
+                if prepared_icons:
+                    self._bump_catalog_version(
+                        cursor,
+                        OPERBLOCK_ICONS_KEY,
+                        "operblock_icons",
+                        None,
+                        "externalize_media",
+                        changed_by_role="maintenance",
+                    )
+        report: dict[str, Any] = {
+            "applied": True,
+            "backgrounds_migrated": len(prepared_backgrounds),
+            "icons_migrated": len(prepared_icons),
+            "backgrounds_skipped": len(background_rows) - len(prepared_backgrounds),
+        }
+        if compact:
+            report["compaction"] = self._compact_settings_db_after_media_migration()
+        return report
 
     @staticmethod
     def _operblock_icons_seed_hash() -> str:
@@ -3363,7 +3482,7 @@ class SettingsService:
                     if not os.path.isfile(source_path):
                         logger.warning("Operblock default icon seed file missing: %s", source_path)
                         continue
-                    image_blob, image_mime, image_hash = self._read_operblock_icon_image(source_path)
+                    _image_blob, image_mime, image_hash = self._read_operblock_icon_image(source_path)
                     value = {
                         "source": "default_seed",
                         "source_file": source_file,
@@ -3371,13 +3490,13 @@ class SettingsService:
                     }
                     now = now_text()
                     existing = cursor.execute(
-                        "SELECT source, image_hash FROM operblock_icons WHERE icon_key = ?",
+                        "SELECT source, image_hash, image_blob IS NOT NULL AS has_image_blob FROM operblock_icons WHERE icon_key = ?",
                         (definition.icon_key,),
                     ).fetchone()
                     if existing:
                         existing_source = str(existing["source"] or "")
                         existing_hash = str(existing["image_hash"] or "")
-                        if existing_source == "seed" and existing_hash != image_hash:
+                        if existing_source == "seed" and (existing_hash != image_hash or bool(existing["has_image_blob"])):
                             cursor.execute(
                                 """
                                 UPDATE operblock_icons
@@ -3401,7 +3520,7 @@ class SettingsService:
                                     definition.name,
                                     definition.default_file,
                                     _stable_json(value),
-                                    image_blob,
+                                    None,
                                     image_mime,
                                     image_hash,
                                     int(definition.sort_order or 0),
@@ -3427,7 +3546,7 @@ class SettingsService:
                             definition.name,
                             definition.default_file,
                             _stable_json(value),
-                            image_blob,
+                            None,
                             image_mime,
                             image_hash,
                             int(definition.sort_order or 0),
@@ -3511,7 +3630,15 @@ class SettingsService:
                 except Exception:
                     value = {}
             item["value"] = value
-            item["has_image_blob"] = bool(item.get("has_image_blob", item.get("image_blob")))
+            item["asset_file"] = os.path.basename(str(value.get("asset_file") or ""))
+            seed_file = (
+                os.path.basename(str(value.get("source_file") or item.get("default_file") or ""))
+                if str(item.get("source") or "") == "seed"
+                else ""
+            )
+            item["has_image_blob"] = bool(
+                item.get("has_image_blob", item.get("image_blob")) or item["asset_file"] or seed_file
+            )
             result[str(item.get("icon_key") or "")] = item
         return result
 
@@ -3552,7 +3679,8 @@ class SettingsService:
                 """,
                 params,
             ).fetchall()
-        return version, self._decode_operblock_icon_rows(rows)
+        records = self._decode_operblock_icon_rows(rows)
+        return version, records
 
     def get_operblock_icon_records(
         self,
@@ -3585,7 +3713,8 @@ class SettingsService:
                 """,
                 tuple(normalized_keys),
             ).fetchall()
-        return version, self._decode_operblock_icon_rows(rows)
+        records = self._decode_operblock_icon_rows(rows)
+        return version, self._attach_icon_asset_blobs(records) if include_blob else records
 
     def list_operblock_icon_metadata(self, *, ensure_defaults: bool = True) -> dict[str, dict[str, Any]]:
         _version, records = self.get_operblock_icon_metadata_snapshot(ensure_defaults=ensure_defaults)
@@ -3610,7 +3739,8 @@ class SettingsService:
                 ORDER BY sort_order ASC, icon_key ASC
                 """
             ).fetchall()
-        return self._decode_operblock_icon_rows(rows)
+        records = self._decode_operblock_icon_rows(rows)
+        return self._attach_icon_asset_blobs(records) if include_blob else records
 
     def list_remcard_icons(self, *, include_blob: bool = True) -> dict[str, dict[str, Any]]:
         self.ensure_ready()
@@ -3628,7 +3758,8 @@ class SettingsService:
                 """,
                 remcard_keys,
             ).fetchall()
-        return self._decode_operblock_icon_rows(rows)
+        records = self._decode_operblock_icon_rows(rows)
+        return self._attach_icon_asset_blobs(records) if include_blob else records
 
     def save_operblock_icon(
         self,
@@ -3647,10 +3778,12 @@ class SettingsService:
         if not clean_key:
             raise ValueError("Ключ иконки не указан.")
         image_blob, image_mime, image_hash = self._read_operblock_icon_image(image_path)
+        asset_file = self._persist_icon_asset(clean_key, image_blob, image_mime, image_hash)
         value = {
             "source": "user_upload",
             "source_file": os.path.basename(str(image_path or "")),
             "default_file": str(default_file or ""),
+            "asset_file": asset_file,
         }
         with self.db.transaction("settings_operblock_icon_save") as cursor:
             before = self._select_by_key(cursor, "operblock_icons", "icon_key", clean_key)
@@ -3685,7 +3818,7 @@ class SettingsService:
                     str(name or clean_key),
                     str(default_file or ""),
                     _stable_json(value),
-                    image_blob,
+                    None,
                     image_mime,
                     image_hash,
                     int(sort_order or 0),
