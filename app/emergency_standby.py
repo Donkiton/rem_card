@@ -30,10 +30,13 @@ from rem_card.app.emergency_compatibility import emergency_metadata_compatibilit
 from rem_card.app.emergency_store import EmergencyLocalStore
 from rem_card.app.emergency_validation import (
     SnapshotValidationResult,
+    probe_medical_db_snapshot,
+    probe_settings_db_snapshot,
     validate_medical_db_snapshot,
     validate_settings_db_snapshot,
 )
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.network_maintenance import find_active_network_sessions, network_maintenance_lock
 from rem_card.app.sqlite_uri import build_sqlite_file_uri
 from rem_card.app.sqlite_shared import backup_connection, configure_connection
 from rem_card.data.settings import settings_schema
@@ -100,6 +103,7 @@ class EmergencyStandbyManager:
         settings_required: bool = True,
         is_safe_to_refresh: Callable[[], bool] | None = None,
         store: EmergencyLocalStore | None = None,
+        session_locks_dir: str | None = None,
     ):
         network_context = build_network_runtime_context()
         self.root = resolve_emergency_root(root)
@@ -112,9 +116,21 @@ class EmergencyStandbyManager:
         self.settings_required = bool(settings_required)
         self.is_safe_to_refresh = is_safe_to_refresh or (lambda: True)
         self.store = store or EmergencyLocalStore(root=self.root, settings_required=self.settings_required)
+        explicit_source = source_medical_db_path is not None or source_settings_db_path is not None
+        self.session_locks_dir = os.path.abspath(
+            os.path.normpath(
+                session_locks_dir
+                or (
+                    os.path.join(os.path.dirname(self.source_medical_db_path), ".maintenance_locks")
+                    if explicit_source
+                    else network_context.session_locks_dir
+                )
+            )
+        )
+        self._maintenance_lock = network_maintenance_lock(self.session_locks_dir)
 
-    def check_network_sources(self) -> EmergencyStandbyRefreshResult:
-        medical_validation = validate_medical_db_snapshot(self.source_medical_db_path)
+    def probe_network_sources(self) -> EmergencyStandbyRefreshResult:
+        medical_validation = probe_medical_db_snapshot(self.source_medical_db_path)
         if not medical_validation.ok:
             return EmergencyStandbyRefreshResult(
                 ok=False,
@@ -125,7 +141,7 @@ class EmergencyStandbyManager:
 
         settings_validation = None
         if self.settings_required:
-            settings_validation = validate_settings_db_snapshot(self.source_settings_db_path)
+            settings_validation = probe_settings_db_snapshot(self.source_settings_db_path)
             if not settings_validation.ok:
                 return EmergencyStandbyRefreshResult(
                     ok=False,
@@ -149,7 +165,7 @@ class EmergencyStandbyManager:
             return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason="refresh is not safe now")
         self.cleanup_expired_standby()
 
-        source_status = self.check_network_sources()
+        source_status = self.probe_network_sources()
         if not source_status.ok:
             return source_status
 
@@ -174,7 +190,59 @@ class EmergencyStandbyManager:
                 settings_validation=source_status.settings_validation,
             )
 
-        return self._refresh_pair(source_status)
+        active_sessions = find_active_network_sessions(self.session_locks_dir)
+        if active_sessions:
+            roles = ",".join(sorted({item.role for item in active_sessions}))
+            return EmergencyStandbyRefreshResult(
+                ok=False,
+                status="deferred",
+                reason=f"active_network_sessions:{roles}",
+            )
+
+        lock_source = "emergency_standby_refresh"
+        lock_owner = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
+        if not self._maintenance_lock.acquire(lock_owner, lock_source):
+            return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason="network_maintenance_busy")
+        try:
+            active_sessions = find_active_network_sessions(self.session_locks_dir)
+            if active_sessions:
+                roles = ",".join(sorted({item.role for item in active_sessions}))
+                return EmergencyStandbyRefreshResult(
+                    ok=False,
+                    status="deferred",
+                    reason=f"active_network_sessions:{roles}",
+                )
+            # Состояние могло измениться между первым probe и получением общей lease.
+            source_status = self.probe_network_sources()
+            if not source_status.ok:
+                return source_status
+            remote_last_change_id = int(
+                source_status.medical_validation.last_change_id if source_status.medical_validation else 0
+            )
+            settings_fingerprint = (
+                None
+                if source_status.settings_validation is None
+                else dict(source_status.settings_validation.fingerprint)
+            )
+            if not self.should_refresh_standby(
+                remote_last_change_id,
+                settings_fingerprint=settings_fingerprint,
+                source_schema_version=(
+                    source_status.medical_validation.schema_version if source_status.medical_validation else None
+                ),
+                forced=forced,
+            ):
+                return EmergencyStandbyRefreshResult(
+                    ok=True,
+                    status="current",
+                    reason="standby is already current",
+                    metadata=self.store.get_latest_valid_standby(),
+                    medical_validation=source_status.medical_validation,
+                    settings_validation=source_status.settings_validation,
+                )
+            return self._refresh_pair(source_status)
+        finally:
+            self._maintenance_lock.release()
 
     def refresh_medical_standby(self) -> EmergencyStandbyRefreshResult:
         return self.create_or_refresh_standby(forced=True)
@@ -418,9 +486,9 @@ class EmergencyStandbyManager:
             os.replace(staging_dir, final_generation_dir)
             generation_moved = True
 
-            final_medical_validation = validate_medical_db_snapshot(final_medical_path)
-            final_settings_validation = validate_settings_db_snapshot(final_settings_path) if final_settings_path else None
-            final_error = self._final_generation_error(metadata, final_medical_validation, final_settings_validation)
+            final_medical_validation = medical_validation
+            final_settings_validation = settings_validation
+            final_error = self._moved_generation_error(metadata, final_medical_validation, final_settings_validation)
             if final_error:
                 if self.settings_required:
                     record_metric(
@@ -520,6 +588,23 @@ class EmergencyStandbyManager:
         if settings_validation and not settings_validation.ok:
             return f"final settings standby validation failed: {settings_validation.reason}"
         return self._standby_hash_error(metadata, medical_validation, settings_validation)
+
+    def _moved_generation_error(
+        self,
+        metadata: EmergencyStandbyMetadata,
+        medical_validation: SnapshotValidationResult,
+        settings_validation: SnapshotValidationResult | None,
+    ) -> str:
+        if not os.path.isfile(metadata.medical_db_path):
+            return "final medical standby is missing"
+        if os.path.getsize(metadata.medical_db_path) != int(medical_validation.file_size or 0):
+            return "final medical standby size mismatch"
+        if metadata.settings_db_path:
+            if settings_validation is None or not os.path.isfile(metadata.settings_db_path):
+                return "final settings standby is missing"
+            if os.path.getsize(metadata.settings_db_path) != int(settings_validation.file_size or 0):
+                return "final settings standby size mismatch"
+        return self._final_generation_error(metadata, medical_validation, settings_validation)
 
     def _build_success_metadata(
         self,

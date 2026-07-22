@@ -27,7 +27,7 @@ from rem_card.ui.shared.orders_balance_adapter import (
 ADD_PATIENT_LOCK_POLL_INTERVAL_MS = 1500
 ADD_PATIENT_LOCK_KEY = "add_patient_button"
 PATIENT_BED_MANAGEMENT_MODE = "patient_bed_management"
-CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "0") == "1"
+CARD_UI_PREWARM_ENABLED = os.environ.get("REMCARD_CARD_UI_PREWARM", "1") == "1"
 CARD_UI_PREWARM_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_DELAY_MS", "900")))
 CARD_UI_PREWARM_STAGGER_MS = max(0, int(os.environ.get("REMCARD_CARD_PREWARM_STAGGER_MS", "120")))
 CARD_OPEN_HYDRATE_DELAY_MS = max(0, int(os.environ.get("REMCARD_CARD_OPEN_HYDRATE_DELAY_MS", "250")))
@@ -2555,9 +2555,9 @@ class DoctorRemCardWidget(QWidget):
         self._refresh_add_patient_button_lock_state()
 
     def _schedule_card_ui_prewarm(self):
-        if not self._full_layout_created:
-            return
         if self._card_ui_prewarm_started or self._card_ui_prewarm_done:
+            return
+        if not self._full_layout_created and not self._ensure_full_layout(reason="idle_prewarm"):
             return
         self._card_ui_prewarm_started = True
         QTimer.singleShot(0, self._run_card_ui_prewarm)

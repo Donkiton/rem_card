@@ -13,7 +13,7 @@ PACKAGE_PARENT = PROJECT_DIR.parent
 if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
-from rem_card.app.settings_db_paths import get_settings_backgrounds_dir  # noqa: E402
+from rem_card.app.settings_db_paths import get_settings_backgrounds_dir, get_settings_icon_assets_dir  # noqa: E402
 from rem_card.data.settings.settings_db import SettingsDatabase  # noqa: E402
 from rem_card.data.settings.settings_release import (  # noqa: E402
     BLOB_BASE64_MARKER,
@@ -122,14 +122,17 @@ class SettingsReleaseSnapshotTest(unittest.TestCase):
                     "SELECT image_blob, image_hash FROM ui_backgrounds WHERE background_key = 'release_bg'"
                 ).fetchone()
                 icon_row = conn.execute(
-                    "SELECT image_blob, image_hash FROM operblock_icons WHERE icon_key = 'custom:release'"
+                    "SELECT value_json, image_blob, image_hash FROM operblock_icons WHERE icon_key = 'custom:release'"
                 ).fetchone()
             self.assertIsNotNone(background_row)
             self.assertIsNone(background_row["image_blob"])
             self.assertEqual(background_row["image_hash"], background_hash)
             self.assertIsNotNone(icon_row)
-            self.assertEqual(icon_row["image_blob"], icon_blob)
+            self.assertIsNone(icon_row["image_blob"])
             self.assertEqual(icon_row["image_hash"], icon_hash)
+            icon_value = json.loads(icon_row["value_json"])
+            icon_file = Path(get_settings_icon_assets_dir(str(target_baza))) / icon_value["asset_file"]
+            self.assertEqual(icon_file.read_bytes(), icon_blob)
 
             snapshot_path.write_text("{ broken json", encoding="utf-8")
             second_report = apply_settings_release_snapshot(

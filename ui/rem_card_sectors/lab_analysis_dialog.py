@@ -96,8 +96,8 @@ def _icon_qss_url(file_name: str) -> str:
 
 
 LAB_COMBO_ARROW_ICON = _icon_qss_url("combo_arrow_down.svg")
-LAB_TIME_UP_ICON = _icon_qss_url("decor_arrow_up.svg")
-LAB_TIME_DOWN_ICON = _icon_qss_url("decor_arrow_down.svg")
+LAB_TIME_UP_ICON = _icon_qss_url("spin_arrow_up.svg")
+LAB_TIME_DOWN_ICON = _icon_qss_url("spin_arrow_down.svg")
 
 LAB_COMBO_VIEW_STYLE = """
 QAbstractItemView {
