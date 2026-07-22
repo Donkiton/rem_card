@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -71,6 +72,85 @@ def _base_file_checks(path: str) -> tuple[bool, str]:
     if os.path.getsize(path) <= 0:
         return False, "file size is zero"
     return True, "ok"
+
+
+def _cheap_file_fingerprint(path: str) -> dict[str, Any]:
+    stat_result = os.stat(path)
+    return {
+        "path": os.path.abspath(path),
+        "size_bytes": int(stat_result.st_size),
+        "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))),
+    }
+
+
+def probe_medical_db_snapshot(path: str) -> SnapshotValidationResult:
+    """Читает только идентификатор изменений и версию схемы, без полного сканирования БД."""
+    started = time.perf_counter()
+    base_ok, base_reason = _base_file_checks(path)
+    conn = None
+    probe_ok = False
+    try:
+        if not base_ok:
+            return SnapshotValidationResult(ok=False, reason=base_reason)
+        conn = _open_readonly(path)
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()
+        last_change_id = int(row[0] or 0) if row else 0
+        try:
+            row = conn.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()
+            schema_version = int(row[0] or 0) if row else 0
+        except sqlite3.DatabaseError:
+            schema_version = 0
+        stat_result = os.stat(path)
+        probe_ok = True
+        return SnapshotValidationResult(
+            ok=True,
+            reason="probe_ok",
+            schema_version=schema_version,
+            last_change_id=last_change_id,
+            file_size=int(stat_result.st_size),
+            file_mtime=float(stat_result.st_mtime),
+            fingerprint=_cheap_file_fingerprint(path),
+        )
+    except Exception as exc:
+        return SnapshotValidationResult(ok=False, reason=str(exc))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        record_metric(
+            "emergency_medical_source_probe_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            status="ok" if probe_ok else "error",
+        )
+
+
+def probe_settings_db_snapshot(path: str) -> SnapshotValidationResult:
+    """Проверяет доступность и stat файла настроек без открытия SQLite и вычисления SHA-256."""
+    started = time.perf_counter()
+    base_ok, base_reason = _base_file_checks(path)
+    probe_ok = False
+    try:
+        if not base_ok:
+            return SnapshotValidationResult(ok=False, reason=base_reason)
+        stat_result = os.stat(path)
+        probe_ok = True
+        return SnapshotValidationResult(
+            ok=True,
+            reason="probe_ok",
+            file_size=int(stat_result.st_size),
+            file_mtime=float(stat_result.st_mtime),
+            fingerprint=_cheap_file_fingerprint(path),
+        )
+    except Exception as exc:
+        return SnapshotValidationResult(ok=False, reason=str(exc))
+    finally:
+        record_metric(
+            "emergency_settings_source_probe_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            status="ok" if probe_ok else "error",
+        )
 
 
 def validate_sqlite_file_quick_check(path: str) -> tuple[bool, str]:

@@ -84,7 +84,7 @@ def test_legacy_default_folder_name_is_confined_to_dev_default_constant():
     ).splitlines()
     for relative in tracked:
         path = PROJECT_DIR / relative
-        if path.suffix.lower() not in allowed_suffixes:
+        if path.suffix.lower() not in allowed_suffixes or not path.is_file():
             continue
         for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             if legacy_name in line:

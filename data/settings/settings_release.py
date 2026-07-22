@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import shutil
@@ -12,7 +13,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 from rem_card.app.runtime_paths import get_resources_dir
-from rem_card.app.settings_db_paths import SETTINGS_BACKGROUNDS_DIR_NAME
+from rem_card.app.settings_db_paths import SETTINGS_BACKGROUNDS_DIR_NAME, SETTINGS_ICON_ASSETS_DIR_NAME
 from rem_card.data.settings.settings_db import SettingsDatabase
 from rem_card.data.settings import settings_schema
 from rem_card.data.settings.settings_schema import now_text
@@ -83,7 +84,6 @@ APP_SETTING_CATALOG_KEYS: dict[str, str] = {
     "print_config": "print_settings",
     "display_settings": "display_settings",
     "lab_orders_columns": "display_settings",
-    "decor_settings": "display_settings",
     "style_settings": "style_settings",
     "emergency_password": "emergency_password",
     "background_settings": "background_settings",
@@ -212,11 +212,14 @@ def _encode_row(
     *,
     table: ReleaseTable,
     snapshot_dir: str,
+    db: SettingsDatabase,
 ) -> dict[str, Any]:
     blob_columns = EXTERNAL_BLOB_COLUMNS.get(table.name) or set()
     encoded: dict[str, Any] = {}
     for column in columns:
         value = row[column]
+        if column == "image_blob" and not value:
+            value = _read_external_image_for_release(row, table_name=table.name, db=db)
         if isinstance(value, bytes) and value and column in blob_columns:
             encoded[column] = _write_blob_file(
                 snapshot_dir=snapshot_dir,
@@ -228,6 +231,43 @@ def _encode_row(
         else:
             encoded[column] = _encode_value(value)
     return encoded
+
+
+def _row_value_payload(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    try:
+        raw = row["value_json"]
+    except (KeyError, IndexError):
+        raw = "{}"
+    try:
+        value = json.loads(str(raw or "{}"))
+    except Exception:
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def _read_external_image_for_release(
+    row: sqlite3.Row | dict[str, Any],
+    *,
+    table_name: str,
+    db: SettingsDatabase,
+) -> bytes | None:
+    value = _row_value_payload(row)
+    if table_name == "ui_backgrounds":
+        directory = SETTINGS_BACKGROUNDS_DIR_NAME
+        file_name = _safe_file_name(value.get("file"))
+    elif table_name == "operblock_icons":
+        directory = SETTINGS_ICON_ASSETS_DIR_NAME
+        file_name = _safe_file_name(value.get("asset_file"))
+    else:
+        return None
+    if not file_name:
+        return None
+    path = os.path.join(db.settings_dir, directory, file_name)
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
 
 
 def _decode_row(
@@ -352,7 +392,7 @@ def export_settings_release_snapshot(
             columns = _export_columns(conn, table.name)
             sql = f"SELECT {', '.join(columns)} FROM {table.name} ORDER BY {table.order_by}"
             rows = [
-                _encode_row(row, columns, table=table, snapshot_dir=snapshot_dir)
+                _encode_row(row, columns, table=table, snapshot_dir=snapshot_dir, db=db)
                 for row in conn.execute(sql).fetchall()
             ]
             if table.name == "app_settings":
@@ -578,6 +618,23 @@ def _background_file_name_from_row(row: dict[str, Any]) -> str:
     return _safe_file_name(value.get("file"))
 
 
+def _icon_asset_file_name_from_row(row: dict[str, Any]) -> str:
+    value = _row_value_payload(row)
+    return _safe_file_name(value.get("asset_file"))
+
+
+def _icon_asset_name_for_blob(row: dict[str, Any], blob: bytes) -> str:
+    existing = _icon_asset_file_name_from_row(row)
+    if existing:
+        return existing
+    icon_key = _safe_media_name_part(row.get("icon_key"))
+    image_hash = str(row.get("image_hash") or hashlib.sha256(blob).hexdigest())
+    extension = mimetypes.guess_extension(str(row.get("image_mime") or "")) or ".bin"
+    if extension == ".jpe":
+        extension = ".jpg"
+    return f"{icon_key}_{image_hash[:16]}{extension.lower()}"
+
+
 def _copy_blob_atomic(blob: bytes, target_path: str) -> None:
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     tmp_path = f"{target_path}.{os.getpid()}.tmp"
@@ -611,11 +668,18 @@ def _prepare_row_media_for_apply(
         file_name = _background_file_name_from_row(prepared)
         if file_name:
             target_path = os.path.join(db.settings_dir, SETTINGS_BACKGROUNDS_DIR_NAME, file_name)
-            try:
-                _copy_blob_atomic(bytes(prepared["image_blob"]), target_path)
-                prepared["image_blob"] = None
-            except Exception:
-                pass
+            _copy_blob_atomic(bytes(prepared["image_blob"]), target_path)
+            prepared["image_blob"] = None
+    elif table_name == "operblock_icons" and isinstance(prepared.get("image_blob"), (bytes, bytearray)):
+        blob = bytes(prepared["image_blob"])
+        if str(prepared.get("source") or "") != "seed":
+            file_name = _icon_asset_name_for_blob(prepared, blob)
+            target_path = os.path.join(db.settings_dir, SETTINGS_ICON_ASSETS_DIR_NAME, file_name)
+            _copy_blob_atomic(blob, target_path)
+            value = _row_value_payload(prepared)
+            value["asset_file"] = file_name
+            prepared["value_json"] = _stable_json(value)
+        prepared["image_blob"] = None
     return prepared
 
 

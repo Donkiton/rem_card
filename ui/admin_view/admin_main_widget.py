@@ -45,7 +45,6 @@ class AdminMainWidget(QWidget):
         self.btn_back_to_roles = None
         self._settings_import_worker = None
         self._settings_import_loading_key = None
-        self.decor_settings_dialog = None
 
         self.setup_ui()
 
@@ -79,7 +78,6 @@ class AdminMainWidget(QWidget):
         self.btn_style = QPushButton("Цветовая схема")
         self.btn_display_settings = QPushButton("Отображение")
         self.btn_background_settings = QPushButton("Изменение фона")
-        self.btn_decor_settings = QPushButton("Настройка декора")
         self.btn_remcard_icon_settings = QPushButton("Настройка иконок рем карты")
         self.btn_operblock_icon_settings = QPushButton("Настройка иконок оперблока")
         self.btn_operblock_medications = QPushButton("Настройки препаратов")
@@ -120,7 +118,6 @@ class AdminMainWidget(QWidget):
         interface_buttons = [
             self.btn_display_settings,
             self.btn_background_settings,
-            self.btn_decor_settings,
             self.btn_remcard_icon_settings,
         ]
         report_buttons = [
@@ -211,7 +208,6 @@ class AdminMainWidget(QWidget):
         self.btn_print.clicked.connect(self.open_print)
         self.btn_display_settings.clicked.connect(self.open_display_settings)
         self.btn_background_settings.clicked.connect(self.open_background_settings)
-        self.btn_decor_settings.clicked.connect(self.open_decor_settings)
         self.btn_remcard_icon_settings.clicked.connect(self.open_remcard_icon_settings)
         self.btn_operblock_icon_settings.clicked.connect(self.open_operblock_icon_settings)
         self.btn_operblock_medications.clicked.connect(self.open_operblock_medications_settings)
@@ -450,16 +446,6 @@ class AdminMainWidget(QWidget):
         finally:
             self._hide_settings_loading(loading_key)
         dialog.exec()
-
-    def open_decor_settings(self):
-        loading_key = self._show_settings_loading("Загрузка настроек декора...", key="decor")
-        try:
-            from .decor_settings_dialog import DecorSettingsDialog
-
-            self.decor_settings_dialog = DecorSettingsDialog(parent=self)
-        finally:
-            self._hide_settings_loading(loading_key)
-        self.decor_settings_dialog.exec()
 
     def open_remcard_icon_settings(self):
         loading_key = self._show_settings_loading("Загрузка настроек иконок рем карты...", key="remcard-icons")
@@ -890,12 +876,6 @@ class AdminMainWidget(QWidget):
             from rem_card.ui.shared.remcard_icon_settings import invalidate_remcard_icon_cache
 
             invalidate_remcard_icon_cache()
-        except Exception:
-            pass
-        try:
-            from rem_card.ui.shared.decor_settings import ensure_decor_asset_dirs
-
-            ensure_decor_asset_dirs()
         except Exception:
             pass
         try:

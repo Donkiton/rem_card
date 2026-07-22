@@ -35,6 +35,7 @@ from rem_card.app.logger import logger
 from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
+from rem_card.app.network_maintenance import find_active_network_sessions, network_maintenance_lock
 from rem_card.app.paths import (
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
@@ -116,8 +117,15 @@ CENTRAL_IO_LOCK_WAIT_WARN_MS = max(
     0.0,
     float(os.environ.get("REMCARD_CENTRAL_IO_LOCK_WAIT_WARN_MS", "250")),
 )
-INTEGRITY_CHECK_INTERVAL_SEC = 30 * 60
-INTEGRITY_START_DELAY_SEC = 45
+BACKGROUND_INTEGRITY_ENABLED = os.environ.get("REMCARD_BACKGROUND_INTEGRITY_ENABLED", "0") == "1"
+INTEGRITY_CHECK_INTERVAL_SEC = max(
+    60 * 60,
+    int(float(os.environ.get("REMCARD_INTEGRITY_CHECK_INTERVAL_SEC", str(6 * 60 * 60)))),
+)
+INTEGRITY_START_DELAY_SEC = max(
+    60,
+    int(float(os.environ.get("REMCARD_INTEGRITY_START_DELAY_SEC", "300"))),
+)
 INTEGRITY_DEFER_RETRY_SEC = max(
     5.0,
     float(os.environ.get("REMCARD_INTEGRITY_DEFER_RETRY_SEC", "60")),
@@ -152,7 +160,7 @@ CONNECTION_PROFILE_LOCK_RETRY_MAX_SEC = max(
 )
 STARTUP_QUICKCHECK_TTL_SEC = max(
     0.0,
-    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_TTL_SEC", "120")),
+    float(os.environ.get("REMCARD_STARTUP_QUICKCHECK_TTL_SEC", str(6 * 60 * 60))),
 )
 STARTUP_GUARD_QUICKCHECK_ENV = "REMCARD_STARTUP_GUARD_QUICKCHECK_OK"
 STARTUP_GUARD_QUICKCHECK_MAX_AGE_SEC = 10 * 60
@@ -1255,9 +1263,31 @@ class DatabaseManager:
             )
             return
 
+        maintenance_lock = None
+        runtime_context = getattr(self, "runtime_context", None)
+        is_network_runtime = getattr(runtime_context, "mode", "") == "network"
+        if is_network_runtime:
+            session_locks_dir = str(getattr(runtime_context, "session_locks_dir", "") or "")
+            active_sessions = find_active_network_sessions(session_locks_dir)
+            if active_sessions:
+                self._record_startup_metric("quick_check_ms", 0.0)
+                logger.info(
+                    "Skipping startup quick_check while other network clients are active: %s",
+                    ",".join(sorted({item.role for item in active_sessions})),
+                )
+                return
+            maintenance_lock = network_maintenance_lock(session_locks_dir)
+            if not maintenance_lock.acquire(self._node_id, "startup_quickcheck_snapshot"):
+                self._record_startup_metric("quick_check_ms", 0.0)
+                logger.info("Skipping startup quick_check because network maintenance lease is busy")
+                return
+
         try:
             quick_started = time.perf_counter()
-            ok, result = run_quick_check(self._remcard_conn)
+            if is_network_runtime:
+                ok, result = self._run_local_snapshot_integrity_check("quick")
+            else:
+                ok, result = run_quick_check(self._remcard_conn)
             self._record_startup_metric("quick_check_ms", (time.perf_counter() - quick_started) * 1000.0)
         except Exception as exc:
             self._record_startup_metric("quick_check_ms", (time.perf_counter() - quick_started) * 1000.0 if "quick_started" in locals() else 0.0)
@@ -1267,6 +1297,9 @@ class DatabaseManager:
             if not is_confirmed_db_corruption_reason(result):
                 raise
             ok = False
+        finally:
+            if maintenance_lock is not None:
+                maintenance_lock.release()
 
         if ok:
             logger.info("SQLite quick_check passed for %s", self.db_path)
@@ -1294,9 +1327,50 @@ class DatabaseManager:
 
         self._init_connections()
 
-        ok, result = run_integrity_check(self._remcard_conn)
+        if getattr(getattr(self, "runtime_context", None), "mode", "") == "network":
+            ok, result = self._run_local_snapshot_integrity_check("integrity")
+        else:
+            ok, result = run_integrity_check(self._remcard_conn)
         if not ok:
             raise RuntimeError(f"Database restore failed integrity_check: {result}")
+
+    def _run_local_snapshot_integrity_check(self, check: str) -> tuple[bool, str]:
+        os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
+        snapshot_path = os.path.join(
+            LOCAL_CACHE_DIR,
+            f"startup_check_{os.getpid()}_{threading.get_ident()}_{int(time.time() * 1000)}.db",
+        )
+        local_conn = None
+        try:
+            backup_connection(
+                self._remcard_conn,
+                snapshot_path,
+                validate=False,
+                source=f"startup_{check}_local_snapshot",
+            )
+            local_conn = sqlite3.connect(
+                build_sqlite_file_uri(snapshot_path, mode="ro"),
+                uri=True,
+                check_same_thread=True,
+                isolation_level=None,
+                timeout=5.0,
+            )
+            configure_connection(local_conn, readonly=True, profile="local_replica")
+            if str(check).strip().lower() == "integrity":
+                return run_integrity_check(local_conn)
+            return run_quick_check(local_conn)
+        finally:
+            if local_conn is not None:
+                try:
+                    local_conn.close()
+                except Exception:
+                    pass
+            try:
+                os.remove(snapshot_path)
+            except FileNotFoundError:
+                pass
+            except Exception as exc:
+                logger.warning("Failed to remove startup integrity snapshot %s: %s", snapshot_path, exc)
 
     def _close_connections_for_restore(self):
         self._close_central_read_connection()
@@ -1333,6 +1407,12 @@ class DatabaseManager:
             logger.warning("Failed to initialize %s in meta: %s", DB_CYCLE_META_KEY, exc)
 
     def _start_integrity_monitor(self):
+        if not BACKGROUND_INTEGRITY_ENABLED:
+            logger.info(
+                "Background integrity monitor is disabled; set REMCARD_BACKGROUND_INTEGRITY_ENABLED=1 "
+                "only on a designated maintenance host."
+            )
+            return
         if self._integrity_thread and self._integrity_thread.is_alive():
             return
         self._integrity_stop_evt.clear()
@@ -1910,8 +1990,7 @@ class DatabaseManager:
         state.central_read_scope_depth = 1
         try:
             if not self._in_current_thread_remcard_transaction() and not self._should_read_from_local():
-                with self._central_io_lock_scope("remcard_read_scope_open", source=str(source or "snapshot")):
-                    conn = self._open_readonly_central_connection()
+                conn = self._open_readonly_central_connection()
                 state.central_read_scope_conn = conn
             yield self
         finally:
@@ -1958,11 +2037,7 @@ class DatabaseManager:
         owns_transaction = False
         try:
             if owns_connection:
-                with self._central_io_lock_scope(
-                    "remcard_read_snapshot_open",
-                    source=str(source or "snapshot"),
-                ):
-                    conn = self._open_readonly_central_connection()
+                conn = self._open_readonly_central_connection()
 
             state.central_read_scope_depth = previous_depth + 1
             state.central_read_scope_conn = conn
@@ -2003,8 +2078,7 @@ class DatabaseManager:
         owners such as ``DataUpdateMonitor`` create, use and close the connection
         in the same thread, avoiding cross-thread sqlite close hazards on Windows.
         """
-        with self._central_io_lock_scope("remcard_persistent_read_open", source=str(source or "persistent_reader")):
-            return self._open_readonly_central_connection()
+        return self._open_readonly_central_connection()
 
     @contextmanager
     def existing_central_read_scope(
@@ -2129,22 +2203,22 @@ class DatabaseManager:
         # позже закрывается/переиспользуется уже из другого потока, что на Windows
         # может завершиться native access violation без Python-исключения.
         try:
-            with self._central_io_lock_scope("remcard_read_all", source="fetch_all"):
-                if use_write_connection or self._in_current_thread_remcard_transaction():
+            if use_write_connection or self._in_current_thread_remcard_transaction():
+                with self._central_io_lock_scope("remcard_read_all_write_conn", source="fetch_all"):
                     conn = self._get_central_write_connection_for_read("remcard_read_all")
                     with self.write_controller.connection_guard(conn):
                         return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
-                scoped_conn = self._scoped_central_read_connection()
-                if scoped_conn is not None:
-                    return self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check)
-                conn = self._open_readonly_central_connection()
+            scoped_conn = self._scoped_central_read_connection()
+            if scoped_conn is not None:
+                return self._fetch_all_with_cancel(scoped_conn, query, params, cancel_check=cancel_check)
+            conn = self._open_readonly_central_connection()
+            try:
+                return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
+            finally:
                 try:
-                    return self._fetch_all_with_cancel(conn, query, params, cancel_check=cancel_check)
-                finally:
-                    try:
-                        conn.close()
-                    except Exception as close_exc:
-                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
+                    conn.close()
+                except Exception as close_exc:
+                    logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_all", logger=logger) from exc
@@ -2152,28 +2226,28 @@ class DatabaseManager:
 
     def _fetch_one_central(self, query, params=(), *, use_write_connection: bool = False):
         try:
-            with self._central_io_lock_scope("remcard_read_one", source="fetch_one"):
-                if use_write_connection or self._in_current_thread_remcard_transaction():
+            if use_write_connection or self._in_current_thread_remcard_transaction():
+                with self._central_io_lock_scope("remcard_read_one_write_conn", source="fetch_one"):
                     conn = self._get_central_write_connection_for_read("remcard_read_one")
                     with self.write_controller.connection_guard(conn):
                         cursor = conn.cursor()
                         cursor.execute(query, params)
                         return cursor.fetchone()
-                scoped_conn = self._scoped_central_read_connection()
-                if scoped_conn is not None:
-                    cursor = scoped_conn.cursor()
-                    cursor.execute(query, params)
-                    return cursor.fetchone()
-                conn = self._open_readonly_central_connection()
+            scoped_conn = self._scoped_central_read_connection()
+            if scoped_conn is not None:
+                cursor = scoped_conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchone()
+            conn = self._open_readonly_central_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchone()
+            finally:
                 try:
-                    cursor = conn.cursor()
-                    cursor.execute(query, params)
-                    return cursor.fetchone()
-                finally:
-                    try:
-                        conn.close()
-                    except Exception as close_exc:
-                        logger.debug("Failed to close short-lived central read connection: %s", close_exc)
+                    conn.close()
+                except Exception as close_exc:
+                    logger.debug("Failed to close short-lived central read connection: %s", close_exc)
         except Exception as exc:
             if is_database_unavailable_error(exc):
                 raise notify_database_unavailable(exc, context="remcard_read_one", logger=logger) from exc
@@ -2262,8 +2336,42 @@ class DatabaseManager:
             return False
 
         conn = None
+        snapshot_conn = None
+        snapshot_path = ""
+        maintenance_lock = None
         try:
-            with maintenance_task("integrity_check", source="integrity_monitor", db_path=self.db_path):
+            runtime_context = getattr(self, "runtime_context", None)
+            if getattr(runtime_context, "mode", "") == "network":
+                session_locks_dir = str(getattr(runtime_context, "session_locks_dir", "") or "")
+                active_sessions = find_active_network_sessions(session_locks_dir)
+                if active_sessions:
+                    roles = ",".join(sorted({item.role for item in active_sessions}))
+                    self._record_maintenance_deferred(
+                        "integrity_check",
+                        "active_network_sessions",
+                        source="integrity_monitor",
+                        retry_sec=INTEGRITY_DEFER_RETRY_SEC,
+                        roles=roles,
+                    )
+                    return False
+                maintenance_lock = network_maintenance_lock(session_locks_dir)
+                if not maintenance_lock.acquire(self._node_id, "integrity_snapshot"):
+                    self._record_maintenance_deferred(
+                        "integrity_check",
+                        "network_maintenance_busy",
+                        source="integrity_monitor",
+                        retry_sec=INTEGRITY_DEFER_RETRY_SEC,
+                    )
+                    return False
+                if find_active_network_sessions(session_locks_dir):
+                    return False
+
+            os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
+            snapshot_path = os.path.join(
+                LOCAL_CACHE_DIR,
+                f"integrity_snapshot_{os.getpid()}_{threading.get_ident()}_{int(time.time() * 1000)}.db",
+            )
+            with maintenance_task("integrity_snapshot", source="integrity_monitor", db_path=self.db_path):
                 conn = sqlite3.connect(
                     self._readonly_db_uri(),
                     uri=True,
@@ -2272,15 +2380,31 @@ class DatabaseManager:
                     timeout=5.0,
                 )
                 configure_connection(conn, readonly=True, profile="network")
-                try:
-                    ok, result = run_integrity_check(conn)
-                finally:
-                    conn.close()
-                    conn = None
+                backup_connection(
+                    conn,
+                    snapshot_path,
+                    validate=False,
+                    source="integrity_local_snapshot",
+                )
+                conn.close()
+                conn = None
+
+            with maintenance_task("integrity_check", source="integrity_monitor_local", db_path=snapshot_path):
+                snapshot_conn = sqlite3.connect(
+                    build_sqlite_file_uri(snapshot_path, mode="ro"),
+                    uri=True,
+                    check_same_thread=True,
+                    isolation_level=None,
+                    timeout=5.0,
+                )
+                configure_connection(snapshot_conn, readonly=True, profile="local_replica")
+                ok, result = run_integrity_check(snapshot_conn)
+                snapshot_conn.close()
+                snapshot_conn = None
             if ok:
                 self._clear_maintenance_deferred("integrity_check")
                 self._mark_heavy_maintenance_io("integrity_check")
-                logger.info("Background integrity_check passed for %s", self.db_path)
+                logger.info("Background integrity_check passed on local snapshot of %s", self.db_path)
                 return True
 
             self._clear_maintenance_deferred("integrity_check")
@@ -2302,6 +2426,20 @@ class DatabaseManager:
                     conn.close()
             except Exception:
                 pass
+            try:
+                if snapshot_conn:
+                    snapshot_conn.close()
+            except Exception:
+                pass
+            if snapshot_path:
+                try:
+                    os.remove(snapshot_path)
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    logger.warning("Failed to remove local integrity snapshot %s: %s", snapshot_path, exc)
+            if maintenance_lock is not None:
+                maintenance_lock.release()
 
     def _create_named_backup(self, prefix: str, source: str):
         if not self._remcard_conn:
