@@ -3,11 +3,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
 import os
+import re
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
+from rem_card.app.settings_db_paths import SETTINGS_BACKGROUNDS_DIR_NAME, SETTINGS_ICON_ASSETS_DIR_NAME
 from rem_card.data.settings.settings_db import SettingsDatabase
 from rem_card.data.settings import settings_schema
 from rem_card.data.settings.settings_release import (
@@ -84,7 +88,6 @@ APP_SETTING_LABELS: dict[str, str] = {
     "print_config": "Параметры печати",
     "display_settings": "Отображение",
     "lab_orders_columns": "Колонки анализов",
-    "decor_settings": "Настройка декора",
     "style_settings": "Цветовая схема",
     "emergency_password": "Аварийный пароль",
     "background_settings": "Настройки фона",
@@ -568,6 +571,97 @@ def _upsert_row(cursor: sqlite3.Cursor, table: ReleaseTable, row: dict[str, Any]
     )
 
 
+def _safe_file_name(value: Any) -> str:
+    return os.path.basename(str(value or "").strip().replace("\\", os.sep).replace("/", os.sep))
+
+
+def _row_value_payload(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        value = json.loads(str(row.get("value_json") or "{}"))
+    except Exception:
+        value = {}
+    return value if isinstance(value, dict) else {}
+
+
+def _copy_file_atomic(source_path: str, target_path: str) -> None:
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    tmp_path = f"{target_path}.{os.getpid()}.tmp"
+    try:
+        shutil.copyfile(source_path, tmp_path)
+        os.replace(tmp_path, target_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _write_blob_atomic(blob: bytes, target_path: str) -> None:
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    tmp_path = f"{target_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(blob)
+        os.replace(tmp_path, target_path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def _prepare_import_media(
+    row: dict[str, Any],
+    *,
+    table_name: str,
+    source_db: SettingsDatabase,
+    target_db: SettingsDatabase,
+) -> dict[str, Any]:
+    prepared = dict(row)
+    value = _row_value_payload(prepared)
+    source_path = ""
+    target_path = ""
+    blob = prepared.get("image_blob")
+
+    if table_name == "ui_backgrounds":
+        file_name = _safe_file_name(value.get("file"))
+        if not file_name:
+            return prepared
+        source_path = os.path.join(source_db.settings_dir, SETTINGS_BACKGROUNDS_DIR_NAME, file_name)
+        target_path = os.path.join(target_db.settings_dir, SETTINGS_BACKGROUNDS_DIR_NAME, file_name)
+    elif table_name == "operblock_icons":
+        if str(prepared.get("source") or "") == "seed":
+            prepared["image_blob"] = None
+            return prepared
+        file_name = _safe_file_name(value.get("asset_file"))
+        if not file_name and isinstance(blob, (bytes, bytearray)):
+            image_hash = str(prepared.get("image_hash") or hashlib.sha256(bytes(blob)).hexdigest())
+            extension = mimetypes.guess_extension(str(prepared.get("image_mime") or "")) or ".bin"
+            if extension == ".jpe":
+                extension = ".jpg"
+            safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(prepared.get("icon_key") or "icon")).strip("_")
+            file_name = f"{safe_key or 'icon'}_{image_hash[:16]}{extension.lower()}"
+            value["asset_file"] = file_name
+            prepared["value_json"] = _stable_json(value)
+        if not file_name:
+            return prepared
+        source_path = os.path.join(source_db.settings_dir, SETTINGS_ICON_ASSETS_DIR_NAME, file_name)
+        target_path = os.path.join(target_db.settings_dir, SETTINGS_ICON_ASSETS_DIR_NAME, file_name)
+    else:
+        return prepared
+
+    if isinstance(blob, (bytes, bytearray)):
+        _write_blob_atomic(bytes(blob), target_path)
+    elif os.path.isfile(source_path):
+        _copy_file_atomic(source_path, target_path)
+    else:
+        raise FileNotFoundError(f"Файл изображения настроек не найден: {source_path}")
+    prepared["image_blob"] = None
+    return prepared
+
+
 def _delete_row(cursor: sqlite3.Cursor, table: ReleaseTable, key_values: tuple[Any, ...]) -> None:
     where = " AND ".join(f"{column} = ?" for column in table.key_columns)
     cursor.execute(f"DELETE FROM {table.name} WHERE {where}", tuple(key_values))
@@ -595,13 +689,23 @@ def apply_settings_import(
     table_by_name = {table.name: table for table in RELEASE_TABLES}
     changed_catalogs: set[str] = set()
     counts = {"insert": 0, "update": 0, "delete": 0}
+    source_db = SettingsDatabase(settings_db_path=preview.source_db_path, readonly=True)
+    prepared_rows: dict[str, dict[str, Any]] = {}
+    for change in selected_changes:
+        if change.operation in {"insert", "update"} and change.after_row is not None:
+            prepared_rows[change.change_id] = _prepare_import_media(
+                dict(change.after_row),
+                table_name=change.table,
+                source_db=source_db,
+                target_db=target_db,
+            )
     with target_db.transaction("settings_dev_import_from_network") as cursor:
         for change in selected_changes:
             table = table_by_name.get(change.table)
             if table is None:
                 continue
             if change.operation in {"insert", "update"} and change.after_row is not None:
-                _upsert_row(cursor, table, dict(change.after_row))
+                _upsert_row(cursor, table, prepared_rows.get(change.change_id, dict(change.after_row)))
             elif change.operation == "delete":
                 _delete_row(cursor, table, change.key_values)
             else:

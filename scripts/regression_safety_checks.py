@@ -2776,9 +2776,8 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
         outside_row = manager.fetch_one_remcard("SELECT value FROM meta WHERE key='read_split_probe'")
         if not outside_row or int(outside_row[0]) != 1:
             return False, "outside transaction read returned wrong value"
-        # Central reads use short-lived readonly connections under the central
-        # IO gate. This keeps background reads off the write connection without
-        # keeping sqlite3.Connection objects alive after worker threads finish.
+        # Central reads use short-lived readonly connections and do not share
+        # the process-wide write/maintenance gate.
         if readonly_open_count != 1:
             return False, f"central read did not open exactly one readonly connection: {readonly_open_count}"
 
@@ -2821,8 +2820,8 @@ def _check_central_reads_split_from_write_connection(temp_root: str) -> tuple[bo
             thread.start()
             if not read_started.wait(1.0):
                 return False, "background read did not start"
-            if read_finished.wait(0.15):
-                return False, "central read did not wait for central IO gate"
+            if not read_finished.wait(1.0):
+                return False, "independent central read was blocked by central IO gate"
         finally:
             manager._central_io_lock.release()
 
@@ -13512,8 +13511,8 @@ def _check_lazy_full_card_role_contract(
         return False, f"{role}: deferred patient context must use generation guard"
 
     prewarm_source = _method_source(source, methods, "_schedule_card_ui_prewarm")
-    if "_full_layout_created" not in prewarm_source:
-        return False, f"{role}: card UI prewarm must not create full layout before patient open"
+    if "_ensure_full_layout(reason=\"idle_prewarm\")" not in prewarm_source:
+        return False, f"{role}: idle card UI prewarm must prepare the full layout before first patient open"
     selection_source = _method_source(source, methods, "_on_selection_mode_changed")
     if "ignored stale beds selection signal" not in selection_source:
         return False, f"{role}: stale beds selection signal guard missing"
@@ -16974,12 +16973,12 @@ def _check_emergency_standby_unavailable_source_does_not_trigger_recovery(temp_r
     import rem_card.app.emergency_standby as standby_module
 
     manager, _source_medical, _source_settings = _prepare_emergency_standby_manager_fixture(temp_root)
-    original_validate = standby_module.validate_medical_db_snapshot
+    original_probe = standby_module.probe_medical_db_snapshot
     try:
-        standby_module.validate_medical_db_snapshot = lambda path: standby_module.SnapshotValidationResult(False, "database is locked")
+        standby_module.probe_medical_db_snapshot = lambda path: standby_module.SnapshotValidationResult(False, "database is locked")
         result = manager.create_or_refresh_standby(forced=True)
     finally:
-        standby_module.validate_medical_db_snapshot = original_validate
+        standby_module.probe_medical_db_snapshot = original_probe
     if result.ok or result.status != "source_unavailable":
         return False, f"locked source was not controlled: {result}"
     text = (PROJECT_ROOT / "app" / "emergency_standby.py").read_text(encoding="utf-8")
@@ -17129,7 +17128,6 @@ class _FakeEmergencyStandbyManager:
         self,
         root: str,
         *,
-        should_refresh: bool = True,
         refresh_ok: bool = True,
         delay_sec: float = 0.0,
         source_ok: bool = True,
@@ -17137,13 +17135,10 @@ class _FakeEmergencyStandbyManager:
         from types import SimpleNamespace
 
         self.root = root
-        self.should_refresh = bool(should_refresh)
         self.refresh_ok = bool(refresh_ok)
         self.delay_sec = float(delay_sec or 0.0)
         self.source_ok = bool(source_ok)
         self.refresh_calls = 0
-        self.should_calls = 0
-        self.check_calls = 0
         self.metadata = SimpleNamespace(
             remote_last_change_id=10,
             medical_db_size=123,
@@ -17151,29 +17146,11 @@ class _FakeEmergencyStandbyManager:
         )
         self.store = SimpleNamespace(get_latest_valid_standby=lambda: self.metadata)
 
-    def check_network_sources(self):
-        from types import SimpleNamespace
-
-        from rem_card.app.emergency_standby import EmergencyStandbyRefreshResult
-
-        self.check_calls += 1
-        if not self.source_ok:
-            return EmergencyStandbyRefreshResult(ok=False, status="source_unavailable", reason="database is locked")
-        return EmergencyStandbyRefreshResult(
-            ok=True,
-            status="ready",
-            reason="ok",
-            medical_validation=SimpleNamespace(last_change_id=11, schema_version=17),
-            settings_validation=SimpleNamespace(fingerprint={"settings": "v1"}),
-        )
-
-    def should_refresh_standby(self, *_args, **_kwargs):
-        self.should_calls += 1
-        return self.should_refresh
-
     def create_or_refresh_standby(self, *, forced: bool = False):
         from rem_card.app.emergency_standby import EmergencyStandbyRefreshResult
 
+        if not self.source_ok:
+            return EmergencyStandbyRefreshResult(ok=False, status="source_unavailable", reason="database is locked")
         self.refresh_calls += 1
         if self.delay_sec:
             time.sleep(self.delay_sec)
@@ -23867,8 +23844,14 @@ def _check_settings_release_snapshot_preserves_all_user_settings(temp_root: str)
     if lab_payload.get("comment") != "Пользовательский комментарий":
         return False, f"release snapshot перезаписал пользовательский анализ: {lab_payload}"
 
-    icon_row = row_by_key(target_service, "operblock_icons", "icon_key", icon_key)
-    if not icon_row or icon_row["image_blob"] != Path(user_icon_path).read_bytes():
+    _icon_version, icon_records = target_service.get_operblock_icon_records(
+        [icon_key], include_blob=True, ensure_defaults=False
+    )
+    icon_row = icon_records.get(icon_key)
+    if (
+        not icon_row
+        or icon_row.get("image_blob") != Path(user_icon_path).read_bytes()
+    ):
         return False, "release snapshot перезаписал пользовательскую иконку"
     background_row_payload = json_column(row_by_key(target_service, "ui_backgrounds", "background_key", background_key), "value_json")
     if background_row_payload.get("name") != "Пользовательский фон":
@@ -26451,7 +26434,7 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         return False, "сохранение иконки препарата не обновило каталог operblock_icons"
     des_record = service.list_operblock_icons().get("drug:manual:gas:desflurane")
     if not des_record or des_record.get("image_blob") != des_source_blob:
-        return False, "иконка десфлюрана не сохранилась BLOB-ом в settings DB"
+        return False, "иконка десфлюрана не загрузилась из файлового хранилища настроек"
     if des_record.get("source") != "manual":
         return False, "пользовательская иконка десфлюрана должна быть manual-строкой"
     if des_record.get("default_file") != "gas_izm.png":
@@ -26490,14 +26473,13 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
         return False, f"release snapshot с иконками не применился: {apply_report}"
     if OPERBLOCK_ICONS_KEY not in apply_report.get("changed_catalogs", []):
         return False, "release snapshot не обновил каталог operblock_icons"
-    with target_service.db.read_connection() as conn:
-        target_row = conn.execute(
-            "SELECT default_file, image_blob FROM operblock_icons WHERE icon_key = ?",
-            ("drug:manual:gas:desflurane",),
-        ).fetchone()
-    if not target_row or target_row["image_blob"] != des_source_blob:
-        return False, "иконка десфлюрана не перенеслась в целевую settings DB"
-    if target_row["default_file"] != "gas_izm.png":
+    _target_version, target_records = target_service.get_operblock_icon_records(
+        ["drug:manual:gas:desflurane"], include_blob=True, ensure_defaults=False
+    )
+    target_row = target_records.get("drug:manual:gas:desflurane")
+    if not target_row or target_row.get("image_blob") != des_source_blob:
+        return False, "иконка десфлюрана не перенеслась в файловое хранилище целевых настроек"
+    if target_row.get("default_file") != "gas_izm.png":
         return False, "fallback десфлюрана изменился после переноса release snapshot"
 
     preserved_baza_dir = os.path.join(temp_root, "PreservedBaza")
@@ -26524,12 +26506,11 @@ def _check_operblock_icons_settings_db(temp_root: str) -> tuple[bool, str]:
     preserved_table = preserved_report.get("tables", {}).get("operblock_icons", {})
     if int(preserved_table.get("preserved") or 0) < 1:
         return False, "release snapshot не сохранил более свежую ручную иконку"
-    with preserved_service.db.read_connection() as conn:
-        preserved_row = conn.execute(
-            "SELECT source, image_blob FROM operblock_icons WHERE icon_key = ?",
-            ("drug:manual:gas:desflurane",),
-        ).fetchone()
-    if not preserved_row or preserved_row["source"] != "manual" or preserved_row["image_blob"] != preserved_blob:
+    _preserved_version, preserved_records = preserved_service.get_operblock_icon_records(
+        ["drug:manual:gas:desflurane"], include_blob=True, ensure_defaults=False
+    )
+    preserved_row = preserved_records.get("drug:manual:gas:desflurane")
+    if not preserved_row or preserved_row.get("source") != "manual" or preserved_row.get("image_blob") != preserved_blob:
         return False, "release snapshot перезаписал ручную иконку десфлюрана"
     return True, "ok"
 
@@ -26602,17 +26583,16 @@ def _check_background_files_use_shared_settings_folder(temp_root: str) -> tuple[
                 "SELECT image_blob FROM ui_backgrounds WHERE background_key = ?",
                 (background_key,),
             ).fetchone()
-        if not row or row["image_blob"] != source_bytes:
-            return False, "ui_backgrounds не сохранил BLOB загруженного изображения"
+        if not row or row["image_blob"] is not None:
+            return False, "ui_backgrounds сохранил лишний BLOB загруженного изображения"
 
-        os.remove(expected_path)
         materialized = bg.ensure_background_file_available(
             {"id": background_key, "file": file_name, "start": "01-01", "end": "12-31"}
         )
         if os.path.normcase(materialized) != os.path.normcase(expected_path):
-            return False, "восстановление из БД не пишет файл в settings/backgrounds"
+            return False, "фон не читается из settings/backgrounds"
         if not os.path.isfile(expected_path) or Path(expected_path).read_bytes() != source_bytes:
-            return False, "восстановление из БД не вернуло файл фона в общую папку"
+            return False, "файл фона в общей папке отсутствует или поврежден"
 
         snapshot_path = os.path.join(temp_root, "settings_release_snapshot.json")
         export_settings_release_snapshot(
@@ -26642,7 +26622,7 @@ def _check_background_files_use_shared_settings_folder(temp_root: str) -> tuple[
         if os.path.normcase(target_materialized) != os.path.normcase(target_path):
             return False, "release snapshot восстановил фон не в settings/backgrounds целевой базы"
         if not os.path.isfile(target_path) or Path(target_path).read_bytes() != source_bytes:
-            return False, "release snapshot не перенес BLOB фона на целевую базу"
+            return False, "release snapshot не перенес файл фона на целевую базу"
 
         legacy_dir = os.path.join(temp_root, "legacy_icon")
         os.makedirs(legacy_dir, exist_ok=True)
