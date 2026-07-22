@@ -17,6 +17,7 @@ if str(PACKAGE_PARENT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_PARENT))
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QSettings  # noqa: E402
 
 from rem_card.services.user_reports import (  # noqa: E402
     REPORT_TYPE_SUGGESTION,
@@ -117,6 +118,37 @@ class UserReportsInboxDialogTest(unittest.TestCase):
             finally:
                 dialog.close()
                 dialog.deleteLater()
+
+    def test_inbox_restores_saved_size_and_position(self):
+        settings = QSettings("MyHospital", "RemCard")
+        settings.remove("user_reports/inbox_dialog_geometry")
+        settings.remove("user_reports/inbox_dialog_splitter_state")
+        settings.remove("user_reports/inbox_dialog_table_header_state")
+        settings.sync()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = UserReportsService(reports_root=Path(tmp) / "users-reports", logs_dirs=[])
+            first_dialog = UserReportsInboxDialog(role="doctor", service=service)
+            try:
+                first_dialog.setGeometry(40, 50, 720, 600)
+                first_dialog._save_saved_geometry()
+            finally:
+                first_dialog.close()
+                first_dialog.deleteLater()
+
+            restored_dialog = UserReportsInboxDialog(role="doctor", service=service)
+            try:
+                self.assertEqual(restored_dialog.geometry().x(), 40)
+                self.assertEqual(restored_dialog.geometry().y(), 50)
+                self.assertEqual(restored_dialog.size().width(), 720)
+                self.assertEqual(restored_dialog.size().height(), 600)
+            finally:
+                restored_dialog.close()
+                restored_dialog.deleteLater()
+                settings.remove("user_reports/inbox_dialog_geometry")
+                settings.remove("user_reports/inbox_dialog_splitter_state")
+                settings.remove("user_reports/inbox_dialog_table_header_state")
+                settings.sync()
 
 
 if __name__ == "__main__":
