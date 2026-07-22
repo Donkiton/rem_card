@@ -32,6 +32,7 @@ from rem_card.services.user_reports import (
 )
 from rem_card.ui.shared.base_dialog import BaseStyledDialog
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.window_state import SavedFramelessDialogMixin
 
 
 class UserReportDialog(BaseStyledDialog):
@@ -136,8 +137,11 @@ class UserReportDialog(BaseStyledDialog):
         self.accept()
 
 
-class UserReportsInboxDialog(BaseStyledDialog):
+class UserReportsInboxDialog(SavedFramelessDialogMixin, BaseStyledDialog):
     reports_changed = Signal()
+    _GEOMETRY_SETTINGS_KEY = "user_reports/inbox_dialog_geometry"
+    _SPLITTER_SETTINGS_KEY = "user_reports/inbox_dialog_splitter_state"
+    _TABLE_HEADER_SETTINGS_KEY = "user_reports/inbox_dialog_table_header_state"
 
     def __init__(self, *, role: str | None = None, parent=None, service: UserReportsService | None = None):
         super().__init__("Репорты", parent)
@@ -147,7 +151,14 @@ class UserReportsInboxDialog(BaseStyledDialog):
         self._loading = False
         self._selected_directory = ""
         self.resize(940, 640)
+        self.setMinimumSize(700, 480)
+        self.setSizeGripEnabled(True)
+        self._init_saved_frameless_dialog(
+            self._GEOMETRY_SETTINGS_KEY,
+            drag_area_height=32,
+        )
         self._setup_ui()
+        self._restore_saved_geometry()
         self._load_reports()
 
     def _setup_ui(self):
@@ -176,8 +187,8 @@ class UserReportsInboxDialog(BaseStyledDialog):
         toolbar.addWidget(refresh_btn)
         layout.addLayout(toolbar)
 
-        splitter = QSplitter(Qt.Vertical, self)
-        self.table = QTableWidget(0, 5, splitter)
+        self.splitter = QSplitter(Qt.Vertical, self)
+        self.table = QTableWidget(0, 5, self.splitter)
         self.table.setHorizontalHeaderLabels(["Дата", "Тип", "Статус", "Пользователь", "Текст"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -189,9 +200,9 @@ class UserReportsInboxDialog(BaseStyledDialog):
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        splitter.addWidget(self.table)
+        self.splitter.addWidget(self.table)
 
-        detail_widget = QWidget(splitter)
+        detail_widget = QWidget(self.splitter)
         detail_layout = QVBoxLayout(detail_widget)
         detail_layout.setContentsMargins(0, 0, 0, 0)
         detail_layout.setSpacing(8)
@@ -219,10 +230,10 @@ class UserReportsInboxDialog(BaseStyledDialog):
         action_row.addWidget(self.in_progress_btn)
         action_row.addWidget(self.close_btn)
         detail_layout.addLayout(action_row)
-        splitter.addWidget(detail_widget)
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
-        layout.addWidget(splitter, 1)
+        self.splitter.addWidget(detail_widget)
+        self.splitter.setStretchFactor(0, 2)
+        self.splitter.setStretchFactor(1, 3)
+        layout.addWidget(self.splitter, 1)
 
         footer = QHBoxLayout()
         footer.addStretch()
@@ -243,6 +254,23 @@ class UserReportsInboxDialog(BaseStyledDialog):
             """
         )
         self._update_action_buttons()
+
+    def _restore_saved_geometry(self) -> None:
+        super()._restore_saved_geometry()
+        settings = self._settings()
+        splitter_state = settings.value(self._SPLITTER_SETTINGS_KEY)
+        if splitter_state is not None:
+            self.splitter.restoreState(splitter_state)
+        header_state = settings.value(self._TABLE_HEADER_SETTINGS_KEY)
+        if header_state is not None:
+            self.table.horizontalHeader().restoreState(header_state)
+
+    def _save_saved_geometry(self) -> None:
+        super()._save_saved_geometry()
+        settings = self._settings()
+        settings.setValue(self._SPLITTER_SETTINGS_KEY, self.splitter.saveState())
+        settings.setValue(self._TABLE_HEADER_SETTINGS_KEY, self.table.horizontalHeader().saveState())
+        settings.sync()
 
     def _load_reports(self, select_directory: str | None = None):
         if self._loading:
