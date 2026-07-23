@@ -14,12 +14,25 @@ from rem_card.ui.styles.theme_tokens import default_role_settings, default_setti
 from rem_card.ui.styles.tooltip_style import apply_tooltip_palette
 
 
+def _is_static_operblock_role(role: str | None = None) -> bool:
+    value = str(role if role is not None else os.environ.get("REMCARD_UI_ROLE", "")).strip().lower()
+    return value.startswith("operblock")
+
+
 class ThemeManager:
     def __init__(self, storage: ThemeStorage | None = None):
-        self.storage = storage or ThemeStorage()
-        self._payload = self.storage.load()
-        self._active_role = normalize_role(os.environ.get("REMCARD_UI_ROLE"))
+        startup_role = str(os.environ.get("REMCARD_UI_ROLE") or "").strip().lower()
+        self._static_operblock = _is_static_operblock_role(startup_role)
+        # Тема оперблока является частью сборки, а не пользовательской
+        # настройкой: для неё хранилище даже не создаётся.
+        self.storage = None if self._static_operblock else (storage or ThemeStorage())
+        self._payload = default_settings_payload() if self._static_operblock else self.storage.load()
+        self._active_role = normalize_role(startup_role)
         self._tokens_cache: dict[str, dict[str, Any]] = {}
+
+    @property
+    def is_static_operblock(self) -> bool:
+        return self._static_operblock
 
     @property
     def active_role(self) -> str:
@@ -27,9 +40,21 @@ class ThemeManager:
 
     @property
     def settings_path(self) -> str:
-        return self.storage.path
+        return self.storage.path if self.storage is not None else ""
 
     def load(self, role: str | None = None) -> dict[str, Any]:
+        if _is_static_operblock_role(role):
+            self._static_operblock = True
+            self.storage = None
+            self._payload = default_settings_payload()
+            self._tokens_cache.clear()
+            self._active_role = "system"
+            if role:
+                os.environ["REMCARD_UI_ROLE"] = str(role).strip().lower()
+            return self._payload
+        if self.storage is None:
+            self.storage = ThemeStorage()
+        self._static_operblock = False
         self._payload = self.storage.load()
         self._tokens_cache.clear()
         if role:
@@ -41,10 +66,26 @@ class ThemeManager:
         return dict(role_settings_from_payload(self._payload, role or self._active_role))
 
     def custom_presets(self) -> dict[str, dict[str, Any]]:
+        if self._static_operblock:
+            return {}
         value = self._payload.get("custom_presets") if isinstance(self._payload, dict) else None
         return deepcopy(value) if isinstance(value, dict) else {}
 
     def theme_options(self) -> list[dict[str, Any]]:
+        if self._static_operblock:
+            preset = get_preset("remcard_light")
+            return [
+                {
+                    "id": preset.id,
+                    "name": preset.name,
+                    "description": preset.description,
+                    "base_preset_id": preset.id,
+                    "mode": "light",
+                    "density": preset.density,
+                    "is_custom": False,
+                    "deletable": False,
+                }
+            ]
         options: list[dict[str, Any]] = []
         for preset in list_presets():
             options.append(
@@ -77,6 +118,8 @@ class ThemeManager:
         return options
 
     def theme_option(self, preset_id: str | None) -> dict[str, Any]:
+        if self._static_operblock:
+            return self.theme_options()[0]
         requested = str(preset_id or "")
         custom = self.custom_presets().get(requested)
         if custom:
@@ -105,6 +148,8 @@ class ThemeManager:
         }
 
     def tokens_for_role(self, role: str | None = None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._static_operblock:
+            return build_tokens("remcard_light", "light", {})
         normalized_role = normalize_role(role or self._active_role)
         if settings is None and normalized_role in self._tokens_cache:
             return dict(self._tokens_cache[normalized_role])
@@ -123,8 +168,11 @@ class ThemeManager:
 
     def apply_to_app(self, app: QApplication | None = None, role: str | None = None) -> None:
         if role:
-            self._active_role = normalize_role(role)
-            os.environ["REMCARD_UI_ROLE"] = self._active_role
+            if _is_static_operblock_role(role):
+                self.load(role)
+            else:
+                self._active_role = normalize_role(role)
+                os.environ["REMCARD_UI_ROLE"] = self._active_role
         target_app = app or QApplication.instance()
         if target_app is not None:
             tokens = self.tokens_for_role(self._active_role)
@@ -179,6 +227,8 @@ class ThemeManager:
                     )
 
     def preview_tokens(self, preset_id: str, mode: str | None = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._static_operblock:
+            return build_tokens("remcard_light", "light", {})
         option = self.theme_option(preset_id)
         selected_mode = normalize_mode(mode or option["mode"])
         if option["is_custom"]:
@@ -208,6 +258,8 @@ class ThemeManager:
         overrides: dict[str, Any] | None = None,
         save: bool = True,
     ) -> str:
+        if self._static_operblock:
+            raise RuntimeError("Тема оперблока зафиксирована и не поддерживает пользовательские схемы.")
         clean_name = str(name or "").strip()
         if not clean_name:
             raise ValueError("Название темы не может быть пустым.")
@@ -243,6 +295,8 @@ class ThemeManager:
         overrides: dict[str, Any] | None = None,
         save: bool = True,
     ) -> None:
+        if self._static_operblock:
+            raise RuntimeError("Тема оперблока зафиксирована и не поддерживает пользовательские схемы.")
         requested = str(preset_id or "")
         custom_presets = self.custom_presets()
         if requested not in custom_presets:
@@ -271,6 +325,8 @@ class ThemeManager:
             self.save()
 
     def delete_custom_preset(self, preset_id: str, *, save: bool = True) -> None:
+        if self._static_operblock:
+            return
         requested = str(preset_id or "")
         custom_presets = self.custom_presets()
         if requested not in custom_presets:
@@ -302,6 +358,8 @@ class ThemeManager:
         overrides: dict[str, Any] | None = None,
         save: bool = False,
     ) -> None:
+        if self._static_operblock:
+            return
         normalized_role = normalize_role(role)
         if normalized_role == "system":
             return
@@ -323,6 +381,8 @@ class ThemeManager:
             self.save()
 
     def reset_role(self, role: str, *, save: bool = True) -> None:
+        if self._static_operblock:
+            return
         normalized_role = normalize_role(role)
         if normalized_role == "system":
             return
@@ -341,6 +401,8 @@ class ThemeManager:
             self.save()
 
     def save(self) -> None:
+        if self._static_operblock or self.storage is None:
+            return
         self.storage.save(self._payload)
 
 
@@ -349,6 +411,7 @@ _THEME_MANAGER: ThemeManager | None = None
 
 def get_theme_manager() -> ThemeManager:
     global _THEME_MANAGER
-    if _THEME_MANAGER is None:
+    static_operblock = _is_static_operblock_role()
+    if _THEME_MANAGER is None or _THEME_MANAGER.is_static_operblock != static_operblock:
         _THEME_MANAGER = ThemeManager()
     return _THEME_MANAGER

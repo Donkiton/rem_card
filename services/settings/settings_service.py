@@ -408,6 +408,11 @@ class SettingsService:
             return True
         return self._current_startup_role() not in {"doctor", "nurse"}
 
+    def _should_repair_backgrounds_on_startup(self) -> bool:
+        # В интерфейсе оперблока фон отсутствует. Его старт не должен ни читать
+        # ui_backgrounds, ни проверять файлы общего каталога backgrounds.
+        return self._current_startup_role() != "operblock"
+
     @staticmethod
     def _is_settings_startup_write_busy(exc: Exception) -> bool:
         if isinstance(exc, SettingsDbError):
@@ -539,10 +544,19 @@ class SettingsService:
             if release_report:
                 info = {**info, "settings_release_snapshot": release_report}
                 self._add_startup_warning_from_report(startup_warnings, release_report)
-            background_repair_report = self._repair_background_settings_from_rows()
-            if background_repair_report:
-                info = {**info, "background_settings_repair": background_repair_report}
-                self._add_startup_warning_from_report(startup_warnings, background_repair_report)
+            if self._should_repair_backgrounds_on_startup():
+                background_repair_report = self._repair_background_settings_from_rows()
+                if background_repair_report:
+                    info = {**info, "background_settings_repair": background_repair_report}
+                    self._add_startup_warning_from_report(startup_warnings, background_repair_report)
+            else:
+                info = {**info, "background_settings_startup": {"skipped": True, "reason": "role_has_no_background"}}
+                record_metric(
+                    "settings_background_startup_repair_skipped",
+                    1,
+                    reason="role_has_no_background",
+                    role=self._current_startup_role(),
+                )
             if self._should_prepare_operblock_on_startup():
                 icons_report = self._ensure_default_operblock_icons()
                 if icons_report:

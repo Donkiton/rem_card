@@ -1,5 +1,6 @@
 import hashlib
 import json
+import threading
 import time
 from functools import wraps
 from typing import List, Optional, Tuple, Dict, Any, Callable, Sequence
@@ -38,6 +39,35 @@ _ORDERS_SNAPSHOT_STEP_OBSERVER = ContextVar("remcard_orders_snapshot_step_observ
 _DIRECT_ORDERS_BUILD_WARNED: set[tuple[str, int, str, str]] = set()
 _LEGACY_ORDERS_ACCESS_COUNT = 0
 _LAB_ORDER_CARD_PRIORITY = 998
+
+
+class _LazyDependency:
+    """Потокобезопасная ленивая зависимость с прозрачным доступом к API."""
+
+    def __init__(self, factory: Callable[[], Any]):
+        self._factory = factory
+        self._instance = None
+        self._lock = threading.Lock()
+
+    @property
+    def is_resolved(self) -> bool:
+        return self._instance is not None
+
+    def resolve(self):
+        instance = self._instance
+        if instance is not None:
+            return instance
+        with self._lock:
+            instance = self._instance
+            if instance is None:
+                instance = self._factory()
+                if instance is None:
+                    raise RuntimeError("Lazy RemCard dependency factory returned None")
+                self._instance = instance
+        return instance
+
+    def __getattr__(self, name: str):
+        return getattr(self.resolve(), name)
 
 
 class OrdersSnapshotCancelled(RuntimeError):
@@ -117,34 +147,66 @@ class RemCardService(QObject):
         self._ventilation = VentilationService(ventilation_dao, data_service=data_service) if ventilation_dao else None
         self._shifts = ShiftService()
 
-        from rem_card.data.dao.diet_dao import DietPlanDAO, OralIntakeDAO
+        def create_diet_plan_dao():
+            from rem_card.data.dao.diet_dao import DietPlanDAO
 
-        self.diet_plan_dao = DietPlanDAO(self.orders_dao.db)
-        self.oral_intake_dao = OralIntakeDAO(self.orders_dao.db)
-        self._diet_templates = DietTemplateService()
-        self._diet_plan = DietPlanService(self.diet_plan_dao, self._diet_templates)
-        self._oral_intake = OralIntakeService(self.oral_intake_dao, self._vitals, self._diet_plan)
+            return DietPlanDAO(self.orders_dao.db)
 
-        from rem_card.data.dao.procedures_dao import ProceduresDAO
-        from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
-        from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
-        from rem_card.services.lab_orders_service import LabOrdersService
-        from rem_card.services.procedures_print_service import ProceduresPrintService
-        from rem_card.services.procedures_service import ProceduresService
+        def create_oral_intake_dao():
+            from rem_card.data.dao.diet_dao import OralIntakeDAO
 
-        self.procedures_dao = ProceduresDAO(self.orders_dao.db)
-        self._procedures = ProceduresService(self.procedures_dao, data_service=data_service)
-        self._procedures_print = ProceduresPrintService(
-            self.procedures_dao,
-            observation_provider=self.get_transfusion_observation_values,
+            return OralIntakeDAO(self.orders_dao.db)
+
+        def create_procedures_dao():
+            from rem_card.data.dao.procedures_dao import ProceduresDAO
+
+            return ProceduresDAO(self.orders_dao.db)
+
+        def create_procedures_service():
+            from rem_card.services.procedures_service import ProceduresService
+
+            return ProceduresService(self.procedures_dao, data_service=data_service)
+
+        def create_procedures_print_service():
+            from rem_card.services.procedures_print_service import ProceduresPrintService
+
+            return ProceduresPrintService(
+                self.procedures_dao,
+                observation_provider=self.get_transfusion_observation_values,
+            )
+
+        def create_lab_orders_dao():
+            from rem_card.data.dao.lab_orders_dao import LabOrdersDAO
+
+            return LabOrdersDAO(self.orders_dao.db)
+
+        def create_lab_analysis_catalog():
+            from rem_card.services.lab_analysis_catalog_service import LabAnalysisCatalogService
+
+            return LabAnalysisCatalogService()
+
+        def create_lab_orders_service():
+            from rem_card.services.lab_orders_service import LabOrdersService
+
+            return LabOrdersService(
+                self.lab_orders_dao,
+                data_service=data_service,
+                catalog_service=self._lab_analysis_catalog,
+            )
+
+        self.diet_plan_dao = _LazyDependency(create_diet_plan_dao)
+        self.oral_intake_dao = _LazyDependency(create_oral_intake_dao)
+        self._diet_templates = _LazyDependency(DietTemplateService)
+        self._diet_plan = _LazyDependency(lambda: DietPlanService(self.diet_plan_dao, self._diet_templates))
+        self._oral_intake = _LazyDependency(
+            lambda: OralIntakeService(self.oral_intake_dao, self._vitals, self._diet_plan)
         )
-        self.lab_orders_dao = LabOrdersDAO(self.orders_dao.db)
-        self._lab_analysis_catalog = LabAnalysisCatalogService()
-        self._lab_orders = LabOrdersService(
-            self.lab_orders_dao,
-            data_service=data_service,
-            catalog_service=self._lab_analysis_catalog,
-        )
+        self.procedures_dao = _LazyDependency(create_procedures_dao)
+        self._procedures = _LazyDependency(create_procedures_service)
+        self._procedures_print = _LazyDependency(create_procedures_print_service)
+        self.lab_orders_dao = _LazyDependency(create_lab_orders_dao)
+        self._lab_analysis_catalog = _LazyDependency(create_lab_analysis_catalog)
+        self._lab_orders = _LazyDependency(create_lab_orders_service)
         self._connect_cache_invalidation()
 
     def _connect_cache_invalidation(self):

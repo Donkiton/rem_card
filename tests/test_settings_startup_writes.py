@@ -45,6 +45,29 @@ def _write_settings_lock(lock_path: str, *, source: str = "settings_test_holder"
 
 
 class SettingsStartupWritesTest(unittest.TestCase):
+    def test_operblock_startup_never_repairs_backgrounds(self):
+        for role in ("operblock", "operblock_planned", "operblock_emergency"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as tmp:
+                db = SettingsDatabase(baza_dir=str(Path(tmp) / "baza"))
+                db.ensure_ready()
+                service = SettingsService(db)
+
+                with (
+                    patch.dict(os.environ, {"REMCARD_UI_ROLE": role}),
+                    patch.object(service, "_ensure_legacy_import"),
+                    patch.object(service, "_ensure_operblock_settings_imported", return_value=None),
+                    patch.object(service, "_apply_bundled_release_snapshot_if_needed", return_value=None),
+                    patch.object(service, "_repair_background_settings_from_rows") as background_repair,
+                    patch.object(service, "_ensure_default_operblock_icons", return_value=None),
+                ):
+                    info = service.ensure_ready()
+
+                background_repair.assert_not_called()
+                self.assertEqual(
+                    info["background_settings_startup"],
+                    {"skipped": True, "reason": "role_has_no_background"},
+                )
+
     def test_release_snapshot_write_is_skipped_when_settings_lock_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

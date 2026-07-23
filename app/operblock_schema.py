@@ -43,6 +43,35 @@ def _index_exists(conn: sqlite3.Connection, index_name: str) -> bool:
     return bool(row)
 
 
+def _schema_objects_exist(
+    conn: sqlite3.Connection,
+    objects_by_type: dict[str, set[str]],
+) -> bool:
+    expected = {
+        (object_type, object_name)
+        for object_type, object_names in objects_by_type.items()
+        for object_name in object_names
+    }
+    if not expected:
+        return True
+
+    clauses: list[str] = []
+    params: list[str] = []
+    for object_type, object_names in objects_by_type.items():
+        if not object_names:
+            continue
+        placeholders = ", ".join("?" for _ in object_names)
+        clauses.append(f"(type=? AND name IN ({placeholders}))")
+        params.append(object_type)
+        params.extend(sorted(object_names))
+
+    rows = conn.execute(
+        f"SELECT type, name FROM sqlite_master WHERE {' OR '.join(clauses)}",
+        params,
+    ).fetchall()
+    return {(str(row[0]), str(row[1])) for row in rows} == expected
+
+
 def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
@@ -50,7 +79,21 @@ def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
     required_tables = {"operating_tables", "operation_cases", "operation_table_assignments"}
     required_tables.add("operblock_timeline_events")
-    if not all(_table_exists(conn, table_name) for table_name in required_tables):
+    required_indexes = {
+        "idx_operation_cases_one_active_per_table",
+        "idx_operation_cases_protocol_sequence",
+        "idx_operation_cases_started_at_id",
+        "idx_operation_assignments_one_active_per_table",
+        "idx_operblock_timeline_admission_time",
+        "idx_operblock_timeline_case_time",
+        "idx_operblock_timeline_status",
+        "idx_operblock_timeline_event_type",
+        "idx_operblock_timeline_parent",
+    }
+    if not _schema_objects_exist(
+        conn,
+        {"table": required_tables, "index": required_indexes},
+    ):
         return False
     admission_columns = _columns(conn, "admissions")
     if not {"unit_scope", "admission_type"}.issubset(admission_columns):
@@ -98,14 +141,6 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "excluded_from_migration",
     }.issubset(case_columns):
         return False
-    if not _index_exists(conn, "idx_operation_cases_one_active_per_table"):
-        return False
-    if not _index_exists(conn, "idx_operation_cases_protocol_sequence"):
-        return False
-    if not _index_exists(conn, "idx_operation_cases_started_at_id"):
-        return False
-    if not _index_exists(conn, "idx_operation_assignments_one_active_per_table"):
-        return False
     timeline_columns = _columns(conn, "operblock_timeline_events")
     if not {
         "id",
@@ -118,15 +153,6 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "parent_event_id",
     }.issubset(timeline_columns):
         return False
-    for index_name in (
-        "idx_operblock_timeline_admission_time",
-        "idx_operblock_timeline_case_time",
-        "idx_operblock_timeline_status",
-        "idx_operblock_timeline_event_type",
-        "idx_operblock_timeline_parent",
-    ):
-        if not _index_exists(conn, index_name):
-            return False
     row = conn.execute(
         "SELECT COUNT(*) FROM operating_tables WHERE code IN ('emergency', 'planned')",
     ).fetchone()

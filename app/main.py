@@ -332,6 +332,12 @@ def _install_no_button_focus_rect_style(app):
 
 def _apply_app_theme(app, role: Optional[str] = None):
     _install_no_button_focus_rect_style(app)
+    # Оперблок использует фиксированную светлую тему. Даже принудительное
+    # REMCARD_FULL_RUNTIME_THEME не должно втягивать его в динамическую тему и
+    # связанную с ней БД настроек до bootstrap.
+    if is_operblock_role(role):
+        _apply_basic_app_theme(app)
+        return
     if not _env_flag_enabled(FULL_RUNTIME_THEME_ENV):
         _apply_basic_app_theme(app)
         return
@@ -1598,8 +1604,12 @@ def _acquire_initial_role_lock(role: Optional[str]):
 
 
 def _configure_operblock_startup_path(role: Optional[str], path_setup: bool) -> bool:
+    # Роль должна быть известна до импорта MainWindow/темы/настроек. Это также
+    # не позволяет запуску врача или медсестры ошибочно готовить оперблок как
+    # роль по умолчанию.
+    if role:
+        os.environ["REMCARD_UI_ROLE"] = str(role).strip().lower()
     if is_operblock_role(role):
-        os.environ["REMCARD_UI_ROLE"] = ROLE_OPERBLOCK
         os.environ["REMCARD_LOCAL_FIRST_SYNC"] = "0"
         os.environ["REMCARD_LOCAL_OUTBOX_SYNC"] = "0"
         if path_setup:

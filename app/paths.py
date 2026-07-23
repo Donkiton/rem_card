@@ -182,6 +182,11 @@ def get_role_lock_path(role: str) -> str:
     return os.path.join(ROLE_LOCKS_DIR, f"{safe_role}.lock")
 
 # Убедимся, что папки существуют
+def ensure_local_directories():
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
+
+
 def ensure_directories():
     allow_shared_create = (
         (not is_compiled() and os.environ.get(DEV_EXISTING_BAZA_ONLY_ENV) != "1")
@@ -201,5 +206,4 @@ def ensure_directories():
             elif not os.path.isdir(directory):
                 raise FileNotFoundError(f"Required shared directory is unavailable: {directory}")
 
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(LOCAL_CACHE_DIR, exist_ok=True)
+    ensure_local_directories()

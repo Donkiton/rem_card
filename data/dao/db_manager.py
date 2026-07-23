@@ -1398,6 +1398,12 @@ class DatabaseManager:
 
     def _ensure_cycle_meta_initialized(self):
         try:
+            row = self._remcard_conn.execute(
+                "SELECT 1 FROM meta WHERE key = ? LIMIT 1",
+                (DB_CYCLE_META_KEY,),
+            ).fetchone()
+            if row:
+                return
             with self.remcard_transaction(source="db_cycle_meta_init") as cursor:
                 cursor.execute(
                     "INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)",

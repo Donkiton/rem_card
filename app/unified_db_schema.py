@@ -313,13 +313,10 @@ def _schema_contract_satisfied(conn: sqlite3.Connection, deep_column_check: bool
     if not _schema_migration_applied(conn, SCHEMA_MIN_MIGRATION_VERSION):
         return False
 
-    if not all(_index_exists(conn, name) for name in _FASTPATH_REQUIRED_INDEXES):
-        return False
-
-    if _table_exists(conn, "operation_cases") and not _index_exists(
-        conn,
-        "idx_operation_cases_started_at_id",
-    ):
+    required_indexes = list(_FASTPATH_REQUIRED_INDEXES)
+    if _table_exists(conn, "operation_cases"):
+        required_indexes.append("idx_operation_cases_started_at_id")
+    if not _all_sqlite_master_objects_exist(conn, "index", tuple(required_indexes)):
         return False
 
     if not _all_sqlite_master_objects_exist(conn, "trigger", _FASTPATH_REQUIRED_TRIGGERS):

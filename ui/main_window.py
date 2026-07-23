@@ -1329,6 +1329,15 @@ class MainWindow(QMainWindow):
 
     def _activate_container(self, container) -> None:
         self.container = container
+        settings_service = getattr(container, "settings_service", None)
+        if settings_service is not None:
+            # bootstrap уже настроил сервис для этого runtime-контекста.
+            # ensure_ready здесь является дешёвой идемпотентной проверкой и не
+            # пересоздаёт подключение к сетевой БД настроек.
+            settings_service.ensure_ready()
+            self._connect_runtime_outage_signal()
+            self._connect_restore_probe_signal()
+            return
         runtime_context = getattr(getattr(container, "db_manager", None), "runtime_context", None)
         if runtime_context is not None:
             from rem_card.services.settings.settings_service import configure_settings_service
@@ -1352,11 +1361,14 @@ class MainWindow(QMainWindow):
         container = self._ensure_default_container()
         if container is None:
             return None
+        if bool(getattr(container, "operblock_schema_prepared", False)):
+            return container
         try:
             from rem_card.app.operblock_schema import ensure_operblock_schema
 
             with operblock_startup_metrics.measure("ensure_operblock_schema_ms", source="main_window"):
                 ensure_operblock_schema(container.db_manager)
+            container.operblock_schema_prepared = True
         except Exception as exc:
             logger.exception("Failed to prepare operblock schema in current database: %s", exc)
             QMessageBox.critical(
