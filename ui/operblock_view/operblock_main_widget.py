@@ -3624,7 +3624,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
 
     def __init__(self, stages: list[dict], parent=None):
         super().__init__(
-            "Этапы операции",
+            "Этапы",
             "operation_stages_dialog_geometry",
             parent,
             minimum_size=(620, 380),
@@ -3686,7 +3686,10 @@ class OperationStagesDialog(OperBlockStyledDialog):
         )
         layout.addWidget(self.scroll, 1)
 
-        note_label = QLabel("Конец операции и конец пособия будут установлены автоматически.")
+        note_label = QLabel(
+            "Начало пособия и начало операции добавляются автоматически. "
+            "Конец операции и конец пособия также будут установлены автоматически."
+        )
         note_label.setWordWrap(True)
         note_label.setStyleSheet(
             f"font-size: 12px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
@@ -3738,8 +3741,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
 
     @classmethod
     def _normalized_stage_rows(cls, stages: list[dict]) -> list[dict]:
-        auto_rows = []
-        custom_rows = []
+        rows = []
         seen_auto: set[str] = set()
         for item in stages or []:
             row = dict(item or {})
@@ -3753,13 +3755,12 @@ class OperationStagesDialog(OperBlockStyledDialog):
                     continue
                 row["readonly"] = True
                 seen_auto.add(kind)
-                auto_rows.append(row)
+                rows.append(row)
             elif kind == cls.CUSTOM_STAGE_KIND:
                 row["readonly"] = False
-                custom_rows.append(row)
-        auto_rows.sort(key=lambda row: 0 if row.get("kind") == "anesthesia_start" else 1)
-        custom_rows.sort(key=cls._stage_sort_key)
-        return auto_rows + custom_rows
+                rows.append(row)
+        rows.sort(key=cls._stage_sort_key)
+        return rows
 
     def set_stages(self, stages: list[dict]) -> None:
         self._rows = self._normalized_stage_rows(stages)
@@ -3914,7 +3915,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
             return
         label = self._clean_label(edit.text())
         if not label:
-            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
             edit.setFocus(Qt.OtherFocusReason)
             return
         button.setText("Сохранение...")
@@ -3943,7 +3944,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
         edit = widgets.get("edit")
         label = self._clean_label(edit.text()) if edit is not None else self._stage_label(row)
         if not label and not is_new:
-            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
             if edit is not None:
                 edit.setFocus(Qt.OtherFocusReason)
             return
@@ -9835,7 +9836,7 @@ class OperBlockMainWidget(QWidget):
         self.start_anesthesia_button = self._stage_action_button(" Начать пособие")
         self.end_anesthesia_button = self._stage_action_button(" Завершить пособие", danger=True)
         self.start_surgery_button = self._stage_action_button(" Начать операцию")
-        self.operation_stages_button = self._stage_action_button(" Этапы операции")
+        self.operation_stages_button = self._stage_action_button(" Этапы")
         self.close_case_button = self._stage_action_button(" Завершить операцию", danger=True)
         self.release_table_button = self._stage_action_button(" Освободить стол", danger=True)
         self.report_button = QPushButton(" Отчет за операцию")
@@ -13494,6 +13495,7 @@ class OperBlockMainWidget(QWidget):
         case_active = bool(getattr(self, "_current_case_active", False))
         aid_active = bool(getattr(self, "_current_anesthesia_active", False))
         surgery_active = bool(getattr(self, "_current_surgery_active", False))
+        stages_available = self._operation_stages_available()
         view_only = self.is_view_only_mode()
         write_enabled = case_active and not self._write_pending and not view_only
         if hasattr(self, "start_anesthesia_button"):
@@ -13507,7 +13509,7 @@ class OperBlockMainWidget(QWidget):
                 self.start_anesthesia_button.setToolTip("")
             self.end_anesthesia_button.setEnabled(write_enabled and aid_active)
             self.start_surgery_button.setEnabled(write_enabled and aid_active and not surgery_active)
-            self.operation_stages_button.setEnabled(write_enabled and aid_active and surgery_active)
+            self.operation_stages_button.setEnabled(write_enabled and stages_available)
             self.close_case_button.setEnabled(write_enabled and aid_active and surgery_active)
             self.release_table_button.setEnabled(write_enabled and not aid_active)
             if hasattr(self, "report_button"):
@@ -19110,7 +19112,17 @@ class OperBlockMainWidget(QWidget):
             or _minute_floor_dt(self._current_protocol_date)
             or datetime.now().replace(second=0, microsecond=0)
         )
-        return base_dt + timedelta(minutes=5)
+        default_dt = base_dt + timedelta(minutes=5)
+        latest_stage_dt = self._latest_stage_before_surgery_datetime()
+        return max(default_dt, latest_stage_dt) if latest_stage_dt is not None else default_dt
+
+    def _latest_stage_before_surgery_datetime(self) -> datetime | None:
+        stage_times = [
+            _minute_floor_dt(_parse_datetime_value(row.get("event_time")))
+            for row in self._operation_stage_dialog_rows()
+            if str(row.get("kind") or "") in {"anesthesia_start", "custom"}
+        ]
+        return max((value for value in stage_times if value is not None), default=None)
 
     @staticmethod
     def _clamp_stage_datetime(
@@ -19264,6 +19276,18 @@ class OperBlockMainWidget(QWidget):
             return
         defaults = self._operation_case_defaults(case_id)
         initial_start_dt = self._default_surgery_start_datetime()
+        min_start_dt = max(
+            (
+                value
+                for value in (
+                    _minute_floor_dt(self._current_anesthesia_start),
+                    _minute_floor_dt(self._current_operation_start),
+                    self._latest_stage_before_surgery_datetime(),
+                )
+                if value is not None
+            ),
+            default=None,
+        )
         dialog = StartSurgeryDialog(
             surgeons,
             operating_nurses,
@@ -19272,7 +19296,7 @@ class OperBlockMainWidget(QWidget):
             initial_surgeons=list(defaults.get("surgeons") or []),
             initial_operating_nurse=str(defaults.get("operating_nurse") or ""),
             initial_start_datetime=initial_start_dt,
-            min_start_datetime=self._current_anesthesia_start or self._current_operation_start,
+            min_start_datetime=min_start_dt,
             max_start_datetime=self._current_anesthesia_end,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -19359,6 +19383,16 @@ class OperBlockMainWidget(QWidget):
             )
         return rows
 
+    def _operation_stages_available(self) -> bool:
+        state = dict(getattr(self, "_current_stage_state", {}) or {})
+        if not bool(state.get("anesthesia_active")):
+            return False
+        if bool(state.get("surgery_active")):
+            return True
+        anesthesia_start = _minute_floor_dt(_parse_datetime_value(state.get("current_anesthesia_start")))
+        surgery_end = _minute_floor_dt(_parse_datetime_value(state.get("last_surgery_end")))
+        return surgery_end is None or anesthesia_start is None or surgery_end < anesthesia_start
+
     def _open_operation_stages_dialog(self):
         if self.is_view_only_mode():
             return
@@ -19366,8 +19400,12 @@ class OperBlockMainWidget(QWidget):
             return
         if not self._current_operation_case_id:
             return
-        if not getattr(self, "_current_surgery_active", False):
-            CustomMessageBox.warning(self, "Этапы операции", "Этапы доступны после начала операции и до её завершения.")
+        if not self._operation_stages_available():
+            CustomMessageBox.warning(
+                self,
+                "Этапы",
+                "Этапы доступны после начала пособия, до начала операции и во время операции.",
+            )
             return
         dialog = OperationStagesDialog(self._operation_stage_dialog_rows(), self)
         dialog_ref = weakref.ref(dialog)
@@ -19380,15 +19418,15 @@ class OperBlockMainWidget(QWidget):
         if event_dt is None:
             CustomMessageBox.warning(self, "Время этапа", "Укажите корректное время этапа.")
             return False
-        surgery_start = _minute_floor_dt(self._current_surgery_start)
-        if surgery_start is None:
-            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить начало операции. Обновите протокол.")
+        anesthesia_start = _minute_floor_dt(self._current_anesthesia_start)
+        if anesthesia_start is None:
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить начало пособия. Обновите протокол.")
             return False
-        if event_dt < surgery_start:
+        if event_dt < anesthesia_start:
             CustomMessageBox.warning(
                 self,
                 "Время этапа",
-                f"Этап операции не может быть раньше начала операции: {surgery_start.strftime('%d.%m.%Y %H:%M')}.",
+                f"Этап не может быть раньше начала пособия: {anesthesia_start.strftime('%d.%m.%Y %H:%M')}.",
             )
             return False
         anesthesia_end = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
@@ -19423,9 +19461,9 @@ class OperBlockMainWidget(QWidget):
         time_dialog = OperationStageTimeEditDialog(
             old_event_dt,
             self,
-            stage_label=label or "Новый этап операции",
+            stage_label=label or "Новый этап",
             field_label="Время этапа",
-            min_datetime=self._current_surgery_start,
+            min_datetime=self._current_anesthesia_start,
             max_datetime=self._current_anesthesia_end if not self._current_anesthesia_active else None,
         )
         if time_dialog.exec() != QDialog.Accepted:
@@ -19465,7 +19503,7 @@ class OperBlockMainWidget(QWidget):
         label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
         if not label:
             dialog.apply_save_error(row_key)
-            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
             return
         case_id = int(self._current_operation_case_id)
         is_new = bool((payload or {}).get("is_new"))
@@ -19474,7 +19512,7 @@ class OperBlockMainWidget(QWidget):
         event_time = str((payload or {}).get("event_time") or "").strip() or None
         if not is_new and not event_id:
             dialog.apply_save_error(row_key)
-            CustomMessageBox.warning(self, "Этапы операции", "Не удалось определить этап. Обновите протокол.")
+            CustomMessageBox.warning(self, "Этапы", "Не удалось определить этап. Обновите протокол.")
             return
         if event_time is not None and not self._validate_operation_stage_datetime_or_warn(event_time):
             dialog.apply_save_error(row_key)
@@ -19603,7 +19641,7 @@ class OperBlockMainWidget(QWidget):
         dialog = dialog_ref()
         if dialog is not None:
             dialog.apply_save_error(row_key)
-        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Этапы операции"
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Этапы"
         CustomMessageBox.warning(self, title, str(exc))
         if isinstance(exc, (DataConflictError, OperBlockConflictError)) and self._current_operation_case_id:
             self.refresh_protocol(force=True)
