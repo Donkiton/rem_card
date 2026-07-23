@@ -2662,6 +2662,46 @@ class DatabaseManager:
         with self.remcard_transaction(source=source, write_options=write_options) as cursor:
             return operation(cursor)
 
+    def run_read_operation(
+        self,
+        operation: Callable[[sqlite3.Cursor], Any],
+        source: str = "read_operation",
+    ):
+        """Run related SELECT statements on one read-only SQLite snapshot."""
+        started = time.perf_counter()
+        status = "error"
+        try:
+            if self._in_current_thread_remcard_transaction():
+                with self._central_io_lock_scope("remcard_read_operation_write_conn", source=source):
+                    conn = self._get_central_write_connection_for_read(source)
+                    with self.write_controller.connection_guard(conn):
+                        cursor = conn.cursor()
+                        try:
+                            result = operation(cursor)
+                        finally:
+                            cursor.close()
+            else:
+                with self.central_read_snapshot_scope(source):
+                    conn = self._scoped_central_read_connection()
+                    if conn is None:
+                        raise DatabaseClosedError(f"Read-only connection is unavailable for {source}")
+                    cursor = conn.cursor()
+                    try:
+                        result = operation(cursor)
+                    finally:
+                        cursor.close()
+            status = "ok"
+            return result
+        finally:
+            record_metric(
+                "read_duration_ms",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                operation="read_operation",
+                source="central_snapshot",
+                operation_source=str(source or "read_operation"),
+                status=status,
+            )
+
     def execute_remcard(self, query, params=(), source: str = "execute_remcard"):
         logger.debug("SQL RemCard Exec: %s | Params: %s", query, params)
         try:

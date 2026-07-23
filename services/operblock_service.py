@@ -3303,6 +3303,35 @@ class OperBlockService:
             _minute_floor(ended_at) if ended_at is not None else None,
         )
 
+    def get_start_anesthesia_context(self, operation_case_id: int) -> dict[str, Any]:
+        """Load all case-derived defaults for the start dialog from one snapshot."""
+        scope_factory = getattr(self.db, "central_read_snapshot_scope", None)
+        if not callable(scope_factory):
+            scope_factory = getattr(self.db, "central_read_scope", None)
+        read_scope = (
+            scope_factory("operblock_start_anesthesia_context")
+            if callable(scope_factory)
+            else nullcontext()
+        )
+        with read_scope:
+            defaults = self.get_operation_case_form_data(int(operation_case_id))
+            vitals = self.list_operation_vitals(int(operation_case_id))
+
+        latest_vital_at = max(
+            (
+                _minute_floor(vital.timestamp)
+                for vital in vitals
+                if isinstance(getattr(vital, "timestamp", None), datetime)
+            ),
+            default=None,
+        )
+        return {
+            "operation_case_id": int(operation_case_id),
+            "has_initial_vitals": bool(vitals),
+            "latest_vital_at": latest_vital_at,
+            "defaults": dict(defaults or {}),
+        }
+
     def _first_operation_vital_row(
         self,
         cursor: sqlite3.Cursor,
@@ -3876,7 +3905,7 @@ class OperBlockService:
                 "vitals_source": vitals_source,
             }
 
-        return dict(self.db.run_write_operation(operation, source="operblock_get_operation_case_form_data"))
+        return dict(self.db.run_read_operation(operation, source="operblock_get_operation_case_form_data"))
 
     def update_operation_case_form_data(
         self,

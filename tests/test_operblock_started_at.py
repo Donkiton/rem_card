@@ -40,6 +40,8 @@ class _MemoryDb:
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         self.read_scope_sources: list[str] = []
+        self.read_operation_sources: list[str] = []
+        self.write_operation_sources: list[str] = []
         self._prepare_schema()
 
     def close(self):
@@ -51,6 +53,7 @@ class _MemoryDb:
         yield self
 
     def run_write_operation(self, operation, source="test"):
+        self.write_operation_sources.append(str(source))
         cursor = self.conn.cursor()
         try:
             result = operation(cursor)
@@ -59,6 +62,14 @@ class _MemoryDb:
         except Exception:
             self.conn.rollback()
             raise
+
+    def run_read_operation(self, operation, source="test"):
+        self.read_operation_sources.append(str(source))
+        cursor = self.conn.cursor()
+        try:
+            return operation(cursor)
+        finally:
+            cursor.close()
 
     def fetch_one_remcard(self, query, params=()):
         return self.conn.execute(query, params).fetchone()
@@ -323,6 +334,35 @@ class OperBlockStartedAtTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Время поступления в оперблок можно изменить"):
             payload = self._base_payload(started_at - timedelta(minutes=20))
             self.service.update_operation_case_form_data(result["operation_case_id"], payload)
+
+    def test_operation_case_form_uses_read_snapshot_without_write_transaction(self):
+        started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        result = self.service.create_operation_case(self._base_payload(started_at))
+        self.db.read_operation_sources.clear()
+        self.db.write_operation_sources.clear()
+
+        form_data = self.service.get_operation_case_form_data(result["operation_case_id"])
+
+        self.assertEqual(form_data["operation_case_id"], result["operation_case_id"])
+        self.assertEqual(
+            self.db.read_operation_sources,
+            ["operblock_get_operation_case_form_data"],
+        )
+        self.assertEqual(self.db.write_operation_sources, [])
+
+    def test_start_anesthesia_context_reuses_one_read_scope(self):
+        started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        result = self.service.create_operation_case(self._base_payload(started_at))
+        self.db.read_scope_sources.clear()
+
+        context = self.service.get_start_anesthesia_context(result["operation_case_id"])
+
+        self.assertTrue(context["has_initial_vitals"])
+        self.assertEqual(context["latest_vital_at"], started_at)
+        self.assertEqual(
+            self.db.read_scope_sources,
+            ["operblock_start_anesthesia_context"],
+        )
 
     def test_operation_report_context_uses_central_read_scope(self):
         started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
