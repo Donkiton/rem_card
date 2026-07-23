@@ -492,13 +492,18 @@ def run_release_checks(root: Path) -> None:
     )
     for name, command in checks:
         print(f"Обязательная проверка перед push: {name}...")
-        try:
-            run(command, cwd=root)
-        except subprocess.CalledProcessError as exc:
+        result = run(command, cwd=root, check=False, capture=True)
+        if result.returncode != 0:
+            details = "\n".join(
+                value.strip()
+                for value in (str(result.stdout or ""), str(result.stderr or ""))
+                if value and value.strip()
+            )
+            suffix = f"\n\n{details}" if details else ""
             raise RuntimeError(
-                f"Проверка перед push не пройдена ({name}), код {exc.returncode}. "
-                "Git push и публикация остановлены."
-            ) from exc
+                f"Проверка перед push не пройдена ({name}), код {result.returncode}. "
+                f"Git push и публикация остановлены.{suffix}"
+            )
     print("Все обязательные проверки перед push пройдены.")
 
 
@@ -1585,15 +1590,14 @@ def main(argv: list[str] | None = None) -> int:
             build_test_worktree(root, args)
             return 0
 
+        if not args.no_commit:
+            cleanup_build_artifacts(root)
         ensure_clean_tree(root)
         if not args.no_commit:
             ensure_release_branch_pushable(
                 root,
                 phase="до подготовки release-коммита",
             )
-        if not args.no_commit:
-            cleanup_build_artifacts(root)
-        ensure_clean_tree(root)
         emit_progress(
             args,
             stage="prepare",

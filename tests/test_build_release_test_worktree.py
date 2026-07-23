@@ -442,3 +442,30 @@ def test_push_reports_github_rejection_without_raw_called_process_error(
         build_release.push_current_branch(tmp_path)
 
     assert "branch protection rejected the push" in str(exc_info.value)
+
+
+def test_release_gate_failure_includes_child_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = 0
+
+    def fail_first_gate(args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return build_release.subprocess.CompletedProcess(
+            args,
+            1,
+            stdout='{"failed": 1, "check": "example_contract"}',
+            stderr="worker failure details",
+        )
+
+    monkeypatch.setattr(build_release, "run", fail_first_gate)
+
+    with pytest.raises(RuntimeError, match="fast regression|architecture safety") as exc_info:
+        build_release.run_release_checks(tmp_path)
+
+    message = str(exc_info.value)
+    assert calls == 1
+    assert "example_contract" in message
+    assert "worker failure details" in message
