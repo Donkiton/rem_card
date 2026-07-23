@@ -1,13 +1,13 @@
 # Runtime UI and chart stack
-PySide6==6.10.2
+PySide6==6.11.1
 pyqtgraph==0.14.0
-numpy==2.4.3
+numpy==2.4.6
 
 # Reports, PDF and analytics
 reportlab==5.0.0
 pypdf==6.14.2
-matplotlib==3.10.8
-pandas==3.0.1
+matplotlib==3.11.1
+pandas==3.0.5
 pillow==12.3.0
 
 # Windows integration used by shortcuts/window helpers
