@@ -246,6 +246,63 @@ def test_real_child_crash_is_reported_by_parallel_merge(monkeypatch, capsys):
     assert payload["workers"][0]["exit_code"] == 37
 
 
+def test_native_crash_worker_is_retried_once_in_isolation(monkeypatch):
+    worker_meta = [
+        {
+            "shard_index": 2,
+            "exit_code": 3221225477,
+            "error": "worker native_crash=3221225477",
+            "native_crash": True,
+            "payload": None,
+        },
+        {
+            "shard_index": 3,
+            "exit_code": 23,
+            "error": "worker exit=23",
+            "native_crash": False,
+            "payload": None,
+        },
+    ]
+    calls: list[int] = []
+
+    def run_recovered_worker(*, shard_index, shard_count, deadline_monotonic, temp_root):
+        _ = (shard_count, deadline_monotonic, temp_root)
+        calls.append(shard_index)
+        return {
+            "shard_index": shard_index,
+            "exit_code": 0,
+            "error": "",
+            "native_crash": False,
+            "crashed": False,
+            "timed_out": False,
+            "payload": {
+                "checks": [
+                    {"check": "recovered", "ok": True, "details": "ok", "duration_sec": 0.1}
+                ]
+            },
+        }
+
+    monkeypatch.setattr(regression, "_run_worker_process", run_recovered_worker)
+
+    retries = regression._retry_native_crash_workers(
+        worker_meta,
+        shard_count=16,
+        deadline_monotonic=time.monotonic() + 5.0,
+        temp_root="",
+        quiet=True,
+    )
+
+    assert retries == 1
+    assert calls == [2]
+    assert worker_meta[0]["retried_native_crash"] is True
+    assert worker_meta[0]["initial_exit_code"] == 3221225477
+    assert regression._worker_report_is_structurally_valid(worker_meta[0])
+    assert worker_meta[1]["exit_code"] == 23
+    assert [item["check"] for item in regression._parallel_results_from_workers(worker_meta)] == [
+        "recovered"
+    ]
+
+
 def test_main_routes_fast_jobs_one_through_parallel_subprocess_path(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
