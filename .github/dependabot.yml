@@ -15,5 +15,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # NumPy 2.5+ requires Python 3.12, while the application and CI use 3.11.
+      - dependency-name: "numpy"
+        versions:
+          - ">=2.5.0"
     commit-message:
       prefix: "Обновить зависимость "
