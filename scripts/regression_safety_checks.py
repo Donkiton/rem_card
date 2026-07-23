@@ -27908,6 +27908,47 @@ def _append_parallel_worker_result(
         results.extend(item for item in worker_checks if isinstance(item, dict))
 
 
+def _parallel_results_from_workers(worker_meta: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for worker in worker_meta:
+        payload = worker.get("payload")
+        worker_checks = payload.get("checks") if isinstance(payload, dict) else None
+        if isinstance(worker_checks, list):
+            results.extend(item for item in worker_checks if isinstance(item, dict))
+    return results
+
+
+def _retry_native_crash_workers(
+    worker_meta: list[dict[str, Any]],
+    *,
+    shard_count: int,
+    deadline_monotonic: float | None,
+    temp_root: str,
+    quiet: bool,
+) -> int:
+    retry_count = 0
+    for position, worker in enumerate(worker_meta):
+        if not worker.get("native_crash"):
+            continue
+        shard_index = int(worker["shard_index"])
+        _print_progress(
+            f"[regression] shard {shard_index + 1}/{shard_count} native crash; retrying once in isolation",
+            quiet=quiet,
+        )
+        retry = _run_worker_process(
+            shard_index=shard_index,
+            shard_count=shard_count,
+            deadline_monotonic=deadline_monotonic,
+            temp_root=temp_root,
+        )
+        retry["retried_native_crash"] = True
+        retry["initial_exit_code"] = worker.get("exit_code")
+        retry["initial_error"] = worker.get("error", "")
+        worker_meta[position] = retry
+        retry_count += 1
+    return retry_count
+
+
 def _await_parallel_workers(
     futures: dict[Any, int],
     *,
@@ -27998,7 +28039,7 @@ def _order_parallel_results(
 
 
 def _parallel_worker_summary(worker: dict[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         "shard_index": worker["shard_index"],
         "exit_code": worker.get("exit_code"),
         "duration_sec": worker.get("duration_sec"),
@@ -28008,6 +28049,10 @@ def _parallel_worker_summary(worker: dict[str, Any]) -> dict[str, Any]:
         "crashed": bool(worker.get("crashed")),
         "native_crash": bool(worker.get("native_crash")),
     }
+    if worker.get("retried_native_crash"):
+        summary["retried_native_crash"] = True
+        summary["initial_exit_code"] = worker.get("initial_exit_code")
+    return summary
 
 
 def _build_parallel_report(
@@ -28036,6 +28081,13 @@ def _build_parallel_report(
         ),
         "worker_crash": any(bool(worker.get("crashed")) for worker in worker_meta),
         "native_crash": any(bool(worker.get("native_crash")) for worker in worker_meta),
+        "native_crash_retries": sum(
+            1 for worker in worker_meta if worker.get("retried_native_crash")
+        ),
+        "native_crash_recovered": any(
+            worker.get("retried_native_crash") and _worker_report_is_structurally_valid(worker)
+            for worker in worker_meta
+        ),
         "completed": sum(1 for item in ordered_results if str(item.get("check")) in expected_names),
         "profile": "fast",
         "jobs": jobs,
@@ -28092,6 +28144,15 @@ def _run_parallel_profile(
             shard_count=shard_count,
             quiet=quiet,
         )
+
+    _retry_native_crash_workers(
+        worker_meta,
+        shard_count=shard_count,
+        deadline_monotonic=deadline_monotonic,
+        temp_root=temp_root,
+        quiet=quiet,
+    )
+    results = _parallel_results_from_workers(worker_meta)
 
     missing, duplicates, unexpected, infrastructure_failures = _parallel_coverage(
         expected_names,

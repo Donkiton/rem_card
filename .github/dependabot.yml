@@ -4,5 +4,16 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      pyinstaller-stack:
+        patterns:
+          - "pyinstaller"
+          - "pyinstaller-hooks-contrib"
+      routine-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
     commit-message:
       prefix: "Обновить зависимость "

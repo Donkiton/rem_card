@@ -343,7 +343,10 @@ def test_visible_operblock_icon_io_is_async_and_deduplicated(qapp):
         )
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         assert immediate.isNull()
-        assert elapsed_ms < 50.0
+        # The worker is held below for three seconds, so returning within one
+        # second still proves that the UI path is asynchronous while allowing
+        # for startup jitter on a busy CI runner.
+        assert elapsed_ms < 1000.0
         assert metadata_started.wait(3.0)
 
         operblock_icon_settings.request_operblock_icon_pixmap(
