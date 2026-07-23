@@ -323,6 +323,11 @@ def test_regular_release_emits_progress_for_all_pipeline_stages(
     monkeypatch.setattr(build_release, "run_build", lambda _root: package_dir)
     monkeypatch.setattr(build_release, "validate_full_package", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(build_release, "run_compiled_smoke", lambda _package: None)
+    monkeypatch.setattr(
+        build_release,
+        "ensure_release_branch_pushable",
+        lambda _root, *, phase: ("main15.07", source_commit),
+    )
     monkeypatch.setattr(build_release, "push_current_branch", lambda _root: source_commit)
     monkeypatch.setattr(
         build_release,
@@ -358,3 +363,82 @@ def test_regular_release_emits_progress_for_all_pipeline_stages(
         if event["stage"] == "publish" and event["status"] == "completed"
     )
     assert publish_completed["path"] == str(published_dir.resolve())
+
+
+def test_release_preflight_accepts_when_remote_is_local_ancestor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    local_commit = "b" * 40
+    remote_commit = "a" * 40
+    monkeypatch.setattr(build_release, "current_branch", lambda _root: "main15.07")
+    monkeypatch.setattr(build_release, "head_commit", lambda _root: local_commit)
+    monkeypatch.setattr(
+        build_release,
+        "fetch_origin_branch_head",
+        lambda _root, _branch: remote_commit,
+    )
+    monkeypatch.setattr(
+        build_release,
+        "commit_is_ancestor",
+        lambda _root, ancestor, descendant: (ancestor, descendant) == (remote_commit, local_commit),
+    )
+
+    assert build_release.ensure_release_branch_pushable(
+        tmp_path,
+        phase="до начала release-сборки",
+    ) == ("main15.07", local_commit)
+
+
+def test_release_preflight_rejects_remote_changes_before_long_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    local_commit = "a" * 40
+    remote_commit = "b" * 40
+    monkeypatch.setattr(build_release, "current_branch", lambda _root: "main15.07")
+    monkeypatch.setattr(build_release, "head_commit", lambda _root: local_commit)
+    monkeypatch.setattr(
+        build_release,
+        "fetch_origin_branch_head",
+        lambda _root, _branch: remote_commit,
+    )
+    monkeypatch.setattr(build_release, "commit_is_ancestor", lambda *_args: False)
+
+    with pytest.raises(RuntimeError, match="origin/main15.07 изменился") as exc_info:
+        build_release.ensure_release_branch_pushable(
+            tmp_path,
+            phase="до начала release-сборки",
+        )
+
+    message = str(exc_info.value)
+    assert remote_commit[:12] in message
+    assert local_commit[:12] in message
+    assert "git pull --rebase origin main15.07" in message
+    assert "повторно запустите полную сборку" in message
+
+
+def test_push_reports_github_rejection_without_raw_called_process_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    local_commit = "c" * 40
+    monkeypatch.setattr(
+        build_release,
+        "ensure_release_branch_pushable",
+        lambda _root, *, phase: ("main15.07", local_commit),
+    )
+
+    def reject_push(*_args, **_kwargs):
+        raise build_release.subprocess.CalledProcessError(
+            1,
+            ["git", "push", "origin", "main15.07"],
+            stderr="remote: branch protection rejected the push",
+        )
+
+    monkeypatch.setattr(build_release, "run", reject_push)
+
+    with pytest.raises(RuntimeError, match="GitHub отклонил push") as exc_info:
+        build_release.push_current_branch(tmp_path)
+
+    assert "branch protection rejected the push" in str(exc_info.value)

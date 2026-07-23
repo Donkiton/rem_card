@@ -199,6 +199,87 @@ def head_commit(root: Path) -> str:
     return commit
 
 
+def current_branch(root: Path) -> str:
+    branch = git_output(root, ["branch", "--show-current"])
+    if not branch:
+        raise RuntimeError("Не удалось определить текущую git-ветку.")
+    return branch
+
+
+def fetch_origin_branch_head(root: Path, branch: str) -> str:
+    remote_ref = f"refs/heads/{branch}"
+    result = run(
+        ["git", "ls-remote", "--heads", "origin", remote_ref],
+        cwd=root,
+        check=False,
+        capture=True,
+    )
+    if result.returncode != 0:
+        details = "\n".join(
+            value.strip()
+            for value in (str(result.stdout or ""), str(result.stderr or ""))
+            if value and value.strip()
+        )
+        suffix = f"\n{details}" if details else ""
+        raise RuntimeError(f"Не удалось проверить origin/{branch}.{suffix}")
+
+    remote_commit = ""
+    for line in str(result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == remote_ref:
+            remote_commit = parts[0]
+            break
+    if not remote_commit:
+        return ""
+
+    fetch_result = run(
+        [
+            "git",
+            "fetch",
+            "--quiet",
+            "origin",
+            f"+{remote_ref}:refs/remotes/origin/{branch}",
+        ],
+        cwd=root,
+        check=False,
+        capture=True,
+    )
+    if fetch_result.returncode != 0:
+        details = "\n".join(
+            value.strip()
+            for value in (str(fetch_result.stdout or ""), str(fetch_result.stderr or ""))
+            if value and value.strip()
+        )
+        suffix = f"\n{details}" if details else ""
+        raise RuntimeError(f"Не удалось обновить origin/{branch}.{suffix}")
+    return git_output(root, ["rev-parse", f"refs/remotes/origin/{branch}"])
+
+
+def commit_is_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
+    result = run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=root,
+        check=False,
+        capture=True,
+    )
+    return result.returncode == 0
+
+
+def ensure_release_branch_pushable(root: Path, *, phase: str) -> tuple[str, str]:
+    branch = current_branch(root)
+    local_commit = head_commit(root)
+    remote_commit = fetch_origin_branch_head(root, branch)
+    if not remote_commit or commit_is_ancestor(root, remote_commit, local_commit):
+        return branch, local_commit
+
+    raise RuntimeError(
+        f"origin/{branch} изменился {phase}: удалённый коммит "
+        f"{remote_commit[:12]} отсутствует в локальном HEAD {local_commit[:12]}. "
+        "Публиковать уже собранные EXE нельзя, потому что они не соответствовали бы git-коммиту. "
+        f"Выполните `git pull --rebase origin {branch}` и повторно запустите полную сборку."
+    )
+
+
 def collect_commit_subjects(root: Path, since_commit: str) -> list[str]:
     raw = git_output(root, ["log", "--reverse", "--format=%s", f"{since_commit}..HEAD"])
     subjects: list[str] = []
@@ -460,11 +541,26 @@ def commit_release(root: Path, version: str) -> None:
 
 
 def push_current_branch(root: Path) -> str:
-    branch = git_output(root, ["branch", "--show-current"])
-    if not branch:
-        raise RuntimeError("Не удалось определить текущую ветку для push.")
-    run(["git", "push", "origin", branch], cwd=root)
-    local_commit = head_commit(root)
+    branch, local_commit = ensure_release_branch_pushable(
+        root,
+        phase="во время release-сборки",
+    )
+    try:
+        run(["git", "push", "origin", branch], cwd=root, capture=True)
+    except subprocess.CalledProcessError as exc:
+        try:
+            ensure_release_branch_pushable(root, phase="непосредственно перед git push")
+        except RuntimeError as remote_exc:
+            raise remote_exc from exc
+        details = "\n".join(
+            value.strip()
+            for value in (str(exc.stdout or ""), str(exc.stderr or ""))
+            if value and value.strip()
+        )
+        suffix = f"\n{details}" if details else ""
+        raise RuntimeError(
+            f"GitHub отклонил push в origin/{branch}. Проверьте права доступа и правила ветки.{suffix}"
+        ) from exc
     remote_ref = f"refs/heads/{branch}"
     raw_remote = git_output(root, ["ls-remote", "--heads", "origin", remote_ref])
     remote_commit = ""
@@ -1220,6 +1316,11 @@ def finish_release(root: Path, version: str, args: argparse.Namespace) -> None:
             message="Обязательные проверки пройдены.",
         )
         ensure_clean_tree(root)
+        if not args.test_worktree and not args.no_commit:
+            ensure_release_branch_pushable(
+                root,
+                phase="до начала release-сборки",
+            )
         emit_progress(
             args,
             stage="build",
@@ -1484,6 +1585,12 @@ def main(argv: list[str] | None = None) -> int:
             build_test_worktree(root, args)
             return 0
 
+        ensure_clean_tree(root)
+        if not args.no_commit:
+            ensure_release_branch_pushable(
+                root,
+                phase="до подготовки release-коммита",
+            )
         if not args.no_commit:
             cleanup_build_artifacts(root)
         ensure_clean_tree(root)
