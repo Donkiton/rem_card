@@ -3,10 +3,10 @@ name: Tests
 on:
   pull_request:
     branches:
-      - main15.07
+      - main
   push:
     branches:
-      - main15.07
+      - main
   workflow_dispatch:
 
 permissions:
