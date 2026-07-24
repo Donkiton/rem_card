@@ -350,6 +350,29 @@ def mark_operblock_write_failed(
     )
 
 
+def mark_operblock_write_outcome_unknown(
+    *,
+    operation_uuid: str | None,
+    description: str,
+    error: Exception | str,
+    phase: str = "",
+    root: str | None = None,
+) -> None:
+    if not operation_uuid:
+        return
+    append_shadow_journal(
+        {
+            "event": "opblock_write_outcome_unknown",
+            "operation_uuid": str(operation_uuid or ""),
+            "description": str(description or ""),
+            "remote_commit_state": "unknown",
+            "phase": str(phase or ""),
+            "error": str(error),
+        },
+        root=root,
+    )
+
+
 def _connect_local_readonly(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(
         build_sqlite_file_uri(db_path, mode="ro"),

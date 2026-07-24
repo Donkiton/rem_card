@@ -30,12 +30,18 @@ from rem_card.app.db_availability import (
     is_database_unavailable_error,
     notify_database_unavailable,
 )
+from rem_card.app.client_identity import get_client_id
 from rem_card.app.foreground_activity import foreground_activity_snapshot, should_defer_background_io
 from rem_card.app.logger import logger
 from rem_card.app.local_replica_sync import LocalReplicaSync
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.network_maintenance import find_active_network_sessions, network_maintenance_lock
+from rem_card.app.network_write_worker import (
+    DEFAULT_NETWORK_WRITE_TIMEOUT_SEC,
+    NetworkWriteWorkerClient,
+    NetworkWriteWorkerTimeout,
+)
 from rem_card.app.paths import (
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
@@ -141,6 +147,26 @@ OUTBOX_HEALTH_LOG_INTERVAL_SEC = max(
 OUTBOX_HEALTH_WARN_PENDING = max(
     1,
     int(os.environ.get("REMCARD_OUTBOX_HEALTH_WARN_PENDING", "40")),
+)
+NETWORK_WRITE_WORKER_ENABLED = os.environ.get("REMCARD_NETWORK_WRITE_WORKER", "1") != "0"
+NETWORK_WRITE_WORKER_TIMEOUT_SEC = max(
+    5.0,
+    min(
+        15.0,
+        float(
+            os.environ.get(
+                "REMCARD_NETWORK_WRITE_WORKER_TIMEOUT_SEC",
+                str(DEFAULT_NETWORK_WRITE_TIMEOUT_SEC),
+            )
+        ),
+    ),
+)
+NETWORK_WRITE_LOCAL_COORDINATION_TIMEOUT_SEC = max(
+    0.1,
+    min(
+        2.0,
+        float(os.environ.get("REMCARD_NETWORK_WRITE_LOCAL_COORDINATION_TIMEOUT_SEC", "0.5")),
+    ),
 )
 DEFERRED_WRITE_FALLBACK_ENABLED = os.environ.get("REMCARD_DEFERRED_WRITE_FALLBACK", "0") == "1"
 READ_LOCK_RETRIES = 2
@@ -280,7 +306,13 @@ class DatabaseManager:
         self._outbox_stop_evt = threading.Event()
         self._outbox_wakeup_evt = threading.Event()
         self._outbox_thread: Optional[threading.Thread] = None
-        self._node_id = f"{socket.gethostname()}:{os.getpid()}:rem_card"
+        try:
+            self._client_id = get_client_id()
+        except Exception as exc:
+            self._client_id = f"legacy-{socket.gethostname().lower()}"
+            logger.warning("Stable client identity is unavailable; using host fallback: %s", exc)
+        self._node_id = f"{self._client_id}:rem_card"
+        self._network_write_worker: NetworkWriteWorkerClient | None = None
         self._prefer_central_reads_until = 0.0
         self._outbox_health_log_interval_sec = OUTBOX_HEALTH_LOG_INTERVAL_SEC
         self._outbox_health_warn_pending = OUTBOX_HEALTH_WARN_PENDING
@@ -1901,8 +1933,10 @@ class DatabaseManager:
     @contextmanager
     def write_metadata_context(self, metadata: dict[str, Any] | None):
         previous = getattr(self._thread_state, "write_metadata", None)
+        previous_counter = getattr(self._thread_state, "isolated_write_counter", None)
         if metadata:
             self._thread_state.write_metadata = dict(metadata)
+            self._thread_state.isolated_write_counter = 0
         try:
             yield
         finally:
@@ -1913,10 +1947,124 @@ class DatabaseManager:
                     pass
             else:
                 self._thread_state.write_metadata = previous
+            if previous_counter is None:
+                try:
+                    delattr(self._thread_state, "isolated_write_counter")
+                except AttributeError:
+                    pass
+            else:
+                self._thread_state.isolated_write_counter = previous_counter
 
     def _current_thread_write_metadata(self) -> dict[str, Any]:
         metadata = getattr(self._thread_state, "write_metadata", None)
         return dict(metadata or {}) if isinstance(metadata, dict) else {}
+
+    def _isolated_operation_id(self, metadata: dict[str, Any]) -> str:
+        root_id = str(metadata.get("operation_id") or "").strip()
+        if not root_id:
+            return ""
+        counter = int(getattr(self._thread_state, "isolated_write_counter", 0) or 0) + 1
+        self._thread_state.isolated_write_counter = counter
+        return root_id if counter == 1 else f"{root_id}:{counter}"
+
+    def _should_use_network_write_worker(self, metadata: dict[str, Any]) -> bool:
+        if not NETWORK_WRITE_WORKER_ENABLED:
+            return False
+        if not bool(metadata.get("isolated_worker")):
+            return False
+        if str(getattr(self.runtime_context, "mode", "") or "") != "network":
+            return False
+        return bool(str(metadata.get("operation_id") or "").strip())
+
+    def _network_write_worker_client(self) -> NetworkWriteWorkerClient:
+        client = self._network_write_worker
+        if client is None:
+            client = NetworkWriteWorkerClient(
+                db_path=self.db_path,
+                lock_path=self.medical_db_lock_path,
+                node_id=self._node_id,
+                timeout_sec=NETWORK_WRITE_WORKER_TIMEOUT_SEC,
+            )
+            self._network_write_worker = client
+        return client
+
+    def _after_isolated_write_committed(self) -> None:
+        self._prefer_central_reads_until = time.time() + LOCAL_READ_AFTER_WRITE_GRACE_SEC
+        if self._local_replica:
+            self._local_replica.trigger_fast_sync()
+
+    def _run_isolated_network_write(
+        self,
+        operation: Callable[[Any], Any],
+        *,
+        source: str,
+        metadata: dict[str, Any],
+    ) -> Any:
+        operation_id = self._isolated_operation_id(metadata)
+        timeout_ms = metadata.get("timeout_ms")
+        try:
+            timeout_sec = float(timeout_ms) / 1000.0 if timeout_ms is not None else NETWORK_WRITE_WORKER_TIMEOUT_SEC
+        except (TypeError, ValueError):
+            timeout_sec = NETWORK_WRITE_WORKER_TIMEOUT_SEC
+        timeout_sec = max(5.0, min(NETWORK_WRITE_WORKER_TIMEOUT_SEC, timeout_sec))
+        started = time.perf_counter()
+        local_lock_acquired = self._central_io_lock.acquire(
+            timeout=min(NETWORK_WRITE_LOCAL_COORDINATION_TIMEOUT_SEC, timeout_sec),
+        )
+        if not local_lock_acquired:
+            record_metric(
+                "network_write_worker_timeout",
+                1,
+                operation_id=operation_id,
+                request_id=str(metadata.get("request_id") or ""),
+                operation_name=str(source or ""),
+                source=str(source or ""),
+                phase="local_coordination",
+                outcome_unknown=False,
+                timeout_sec=timeout_sec,
+            )
+            raise NetworkWriteWorkerTimeout(
+                operation_id=operation_id,
+                source=source,
+                timeout_sec=timeout_sec,
+                phase="local_coordination",
+                outcome_unknown=False,
+            )
+        self._central_io_lock.release()
+        try:
+            result = self._network_write_worker_client().execute(
+                operation,
+                operation_id=operation_id,
+                source=source,
+                metadata=metadata,
+                timeout_sec=timeout_sec,
+            )
+        except NetworkWriteWorkerTimeout as exc:
+            record_metric(
+                "network_write_worker_timeout",
+                1,
+                force_flush=True,
+                operation_id=operation_id,
+                request_id=str(metadata.get("request_id") or ""),
+                operation_name=str(source or ""),
+                source=str(source or ""),
+                phase=exc.phase,
+                outcome_unknown=bool(exc.outcome_unknown),
+                timeout_sec=timeout_sec,
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            )
+            raise
+        self._after_isolated_write_committed()
+        record_metric(
+            "network_write_worker_duration_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            operation_id=operation_id,
+            request_id=str(metadata.get("request_id") or ""),
+            operation_name=str(source or ""),
+            source=str(source or ""),
+            result="committed",
+        )
+        return result
 
     def _readonly_db_uri(self) -> str:
         return build_sqlite_file_uri(self.db_path, mode="ro")
@@ -2659,6 +2807,13 @@ class DatabaseManager:
         source: str = "write_operation",
         write_options: Optional[dict[str, Any]] = None,
     ):
+        effective_metadata = dict(write_options or self._current_thread_write_metadata())
+        if self._should_use_network_write_worker(effective_metadata):
+            return self._run_isolated_network_write(
+                operation,
+                source=source,
+                metadata=effective_metadata,
+            )
         with self.remcard_transaction(source=source, write_options=write_options) as cursor:
             return operation(cursor)
 
@@ -3010,6 +3165,9 @@ class DatabaseManager:
 
             self._stop_outbox_replay()
             self._stop_local_replica_sync()
+            if self._network_write_worker is not None:
+                self._network_write_worker.close()
+                self._network_write_worker = None
 
             logger.info("Database shutdown acquiring central IO lock timeout_sec=%.1f", io_timeout_sec)
             io_lock_acquired = self._central_io_lock.acquire(timeout=io_timeout_sec)
