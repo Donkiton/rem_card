@@ -4,6 +4,7 @@ from ..data.dao.patient_status_dao import PatientStatusDAO
 from ..data.dto.remcard_dto import PatientStatus, PatientStatusEventDTO
 from .ventilation_service import VentilationService
 from rem_card.app.logger import logger
+from rem_card.services.operblock_handoff_service import OperBlockHandoffService
 
 class PatientStatusService:
     def __init__(
@@ -16,6 +17,7 @@ class PatientStatusService:
     ):
         self.status_dao = status_dao
         self.data_service = data_service
+        self.operblock_handoff_service = OperBlockHandoffService(status_dao.db)
         if ventilation_service is not None:
             self.ventilation_service = ventilation_service
         elif ventilation_dao is not None:
@@ -29,15 +31,25 @@ class PatientStatusService:
                       expected_active_event_id: Optional[int] = None,
                       expected_active_revision: Optional[int] = None) -> bool:
         """РЎРјРµРЅР° СЃС‚Р°С‚СѓСЃР° РїР°С†РёРµРЅС‚Р°."""
-        ok = self.status_dao.change_status(
-            admission_id,
-            new_status,
-            reason_type,
-            reason_text,
-            user_id,
-            expected_active_event_id=expected_active_event_id,
-            expected_active_revision=expected_active_revision,
-        )
+        if new_status == PatientStatus.OR and self.operblock_handoff_service.is_available():
+            result = self.operblock_handoff_service.dispatch_from_rao(
+                admission_id,
+                reason_text=str(reason_text or ""),
+                user_id=user_id,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+            )
+            ok = bool(result)
+        else:
+            ok = self.status_dao.change_status(
+                admission_id,
+                new_status,
+                reason_type,
+                reason_text,
+                user_id,
+                expected_active_event_id=expected_active_event_id,
+                expected_active_revision=expected_active_revision,
+            )
         if ok:
             self._sync_ventilation_for_admission(admission_id)
         return ok

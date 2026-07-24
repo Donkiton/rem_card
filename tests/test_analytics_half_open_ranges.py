@@ -374,3 +374,42 @@ def test_multi_db_snapshot_filters_with_half_open_boundary(tmp_path: Path):
         assert [int(row[0]) for row in rows] == [1]
     finally:
         manager.close_connection()
+
+
+def test_multi_db_snapshot_excludes_soft_merged_admissions(tmp_path: Path):
+    db_path = tmp_path / "analytics_merged.sqlite"
+    source = sqlite3.connect(db_path)
+    try:
+        source.execute(
+            """
+            CREATE TABLE admissions (
+                id INTEGER PRIMARY KEY,
+                admission_datetime TEXT,
+                merged_into_admission_id INTEGER
+            )
+            """
+        )
+        source.executemany(
+            """
+            INSERT INTO admissions (id, admission_datetime, merged_into_admission_id)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (1, "2026-07-12 10:00:00", None),
+                (2, "2026-07-12 11:00:00", 1),
+            ],
+        )
+        source.commit()
+    finally:
+        source.close()
+
+    manager = create_multi_db_analytics_manager(
+        [str(db_path)],
+        start_dt="2026-07-12",
+        end_dt="2026-07-12",
+    )
+    try:
+        rows = manager.get_connection().execute("SELECT id FROM admissions").fetchall()
+        assert [int(row[0]) for row in rows] == [1]
+    finally:
+        manager.close_connection()

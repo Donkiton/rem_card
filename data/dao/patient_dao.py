@@ -594,6 +594,7 @@ class PatientDAO:
             "emergency_notice_entered_at",
             "unit_scope",
             "admission_type",
+            "merged_into_admission_id",
         }
 
         def p_col(name: str) -> str:
@@ -651,6 +652,8 @@ class PatientDAO:
             where_parts.append("LOWER(TRIM(COALESCE(a.unit_scope, ''))) <> 'operblock'")
         if "admission_type" in admission_columns:
             where_parts.append("LOWER(TRIM(COALESCE(a.admission_type, ''))) <> 'operblock'")
+        if "merged_into_admission_id" in admission_columns:
+            where_parts.append("a.merged_into_admission_id IS NULL")
         if has_operation_cases_table:
             where_parts.append(
                 "NOT EXISTS (SELECT 1 FROM operation_cases oc WHERE oc.admission_id = a.id)"

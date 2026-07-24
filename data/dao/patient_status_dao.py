@@ -634,7 +634,11 @@ class PatientStatusDAO:
                 
                 # 2. Ищем текущее активное событие
                 cursor.execute(
-                    "SELECT id, status, COALESCE(revision, 0) AS revision FROM patient_status_events WHERE admission_id = ? AND end_time IS NULL",
+                    """
+                    SELECT id, status, start_time, COALESCE(revision, 0) AS revision
+                    FROM patient_status_events
+                    WHERE admission_id = ? AND end_time IS NULL
+                    """,
                     (admission_id,)
                 )
                 current_active = cursor.fetchone()
@@ -647,6 +651,12 @@ class PatientStatusDAO:
                     if old_status == new_status.value:
                         logger.debug(f"[StatusDAO] Status for admission {admission_id} is already {old_status}. No change needed.")
                         return True # Статус уже такой, ничего не меняем
+                    active_start = self._parse_sqlite_dt(str(current_active["start_time"] or ""))
+                    if active_start is not None and active_start > datetime.now():
+                        raise DataConflictError(
+                            "Движение уже обновлено оперблоком и начнётся "
+                            f"{active_start.strftime('%d.%m.%Y в %H:%M')}. Обновите вкладку движения."
+                        )
                     
                     # Закрываем старое событие
                     cursor.execute(
@@ -675,6 +685,23 @@ class PatientStatusDAO:
                     admission_id, new_status.value, reason_type, reason_text, 
                     now_str, user_id, now_str, now_str
                 ))
+                if new_status != PatientStatus.OR:
+                    handoff_table = cursor.execute(
+                        """
+                        SELECT 1
+                        FROM sqlite_master
+                        WHERE type = 'table' AND name = 'operblock_handoffs'
+                        LIMIT 1
+                        """
+                    ).fetchone()
+                    if handoff_table:
+                        from rem_card.services.operblock_handoff_service import OperBlockHandoffService
+
+                        OperBlockHandoffService.mark_cancelled_for_status_change(
+                            cursor,
+                            admission_id,
+                            actor=user_id,
+                        )
                 
                 # При смене статуса на DEAD/TRANSFERRED мы НЕ трогаем is_active, 
                 # так как за список коек (W1) отвечает Журнал.
@@ -867,6 +894,22 @@ class PatientStatusDAO:
                         user_id,
                     ),
                 )
+                handoff_table = cursor.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table' AND name = 'operblock_handoffs'
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if handoff_table:
+                    from rem_card.services.operblock_handoff_service import OperBlockHandoffService
+
+                    OperBlockHandoffService.mark_cancelled_for_status_change(
+                        cursor,
+                        admission_id,
+                        actor=user_id,
+                    )
 
                 if new_status == PatientStatus.TRANSFERRED:
                     cursor.execute(
@@ -1451,6 +1494,22 @@ class PatientStatusDAO:
                         """,
                         (now_str, prev['id'])
                     )
+                    if current_status == PatientStatus.OR.value:
+                        handoff_table = cursor.execute(
+                            """
+                            SELECT 1 FROM sqlite_master
+                            WHERE type = 'table' AND name = 'operblock_handoffs'
+                            LIMIT 1
+                            """
+                        ).fetchone()
+                        if handoff_table:
+                            from rem_card.services.operblock_handoff_service import OperBlockHandoffService
+
+                            OperBlockHandoffService.mark_cancelled_for_status_change(
+                                cursor,
+                                admission_id,
+                                actor="ROLLBACK",
+                            )
 
                     if should_restore_bed:
                         cursor.execute(
