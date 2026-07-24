@@ -3,9 +3,7 @@ name: Автослияние Dependabot
 on:
   pull_request:
     types:
-      - opened
-      - reopened
-      - synchronize
+      - labeled
 
 permissions:
   contents: write
@@ -14,6 +12,7 @@ permissions:
 jobs:
   enable-auto-merge:
     if: >-
+      github.event.label.name == 'dependabot-automerge' &&
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.repository == 'Donkiton/rem_card' &&
       startsWith(github.head_ref, 'dependabot/pip/routine-updates-')

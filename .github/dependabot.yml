@@ -4,6 +4,9 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    labels:
+      - "dependencies"
+      - "dependabot-automerge"
     groups:
       pyinstaller-stack:
         patterns:
