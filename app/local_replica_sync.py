@@ -129,6 +129,8 @@ class LocalReplicaSync:
         with self._lock:
             if self._local_conn is None or self.last_sync_ok_ts <= 0:
                 return False
+            if self.consecutive_failures > 0 or self.last_sync_error is not None:
+                return False
             age_sec = max(0.0, time.time() - self.last_sync_ok_ts)
             return age_sec <= max(1.0, float(max_stale_sec))
 

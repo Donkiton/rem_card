@@ -190,7 +190,7 @@ class NetworkWriteOutcomeHandlingTest(unittest.TestCase):
             )
         )
 
-    def test_repeated_replica_timeout_starts_network_outage_transition(self):
+    def test_repeated_replica_timeout_keeps_central_runtime_active(self):
         harness = _failure_harness()
         harness._shutting_down = False
         harness._network_outage_detected = False
@@ -199,22 +199,26 @@ class NetworkWriteOutcomeHandlingTest(unittest.TestCase):
             harness,
         )
 
-        DataService._handle_local_replica_sync_failure(
-            harness,
-            {
-                "consecutive_failures": 2,
-                "last_sync_error": (
-                    "Обновление локальной реплики превысило безопасный "
-                    "тайм-аут 6.0 с."
-                ),
-                "last_sync_error_class": "LocalReplicaWorkerTimeout",
-            },
-        )
+        with patch("rem_card.services.data_service.record_metric") as metric:
+            DataService._handle_local_replica_sync_failure(
+                harness,
+                {
+                    "consecutive_failures": 2,
+                    "last_sync_error": (
+                        "Обновление локальной реплики превысило безопасный "
+                        "тайм-аут 6.0 с."
+                    ),
+                    "last_sync_error_class": "LocalReplicaWorkerTimeout",
+                },
+            )
 
-        self.assertIsNotNone(harness.blocked_info)
+        self.assertIsNone(harness.blocked_info)
+        self.assertEqual(harness._last_failure_category, "")
+        self.assertEqual(harness.network_outage_detected.values, [])
+        metric.assert_called_once()
         self.assertEqual(
-            harness.blocked_info["source"],
-            "local_replica_sync",
+            metric.call_args.args[0],
+            "local_replica_failure_did_not_trigger_network_outage",
         )
 
     def test_replica_schema_error_does_not_start_network_outage(self):

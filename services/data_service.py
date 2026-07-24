@@ -107,26 +107,29 @@ class DataService(QObject):
         if self._shutting_down or self._network_outage_detected:
             return
         payload = dict(snapshot or {})
-        if int(payload.get("consecutive_failures") or 0) < 2:
+        failure_count = int(payload.get("consecutive_failures") or 0)
+        if failure_count != 2:
             return
+        # Локальная реплика — необязательный кэш чтения. Только прямая ошибка
+        # центральной БД может переводить работающую программу в аварийный режим.
         error = str(payload.get("last_sync_error") or "")
         error_class = str(payload.get("last_sync_error_class") or "")
-        category = classify_database_access_error(RuntimeError(error))
-        if error_class in {
-            "LocalReplicaWorkerTimeout",
-            "FileNotFoundError",
-            "PermissionError",
-            "OSError",
-        }:
-            category = "network_unavailable"
-        if not runtime_outage_transition_allowed(category):
-            return
-        self._handle_database_access_failure(
-            OSError(
-                "Сетевая база недоступна при обновлении локальной реплики: "
-                f"{error or error_class or 'неизвестная ошибка'}"
+        record_metric(
+            "local_replica_failure_did_not_trigger_network_outage",
+            1,
+            force_flush=True,
+            error_class=error_class or "unknown",
+            consecutive_failures=failure_count,
+            error_message_sanitized=_sanitize_diagnostic_message(
+                RuntimeError(error or error_class or "неизвестная ошибка")
             ),
-            source="local_replica_sync",
+        )
+        logger.warning(
+            "Local replica is degraded after %s consecutive failures; "
+            "keeping central database runtime active until a direct central "
+            "access failure is observed: %s",
+            failure_count,
+            error or error_class or "unknown error",
         )
 
     def get_data_version(self) -> int:
