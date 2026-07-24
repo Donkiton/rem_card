@@ -92,6 +92,14 @@ class _BlockingWorkerClient:
         self.release.set()
 
 
+class _FailingWorkerClient:
+    def sync(self, **_kwargs):
+        raise LocalReplicaWorkerTimeout(0.3)
+
+    def close(self):
+        pass
+
+
 class LocalReplicaSyncTest(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
@@ -197,6 +205,34 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.2)
         self.assertFalse(temp_path.exists())
         self.assertFalse(Path(f"{temp_path}-wal").exists())
+
+    def test_failed_sync_disables_local_reads_until_replica_recovers(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            sync_interval_sec=60.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+        self.assertTrue(self.replica.is_ready(max_stale_sec=10.0))
+
+        self.replica._worker_client.close()
+        self.replica._worker_client = _FailingWorkerClient()
+        self.assertFalse(self.replica.sync_once())
+
+        self.assertFalse(self.replica.is_ready(max_stale_sec=10.0))
+        health = self.replica.health_snapshot()
+        self.assertEqual(health["consecutive_failures"], 1)
+        self.assertEqual(
+            health["last_sync_error_class"],
+            "LocalReplicaWorkerTimeout",
+        )
+
+        self.replica._worker_client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            timeout_sec=2.0,
+        )
+        self.assertTrue(self.replica.sync_once())
+        self.assertTrue(self.replica.is_ready(max_stale_sec=10.0))
 
     def test_snapshot_and_database_rotation_use_the_same_lock(self):
         rotation_lock_path = self.root / "db_rotation.lock"
