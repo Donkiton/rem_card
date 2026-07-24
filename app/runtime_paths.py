@@ -31,6 +31,8 @@ DEV_EXISTING_BAZA_ONLY_ENV = "REMCARD_DEV_EXISTING_BAZA_ONLY"
 DATA_PATH_CONFIG_NAME = "remcard_data_path.json"
 LOCAL_LOG_RETENTION_DAYS = 30
 CRASH_REPORT_RETENTION_DAYS = 180
+RUNTIME_LOG_MIGRATION_MARKER_NAME = "migration-v1.json"
+RUNTIME_LOG_LOCATION_MARKER_NAME = "log_location.json"
 
 
 def _startup_path_validation_ttl_sec() -> float:
@@ -44,6 +46,8 @@ def _startup_path_validation_ttl_sec() -> float:
 STARTUP_PATH_VALIDATION_TTL_SEC = _startup_path_validation_ttl_sec()
 _STARTUP_PATH_VALIDATION_LOCK = threading.Lock()
 _STARTUP_PATH_VALIDATION: dict[str, object] | None = None
+_RUNTIME_LOG_LOCATION_LOCK = threading.Lock()
+_RUNTIME_LOG_LOCATION_CACHE: tuple[tuple[str, ...], str] | None = None
 
 REQUIRED_BAZA_DIRS = (
     "archiv",
@@ -692,11 +696,196 @@ def resolve_baza_dir() -> str:
 
 
 def get_runtime_logs_dir() -> str:
-    """Return the local-first log directory that stays available without Baza."""
+    """Return the preferred local log directory without touching Baza."""
     override = os.environ.get("REMCARD_LOCAL_LOGS_DIR")
     if override:
         return os.path.abspath(override)
+    base_dir = get_executable_dir() if is_compiled() else get_dev_checkout_root()
+    return os.path.join(base_dir, "logs")
+
+
+def get_legacy_runtime_logs_dir() -> str:
+    """Return the AppData log directory used by releases before migration v1."""
     return os.path.join(_get_local_remcard_dir(), "logs")
+
+
+def get_legacy_crash_spool_dir() -> str:
+    """Return the AppData crash spool used by releases before migration v1."""
+    return os.path.join(_get_local_remcard_dir(), "crash-outbox")
+
+
+def get_runtime_log_directory_candidates() -> tuple[str, ...]:
+    """Return preferred and emergency fallback locations, in priority order."""
+    fallback = os.path.join(tempfile.gettempdir(), "RemCard", "logs")
+    candidates: list[str] = []
+    for raw_path in (get_runtime_logs_dir(), fallback):
+        normalized = os.path.abspath(raw_path)
+        if os.path.normcase(normalized) not in {
+            os.path.normcase(candidate) for candidate in candidates
+        }:
+            candidates.append(normalized)
+    return tuple(candidates)
+
+
+def _runtime_log_directory_is_writable(path: str) -> tuple[bool, str]:
+    probe_path = os.path.join(
+        path,
+        f".remcard-write-test-{os.getpid()}-{threading.get_ident()}",
+    )
+    try:
+        os.makedirs(path, exist_ok=True)
+        fd = os.open(probe_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        os.remove(probe_path)
+        return True, ""
+    except OSError as exc:
+        try:
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+        except OSError:
+            pass
+        return False, str(exc)
+
+
+def record_runtime_log_location(
+    effective_dir: str,
+    *,
+    preferred_dir: str | None = None,
+    fallback_reason: str = "",
+) -> None:
+    """Persist a small AppData pointer when logs had to leave the program folder."""
+    preferred = os.path.abspath(preferred_dir or get_runtime_logs_dir())
+    effective = os.path.abspath(effective_dir)
+    if os.path.normcase(preferred) == os.path.normcase(effective):
+        return
+    try:
+        _write_json_atomic(
+            os.path.join(_get_local_remcard_dir(), RUNTIME_LOG_LOCATION_MARKER_NAME),
+            {
+                "version": 1,
+                "status": "fallback",
+                "preferred_log_dir": preferred,
+                "effective_log_dir": effective,
+                "reason": str(fallback_reason or ""),
+                "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
+    except Exception:
+        pass
+
+
+def get_writable_runtime_logs_dir() -> str:
+    """Resolve a writable local log directory without resolving the database."""
+    global _RUNTIME_LOG_LOCATION_CACHE
+    candidates = get_runtime_log_directory_candidates()
+    cache_key = tuple(os.path.normcase(path) for path in candidates)
+    with _RUNTIME_LOG_LOCATION_LOCK:
+        if (
+            _RUNTIME_LOG_LOCATION_CACHE is not None
+            and _RUNTIME_LOG_LOCATION_CACHE[0] == cache_key
+        ):
+            return _RUNTIME_LOG_LOCATION_CACHE[1]
+
+        failures: list[str] = []
+        for candidate in candidates:
+            writable, reason = _runtime_log_directory_is_writable(candidate)
+            if not writable:
+                failures.append(f"{candidate}: {reason}")
+                continue
+            _RUNTIME_LOG_LOCATION_CACHE = (cache_key, candidate)
+            if candidate != candidates[0]:
+                record_runtime_log_location(
+                    candidate,
+                    preferred_dir=candidates[0],
+                    fallback_reason="; ".join(failures),
+                )
+            return candidate
+    raise OSError("Нет доступного локального каталога логов: " + "; ".join(failures))
+
+
+def _paths_are_same(left: str, right: str) -> bool:
+    return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+
+
+def _copy_directory_snapshot(source_dir: str, target_dir: str) -> tuple[int, list[str]]:
+    copied = 0
+    errors: list[str] = []
+    if not os.path.isdir(source_dir):
+        return copied, errors
+    for root, dir_names, file_names in os.walk(source_dir, followlinks=False):
+        dir_names[:] = [
+            name
+            for name in dir_names
+            if not os.path.islink(os.path.join(root, name))
+        ]
+        relative_root = os.path.relpath(root, source_dir)
+        for name in file_names:
+            source_path = os.path.join(root, name)
+            if os.path.islink(source_path):
+                continue
+            relative_path = name if relative_root == "." else os.path.join(relative_root, name)
+            target_path = os.path.join(target_dir, relative_path)
+            try:
+                _copy_file_atomic(source_path, target_path)
+                copied += 1
+            except Exception as exc:
+                errors.append(f"{source_path}: {exc}")
+    return copied, errors
+
+
+def migrate_legacy_runtime_logs(target_log_dir: str | None = None) -> dict[str, object]:
+    """
+    Copy legacy AppData logs into the visible program-local log tree.
+
+    Source files are intentionally retained for the first migration release.
+    The copied snapshot is forensic history; crash_reports separately imports
+    pending crash files into the active outbox.
+    """
+    target_root = os.path.abspath(target_log_dir or get_runtime_logs_dir())
+    legacy_logs = os.path.abspath(get_legacy_runtime_logs_dir())
+    legacy_crashes = os.path.abspath(get_legacy_crash_spool_dir())
+    migration_root = os.path.join(target_root, "migrated-appdata")
+    marker_path = os.path.join(migration_root, RUNTIME_LOG_MIGRATION_MARKER_NAME)
+    result: dict[str, object] = {
+        "copied": 0,
+        "errors": [],
+        "marker": marker_path,
+        "skipped": False,
+    }
+    if os.path.isfile(marker_path):
+        result["skipped"] = True
+        return result
+    if _paths_are_same(target_root, legacy_logs):
+        result["skipped"] = True
+        return result
+
+    copied_logs, log_errors = _copy_directory_snapshot(
+        legacy_logs,
+        os.path.join(migration_root, "logs"),
+    )
+    copied_crashes, crash_errors = _copy_directory_snapshot(
+        legacy_crashes,
+        os.path.join(migration_root, "crash-outbox"),
+    )
+    errors = [*log_errors, *crash_errors]
+    result["copied"] = copied_logs + copied_crashes
+    result["errors"] = errors
+    if errors:
+        return result
+    _write_json_atomic(
+        marker_path,
+        {
+            "version": 1,
+            "status": "copied" if result["copied"] else "no_legacy_data",
+            "copied_files": int(result["copied"]),
+            "legacy_logs_dir": legacy_logs,
+            "legacy_crash_spool_dir": legacy_crashes,
+            "target_log_dir": target_root,
+            "source_files_retained": True,
+            "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+    return result
 
 
 def get_log_file_prefix() -> str:

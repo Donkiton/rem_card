@@ -23,7 +23,9 @@ from rem_card.app.runtime_paths import (
     create_baza_structure_and_db,
     data_path_configuration_guard,
     get_runtime_logs_dir,
+    get_writable_runtime_logs_dir,
     is_compiled,
+    migrate_legacy_runtime_logs,
     read_configured_baza_dir,
     write_configured_baza_dir,
 )
@@ -362,8 +364,17 @@ def _apply_app_theme(app, role: Optional[str] = None):
 
 def _write_startup_local_log(message: str):
     try:
-        log_dir = get_runtime_logs_dir()
+        log_dir = get_writable_runtime_logs_dir()
         os.makedirs(log_dir, exist_ok=True)
+        if (
+            is_compiled()
+            and os.path.normcase(log_dir)
+            == os.path.normcase(os.path.abspath(get_runtime_logs_dir()))
+        ):
+            try:
+                migrate_legacy_runtime_logs(log_dir)
+            except Exception:
+                pass
         cleanup_old_local_logs(log_dir)
         path = os.path.join(log_dir, "startup.log")
         from datetime import datetime
