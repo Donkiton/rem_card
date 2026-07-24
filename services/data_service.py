@@ -92,9 +92,42 @@ class DataService(QObject):
         self._success_callback_requested.connect(self._dispatch_success_callback, Qt.QueuedConnection)
         self._error_callback_requested.connect(self._dispatch_error_callback, Qt.QueuedConnection)
         self._monitor.start()
+        if hasattr(self.db, "set_local_replica_failure_callback"):
+            self.db.set_local_replica_failure_callback(
+                self._handle_local_replica_sync_failure
+            )
 
     def set_runtime_role(self, role: str | None):
         self._runtime_role = str(role or "").strip().lower() or None
+
+    def _handle_local_replica_sync_failure(
+        self,
+        snapshot: dict[str, Any] | None,
+    ) -> None:
+        if self._shutting_down or self._network_outage_detected:
+            return
+        payload = dict(snapshot or {})
+        if int(payload.get("consecutive_failures") or 0) < 2:
+            return
+        error = str(payload.get("last_sync_error") or "")
+        error_class = str(payload.get("last_sync_error_class") or "")
+        category = classify_database_access_error(RuntimeError(error))
+        if error_class in {
+            "LocalReplicaWorkerTimeout",
+            "FileNotFoundError",
+            "PermissionError",
+            "OSError",
+        }:
+            category = "network_unavailable"
+        if not runtime_outage_transition_allowed(category):
+            return
+        self._handle_database_access_failure(
+            OSError(
+                "Сетевая база недоступна при обновлении локальной реплики: "
+                f"{error or error_class or 'неизвестная ошибка'}"
+            ),
+            source="local_replica_sync",
+        )
 
     def get_data_version(self) -> int:
         return self.db.get_data_version()

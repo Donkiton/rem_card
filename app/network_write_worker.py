@@ -494,6 +494,25 @@ class NetworkWriteWorkerClient:
         self._mutex = threading.Lock()
         self._process = None
         self._pipe = None
+        self.last_commit_info: dict[str, Any] = {}
+
+    @property
+    def last_affected_change_id(self) -> int:
+        affected_rows = self.last_commit_info.get("affected_rows") or []
+        return max(
+            (
+                int(row.get("change_id") or 0)
+                for row in affected_rows
+                if isinstance(row, Mapping)
+            ),
+            default=0,
+        )
+
+    def _remember_commit_info(
+        self,
+        payload: dict[str, Any] | None,
+    ) -> None:
+        self.last_commit_info = dict(payload or {})
 
     def _ensure_started(self) -> None:
         if self._process is not None and self._process.is_alive() and self._pipe is not None:
@@ -646,6 +665,7 @@ class NetworkWriteWorkerClient:
             effective_timeout / 3.0,
         )
         with self._mutex:
+            self._remember_commit_info({})
             try:
                 self._ensure_started()
                 begin = self._request(
@@ -664,6 +684,7 @@ class NetworkWriteWorkerClient:
                     phase="begin",
                 )
                 if begin.get("status") == "already_committed":
+                    self._remember_commit_info(begin)
                     return begin.get("result")
                 cursor = _RemoteCursor(self, work_deadline, operation_id, source)
                 try:
@@ -687,6 +708,7 @@ class NetworkWriteWorkerClient:
                     source=source,
                     phase="commit",
                 )
+                self._remember_commit_info(finish)
                 return result if finish.get("status") == "committed" else finish.get("result")
             except NetworkWriteWorkerTimeout as exc:
                 receipt = self._confirm_after_timeout(
@@ -695,6 +717,7 @@ class NetworkWriteWorkerClient:
                     deadline=total_deadline,
                 )
                 if receipt and not receipt.get("missing"):
+                    self._remember_commit_info(receipt)
                     return receipt.get("result")
                 raise NetworkWriteWorkerTimeout(
                     operation_id=operation_id,

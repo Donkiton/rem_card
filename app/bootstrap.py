@@ -323,7 +323,12 @@ def bootstrap(role: str | None = None, runtime_context=None) -> Container:
             print(f"[RUNTIME MODE] {runtime_mode}")
             print(f"[DB PATH] runtime medical -> {runtime_context.medical_db_path}")
 
-    db_manager = DatabaseManager(medical_db_path, remcard_db_path, runtime_context=runtime_context)
+    db_manager = DatabaseManager(
+        medical_db_path,
+        remcard_db_path,
+        runtime_context=runtime_context,
+        role=role,
+    )
     from rem_card.services.settings.settings_service import configure_settings_service, get_settings_service
 
     if runtime_context is not None:
