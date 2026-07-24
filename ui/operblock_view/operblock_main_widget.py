@@ -138,6 +138,10 @@ from rem_card.services.operblock_anesthesia_types import (
     normalize_operblock_anesthesia_type_label,
     save_operblock_anesthesia_types,
 )
+from rem_card.services.operblock_anesthesia_prep import (
+    invalidate_start_anesthesia_options_cache,
+    load_start_anesthesia_options,
+)
 from rem_card.services.operblock_team import (
     OPERBLOCK_TEAM_DEFAULT_POSITIONS,
     load_operblock_anesthesiologists,
@@ -3624,7 +3628,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
 
     def __init__(self, stages: list[dict], parent=None):
         super().__init__(
-            "Этапы операции",
+            "Этапы",
             "operation_stages_dialog_geometry",
             parent,
             minimum_size=(620, 380),
@@ -3686,7 +3690,10 @@ class OperationStagesDialog(OperBlockStyledDialog):
         )
         layout.addWidget(self.scroll, 1)
 
-        note_label = QLabel("Конец операции и конец пособия будут установлены автоматически.")
+        note_label = QLabel(
+            "Начало пособия и начало операции добавляются автоматически. "
+            "Конец операции и конец пособия также будут установлены автоматически."
+        )
         note_label.setWordWrap(True)
         note_label.setStyleSheet(
             f"font-size: 12px; color: {TEXT_SECONDARY}; background: transparent; border: none;"
@@ -3738,8 +3745,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
 
     @classmethod
     def _normalized_stage_rows(cls, stages: list[dict]) -> list[dict]:
-        auto_rows = []
-        custom_rows = []
+        rows = []
         seen_auto: set[str] = set()
         for item in stages or []:
             row = dict(item or {})
@@ -3753,13 +3759,12 @@ class OperationStagesDialog(OperBlockStyledDialog):
                     continue
                 row["readonly"] = True
                 seen_auto.add(kind)
-                auto_rows.append(row)
+                rows.append(row)
             elif kind == cls.CUSTOM_STAGE_KIND:
                 row["readonly"] = False
-                custom_rows.append(row)
-        auto_rows.sort(key=lambda row: 0 if row.get("kind") == "anesthesia_start" else 1)
-        custom_rows.sort(key=cls._stage_sort_key)
-        return auto_rows + custom_rows
+                rows.append(row)
+        rows.sort(key=cls._stage_sort_key)
+        return rows
 
     def set_stages(self, stages: list[dict]) -> None:
         self._rows = self._normalized_stage_rows(stages)
@@ -3914,7 +3919,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
             return
         label = self._clean_label(edit.text())
         if not label:
-            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
             edit.setFocus(Qt.OtherFocusReason)
             return
         button.setText("Сохранение...")
@@ -3943,7 +3948,7 @@ class OperationStagesDialog(OperBlockStyledDialog):
         edit = widgets.get("edit")
         label = self._clean_label(edit.text()) if edit is not None else self._stage_label(row)
         if not label and not is_new:
-            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
             if edit is not None:
                 edit.setFocus(Qt.OtherFocusReason)
             return
@@ -7846,11 +7851,7 @@ class OperBlockVitalsServiceAdapter:
         return self._operblock_service.add_vital_record(dto, expected_revision=expected_revision)
 
     def delete_last_vital(self, admission_id: int, date: datetime, expected_revision=None):
-        vitals = self.get_vitals(admission_id, date)
-        if not vitals:
-            return None
-        latest = vitals[-1]
-        _ = latest
+        _ = date
         return self._operblock_service.delete_last_vital_record(
             admission_id,
             expected_revision=expected_revision,
@@ -9211,6 +9212,9 @@ class OperBlockMainWidget(QWidget):
         self._protocol_hash = ""
         self._protocol_refresh_worker = None
         self._protocol_refresh_pending: dict[str, Any] | None = None
+        self._start_anesthesia_prep_worker = None
+        self._start_anesthesia_prep_generation = 0
+        self._start_anesthesia_prep_pending = False
         self._protocol_tab_ready_pending = False
         self._chart_module_preload_worker = None
         self._chart_module_preloaded = False
@@ -9835,7 +9839,7 @@ class OperBlockMainWidget(QWidget):
         self.start_anesthesia_button = self._stage_action_button(" Начать пособие")
         self.end_anesthesia_button = self._stage_action_button(" Завершить пособие", danger=True)
         self.start_surgery_button = self._stage_action_button(" Начать операцию")
-        self.operation_stages_button = self._stage_action_button(" Этапы операции")
+        self.operation_stages_button = self._stage_action_button(" Этапы")
         self.close_case_button = self._stage_action_button(" Завершить операцию", danger=True)
         self.release_table_button = self._stage_action_button(" Освободить стол", danger=True)
         self.report_button = QPushButton(" Отчет за операцию")
@@ -9897,7 +9901,7 @@ class OperBlockMainWidget(QWidget):
             vitals_widget_started,
             source="operblock_widget",
         )
-        self.vitals_input.data_changed.connect(self._on_standard_vitals_changed)
+        self.vitals_input.vital_changed.connect(self._on_standard_vitals_changed)
         try:
             self.vitals_input.undo_btn.clicked.disconnect()
         except Exception:
@@ -13494,11 +13498,15 @@ class OperBlockMainWidget(QWidget):
         case_active = bool(getattr(self, "_current_case_active", False))
         aid_active = bool(getattr(self, "_current_anesthesia_active", False))
         surgery_active = bool(getattr(self, "_current_surgery_active", False))
+        stages_available = self._operation_stages_available()
         view_only = self.is_view_only_mode()
         write_enabled = case_active and not self._write_pending and not view_only
         if hasattr(self, "start_anesthesia_button"):
             has_initial_vitals = bool(getattr(self, "_current_operation_has_vitals", False))
-            self.start_anesthesia_button.setEnabled(write_enabled and not aid_active and has_initial_vitals)
+            start_prep_pending = bool(getattr(self, "_start_anesthesia_prep_pending", False))
+            self.start_anesthesia_button.setEnabled(
+                write_enabled and not aid_active and has_initial_vitals and not start_prep_pending
+            )
             if write_enabled and not aid_active and not has_initial_vitals:
                 self.start_anesthesia_button.setToolTip(
                     "Введите исходные витальные показатели, чтобы начать пособие."
@@ -13507,7 +13515,7 @@ class OperBlockMainWidget(QWidget):
                 self.start_anesthesia_button.setToolTip("")
             self.end_anesthesia_button.setEnabled(write_enabled and aid_active)
             self.start_surgery_button.setEnabled(write_enabled and aid_active and not surgery_active)
-            self.operation_stages_button.setEnabled(write_enabled and aid_active and surgery_active)
+            self.operation_stages_button.setEnabled(write_enabled and stages_available)
             self.close_case_button.setEnabled(write_enabled and aid_active and surgery_active)
             self.release_table_button.setEnabled(write_enabled and not aid_active)
             if hasattr(self, "report_button"):
@@ -13676,23 +13684,65 @@ class OperBlockMainWidget(QWidget):
             visible_hours += 1
         return visible_hours
 
-    def _on_standard_vitals_changed(self):
-        self._refresh_current_operation_vitals_presence()
+    def _on_standard_vitals_changed(self, change=None):
+        started = time.perf_counter()
+        payload = dict(change or {}) if isinstance(change, dict) else {}
+        action = str(payload.get("action") or "")
+        chart_vitals = list(getattr(self, "_current_chart_vitals", []) or [])
+        if action == "upsert":
+            vital = payload.get("vital")
+            vital_id = getattr(vital, "id", None)
+            vital_timestamp = getattr(vital, "timestamp", None)
+            replaced = False
+            for index, current in enumerate(chart_vitals):
+                current_id = getattr(current, "id", None)
+                current_timestamp = getattr(current, "timestamp", None)
+                if (
+                    vital_id is not None
+                    and current_id is not None
+                    and int(current_id) == int(vital_id)
+                ) or (
+                    isinstance(vital_timestamp, datetime)
+                    and isinstance(current_timestamp, datetime)
+                    and _minute_floor_dt(current_timestamp) == _minute_floor_dt(vital_timestamp)
+                ):
+                    chart_vitals[index] = vital
+                    replaced = True
+                    break
+            if vital is not None and not replaced:
+                chart_vitals.append(vital)
+            chart_vitals.sort(
+                key=lambda item: (
+                    getattr(item, "timestamp", datetime.min),
+                    int(getattr(item, "id", 0) or 0),
+                )
+            )
+        elif action == "delete":
+            vital_id = payload.get("vital_id")
+            if vital_id is not None:
+                chart_vitals = [
+                    vital
+                    for vital in chart_vitals
+                    if int(getattr(vital, "id", 0) or 0) != int(vital_id)
+                ]
+
+        if action in {"upsert", "delete"}:
+            self._current_chart_vitals = chart_vitals
+            self._current_operation_has_vitals = bool(
+                payload.get("has_vitals", bool(chart_vitals))
+            )
         self._apply_protocol_controls_state()
+        if action in {"upsert", "delete"} and getattr(self, "_vitals_tab_built", False):
+            QTimer.singleShot(0, self._update_vitals_chart)
         self.refresh_protocol(force=True)
         self.refresh_board(force=True)
-
-    def _refresh_current_operation_vitals_presence(self) -> bool:
-        case_id = int(self._current_operation_case_id or 0)
-        if not case_id:
-            self._current_operation_has_vitals = False
-            return False
-        try:
-            self._current_operation_has_vitals = bool(self.operblock_service.operation_has_initial_vitals(case_id))
-        except Exception as exc:
-            logger.error("operblock initial vitals presence refresh failed: %s", exc, exc_info=True)
-            self._current_operation_has_vitals = False
-        return bool(self._current_operation_has_vitals)
+        record_metric(
+            "operblock_vitals_local_apply_ms",
+            round((time.perf_counter() - started) * 1000.0, 3),
+            operation_case_id=int(self._current_operation_case_id or 0),
+            action=action or "unknown",
+            ui_sync_reads=0,
+        )
 
     def _load_quick_orders_data(self):
         metric_started = operblock_startup_metrics.timer_start()
@@ -14795,6 +14845,7 @@ class OperBlockMainWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Виды пособия", f"Не удалось сохранить виды пособия: {exc}")
             return
+        invalidate_start_anesthesia_options_cache()
 
     def _open_operblock_team_settings(self, dialog_parent: QWidget | None = None):
         if self._is_closing:
@@ -14823,6 +14874,7 @@ class OperBlockMainWidget(QWidget):
         except Exception as exc:
             CustomMessageBox.warning(self, "Опер. бригада", f"Не удалось сохранить опер. бригаду: {exc}")
             return
+        invalidate_start_anesthesia_options_cache()
 
     def _open_quick_orders_settings(self, dialog_parent: QWidget | None = None):
         if self._is_closing or self._write_pending:
@@ -19083,25 +19135,108 @@ class OperBlockMainWidget(QWidget):
             logger.error("operblock operation case defaults load failed: %s", exc, exc_info=True)
             return {}
 
-    def _default_anesthesia_start_datetime(self, operation_case_id: int) -> datetime:
+    def _default_anesthesia_start_datetime(
+        self,
+        operation_case_id: int | None = None,
+        *,
+        latest_vital_at: datetime | None = None,
+    ) -> datetime:
         fallback = (
             _minute_floor_dt(self._current_operation_start)
             or _minute_floor_dt(self._current_protocol_date)
             or datetime.now().replace(second=0, microsecond=0)
         )
-        try:
-            vitals = self.operblock_service.list_operation_vitals(int(operation_case_id))
-        except Exception as exc:
-            logger.error("operblock anesthesia default time vitals load failed: %s", exc, exc_info=True)
-            vitals = []
-        latest_vital_dt = None
-        for vital in vitals or []:
-            timestamp = _minute_floor_dt(getattr(vital, "timestamp", None))
-            if timestamp is not None and (latest_vital_dt is None or timestamp > latest_vital_dt):
-                latest_vital_dt = timestamp
+        latest_vital_dt = _minute_floor_dt(latest_vital_at)
+        if latest_vital_dt is None and operation_case_id:
+            try:
+                vitals = self.operblock_service.list_operation_vitals(int(operation_case_id))
+            except Exception as exc:
+                logger.error("operblock anesthesia default time vitals load failed: %s", exc, exc_info=True)
+                vitals = []
+            for vital in vitals or []:
+                timestamp = _minute_floor_dt(getattr(vital, "timestamp", None))
+                if timestamp is not None and (latest_vital_dt is None or timestamp > latest_vital_dt):
+                    latest_vital_dt = timestamp
         if latest_vital_dt is not None:
             return latest_vital_dt + timedelta(minutes=5)
         return fallback
+
+    def _prepare_start_anesthesia_dialog_data(
+        self,
+        operation_case_id: int,
+        fallback_start_datetime: datetime,
+    ) -> dict[str, Any]:
+        started = time.perf_counter()
+        status = "error"
+        try:
+            context = dict(
+                self.operblock_service.get_start_anesthesia_context(int(operation_case_id))
+                or {}
+            )
+            options = load_start_anesthesia_options()
+            latest_vital_at = _minute_floor_dt(context.get("latest_vital_at"))
+            initial_start_datetime = (
+                latest_vital_at + timedelta(minutes=5)
+                if latest_vital_at is not None
+                else _minute_floor_dt(fallback_start_datetime)
+            )
+            status = "ok"
+            return {
+                **context,
+                **options,
+                "initial_start_datetime": initial_start_datetime,
+            }
+        finally:
+            record_metric(
+                "operblock_start_anesthesia_prepare_worker_ms",
+                round((time.perf_counter() - started) * 1000.0, 3),
+                operation_case_id=int(operation_case_id),
+                status=status,
+            )
+
+    def _show_start_anesthesia_dialog(self, case_id: int, payload: dict[str, Any]) -> None:
+        has_initial_vitals = bool(payload.get("has_initial_vitals"))
+        self._current_operation_has_vitals = has_initial_vitals
+        self._apply_protocol_controls_state()
+        if not has_initial_vitals:
+            CustomMessageBox.warning(
+                self,
+                "Начать пособие",
+                "Перед началом пособия введите исходные витальные показатели.",
+            )
+            return
+
+        defaults = dict(payload.get("defaults") or {})
+        dialog = StartAnesthesiaDialog(
+            list(payload.get("anesthesia_types") or []),
+            list(payload.get("anesthesiologists") or []),
+            list(payload.get("anesthetists") or []),
+            self,
+            initial_assistance_type=str(defaults.get("anesthesia_assistance_type") or ""),
+            initial_anesthesiologist=str(defaults.get("anesthesiologist") or ""),
+            initial_anesthetist=str(defaults.get("anesthetist") or ""),
+            initial_start_datetime=_minute_floor_dt(payload.get("initial_start_datetime"))
+            or self._default_anesthesia_start_datetime(),
+            min_start_datetime=self._current_operation_start,
+            max_start_datetime=self._current_operation_end,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        assistance_type = dialog.selected_assistance_type()
+        anesthesiologist = dialog.selected_anesthesiologist()
+        anesthetist = dialog.selected_anesthetist()
+        event_time = dialog.start_datetime_text()
+        self._run_stage_action(
+            f"operblock_start_anesthesia:{case_id}",
+            lambda: self.operblock_service.start_anesthesia(
+                case_id,
+                assistance_type,
+                anesthesiologist=anesthesiologist,
+                anesthetist=anesthetist,
+                event_time=event_time,
+            ),
+            "Анестезиологическое пособие начато.",
+        )
 
     def _default_surgery_start_datetime(self) -> datetime:
         base_dt = (
@@ -19110,7 +19245,17 @@ class OperBlockMainWidget(QWidget):
             or _minute_floor_dt(self._current_protocol_date)
             or datetime.now().replace(second=0, microsecond=0)
         )
-        return base_dt + timedelta(minutes=5)
+        default_dt = base_dt + timedelta(minutes=5)
+        latest_stage_dt = self._latest_stage_before_surgery_datetime()
+        return max(default_dt, latest_stage_dt) if latest_stage_dt is not None else default_dt
+
+    def _latest_stage_before_surgery_datetime(self) -> datetime | None:
+        stage_times = [
+            _minute_floor_dt(_parse_datetime_value(row.get("event_time")))
+            for row in self._operation_stage_dialog_rows()
+            if str(row.get("kind") or "") in {"anesthesia_start", "custom"}
+        ]
+        return max((value for value in stage_times if value is not None), default=None)
 
     @staticmethod
     def _clamp_stage_datetime(
@@ -19148,63 +19293,78 @@ class OperBlockMainWidget(QWidget):
             return
         if not self._current_operation_case_id:
             return
-        case_id = int(self._current_operation_case_id)
-        try:
-            has_initial_vitals = bool(self.operblock_service.operation_has_initial_vitals(case_id))
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Начать пособие", f"Не удалось проверить исходные витальные показатели: {exc}")
+        active_worker = getattr(self, "_start_anesthesia_prep_worker", None)
+        if active_worker is not None and active_worker.isRunning():
             return
-        if not has_initial_vitals:
+
+        case_id = int(self._current_operation_case_id)
+        fallback_start_datetime = self._default_anesthesia_start_datetime()
+        generation = int(getattr(self, "_start_anesthesia_prep_generation", 0)) + 1
+        self._start_anesthesia_prep_generation = generation
+        self._start_anesthesia_prep_pending = True
+        self._apply_protocol_controls_state()
+        loading_key = self._show_operblock_loading(
+            "Подготовка начала пособия...",
+            key="start-anesthesia",
+            auto_hide_ms=30000,
+        )
+        total_started = time.perf_counter()
+        worker = AsyncCallThread(
+            self._prepare_start_anesthesia_dialog_data,
+            case_id,
+            fallback_start_datetime,
+            parent=self,
+        )
+        self._start_anesthesia_prep_worker = worker
+        finalized = {"done": False}
+
+        def is_stale_result() -> bool:
+            return (
+                bool(getattr(self, "_is_closing", False))
+                or generation != int(getattr(self, "_start_anesthesia_prep_generation", 0))
+                or case_id != int(getattr(self, "_current_operation_case_id", 0) or 0)
+            )
+
+        def finalize_preparation(status: str) -> None:
+            if finalized["done"]:
+                return
+            finalized["done"] = True
+            self._hide_operblock_loading(loading_key, delay_ms=0)
+            if getattr(self, "_start_anesthesia_prep_worker", None) is worker:
+                self._start_anesthesia_prep_worker = None
+            if generation == int(getattr(self, "_start_anesthesia_prep_generation", 0)):
+                self._start_anesthesia_prep_pending = False
+                self._apply_protocol_controls_state()
+            record_metric(
+                "operblock_start_anesthesia_prepare_total_ms",
+                round((time.perf_counter() - total_started) * 1000.0, 3),
+                operation_case_id=case_id,
+                status=status,
+                ui_sync_reads=0,
+            )
+
+        def on_preparation_ready(payload):
+            stale = is_stale_result()
+            finalize_preparation("stale" if stale else "ok")
+            if stale:
+                return
+            self._show_start_anesthesia_dialog(case_id, dict(payload or {}))
+
+        def on_preparation_failed(exc):
+            stale = is_stale_result()
+            finalize_preparation("stale" if stale else "error")
+            if stale:
+                return
+            logger.error("operblock start anesthesia preparation failed: %s", exc, exc_info=True)
             CustomMessageBox.warning(
                 self,
                 "Начать пособие",
-                "Перед началом пособия введите исходные витальные показатели.",
+                f"Не удалось подготовить начало пособия: {exc}",
             )
-            self._current_operation_has_vitals = False
-            self._apply_protocol_controls_state()
-            return
-        try:
-            anesthesia_types = load_operblock_anesthesia_types()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Начать пособие", f"Не удалось загрузить виды пособия: {exc}")
-            return
-        try:
-            anesthesiologists = load_operblock_anesthesiologists()
-            anesthetists = load_operblock_anesthetists()
-        except Exception as exc:
-            CustomMessageBox.warning(self, "Начать пособие", f"Не удалось загрузить сотрудников для пособия: {exc}")
-            return
-        defaults = self._operation_case_defaults(case_id)
-        initial_start_dt = self._default_anesthesia_start_datetime(case_id)
-        dialog = StartAnesthesiaDialog(
-            anesthesia_types,
-            anesthesiologists,
-            anesthetists,
-            self,
-            initial_assistance_type=str(defaults.get("anesthesia_assistance_type") or ""),
-            initial_anesthesiologist=str(defaults.get("anesthesiologist") or ""),
-            initial_anesthetist=str(defaults.get("anesthetist") or ""),
-            initial_start_datetime=initial_start_dt,
-            min_start_datetime=self._current_operation_start,
-            max_start_datetime=self._current_operation_end,
-        )
-        if dialog.exec() != QDialog.Accepted:
-            return
-        assistance_type = dialog.selected_assistance_type()
-        anesthesiologist = dialog.selected_anesthesiologist()
-        anesthetist = dialog.selected_anesthetist()
-        event_time = dialog.start_datetime_text()
-        self._run_stage_action(
-            f"operblock_start_anesthesia:{case_id}",
-            lambda: self.operblock_service.start_anesthesia(
-                case_id,
-                assistance_type,
-                anesthesiologist=anesthesiologist,
-                anesthetist=anesthetist,
-                event_time=event_time,
-            ),
-            "Анестезиологическое пособие начато.",
-        )
+
+        worker.succeeded.connect(on_preparation_ready)
+        worker.failed.connect(on_preparation_failed)
+        worker.start()
 
     def _end_anesthesia(self):
         if self.is_view_only_mode():
@@ -19264,6 +19424,18 @@ class OperBlockMainWidget(QWidget):
             return
         defaults = self._operation_case_defaults(case_id)
         initial_start_dt = self._default_surgery_start_datetime()
+        min_start_dt = max(
+            (
+                value
+                for value in (
+                    _minute_floor_dt(self._current_anesthesia_start),
+                    _minute_floor_dt(self._current_operation_start),
+                    self._latest_stage_before_surgery_datetime(),
+                )
+                if value is not None
+            ),
+            default=None,
+        )
         dialog = StartSurgeryDialog(
             surgeons,
             operating_nurses,
@@ -19272,7 +19444,7 @@ class OperBlockMainWidget(QWidget):
             initial_surgeons=list(defaults.get("surgeons") or []),
             initial_operating_nurse=str(defaults.get("operating_nurse") or ""),
             initial_start_datetime=initial_start_dt,
-            min_start_datetime=self._current_anesthesia_start or self._current_operation_start,
+            min_start_datetime=min_start_dt,
             max_start_datetime=self._current_anesthesia_end,
         )
         if dialog.exec() != QDialog.Accepted:
@@ -19359,6 +19531,16 @@ class OperBlockMainWidget(QWidget):
             )
         return rows
 
+    def _operation_stages_available(self) -> bool:
+        state = dict(getattr(self, "_current_stage_state", {}) or {})
+        if not bool(state.get("anesthesia_active")):
+            return False
+        if bool(state.get("surgery_active")):
+            return True
+        anesthesia_start = _minute_floor_dt(_parse_datetime_value(state.get("current_anesthesia_start")))
+        surgery_end = _minute_floor_dt(_parse_datetime_value(state.get("last_surgery_end")))
+        return surgery_end is None or anesthesia_start is None or surgery_end < anesthesia_start
+
     def _open_operation_stages_dialog(self):
         if self.is_view_only_mode():
             return
@@ -19366,8 +19548,12 @@ class OperBlockMainWidget(QWidget):
             return
         if not self._current_operation_case_id:
             return
-        if not getattr(self, "_current_surgery_active", False):
-            CustomMessageBox.warning(self, "Этапы операции", "Этапы доступны после начала операции и до её завершения.")
+        if not self._operation_stages_available():
+            CustomMessageBox.warning(
+                self,
+                "Этапы",
+                "Этапы доступны после начала пособия, до начала операции и во время операции.",
+            )
             return
         dialog = OperationStagesDialog(self._operation_stage_dialog_rows(), self)
         dialog_ref = weakref.ref(dialog)
@@ -19380,15 +19566,15 @@ class OperBlockMainWidget(QWidget):
         if event_dt is None:
             CustomMessageBox.warning(self, "Время этапа", "Укажите корректное время этапа.")
             return False
-        surgery_start = _minute_floor_dt(self._current_surgery_start)
-        if surgery_start is None:
-            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить начало операции. Обновите протокол.")
+        anesthesia_start = _minute_floor_dt(self._current_anesthesia_start)
+        if anesthesia_start is None:
+            CustomMessageBox.warning(self, "Время этапа", "Не удалось определить начало пособия. Обновите протокол.")
             return False
-        if event_dt < surgery_start:
+        if event_dt < anesthesia_start:
             CustomMessageBox.warning(
                 self,
                 "Время этапа",
-                f"Этап операции не может быть раньше начала операции: {surgery_start.strftime('%d.%m.%Y %H:%M')}.",
+                f"Этап не может быть раньше начала пособия: {anesthesia_start.strftime('%d.%m.%Y %H:%M')}.",
             )
             return False
         anesthesia_end = _minute_floor_dt(self._current_anesthesia_end) if not self._current_anesthesia_active else None
@@ -19423,9 +19609,9 @@ class OperBlockMainWidget(QWidget):
         time_dialog = OperationStageTimeEditDialog(
             old_event_dt,
             self,
-            stage_label=label or "Новый этап операции",
+            stage_label=label or "Новый этап",
             field_label="Время этапа",
-            min_datetime=self._current_surgery_start,
+            min_datetime=self._current_anesthesia_start,
             max_datetime=self._current_anesthesia_end if not self._current_anesthesia_active else None,
         )
         if time_dialog.exec() != QDialog.Accepted:
@@ -19465,7 +19651,7 @@ class OperBlockMainWidget(QWidget):
         label = re.sub(r"\s+", " ", str((payload or {}).get("label") or "").strip())
         if not label:
             dialog.apply_save_error(row_key)
-            CustomMessageBox.warning(self, "Этапы операции", "Укажите название этапа.")
+            CustomMessageBox.warning(self, "Этапы", "Укажите название этапа.")
             return
         case_id = int(self._current_operation_case_id)
         is_new = bool((payload or {}).get("is_new"))
@@ -19474,7 +19660,7 @@ class OperBlockMainWidget(QWidget):
         event_time = str((payload or {}).get("event_time") or "").strip() or None
         if not is_new and not event_id:
             dialog.apply_save_error(row_key)
-            CustomMessageBox.warning(self, "Этапы операции", "Не удалось определить этап. Обновите протокол.")
+            CustomMessageBox.warning(self, "Этапы", "Не удалось определить этап. Обновите протокол.")
             return
         if event_time is not None and not self._validate_operation_stage_datetime_or_warn(event_time):
             dialog.apply_save_error(row_key)
@@ -19603,7 +19789,7 @@ class OperBlockMainWidget(QWidget):
         dialog = dialog_ref()
         if dialog is not None:
             dialog.apply_save_error(row_key)
-        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Этапы операции"
+        title = "Конфликт данных" if isinstance(exc, (DataConflictError, OperBlockConflictError)) else "Этапы"
         CustomMessageBox.warning(self, title, str(exc))
         if isinstance(exc, (DataConflictError, OperBlockConflictError)) and self._current_operation_case_id:
             self.refresh_protocol(force=True)

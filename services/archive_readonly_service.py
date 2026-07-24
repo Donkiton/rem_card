@@ -130,6 +130,24 @@ class ArchiveReadOnlyDatabaseManager:
         return {str(row[0]) for row in rows if row and row[0] is not None}
 
     @contextmanager
+    def central_read_scope(self, source: str = "archive_readonly_snapshot"):
+        _ = source
+        yield self
+
+    @contextmanager
+    def central_read_snapshot_scope(self, source: str = "archive_readonly_snapshot"):
+        _ = source
+        yield self
+
+    def run_read_operation(self, operation: Callable, source: str = "archive_readonly_read"):
+        _ = source
+        cursor = self._conn.cursor()
+        try:
+            return operation(cursor)
+        finally:
+            cursor.close()
+
+    @contextmanager
     def remcard_transaction(self, source: str = "archive_readonly_tx"):
         raise ReadOnlyArchiveDbError("Archive DB is opened in read-only mode")
         yield

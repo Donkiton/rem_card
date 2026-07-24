@@ -401,6 +401,16 @@ def _stage_rows_from_timeline_rows(rows: list[Mapping[str, Any]] | list[dict[str
     return result
 
 
+def _operation_stage_window_is_active(state: Mapping[str, Any] | dict[str, Any]) -> bool:
+    if not bool((state or {}).get("anesthesia_active")):
+        return False
+    if bool((state or {}).get("surgery_active")):
+        return True
+    anesthesia_start = _parse_dt((state or {}).get("current_anesthesia_start"))
+    surgery_end = _parse_dt((state or {}).get("last_surgery_end"))
+    return surgery_end is None or anesthesia_start is None or surgery_end < anesthesia_start
+
+
 def _iso_or_none(value: datetime | None) -> str | None:
     return value.isoformat(timespec="seconds") if isinstance(value, datetime) else None
 
@@ -3293,6 +3303,35 @@ class OperBlockService:
             _minute_floor(ended_at) if ended_at is not None else None,
         )
 
+    def get_start_anesthesia_context(self, operation_case_id: int) -> dict[str, Any]:
+        """Load all case-derived defaults for the start dialog from one snapshot."""
+        scope_factory = getattr(self.db, "central_read_snapshot_scope", None)
+        if not callable(scope_factory):
+            scope_factory = getattr(self.db, "central_read_scope", None)
+        read_scope = (
+            scope_factory("operblock_start_anesthesia_context")
+            if callable(scope_factory)
+            else nullcontext()
+        )
+        with read_scope:
+            defaults = self.get_operation_case_form_data(int(operation_case_id))
+            vitals = self.list_operation_vitals(int(operation_case_id))
+
+        latest_vital_at = max(
+            (
+                _minute_floor(vital.timestamp)
+                for vital in vitals
+                if isinstance(getattr(vital, "timestamp", None), datetime)
+            ),
+            default=None,
+        )
+        return {
+            "operation_case_id": int(operation_case_id),
+            "has_initial_vitals": bool(vitals),
+            "latest_vital_at": latest_vital_at,
+            "defaults": dict(defaults or {}),
+        }
+
     def _first_operation_vital_row(
         self,
         cursor: sqlite3.Cursor,
@@ -3866,7 +3905,7 @@ class OperBlockService:
                 "vitals_source": vitals_source,
             }
 
-        return dict(self.db.run_write_operation(operation, source="operblock_get_operation_case_form_data"))
+        return dict(self.db.run_read_operation(operation, source="operblock_get_operation_case_form_data"))
 
     def update_operation_case_form_data(
         self,
@@ -4221,19 +4260,15 @@ class OperBlockService:
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
             stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
             state = self._stage_state_from_cursor_rows(stage_rows)
-            if not bool(state.get("surgery_active")):
-                raise ValueError("Этапы операции доступны только после начала операции и до её завершения.")
-            surgery_start = _parse_dt(state.get("current_surgery_start"))
-            if surgery_start is not None and event_dt < _minute_floor(surgery_start):
+            if not _operation_stage_window_is_active(state):
                 raise ValueError(
-                    f"Этап операции не может быть раньше начала операции: "
-                    f"{_format_bound_time(_minute_floor(surgery_start))}."
+                    "Этапы доступны после начала пособия, до начала операции и во время операции."
                 )
             self._assert_datetime_in_active_anesthesia_bounds(
                 cursor,
                 event_dt,
                 case,
-                entity_label="Этап операции",
+                entity_label="Этап",
             )
             payload = {"stage_kind": "custom", "label": clean_label}
             payload_json = self._timeline_payload_json(payload)
@@ -4307,25 +4342,19 @@ class OperBlockService:
                 raise OperBlockConflictError("Этап операции не принадлежит текущему случаю. Обновите протокол.")
             stage_rows = self._fetch_stage_rows_for_case(cursor, int(case["operation_case_id"]))
             state = self._stage_state_from_cursor_rows(stage_rows)
-            if not bool(state.get("surgery_active")):
-                raise ValueError("Этапы операции доступны только после начала операции и до её завершения.")
+            if not _operation_stage_window_is_active(state):
+                raise ValueError(
+                    "Этапы доступны после начала пособия, до начала операции и во время операции."
+                )
             event_dt = _parse_dt(row["event_time"])
             if event_dt is None:
                 raise OperBlockConflictError("Не удалось определить время этапа. Обновите протокол.")
             effective_event_dt = _minute_floor(new_event_dt or event_dt)
-            surgery_start = _parse_dt(state.get("current_surgery_start"))
-            if surgery_start is None:
-                raise OperBlockConflictError("Не удалось определить начало операции. Обновите протокол.")
-            if effective_event_dt < _minute_floor(surgery_start):
-                raise ValueError(
-                    f"Этап операции не может быть раньше начала операции: "
-                    f"{_format_bound_time(_minute_floor(surgery_start))}."
-                )
             self._assert_datetime_in_active_anesthesia_bounds(
                 cursor,
                 effective_event_dt,
                 case,
-                entity_label="Время этапа операции",
+                entity_label="Время этапа",
             )
             payload["label"] = clean_label
             payload_json = self._timeline_payload_json(payload)
@@ -4627,6 +4656,30 @@ class OperBlockService:
                     raise ValueError("Начать операцию можно только после начала пособия.")
                 if surgery_active:
                     raise ValueError("Операция уже начата.")
+                active_anesthesia_start = _parse_dt(state.get("current_anesthesia_start"))
+                latest_custom_stage = next(
+                    (
+                        row
+                        for row in reversed(stage_rows)
+                        if str(row.get("stage_kind") or "") == "custom"
+                        and (
+                            active_anesthesia_start is None
+                            or _minute_floor(row["event_dt"]) >= _minute_floor(active_anesthesia_start)
+                        )
+                    ),
+                    None,
+                )
+                if latest_custom_stage is not None:
+                    latest_custom_dt = _minute_floor(latest_custom_stage["event_dt"])
+                    if event_dt < latest_custom_dt:
+                        latest_custom_label = (
+                            _normalize_operation_stage_label(latest_custom_stage.get("stage_label"))
+                            or "предыдущего этапа"
+                        )
+                        raise ValueError(
+                            f"Начало операции не может быть раньше этапа «{latest_custom_label}»: "
+                            f"{_format_bound_time(latest_custom_dt)}."
+                        )
                 self._assert_datetime_in_active_anesthesia_bounds(
                     cursor,
                     event_dt,

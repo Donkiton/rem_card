@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -7,6 +8,7 @@ import unittest
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -20,6 +22,8 @@ if str(PACKAGE_PARENT) not in sys.path:
 from rem_card.services.operblock_service import OperBlockService  # noqa: E402
 from rem_card.ui.operblock_view.operblock_main_widget import (  # noqa: E402
     OperBlockAdmissionTimeInput,
+    OperBlockMainWidget,
+    OperationStagesDialog,
     _operblock_format_time_edit_text,
     _operblock_time_minutes_from_text,
 )
@@ -36,6 +40,8 @@ class _MemoryDb:
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
         self.read_scope_sources: list[str] = []
+        self.read_operation_sources: list[str] = []
+        self.write_operation_sources: list[str] = []
         self._prepare_schema()
 
     def close(self):
@@ -47,6 +53,7 @@ class _MemoryDb:
         yield self
 
     def run_write_operation(self, operation, source="test"):
+        self.write_operation_sources.append(str(source))
         cursor = self.conn.cursor()
         try:
             result = operation(cursor)
@@ -55,6 +62,14 @@ class _MemoryDb:
         except Exception:
             self.conn.rollback()
             raise
+
+    def run_read_operation(self, operation, source="test"):
+        self.read_operation_sources.append(str(source))
+        cursor = self.conn.cursor()
+        try:
+            return operation(cursor)
+        finally:
+            cursor.close()
 
     def fetch_one_remcard(self, query, params=()):
         return self.conn.execute(query, params).fetchone()
@@ -231,7 +246,9 @@ class _MemoryDb:
                 payload_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_modified_by TEXT
+                last_modified_by TEXT,
+                created_by_role TEXT,
+                created_by_client_id TEXT
             );
             """
         )
@@ -318,6 +335,35 @@ class OperBlockStartedAtTest(unittest.TestCase):
             payload = self._base_payload(started_at - timedelta(minutes=20))
             self.service.update_operation_case_form_data(result["operation_case_id"], payload)
 
+    def test_operation_case_form_uses_read_snapshot_without_write_transaction(self):
+        started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        result = self.service.create_operation_case(self._base_payload(started_at))
+        self.db.read_operation_sources.clear()
+        self.db.write_operation_sources.clear()
+
+        form_data = self.service.get_operation_case_form_data(result["operation_case_id"])
+
+        self.assertEqual(form_data["operation_case_id"], result["operation_case_id"])
+        self.assertEqual(
+            self.db.read_operation_sources,
+            ["operblock_get_operation_case_form_data"],
+        )
+        self.assertEqual(self.db.write_operation_sources, [])
+
+    def test_start_anesthesia_context_reuses_one_read_scope(self):
+        started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        result = self.service.create_operation_case(self._base_payload(started_at))
+        self.db.read_scope_sources.clear()
+
+        context = self.service.get_start_anesthesia_context(result["operation_case_id"])
+
+        self.assertTrue(context["has_initial_vitals"])
+        self.assertEqual(context["latest_vital_at"], started_at)
+        self.assertEqual(
+            self.db.read_scope_sources,
+            ["operblock_start_anesthesia_context"],
+        )
+
     def test_operation_report_context_uses_central_read_scope(self):
         started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
         result = self.service.create_operation_case(self._base_payload(started_at))
@@ -344,6 +390,178 @@ class OperBlockStartedAtTest(unittest.TestCase):
         self.assertEqual(calls["count"], 2)
         self.assertEqual(self.db.read_scope_sources[-2:], ["operblock_report_context", "operblock_report_context"])
         sleep_mock.assert_called_once()
+
+
+class OperBlockStagesTest(unittest.TestCase):
+    def setUp(self):
+        self.db = _MemoryDb()
+        self.service = OperBlockService(self.db)
+        self.started_at = datetime.now().replace(second=0, microsecond=0) - timedelta(hours=2)
+        self.case = self.service.create_operation_case(OperBlockStartedAtTest._base_payload(self.started_at))
+
+    def tearDown(self):
+        self.db.close()
+
+    def test_custom_stage_requires_active_anesthesia_and_respects_its_start(self):
+        stage_time = self.started_at + timedelta(minutes=20)
+
+        with self.assertRaisesRegex(ValueError, "после начала пособия"):
+            self.service.add_operation_stage(
+                self.case["operation_case_id"],
+                "Установка катетера",
+                event_time=stage_time,
+            )
+
+        anesthesia_start = self.started_at + timedelta(minutes=10)
+        self.service.start_anesthesia(
+            self.case["operation_case_id"],
+            "Общая анестезия",
+            event_time=anesthesia_start,
+        )
+
+        with self.assertRaisesRegex(ValueError, "раньше начала пособия"):
+            self.service.add_operation_stage(
+                self.case["operation_case_id"],
+                "Слишком ранний этап",
+                event_time=anesthesia_start - timedelta(minutes=1),
+            )
+
+    def test_intermediate_stage_can_be_added_and_edited_before_surgery(self):
+        anesthesia_start = self.started_at + timedelta(minutes=10)
+        intermediate_time = self.started_at + timedelta(minutes=20)
+        surgery_start = self.started_at + timedelta(minutes=25)
+        case_id = self.case["operation_case_id"]
+        self.service.start_anesthesia(case_id, "Общая анестезия", event_time=anesthesia_start)
+
+        stage = self.service.add_operation_stage(
+            case_id,
+            "Укладка пациента",
+            event_time=intermediate_time,
+        )
+
+        self.assertEqual(stage["payload"]["stage_kind"], "custom")
+        self.assertEqual(stage["event_time"], intermediate_time.isoformat(timespec="seconds"))
+
+        with self.assertRaisesRegex(ValueError, "раньше этапа «Укладка пациента»"):
+            self.service.start_surgery(
+                case_id,
+                operation_name="Остеосинтез",
+                event_time=intermediate_time - timedelta(minutes=1),
+            )
+
+        self.service.start_surgery(
+            case_id,
+            operation_name="Остеосинтез",
+            event_time=surgery_start,
+        )
+        updated = self.service.update_operation_stage(
+            stage["source_id"],
+            "Обработка операционного поля",
+            expected_revision=stage["revision"],
+            event_time=intermediate_time + timedelta(minutes=1),
+        )
+
+        self.assertEqual(updated["display_label"], "Обработка операционного поля")
+        self.assertEqual(updated["revision"], 2)
+
+        rows = self.db.conn.execute(
+            """
+            SELECT event_time, payload_json
+            FROM operblock_timeline_events
+            WHERE operation_case_id = ?
+              AND event_type = 'clinical_event'
+              AND status = 'active'
+            ORDER BY datetime(event_time) ASC, id ASC
+            """,
+            (case_id,),
+        ).fetchall()
+        stages = [
+            (json.loads(row["payload_json"])["stage_kind"], row["event_time"])
+            for row in rows
+        ]
+        self.assertEqual(
+            stages,
+            [
+                ("anesthesia_start", anesthesia_start.isoformat(timespec="seconds")),
+                ("custom", (intermediate_time + timedelta(minutes=1)).isoformat(timespec="seconds")),
+                ("surgery_start", surgery_start.isoformat(timespec="seconds")),
+            ],
+        )
+
+        self.service.end_surgery(case_id, event_time=surgery_start + timedelta(minutes=10))
+        with self.assertRaisesRegex(ValueError, "до начала операции и во время операции"):
+            self.service.add_operation_stage(
+                case_id,
+                "Поздний этап",
+                event_time=surgery_start + timedelta(minutes=11),
+            )
+
+    def test_dialog_orders_automatic_and_custom_stages_by_time(self):
+        anesthesia_start = self.started_at + timedelta(minutes=10)
+        intermediate_time = self.started_at + timedelta(minutes=20)
+        surgery_start = self.started_at + timedelta(minutes=25)
+
+        rows = OperationStagesDialog._normalized_stage_rows(
+            [
+                {
+                    "kind": "surgery_start",
+                    "label": "Начало операции",
+                    "event_id": 3,
+                    "event_time": surgery_start.isoformat(timespec="seconds"),
+                },
+                {
+                    "kind": "custom",
+                    "label": "Обработка операционного поля",
+                    "event_id": 2,
+                    "event_time": intermediate_time.isoformat(timespec="seconds"),
+                },
+                {
+                    "kind": "anesthesia_start",
+                    "label": "Начало пособия",
+                    "event_id": 1,
+                    "event_time": anesthesia_start.isoformat(timespec="seconds"),
+                },
+            ]
+        )
+
+        self.assertEqual(
+            [row["kind"] for row in rows],
+            ["anesthesia_start", "custom", "surgery_start"],
+        )
+        self.assertTrue(rows[0]["readonly"])
+        self.assertFalse(rows[1]["readonly"])
+        self.assertTrue(rows[2]["readonly"])
+
+    def test_ui_stage_window_is_open_before_and_during_but_not_after_surgery(self):
+        anesthesia_start = self.started_at + timedelta(minutes=10)
+        surgery_start = self.started_at + timedelta(minutes=25)
+        surgery_end = surgery_start + timedelta(minutes=10)
+        widget = SimpleNamespace(
+            _current_stage_state={
+                "anesthesia_active": True,
+                "surgery_active": False,
+                "current_anesthesia_start": anesthesia_start.isoformat(timespec="seconds"),
+                "last_surgery_end": None,
+            }
+        )
+
+        self.assertTrue(OperBlockMainWidget._operation_stages_available(widget))
+
+        widget._current_stage_state.update(
+            {
+                "surgery_active": True,
+                "current_surgery_start": surgery_start.isoformat(timespec="seconds"),
+            }
+        )
+        self.assertTrue(OperBlockMainWidget._operation_stages_available(widget))
+
+        widget._current_stage_state.update(
+            {
+                "surgery_active": False,
+                "last_surgery_end": surgery_end.isoformat(timespec="seconds"),
+            }
+        )
+        self.assertFalse(OperBlockMainWidget._operation_stages_available(widget))
 
 
 class OperBlockTimeParserTest(unittest.TestCase):

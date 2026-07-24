@@ -24796,26 +24796,48 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
             "Лапароскопическая аппендэктомия",
         ]:
             return False, f"operation stage time edit did not reorder stages: {reordered_labels!r}"
+        second_moved_before_surgery = service.update_operation_stage(
+            int(second_moved_earlier["source_id"]),
+            "Ревизия брюшной полости",
+            expected_revision=int(second_moved_earlier["revision"]),
+            event_time=surgery_start_dt - timedelta(minutes=1),
+        )
+        snapshot_before_surgery = service.build_operblock_timeline_snapshot(
+            admission_id,
+            operation_case_id=case_id,
+        ).to_dict()
+        labels_before_surgery = [
+            event.get("display_label")
+            for event in snapshot_before_surgery.get("operation_events") or []
+        ]
+        if labels_before_surgery != [
+            "Начало пособия",
+            "Ревизия брюшной полости",
+            "Начало операции",
+            "Лапароскопическая аппендэктомия",
+        ]:
+            return False, f"before-surgery custom stage order is wrong: {labels_before_surgery!r}"
+        anesthesia_start_dt = datetime.fromisoformat(str(added_events[0].get("event_time")).replace(" ", "T"))
         try:
             service.update_operation_stage(
-                int(second_moved_earlier["source_id"]),
+                int(second_moved_before_surgery["source_id"]),
                 "Ревизия брюшной полости",
-                expected_revision=int(second_moved_earlier["revision"]),
-                event_time=surgery_start_dt - timedelta(minutes=1),
+                expected_revision=int(second_moved_before_surgery["revision"]),
+                event_time=anesthesia_start_dt - timedelta(minutes=1),
             )
         except ValueError as exc:
-            if "раньше начала операции" not in str(exc):
-                return False, f"unexpected before-surgery stage time error: {exc}"
+            if "раньше начала пособия" not in str(exc) and "раньше поступления пациента" not in str(exc):
+                return False, f"unexpected before-anesthesia stage time error: {exc}"
         else:
-            return False, "custom stage time was moved before surgery start"
+            return False, "custom stage time was moved before anesthesia start"
 
         widget = OperBlockMainWidget.__new__(OperBlockMainWidget)
         widget._current_timeline_snapshot = dict(snapshot_after_edit)
-        if not OperBlockMainWidget._patch_operation_stage_event_locally(widget, second_moved_earlier):
+        if not OperBlockMainWidget._patch_operation_stage_event_locally(widget, second_moved_before_surgery):
             return False, "local UI stage patch returned false"
         patched_events = list((widget._current_timeline_snapshot or {}).get("operation_events") or [])
         patched_labels = [event.get("display_label") for event in patched_events]
-        if patched_labels != reordered_labels:
+        if patched_labels != labels_before_surgery:
             return False, f"local UI patch did not replace only target stage: {patched_labels!r}"
         if len(patched_events) != len(edited_events):
             return False, "local UI patch changed operation_events count"
@@ -24857,7 +24879,7 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
                 save_widget,
                 weakref.ref(dialog_spy),
                 f"event:{int(second_moved_later['source_id'])}",
-                second_moved_earlier,
+                second_moved_before_surgery,
             )
         except AssertionError as exc:
             return False, str(exc)
@@ -24937,9 +24959,9 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
                 {
                     "kind": "custom",
                     "label": "Ревизия брюшной полости",
-                    "event_id": int(second_moved_later["source_id"]),
-                    "event_time": second_moved_later.get("event_time"),
-                    "revision": int(second_moved_later["revision"]),
+                    "event_id": int(second_moved_before_surgery["source_id"]),
+                    "event_time": second_moved_before_surgery.get("event_time"),
+                    "revision": int(second_moved_before_surgery["revision"]),
                     "readonly": False,
                     "payload": {"stage_kind": "custom", "label": "Ревизия брюшной полости"},
                 },
@@ -25037,7 +25059,7 @@ def _check_operblock_operation_stages_custom_events(temp_root: str) -> tuple[boo
         try:
             service.add_operation_stage(case_id, "Поздний этап")
         except ValueError as exc:
-            if "после начала операции" not in str(exc):
+            if "до начала операции и во время операции" not in str(exc):
                 return False, f"unexpected closed-surgery stage error: {exc}"
         else:
             return False, "custom stage was added after surgery end"

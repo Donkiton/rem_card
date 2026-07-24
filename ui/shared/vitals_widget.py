@@ -23,6 +23,7 @@ class CommaDotDoubleValidator(QDoubleValidator):
 
 class VitalsWidget(QWidget):
     data_changed = Signal()
+    vital_changed = Signal(object)
 
     def __init__(
         self,
@@ -223,6 +224,44 @@ class VitalsWidget(QWidget):
         self._last_settings = None
         self._cached_settings = None
         self._cached_vitals = None
+
+    def _cache_saved_vital(self, vital: VitalDTO) -> None:
+        cached = list(self._cached_vitals or [])
+        vital_id = getattr(vital, "id", None)
+        target_minute = self._minute_floor(vital.timestamp)
+        replaced = False
+        for index, current in enumerate(cached):
+            current_id = getattr(current, "id", None)
+            current_timestamp = getattr(current, "timestamp", None)
+            if (
+                vital_id is not None
+                and current_id is not None
+                and int(current_id) == int(vital_id)
+            ) or (
+                isinstance(current_timestamp, datetime)
+                and self._minute_floor(current_timestamp) == target_minute
+            ):
+                cached[index] = vital
+                replaced = True
+                break
+        if not replaced:
+            cached.append(vital)
+        cached.sort(key=lambda item: (getattr(item, "timestamp", datetime.min), int(getattr(item, "id", 0) or 0)))
+        self._cached_vitals = cached
+        self._has_vitals = bool(cached)
+        self._db_cache_dirty = False
+
+    def _cache_deleted_vital(self, vital_id) -> None:
+        cached = list(self._cached_vitals or [])
+        if vital_id is not None:
+            cached = [
+                vital
+                for vital in cached
+                if int(getattr(vital, "id", 0) or 0) != int(vital_id)
+            ]
+        self._cached_vitals = cached
+        self._has_vitals = bool(cached)
+        self._db_cache_dirty = False
 
     def set_context(self, admission_id, shift_date):
         """Обновляет контекст виджета (пациент/дата) без его пересоздания."""
@@ -451,11 +490,24 @@ class VitalsWidget(QWidget):
             expected_revision = self._expected_revision_for_last_vital()
         except Exception:
             expected_revision = None
+        cached_last_vital_id = (
+            getattr(self._cached_vitals[-1], "id", None)
+            if self._cached_vitals
+            else None
+        )
         self.undo_btn.setEnabled(False)
 
-        def on_success(_):
-            self.mark_dirty()
+        def on_success(result):
+            deleted_vital_id = result if result is not None else cached_last_vital_id
+            self._cache_deleted_vital(deleted_vital_id)
             self.update_undo_button_state()
+            self.vital_changed.emit(
+                {
+                    "action": "delete",
+                    "vital_id": deleted_vital_id,
+                    "has_vitals": bool(self._has_vitals),
+                }
+            )
             self.data_changed.emit()
 
         def on_error(exc):
@@ -563,8 +615,15 @@ class VitalsWidget(QWidget):
                     next_hour = self.service.next_full_hour(current_time, self.shift_date)
                     self._set_time_from_service(next_hour)
 
-                self.mark_dirty()
+                self._cache_saved_vital(dto)
                 self.update_undo_button_state()
+                self.vital_changed.emit(
+                    {
+                        "action": "upsert",
+                        "vital": dto,
+                        "has_vitals": True,
+                    }
+                )
                 self.data_changed.emit()
                 self.save_btn.setEnabled(True)
 
