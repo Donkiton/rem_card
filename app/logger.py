@@ -1,7 +1,6 @@
 import logging
 import os
 import sys
-import tempfile
 import time
 import functools
 from datetime import datetime
@@ -9,7 +8,11 @@ from datetime import datetime
 from rem_card.app.runtime_paths import (
     cleanup_old_local_logs,
     get_log_file_prefix,
+    get_runtime_log_directory_candidates,
     get_runtime_logs_dir,
+    is_compiled,
+    migrate_legacy_runtime_logs,
+    record_runtime_log_location,
 )
 
 
@@ -25,13 +28,7 @@ def _ensure_logger_directories() -> str | None:
 
 
 def _logger_directory_candidates() -> tuple[str, ...]:
-    fallback = os.path.join(tempfile.gettempdir(), "RemCard", "logs")
-    unique: list[str] = []
-    for candidate in (LOGS_DIR, fallback):
-        normalized = os.path.abspath(candidate)
-        if normalized not in unique:
-            unique.append(normalized)
-    return tuple(unique)
+    return get_runtime_log_directory_candidates()
 
 
 def _create_file_handler(formatter: logging.Formatter):
@@ -46,6 +43,20 @@ def _create_file_handler(formatter: logging.Formatter):
             cleanup_old_local_logs(log_dir)
         except OSError as exc:
             warnings.append(f"cleanup {log_dir}: {exc}")
+        if (
+            is_compiled()
+            and os.path.normcase(os.path.abspath(log_dir))
+            == os.path.normcase(os.path.abspath(LOGS_DIR))
+        ):
+            try:
+                migration = migrate_legacy_runtime_logs(log_dir)
+                if migration.get("errors"):
+                    warnings.append(
+                        f"legacy log migration {log_dir}: "
+                        + "; ".join(str(item) for item in migration["errors"])
+                    )
+            except Exception as exc:
+                warnings.append(f"legacy log migration {log_dir}: {exc}")
         log_file = os.path.join(
             log_dir,
             f"{get_log_file_prefix()}_{datetime.now().strftime('%Y%m%d')}.log",
@@ -56,6 +67,12 @@ def _create_file_handler(formatter: logging.Formatter):
             warnings.append(f"{log_file}: {exc}")
             continue
         handler.setFormatter(formatter)
+        if os.path.normcase(os.path.abspath(log_dir)) != os.path.normcase(os.path.abspath(LOGS_DIR)):
+            record_runtime_log_location(
+                log_dir,
+                preferred_dir=LOGS_DIR,
+                fallback_reason="; ".join(warnings),
+            )
         return handler, warnings
     return None, warnings
 

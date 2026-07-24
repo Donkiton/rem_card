@@ -22,6 +22,7 @@ dist/
 
 tmp/
 /.remcard/
+/logs/
 scripts/bench_results/
 *.log
 
