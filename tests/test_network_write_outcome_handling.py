@@ -190,6 +190,53 @@ class NetworkWriteOutcomeHandlingTest(unittest.TestCase):
             )
         )
 
+    def test_repeated_replica_timeout_starts_network_outage_transition(self):
+        harness = _failure_harness()
+        harness._shutting_down = False
+        harness._network_outage_detected = False
+        harness._handle_database_access_failure = MethodType(
+            DataService._handle_database_access_failure,
+            harness,
+        )
+
+        DataService._handle_local_replica_sync_failure(
+            harness,
+            {
+                "consecutive_failures": 2,
+                "last_sync_error": (
+                    "Обновление локальной реплики превысило безопасный "
+                    "тайм-аут 6.0 с."
+                ),
+                "last_sync_error_class": "LocalReplicaWorkerTimeout",
+            },
+        )
+
+        self.assertIsNotNone(harness.blocked_info)
+        self.assertEqual(
+            harness.blocked_info["source"],
+            "local_replica_sync",
+        )
+
+    def test_replica_schema_error_does_not_start_network_outage(self):
+        harness = _failure_harness()
+        harness._shutting_down = False
+        harness._network_outage_detected = False
+        harness._handle_database_access_failure = MethodType(
+            DataService._handle_database_access_failure,
+            harness,
+        )
+
+        DataService._handle_local_replica_sync_failure(
+            harness,
+            {
+                "consecutive_failures": 3,
+                "last_sync_error": "no such table: change_log",
+                "last_sync_error_class": "LocalReplicaWorkerError",
+            },
+        )
+
+        self.assertIsNone(harness.blocked_info)
+
 
 if __name__ == "__main__":
     unittest.main()

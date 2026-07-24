@@ -33,7 +33,11 @@ from rem_card.app.db_availability import (
 from rem_card.app.client_identity import get_client_id
 from rem_card.app.foreground_activity import foreground_activity_snapshot, should_defer_background_io
 from rem_card.app.logger import logger
-from rem_card.app.local_replica_sync import LocalReplicaSync
+from rem_card.app.local_replica_sync import (
+    LocalReplicaSync,
+    build_local_replica_path,
+)
+from rem_card.app.local_replica_worker import DEFAULT_REPLICA_SYNC_TIMEOUT_SEC
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.maintenance_activity import active_maintenance_snapshot, maintenance_task
 from rem_card.app.network_maintenance import find_active_network_sessions, network_maintenance_lock
@@ -45,7 +49,6 @@ from rem_card.app.network_write_worker import (
 from rem_card.app.paths import (
     LOCAL_CACHE_DIR,
     LOCAL_REMCARD_OUTBOX_PATH,
-    LOCAL_REMCARD_REPLICA_PATH,
 )
 from rem_card.app.runtime_paths import (
     get_existing_sqlite_rw_uri,
@@ -137,6 +140,22 @@ INTEGRITY_DEFER_RETRY_SEC = max(
     float(os.environ.get("REMCARD_INTEGRITY_DEFER_RETRY_SEC", "60")),
 )
 LOCAL_READ_AFTER_WRITE_GRACE_SEC = 1.5
+LOCAL_REPLICA_MAX_STALE_SEC = max(
+    5.0,
+    float(os.environ.get("REMCARD_LOCAL_REPLICA_MAX_STALE_SEC", "15")),
+)
+LOCAL_REPLICA_SYNC_TIMEOUT_SEC = max(
+    2.0,
+    min(
+        15.0,
+        float(
+            os.environ.get(
+                "REMCARD_LOCAL_REPLICA_SYNC_TIMEOUT_SEC",
+                str(DEFAULT_REPLICA_SYNC_TIMEOUT_SEC),
+            )
+        ),
+    ),
+)
 OUTBOX_REPLAY_INTERVAL_SEC = 3.0
 OUTBOX_MAX_ATTEMPTS = 80
 OUTBOX_MAX_RETRY_DELAY_SEC = 120.0
@@ -275,8 +294,10 @@ class DatabaseManager:
         journal_db_path,
         remcard_db_path=None,
         runtime_context: DbRuntimeContext | None = None,
+        role: str | None = None,
     ):
         self.runtime_context = self._resolve_runtime_context(journal_db_path, remcard_db_path, runtime_context)
+        self._runtime_role = str(role or "").strip().lower() or "default"
         self.journal_db_path = self.runtime_context.medical_db_path
         self.remcard_db_path = self.runtime_context.medical_db_path
         self.db_path = self.runtime_context.medical_db_path
@@ -297,9 +318,16 @@ class DatabaseManager:
         self._integrity_thread: Optional[threading.Thread] = None
         self._startup_quickcheck_stop_evt = threading.Event()
         self._startup_quickcheck_thread: Optional[threading.Thread] = None
-        self._local_first_enabled = os.environ.get("REMCARD_LOCAL_FIRST_SYNC", "0") == "1"
-        self._local_sync_interval_sec = max(1.0, float(os.environ.get("REMCARD_LOCAL_SYNC_INTERVAL_SEC", "5")))
+        self._local_first_enabled = (
+            str(getattr(self.runtime_context, "mode", "") or "") == "network"
+            and os.environ.get("REMCARD_LOCAL_FIRST_SYNC", "1") != "0"
+        )
+        self._local_sync_interval_sec = max(
+            1.0,
+            float(os.environ.get("REMCARD_LOCAL_SYNC_INTERVAL_SEC", "2")),
+        )
         self._local_replica: Optional[LocalReplicaSync] = None
+        self._local_replica_failure_callback: Callable[[dict[str, Any]], None] | None = None
         self._outbox_enabled = os.environ.get("REMCARD_LOCAL_OUTBOX_SYNC", "0") == "1"
         self._outbox_replay_interval_sec = max(1.0, float(os.environ.get("REMCARD_LOCAL_OUTBOX_REPLAY_SEC", str(OUTBOX_REPLAY_INTERVAL_SEC))))
         self._outbox: Optional[DurableSqlOutbox] = None
@@ -312,7 +340,16 @@ class DatabaseManager:
             self._client_id = f"legacy-{socket.gethostname().lower()}"
             logger.warning("Stable client identity is unavailable; using host fallback: %s", exc)
         self._node_id = f"{self._client_id}:rem_card"
+        self._local_replica_path = build_local_replica_path(
+            cache_dir=LOCAL_CACHE_DIR,
+            central_db_path=self.db_path,
+            client_id=self._client_id,
+            role=self._runtime_role,
+        )
         self._network_write_worker: NetworkWriteWorkerClient | None = None
+        self._local_replica_visibility_lock = threading.Lock()
+        self._required_local_replica_cursor = 0
+        self._local_replica_cycle_seen = ""
         self._prefer_central_reads_until = 0.0
         self._outbox_health_log_interval_sec = OUTBOX_HEALTH_LOG_INTERVAL_SEC
         self._outbox_health_warn_pending = OUTBOX_HEALTH_WARN_PENDING
@@ -787,40 +824,44 @@ class DatabaseManager:
                 "blocked_emergency_sessions": active_emergency_sessions,
             }
 
-        with self._central_io_lock:
-            self._close_central_read_connection()
-            if self._remcard_conn:
-                with self.write_controller.connection_guard(self._remcard_conn):
-                    self._remcard_conn.close()
-            self._remcard_conn = None
-            self._journal_conn = None
+        restart_local_replica = bool(self._local_replica)
+        if restart_local_replica:
+            self._stop_local_replica_sync()
+        try:
+            with self._central_io_lock:
+                self._close_central_read_connection()
+                if self._remcard_conn:
+                    with self.write_controller.connection_guard(self._remcard_conn):
+                        self._remcard_conn.close()
+                self._remcard_conn = None
+                self._journal_conn = None
 
-            result = rotate_database_now(
-                db_path=self.db_path,
-                archive_dir=os.path.dirname(self.db_path),
-                rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
-                db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
-                logger=logger,
-                backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
-                invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
-                runtime_mode=getattr(self.runtime_context, "mode", "network"),
-                source="manual_rotation",
-                blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
-                blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
-            )
-            self._startup_pre_connect_fingerprint = None
-            status = result.get("status")
-            db_available = os.path.isfile(self.db_path)
-            if (status == "new_db_failed" and not result.get("current_preserved")) or (
-                status == "rotate_failed" and not db_available
-            ):
-                logger.critical("Manual DB rotation left current DB unavailable: %s", result)
-            else:
-                self._init_connections()
-
-        if self._local_replica:
-            self._local_replica.trigger_fast_sync()
-        return result
+                result = rotate_database_now(
+                    db_path=self.db_path,
+                    archive_dir=os.path.dirname(self.db_path),
+                    rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
+                    db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
+                    logger=logger,
+                    backup_dir=getattr(self, "medical_backups_valid_dir", BACKUPS_VALID_DIR),
+                    invalid_dir=getattr(self, "medical_invalid_backups_dir", INVALID_BACKUPS_DIR),
+                    runtime_mode=getattr(self.runtime_context, "mode", "network"),
+                    source="manual_rotation",
+                    blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
+                    blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
+                )
+                self._startup_pre_connect_fingerprint = None
+                status = result.get("status")
+                db_available = os.path.isfile(self.db_path)
+                if (status == "new_db_failed" and not result.get("current_preserved")) or (
+                    status == "rotate_failed" and not db_available
+                ):
+                    logger.critical("Manual DB rotation left current DB unavailable: %s", result)
+                else:
+                    self._init_connections()
+            return result
+        finally:
+            if restart_local_replica and not self._closed:
+                self._start_local_replica_sync()
 
     def _init_connections(self):
         logger.info("Initializing unified DB connection at %s", self.db_path)
@@ -977,7 +1018,7 @@ class DatabaseManager:
             return
 
         keep_paths = {
-            os.path.abspath(LOCAL_REMCARD_REPLICA_PATH),
+            os.path.abspath(self._local_replica_path),
             os.path.abspath(LOCAL_REMCARD_OUTBOX_PATH),
         }
         for base_path in list(keep_paths):
@@ -986,16 +1027,15 @@ class DatabaseManager:
             keep_paths.add(f"{base_path}-journal")
 
         managed_files: list[str] = []
-        for name in os.listdir(LOCAL_CACHE_DIR):
-            full_path = os.path.join(LOCAL_CACHE_DIR, name)
-            if not os.path.isfile(full_path):
-                continue
-            if not self._is_managed_local_cache_file(name):
-                continue
-            abs_path = os.path.abspath(full_path)
-            if abs_path in keep_paths:
-                continue
-            managed_files.append(abs_path)
+        for current_dir, _dir_names, file_names in os.walk(LOCAL_CACHE_DIR):
+            for name in file_names:
+                full_path = os.path.join(current_dir, name)
+                if not self._is_managed_local_cache_file(name):
+                    continue
+                abs_path = os.path.abspath(full_path)
+                if abs_path in keep_paths:
+                    continue
+                managed_files.append(abs_path)
 
         if not managed_files:
             return
@@ -1463,24 +1503,38 @@ class DatabaseManager:
 
     def _start_local_replica_sync(self):
         if not self._local_first_enabled:
-            logger.info("Local-first sync is disabled by env REMCARD_LOCAL_FIRST_SYNC=0")
+            logger.info(
+                "Local-first sync is disabled (runtime=%s env=%s)",
+                str(getattr(self.runtime_context, "mode", "") or ""),
+                os.environ.get("REMCARD_LOCAL_FIRST_SYNC", "1"),
+            )
             return
-        if not _is_local_cache_path_writable(LOCAL_REMCARD_REPLICA_PATH):
+        if not _is_local_cache_path_writable(self._local_replica_path):
             self._local_first_enabled = False
             logger.warning(
                 "Local-first sync disabled: local replica path is not writable (%s)",
-                LOCAL_REMCARD_REPLICA_PATH,
+                self._local_replica_path,
             )
             return
         try:
             self._local_replica = LocalReplicaSync(
                 central_db_path=self.db_path,
-                local_db_path=LOCAL_REMCARD_REPLICA_PATH,
+                local_db_path=self._local_replica_path,
+                rotation_lock_path=self.medical_db_rotation_lock_path,
                 logger=logger,
                 sync_interval_sec=self._local_sync_interval_sec,
+                sync_timeout_sec=LOCAL_REPLICA_SYNC_TIMEOUT_SEC,
+            )
+            self._local_replica.set_failure_callback(
+                self._local_replica_failure_callback
             )
             self._local_replica.start()
-            logger.info("Local-first sync enabled (interval=%ss, local=%s)", self._local_sync_interval_sec, LOCAL_REMCARD_REPLICA_PATH)
+            logger.info(
+                "Local-first sync enabled (interval=%ss timeout=%ss local=%s)",
+                self._local_sync_interval_sec,
+                LOCAL_REPLICA_SYNC_TIMEOUT_SEC,
+                self._local_replica_path,
+            )
         except Exception as exc:
             self._local_replica = None
             logger.warning("Failed to enable local-first sync replica: %s", exc)
@@ -1488,10 +1542,19 @@ class DatabaseManager:
     def _stop_local_replica_sync(self):
         if self._local_replica:
             try:
+                self._local_replica.set_failure_callback(None)
                 self._local_replica.stop()
             except Exception as exc:
                 logger.warning("Failed to stop local replica sync: %s", exc)
         self._local_replica = None
+
+    def set_local_replica_failure_callback(
+        self,
+        callback: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        self._local_replica_failure_callback = callback
+        if self._local_replica:
+            self._local_replica.set_failure_callback(callback)
 
     def _start_startup_quickcheck_updater(self):
         if not STARTUP_QUICKCHECK_BACKGROUND_ENABLED:
@@ -1798,16 +1861,22 @@ class DatabaseManager:
             except Exception as exc:
                 outbox_snapshot = {"error": str(exc)}
 
-        replica_age_sec = 0.0
-        if self._local_replica and self._local_replica.last_sync_ok_ts:
-            replica_age_sec = max(0.0, time.time() - float(self._local_replica.last_sync_ok_ts))
-        replica_snapshot = {
-            "enabled": bool(self._local_replica),
-            "last_sync_ok_ts": float(self._local_replica.last_sync_ok_ts) if self._local_replica else 0.0,
-            "last_sync_age_sec": replica_age_sec,
-            "last_sync_error": str(self._local_replica.last_sync_error or "") if self._local_replica else "",
-            "sync_interval_sec": float(self._local_sync_interval_sec),
-        }
+        replica_snapshot = (
+            self._local_replica.health_snapshot()
+            if self._local_replica
+            else {
+                "enabled": False,
+                "ready": False,
+                "last_sync_ok_ts": 0.0,
+                "last_sync_age_sec": None,
+                "last_sync_error": "",
+                "last_sync_error_class": "",
+                "consecutive_failures": 0,
+                "local_db_path": self._local_replica_path,
+            }
+        )
+        replica_snapshot["sync_interval_sec"] = float(self._local_sync_interval_sec)
+        replica_snapshot["max_stale_sec"] = float(LOCAL_REPLICA_MAX_STALE_SEC)
         return {
             "replica": replica_snapshot,
             "outbox": outbox_snapshot,
@@ -1816,6 +1885,7 @@ class DatabaseManager:
 
     def _after_write_committed(self):
         self._prefer_central_reads_until = time.time() + LOCAL_READ_AFTER_WRITE_GRACE_SEC
+        self._capture_local_replica_required_cursor()
         if time.time() >= self._changelog_live_trim_grace_until:
             self._maybe_trim_change_log_live()
         self._cleanup_local_cache_artifacts(force=False)
@@ -1904,7 +1974,62 @@ class DatabaseManager:
             return False
         if not self._local_replica:
             return False
-        return time.time() >= self._prefer_central_reads_until
+        if time.time() < self._prefer_central_reads_until:
+            return False
+        if not self._local_replica.is_ready(
+            max_stale_sec=LOCAL_REPLICA_MAX_STALE_SEC,
+        ):
+            return False
+        snapshot = self._local_replica.health_snapshot()
+        state = dict(snapshot.get("state") or {})
+        replica_cycle = str(state.get("db_cycle") or "")
+        replica_cursor = int(state.get("change_cursor") or 0)
+        with self._local_replica_visibility_lock:
+            if (
+                self._local_replica_cycle_seen
+                and replica_cycle
+                and replica_cycle != self._local_replica_cycle_seen
+            ):
+                self._required_local_replica_cursor = 0
+                self._last_seen_change_cursor = replica_cursor
+            if replica_cycle:
+                self._local_replica_cycle_seen = replica_cycle
+            required_cursor = int(self._required_local_replica_cursor)
+        return replica_cursor >= required_cursor
+
+    def _mark_local_replica_required_cursor(
+        self,
+        cursor: int | None,
+    ) -> None:
+        if not self._local_replica:
+            return
+        try:
+            value = max(0, int(cursor or 0))
+        except (TypeError, ValueError):
+            return
+        if value <= 0:
+            return
+        with self._local_replica_visibility_lock:
+            self._required_local_replica_cursor = max(
+                self._required_local_replica_cursor,
+                value,
+            )
+
+    def _capture_local_replica_required_cursor(self) -> None:
+        if not self._local_replica or not self._remcard_conn:
+            return
+        try:
+            row = self._remcard_conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM change_log"
+            ).fetchone()
+            self._mark_local_replica_required_cursor(
+                int(row[0] or 0) if row else 0
+            )
+        except Exception as exc:
+            logger.debug(
+                "Could not capture local replica visibility cursor: %s",
+                exc,
+            )
 
     def _current_thread_remcard_tx_depth(self) -> int:
         try:
@@ -2032,12 +2157,16 @@ class DatabaseManager:
             )
         self._central_io_lock.release()
         try:
-            result = self._network_write_worker_client().execute(
+            worker_client = self._network_write_worker_client()
+            result = worker_client.execute(
                 operation,
                 operation_id=operation_id,
                 source=source,
                 metadata=metadata,
                 timeout_sec=timeout_sec,
+            )
+            self._mark_local_replica_required_cursor(
+                getattr(worker_client, "last_affected_change_id", 0)
             )
         except NetworkWriteWorkerTimeout as exc:
             record_metric(
@@ -3034,6 +3163,7 @@ class DatabaseManager:
             current = self._last_seen_change_cursor
         if self._local_replica and current > self._last_seen_change_cursor:
             self._last_seen_change_cursor = current
+            self._mark_local_replica_required_cursor(current)
             if used_central:
                 self._prefer_central_reads_until = time.time() + LOCAL_READ_AFTER_WRITE_GRACE_SEC
             if (time.time() - self._local_replica.last_sync_ok_ts) >= self._local_sync_interval_sec:

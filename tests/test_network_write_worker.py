@@ -111,6 +111,7 @@ class NetworkWriteWorkerTest(unittest.TestCase):
         )
 
         self.assertEqual(result, {"id": 1, "value": "first"})
+        self.assertEqual(self.client.last_affected_change_id, 1)
         receipt = self._fetch_one(
             """
             SELECT request_id, source, node_id, role, admission_id,
