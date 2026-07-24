@@ -11,6 +11,7 @@ from rem_card.app.db_access_classifier import classify_database_access, classify
 from rem_card.app.foreground_activity import should_defer_for_foreground_resume
 from rem_card.app.logger import logger
 from rem_card.app.local_metrics import record_metric
+from rem_card.app.network_write_worker import NetworkWriteWorkerTimeout
 from rem_card.app.sqlite_shared import LocalWriteQueue, OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS
 from rem_card.app.runtime_outage import (
     RuntimeNetworkOutageWriteBlockedError,
@@ -212,11 +213,13 @@ class DataService(QObject):
             raise RuntimeNetworkOutageWriteBlockedError("Сетевая база недоступна; запись заблокирована до перезапуска.")
         operation_uuid = self._record_operblock_write_intent(description)
         metadata = self._opblock_interactive_write_metadata(description)
+        if operation_uuid:
+            metadata["operation_id"] = operation_uuid
         try:
             with self._write_metadata_context(metadata):
                 result = self.db.run_write_operation(operation, source=description)
         except Exception as exc:
-            self._mark_operblock_write_failed(operation_uuid, description, exc)
+            self._mark_operblock_write_outcome(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
             raise
         self._mark_operblock_write_remote_committed(operation_uuid, description)
@@ -276,6 +279,7 @@ class DataService(QObject):
                 "source": str(description or ""),
                 "operation_name": str(description or ""),
                 "timeout_ms": int(payload.get("timeout_ms") or OPBLOCK_INTERACTIVE_WRITE_LOCK_TIMEOUT_MS),
+                "isolated_worker": True,
             }
         )
         return payload
@@ -312,6 +316,44 @@ class DataService(QObject):
             )
         except Exception as journal_exc:
             logger.warning("Operblock failed-write local journal failed for %s: %s", description, journal_exc, exc_info=True)
+
+    def _mark_operblock_write_outcome(
+        self,
+        operation_uuid: str | None,
+        description: str,
+        exc: Exception,
+    ) -> None:
+        if not operation_uuid:
+            return
+        if isinstance(exc, NetworkWriteWorkerTimeout) and exc.outcome_unknown:
+            self._unknown_active_write = True
+            try:
+                from rem_card.app.operblock_offline_store import mark_operblock_write_outcome_unknown
+
+                mark_operblock_write_outcome_unknown(
+                    operation_uuid=operation_uuid,
+                    description=str(description or ""),
+                    error=exc,
+                    phase=exc.phase,
+                )
+                record_metric(
+                    "operblock_write_outcome_unknown",
+                    1,
+                    force_flush=True,
+                    operation_id=operation_uuid,
+                    operation_name=str(description or ""),
+                    phase=exc.phase,
+                )
+            except Exception as journal_exc:
+                logger.critical(
+                    "Operblock unknown-write local journal failed for %s operation_uuid=%s: %s",
+                    description,
+                    operation_uuid,
+                    journal_exc,
+                    exc_info=True,
+                )
+            return
+        self._mark_operblock_write_failed(operation_uuid, description, exc)
 
     def _mark_operblock_write_remote_committed(self, operation_uuid: str | None, description: str) -> bool:
         if not operation_uuid:
@@ -783,6 +825,8 @@ class DataService(QObject):
             return False
 
         metadata = self._opblock_interactive_write_metadata(description, write_metadata)
+        if operation_uuid:
+            metadata["operation_id"] = operation_uuid
 
         def run_operation_with_metadata():
             with self._write_metadata_context(metadata):
@@ -817,7 +861,7 @@ class DataService(QObject):
 
         def handle_error(exc: Exception):
             logger.error("Queued write failed for %s: %s", description, exc)
-            self._mark_operblock_write_failed(operation_uuid, description, exc)
+            self._mark_operblock_write_outcome(operation_uuid, description, exc)
             self._handle_database_access_failure(exc, source=description, write_description=description)
             self.write_failed.emit(f"{description}: {exc}")
             self._error_callback_requested.emit(on_error, exc)
@@ -1005,10 +1049,15 @@ class DataService(QObject):
     ) -> str:
         classification = classify_database_access(exc)
         category = classification.category
+        worker_timeout = exc if isinstance(exc, NetworkWriteWorkerTimeout) else None
+        if worker_timeout is not None and worker_timeout.phase == "local_coordination":
+            category = "locked_busy"
         self._last_failure_category = category
-        if write_description and runtime_outage_transition_allowed(category):
+        transition_allowed = runtime_outage_transition_allowed(category)
+        outcome_unknown = bool(worker_timeout is None or worker_timeout.outcome_unknown)
+        if write_description and transition_allowed and outcome_unknown:
             self._unconfirmed_write_count += 1
-        if not runtime_outage_transition_allowed(category):
+        if not transition_allowed:
             return category
 
         active_count = int(getattr(self._queue, "active_count", lambda: 0)())
@@ -1024,7 +1073,7 @@ class DataService(QObject):
             "active_write_in_progress": active_count > 0,
             "unconfirmed_write_count": int(self._unconfirmed_write_count),
         }
-        if active_count > 0:
+        if active_count > 0 and outcome_unknown:
             self._unknown_active_write = True
         self.block_new_writes_for_runtime_outage(info)
         if not self._outage_signal_emitted:

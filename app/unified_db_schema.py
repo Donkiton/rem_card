@@ -4,8 +4,8 @@ import sqlite3
 from typing import Optional
 
 SCHEMA_FASTPATH_META_KEY = "unified_schema_fastpath_rev"
-SCHEMA_FASTPATH_REV = 22
-SCHEMA_MIN_MIGRATION_VERSION = 22
+SCHEMA_FASTPATH_REV = 23
+SCHEMA_MIN_MIGRATION_VERSION = 23
 SCHEMA_REQUIRED_CLIENT_VERSION = "2.0.0"
 USE_META_VERSION_IN_CHANGE_TRIGGERS = os.environ.get("REMCARD_CHANGELOG_META_VERSION", "0") == "1"
 
@@ -24,6 +24,7 @@ _FASTPATH_REQUIRED_TABLES: tuple[str, ...] = (
     "meta",
     "change_log",
     "sync_applied_ops",
+    "runtime_write_receipts",
     "schema_migrations",
     "vitals",
     "vital_settings",
@@ -161,6 +162,8 @@ _FASTPATH_REQUIRED_INDEXES: tuple[str, ...] = (
     "idx_medical_audit_admission_changed",
     "idx_medical_audit_table_row",
     "idx_medical_audit_operation",
+    "idx_runtime_write_receipts_committed",
+    "idx_runtime_write_receipts_request",
     "idx_procedures_admission_type_time",
     "idx_lab_orders_admission_card_day",
     "idx_lab_orders_admission_scheduled",
@@ -844,6 +847,22 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
             source TEXT,
             node_id TEXT,
             applied_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_write_receipts (
+            operation_id TEXT PRIMARY KEY,
+            request_id TEXT,
+            source TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            role TEXT,
+            admission_id INTEGER,
+            operation_case_id INTEGER,
+            result_json TEXT NOT NULL DEFAULT 'null',
+            affected_rows_json TEXT NOT NULL DEFAULT '[]',
+            committed_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
         )
         """
     )
@@ -1545,6 +1564,14 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_table_row ON medical_audit_log(table_name, row_id, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_medical_audit_operation ON medical_audit_log(operation_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_applied_ops_applied_at ON sync_applied_ops(applied_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_write_receipts_committed "
+        "ON runtime_write_receipts(committed_at, operation_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runtime_write_receipts_request "
+        "ON runtime_write_receipts(request_id) WHERE request_id IS NOT NULL AND request_id <> ''"
+    )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_schema_migrations_applied_at ON schema_migrations(applied_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_procedures_admission_type_time ON procedures(admission_id, procedure_type, started_at, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_lab_orders_admission_card_day ON lab_orders(admission_id, card_day_id, id)")
@@ -2008,6 +2035,6 @@ def ensure_unified_schema(conn: sqlite3.Connection, logger: Optional[logging.Log
     _mark_schema_migration(
         conn,
         SCHEMA_MIN_MIGRATION_VERSION,
-        "domain validation for vital writes",
+        "isolated network write receipts and affected row identity",
     )
     _set_meta_int_value(conn, SCHEMA_FASTPATH_META_KEY, SCHEMA_FASTPATH_REV)

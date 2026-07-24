@@ -1,6 +1,11 @@
+import multiprocessing
+
 from _local_rem_card_bootstrap import bootstrap_local_rem_card
 
 PROJECT_ROOT = bootstrap_local_rem_card()
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
 try:
     import PySide6.QtOpenGL  # noqa: F401
