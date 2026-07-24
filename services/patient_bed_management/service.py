@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -8,6 +9,11 @@ from typing import Any, Callable, Optional
 from rem_card.app.patient_age import parse_date_value
 from rem_card.services.concurrency import assert_revision_matches
 from rem_card.services.patient_bed_management.recovery_beds import is_recovery_bed_number
+from rem_card.services.operblock_handoff_service import (
+    HANDOFF_RETURNED_TO_RAO,
+    normalize_handoff_full_name,
+    normalize_handoff_history_number,
+)
 from rem_card.services.shift_service import ShiftService
 from rem_card.data.dto.remcard_dto import PatientStatus
 
@@ -510,6 +516,436 @@ class PatientBedManagementService:
             return True
 
         return self.db.run_write_operation(operation, source="patient_bed_move_patient")
+
+    def get_recovery_merge_preview(self, source_bed: int, target_bed: int) -> dict[str, Any]:
+        source_bed = int(source_bed)
+        target_bed = int(target_bed)
+        if not is_recovery_bed_number(source_bed) or is_recovery_bed_number(target_bed):
+            raise RuntimeError("Слияние доступно только с койки пробуждения на обычную койку.")
+        rows = self.db.fetch_all_remcard(
+            """
+            SELECT
+                b.bed_number,
+                b.status AS bed_status,
+                COALESCE(b.revision, 0) AS bed_revision,
+                a.id AS admission_id,
+                a.history_number,
+                a.admission_datetime,
+                a.intake_extra_json,
+                COALESCE(a.recovery_bed_stay, 0) AS recovery_bed_stay,
+                COALESCE(a.revision, 0) AS admission_revision,
+                p.full_name,
+                p.birth_date
+            FROM beds b
+            JOIN admissions a ON a.id = b.current_admission_id
+            JOIN patients p ON p.id = a.patient_id
+            WHERE b.bed_number IN (?, ?)
+            """,
+            (source_bed, target_bed),
+        )
+        by_bed = {int(row["bed_number"]): dict(row) for row in rows}
+        source = by_bed.get(source_bed)
+        target = by_bed.get(target_bed)
+        if not source or str(source.get("bed_status") or "") == "FREE":
+            raise RuntimeError("Койка пробуждения уже свободна.")
+        if not target or str(target.get("bed_status") or "") == "FREE":
+            raise RuntimeError("Целевая койка уже свободна; используйте обычный перенос.")
+        try:
+            intake = json.loads(str(source.get("intake_extra_json") or "{}"))
+        except Exception:
+            intake = {}
+        operation_case_id = int(intake.get("operation_case_id") or 0) if isinstance(intake, dict) else 0
+        if not source.get("recovery_bed_stay") or not operation_case_id:
+            raise RuntimeError(
+                "Исходная карта не подтверждена как поступившая на койку пробуждения из оперблока."
+            )
+        history_matches = (
+            normalize_handoff_history_number(source.get("history_number"))
+            == normalize_handoff_history_number(target.get("history_number"))
+        )
+        full_name_matches = (
+            normalize_handoff_full_name(source.get("full_name"))
+            == normalize_handoff_full_name(target.get("full_name"))
+        )
+        birth_date_matches = str(source.get("birth_date") or "") == str(target.get("birth_date") or "")
+        return {
+            "source_bed": source_bed,
+            "target_bed": target_bed,
+            "source_admission_id": int(source["admission_id"]),
+            "target_admission_id": int(target["admission_id"]),
+            "operation_case_id": operation_case_id,
+            "source_full_name": str(source.get("full_name") or ""),
+            "target_full_name": str(target.get("full_name") or ""),
+            "source_history_number": str(source.get("history_number") or ""),
+            "target_history_number": str(target.get("history_number") or ""),
+            "history_number_matches": history_matches,
+            "full_name_matches": full_name_matches,
+            "birth_date_matches": birth_date_matches,
+            "source_bed_revision": int(source.get("bed_revision") or 0),
+            "target_bed_revision": int(target.get("bed_revision") or 0),
+            "source_admission_revision": int(source.get("admission_revision") or 0),
+            "target_admission_revision": int(target.get("admission_revision") or 0),
+        }
+
+    def merge_recovery_admission(
+        self,
+        source_bed: int,
+        target_bed: int,
+        *,
+        expected_source_bed_revision: int | None = None,
+        expected_target_bed_revision: int | None = None,
+        expected_source_admission_revision: int | None = None,
+        expected_target_admission_revision: int | None = None,
+        user_id: str | None = None,
+        allow_identity_mismatch: bool = False,
+    ) -> dict[str, Any]:
+        source_bed = int(source_bed)
+        target_bed = int(target_bed)
+        if not is_recovery_bed_number(source_bed) or is_recovery_bed_number(target_bed):
+            raise RuntimeError("Недопустимое направление слияния карт.")
+        actor = str(user_id or "USER")
+
+        def operation(cursor):
+            source_bed_row = cursor.execute(
+                "SELECT * FROM beds WHERE bed_number = ?",
+                (source_bed,),
+            ).fetchone()
+            target_bed_row = cursor.execute(
+                "SELECT * FROM beds WHERE bed_number = ?",
+                (target_bed,),
+            ).fetchone()
+            if (
+                not source_bed_row
+                or source_bed_row["status"] == "FREE"
+                or source_bed_row["current_admission_id"] is None
+                or not target_bed_row
+                or target_bed_row["status"] == "FREE"
+                or target_bed_row["current_admission_id"] is None
+            ):
+                raise RuntimeError("Состав коек изменился. Обновите окно движения пациентов.")
+            assert_revision_matches(source_bed_row["revision"], expected_source_bed_revision)
+            assert_revision_matches(target_bed_row["revision"], expected_target_bed_revision)
+            source_admission_id = int(source_bed_row["current_admission_id"])
+            target_admission_id = int(target_bed_row["current_admission_id"])
+            source = cursor.execute(
+                """
+                SELECT a.*, p.full_name, p.birth_date
+                FROM admissions a
+                JOIN patients p ON p.id = a.patient_id
+                WHERE a.id = ?
+                """,
+                (source_admission_id,),
+            ).fetchone()
+            target = cursor.execute(
+                """
+                SELECT a.*, p.full_name, p.birth_date
+                FROM admissions a
+                JOIN patients p ON p.id = a.patient_id
+                WHERE a.id = ?
+                """,
+                (target_admission_id,),
+            ).fetchone()
+            if not source or not target:
+                raise RuntimeError("Одна из карт пациента уже недоступна.")
+            assert_revision_matches(source["revision"], expected_source_admission_revision)
+            assert_revision_matches(target["revision"], expected_target_admission_revision)
+            if source["merged_into_admission_id"] is not None:
+                raise RuntimeError("Карта с койки пробуждения уже была объединена.")
+            if target["merged_into_admission_id"] is not None:
+                raise RuntimeError("Целевая карта уже является частью другого слияния.")
+            try:
+                intake = json.loads(str(source["intake_extra_json"] or "{}"))
+            except Exception:
+                intake = {}
+            operation_case_id = int(intake.get("operation_case_id") or 0) if isinstance(intake, dict) else 0
+            if not int(source["recovery_bed_stay"] or 0) or not operation_case_id:
+                raise RuntimeError("Карта не подтверждена как поступившая из оперблока.")
+            operation_case = cursor.execute(
+                """
+                SELECT id, handoff_id, source_rao_admission_id
+                FROM operation_cases
+                WHERE id = ? AND future_rao_admission_id = ?
+                """,
+                (operation_case_id, source_admission_id),
+            ).fetchone()
+            if not operation_case:
+                raise RuntimeError("Не удалось подтвердить операционный случай для слияния.")
+            linked_source_id = operation_case["source_rao_admission_id"]
+            if linked_source_id is not None and int(linked_source_id) != target_admission_id:
+                raise RuntimeError("Операционный случай уже связан с другой исходной картой РАО.")
+            target_open_status = cursor.execute(
+                """
+                SELECT status
+                FROM patient_status_events
+                WHERE admission_id = ? AND end_time IS NULL
+                LIMIT 1
+                """,
+                (target_admission_id,),
+            ).fetchone()
+            if target_open_status and str(target_open_status["status"] or "") in {
+                PatientStatus.TRANSFERRED.value,
+                PatientStatus.DEAD.value,
+            }:
+                raise RuntimeError("Карту с финальным исходом нельзя использовать как главную для слияния.")
+
+            history_matches = (
+                normalize_handoff_history_number(source["history_number"])
+                == normalize_handoff_history_number(target["history_number"])
+            )
+            full_name_matches = (
+                normalize_handoff_full_name(source["full_name"])
+                == normalize_handoff_full_name(target["full_name"])
+            )
+            birth_date_matches = str(source["birth_date"] or "") == str(target["birth_date"] or "")
+            if (
+                not allow_identity_mismatch
+                and not (history_matches and full_name_matches and birth_date_matches)
+            ):
+                raise RuntimeError(
+                    "Идентификационные данные различаются. "
+                    "Для слияния требуется отдельное подтверждение пользователя."
+                )
+            now = self._now_text()
+            comparison = {
+                "source_history_number": source["history_number"],
+                "target_history_number": target["history_number"],
+                "source_full_name": source["full_name"],
+                "target_full_name": target["full_name"],
+                "source_birth_date": source["birth_date"],
+                "target_birth_date": target["birth_date"],
+                "birth_date_matches": birth_date_matches,
+            }
+            cursor.execute(
+                """
+                INSERT INTO admission_merges (
+                    source_admission_id, target_admission_id, operation_case_id,
+                    source_bed_number, target_bed_number,
+                    history_number_matches, full_name_matches, comparison_json,
+                    merged_at, merged_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_admission_id,
+                    target_admission_id,
+                    operation_case_id,
+                    source_bed,
+                    target_bed,
+                    1 if history_matches else 0,
+                    1 if full_name_matches else 0,
+                    json.dumps(comparison, ensure_ascii=False, sort_keys=True, default=str),
+                    now,
+                    actor,
+                ),
+            )
+            cursor.execute(
+                """
+                UPDATE admissions
+                SET merged_into_admission_id = ?,
+                    merged_at = ?,
+                    is_active = 0,
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ? AND merged_into_admission_id IS NULL
+                """,
+                (target_admission_id, now, now, source_admission_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Карта с койки пробуждения уже была объединена.")
+            cursor.execute(
+                """
+                UPDATE beds
+                SET current_admission_id = NULL,
+                    status = 'FREE',
+                    revision = COALESCE(revision, 0) + 1
+                WHERE bed_number = ? AND current_admission_id = ?
+                """,
+                (source_bed, source_admission_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("Койка пробуждения изменилась другим пользователем.")
+
+            arrival_dt = self._parse_dt(source["admission_datetime"]) or datetime.now()
+            target_status = cursor.execute(
+                """
+                SELECT id, status, start_time
+                FROM patient_status_events
+                WHERE admission_id = ? AND end_time IS NULL
+                LIMIT 1
+                """,
+                (target_admission_id,),
+            ).fetchone()
+            movement_changed = False
+            if target_status and str(target_status["status"] or "") == PatientStatus.OR.value:
+                status_start = self._parse_dt(target_status["start_time"])
+                effective_dt = max(
+                    arrival_dt.replace(microsecond=0),
+                    status_start.replace(microsecond=0) if status_start else arrival_dt.replace(microsecond=0),
+                )
+                effective_text = effective_dt.isoformat(timespec="seconds")
+                cursor.execute(
+                    """
+                    UPDATE patient_status_events
+                    SET end_time = ?, updated_at = ?, last_modified_by = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ? AND end_time IS NULL
+                    """,
+                    (effective_text, now, actor, int(target_status["id"])),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("Движение целевой карты изменилось другим пользователем.")
+                cursor.execute(
+                    """
+                    INSERT INTO patient_status_events (
+                        admission_id, status, reason_type, reason_text, start_time,
+                        created_by, created_at, updated_at, last_modified_by
+                    ) VALUES (?, ?, 'operblock_merge', 'Возврат из операционной после слияния',
+                              ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        target_admission_id,
+                        PatientStatus.ACTIVE.value,
+                        effective_text,
+                        actor,
+                        now,
+                        now,
+                        actor,
+                    ),
+                )
+                movement_changed = True
+
+            source_status = cursor.execute(
+                """
+                SELECT id, start_time
+                FROM patient_status_events
+                WHERE admission_id = ? AND end_time IS NULL
+                LIMIT 1
+                """,
+                (source_admission_id,),
+            ).fetchone()
+            if source_status:
+                source_start = self._parse_dt(source_status["start_time"])
+                source_end = max(datetime.now(), source_start) if source_start else datetime.now()
+                cursor.execute(
+                    """
+                    UPDATE patient_status_events
+                    SET end_time = ?, updated_at = ?, last_modified_by = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ? AND end_time IS NULL
+                    """,
+                    (
+                        source_end.replace(microsecond=0).isoformat(timespec="seconds"),
+                        now,
+                        actor,
+                        int(source_status["id"]),
+                    ),
+                )
+
+            latest_vital = cursor.execute(
+                """
+                SELECT sys, dia, pulse, temp, spo2, rr, cvp
+                FROM vitals
+                WHERE admission_id = ?
+                ORDER BY DATETIME(datetime) DESC, id DESC
+                LIMIT 1
+                """,
+                (source_admission_id,),
+            ).fetchone()
+            if latest_vital:
+                cursor.execute(
+                    """
+                    INSERT INTO vitals (
+                        admission_id, datetime, sys, dia, pulse, temp, spo2, rr, cvp,
+                        created_at, updated_at, last_modified_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        target_admission_id,
+                        arrival_dt.replace(microsecond=0).isoformat(timespec="seconds"),
+                        latest_vital["sys"],
+                        latest_vital["dia"],
+                        latest_vital["pulse"],
+                        latest_vital["temp"],
+                        latest_vital["spo2"],
+                        latest_vital["rr"],
+                        latest_vital["cvp"],
+                        now,
+                        now,
+                        actor,
+                    ),
+                )
+            cursor.execute(
+                """
+                UPDATE admissions
+                SET operation_description = COALESCE(
+                        NULLIF(TRIM(operation_description), ''),
+                        (SELECT planned_operation_name FROM operation_cases WHERE id = ?)
+                    ),
+                    updated_at = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (operation_case_id, now, target_admission_id),
+            )
+            cursor.execute(
+                """
+                UPDATE operation_cases
+                SET source_rao_admission_id = COALESCE(source_rao_admission_id, ?),
+                    resolved_rao_admission_id = ?,
+                    last_modified_by = ?,
+                    revision = COALESCE(revision, 0) + 1
+                WHERE id = ?
+                """,
+                (target_admission_id, target_admission_id, actor, operation_case_id),
+            )
+            handoff = cursor.execute(
+                """
+                SELECT id
+                FROM operblock_handoffs
+                WHERE source_admission_id = ?
+                  AND status IN ('waiting', 'accepted')
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (target_admission_id,),
+            ).fetchone()
+            if handoff:
+                cursor.execute(
+                    """
+                    UPDATE operblock_handoffs
+                    SET status = ?,
+                        operation_case_id = ?,
+                        transfer_department = 'РАО',
+                        released_at = COALESCE(released_at, ?),
+                        effective_return_at = COALESCE(effective_return_at, ?),
+                        last_modified_by = ?,
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (
+                        HANDOFF_RETURNED_TO_RAO,
+                        operation_case_id,
+                        now,
+                        arrival_dt.replace(microsecond=0).isoformat(timespec="seconds"),
+                        actor,
+                        int(handoff["id"]),
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE operation_cases
+                    SET handoff_id = COALESCE(handoff_id, ?)
+                    WHERE id = ?
+                    """,
+                    (int(handoff["id"]), operation_case_id),
+                )
+            return {
+                "source_admission_id": source_admission_id,
+                "target_admission_id": target_admission_id,
+                "operation_case_id": operation_case_id,
+                "movement_changed": movement_changed,
+            }
+
+        return dict(self.db.run_write_operation(operation, source="patient_bed_merge_recovery"))
 
     def _insert_initial_active_status(self, cursor, admission_id: int, admission_datetime) -> None:
         cursor.execute("SELECT COUNT(*) AS cnt FROM patient_status_events WHERE admission_id = ?", (int(admission_id),))

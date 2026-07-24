@@ -132,13 +132,8 @@ class BedWidget(QFrame):
             source_bed = int(source_bed_str)
             if source_bed == self.bed_number:
                 return
-            source_is_recovery = is_recovery_bed(source_bed)
             target_is_recovery = is_recovery_bed(self.bed_number)
-            target_is_occupied = self.status != "FREE"
-            if not source_is_recovery and target_is_recovery:
-                event.ignore()
-                return
-            if source_is_recovery and target_is_occupied:
+            if not is_recovery_bed(source_bed) and target_is_recovery:
                 event.ignore()
                 return
             event.acceptProposedAction()
@@ -154,8 +149,7 @@ class BedWidget(QFrame):
         target_bed = self.bed_number
         source_is_recovery = is_recovery_bed(source_bed)
         target_is_recovery = is_recovery_bed(target_bed)
-        target_is_occupied = self.status != "FREE"
-        if (not source_is_recovery and target_is_recovery) or (source_is_recovery and target_is_occupied):
+        if not source_is_recovery and target_is_recovery:
             event.ignore()
             self._update_display()
             return

@@ -300,6 +300,13 @@ class PatientBedManagementWidget(QWidget):
             return
         if not source_bed_data or source_bed_data["status"] == "FREE":
             return
+        if (
+            is_recovery_bed(source_bed)
+            and target_bed_data
+            and target_bed_data["status"] != "FREE"
+        ):
+            self._merge_recovery_patient(source_bed, target_bed)
+            return
         _source_patient, source_admission = self.patient_bed_service.get_patient_with_current_admission(source_bed)
         _target_patient, target_admission = (
             self.patient_bed_service.get_patient_with_current_admission(target_bed)
@@ -368,12 +375,90 @@ class PatientBedManagementWidget(QWidget):
     def _recovery_move_error(source_bed: int, target_bed: int, target_bed_data) -> str:
         source_is_recovery = is_recovery_bed(source_bed)
         target_is_recovery = is_recovery_bed(target_bed)
-        target_is_occupied = bool(target_bed_data and target_bed_data["status"] != "FREE")
         if not source_is_recovery and target_is_recovery:
             return "Пациента с обычной койки нельзя перенести на койку пробуждения."
-        if source_is_recovery and target_is_occupied:
-            return "Пациента с койки пробуждения можно перенести только на свободную койку."
         return ""
+
+    def _merge_recovery_patient(self, source_bed: int, target_bed: int):
+        try:
+            preview = self.patient_bed_service.get_recovery_merge_preview(source_bed, target_bed)
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Слияние пациентов", str(exc))
+            self.refresh_bed_statuses()
+            return
+        action = CustomMessageBox.warning_with_actions(
+            self,
+            "Слияние пациентов",
+            "Койка назначения уже занята. Объединить карту с койки пробуждения "
+            "с картой на занятой койке?\n\n"
+            "Главной останется карта на обычной койке. Карта с койки пробуждения "
+            "будет помечена как слитая, а койка пробуждения освободится.",
+            [("Объединить", 1), ("Отмена", 0)],
+        )
+        if action != 1:
+            return
+        differences = []
+        if not preview.get("history_number_matches"):
+            differences.append(
+                "номер истории: "
+                f"«{preview.get('source_history_number') or 'не указан'}» / "
+                f"«{preview.get('target_history_number') or 'не указан'}»"
+            )
+        if not preview.get("full_name_matches"):
+            differences.append(
+                "ФИО: "
+                f"«{preview.get('source_full_name') or 'не указано'}» / "
+                f"«{preview.get('target_full_name') or 'не указано'}»"
+            )
+        if not preview.get("birth_date_matches"):
+            differences.append("дата рождения различается")
+        if differences:
+            action = CustomMessageBox.warning_with_actions(
+                self,
+                "Различаются данные пациентов",
+                "Защитная проверка обнаружила различия:\n\n"
+                + "\n".join(f"• {item}" for item in differences)
+                + "\n\nОбъединяйте карты только после проверки пациента.",
+                [("Объединить", 1), ("Отмена", 0)],
+            )
+            if action != 1:
+                return
+
+        def operation():
+            return self.patient_bed_service.merge_recovery_admission(
+                source_bed,
+                target_bed,
+                expected_source_bed_revision=preview.get("source_bed_revision"),
+                expected_target_bed_revision=preview.get("target_bed_revision"),
+                expected_source_admission_revision=preview.get("source_admission_revision"),
+                expected_target_admission_revision=preview.get("target_admission_revision"),
+                allow_identity_mismatch=bool(differences),
+            )
+
+        def on_success(_result):
+            if self._is_closing:
+                return
+            self._finish_move_pending()
+            self._pending_side_card_update = (int(target_bed), None)
+            self.refresh_bed_statuses()
+
+        def on_error(exc):
+            if self._is_closing:
+                return
+            self._finish_move_pending()
+            self.refresh_bed_statuses()
+            CustomMessageBox.warning(self, "Слияние пациентов", str(exc))
+
+        self._begin_move_pending()
+        try:
+            self.patient_bed_service.enqueue_write(
+                f"patient_bed_merge_recovery:{source_bed}:{target_bed}",
+                operation,
+                on_success=on_success,
+                on_error=on_error,
+            )
+        except Exception as exc:
+            on_error(exc)
 
     def _begin_move_pending(self):
         self._move_pending = True

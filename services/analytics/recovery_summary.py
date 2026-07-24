@@ -292,12 +292,19 @@ def _fetch_admission_rows(conn, start_dt: datetime, end_dt: datetime) -> list[di
         _select_expr(columns, "outcome", "outcome"),
         _select_expr(columns, "bed_number", "bed_number"),
         _select_expr(columns, "recovery_bed_stay", "recovery_bed_stay", default="0"),
+        _select_expr(columns, "merged_into_admission_id", "merged_into_admission_id"),
     ]
+    merged_filter = (
+        "AND merged_into_admission_id IS NULL"
+        if "merged_into_admission_id" in columns
+        else ""
+    )
     query = f"""
         SELECT {', '.join(select_parts)}
         FROM main.admissions
         WHERE DATETIME(admission_datetime) >= DATETIME(?)
           AND DATETIME(admission_datetime) < DATETIME(?)
+          {merged_filter}
     """
     cursor = conn.execute(
         query,
@@ -317,6 +324,8 @@ def _select_expr(columns: set[str], column_name: str, alias: str, *, default: st
 
 
 def _is_recovery_admission(row: dict[str, Any]) -> bool:
+    if row.get("merged_into_admission_id") not in (None, ""):
+        return False
     if _truthy(row.get("recovery_bed_stay")):
         return True
     try:

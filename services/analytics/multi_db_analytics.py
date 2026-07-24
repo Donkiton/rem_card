@@ -37,7 +37,8 @@ FALLBACK_DDL: dict[str, str] = {
             diagnosis_code TEXT,
             diagnosis_text TEXT,
             bed_number INTEGER,
-            recovery_bed_stay INTEGER DEFAULT 0
+            recovery_bed_stay INTEGER DEFAULT 0,
+            merged_into_admission_id INTEGER
         )
     """,
     "operations": """
@@ -200,6 +201,7 @@ def create_multi_db_analytics_manager(
             _prepare_target_table(conn, aliases, table_name)
             if table_name == "admissions":
                 _ensure_column(conn, "admissions", "recovery_bed_stay", "INTEGER DEFAULT 0")
+                _ensure_column(conn, "admissions", "merged_into_admission_id", "INTEGER")
             for alias in aliases:
                 if not _table_exists(conn, table_name, schema=alias):
                     continue
@@ -301,12 +303,17 @@ def _copy_table_rows(
         f'INSERT INTO "{table_name}" ({insert_cols}) '
         f'SELECT {select_cols} FROM {schema}."{table_name}"'
     )
-    params: tuple[object, ...] = ()
+    where_parts: list[str] = []
+    params_list: list[object] = []
     if start_dt and end_dt and time_col and time_col in source_cols:
-        query += f' WHERE "{time_col}" >= ? AND "{time_col}" < ?'
-        params = (start_dt, end_dt)
+        where_parts.append(f'"{time_col}" >= ? AND "{time_col}" < ?')
+        params_list.extend((start_dt, end_dt))
+    if table_name == "admissions" and "merged_into_admission_id" in source_cols:
+        where_parts.append('"merged_into_admission_id" IS NULL')
+    if where_parts:
+        query += " WHERE " + " AND ".join(where_parts)
 
-    conn.execute(query, params)
+    conn.execute(query, tuple(params_list))
 
 
 def _create_light_indexes(conn: sqlite3.Connection):

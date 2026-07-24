@@ -688,6 +688,26 @@ class SectorEvents(BaseSectorWidget):
         for btn in self._status_buttons():
             btn.setEnabled(can_edit and not self._status_write_pending)
 
+    @staticmethod
+    def _status_label(status: PatientStatus) -> str:
+        return {
+            PatientStatus.ACTIVE: "В отделении",
+            PatientStatus.OUT: "Вне отделения",
+            PatientStatus.OR: "Операционная",
+            PatientStatus.TRANSFERRED: "Переведён",
+            PatientStatus.DEAD: "Умер",
+        }.get(status, str(getattr(status, "value", status)))
+
+    def _handle_already_current_status(self, status: PatientStatus) -> None:
+        self._set_status_write_pending(False)
+        self.refresh(force=True)
+        CustomMessageBox.information(
+            self,
+            "Движение уже обновлено",
+            f"Пациент уже имеет статус «{self._status_label(status)}». "
+            "Данные вкладки движения обновлены.",
+        )
+
     def on_status_btn_clicked(self, status):
         if not self.admission_id or not self.status_service: return
         if self._status_write_pending:
@@ -710,6 +730,9 @@ class SectorEvents(BaseSectorWidget):
             )
             expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
             expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
+            if current_event is not None and getattr(current_event, "status", None) == status:
+                self._handle_already_current_status(status)
+                return
 
             def on_success(result):
                 self._set_status_write_pending(False)
@@ -750,6 +773,9 @@ class SectorEvents(BaseSectorWidget):
         )
         expected_active_event_id = int(getattr(current_event, "id", 0) or 0) if current_event else None
         expected_active_revision = int(getattr(current_event, "revision", 0) or 0) if current_event else None
+        if current_event is not None and getattr(current_event, "status", None) == status:
+            self._handle_already_current_status(status)
+            return
         if self.status_service.change_status(
             self.admission_id,
             status,

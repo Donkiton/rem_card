@@ -48,6 +48,14 @@ from rem_card.services.operblock_route_settings import (
     strip_operblock_route_tag,
 )
 from rem_card.services.operblock_anesthesia_types import normalize_operblock_anesthesia_type_label
+from rem_card.services.operblock_handoff_service import (
+    HANDOFF_ACCEPTED,
+    HANDOFF_COMPLETED_NON_RAO,
+    HANDOFF_RETURNED_TO_RAO,
+    OperBlockHandoffService,
+    normalize_handoff_full_name,
+    normalize_handoff_history_number,
+)
 from rem_card.services.operblock_timeline import (
     OPERBLOCK_STAGE_KIND_LABELS,
     OperBlockTimelineSnapshot,
@@ -147,6 +155,8 @@ class OperBlockPatientInput:
     preop_dia: Optional[int] = None
     preop_pulse: Optional[int] = None
     preop_spo2: Optional[int] = None
+    handoff_id: Optional[int] = None
+    source_rao_admission_id: Optional[int] = None
 
 
 def normalize_operblock_history_number(value: str) -> str:
@@ -798,6 +808,13 @@ def _case_input_from_payload(data: OperBlockPatientInput | Mapping[str, Any] | d
         preop_dia=_normalize_optional_int(payload.get("preop_dia"), "АД диастолическое", 0, 300),
         preop_pulse=_normalize_optional_int(payload.get("preop_pulse"), "ЧСС", 0, 300),
         preop_spo2=_normalize_optional_int(payload.get("preop_spo2"), "SpO₂", 0, 100),
+        handoff_id=_normalize_optional_int(payload.get("handoff_id"), "Связь с РАО", 1, 2_147_483_647),
+        source_rao_admission_id=_normalize_optional_int(
+            payload.get("source_rao_admission_id"),
+            "Исходная карта РАО",
+            1,
+            2_147_483_647,
+        ),
     )
 
 
@@ -850,6 +867,7 @@ class OperBlockService:
     def __init__(self, db_manager):
         self.db = db_manager
         self.client_id = f"{socket.gethostname()}:{os.getpid()}"
+        self.handoff_service = OperBlockHandoffService(db_manager, client_id=self.client_id)
         self._operation_case_columns_cache: set[str] | None = None
         self._timeline_events_table_exists_cache: bool | None = None
 
@@ -3604,6 +3622,94 @@ class OperBlockService:
                     updated += 1
         return updated
 
+    def list_waiting_rao_handoffs(self) -> list[dict[str, Any]]:
+        validate_operblock_runtime_path(self.db)
+        return self.handoff_service.list_waiting()
+
+    def get_rao_handoff_form_data(self, handoff_id: int, table_code: str) -> dict[str, Any]:
+        validate_operblock_runtime_path(self.db)
+        table_code = self._validate_table_code(table_code)
+        handoff = self.handoff_service.get_waiting(int(handoff_id))
+        if not handoff:
+            raise OperBlockConflictError(
+                "Пациент уже выбран другим рабочим местом или больше не ожидает операционную."
+            )
+        patient = dict(handoff.get("patient_snapshot") or {})
+        vitals = dict(handoff.get("vitals_snapshot") or {})
+        return {
+            "table_code": table_code,
+            "handoff_id": int(handoff["id"]),
+            "source_rao_admission_id": int(handoff["source_admission_id"]),
+            "history_number": str(patient.get("history_number") or ""),
+            "full_name": str(patient.get("full_name") or ""),
+            "gender": str(patient.get("gender") or ""),
+            "birth_date": patient.get("birth_date"),
+            "diagnosis_code": patient.get("diagnosis_code"),
+            "diagnosis_text": str(patient.get("diagnosis_text") or ""),
+            "department_profile": str(patient.get("department_profile") or ""),
+            "started_at": handoff.get("expected_arrival_at"),
+            "can_edit_started_at": False,
+            "started_at_edit_lock_reason": (
+                "Время поступления рассчитано как время отправки из РАО плюс 5 минут."
+            ),
+            "preop_sys": vitals.get("sys"),
+            "preop_dia": vitals.get("dia"),
+            "preop_pulse": vitals.get("pulse"),
+            "preop_spo2": vitals.get("spo2"),
+        }
+
+    def find_late_binding_candidates(
+        self,
+        operation_case_id: int,
+        *,
+        target_department: str | None = None,
+    ) -> list[dict[str, Any]]:
+        validate_operblock_runtime_path(self.db)
+        handoff_expr = self._operation_case_column_expr("handoff_id")
+        source_expr = self._operation_case_column_expr("source_rao_admission_id")
+        future_rao_expr = self._operation_case_column_expr("future_rao_admission_id")
+        case = self.db.fetch_one_remcard(
+            f"""
+            SELECT
+                oc.id AS operation_case_id,
+                {handoff_expr},
+                {source_expr},
+                {future_rao_expr},
+                oc.transfer_department,
+                a.history_number,
+                p.full_name,
+                p.birth_date
+            FROM operation_cases oc
+            JOIN admissions a ON a.id = oc.admission_id
+            JOIN patients p ON p.id = oc.patient_id
+            WHERE oc.id = ? AND oc.status = 'active'
+            """,
+            (int(operation_case_id),),
+        )
+        effective_department = (
+            normalize_operblock_transfer_department(target_department)
+            if target_department is not None
+            else normalize_operblock_transfer_department(case["transfer_department"] if case else None)
+        )
+        if (
+            not case
+            or case["handoff_id"] is not None
+            or case["source_rao_admission_id"] is not None
+            or case["future_rao_admission_id"] is not None
+            or not _is_rao_transfer_department(effective_department)
+        ):
+            return []
+        candidates = self.handoff_service.find_waiting_candidates(
+            history_number=case["history_number"],
+            full_name=case["full_name"],
+            birth_date=case["birth_date"],
+        )
+        return [
+            candidate
+            for candidate in candidates
+            if candidate.get("full_name_matches") and candidate.get("birth_date_matches")
+        ]
+
     def create_operation_case(self, data: OperBlockPatientInput | dict[str, Any]) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
         data = _case_input_from_payload(data)
@@ -3626,7 +3732,7 @@ class OperBlockService:
         now = _now_text()
         started_dt = _minute_floor(data.started_at or datetime.now())
         current_minute = _minute_floor(datetime.now())
-        if started_dt > current_minute + timedelta(minutes=1):
+        if data.handoff_id is None and started_dt > current_minute + timedelta(minutes=1):
             raise ValueError("Время поступления в оперблок не может быть позже текущего времени.")
         started_text = started_dt.isoformat(timespec="seconds")
         age = storage_age_from_birth_date(birth_date, started_dt)
@@ -3637,6 +3743,46 @@ class OperBlockService:
         offline_session_id = self._offline_session_id() if self._is_opblock_offline_runtime() else None
 
         def operation(cursor: sqlite3.Cursor):
+            case_started_text = started_text
+            case_age = age
+            handoff = None
+            if data.handoff_id is not None:
+                handoff = cursor.execute(
+                    """
+                    SELECT h.*, pse.status AS current_source_status
+                    FROM operblock_handoffs h
+                    JOIN patient_status_events pse
+                      ON pse.admission_id = h.source_admission_id
+                     AND pse.end_time IS NULL
+                    JOIN beds b
+                      ON b.current_admission_id = h.source_admission_id
+                     AND b.status = 'OCCUPIED'
+                    WHERE h.id = ?
+                      AND h.status = 'waiting'
+                    LIMIT 1
+                    """,
+                    (int(data.handoff_id),),
+                ).fetchone()
+                if not handoff:
+                    raise OperBlockConflictError(
+                        "Пациент уже выбран другим рабочим местом или больше не ожидает операционную."
+                    )
+                if str(handoff["current_source_status"] or "") != PatientStatus.OR.value:
+                    raise OperBlockConflictError(
+                        "Движение пациента в РАО уже изменилось. Обновите очередь."
+                    )
+                source_admission_id = int(handoff["source_admission_id"])
+                if (
+                    data.source_rao_admission_id is not None
+                    and int(data.source_rao_admission_id) != source_admission_id
+                ):
+                    raise OperBlockConflictError("Связь с исходной картой РАО изменилась.")
+                expected_arrival = _parse_dt(handoff["expected_arrival_at"])
+                if expected_arrival is None:
+                    raise OperBlockConflictError("Не удалось определить время поступления из РАО.")
+                case_started_text = _minute_floor(expected_arrival).isoformat(timespec="seconds")
+                case_age = storage_age_from_birth_date(birth_date, expected_arrival)
+
             existing = cursor.execute(
                 "SELECT id FROM operation_cases WHERE table_code = ? AND status = 'active' LIMIT 1",
                 (table_code,),
@@ -3666,10 +3812,10 @@ class OperBlockService:
                     patient_id,
                     bed_number,
                     history_number,
-                    started_text,
-                    age["patient_age"],
-                    age["patient_months"],
-                    age["patient_age_unit"],
+                    case_started_text,
+                    case_age["patient_age"],
+                    case_age["patient_months"],
+                    case_age["patient_age_unit"],
                     data.gender,
                     diagnosis_code or None,
                     diagnosis_text,
@@ -3701,7 +3847,7 @@ class OperBlockService:
                     admission_id,
                     table_code,
                     now,
-                    started_text,
+                    case_started_text,
                     self.client_id,
                     data.operation_name or None,
                     data.anesthesia_assistance_type or None,
@@ -3725,6 +3871,45 @@ class OperBlockService:
                 ),
             )
             operation_case_id = int(cursor.lastrowid)
+            if handoff is not None:
+                cursor.execute(
+                    """
+                    UPDATE operation_cases
+                    SET handoff_id = ?,
+                        source_rao_admission_id = ?,
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                    """,
+                    (
+                        int(handoff["id"]),
+                        int(handoff["source_admission_id"]),
+                        operation_case_id,
+                    ),
+                )
+                cursor.execute(
+                    """
+                    UPDATE operblock_handoffs
+                    SET status = ?,
+                        operation_case_id = ?,
+                        accepted_table_code = ?,
+                        accepted_at = ?,
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ? AND status = 'waiting'
+                    """,
+                    (
+                        HANDOFF_ACCEPTED,
+                        operation_case_id,
+                        table_code,
+                        now,
+                        int(handoff["id"]),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise OperBlockConflictError(
+                        "Пациент уже выбран другим рабочим местом. Обновите очередь."
+                    )
             if self._is_opblock_offline_runtime():
                 cursor.execute(
                     """
@@ -3742,7 +3927,7 @@ class OperBlockService:
                     created_by_role, created_by_client_id, last_modified_by
                 ) VALUES (?, ?, ?, 'active', 'operblock', ?, 'operblock')
                 """,
-                (operation_case_id, table_code, started_text, self.client_id),
+                (operation_case_id, table_code, case_started_text, self.client_id),
             )
             cursor.execute(
                 """
@@ -3751,13 +3936,13 @@ class OperBlockService:
                     created_by, last_modified_by
                 ) VALUES (?, 'OR', 'operblock', 'В операционной', ?, 'operblock', 'operblock')
                 """,
-                (admission_id, started_text),
+                (admission_id, case_started_text),
             )
             if _has_case_vitals(data):
                 self._upsert_initial_vitals_for_case(cursor, {
                     "operation_case_id": operation_case_id,
                     "admission_id": admission_id,
-                    "started_at": started_text,
+                    "started_at": case_started_text,
                     "ended_at": None,
                 }, data)
             return {
@@ -4107,16 +4292,32 @@ class OperBlockService:
     def close_operation_case(self, operation_case_id: int) -> dict[str, int]:
         return self.release_operation_table(operation_case_id)
 
-    def release_operation_table(self, operation_case_id: int) -> dict[str, int]:
+    def release_operation_table(
+        self,
+        operation_case_id: int,
+        *,
+        handoff_id: int | None = None,
+    ) -> dict[str, int]:
         validate_operblock_runtime_path(self.db)
-        now = _now_text()
+        released_dt = _minute_floor(datetime.now())
+        now = released_dt.isoformat(timespec="seconds")
+        handoff_expr = self._operation_case_column_expr("handoff_id")
+        source_rao_expr = self._operation_case_column_expr("source_rao_admission_id")
 
         def operation(cursor: sqlite3.Cursor):
+            if handoff_id is not None:
+                active_case = self._assert_active_operation_case_for_update(
+                    cursor,
+                    int(operation_case_id),
+                )
+                self._bind_waiting_handoff_to_case(cursor, active_case, int(handoff_id))
             row = cursor.execute(
-                """
-                SELECT id, admission_id, table_code
-                FROM operation_cases
-                WHERE id = ? AND status = 'active'
+                f"""
+                SELECT
+                    oc.id, oc.admission_id, oc.table_code, oc.started_at, oc.transfer_department,
+                    {handoff_expr}, {source_rao_expr}
+                FROM operation_cases oc
+                WHERE oc.id = ? AND oc.status = 'active'
                 """,
                 (int(operation_case_id),),
             ).fetchone()
@@ -4126,6 +4327,38 @@ class OperBlockService:
             stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
             if self._active_anesthesia_interval(stage_rows) is not None:
                 raise ValueError("Перед освобождением стола завершите анестезиологическое пособие.")
+            linked_handoff_id = int(row["handoff_id"]) if row["handoff_id"] is not None else None
+            source_rao_admission_id = (
+                int(row["source_rao_admission_id"])
+                if row["source_rao_admission_id"] is not None
+                else None
+            )
+            transfer_department = normalize_operblock_transfer_department(row["transfer_department"])
+            case_started_dt = _parse_dt(row["started_at"])
+            case_closed_dt = max(released_dt, _minute_floor(case_started_dt)) if case_started_dt else released_dt
+            case_closed_text = case_closed_dt.isoformat(timespec="seconds")
+            return_to_rao = bool(
+                linked_handoff_id is not None
+                and source_rao_admission_id is not None
+                and _is_rao_transfer_department(transfer_department)
+            )
+            effective_return_dt = released_dt + timedelta(minutes=5)
+            effective_return_text = effective_return_dt.isoformat(timespec="seconds")
+            if return_to_rao:
+                source_event = cursor.execute(
+                    """
+                    SELECT id, status, start_time
+                    FROM patient_status_events
+                    WHERE admission_id = ? AND end_time IS NULL
+                    LIMIT 1
+                    """,
+                    (source_rao_admission_id,),
+                ).fetchone()
+                if not source_event or str(source_event["status"] or "") != PatientStatus.OR.value:
+                    raise OperBlockConflictError(
+                        "Движение исходной карты РАО уже изменилось. "
+                        "Стол не освобождён; обновите данные пациента."
+                    )
             cursor.execute(
                 """
                 UPDATE operation_cases
@@ -4139,7 +4372,7 @@ class OperBlockService:
                     revision = COALESCE(revision, 0) + 1
                 WHERE id = ? AND status = 'active'
                 """,
-                (now, int(operation_case_id)),
+                (case_closed_text, int(operation_case_id)),
             )
             if cursor.rowcount != 1:
                 raise OperBlockConflictError("Случай уже закрыт другим пользователем.")
@@ -4154,7 +4387,7 @@ class OperBlockService:
                   AND status = 'active'
                   AND released_at IS NULL
                 """,
-                (now, int(operation_case_id)),
+                (case_closed_text, int(operation_case_id)),
             )
             cursor.execute(
                 """
@@ -4165,7 +4398,7 @@ class OperBlockService:
                 WHERE admission_id = ?
                   AND end_time IS NULL
                 """,
-                (now, admission_id),
+                (case_closed_text, admission_id),
             )
             cursor.execute(
                 """
@@ -4177,6 +4410,80 @@ class OperBlockService:
                 """,
                 (now, admission_id),
             )
+            if linked_handoff_id is not None and source_rao_admission_id is not None:
+                if return_to_rao:
+                    cursor.execute(
+                        """
+                        UPDATE patient_status_events
+                        SET end_time = ?,
+                            updated_at = ?,
+                            last_modified_by = 'operblock',
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE admission_id = ?
+                          AND status = 'OR'
+                          AND end_time IS NULL
+                        """,
+                        (effective_return_text, now, source_rao_admission_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise OperBlockConflictError(
+                            "Движение исходной карты РАО изменилось другим пользователем."
+                        )
+                    cursor.execute(
+                        """
+                        INSERT INTO patient_status_events (
+                            admission_id, status, reason_type, reason_text, start_time,
+                            created_by, created_at, updated_at, last_modified_by
+                        ) VALUES (?, ?, 'operblock_return', ?, ?, 'operblock', ?, ?, 'operblock')
+                        """,
+                        (
+                            source_rao_admission_id,
+                            PatientStatus.ACTIVE.value,
+                            "Возврат из операционной",
+                            effective_return_text,
+                            now,
+                            now,
+                        ),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE operation_cases
+                        SET resolved_rao_admission_id = ?,
+                            last_modified_by = 'operblock',
+                            revision = COALESCE(revision, 0) + 1
+                        WHERE id = ?
+                        """,
+                        (source_rao_admission_id, int(operation_case_id)),
+                    )
+                    handoff_status = HANDOFF_RETURNED_TO_RAO
+                else:
+                    handoff_status = HANDOFF_COMPLETED_NON_RAO
+                cursor.execute(
+                    """
+                    UPDATE operblock_handoffs
+                    SET status = ?,
+                        transfer_department = ?,
+                        released_at = ?,
+                        effective_return_at = ?,
+                        last_modified_by = 'operblock',
+                        revision = COALESCE(revision, 0) + 1
+                    WHERE id = ?
+                      AND operation_case_id = ?
+                      AND status = 'accepted'
+                    """,
+                    (
+                        handoff_status,
+                        transfer_department or None,
+                        now,
+                        effective_return_text if return_to_rao else None,
+                        linked_handoff_id,
+                        int(operation_case_id),
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise OperBlockConflictError(
+                        "Связь с исходной картой РАО уже изменена другим пользователем."
+                    )
             return {"operation_case_id": int(operation_case_id), "admission_id": admission_id}
 
         return dict(self.db.run_write_operation(operation, source="operblock_release_operation_table"))
@@ -4208,12 +4515,14 @@ class OperBlockService:
         transfer_department: str,
         *,
         event_time: Any = None,
+        handoff_id: int | None = None,
     ) -> int:
         return self._add_stage_event(
             operation_case_id,
             "anesthesia_end",
             transfer_department=transfer_department,
             event_time=event_time,
+            handoff_id=handoff_id,
         )
 
     def start_surgery(
@@ -4563,6 +4872,102 @@ class OperBlockService:
 
         return dict(self.db.run_write_operation(operation, source="operblock_update_operation_staff"))
 
+    def _bind_waiting_handoff_to_case(
+        self,
+        cursor: sqlite3.Cursor,
+        case: dict[str, Any],
+        handoff_id: int,
+    ) -> dict[str, Any]:
+        if case.get("handoff_id") is not None or case.get("source_rao_admission_id") is not None:
+            if int(case.get("handoff_id") or 0) == int(handoff_id):
+                return case
+            raise OperBlockConflictError("Операционный случай уже связан с другой картой РАО.")
+        identity = cursor.execute(
+            """
+            SELECT a.history_number, p.full_name, p.birth_date
+            FROM admissions a
+            JOIN patients p ON p.id = a.patient_id
+            WHERE a.id = ?
+            """,
+            (int(case["admission_id"]),),
+        ).fetchone()
+        handoff = cursor.execute(
+            """
+            SELECT
+                h.id, h.source_admission_id, h.patient_snapshot_json,
+                a.history_number, p.full_name, p.birth_date
+            FROM operblock_handoffs h
+            JOIN admissions a ON a.id = h.source_admission_id
+            JOIN patients p ON p.id = a.patient_id
+            JOIN patient_status_events pse
+              ON pse.admission_id = h.source_admission_id
+             AND pse.end_time IS NULL
+             AND pse.status = 'OR'
+            JOIN beds b
+              ON b.current_admission_id = h.source_admission_id
+             AND b.status = 'OCCUPIED'
+            WHERE h.id = ? AND h.status = 'waiting'
+            LIMIT 1
+            """,
+            (int(handoff_id),),
+        ).fetchone()
+        if not identity or not handoff:
+            raise OperBlockConflictError(
+                "Пациент уже выбран другим рабочим местом или его движение в РАО изменилось."
+            )
+        identity_matches = (
+            normalize_handoff_history_number(identity["history_number"])
+            == normalize_handoff_history_number(handoff["history_number"])
+            and normalize_handoff_full_name(identity["full_name"])
+            == normalize_handoff_full_name(handoff["full_name"])
+            and str(identity["birth_date"] or "") == str(handoff["birth_date"] or "")
+        )
+        if not identity_matches:
+            raise OperBlockConflictError(
+                "Идентификационные данные операционной карты и карты РАО различаются."
+            )
+        now = _now_text()
+        cursor.execute(
+            """
+            UPDATE operation_cases
+            SET handoff_id = ?,
+                source_rao_admission_id = ?,
+                last_modified_by = 'operblock',
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ?
+              AND handoff_id IS NULL
+              AND source_rao_admission_id IS NULL
+            """,
+            (int(handoff_id), int(handoff["source_admission_id"]), int(case["operation_case_id"])),
+        )
+        if cursor.rowcount != 1:
+            raise OperBlockConflictError("Операционный случай уже связан другим пользователем.")
+        cursor.execute(
+            """
+            UPDATE operblock_handoffs
+            SET status = ?,
+                operation_case_id = ?,
+                accepted_table_code = ?,
+                accepted_at = ?,
+                last_modified_by = 'operblock',
+                revision = COALESCE(revision, 0) + 1
+            WHERE id = ? AND status = 'waiting'
+            """,
+            (
+                HANDOFF_ACCEPTED,
+                int(case["operation_case_id"]),
+                str(case.get("table_code") or ""),
+                now,
+                int(handoff_id),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise OperBlockConflictError("Пациент уже выбран другим рабочим местом.")
+        result = dict(case)
+        result["handoff_id"] = int(handoff_id)
+        result["source_rao_admission_id"] = int(handoff["source_admission_id"])
+        return result
+
     def _add_stage_event(
         self,
         operation_case_id: int,
@@ -4577,6 +4982,7 @@ class OperBlockService:
         operating_nurse: str | None = None,
         transfer_department: str | None = None,
         event_time: Any = None,
+        handoff_id: int | None = None,
     ) -> int:
         validate_operblock_runtime_path(self.db)
         clean_kind = str(stage_kind or "").strip()
@@ -4601,6 +5007,8 @@ class OperBlockService:
         def operation(cursor: sqlite3.Cursor):
             nonlocal clean_transfer_department
             case = self._assert_active_operation_case_for_update(cursor, operation_case_id)
+            if handoff_id is not None:
+                case = self._bind_waiting_handoff_to_case(cursor, case, int(handoff_id))
             self._assert_datetime_in_operation_bounds(event_dt, case, entity_label=_stage_label(clean_kind))
             stage_rows = self._fetch_stage_rows_for_case(cursor, int(operation_case_id))
             state = self._stage_state_from_cursor_rows(stage_rows)
@@ -4715,7 +5123,11 @@ class OperBlockService:
                 operating_nurse=clean_operating_nurse,
                 transfer_department=clean_transfer_department,
             )
-            if clean_kind == "anesthesia_end" and _is_rao_transfer_department(clean_transfer_department):
+            if (
+                clean_kind == "anesthesia_end"
+                and _is_rao_transfer_department(clean_transfer_department)
+                and case.get("source_rao_admission_id") is None
+            ):
                 if self._is_opblock_offline_runtime():
                     logger.info(
                         "operblock_offline_rao_transfer_archival_only case_id=%s",
@@ -7137,8 +7549,11 @@ class OperBlockService:
         cursor: sqlite3.Cursor,
         operation_case_id: int,
     ) -> dict[str, Any]:
+        handoff_expr = self._operation_case_column_expr("handoff_id")
+        source_rao_expr = self._operation_case_column_expr("source_rao_admission_id")
+        resolved_rao_expr = self._operation_case_column_expr("resolved_rao_admission_id")
         row = cursor.execute(
-            """
+            f"""
             SELECT
                 oc.id AS operation_case_id,
                 oc.patient_id,
@@ -7150,6 +7565,9 @@ class OperBlockService:
                 oc.anesthesia_protocol_number,
                 oc.anesthesia_protocol_date,
                 oc.transfer_department,
+                {handoff_expr},
+                {source_rao_expr},
+                {resolved_rao_expr},
                 a.department_profile,
                 COALESCE(oc.revision, 0) AS revision
             FROM operation_cases oc

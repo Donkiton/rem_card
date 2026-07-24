@@ -12,7 +12,11 @@ FILTERED_RELATED_TABLES = ("operations", "transfusions", "ivl_episodes", "proced
 
 @contextmanager
 def recovery_bed_analytics_filter(conn: sqlite3.Connection, *, include_recovery_beds: bool):
-    if include_recovery_beds or not _table_exists(conn, "admissions"):
+    if not _table_exists(conn, "admissions"):
+        yield
+        return
+    admission_columns = set(_columns(conn, "admissions"))
+    if include_recovery_beds and "merged_into_admission_id" not in admission_columns:
         yield
         return
 
@@ -20,7 +24,7 @@ def recovery_bed_analytics_filter(conn: sqlite3.Connection, *, include_recovery_
     created_tables: list[str] = []
     try:
         _set_query_only(conn, False)
-        _create_filtered_admissions(conn)
+        _create_filtered_admissions(conn, include_recovery_beds=include_recovery_beds)
         created_tables.append("admissions")
         for table_name in FILTERED_RELATED_TABLES:
             if _table_exists(conn, table_name) and "admission_id" in _columns(conn, table_name):
@@ -36,20 +40,22 @@ def recovery_bed_analytics_filter(conn: sqlite3.Connection, *, include_recovery_
             _set_query_only(conn, original_query_only)
 
 
-def _create_filtered_admissions(conn: sqlite3.Connection) -> None:
+def _create_filtered_admissions(conn: sqlite3.Connection, *, include_recovery_beds: bool) -> None:
     columns = set(_columns(conn, "admissions"))
     recovery_numbers = ", ".join(str(int(number)) for number in sorted(RECOVERY_BED_NUMBERS))
-    if "recovery_bed_stay" in columns and "bed_number" in columns:
-        where_clause = (
+    where_parts = []
+    if "merged_into_admission_id" in columns:
+        where_parts.append("merged_into_admission_id IS NULL")
+    if not include_recovery_beds and "recovery_bed_stay" in columns and "bed_number" in columns:
+        where_parts.append(
             f"COALESCE(recovery_bed_stay, 0) = 0 "
             f"AND COALESCE(bed_number, 0) NOT IN ({recovery_numbers})"
         )
-    elif "recovery_bed_stay" in columns:
-        where_clause = "COALESCE(recovery_bed_stay, 0) = 0"
-    elif "bed_number" in columns:
-        where_clause = f"COALESCE(bed_number, 0) NOT IN ({recovery_numbers})"
-    else:
-        where_clause = "1 = 1"
+    elif not include_recovery_beds and "recovery_bed_stay" in columns:
+        where_parts.append("COALESCE(recovery_bed_stay, 0) = 0")
+    elif not include_recovery_beds and "bed_number" in columns:
+        where_parts.append(f"COALESCE(bed_number, 0) NOT IN ({recovery_numbers})")
+    where_clause = " AND ".join(where_parts) if where_parts else "1 = 1"
 
     conn.execute("DROP TABLE IF EXISTS temp.admissions")
     conn.execute(f"CREATE TEMP TABLE admissions AS SELECT * FROM main.admissions WHERE {where_clause}")

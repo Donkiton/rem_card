@@ -15,7 +15,7 @@ from rem_card.app.unified_db_schema import (
 )
 
 
-OPERBLOCK_SCHEMA_VERSION = 1010
+OPERBLOCK_SCHEMA_VERSION = 1011
 OPERBLOCK_TABLE_CODES = ("emergency", "planned")
 
 
@@ -77,7 +77,13 @@ def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
 
 
 def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
-    required_tables = {"operating_tables", "operation_cases", "operation_table_assignments"}
+    required_tables = {
+        "operating_tables",
+        "operation_cases",
+        "operation_table_assignments",
+        "operblock_handoffs",
+        "admission_merges",
+    }
     required_tables.add("operblock_timeline_events")
     required_indexes = {
         "idx_operation_cases_one_active_per_table",
@@ -89,6 +95,11 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "idx_operblock_timeline_status",
         "idx_operblock_timeline_event_type",
         "idx_operblock_timeline_parent",
+        "idx_operblock_handoffs_waiting_history",
+        "idx_operblock_handoffs_source_status",
+        "idx_operblock_handoffs_one_active_source",
+        "idx_operblock_handoffs_operation_case",
+        "idx_admissions_merged_into",
     }
     if not _schema_objects_exist(
         conn,
@@ -96,7 +107,7 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
     ):
         return False
     admission_columns = _columns(conn, "admissions")
-    if not {"unit_scope", "admission_type"}.issubset(admission_columns):
+    if not {"unit_scope", "admission_type", "merged_into_admission_id", "merged_at"}.issubset(admission_columns):
         return False
     case_columns = _columns(conn, "operation_cases")
     if not {
@@ -139,6 +150,9 @@ def is_operblock_schema_ready(conn: sqlite3.Connection) -> bool:
         "original_local_id",
         "original_protocol_number",
         "excluded_from_migration",
+        "handoff_id",
+        "source_rao_admission_id",
+        "resolved_rao_admission_id",
     }.issubset(case_columns):
         return False
     timeline_columns = _columns(conn, "operblock_timeline_events")
@@ -164,6 +178,8 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
 
     _ensure_column(conn, "admissions", "unit_scope", "TEXT", logger)
     _ensure_column(conn, "admissions", "admission_type", "TEXT", logger)
+    _ensure_column(conn, "admissions", "merged_into_admission_id", "INTEGER", logger)
+    _ensure_column(conn, "admissions", "merged_at", "TEXT", logger)
 
     cursor.execute(
         """
@@ -261,6 +277,9 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     _ensure_column(conn, "operation_cases", "original_local_id", "INTEGER", logger)
     _ensure_column(conn, "operation_cases", "original_protocol_number", "INTEGER", logger)
     _ensure_column(conn, "operation_cases", "excluded_from_migration", "INTEGER NOT NULL DEFAULT 0", logger)
+    _ensure_column(conn, "operation_cases", "handoff_id", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "source_rao_admission_id", "INTEGER", logger)
+    _ensure_column(conn, "operation_cases", "resolved_rao_admission_id", "INTEGER", logger)
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS operation_table_assignments (
@@ -280,6 +299,74 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
             CHECK (released_at IS NULL OR DATETIME(released_at) >= DATETIME(assigned_at)),
             FOREIGN KEY (operation_case_id) REFERENCES operation_cases(id),
             FOREIGN KEY (table_code) REFERENCES operating_tables(code)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS operblock_handoffs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_patient_id INTEGER NOT NULL,
+            source_admission_id INTEGER NOT NULL,
+            bed_number_at_dispatch INTEGER NOT NULL,
+            history_number_normalized TEXT NOT NULL,
+            dispatched_at TEXT NOT NULL,
+            expected_arrival_at TEXT NOT NULL,
+            patient_snapshot_json TEXT NOT NULL,
+            vitals_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'waiting',
+            operation_case_id INTEGER,
+            accepted_table_code TEXT,
+            accepted_at TEXT,
+            transfer_department TEXT,
+            released_at TEXT,
+            effective_return_at TEXT,
+            created_by TEXT,
+            created_by_client_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            last_modified_by TEXT,
+            revision INTEGER NOT NULL DEFAULT 0,
+            CHECK (
+                status IN (
+                    'waiting',
+                    'accepted',
+                    'returned_to_rao',
+                    'completed_non_rao',
+                    'cancelled'
+                )
+            ),
+            CHECK (
+                accepted_table_code IS NULL
+                OR accepted_table_code IN ('emergency', 'planned')
+            ),
+            FOREIGN KEY (source_patient_id) REFERENCES patients(id),
+            FOREIGN KEY (source_admission_id) REFERENCES admissions(id),
+            FOREIGN KEY (operation_case_id) REFERENCES operation_cases(id),
+            FOREIGN KEY (accepted_table_code) REFERENCES operating_tables(code)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS admission_merges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_admission_id INTEGER NOT NULL,
+            target_admission_id INTEGER NOT NULL,
+            operation_case_id INTEGER,
+            source_bed_number INTEGER,
+            target_bed_number INTEGER,
+            history_number_matches INTEGER NOT NULL DEFAULT 0,
+            full_name_matches INTEGER NOT NULL DEFAULT 0,
+            comparison_json TEXT NOT NULL DEFAULT '{}',
+            merged_at TEXT NOT NULL,
+            merged_by TEXT,
+            merged_by_client_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+            UNIQUE(source_admission_id),
+            FOREIGN KEY (source_admission_id) REFERENCES admissions(id),
+            FOREIGN KEY (target_admission_id) REFERENCES admissions(id),
+            FOREIGN KEY (operation_case_id) REFERENCES operation_cases(id)
         )
         """
     )
@@ -391,6 +478,40 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_operation_assignments_case ON operation_table_assignments(operation_case_id)"
     )
     cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operblock_handoffs_one_active_source
+        ON operblock_handoffs(source_admission_id)
+        WHERE status IN ('waiting', 'accepted')
+        """
+    )
+    cursor.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_operblock_handoffs_operation_case
+        ON operblock_handoffs(operation_case_id)
+        WHERE operation_case_id IS NOT NULL
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_operblock_handoffs_waiting_history
+        ON operblock_handoffs(history_number_normalized, dispatched_at, id)
+        WHERE status = 'waiting'
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_operblock_handoffs_source_status
+        ON operblock_handoffs(source_admission_id, status, id)
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_admissions_merged_into
+        ON admissions(merged_into_admission_id)
+        WHERE merged_into_admission_id IS NOT NULL
+        """
+    )
+    cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_admissions_scope_type ON admissions(unit_scope, admission_type, is_active)"
     )
     cursor.execute(
@@ -413,6 +534,7 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
     _create_updated_at_trigger(conn, "operation_cases")
     _create_updated_at_trigger(conn, "operation_table_assignments")
     _create_updated_at_trigger(conn, "operblock_timeline_events")
+    _create_updated_at_trigger(conn, "operblock_handoffs")
     _create_change_triggers(
         conn,
         "operating_tables",
@@ -457,6 +579,17 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         "COALESCE(OLD.last_modified_by, OLD.created_by_role, 'operblock')",
         use_updated_at_gate=False,
     )
+    _create_change_triggers(
+        conn,
+        "operblock_handoffs",
+        "NEW.id",
+        "OLD.id",
+        "NEW.source_admission_id",
+        "OLD.source_admission_id",
+        "COALESCE(NEW.last_modified_by, NEW.created_by, 'operblock')",
+        "COALESCE(OLD.last_modified_by, OLD.created_by, 'operblock')",
+        use_updated_at_gate=False,
+    )
     _mark_schema_migration(conn, 1001, "operblock operation cases and table assignments")
     _mark_schema_migration(conn, 1006, "operblock anesthesia protocol numbers and transfer target")
     cursor.execute(
@@ -478,7 +611,12 @@ def _apply_operblock_schema(cursor: sqlite3.Cursor) -> None:
         """
     )
     _create_updated_at_trigger(conn, "opblock_offline_case_map")
-    _mark_schema_migration(conn, OPERBLOCK_SCHEMA_VERSION, "operblock archive started-at index")
+    _mark_schema_migration(conn, 1010, "operblock archive started-at index")
+    _mark_schema_migration(
+        conn,
+        OPERBLOCK_SCHEMA_VERSION,
+        "operblock RAO handoffs and soft admission merges",
+    )
 
 
 def _backfill_anesthesia_protocol_numbers(cursor: sqlite3.Cursor) -> None:

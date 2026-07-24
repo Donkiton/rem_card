@@ -8144,6 +8144,140 @@ class OperBlockAdmissionTimeInput(QFrame):
         return self.datetime_value().isoformat(timespec="seconds")
 
 
+class OperBlockQueueDialog(OperBlockStyledDialog):
+    def __init__(self, loader, parent=None):
+        self._loader = loader
+        self._rows: list[dict[str, Any]] = []
+        self.selected_handoff_id: int | None = None
+        super().__init__(
+            "Очередь пациентов из РАО",
+            "rao_queue_dialog_geometry",
+            parent,
+            minimum_size=(720, 420),
+            initial_size=(920, 560),
+        )
+        self._init_ui()
+        self._finalize_dialog_chrome()
+
+    def _init_ui(self) -> None:
+        intro = QLabel(
+            "Список запрашивается только при открытии этого окна и по кнопке «Обновить»."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        self.content_layout.addWidget(intro)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setObjectName("OperBlockRaoQueueTable")
+        self.table.setHorizontalHeaderLabels(
+            ["Отправлен", "Ожидается", "ФИО", "История", "Койка", "Диагноз", "Профиль"]
+        )
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        self.table.itemSelectionChanged.connect(self._update_selection)
+        self.table.itemDoubleClicked.connect(lambda *_args: self._choose_selected())
+        self.content_layout.addWidget(self.table, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+        self.content_layout.addWidget(self.status_label)
+
+        actions = QHBoxLayout()
+        self.refresh_button = QPushButton("Обновить")
+        self.refresh_button.setMinimumHeight(36)
+        self.refresh_button.setCursor(Qt.PointingHandCursor)
+        self.refresh_button.setStyleSheet(STYLE_SECTOR8_BUTTON)
+        self.refresh_button.clicked.connect(self.refresh_rows)
+        actions.addWidget(self.refresh_button)
+        actions.addStretch(1)
+        close_button = QPushButton("Закрыть")
+        close_button.setMinimumHeight(36)
+        close_button.setStyleSheet(OPERBLOCK_DIALOG_CANCEL_BUTTON_STYLE)
+        close_button.clicked.connect(self.reject)
+        actions.addWidget(close_button)
+        self.choose_button = QPushButton("Занять стол")
+        self.choose_button.setMinimumHeight(36)
+        self.choose_button.setEnabled(False)
+        self.choose_button.setStyleSheet(OPERBLOCK_DIALOG_SAVE_BUTTON_STYLE)
+        self.choose_button.clicked.connect(self._choose_selected)
+        actions.addWidget(self.choose_button)
+        self.content_layout.addLayout(actions)
+
+    @staticmethod
+    def _display_time(value: Any) -> str:
+        parsed = _parse_datetime_value(value)
+        return parsed.strftime("%d.%m.%Y %H:%M") if parsed is not None else str(value or "")
+
+    def refresh_rows(self) -> None:
+        self.refresh_button.setEnabled(False)
+        self.choose_button.setEnabled(False)
+        self.status_label.setText("Загрузка…")
+        QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        try:
+            self._rows = [dict(row or {}) for row in (self._loader() or [])]
+        except Exception as exc:
+            self._rows = []
+            self.table.setRowCount(0)
+            self.status_label.setText("Не удалось обновить очередь.")
+            CustomMessageBox.warning(self, "Очередь", str(exc))
+        else:
+            self._fill_table()
+        finally:
+            self.refresh_button.setEnabled(True)
+
+    def _fill_table(self) -> None:
+        self.table.setRowCount(len(self._rows))
+        for row_index, row in enumerate(self._rows):
+            patient = dict(row.get("patient_snapshot") or {})
+            values = (
+                self._display_time(row.get("dispatched_at")),
+                self._display_time(row.get("expected_arrival_at")),
+                str(patient.get("full_name") or ""),
+                str(patient.get("history_number") or ""),
+                str(row.get("current_bed_number") or row.get("bed_number_at_dispatch") or ""),
+                str(patient.get("diagnosis_text") or patient.get("diagnosis_code") or ""),
+                str(patient.get("department_profile") or ""),
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(Qt.UserRole, int(row["id"]))
+                self.table.setItem(row_index, column, item)
+        if self._rows:
+            self.status_label.setText(f"Ожидают операционную: {len(self._rows)}")
+            self.table.selectRow(0)
+        else:
+            self.status_label.setText("Пациентов, ожидающих операционную, нет.")
+        self._update_selection()
+
+    def _selected_id(self) -> int | None:
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        value = item.data(Qt.UserRole) if item is not None else None
+        return int(value) if value is not None else None
+
+    def _update_selection(self) -> None:
+        self.choose_button.setEnabled(self._selected_id() is not None)
+
+    def _choose_selected(self) -> None:
+        handoff_id = self._selected_id()
+        if handoff_id is None:
+            return
+        self.selected_handoff_id = handoff_id
+        self.accept()
+
+
 class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
     EMPTY_BIRTH_DATE = QDate(1900, 1, 1)
 
@@ -8161,6 +8295,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.table_code = table_code
         self.table_name = table_name or _operblock_table_display_name(table_code)
         self.operation_case_id = int(operation_case_id) if operation_case_id else None
+        self.handoff_id: int | None = None
+        self.source_rao_admission_id: int | None = None
         self.is_edit_mode = str(mode or "").strip().lower() == "edit"
         self.mkb_service = MKBService()
         self._surgeon_rows: list[tuple[QWidget, QComboBox]] = []
@@ -8929,6 +9065,16 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
         self.birth_date_input.setText(birth_date.strftime("%d.%m.%Y"))
 
     def set_data(self, data: dict) -> None:
+        self.handoff_id = (
+            int((data or {}).get("handoff_id"))
+            if (data or {}).get("handoff_id") not in (None, "")
+            else None
+        )
+        self.source_rao_admission_id = (
+            int((data or {}).get("source_rao_admission_id"))
+            if (data or {}).get("source_rao_admission_id") not in (None, "")
+            else None
+        )
         self.history_input.setText(str((data or {}).get("history_number") or ""))
         self.full_name_input.setText(str((data or {}).get("full_name") or ""))
         self._set_combo_text(self.gender_combo, str((data or {}).get("gender") or ""))
@@ -9178,6 +9324,8 @@ class OccupyTableDialog(SavedFramelessDialogMixin, QDialog):
             "preop_dia": preop_dia,
             "preop_pulse": preop_pulse,
             "preop_spo2": preop_spo2,
+            "handoff_id": self.handoff_id,
+            "source_rao_admission_id": self.source_rao_admission_id,
         }
 
 
@@ -12083,6 +12231,41 @@ class OperBlockMainWidget(QWidget):
             button.clicked.connect(lambda _=False, code=table_code, name=display_name: self._open_occupy_dialog(code, name))
         return button
 
+    def _make_empty_table_queue_button(self, table_code: str, display_name: str) -> QPushButton:
+        button = QPushButton("ОЧЕРЕДЬ")
+        button.setObjectName("OperBlockEmptyStateQueueButton")
+        button.setFixedHeight(58)
+        button.setMinimumWidth(190)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setStyleSheet(
+            """
+            QPushButton#OperBlockEmptyStateQueueButton {
+                background-color: #2563EB;
+                color: #FFFFFF;
+                border: 1px solid #1D4ED8;
+                border-radius: 12px;
+                font-size: 17px;
+                font-weight: 800;
+                padding: 0 24px;
+            }
+            QPushButton#OperBlockEmptyStateQueueButton:hover {
+                background-color: #1D4ED8;
+            }
+            QPushButton#OperBlockEmptyStateQueueButton:pressed {
+                background-color: #1E40AF;
+            }
+            """
+        )
+        button.setEnabled(not self.is_view_only_mode())
+        if not self.is_view_only_mode():
+            button.clicked.connect(
+                lambda _=False, code=table_code, name=display_name: self._open_rao_queue_dialog(
+                    code,
+                    name,
+                )
+            )
+        return button
+
     @staticmethod
     def _make_empty_table_info_block() -> QFrame:
         info = QFrame()
@@ -12205,7 +12388,17 @@ class OperBlockMainWidget(QWidget):
         empty_layout.addSpacing(2)
         empty_layout.addWidget(separator)
         empty_layout.addSpacing(2)
-        empty_layout.addWidget(self._make_empty_table_action_button(table_code, display_name), 0, Qt.AlignCenter)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(12)
+        action_row.addStretch(1)
+        occupy_button = self._make_empty_table_action_button(table_code, display_name)
+        occupy_button.setMinimumWidth(240)
+        occupy_button.setMaximumWidth(420)
+        action_row.addWidget(occupy_button, 2)
+        action_row.addWidget(self._make_empty_table_queue_button(table_code, display_name), 1)
+        action_row.addStretch(1)
+        empty_layout.addLayout(action_row)
 
         body_layout.addWidget(empty_card)
         body_layout.addWidget(self._make_empty_table_info_block())
@@ -13222,12 +13415,40 @@ class OperBlockMainWidget(QWidget):
         )
         return frame
 
-    def _open_occupy_dialog(self, table_code: str, table_name: str):
+    def _open_rao_queue_dialog(self, table_code: str, table_name: str):
+        if self._is_closing or self._write_pending or self.is_view_only_mode():
+            return
+        dialog = OperBlockQueueDialog(self.operblock_service.list_waiting_rao_handoffs, self)
+        dialog.refresh_rows()
+        if dialog.exec() != QDialog.Accepted or dialog.selected_handoff_id is None:
+            return
+        try:
+            initial_data = self.operblock_service.get_rao_handoff_form_data(
+                dialog.selected_handoff_id,
+                table_code,
+            )
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Очередь", str(exc))
+            return
+        self._open_occupy_dialog(table_code, table_name, initial_data=initial_data)
+
+    def _open_occupy_dialog(
+        self,
+        table_code: str,
+        table_name: str,
+        *,
+        initial_data: dict[str, Any] | None = None,
+    ):
         if self._is_closing or self._write_pending:
             return
         if self.is_view_only_mode():
             return
-        dialog = OccupyTableDialog(table_code, table_name, self)
+        dialog = OccupyTableDialog(
+            table_code,
+            table_name,
+            self,
+            initial_data=dict(initial_data or {}),
+        )
         dialog_ref = weakref.ref(dialog)
 
         def save():
@@ -19400,12 +19621,45 @@ class OperBlockMainWidget(QWidget):
             return
         transfer_department = dialog.selected_department()
         event_time = dialog.end_datetime_text()
+        handoff_id = None
+        if normalize_operblock_transfer_department(transfer_department).casefold() == "рао":
+            try:
+                candidates = self.operblock_service.find_late_binding_candidates(
+                    case_id,
+                    target_department=transfer_department,
+                )
+            except Exception as exc:
+                logger.error(
+                    "operblock late handoff lookup failed case_id=%s: %s",
+                    case_id,
+                    exc,
+                    exc_info=True,
+                )
+                candidates = []
+            if len(candidates) == 1:
+                candidate = candidates[0]
+                patient = dict(candidate.get("patient_snapshot") or {})
+                reply = CustomMessageBox.question(
+                    self,
+                    "Связать с картой РАО",
+                    "В очереди РАО найден пациент с теми же номером истории, ФИО "
+                    "и датой рождения:\n\n"
+                    f"{patient.get('full_name') or 'ФИО не указано'}\n"
+                    f"История: {patient.get('history_number') or 'не указана'}\n\n"
+                    "Связать операционный случай с исходной картой и вернуть пациента "
+                    "на зарезервированную койку?",
+                    CustomMessageBox.Yes | CustomMessageBox.No,
+                    CustomMessageBox.Yes,
+                )
+                if reply == CustomMessageBox.Yes:
+                    handoff_id = int(candidate["id"])
         self._run_stage_action(
             f"operblock_end_anesthesia:{case_id}",
             lambda: self.operblock_service.end_anesthesia_with_transfer(
                 case_id,
                 transfer_department,
                 event_time=event_time,
+                handoff_id=handoff_id,
             ),
             "Анестезиологическое пособие завершено.",
         )
@@ -19837,10 +20091,42 @@ class OperBlockMainWidget(QWidget):
         )
         if reply != CustomMessageBox.Yes:
             return
+        handoff_id = None
+        try:
+            candidates = self.operblock_service.find_late_binding_candidates(
+                int(operation_case_id)
+            )
+        except Exception as exc:
+            logger.error(
+                "operblock release late handoff lookup failed case_id=%s: %s",
+                operation_case_id,
+                exc,
+                exc_info=True,
+            )
+            candidates = []
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            patient = dict(candidate.get("patient_snapshot") or {})
+            reply = CustomMessageBox.question(
+                self,
+                "Связать с картой РАО",
+                "Перед освобождением стола найдена исходная карта РАО с теми же "
+                "номером истории, ФИО и датой рождения:\n\n"
+                f"{patient.get('full_name') or 'ФИО не указано'}\n"
+                f"История: {patient.get('history_number') or 'не указана'}\n\n"
+                "Связать случай и вернуть пациента на зарезервированную койку?",
+                CustomMessageBox.Yes | CustomMessageBox.No,
+                CustomMessageBox.Yes,
+            )
+            if reply == CustomMessageBox.Yes:
+                handoff_id = int(candidate["id"])
         self._write_pending = True
 
         def operation():
-            return self.operblock_service.release_operation_table(operation_case_id)
+            return self.operblock_service.release_operation_table(
+                operation_case_id,
+                handoff_id=handoff_id,
+            )
 
         self._enqueue_write(
             f"operblock_release_operation_table:{operation_case_id}",
