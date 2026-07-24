@@ -17,6 +17,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rem_card.app.runtime_paths import (
+    CRASH_REPORT_RETENTION_DAYS,
+    get_legacy_crash_spool_dir,
+    get_writable_runtime_logs_dir,
+    is_compiled,
+)
+
 
 SCHEMA_VERSION = 1
 EVENT_TYPES = {
@@ -49,18 +56,11 @@ def _now_iso() -> str:
     return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
-def _local_appdata_dir() -> Path:
-    root = os.environ.get("LOCALAPPDATA")
-    if root:
-        return Path(root)
-    return Path.home() / "AppData" / "Local"
-
-
 def get_local_crash_spool_dir() -> Path:
     override = str(os.environ.get("REMCARD_CRASH_OUTBOX_DIR") or "").strip()
     if override:
         return Path(override).expanduser().resolve()
-    return _local_appdata_dir() / "RemCard" / "crash-outbox"
+    return Path(get_writable_runtime_logs_dir()).joinpath("crashes").resolve()
 
 
 def get_shared_crash_root(data_root: str | os.PathLike[str] | None = None) -> Path:
@@ -106,6 +106,27 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         _replace_with_retry(tmp_name, path)
+    finally:
+        try:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+        except Exception:
+            pass
+
+
+def _atomic_copy_file(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    try:
+        with source.open("rb") as source_fh, os.fdopen(fd, "wb") as target_fh:
+            while True:
+                chunk = source_fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                target_fh.write(chunk)
+            target_fh.flush()
+            os.fsync(target_fh.fileno())
+        _replace_with_retry(tmp_name, target)
     finally:
         try:
             if os.path.exists(tmp_name):
@@ -332,6 +353,90 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def migrate_legacy_crash_spool() -> dict[str, int]:
+    """Import pending AppData crashes once, retaining every legacy source file."""
+    result = {"outbox": 0, "sessions": 0, "native": 0, "failed": 0}
+    if (
+        not is_compiled()
+        or str(os.environ.get("REMCARD_CRASH_OUTBOX_DIR") or "").strip()
+    ):
+        return result
+
+    legacy = Path(get_legacy_crash_spool_dir()).expanduser().resolve()
+    target = get_local_crash_spool_dir()
+    if os.path.normcase(str(legacy)) == os.path.normcase(str(target)):
+        return result
+    marker_path = target / ".appdata-import-v1.json"
+    if marker_path.is_file() or not legacy.is_dir():
+        return result
+
+    for source in sorted((legacy / "outbox").glob("*.json")):
+        destination = target / "outbox" / source.name
+        if destination.is_file():
+            continue
+        try:
+            payload = _read_json(source)
+            if payload is None:
+                continue
+            _atomic_write_json(destination, payload)
+            result["outbox"] += 1
+        except Exception:
+            result["failed"] += 1
+
+    for source_marker in sorted((legacy / "sessions").glob("*.json")):
+        target_marker = target / "sessions" / source_marker.name
+        if target_marker.is_file():
+            continue
+        try:
+            marker = _read_json(source_marker)
+            if marker is None:
+                continue
+            source_native = legacy / "native" / f"{source_marker.stem}.log"
+            target_native = target / "native" / f"{source_marker.stem}.log"
+            if source_native.is_file():
+                _atomic_copy_file(source_native, target_native)
+                marker["native_path"] = str(target_native)
+                result["native"] += 1
+            else:
+                marker["native_path"] = ""
+            _atomic_write_json(target_marker, marker)
+            result["sessions"] += 1
+        except Exception:
+            result["failed"] += 1
+
+    if result["failed"] == 0:
+        _atomic_write_json(
+            marker_path,
+            {
+                "version": 1,
+                "imported_at": _now_iso(),
+                "legacy_source": str(legacy),
+                "source_files_retained": True,
+                **result,
+            },
+        )
+    return result
+
+
+def cleanup_old_local_crash_reports(
+    retention_days: int = CRASH_REPORT_RETENTION_DAYS,
+) -> int:
+    """Remove only delivered local reports; pending and session data are retained."""
+    sent_dir = get_local_crash_spool_dir() / "sent"
+    if not sent_dir.is_dir():
+        return 0
+    cutoff_ts = time.time() - (max(1, int(retention_days)) * 86400)
+    removed = 0
+    for path in sent_dir.glob("*.json"):
+        try:
+            if path.stat().st_mtime < cutoff_ts:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def _remove_file(path: Path | None) -> None:
     if path is None:
         return
@@ -407,6 +512,8 @@ def _process_stale_sessions() -> None:
 def initialize_crash_session(role: str | None = None) -> str:
     global _FAULT_FILE, _CURRENT_MARKER_PATH, _CURRENT_NATIVE_PATH, _CURRENT_SESSION_ID
     with _STATE_LOCK:
+        migrate_legacy_crash_spool()
+        cleanup_old_local_crash_reports()
         _process_stale_sessions()
         session_id = uuid.uuid4().hex
         spool = get_local_crash_spool_dir()
@@ -487,7 +594,9 @@ def finalize_crash_session(exit_code: int | None = None, *, crash_recorded: bool
 
 def flush_local_crash_outbox(data_root: str | os.PathLike[str] | None = None) -> dict[str, int]:
     result = {"delivered": 0, "failed": 0, "remaining": 0}
-    outbox = get_local_crash_spool_dir() / "outbox"
+    spool = get_local_crash_spool_dir()
+    cleanup_old_local_crash_reports()
+    outbox = spool / "outbox"
     if not outbox.is_dir():
         return result
     try:
@@ -516,7 +625,9 @@ def flush_local_crash_outbox(data_root: str | os.PathLike[str] | None = None) ->
                         os.remove(tmp_name)
                 except Exception:
                     pass
-            source.unlink()
+            sent_target = spool / "sent" / source.name
+            sent_target.parent.mkdir(parents=True, exist_ok=True)
+            _replace_with_retry(source, sent_target)
             result["delivered"] += 1
         except Exception:
             result["failed"] += 1

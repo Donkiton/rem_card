@@ -32,6 +32,14 @@ from PySide6.QtWidgets import (
 )
 
 from rem_card.app.process_launch import hidden_window_creationflags, hidden_window_startupinfo, popen_hidden
+from rem_card.app.runtime_paths import (
+    cleanup_old_local_logs,
+    get_runtime_log_directory_candidates,
+    get_runtime_logs_dir,
+    is_compiled,
+    migrate_legacy_runtime_logs,
+    record_runtime_log_location,
+)
 from rem_card.app.full_update_manifest import (
     FullUpdateManifestError,
     PACKAGE_TYPE_FULL,
@@ -142,6 +150,7 @@ UPDATE_LOCK_RELEASE_INITIAL_DELAY_SEC = 0.1
 UPDATE_LOCK_RELEASE_MAX_DELAY_SEC = 0.8
 UPDATE_LOCK_TERMINAL_WRITE_ATTEMPTS = 3
 UPDATE_LOCK_HEARTBEAT_STOP_TIMEOUT_SEC = 5.0
+_UPDATE_LOG_CONTEXT = threading.local()
 
 
 class UpdateAlreadyRunning(RuntimeError):
@@ -353,15 +362,45 @@ def _now_text() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _write_log(baza_dir: str, message: str):
-    try:
-        logs_dir = os.path.join(baza_dir, "logs")
-        os.makedirs(logs_dir, exist_ok=True)
-        path = os.path.join(logs_dir, f"updater_{datetime.now().strftime('%Y%m%d')}.log")
-        with open(path, "a", encoding="utf-8") as fh:
-            fh.write(f"{_now_text()} | {message}\n")
-    except Exception:
-        pass
+def _write_log(_baza_dir: str, message: str, *, target_dir: str = ""):
+    target_dir = str(
+        target_dir or getattr(_UPDATE_LOG_CONTEXT, "target_dir", "")
+    ).strip()
+    preferred = (
+        os.path.join(os.path.abspath(target_dir), "logs")
+        if target_dir
+        else get_runtime_logs_dir()
+    )
+    candidates: list[str] = []
+    for candidate in (preferred, *get_runtime_log_directory_candidates()):
+        normalized = os.path.abspath(candidate)
+        if os.path.normcase(normalized) not in {
+            os.path.normcase(item) for item in candidates
+        }:
+            candidates.append(normalized)
+    failures: list[str] = []
+    for logs_dir in candidates:
+        try:
+            os.makedirs(logs_dir, exist_ok=True)
+            if (
+                is_compiled()
+                and os.path.normcase(logs_dir)
+                == os.path.normcase(os.path.abspath(preferred))
+            ):
+                migrate_legacy_runtime_logs(logs_dir)
+            cleanup_old_local_logs(logs_dir)
+            path = os.path.join(logs_dir, f"updater_{datetime.now().strftime('%Y%m%d')}.log")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(f"{_now_text()} | {message}\n")
+            if os.path.normcase(logs_dir) != os.path.normcase(os.path.abspath(preferred)):
+                record_runtime_log_location(
+                    logs_dir,
+                    preferred_dir=preferred,
+                    fallback_reason="; ".join(failures),
+                )
+            return
+        except Exception as exc:
+            failures.append(f"{logs_dir}: {exc}")
 
 
 def _is_pid_alive(pid: int) -> bool:
@@ -954,6 +993,7 @@ class UpdateWorker(QObject):
             source = os.path.abspath(self.args.source)
             target = os.path.abspath(self.args.target)
             baza_dir = os.path.abspath(self.args.baza_dir)
+            _UPDATE_LOG_CONTEXT.target_dir = target
             target_version = str(self.args.target_version or "")
 
             self._status("Проверка пакета обновления...", 3)
@@ -979,7 +1019,10 @@ class UpdateWorker(QObject):
             self._status("Получение блокировки обновления...", 5)
             lock.acquire()
             _remove_file_quietly(str(self.args.starting_lock or ""))
-            _write_log(baza_dir, f"update started source={source} target={target} version={payload['target_version']}")
+            _write_log(
+                baza_dir,
+                f"update started source={source} target={target} version={payload['target_version']}",
+            )
 
             _wait_for_parent(int(self.args.parent_pid or 0), self._status)
             _wait_for_active_sessions(baza_dir, self._status)
@@ -993,7 +1036,10 @@ class UpdateWorker(QObject):
             replacement_completed = True
 
             self._status("Обновление завершено.", 100)
-            _write_log(baza_dir, f"update finished version={payload['target_version']}")
+            _write_log(
+                baza_dir,
+                f"update finished version={payload['target_version']}",
+            )
 
             # On return release() guarantees either physical deletion or a
             # persisted terminal marker that launchers treat as inactive.
@@ -1012,21 +1058,30 @@ class UpdateWorker(QObject):
                             "Обновление установлено, но автоматически запустить новую версию "
                             "не удалось. Запустите РЕМКАРТА вручную."
                         )
-                        _write_log(baza_dir, f"update restart failed path={restart_path}: {exc}")
+                        _write_log(
+                            baza_dir,
+                            f"update restart failed path={restart_path}: {exc}",
+                        )
                         self.restart_warning.emit(warning)
                 else:
                     warning = (
                         "Обновление установлено, но файл для автоматического запуска не найден. "
                         "Запустите РЕМКАРТА вручную."
                     )
-                    _write_log(baza_dir, f"update restart target missing path={restart_path}")
+                    _write_log(
+                        baza_dir,
+                        f"update restart target missing path={restart_path}",
+                    )
                     self.restart_warning.emit(warning)
             self.succeeded.emit(str(payload["target_version"] or ""))
         except UpdateAlreadyRunning as exc:
             self.failed.emit(str(exc))
         except Exception as exc:
             try:
-                _write_log(os.path.abspath(self.args.baza_dir), f"update failed: {exc}")
+                _write_log(
+                    os.path.abspath(self.args.baza_dir),
+                    f"update failed: {exc}",
+                )
             except Exception:
                 pass
             self.failed.emit(str(exc))
@@ -1038,9 +1093,16 @@ class UpdateWorker(QObject):
                 except UpdateLockReleaseError as exc:
                     try:
                         if baza_dir:
-                            _write_log(baza_dir, f"update lock release failed: {exc}")
+                            _write_log(
+                                baza_dir,
+                                f"update lock release failed: {exc}",
+                            )
                     except Exception:
                         pass
+            try:
+                del _UPDATE_LOG_CONTEXT.target_dir
+            except AttributeError:
+                pass
 
     def _status(self, text: str, progress: int):
         self.status_changed.emit(text, max(0, min(100, int(progress))))
