@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -14,6 +15,8 @@ from rem_card.app.emergency_metadata import (
     EmergencyStandbyMetadata,
     atomic_write_json,
     metadata_to_dict,
+    read_json_file,
+    standby_metadata_from_dict,
 )
 from rem_card.app.emergency_paths import (
     resolve_emergency_root,
@@ -24,6 +27,7 @@ from rem_card.app.emergency_paths import (
     standby_generation_settings_db_path,
     standby_generations_dir,
     standby_medical_db_path,
+    standby_metadata_path,
     standby_settings_db_path,
 )
 from rem_card.app.emergency_compatibility import emergency_metadata_compatibility_error, emergency_metadata_compatible
@@ -44,6 +48,25 @@ from rem_card.app.version import APP_VERSION
 
 
 DEFAULT_STANDBY_MAX_AGE_DAYS = max(1, int(float(os.environ.get("REMCARD_EMERGENCY_STANDBY_MAX_AGE_DAYS", "3"))))
+DEFAULT_TEMP_MAX_AGE_HOURS = max(
+    1,
+    int(float(os.environ.get("REMCARD_EMERGENCY_TEMP_MAX_AGE_HOURS", "24"))),
+)
+MIN_EMERGENCY_STORAGE_QUOTA_BYTES = max(
+    512 * 1024 * 1024,
+    int(
+        float(
+            os.environ.get(
+                "REMCARD_EMERGENCY_MIN_STORAGE_QUOTA_BYTES",
+                str(5 * 1024 * 1024 * 1024),
+            )
+        )
+    ),
+)
+EMERGENCY_STORAGE_PAIR_MULTIPLIER = max(
+    3,
+    int(float(os.environ.get("REMCARD_EMERGENCY_STORAGE_PAIR_MULTIPLIER", "6"))),
+)
 
 
 class EmergencyStandbyError(RuntimeError):
@@ -164,6 +187,23 @@ class EmergencyStandbyManager:
         if not self.is_safe_to_refresh():
             return EmergencyStandbyRefreshResult(ok=False, status="deferred", reason="refresh is not safe now")
         self.cleanup_expired_standby()
+        storage = self.cleanup_storage()
+        if storage["total_bytes"] >= storage["quota_bytes"]:
+            record_metric(
+                "emergency_storage_quota_blocked_refresh",
+                1,
+                total_bytes=storage["total_bytes"],
+                quota_bytes=storage["quota_bytes"],
+                protected_sessions=storage["protected_sessions"],
+            )
+            return EmergencyStandbyRefreshResult(
+                ok=False,
+                status="deferred",
+                reason=(
+                    "emergency_storage_quota_exceeded:"
+                    f"{storage['total_bytes']}/{storage['quota_bytes']}"
+                ),
+            )
 
         source_status = self.probe_network_sources()
         if not source_status.ok:
@@ -384,14 +424,24 @@ class EmergencyStandbyManager:
         self.store.write_standby_metadata(invalid)
         return EmergencyStandbyRefreshResult(ok=False, status="invalid", reason=str(reason or "invalid"), metadata=invalid)
 
-    def cleanup_failed_temp_files(self) -> int:
+    def cleanup_failed_temp_files(
+        self,
+        *,
+        max_age_hours: int | float = DEFAULT_TEMP_MAX_AGE_HOURS,
+        now_ts: float | None = None,
+    ) -> int:
         cleanup_count = 0
         directory = standby_dir(self.root)
         if not os.path.isdir(directory):
             return 0
+        cutoff = (time.time() if now_ts is None else float(now_ts)) - (
+            max(1.0, float(max_age_hours)) * 3600.0
+        )
         for name in os.listdir(directory):
             path = os.path.join(directory, name)
             try:
+                if os.path.getmtime(path) > cutoff:
+                    continue
                 if name.startswith(".staging.") and os.path.isdir(path):
                     shutil.rmtree(path, ignore_errors=True)
                     cleanup_count += 1
@@ -401,6 +451,174 @@ class EmergencyStandbyManager:
             except OSError:
                 pass
         return cleanup_count
+
+    @staticmethod
+    def _directory_size(path: str) -> int:
+        return EmergencyLocalStore._directory_size(path)
+
+    def _read_generation_metadata(
+        self,
+        generation_path: str,
+    ) -> EmergencyStandbyMetadata | None:
+        metadata_path = os.path.join(
+            generation_path,
+            os.path.basename(standby_metadata_path(self.root)),
+        )
+        try:
+            metadata = standby_metadata_from_dict(read_json_file(metadata_path))
+        except Exception:
+            return None
+        if metadata.validation_status not in {"ok", "valid"}:
+            return None
+        if not os.path.isfile(metadata.medical_db_path):
+            return None
+        if (
+            self.settings_required
+            and (
+                not metadata.settings_db_path
+                or not os.path.isfile(metadata.settings_db_path)
+            )
+        ):
+            return None
+        return metadata
+
+    def cleanup_standby_generations(
+        self,
+        *,
+        preferred_previous_generation_id: str | None = None,
+    ) -> dict[str, int]:
+        generations_root = standby_generations_dir(self.root)
+        result = {"removed_generations": 0, "removed_bytes": 0}
+        if not os.path.isdir(generations_root):
+            return result
+        try:
+            current = self.store.read_standby_metadata()
+            current_generation_id = str(current.generation_id or "")
+        except EmergencyMetadataError:
+            current_generation_id = ""
+
+        candidates = []
+        for entry in os.scandir(generations_root):
+            if (
+                not entry.name.startswith("gen_")
+                or not entry.is_dir(follow_symlinks=False)
+            ):
+                continue
+            try:
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((entry.name, entry.path, mtime))
+
+        protected = {current_generation_id} if current_generation_id else set()
+        previous_id = str(preferred_previous_generation_id or "")
+        by_id = {item[0]: item for item in candidates}
+        if current_generation_id:
+            if (
+                previous_id
+                and previous_id != current_generation_id
+                and previous_id in by_id
+                and self._read_generation_metadata(by_id[previous_id][1])
+                is not None
+            ):
+                protected.add(previous_id)
+            else:
+                for generation_id, path, _mtime in sorted(
+                    candidates,
+                    key=lambda item: item[2],
+                    reverse=True,
+                ):
+                    if generation_id == current_generation_id:
+                        continue
+                    if self._read_generation_metadata(path) is not None:
+                        protected.add(generation_id)
+                        break
+
+        for generation_id, path, _mtime in candidates:
+            if generation_id in protected:
+                continue
+            removed_bytes = self._directory_size(path)
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                continue
+            result["removed_generations"] += 1
+            result["removed_bytes"] += removed_bytes
+        return result
+
+    def _storage_quota_bytes(self) -> int:
+        metadata = self.store.get_latest_valid_standby()
+        pair_size = 0
+        if metadata is not None:
+            pair_size = int(metadata.medical_db_size or 0) + int(
+                metadata.settings_db_size or 0
+            )
+        return max(
+            MIN_EMERGENCY_STORAGE_QUOTA_BYTES,
+            pair_size * EMERGENCY_STORAGE_PAIR_MULTIPLIER,
+        )
+
+    def cleanup_storage(
+        self,
+        *,
+        preferred_previous_generation_id: str | None = None,
+    ) -> dict[str, int]:
+        cleanup_errors = 0
+        try:
+            temp_removed = self.cleanup_failed_temp_files()
+        except Exception:
+            temp_removed = 0
+            cleanup_errors += 1
+        try:
+            generations = self.cleanup_standby_generations(
+                preferred_previous_generation_id=preferred_previous_generation_id,
+            )
+        except Exception:
+            generations = {"removed_generations": 0, "removed_bytes": 0}
+            cleanup_errors += 1
+        try:
+            sessions = self.store.cleanup_completed_archived_sessions()
+        except Exception:
+            sessions = {
+                "removed_sessions": 0,
+                "removed_bytes": 0,
+                "protected_sessions": 0,
+            }
+            cleanup_errors += 1
+        try:
+            total_bytes = self._directory_size(self.root)
+        except Exception:
+            total_bytes = 0
+            cleanup_errors += 1
+        try:
+            quota_bytes = self._storage_quota_bytes()
+        except Exception:
+            quota_bytes = MIN_EMERGENCY_STORAGE_QUOTA_BYTES
+            cleanup_errors += 1
+        result = {
+            "temp_removed": temp_removed,
+            "removed_generations": generations["removed_generations"],
+            "removed_generation_bytes": generations["removed_bytes"],
+            "removed_sessions": sessions["removed_sessions"],
+            "removed_session_bytes": sessions["removed_bytes"],
+            "protected_sessions": sessions["protected_sessions"],
+            "total_bytes": total_bytes,
+            "quota_bytes": quota_bytes,
+            "cleanup_errors": cleanup_errors,
+        }
+        if (
+            temp_removed
+            or result["removed_generations"]
+            or result["removed_sessions"]
+            or cleanup_errors
+            or total_bytes >= int(quota_bytes * 0.7)
+        ):
+            record_metric(
+                "emergency_storage_cleanup",
+                1,
+                **result,
+            )
+        return result
 
     def cleanup_expired_standby(self) -> int:
         try:
@@ -412,6 +630,12 @@ class EmergencyStandbyManager:
         return self.store.delete_standby_files(metadata)
 
     def _refresh_pair(self, source_status: EmergencyStandbyRefreshResult) -> EmergencyStandbyRefreshResult:
+        previous_metadata = self.store.get_latest_valid_standby()
+        previous_generation_id = (
+            ""
+            if previous_metadata is None
+            else str(previous_metadata.generation_id or "")
+        )
         generation_id = self._new_generation_id()
         staging_dir = self._new_staging_dir()
         final_generation_dir = standby_generation_dir(self.root, generation_id)
@@ -510,6 +734,9 @@ class EmergencyStandbyManager:
 
             self.store.write_standby_metadata(metadata)
             committed = True
+            self.cleanup_storage(
+                preferred_previous_generation_id=previous_generation_id,
+            )
             if self.settings_required and final_settings_validation is not None:
                 record_metric(
                     "emergency_settings_snapshot_rebuild_finished",

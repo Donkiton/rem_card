@@ -1260,9 +1260,10 @@ class NurseMainWidget(QWidget):
             if current_orders_visibility_changes:
                 self._refresh_current_orders_from_payload(payload)
             return
-        if hasattr(self.layout_manager, 'orders_widget'):
+        orders_widget = getattr(self.layout_manager, "orders_widget", None)
+        if orders_widget is not None:
             try:
-                self.layout_manager.orders_widget.handle_data_changes(
+                orders_widget.handle_data_changes(
                     payload,
                     tab_active=self._is_orders_tab_active(),
                 )
@@ -2372,8 +2373,9 @@ class NurseMainWidget(QWidget):
                     ensure_initial_status=self._should_ensure_initial_status_for_date(self._current_date),
                     force_emit=True,
                 )
-                if hasattr(self.layout_manager, 'orders_widget') and self.layout_manager.orders_widget:
-                    self.layout_manager.orders_widget.request_refresh(force=True)
+                orders_widget = self._ensure_orders_widget()
+                if orders_widget is not None:
+                    orders_widget.request_refresh(force=True)
                 if hasattr(self.layout_manager, 'nurse_orders_manager') and self.layout_manager.nurse_orders_manager:
                     self.layout_manager.nurse_orders_manager.refresh_data()
                 events_sector = None

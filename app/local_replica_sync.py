@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.local_replica_worker import (
     DEFAULT_REPLICA_SYNC_TIMEOUT_SEC,
+    LocalReplicaRotationBusy,
     LocalReplicaWorkerClient,
 )
 from rem_card.app.sqlite_shared import configure_connection
@@ -51,6 +52,8 @@ def build_local_replica_path(
 
 class LocalReplicaSync:
     """Неблокирующая локальная read-only реплика сетевой SQLite."""
+
+    FAILURE_BACKOFF_SEC = (15.0, 30.0, 60.0, 300.0)
 
     def __init__(
         self,
@@ -92,6 +95,8 @@ class LocalReplicaSync:
         self.consecutive_failures: int = 0
         self.last_state: dict[str, Any] = {}
         self._failure_callback: Callable[[dict[str, Any]], None] | None = None
+        self._next_retry_not_before: float = 0.0
+        self._current_backoff_sec: float = 0.0
 
     def start(self) -> None:
         os.makedirs(os.path.dirname(self.local_db_path), exist_ok=True)
@@ -149,6 +154,11 @@ class LocalReplicaSync:
                 "last_sync_error": str(self.last_sync_error or ""),
                 "last_sync_error_class": str(self.last_sync_error_class or ""),
                 "consecutive_failures": int(self.consecutive_failures),
+                "retry_backoff_sec": float(self._current_backoff_sec),
+                "retry_after_sec": max(
+                    0.0,
+                    self._next_retry_not_before - time.monotonic(),
+                ),
                 "state": dict(self.last_state),
                 "local_db_path": self.local_db_path,
             }
@@ -192,10 +202,13 @@ class LocalReplicaSync:
             elif status != "unchanged":
                 raise RuntimeError(f"Unexpected local replica worker status: {status}")
             with self._lock:
+                recovered_after = int(self.consecutive_failures)
                 self.last_sync_ok_ts = time.time()
                 self.last_sync_error = None
                 self.last_sync_error_class = ""
                 self.consecutive_failures = 0
+                self._current_backoff_sec = 0.0
+                self._next_retry_not_before = 0.0
                 self.last_state = state
             record_metric(
                 "local_replica_sync_duration_ms",
@@ -204,6 +217,17 @@ class LocalReplicaSync:
                 change_cursor=state.get("change_cursor"),
                 db_cycle=str(state.get("db_cycle") or ""),
             )
+            if recovered_after:
+                record_metric(
+                    "local_replica_sync_recovered",
+                    1,
+                    failures=recovered_after,
+                    result=status,
+                )
+                self.logger.info(
+                    "Local replica sync recovered after %s failed attempts.",
+                    recovered_after,
+                )
             return True
         except Exception as exc:
             with self._lock:
@@ -214,22 +238,43 @@ class LocalReplicaSync:
                 )
                 self.consecutive_failures += 1
                 failure_count = self.consecutive_failures
+                backoff_index = min(
+                    failure_count - 1,
+                    len(self.FAILURE_BACKOFF_SEC) - 1,
+                )
+                self._current_backoff_sec = self.FAILURE_BACKOFF_SEC[backoff_index]
+                self._next_retry_not_before = (
+                    time.monotonic() + self._current_backoff_sec
+                )
                 failure_callback = self._failure_callback
-            record_metric(
-                "local_replica_sync_failed",
-                1,
-                force_flush=failure_count >= 2,
-                error_class=type(exc).__name__,
-                consecutive_failures=failure_count,
-                duration_ms=round((time.perf_counter() - started) * 1000.0, 3),
-            )
-            self.logger.warning(
-                "Local replica sync failed (%s -> %s): %s",
-                self.central_db_path,
-                self.local_db_path,
-                exc,
-            )
-            if failure_count >= 2 and failure_callback is not None:
+            should_report = self._should_report_failure(failure_count)
+            if should_report:
+                record_metric(
+                    "local_replica_sync_failed",
+                    1,
+                    force_flush=failure_count >= 2,
+                    error_class=type(exc).__name__,
+                    consecutive_failures=failure_count,
+                    retry_backoff_sec=self._current_backoff_sec,
+                    duration_ms=round(
+                        (time.perf_counter() - started) * 1000.0,
+                        3,
+                    ),
+                )
+                self.logger.warning(
+                    "Local replica sync failed (%s -> %s), attempt=%s "
+                    "retry_in=%.0fs: %s",
+                    self.central_db_path,
+                    self.local_db_path,
+                    failure_count,
+                    self._current_backoff_sec,
+                    exc,
+                )
+            if (
+                should_report
+                and failure_count >= 2
+                and failure_callback is not None
+            ):
                 try:
                     failure_callback(self.health_snapshot())
                 except Exception as callback_exc:
@@ -244,12 +289,52 @@ class LocalReplicaSync:
 
     def _worker(self) -> None:
         while not self._stop_evt.is_set():
-            triggered = self._fast_sync_evt.wait(self.sync_interval_sec)
+            with self._lock:
+                delay_sec = (
+                    self.sync_interval_sec
+                    if self.consecutive_failures <= 0
+                    else max(
+                        0.0,
+                        self._next_retry_not_before - time.monotonic(),
+                    )
+                )
+                last_error_class = self.last_sync_error_class
+            triggered = self._wait_for_retry(delay_sec, last_error_class)
             if self._stop_evt.is_set():
                 return
             if triggered:
                 self._fast_sync_evt.clear()
             self.sync_once()
+
+    def _wait_for_retry(self, delay_sec: float, last_error_class: str) -> bool:
+        deadline = time.monotonic() + max(0.0, float(delay_sec))
+        while not self._stop_evt.is_set():
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                return False
+            if self._fast_sync_evt.wait(min(1.0, remaining)):
+                self._fast_sync_evt.clear()
+                if not last_error_class:
+                    return True
+                if (
+                    last_error_class == LocalReplicaRotationBusy.__name__
+                    and self.rotation_lock_path
+                    and not os.path.exists(self.rotation_lock_path)
+                ):
+                    return True
+                continue
+            if (
+                last_error_class == LocalReplicaRotationBusy.__name__
+                and self.rotation_lock_path
+                and not os.path.exists(self.rotation_lock_path)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _should_report_failure(failure_count: int) -> bool:
+        count = max(1, int(failure_count))
+        return count in {1, 2, 3, 5, 10} or count % 20 == 0
 
     def _start_worker(self) -> None:
         if self._thread and self._thread.is_alive():

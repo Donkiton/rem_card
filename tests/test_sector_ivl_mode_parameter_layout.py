@@ -93,6 +93,36 @@ class SectorIvlModeParameterLayoutTest(unittest.TestCase):
         ):
             self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
 
+    def test_ivl_write_is_single_attempt_and_shows_loading_state(self):
+        captured = {}
+
+        class Service:
+            @staticmethod
+            def enqueue_write(**kwargs):
+                captured.update(kwargs)
+                return True
+
+        self.widget.show_loading_indicator = lambda *_args, **_kwargs: "ivl-test"
+        self.widget.hide_loading_indicator = lambda *_args, **_kwargs: None
+        self.widget.remcard_service = Service()
+        self.widget.admission_id = 164
+        self.widget._enqueue_ivl_write(
+            "ivl_create_case:164",
+            lambda: None,
+            pending_text="Случай: открытие сохраняется...",
+            error_title="Ошибка",
+        )
+        self.app.processEvents()
+
+        self.assertTrue(self.widget._ivl_write_pending)
+        self.assertIsNotNone(self.widget._ivl_loading_key)
+        self.assertFalse(self.widget.btn_create_case.isEnabled())
+        self.assertEqual(captured["write_metadata"]["role"], "doctor")
+        self.assertEqual(captured["write_metadata"]["queue_retryable"], False)
+        self.assertEqual(captured["write_metadata"]["timeout_ms"], 5000)
+        self.widget._ivl_write_pending = False
+        self.widget._hide_ivl_write_loading()
+
 
 if __name__ == "__main__":
     unittest.main()
