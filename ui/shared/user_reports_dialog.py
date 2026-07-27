@@ -122,18 +122,13 @@ class UserReportDialog(BaseStyledDialog):
 
         self.send_btn.setEnabled(False)
         try:
-            result = self.service.submit_report(report_type=report_type, text=text, role=self.role)
+            self.service.submit_report(report_type=report_type, text=text, role=self.role)
         except Exception as exc:
             self.send_btn.setEnabled(True)
             CustomMessageBox.critical(self, "Ошибка", f"Не удалось отправить репорт:\n{exc}")
             return
 
         self.submitted.emit()
-        CustomMessageBox.information(
-            self,
-            "Репорт отправлен",
-            f"Репорт сохранен:\n{result.directory}",
-        )
         self.accept()
 
 

@@ -27,7 +27,7 @@ from rem_card.services.user_reports import (  # noqa: E402
     UserReportsService,
 )
 from rem_card.ui.shared.custom_message_box import CustomMessageBox  # noqa: E402
-from rem_card.ui.shared.user_reports_dialog import UserReportsInboxDialog  # noqa: E402
+from rem_card.ui.shared.user_reports_dialog import UserReportDialog, UserReportsInboxDialog  # noqa: E402
 
 
 class UserReportsInboxDialogTest(unittest.TestCase):
@@ -60,6 +60,29 @@ class UserReportsInboxDialogTest(unittest.TestCase):
 
                 self.assertEqual(service.count_new_reports(), 0)
                 self.assertEqual(service.read_report(result.directory)["status"], STATUS_READ)
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+
+    def test_submitting_report_closes_without_showing_save_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service = UserReportsService(reports_root=Path(tmp) / "users-reports", logs_dirs=[])
+            dialog = UserReportDialog(role="nurse", service=service)
+            try:
+                dialog.problem_edit.setPlainText("Не открывается список пациентов.")
+                with (
+                    mock.patch.object(
+                        CustomMessageBox,
+                        "question",
+                        return_value=CustomMessageBox.Yes,
+                    ),
+                    mock.patch.object(CustomMessageBox, "information") as information_mock,
+                ):
+                    dialog._submit()
+
+                information_mock.assert_not_called()
+                self.assertTrue(dialog.result())
+                self.assertEqual(service.count_new_reports(), 1)
             finally:
                 dialog.close()
                 dialog.deleteLater()

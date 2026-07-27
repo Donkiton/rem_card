@@ -197,6 +197,7 @@ class DoctorRemCardWidget(QWidget):
             lock_path=lock_path,
             role=ADD_PATIENT_LOCK_KEY,
             owner_id=owner_id,
+            owner_role="doctor",
             stale_timeout_sec=60.0,
             heartbeat_sec=8.0,
             logger=logger,
@@ -3563,10 +3564,15 @@ class DoctorRemCardWidget(QWidget):
             self._show_read_only_hint()
             return
         if not self._acquire_add_patient_lock():
+            holder_role = self._add_patient_lock.holder_owner_role()
+            holder_label = {"doctor": "врача", "nurse": "медсестры"}.get(holder_role)
+            message = "Окно добавления пациента уже открыто.\nПожалуйста, подождите."
+            if holder_label:
+                message = f"Окно добавления пациента уже открыто у {holder_label}.\nПожалуйста, подождите."
             CustomMessageBox.warning(
                 self,
                 "Добавление занято",
-                "Окно добавления пациента уже открыто.\nПожалуйста, подождите.",
+                message,
             )
             self._refresh_add_patient_button_lock_state()
             return
