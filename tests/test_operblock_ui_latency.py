@@ -146,6 +146,10 @@ class OperBlockUiLatencyTest(unittest.TestCase):
             service,
             None,
             shift_date,
+            # Этот тест проверяет только локальный кеш после сохранения. Лимит
+            # ввода в будущем проверяется отдельно и не должен зависеть от
+            # времени запуска CI (у виджета по умолчанию 08:00).
+            allow_future_input=True,
             forced_settings={
                 "ad": 1,
                 "pulse": 1,
