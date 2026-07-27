@@ -24,6 +24,7 @@ class RoleSessionLock:
         role: str,
         owner_id: str,
         *,
+        owner_role: str | None = None,
         stale_timeout_sec: float = 45.0,
         heartbeat_sec: float = 10.0,
         logger: Optional[logging.Logger] = None,
@@ -31,6 +32,7 @@ class RoleSessionLock:
         self.lock_path = lock_path
         self.role = role
         self.owner_id = owner_id
+        self.owner_role = str(owner_role or "").strip().casefold()
         self.stale_timeout_sec = stale_timeout_sec
         self.heartbeat_sec = heartbeat_sec
         self.logger = logger or logging.getLogger(__name__)
@@ -42,7 +44,7 @@ class RoleSessionLock:
         self._mutex = threading.Lock()
 
     def _build_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "timestamp": time.time(),
             "role": self.role,
             "pid": os.getpid(),
@@ -50,6 +52,9 @@ class RoleSessionLock:
             "owner_id": self.owner_id,
             "nonce": uuid.uuid4().hex,
         }
+        if self.owner_role:
+            payload["owner_role"] = self.owner_role
+        return payload
 
     def _read_payload(self):
         try:
@@ -334,6 +339,25 @@ class RoleSessionLock:
         if isinstance(ts, (int, float)):
             ts_human = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
         return f"host={host}, pid={pid}, время={ts_human}"
+
+    def holder_owner_role(self) -> str | None:
+        """Возвращает роль владельца lock, если она известна."""
+        holder = self._last_holder or self._read_payload()
+        if not isinstance(holder, dict):
+            return None
+
+        owner_role = str(holder.get("owner_role") or "").strip().casefold()
+        if owner_role:
+            return owner_role
+
+        # Lock старой версии не содержит owner_role. Для формы добавления
+        # пациента сохраняем понятное предупреждение, извлекая роль из owner_id.
+        owner_id = str(holder.get("owner_id") or "").strip().casefold()
+        if owner_id.endswith(":doctor_add_patient"):
+            return "doctor"
+        if owner_id.endswith(":nurse_add_patient"):
+            return "nurse"
+        return None
 
     def _start_heartbeat(self):
         with self._mutex:
