@@ -1320,6 +1320,13 @@ class MainWindow(QMainWindow):
         self._role_lock = None
         self._role_lock_key = None
 
+    def manual_rotation_owner_context(self):
+        """Точный lock текущего врача, который допустимо не считать внешним блокатором."""
+        if self._role_lock_key != ROLE_DOCTOR or self._role_lock is None:
+            return None
+        getter = getattr(self._role_lock, "ownership_context", None)
+        return getter() if callable(getter) else None
+
     def set_default_container(self, container, *, activate: bool = True) -> None:
         self._default_container = container
         if activate:

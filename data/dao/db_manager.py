@@ -12,8 +12,10 @@ from typing import Any, Callable, Optional
 
 from rem_card.app.db_lifecycle import (
     DB_CYCLE_META_KEY,
+    cancel_manual_rotation,
     find_active_emergency_nurse_sessions,
     find_active_rotation_role_locks,
+    manual_rotation_undo_status,
     maybe_rotate_database_if_due,
     rotate_database_now,
 )
@@ -752,9 +754,21 @@ class DatabaseManager:
             result.append(os.path.abspath(root))
         return result
 
-    def active_rotation_role_locks(self) -> list[dict[str, str]]:
+    @staticmethod
+    def _rotation_ignored_lock_nonces(rotation_owner_context: Optional[dict[str, str]]) -> dict[str, str]:
+        if not isinstance(rotation_owner_context, dict):
+            return {}
+        path = str(rotation_owner_context.get("path") or "").strip()
+        nonce = str(rotation_owner_context.get("nonce") or "").strip()
+        role = str(rotation_owner_context.get("role") or "").strip().lower()
+        if not path or not nonce or role != "doctor":
+            return {}
+        return {os.path.abspath(path): nonce}
+
+    def active_rotation_role_locks(self, rotation_owner_context: Optional[dict[str, str]] = None) -> list[dict[str, str]]:
         return find_active_rotation_role_locks(
             self._rotation_blocking_role_lock_paths(),
+            ignored_lock_nonces=self._rotation_ignored_lock_nonces(rotation_owner_context),
             logger=logger,
         )
 
@@ -803,14 +817,20 @@ class DatabaseManager:
     def maybe_rotate_database_after_doctor_exit(self) -> dict:
         return self._maybe_rotate_db_lifecycle(source="doctor_exit_auto_rotation")
 
-    def rotate_database_manually(self) -> dict:
+    def manual_rotation_undo_status(self) -> dict:
+        return manual_rotation_undo_status(
+            db_path=self.db_path,
+            archive_dir=os.path.dirname(self.db_path),
+        )
+
+    def rotate_database_manually(self, rotation_owner_context: Optional[dict[str, str]] = None) -> dict:
         if getattr(self.runtime_context, "mode", "network") != "network":
             return {
                 "status": "rotation_forbidden_runtime",
                 "runtime_mode": getattr(self.runtime_context, "mode", ""),
             }
 
-        active_role_locks = self.active_rotation_role_locks()
+        active_role_locks = self.active_rotation_role_locks(rotation_owner_context)
         if active_role_locks:
             return {
                 "status": "deferred_active_role_lock",
@@ -848,6 +868,7 @@ class DatabaseManager:
                     source="manual_rotation",
                     blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
                     blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
+                    ignored_lock_nonces=self._rotation_ignored_lock_nonces(rotation_owner_context),
                 )
                 self._startup_pre_connect_fingerprint = None
                 status = result.get("status")
@@ -859,6 +880,45 @@ class DatabaseManager:
                 else:
                     self._init_connections()
             return result
+        finally:
+            if restart_local_replica and not self._closed:
+                self._start_local_replica_sync()
+
+    def cancel_manual_rotation(self, rotation_owner_context: Optional[dict[str, str]] = None) -> dict:
+        active_role_locks = self.active_rotation_role_locks(rotation_owner_context)
+        if active_role_locks:
+            return {"status": "deferred_active_role_lock", "blocked_roles": active_role_locks}
+        active_emergency_sessions = self.active_rotation_emergency_sessions()
+        if active_emergency_sessions:
+            return {
+                "status": "deferred_active_emergency_session",
+                "blocked_emergency_sessions": active_emergency_sessions,
+            }
+        restart_local_replica = bool(self._local_replica)
+        if restart_local_replica:
+            self._stop_local_replica_sync()
+        try:
+            with self._central_io_lock:
+                self._close_central_read_connection()
+                if self._remcard_conn:
+                    with self.write_controller.connection_guard(self._remcard_conn):
+                        self._remcard_conn.close()
+                self._remcard_conn = None
+                self._journal_conn = None
+                result = cancel_manual_rotation(
+                    db_path=self.db_path,
+                    archive_dir=os.path.dirname(self.db_path),
+                    rotation_lock_path=getattr(self, "medical_db_rotation_lock_path", DB_ROTATION_LOCK_PATH),
+                    db_lock_path=getattr(self, "medical_db_lock_path", DB_LOCK_PATH),
+                    logger=logger,
+                    blocked_role_lock_paths=self._rotation_blocking_role_lock_paths(),
+                    blocked_emergency_roots=self._rotation_blocking_emergency_roots(),
+                    ignored_lock_nonces=self._rotation_ignored_lock_nonces(rotation_owner_context),
+                )
+                if result.get("status") == "undo_rotated":
+                    self._startup_pre_connect_fingerprint = None
+                    self._init_connections()
+                return result
         finally:
             if restart_local_replica and not self._closed:
                 self._start_local_replica_sync()

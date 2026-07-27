@@ -569,10 +569,29 @@ class AdminMainWidget(QWidget):
                 db_manager,
                 parent=self,
                 on_rotated=self._on_db_rotated,
+                rotation_owner_context=self._manual_rotation_owner_context,
+                on_restart_requested=self._request_application_restart,
             )
         finally:
             self._hide_settings_loading(loading_key)
         self.db_rotation_dialog.exec()
+
+    def _manual_rotation_owner_context(self):
+        window = self.window()
+        getter = getattr(window, "manual_rotation_owner_context", None)
+        return getter() if callable(getter) else None
+
+    def _request_application_restart(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.setProperty("remcard_restart_requested", True)
+        top_level = self.window()
+        if top_level is not None and top_level is not self:
+            if not bool(top_level.close()):
+                app.setProperty("remcard_restart_requested", False)
+        else:
+            app.quit()
 
     def open_database_info(self):
         from .database_info_dialog import DatabaseInfoDialog

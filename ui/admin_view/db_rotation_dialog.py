@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -24,10 +24,19 @@ from rem_card.ui.styles.theme_tokens import token
 
 
 class DbRotationDialog(BaseStyledDialog):
-    def __init__(self, db_manager, parent=None, on_rotated: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        db_manager,
+        parent=None,
+        on_rotated: Callable[[], None] | None = None,
+        rotation_owner_context: Callable[[], dict | None] | None = None,
+        on_restart_requested: Callable[[], None] | None = None,
+    ):
         super().__init__("Ручная ротация БД", parent)
         self.db_manager = db_manager
         self.on_rotated = on_rotated
+        self.rotation_owner_context = rotation_owner_context
+        self.on_restart_requested = on_restart_requested
         self._cycles: list[DbCycleInfo] = []
         self.setWindowTitle("Ручная ротация БД")
         self.setMinimumSize(900, 580)
@@ -36,6 +45,12 @@ class DbRotationDialog(BaseStyledDialog):
         self._init_ui()
         self._apply_local_style()
         self.reload_cycles()
+        # Пока окно открыто, пациент может поступить в новый цикл из другого
+        # рабочего места. Тогда возможность отмены должна исчезнуть сама.
+        self._undo_poll_timer = QTimer(self)
+        self._undo_poll_timer.setInterval(3000)
+        self._undo_poll_timer.timeout.connect(self._update_undo_button)
+        self._undo_poll_timer.start()
 
     def _init_ui(self):
         root = self.content_layout
@@ -51,7 +66,7 @@ class DbRotationDialog(BaseStyledDialog):
         title.setObjectName("DbRotationHeaderTitle")
         header_layout.addWidget(title)
 
-        hint = QLabel("Ручная ротация доступна только для текущей сетевой БД, когда нет пациентов на койках и активных рабочих сессий медсестры.")
+        hint = QLabel("Ручная ротация доступна для текущей сетевой БД, когда нет пациентов на койках и других активных рабочих сессий. После успешной операции программа будет перезапущена.")
         hint.setObjectName("DbRotationHint")
         hint.setWordWrap(True)
         header_layout.addWidget(hint)
@@ -101,6 +116,11 @@ class DbRotationDialog(BaseStyledDialog):
         self.rotate_btn.setObjectName("DbRotationPrimaryButton")
         self.rotate_btn.clicked.connect(self._on_rotate_clicked)
         buttons.addWidget(self.rotate_btn)
+
+        self.undo_btn = QPushButton("Отменить ручную ротацию")
+        self.undo_btn.setObjectName("DialogOkBtn")
+        self.undo_btn.clicked.connect(self._on_undo_clicked)
+        buttons.addWidget(self.undo_btn)
 
         self.close_btn = QPushButton("Закрыть")
         self.close_btn.setObjectName("DialogOkBtn")
@@ -206,6 +226,7 @@ class DbRotationDialog(BaseStyledDialog):
         else:
             self.summary.setPlainText("БД не найдены.")
         self._update_rotate_button()
+        self._update_undo_button()
 
     def _on_selection_changed(self, row: int):
         info = self._info_at(row)
@@ -214,6 +235,7 @@ class DbRotationDialog(BaseStyledDialog):
         else:
             self.summary.setPlainText(self._format_summary(info))
         self._update_rotate_button()
+        self._update_undo_button()
 
     def _on_rotate_clicked(self):
         current = self._current_info()
@@ -261,7 +283,7 @@ class DbRotationDialog(BaseStyledDialog):
 
         self._set_busy(True)
         try:
-            result = self.db_manager.rotate_database_manually()
+            result = self.db_manager.rotate_database_manually(self._rotation_owner_context())
         except Exception as exc:
             CustomMessageBox.warning(self, "Ошибка", f"Не удалось выполнить ротацию БД:\n{exc}")
             return
@@ -270,14 +292,52 @@ class DbRotationDialog(BaseStyledDialog):
 
         status = result.get("status")
         if status == "rotated":
-            CustomMessageBox.information(self, "Ротация БД", "Ротация БД выполнена.")
+            CustomMessageBox.information(
+                self,
+                "Ротация БД",
+                "Ротация БД выполнена.\n\nПрограмма будет перезапущена, чтобы подключиться к новой рабочей базе.",
+            )
             if self.on_rotated:
                 self.on_rotated()
-            self.reload_cycles()
+            if self.on_restart_requested:
+                self.on_restart_requested()
             return
 
         message = self._rotation_status_message(result)
         CustomMessageBox.warning(self, "Ротация БД", message)
+        self.reload_cycles()
+
+    def _on_undo_clicked(self):
+        status = self._manual_undo_status()
+        if not status.get("available"):
+            CustomMessageBox.warning(self, "Отмена ротации", self._undo_status_message(status))
+            self.reload_cycles()
+            return
+        reply = CustomMessageBox.question(
+            self,
+            "Отменить ручную ротацию",
+            "Будет восстановлена предыдущая рабочая БД. Новая пустая БД будет сохранена в архиве.\n\nПродолжить?",
+        )
+        if reply != CustomMessageBox.Yes:
+            return
+        self._set_busy(True)
+        try:
+            result = self.db_manager.cancel_manual_rotation(self._rotation_owner_context())
+        except Exception as exc:
+            CustomMessageBox.warning(self, "Ошибка", f"Не удалось отменить ручную ротацию БД:\n{exc}")
+            return
+        finally:
+            self._set_busy(False)
+        if result.get("status") == "undo_rotated":
+            CustomMessageBox.information(
+                self,
+                "Отмена ротации",
+                "Ручная ротация отменена.\n\nПрограмма будет перезапущена, чтобы подключиться к восстановленной рабочей базе.",
+            )
+            if self.on_restart_requested:
+                self.on_restart_requested()
+            return
+        CustomMessageBox.warning(self, "Отмена ротации", self._undo_status_message(result))
         self.reload_cycles()
 
     def _set_busy(self, busy: bool):
@@ -286,8 +346,10 @@ class DbRotationDialog(BaseStyledDialog):
         self.list_widget.setEnabled(not busy)
         if busy:
             self.rotate_btn.setEnabled(False)
+            self.undo_btn.setEnabled(False)
         else:
             self._update_rotate_button()
+            self._update_undo_button()
 
     def _update_rotate_button(self):
         current = self._current_info()
@@ -305,6 +367,42 @@ class DbRotationDialog(BaseStyledDialog):
             and not active_emergency_sessions
         )
         self.rotate_btn.setEnabled(enabled)
+
+    def _rotation_owner_context(self):
+        try:
+            return self.rotation_owner_context() if self.rotation_owner_context else None
+        except Exception:
+            return None
+
+    def _manual_undo_status(self) -> dict:
+        checker = getattr(self.db_manager, "manual_rotation_undo_status", None)
+        if not callable(checker):
+            return {"available": False, "reason": "not_available"}
+        try:
+            return dict(checker() or {})
+        except Exception:
+            return {"available": False, "reason": "check_failed"}
+
+    def _update_undo_button(self):
+        self.undo_btn.setEnabled(bool(self._manual_undo_status().get("available")))
+
+    @staticmethod
+    def _undo_status_message(status: dict) -> str:
+        reason = str(status.get("reason") or "")
+        mapping = {
+            "not_available": "Для этой базы нет доступной ручной ротации для отмены.",
+            "expired": "Отмена ручной ротации доступна только в течение 24 часов после её выполнения.",
+            "patient_data_added": "Отмена невозможна: после ротации в новую БД уже поступил пациент.",
+            "files_changed": "Отмена невозможна: файлы цикла БД изменены или недоступны.",
+            "check_failed": "Не удалось безопасно проверить возможность отмены ротации.",
+            "invalid_state": "Данные об отмене ручной ротации повреждены.",
+            "rotation_lock_busy": "Ротация или другая операция с БД уже выполняется.",
+            "db_lock_busy": "БД сейчас занята другой операцией.",
+            "undo_validation_failed": "Отмена невозможна: одна из БД не прошла проверку доступности.",
+            "deferred_active_role_lock": "Отмена невозможна: есть активная рабочая сессия.",
+            "deferred_active_emergency_session": "Отмена невозможна: есть активная аварийная сессия медсестры.",
+        }
+        return mapping.get(reason, "Не удалось отменить ручную ротацию БД.")
 
     def _selected_info(self) -> DbCycleInfo | None:
         return self._info_at(self.list_widget.currentRow())
@@ -367,7 +465,7 @@ class DbRotationDialog(BaseStyledDialog):
             elif info.active_beds > 0:
                 lines.append("Ротация: невозможна, есть пациенты на койках.")
             elif self._active_role_locks():
-                lines.append("Ротация: невозможна, роль медсестры запущена на рабочем месте.")
+                lines.append("Ротация: невозможна, есть активная рабочая сессия.")
             elif self._active_emergency_sessions():
                 lines.append("Ротация: невозможна, есть активная аварийная сессия медсестры.")
             else:
@@ -379,12 +477,12 @@ class DbRotationDialog(BaseStyledDialog):
         if not callable(checker):
             return []
         try:
-            return list(checker() or [])
+            return list(checker(self._rotation_owner_context()) or [])
         except Exception:
             return [
                 {
-                    "role": "nurse",
-                    "holder": "не удалось проверить lock роли медсестры",
+                    "role": "unknown",
+                    "holder": "не удалось проверить активные рабочие сессии",
                 }
             ]
 
@@ -417,7 +515,7 @@ class DbRotationDialog(BaseStyledDialog):
             holder = str(item.get("holder") or "").strip()
             details.append(f"{role_text}: {holder}" if holder else role_text)
         suffix = "\n\n" + "\n".join(details) if details else ""
-        return "Ротация невозможна: роль медсестры запущена на рабочем месте." + suffix
+        return "Ротация невозможна: есть активная рабочая сессия." + suffix
 
     @staticmethod
     def _format_emergency_session_message(active_sessions: list[dict[str, str]]) -> str:
