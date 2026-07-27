@@ -13,6 +13,10 @@ from PySide6.QtWidgets import QApplication, QLabel
 from rem_card.data.settings.settings_db import SettingsDatabase
 from rem_card.services.settings import settings_service as settings_module
 from rem_card.services.settings.settings_service import OPERBLOCK_ICONS_KEY, SettingsService
+from rem_card.services.remcard_icon_defaults import (
+    REMCARD_FEMALE_PATIENT_ICON_KEY,
+    REMCARD_MALE_PATIENT_ICON_KEY,
+)
 from rem_card.ui.shared import operblock_icon_settings, remcard_icon_settings
 from rem_card.ui.shared.async_icon_loader import get_async_icon_loader, request_async_icon
 from rem_card.ui.shared.pixmap_lru import (
@@ -276,6 +280,75 @@ def test_remcard_pixmap_cache_is_size_aware(qapp):
         assert second.cacheKey() == first.cacheKey()
         assert fake.metadata_calls == 1
         assert fake.blob_calls == 1
+    finally:
+        remcard_icon_settings.invalidate_remcard_icon_cache()
+        settings_module._DEFAULT_SERVICE = previous
+
+
+def test_patient_preview_icon_prewarm_populates_visible_pixmap_cache(qapp):
+    class FakeSettingsService:
+        def __init__(self):
+            self.version = (1, "patient-preview")
+            self.metadata_calls = 0
+            self.blob_calls = 0
+            self.blobs = {
+                REMCARD_MALE_PATIENT_ICON_KEY: _png_bytes(color="#2255cc"),
+                REMCARD_FEMALE_PATIENT_ICON_KEY: _png_bytes(color="#cc3388"),
+            }
+
+        def get_operblock_icon_metadata_snapshot(self, **kwargs):
+            self.metadata_calls += 1
+            assert kwargs.get("remcard_only") is True
+            return self.version, {
+                icon_key: {
+                    "icon_key": icon_key,
+                    "category": "remcard_patient_preview",
+                    "image_hash": icon_key,
+                    "has_image_blob": True,
+                    "value": {},
+                }
+                for icon_key in self.blobs
+            }
+
+        def get_operblock_icon_records(self, keys, **kwargs):
+            self.blob_calls += 1
+            icon_key = keys[0]
+            return self.version, {
+                icon_key: {
+                    "icon_key": icon_key,
+                    "category": "remcard_patient_preview",
+                    "image_hash": icon_key,
+                    "has_image_blob": True,
+                    "image_blob": self.blobs[icon_key],
+                    "value": {},
+                }
+            }
+
+    fake = FakeSettingsService()
+    previous = settings_module._DEFAULT_SERVICE
+    settings_module._DEFAULT_SERVICE = fake
+    remcard_icon_settings.invalidate_remcard_icon_cache()
+    try:
+        scheduled = remcard_icon_settings.preload_remcard_icon_pixmaps(
+            (REMCARD_MALE_PATIENT_ICON_KEY, REMCARD_FEMALE_PATIENT_ICON_KEY),
+            target_size=(320, 320),
+            aspect_mode=Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        )
+        assert scheduled == 2
+        assert _wait_for(qapp, lambda: get_async_icon_loader().pending_count == 0)
+
+        label = QLabel()
+        immediate = remcard_icon_settings.request_remcard_icon_pixmap(
+            label,
+            REMCARD_MALE_PATIENT_ICON_KEY,
+            target_size=(320, 320),
+            aspect_mode=Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        )
+
+        assert not immediate.isNull()
+        assert immediate.toImage().pixelColor(0, 0).blue() > 150
+        assert fake.metadata_calls == 1
+        assert fake.blob_calls == 2
     finally:
         remcard_icon_settings.invalidate_remcard_icon_cache()
         settings_module._DEFAULT_SERVICE = previous

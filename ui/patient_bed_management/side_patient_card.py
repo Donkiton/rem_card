@@ -12,6 +12,7 @@ from rem_card.services.remcard_icon_defaults import (
 from rem_card.ui.patient_bed_management.bed_labels import format_patient_bed_label
 from rem_card.ui.shared.remcard_icon_settings import (
     load_remcard_icon_pixmap,
+    preload_remcard_icon_pixmaps,
     request_remcard_icon_pixmap,
 )
 from rem_card.ui.styles.theme import (
@@ -28,6 +29,15 @@ from rem_card.ui.styles.theme import (
 PATIENT_PHOTO_SIZE = 320
 PATIENT_PHOTO_FRAME_WIDTH = 1
 EMPTY_BED_PHOTO_VERTICAL_OFFSET = 12
+
+
+def preload_patient_preview_icon_pixmaps() -> int:
+    """Подготавливает изображения пациентов до первого открытия управления койками."""
+    return preload_remcard_icon_pixmaps(
+        (REMCARD_MALE_PATIENT_ICON_KEY, REMCARD_FEMALE_PATIENT_ICON_KEY),
+        target_size=(PATIENT_PHOTO_SIZE, PATIENT_PHOTO_SIZE),
+        aspect_mode=Qt.KeepAspectRatioByExpanding,
+    )
 
 
 class MultilineElidedLabel(QLabel):
