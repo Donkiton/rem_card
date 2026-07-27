@@ -169,6 +169,23 @@ def test_dev_add_patient_mutex_is_local_not_in_selected_database(monkeypatch, tm
     assert not os.path.commonpath([expected, str(local_appdata)]).startswith(str(selected_baza))
 
 
+def test_add_patient_mutex_exposes_owner_role(monkeypatch, tmp_path):
+    from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
+    from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local_appdata"))
+    monkeypatch.setattr(runtime_paths, "is_compiled", lambda: False)
+
+    doctor_lock = DoctorRemCardWidget._build_add_patient_lock(object())
+    nurse_lock = NurseMainWidget._build_add_patient_lock(object())
+    try:
+        assert doctor_lock.acquire() is True
+        assert nurse_lock.acquire() is False
+        assert nurse_lock.holder_owner_role() == "doctor"
+    finally:
+        doctor_lock.release()
+
+
 def test_dev_emergency_probe_does_not_create_network_role_marker(monkeypatch):
     from rem_card.app.emergency_restore_probe import EmergencyRestoreProbe
 
