@@ -65,8 +65,9 @@ STARTUP_UNAVAILABLE_CATEGORIES = {
 
 
 class _LockHeartbeat:
-    def __init__(self, lock_path: str, *, role: Optional[str], source: str):
-        self.lock_path = lock_path
+    def __init__(self, lock: FileWriteLock, *, role: Optional[str], source: str):
+        self.lock = lock
+        self.lock_path = lock.lock_path
         self.role = role
         self.source = source
         self._stop = threading.Event()
@@ -80,21 +81,8 @@ class _LockHeartbeat:
         self._stop.set()
         self._thread.join(timeout=1.0)
 
-    def _payload(self) -> dict[str, Any]:
-        return {
-            "timestamp": time.time(),
-            "pid": os.getpid(),
-            "host": socket.gethostname(),
-            "role": self.role,
-            "source": self.source,
-        }
-
     def _write(self):
-        try:
-            with open(self.lock_path, "w", encoding="utf-8") as fh:
-                json.dump(self._payload(), fh, ensure_ascii=True)
-        except Exception:
-            pass
+        self.lock.refresh(metadata={"role": self.role, "source": self.source})
 
     def _run(self):
         while not self._stop.wait(LOCK_HEARTBEAT_SEC):
@@ -441,7 +429,7 @@ def _acquire_lock_with_wait(
             baza_dir=baza_dir,
         )
         if lock.acquire(owner_id=owner_id, source=source):
-            heartbeat = _LockHeartbeat(lock_path, role=role, source=source)
+            heartbeat = _LockHeartbeat(lock, role=role, source=source)
             heartbeat.start()
             write_audit_event(
                 f"{source}_lock_acquired",

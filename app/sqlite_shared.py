@@ -1251,6 +1251,43 @@ class FileWriteLock:
                     self.logger.warning("Observed stale db lock at %s; age-only cleanup is disabled", self.lock_path)
                 return False
 
+    def refresh(self, *, metadata: Optional[dict[str, Any]] = None) -> bool:
+        """Refresh a held lock without discarding its ownership token."""
+        with self._mutex:
+            if self._owner_token is None:
+                return False
+            owner_token = dict(self._owner_token)
+
+        expected_token = str(owner_token.get("lock_token") or "")
+        if not expected_token:
+            return False
+
+        try:
+            with open(self.lock_path, "r+", encoding="utf-8") as fh:
+                payload = json.load(fh)
+                if not isinstance(payload, dict):
+                    return False
+                current_token = str(payload.get("lock_token") or "")
+                if not current_token or current_token != expected_token:
+                    return False
+
+                payload["timestamp"] = time.time()
+                if self.lease_duration_sec is not None:
+                    payload["lease_expires_at"] = payload["timestamp"] + self.lease_duration_sec
+                for key, value in dict(metadata or {}).items():
+                    if key not in {"lock_token", "pid", "host", "user_id", "thread_id"}:
+                        payload[key] = value
+
+                fh.seek(0)
+                json.dump(payload, fh, ensure_ascii=True)
+                fh.truncate()
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self.logger.warning("Failed to refresh db lock %s: %s", self.lock_path, exc)
+            return False
+
     def release(self) -> bool:
         thread_id = threading.get_ident()
         owner_token = None
