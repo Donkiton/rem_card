@@ -27,6 +27,7 @@ from rem_card.app.paths import get_icon_dir
 from rem_card.ui.shared.click_section_wheel_datetime_edit import ClickSectionWheelDateTimeEdit
 from rem_card.ui.shared.base_sector import BaseSectorWidget
 from rem_card.ui.shared.custom_message_box import CustomMessageBox
+from rem_card.ui.shared.loading_overlay import hide_app_loading, show_app_loading
 from rem_card.ui.styles.theme import COLOR_DANGER
 
 
@@ -224,6 +225,7 @@ class SectorIvl(BaseSectorWidget):
         self._latest_event_revision_by_case: dict[int, int] = {}
         self._snapshot_cache = OrderedDict()
         self._ivl_write_pending = False
+        self._ivl_loading_key = None
         self._history_events = []
         self._history_sort_desc = True
         self._restoring_history_header = False
@@ -1224,9 +1226,23 @@ class SectorIvl(BaseSectorWidget):
         self.lbl_case_status.setText(status_text)
         self.lbl_case_start.setText("")
         self._set_ivl_write_controls_enabled(False)
+        self._ivl_loading_key = show_app_loading(
+            self,
+            status_text,
+            key=f"ivl-write:{id(self)}",
+            auto_hide_ms=15000,
+            process_events=True,
+        )
+
+    def _hide_ivl_write_loading(self):
+        if not self._ivl_loading_key:
+            return
+        hide_app_loading(self, self._ivl_loading_key)
+        self._ivl_loading_key = None
 
     def _finish_ivl_write_success(self, result, on_success=None):
         self._ivl_write_pending = False
+        self._hide_ivl_write_loading()
         self._invalidate_current_snapshot()
         try:
             if on_success:
@@ -1236,6 +1252,7 @@ class SectorIvl(BaseSectorWidget):
 
     def _finish_ivl_write_error(self, exc: Exception, error_title: str):
         self._ivl_write_pending = False
+        self._hide_ivl_write_loading()
         self._invalidate_current_snapshot()
         self.refresh()
         CustomMessageBox.warning(self, error_title, str(exc))
@@ -1250,6 +1267,13 @@ class SectorIvl(BaseSectorWidget):
                 operation=operation,
                 on_success=lambda result: self._finish_ivl_write_success(result, on_success),
                 on_error=lambda exc: self._finish_ivl_write_error(exc, error_title),
+                write_metadata={
+                    "interactive": True,
+                    "role": "doctor",
+                    "timeout_ms": 5000,
+                    "admission_id": self.admission_id,
+                    "queue_retryable": False,
+                },
             )
             return
         try:

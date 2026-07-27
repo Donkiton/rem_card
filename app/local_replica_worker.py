@@ -31,6 +31,14 @@ class LocalReplicaWorkerTimeout(LocalReplicaWorkerError):
         )
 
 
+class LocalReplicaRotationBusy(LocalReplicaWorkerError):
+    def __init__(self):
+        super().__init__(
+            "Обновление локальной реплики отложено: выполняется другая операция "
+            "снимка или ротации базы."
+        )
+
+
 def _remove_with_sidecars(db_path: str) -> None:
     for candidate in (
         db_path,
@@ -284,6 +292,9 @@ class LocalReplicaWorkerClient:
                 FileWriteLock(
                     self.rotation_lock_path,
                     stale_timeout_sec=60.0,
+                    lease_duration_sec=max(15.0, effective_timeout * 2.0 + 3.0),
+                    allow_expired_lease_cleanup=True,
+                    allow_legacy_replica_cleanup=True,
                 )
                 if self.rotation_lock_path
                 else None
@@ -295,15 +306,11 @@ class LocalReplicaWorkerClient:
                         f"{socket.gethostname()}:{os.getpid()}:"
                         "local_replica_sync"
                     )
-                    while not rotation_lock.acquire(
+                    if not rotation_lock.acquire(
                         owner_id=owner_id,
                         source="local_replica_sync",
                     ):
-                        if time.monotonic() >= deadline:
-                            raise LocalReplicaWorkerTimeout(
-                                effective_timeout
-                            )
-                        time.sleep(0.05)
+                        raise LocalReplicaRotationBusy()
                     rotation_lock_acquired = True
                 self._ensure_started()
                 self._pipe.send(

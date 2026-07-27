@@ -9,6 +9,7 @@ import socket
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -842,24 +843,45 @@ def restore_from_best_available_source(
 
 
 class FileWriteLock:
-    def __init__(self, lock_path: str, stale_timeout_sec: float = 60.0, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        lock_path: str,
+        stale_timeout_sec: float = 60.0,
+        logger: Optional[logging.Logger] = None,
+        *,
+        lease_duration_sec: float | None = None,
+        allow_expired_lease_cleanup: bool = False,
+        allow_legacy_replica_cleanup: bool = False,
+    ):
         self.lock_path = lock_path
         self.stale_timeout_sec = stale_timeout_sec
         self.logger = logger or logging.getLogger(__name__)
+        self.lease_duration_sec = (
+            None
+            if lease_duration_sec is None
+            else max(1.0, float(lease_duration_sec))
+        )
+        self.allow_expired_lease_cleanup = bool(allow_expired_lease_cleanup)
+        self.allow_legacy_replica_cleanup = bool(allow_legacy_replica_cleanup)
         self._owner_token = None
         self._owner_thread_id = None
         self._reentrancy = 0
         self._mutex = threading.Lock()
 
     def _build_payload(self, owner_id: str, source: str) -> dict[str, Any]:
-        return {
-            "timestamp": time.time(),
+        timestamp = time.time()
+        payload = {
+            "timestamp": timestamp,
             "pid": os.getpid(),
             "host": socket.gethostname(),
             "user_id": owner_id,
             "source": source,
             "thread_id": threading.get_ident(),
+            "lock_token": uuid.uuid4().hex,
         }
+        if self.lease_duration_sec is not None:
+            payload["lease_expires_at"] = timestamp + self.lease_duration_sec
+        return payload
 
     def _try_read_payload(self) -> Optional[dict[str, Any]]:
         try:
@@ -1081,6 +1103,81 @@ class FileWriteLock:
         self.logger.warning("Removed local dead-PID db lock at %s (pid=%s host=%s)", self.lock_path, holder_pid, holder_host)
         return True
 
+    def _cleanup_expired_replica_lease(
+        self,
+        *,
+        source: str,
+        metric_context: dict[str, Any] | None = None,
+    ) -> bool:
+        if not self.allow_expired_lease_cleanup:
+            return False
+        started = time.perf_counter()
+        snapshot = self._read_lock_snapshot()
+        if not snapshot.exists or not snapshot.readable:
+            return False
+        payload = dict(snapshot.payload or {})
+        if str(payload.get("source") or "") != "local_replica_sync":
+            return False
+
+        now = time.time()
+        lease_expires_at = payload.get("lease_expires_at")
+        lease_expired = isinstance(lease_expires_at, (int, float)) and float(
+            lease_expires_at
+        ) <= now
+        legacy_age_expired = (
+            self.allow_legacy_replica_cleanup
+            and lease_expires_at is None
+            and isinstance(payload.get("timestamp"), (int, float))
+            and (now - float(payload["timestamp"])) > self.stale_timeout_sec
+        )
+        if not lease_expired and not legacy_age_expired:
+            return False
+
+        latest = self._read_lock_snapshot()
+        if not self._same_lock_snapshot(snapshot, latest):
+            self._record_cleanup_skipped(
+                "changed_during_lease_cleanup",
+                latest if latest.exists else snapshot,
+                source=source,
+                metric_context=metric_context,
+            )
+            return False
+        try:
+            os.remove(self.lock_path)
+        except FileNotFoundError:
+            return False
+        except Exception as exc:
+            self._record_cleanup_failed(
+                "expired_lease_delete_failed",
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+                exc=exc,
+            )
+            return False
+
+        reason = "expired_lease" if lease_expired else "legacy_replica_timeout"
+        record_metric(
+            "sqlite_write_lock_stale_removed",
+            1,
+            reason=reason,
+            lock_content_hash=snapshot.content_hash,
+            elapsed_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            **self._cleanup_metric_fields(
+                snapshot,
+                source=source,
+                metric_context=metric_context,
+            ),
+        )
+        self.logger.warning(
+            "Removed expired local-replica lease at %s (reason=%s holder=%s:%s)",
+            self.lock_path,
+            reason,
+            payload.get("host"),
+            payload.get("pid"),
+        )
+        return True
+
     def _is_stale(self, payload: Optional[dict[str, Any]]) -> bool:
         if payload is _LOCK_READ_UNAVAILABLE:
             # Ошибка чтения lock-файла не означает "stale".
@@ -1145,20 +1242,27 @@ class FileWriteLock:
                         self.logger.warning("Failed to remove orphan self-owned db lock %s: %s", self.lock_path, exc)
                 if self._cleanup_local_dead_pid_lock(source=source, metric_context=metric_context):
                     continue
+                if self._cleanup_expired_replica_lease(
+                    source=source,
+                    metric_context=metric_context,
+                ):
+                    continue
                 if self._is_stale(existing):
                     self.logger.warning("Observed stale db lock at %s; age-only cleanup is disabled", self.lock_path)
                 return False
 
-    def release(self):
+    def release(self) -> bool:
         thread_id = threading.get_ident()
+        owner_token = None
         with self._mutex:
             if self._owner_thread_id != thread_id or self._owner_token is None:
-                return
+                return False
 
             self._reentrancy -= 1
             if self._reentrancy > 0:
-                return
+                return True
 
+            owner_token = dict(self._owner_token)
             self._owner_token = None
             self._owner_thread_id = None
             self._reentrancy = 0
@@ -1166,10 +1270,44 @@ class FileWriteLock:
         try:
             for attempt in range(10):
                 try:
+                    snapshot = self._read_lock_snapshot()
+                    if not snapshot.exists:
+                        return True
+                    current_token = str(
+                        (snapshot.payload or {}).get("lock_token") or ""
+                    )
+                    expected_token = str(
+                        (owner_token or {}).get("lock_token") or ""
+                    )
+                    if not snapshot.readable:
+                        if attempt < 9:
+                            time.sleep(0.03)
+                            continue
+                        reason = snapshot.reason or "unreadable"
+                    else:
+                        reason = "ownership_changed"
+                    if (
+                        not snapshot.readable
+                        or not current_token
+                        or current_token != expected_token
+                    ):
+                        record_metric(
+                            "sqlite_write_lock_release_skipped",
+                            1,
+                            lock_path=self.lock_path,
+                            reason=reason,
+                            expected_token=expected_token,
+                            current_token=current_token,
+                        )
+                        self.logger.warning(
+                            "Skipped db lock release after ownership changed: %s",
+                            self.lock_path,
+                        )
+                        return False
                     os.remove(self.lock_path)
-                    return
+                    return True
                 except FileNotFoundError:
-                    return
+                    return True
                 except PermissionError:
                     if attempt >= 9:
                         raise
@@ -1181,9 +1319,17 @@ class FileWriteLock:
                         continue
                     raise
         except FileNotFoundError:
-            pass
+            return True
         except Exception as exc:
             self.logger.warning("Failed to remove db lock %s: %s", self.lock_path, exc)
+            record_metric(
+                "sqlite_write_lock_release_failed",
+                1,
+                lock_path=self.lock_path,
+                error_class=type(exc).__name__,
+                error_message_sanitized=_sanitize_sqlite_error_message(exc),
+            )
+            return False
 
 
 class SQLiteWriteController:
@@ -1343,15 +1489,32 @@ class SQLiteWriteController:
             committed = False
             thread_id = threading.get_ident()
             options = dict(write_options or {})
-            is_interactive_opblock = bool(options.get("interactive")) and str(options.get("role") or "").lower().startswith("operblock")
-            timeout_ms = _bounded_opblock_interactive_timeout_ms(options.get("timeout_ms")) if is_interactive_opblock else SQLITE_BUSY_TIMEOUT_MS
-            deadline = lock_wait_started + (timeout_ms / 1000.0) if is_interactive_opblock else None
+            role = str(options.get("role") or "").strip().lower()
+            metadata_source = str(options.get("source") or "")
+            is_interactive_opblock = bool(options.get("interactive")) and role.startswith(
+                "operblock"
+            )
+            is_interactive_clinical_write = bool(options.get("interactive")) and (
+                (
+                    role == "doctor"
+                    and metadata_source.startswith("ivl_")
+                )
+                or (
+                    role == "nurse"
+                    and metadata_source.startswith("nurse_order_mark:")
+                )
+            )
+            is_interactive_write = (
+                is_interactive_opblock or is_interactive_clinical_write
+            )
+            timeout_ms = _bounded_opblock_interactive_timeout_ms(options.get("timeout_ms")) if is_interactive_write else SQLITE_BUSY_TIMEOUT_MS
+            deadline = lock_wait_started + (timeout_ms / 1000.0) if is_interactive_write else None
             original_busy_timeout_ms = None
             busy_timeout_overridden = False
-            metric_context = self._write_metric_context(options, interactive=is_interactive_opblock)
+            metric_context = self._write_metric_context(options, interactive=is_interactive_write)
 
             try:
-                if is_interactive_opblock:
+                if is_interactive_write:
                     try:
                         row = conn.execute("PRAGMA busy_timeout").fetchone()
                         original_busy_timeout_ms = int(row[0]) if row else SQLITE_BUSY_TIMEOUT_MS
@@ -1364,9 +1527,9 @@ class SQLiteWriteController:
                 attempt = 0
                 while True:
                     attempt += 1
-                    if not is_interactive_opblock and attempt > self.max_retries:
+                    if not is_interactive_write and attempt > self.max_retries:
                         break
-                    if is_interactive_opblock and self._remaining_ms(deadline) <= 0:
+                    if is_interactive_write and self._remaining_ms(deadline) <= 0:
                         holder = describe_sqlite_lock_holder(self.lock_path)
                         phase = "begin_immediate_timeout" if last_exc is not None and self._is_retryable(last_exc) else "file_lock_timeout"
                         self._raise_interactive_timeout(
@@ -1431,7 +1594,7 @@ class SQLiteWriteController:
                         holder = describe_sqlite_lock_holder(self.lock_path)
                         active_payload["lock_holder"] = holder
                         _set_active_sqlite_operation(thread_id, active_payload)
-                        retry_wait_ms = round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_opblock else round(self.retry_delay_sec * 1000.0, 3)
+                        retry_wait_ms = round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_write else round(self.retry_delay_sec * 1000.0, 3)
                         record_metric(
                             "sqlite_write_lock_wait_retry",
                             1,
@@ -1445,7 +1608,7 @@ class SQLiteWriteController:
                             **metric_context,
                             **_lock_holder_metric_fields(holder),
                         )
-                        if is_interactive_opblock and self._remaining_ms(deadline) <= 0:
+                        if is_interactive_write and self._remaining_ms(deadline) <= 0:
                             self._raise_interactive_timeout(
                                 source=source,
                                 timeout_ms=timeout_ms,
@@ -1517,7 +1680,7 @@ class SQLiteWriteController:
                         self.lock.release()
                         lock_acquired = False
                         lock_held_started = None
-                        if retryable and (is_interactive_opblock or attempt < self.max_retries):
+                        if retryable and (is_interactive_write or attempt < self.max_retries):
                             holder = describe_sqlite_lock_holder(self.lock_path)
                             record_metric(
                                 "sqlite_write_lock_wait_retry",
@@ -1525,7 +1688,7 @@ class SQLiteWriteController:
                                 operation_name=source,
                                 source=source,
                                 attempt=attempt,
-                                wait_ms=round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_opblock else round(self.retry_delay_sec * 1000.0, 3),
+                                wait_ms=round(min(self.retry_delay_sec * 1000.0, self._remaining_ms(deadline)), 3) if is_interactive_write else round(self.retry_delay_sec * 1000.0, 3),
                                 total_wait_ms=round((time.perf_counter() - lock_wait_started) * 1000.0, 3),
                                 timeout_ms=timeout_ms,
                                 phase="begin_immediate",
@@ -1534,7 +1697,7 @@ class SQLiteWriteController:
                                 **metric_context,
                                 **_lock_holder_metric_fields(holder),
                             )
-                            if is_interactive_opblock and self._remaining_ms(deadline) <= 0:
+                            if is_interactive_write and self._remaining_ms(deadline) <= 0:
                                 self._raise_interactive_timeout(
                                     source=source,
                                     timeout_ms=timeout_ms,
@@ -1549,7 +1712,7 @@ class SQLiteWriteController:
                                 )
                             self._sleep_before_retry(deadline)
                             continue
-                        if is_interactive_opblock and retryable:
+                        if is_interactive_write and retryable:
                             holder = describe_sqlite_lock_holder(self.lock_path)
                             self._raise_interactive_timeout(
                                 source=source,
@@ -1578,7 +1741,7 @@ class SQLiteWriteController:
 
                 if cursor is None:
                     holder = describe_sqlite_lock_holder(self.lock_path)
-                    if is_interactive_opblock:
+                    if is_interactive_write:
                         phase = "begin_immediate_timeout" if last_exc is not None and self._is_retryable(last_exc) else "file_lock_timeout"
                         self._raise_interactive_timeout(
                             source=source,

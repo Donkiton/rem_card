@@ -22,6 +22,7 @@ from rem_card.app.emergency_metadata import (
     standby_metadata_from_dict,
 )
 from rem_card.app.emergency_paths import (
+    ACTIVE_SESSION_METADATA_FILE_NAME,
     active_base_snapshot_path,
     active_dir,
     active_medical_db_path,
@@ -44,6 +45,18 @@ from rem_card.app.emergency_validation import (
 )
 from rem_card.app.local_metrics import record_metric
 from rem_card.app.version import APP_VERSION
+
+DEFAULT_COMPLETED_SESSION_RETENTION_DAYS = max(
+    1,
+    int(
+        float(
+            os.environ.get(
+                "REMCARD_EMERGENCY_COMPLETED_RETENTION_DAYS",
+                "7",
+            )
+        )
+    ),
+)
 
 
 class EmergencyStoreError(RuntimeError):
@@ -237,6 +250,85 @@ class EmergencyLocalStore:
             except OSError:
                 pass
         return removed
+
+    @staticmethod
+    def _directory_size(path: str) -> int:
+        total = 0
+        for directory, _subdirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(directory, name))
+                except OSError:
+                    pass
+        return total
+
+    def cleanup_completed_archived_sessions(
+        self,
+        *,
+        retention_days: int | float = DEFAULT_COMPLETED_SESSION_RETENTION_DAYS,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        archive_root = archived_dir(self.root)
+        result = {
+            "removed_sessions": 0,
+            "removed_bytes": 0,
+            "protected_sessions": 0,
+        }
+        if not os.path.isdir(archive_root):
+            return result
+        current = now or datetime.now()
+        cutoff_seconds = max(1.0, float(retention_days)) * 86400.0
+        for entry in os.scandir(archive_root):
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            metadata_path = os.path.join(
+                entry.path,
+                ACTIVE_SESSION_METADATA_FILE_NAME,
+            )
+            try:
+                metadata = session_metadata_from_dict(
+                    read_json_file(metadata_path)
+                )
+            except Exception:
+                result["protected_sessions"] += 1
+                continue
+            if metadata.status not in {"merged", "discarded"}:
+                result["protected_sessions"] += 1
+                continue
+            stamp_text = (
+                metadata.merged_at
+                or metadata.discarded_at
+                or metadata.ended_at
+            )
+            try:
+                stamp = datetime.fromisoformat(str(stamp_text or ""))
+            except ValueError:
+                result["protected_sessions"] += 1
+                continue
+            comparable_now = current
+            if stamp.tzinfo is not None and comparable_now.tzinfo is None:
+                comparable_now = comparable_now.replace(tzinfo=stamp.tzinfo)
+            elif stamp.tzinfo is None and comparable_now.tzinfo is not None:
+                comparable_now = comparable_now.replace(tzinfo=None)
+            if (comparable_now - stamp).total_seconds() <= cutoff_seconds:
+                continue
+            removed_bytes = self._directory_size(entry.path)
+            try:
+                shutil.rmtree(entry.path)
+            except OSError:
+                result["protected_sessions"] += 1
+                continue
+            result["removed_sessions"] += 1
+            result["removed_bytes"] += removed_bytes
+        if result["removed_sessions"]:
+            record_metric(
+                "emergency_completed_sessions_cleanup",
+                result["removed_sessions"],
+                removed_bytes=result["removed_bytes"],
+                retention_days=float(retention_days),
+                protected_sessions=result["protected_sessions"],
+            )
+        return result
 
     def create_active_session_from_standby(
         self,

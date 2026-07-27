@@ -907,6 +907,8 @@ class DataService(QObject):
             description=description,
             on_success=handle_success,
             on_error=handle_error,
+            retryable=bool(metadata.get("queue_retryable", True)),
+            retries_left=max(0, int(metadata.get("queue_retries_left", 10))),
         )
         return True
 

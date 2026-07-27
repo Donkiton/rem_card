@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -14,6 +16,7 @@ from rem_card.app.local_replica_sync import (
     build_local_replica_path,
 )
 from rem_card.app.local_replica_worker import (
+    LocalReplicaRotationBusy,
     LocalReplicaWorkerClient,
     LocalReplicaWorkerTimeout,
 )
@@ -277,6 +280,89 @@ class LocalReplicaSyncTest(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["value"]["status"], "snapshot_ready")
         self.assertFalse(rotation_lock_path.exists())
+
+    def test_busy_rotation_lock_fails_fast_without_worker_timeout(self):
+        rotation_lock_path = self.root / "db_rotation.lock"
+        competing_lock = FileWriteLock(str(rotation_lock_path))
+        self.assertTrue(
+            competing_lock.acquire(
+                owner_id="test-rotation",
+                source="db_rotation",
+            )
+        )
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            rotation_lock_path=str(rotation_lock_path),
+            timeout_sec=2.0,
+        )
+        started = time.monotonic()
+        try:
+            with self.assertRaises(LocalReplicaRotationBusy):
+                client.sync(
+                    local_state={},
+                    temp_db_path=str(self.root / "busy.sync_tmp.db"),
+                )
+        finally:
+            competing_lock.release()
+            client.close()
+
+        self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_expired_legacy_replica_lock_is_recovered_safely(self):
+        rotation_lock_path = self.root / "db_rotation.lock"
+        rotation_lock_path.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.time() - 120.0,
+                    "pid": 999999,
+                    "host": f"foreign-{socket.gethostname()}",
+                    "user_id": "old-client",
+                    "source": "local_replica_sync",
+                    "thread_id": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        client = LocalReplicaWorkerClient(
+            central_db_path=str(self.central_path),
+            rotation_lock_path=str(rotation_lock_path),
+            timeout_sec=2.0,
+        )
+        try:
+            result = client.sync(
+                local_state={},
+                temp_db_path=str(self.root / "recovered.sync_tmp.db"),
+            )
+        finally:
+            client.close()
+
+        self.assertEqual(result["status"], "snapshot_ready")
+        self.assertFalse(rotation_lock_path.exists())
+
+    def test_release_never_deletes_lock_after_ownership_changes(self):
+        lock_path = self.root / "ownership.lock"
+        lock = FileWriteLock(str(lock_path))
+        self.assertTrue(lock.acquire("owner-a", "test"))
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        payload["lock_token"] = "replacement-owner"
+        payload["user_id"] = "owner-b"
+        lock_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        self.assertFalse(lock.release())
+        self.assertTrue(lock_path.exists())
+
+    def test_replica_failure_backoff_is_bounded_and_reported(self):
+        self.replica = LocalReplicaSync(
+            central_db_path=str(self.central_path),
+            local_db_path=str(self.local_path),
+            worker_client=_FailingWorkerClient(),
+        )
+
+        for expected in (15.0, 30.0, 60.0, 300.0, 300.0):
+            self.assertFalse(self.replica.sync_once())
+            health = self.replica.health_snapshot()
+            self.assertEqual(health["retry_backoff_sec"], expected)
+            self.assertGreater(health["retry_after_sec"], 0.0)
 
     def test_local_path_is_stable_and_scoped_by_role_and_database(self):
         kwargs = {

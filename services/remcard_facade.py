@@ -2396,6 +2396,7 @@ class RemCardService(QObject):
         operation: Callable[[], Any],
         on_success: Optional[Callable[[Any], None]] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
+        write_metadata: Optional[dict[str, Any]] = None,
     ):
         """
         РђСЃРёРЅС…СЂРѕРЅРЅР°СЏ Р·Р°РїРёСЃСЊ СЃ Р»РѕРєР°Р»СЊРЅРѕР№ РѕС‡РµСЂРµРґСЊСЋ.
@@ -2407,6 +2408,7 @@ class RemCardService(QObject):
                 operation=operation,
                 on_success=on_success,
                 on_error=on_error,
+                write_metadata=write_metadata,
             )
             return
 

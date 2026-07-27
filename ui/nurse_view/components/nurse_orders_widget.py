@@ -107,6 +107,8 @@ class NurseOrdersWidget(QWidget):
         self._admin_only_snapshot_until = 0.0
         self._orders_click_seq = 0
         self._pending_admin_write_count = 0
+        self._pending_admin_ids: set[int] = set()
+        self._deferred_change_reload = False
         self._legacy_direct_snapshot_warned = False
         self._change_debounce_ms = max(100, int(os.getenv("REMCARD_ORDERS_CHANGE_DEBOUNCE_MS", "120")))
         self._pending_change_context_key = None
@@ -409,6 +411,9 @@ class NurseOrdersWidget(QWidget):
             self._reset_change_cursor()
             self.highlighted_order_id = None
             self._snapshot_stale = False
+            self._deferred_change_reload = False
+            self._pending_admin_write_count = 0
+            self._pending_admin_ids.clear()
             self._reset_change_batch(stop_timer=True)
             self._clear_soft_update_state()
 
@@ -544,6 +549,8 @@ class NurseOrdersWidget(QWidget):
             self._reset_change_batch(stop_timer=True)
         self._pending_change_context_key = context_key
         self._pending_change_reload = self._pending_change_reload or bool(tab_active)
+        if not tab_active:
+            self._deferred_change_reload = True
         self._pending_change_count += 1
         if not self._pending_change_invalidated:
             coordinator.invalidate_tab(context, reason="change_log_orders")
@@ -1206,6 +1213,7 @@ class NurseOrdersWidget(QWidget):
                 snapshot.get("version"),
             )
             self._clear_soft_update_state()
+            self._deferred_change_reload = False
             return True
 
         self._ensure_model_initialized()
@@ -1230,7 +1238,15 @@ class NurseOrdersWidget(QWidget):
             len(snapshot.get("admin_rows") or []),
             scroll_value,
         )
+        pending_admins = {
+            key: copy(admin)
+            for key, admin in getattr(self.model, "admin_map", {}).items()
+            if admin is not None
+            and int(getattr(admin, "id", 0) or 0) in self._pending_admin_ids
+        }
         self._apply_full_snapshot_to_model(snapshot)
+        if pending_admins:
+            self.model.admin_map.update(pending_admins)
         self._restore_table_scroll(scroll_value)
         self._cached_has_administrations = bool(snapshot.get("has_any_administrations", False))
         self._cached_has_orders = bool(snapshot.get("has_any_orders", False))
@@ -1259,6 +1275,7 @@ class NurseOrdersWidget(QWidget):
             snapshot.get("version"),
         )
         self._last_applied_snapshot_signature = snapshot_signature
+        self._deferred_change_reload = False
         return True
 
     def _try_apply_admin_only_snapshot(
@@ -1273,14 +1290,14 @@ class NurseOrdersWidget(QWidget):
     ) -> bool:
         if self._pending_admin_write_count > 0:
             logger.info(
-                "[OrdersClick] snapshot_skip_pending_local_write role=nurse admission_id=%s pending=%s source=%s trace_id=%s change_id=%s",
+                "[OrdersClick] snapshot_merge_pending_local_write role=nurse admission_id=%s pending=%s source=%s trace_id=%s change_id=%s",
                 admission_id,
                 self._pending_admin_write_count,
                 snapshot.get("source"),
                 snapshot.get("load_trace_id"),
                 snapshot.get("change_id"),
             )
-            return True
+            return False
         if (
             self.model is None
             or time.monotonic() >= self._admin_only_snapshot_until
@@ -1313,6 +1330,7 @@ class NurseOrdersWidget(QWidget):
             len(snapshot.get("admin_rows") or []),
         )
         self._last_applied_snapshot_signature = snapshot_signature
+        self._deferred_change_reload = False
         return True
 
     def _snapshot_apply_signature(self, snapshot, context_key):
@@ -1512,6 +1530,8 @@ class NurseOrdersWidget(QWidget):
                 priority="MEDIUM",
                 invalidate_reason=None,
             )
+        else:
+            self._deferred_change_reload = True
 
     def _should_show_soft_update(self, source: str) -> bool:
         return False
@@ -1574,6 +1594,13 @@ class NurseOrdersWidget(QWidget):
             operation=operation,
             on_success=_on_success,
             on_error=_on_error,
+            write_metadata={
+                "interactive": True,
+                "role": "nurse",
+                "timeout_ms": 5000,
+                "admission_id": self.admission_id,
+                "queue_retryable": False,
+            },
         )
 
     def setup_data(self):
@@ -1684,14 +1711,16 @@ class NurseOrdersWidget(QWidget):
             self.setup_data()
             return
 
-        if self._snapshot_stale:
-            if self._apply_cached_snapshot_if_available():
-                return
+        if self._snapshot_stale or self._deferred_change_reload:
             self._request_snapshot(
-                force=False,
-                source="refresh",
+                force=bool(self._deferred_change_reload),
+                source="user",
                 priority="HIGH",
-                invalidate_reason=None,
+                invalidate_reason=(
+                    "deferred_hidden_tab_change"
+                    if self._deferred_change_reload
+                    else None
+                ),
             )
             return
 
@@ -1756,11 +1785,13 @@ class NurseOrdersWidget(QWidget):
         self._orders_click_seq += 1
         return self._orders_click_seq
 
-    def _begin_admin_write(self):
+    def _begin_admin_write(self, admin_id: int):
         self._pending_admin_write_count += 1
+        self._pending_admin_ids.add(int(admin_id))
 
-    def _finish_admin_write(self):
+    def _finish_admin_write(self, admin_id: int):
         self._pending_admin_write_count = max(0, self._pending_admin_write_count - 1)
+        self._pending_admin_ids.discard(int(admin_id))
 
     def _schedule_silent_sync(self):
         self._silent_sync_timer.start(self._silent_sync_delay_ms)
@@ -1914,6 +1945,14 @@ class NurseOrdersWidget(QWidget):
                                 operation = lambda aid=admin_id: self.service.set_nurse_order_mark(aid, NURSE_MARK_NOT_EXECUTED)
 
                         if operation:
+                            if int(admin_id) in self._pending_admin_ids:
+                                logger.info(
+                                    "[OrdersClick] click_ignore role=nurse seq=%s reason=write_pending admission_id=%s admin_id=%s",
+                                    click_seq,
+                                    self.admission_id,
+                                    admin_id,
+                                )
+                                return True
                             logger.info(
                                 "[OrdersClick] click_accept role=nurse seq=%s admission_id=%s row=%s col=%s admin_id=%s old_mark=%s next_mark=%s button=%s",
                                 click_seq,
@@ -1928,17 +1967,20 @@ class NurseOrdersWidget(QWidget):
                             self._admin_only_snapshot_until = time.monotonic() + self._admin_only_snapshot_window_sec
                             key = self._admin_key_from_admin(admin)
                             previous_admin = copy(admin) if key is not None else None
+                            write_context_key = self._current_context_key()
                             self._apply_pending_nurse_mark(index, admin, next_mark)
-                            self._begin_admin_write()
+                            self._begin_admin_write(admin_id)
 
                             def on_success():
-                                self._apply_committed_nurse_mark(index, admin, next_mark)
-                                self._finish_admin_write()
-                                self._on_mark_updated()
+                                self._finish_admin_write(admin_id)
+                                if write_context_key == self._current_context_key():
+                                    self._apply_committed_nurse_mark(index, admin, next_mark)
+                                    self._on_mark_updated()
 
                             def on_error(exc):
-                                self._finish_admin_write()
-                                self._restore_admin_cell(index, key, previous_admin)
+                                self._finish_admin_write(admin_id)
+                                if write_context_key == self._current_context_key():
+                                    self._restore_admin_cell(index, key, previous_admin)
 
                             self._enqueue_write(
                                 f"nurse_order_mark:{admin_id}:seq={click_seq}",
