@@ -638,10 +638,61 @@ def _configure_dev_runtime_baza_pin() -> Optional[str]:
     return selected_path
 
 
-def _launch_requested_dev_restart() -> bool:
-    if is_compiled():
+def _wait_for_restart_parent(parent_pid: int, *, timeout_sec: float = 45.0) -> bool:
+    if parent_pid <= 0 or parent_pid == os.getpid():
+        return False
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        try:
+            os.kill(parent_pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            # Для дочернего процесса этого не должно происходить, но не
+            # начинаем второй экземпляр, пока родитель потенциально жив.
+            pass
+        except OSError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _launch_requested_restart() -> bool:
+    """Перезапускает тот же entrypoint после полного выхода текущего процесса."""
+    try:
+        from rem_card.app.process_launch import popen_hidden
+        from rem_card.app.runtime_paths import (
+            DEV_EXISTING_BAZA_ONLY_ENV,
+            DEV_RUNTIME_BAZA_PIN_ENV,
+        )
+
+        if not sys.argv or not str(sys.argv[0]).strip():
+            return False
+        if is_compiled():
+            command = [os.path.abspath(sys.executable), "--restart-after-pid", str(os.getpid())]
+        else:
+            if os.environ.get(DEV_RUNTIME_BAZA_PIN_ENV) == str(os.getpid()):
+                os.environ.pop("REMCARD_BAZA_DIR", None)
+                os.environ.pop(DEV_RUNTIME_BAZA_PIN_ENV, None)
+                os.environ.pop(DEV_EXISTING_BAZA_ONLY_ENV, None)
+            command = [
+                sys.executable,
+                os.path.abspath(sys.argv[0]),
+                *[str(arg) for arg in sys.argv[1:]],
+                "--restart-after-pid",
+                str(os.getpid()),
+            ]
+        popen_hidden(command, cwd=os.getcwd())
+        return True
+    except Exception as exc:
+        _write_startup_local_log(f"restart launch failed: {exc}")
         return False
 
+
+def _launch_requested_dev_restart() -> bool:
+    """Совместимый helper для тестов и старых dev-вызовов."""
+    if is_compiled():
+        return False
     try:
         from PySide6.QtCore import QProcess
         from rem_card.app.runtime_paths import (
@@ -655,13 +706,12 @@ def _launch_requested_dev_restart() -> bool:
             os.environ.pop("REMCARD_BAZA_DIR", None)
             os.environ.pop(DEV_RUNTIME_BAZA_PIN_ENV, None)
             os.environ.pop(DEV_EXISTING_BAZA_ONLY_ENV, None)
-        program = sys.executable
-        arguments = [os.path.abspath(sys.argv[0]), *[str(arg) for arg in sys.argv[1:]]]
-
-        result = QProcess.startDetached(program, arguments, os.getcwd())
-        if isinstance(result, tuple):
-            return bool(result[0])
-        return bool(result)
+        result = QProcess.startDetached(
+            sys.executable,
+            [os.path.abspath(sys.argv[0]), *[str(arg) for arg in sys.argv[1:]]],
+            os.getcwd(),
+        )
+        return bool(result[0] if isinstance(result, tuple) else result)
     except Exception as exc:
         _write_startup_local_log(f"dev restart launch failed: {exc}")
         return False
@@ -2060,8 +2110,15 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     parser.add_argument("--path-setup", action="store_true", help="Настроить путь к папке базы")
     parser.add_argument("--emergency-startup-request", default="", help=argparse.SUPPRESS)
     parser.add_argument("--compiled-smoke", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--restart-after-pid", type=int, default=0, help=argparse.SUPPRESS)
     args, _unknown = parser.parse_known_args()
     if args.compiled_smoke:
+        return
+    if args.restart_after_pid and not _wait_for_restart_parent(args.restart_after_pid):
+        _show_native_warning(
+            "Перезапуск RemCard",
+            "Предыдущий экземпляр программы не завершился вовремя. Запустите RemCard вручную.",
+        )
         return
     args.role = _resolve_startup_role(args.role, forced_role)
     path_setup = bool(path_setup or args.path_setup)
@@ -2404,15 +2461,13 @@ def _main_impl(forced_role: Optional[str] = None, path_setup: bool = False):
     if restart_requested and exit_code == 0:
         if not resources_shutdown_ok:
             _show_native_warning(
-                "Смена базы",
-                "Путь к новой базе сохранён, но часть ресурсов старой базы не успела "
-                "штатно завершиться. Запустите dev-версию вручную после её полного закрытия.",
+                "Перезапуск RemCard",
+                "Часть ресурсов программы не успела штатно завершиться. Запустите RemCard вручную после её полного закрытия.",
             )
-        elif not _launch_requested_dev_restart():
+        elif not _launch_requested_restart():
             _show_native_warning(
-                "Смена базы",
-                "Путь к новой базе сохранён, но автоматически перезапустить dev-версию не удалось. "
-                "Запустите её вручную.",
+                "Перезапуск RemCard",
+                "Автоматически перезапустить программу не удалось. Запустите её вручную.",
             )
 
     sys.exit(exit_code)

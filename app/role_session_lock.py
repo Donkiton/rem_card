@@ -194,7 +194,20 @@ class RoleSessionLock:
             self.logger.warning("Failed to remove stale role lock %s: %s", self.lock_path, exc)
             return False
 
-    def is_held_by_other(self) -> bool:
+    def ownership_context(self) -> Optional[dict[str, str]]:
+        """Возвращает точный идентификатор удерживаемого этим объектом lock'а."""
+        with self._mutex:
+            token = dict(self._token) if self._token else None
+        nonce = str((token or {}).get("nonce") or "").strip()
+        if not nonce:
+            return None
+        return {
+            "path": os.path.abspath(self.lock_path),
+            "nonce": nonce,
+            "role": str(self.role or ""),
+        }
+
+    def is_held_by_other(self, *, ignored_nonce: str = "") -> bool:
         """
         Проверяет, занят ли lock другим процессом.
         Stale-lock будет очищен автоматически, если это возможно.
@@ -204,6 +217,9 @@ class RoleSessionLock:
         if holder is _ROLE_LOCK_READ_UNAVAILABLE:
             return True
         if not holder:
+            return False
+
+        if ignored_nonce and str(holder.get("nonce") or "") == str(ignored_nonce):
             return False
 
         # Наш же lock (по nonce) — не считаем занятым "другим".

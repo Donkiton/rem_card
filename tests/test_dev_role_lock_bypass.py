@@ -150,6 +150,24 @@ def test_dev_restart_drops_current_process_database_pin(monkeypatch, tmp_path):
     assert runtime_paths.DEV_RUNTIME_BAZA_PIN_ENV not in os.environ
 
 
+def test_compiled_restart_uses_same_exe_and_waits_for_parent(monkeypatch, tmp_path):
+    from rem_card.app import process_launch
+
+    captured = {}
+    executable = tmp_path / "RemCardDoctor.exe"
+    monkeypatch.setattr(app_main, "is_compiled", lambda: True)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    monkeypatch.setattr(app_main.os, "getpid", lambda: 4321)
+
+    def fake_popen(command, **kwargs):
+        captured.update(command=command, kwargs=kwargs)
+
+    monkeypatch.setattr(process_launch, "popen_hidden", fake_popen)
+
+    assert app_main._launch_requested_restart() is True
+    assert captured["command"] == [str(executable), "--restart-after-pid", "4321"]
+
+
 def test_dev_add_patient_mutex_is_local_not_in_selected_database(monkeypatch, tmp_path):
     from rem_card.ui.doctor_view.doctor_remcard_widget import DoctorRemCardWidget
     from rem_card.ui.nurse_view.nurse_main_widget import NurseMainWidget

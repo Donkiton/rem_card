@@ -5,7 +5,7 @@ import sqlite3
 import time
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional
 
 from rem_card.app.schema_migration_guard import ensure_unified_schema_with_migration_backup
@@ -15,6 +15,8 @@ from rem_card.app.sqlite_shared import FileWriteLock, backup_connection, configu
 DB_CYCLE_META_KEY = "db_cycle_started_at"
 ROTATION_ROLE_LOCK_STALE_TIMEOUT_SEC = 75.0
 ROTATION_BLOCKING_EMERGENCY_STATUSES = {"active", "merge_pending", "merging", "merge_failed"}
+MANUAL_ROTATION_UNDO_STATE_FILE = "manual_rotation_undo.json"
+MANUAL_ROTATION_UNDO_WINDOW = timedelta(hours=24)
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -90,6 +92,123 @@ def _db_file_fingerprint(db_path: str) -> dict[str, int]:
     return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)}
 
 
+def _manual_rotation_undo_state_path(archive_dir: str) -> str:
+    return os.path.join(archive_dir, MANUAL_ROTATION_UNDO_STATE_FILE)
+
+
+def _read_manual_rotation_undo_state(archive_dir: str) -> dict[str, Any] | None:
+    try:
+        with open(_manual_rotation_undo_state_path(archive_dir), "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_manual_rotation_undo_state(archive_dir: str, payload: dict[str, Any]) -> str:
+    os.makedirs(archive_dir, exist_ok=True)
+    path = _manual_rotation_undo_state_path(archive_dir)
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temp_path, path)
+    return path
+
+
+def _remove_manual_rotation_undo_state(archive_dir: str) -> None:
+    try:
+        os.remove(_manual_rotation_undo_state_path(archive_dir))
+    except FileNotFoundError:
+        pass
+
+
+def _rotation_change_cursor(conn: sqlite3.Connection) -> int:
+    if not _table_exists(conn, "change_log"):
+        return 0
+    row = conn.execute("SELECT COALESCE(MAX(id), 0) FROM change_log").fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def manual_rotation_undo_status(*, db_path: str, archive_dir: str) -> dict[str, Any]:
+    """Проверяет, можно ли вернуть последний ручной цикл без потери пациента."""
+    state = _read_manual_rotation_undo_state(archive_dir)
+    if not state:
+        return {"available": False, "reason": "not_available"}
+    try:
+        expires_at = datetime.fromisoformat(str(state.get("expires_at_utc") or ""))
+        if expires_at.tzinfo is None:
+            return {"available": False, "reason": "invalid_state"}
+    except ValueError:
+        return {"available": False, "reason": "invalid_state"}
+    if datetime.now(timezone.utc) >= expires_at:
+        return {"available": False, "reason": "expired", "expires_at_utc": state.get("expires_at_utc")}
+    archived_path = os.path.abspath(str(state.get("archived_path") or ""))
+    if not archived_path or not os.path.isfile(archived_path) or not os.path.isfile(db_path):
+        return {"available": False, "reason": "files_changed"}
+    if os.path.normcase(os.path.abspath(str(state.get("db_path") or ""))) != os.path.normcase(os.path.abspath(db_path)):
+        return {"available": False, "reason": "files_changed"}
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None, timeout=5.0)
+        configure_connection(conn, readonly=True)
+        baseline = int(state.get("change_log_id") or 0)
+        if _table_exists(conn, "change_log"):
+            row = conn.execute(
+                """
+                SELECT 1 FROM change_log
+                WHERE id > ? AND entity_name IN ('patients', 'admissions')
+                LIMIT 1
+                """,
+                (baseline,),
+            ).fetchone()
+            if row:
+                return {"available": False, "reason": "patient_data_added"}
+        return {"available": True, "expires_at_utc": state.get("expires_at_utc"), "state": state}
+    except Exception:
+        return {"available": False, "reason": "check_failed"}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _record_manual_rotation_undo_state(
+    *,
+    source: str,
+    db_path: str,
+    archive_dir: str,
+    archived_path: str,
+    backup_path: str,
+) -> str:
+    try:
+        if source != "manual_rotation":
+            return ""
+        baseline_conn = sqlite3.connect(db_path, check_same_thread=False, isolation_level=None, timeout=5.0)
+        try:
+            configure_connection(baseline_conn, readonly=True)
+            change_log_id = _rotation_change_cursor(baseline_conn)
+        finally:
+            baseline_conn.close()
+        created_at = datetime.now(timezone.utc)
+        return _write_manual_rotation_undo_state(
+            archive_dir,
+            {
+                "version": 1,
+                "db_path": os.path.abspath(db_path),
+                "archived_path": os.path.abspath(archived_path),
+                "backup_path": os.path.abspath(backup_path),
+                "change_log_id": change_log_id,
+                "created_at_utc": created_at.isoformat(),
+                "expires_at_utc": (created_at + MANUAL_ROTATION_UNDO_WINDOW).isoformat(),
+            },
+        )
+    except Exception:
+        return ""
+
+
 def _build_pre_rotation_backup_path(backup_dir: str, db_path: str, source: str) -> str:
     os.makedirs(backup_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(db_path))[0]
@@ -154,11 +273,17 @@ def _normalise_role_lock_paths(blocked_role_lock_paths: Any) -> list[tuple[str, 
 def find_active_rotation_role_locks(
     blocked_role_lock_paths: Any,
     *,
+    ignored_lock_nonces: Mapping[str, str] | None = None,
     stale_timeout_sec: float = ROTATION_ROLE_LOCK_STALE_TIMEOUT_SEC,
     logger: Optional[logging.Logger] = None,
 ) -> list[dict[str, str]]:
     logger = logger or logging.getLogger(__name__)
     active: list[dict[str, str]] = []
+    ignored_by_path = {
+        os.path.normcase(os.path.abspath(str(path))): str(nonce or "")
+        for path, nonce in dict(ignored_lock_nonces or {}).items()
+        if path and nonce
+    }
     for role, lock_path in _normalise_role_lock_paths(blocked_role_lock_paths):
         if not lock_path:
             continue
@@ -174,7 +299,8 @@ def find_active_rotation_role_locks(
                 heartbeat_sec=60.0,
                 logger=logger,
             )
-            if lock.is_held_by_other():
+            ignored_nonce = ignored_by_path.get(os.path.normcase(os.path.abspath(lock_path)), "")
+            if lock.is_held_by_other(ignored_nonce=ignored_nonce):
                 active.append(
                     {
                         "role": role_key,
@@ -300,6 +426,7 @@ def rotate_database_now(
     max_age_days: int = 180,
     blocked_role_lock_paths: Any = None,
     blocked_emergency_roots: Any = None,
+    ignored_lock_nonces: Mapping[str, str] | None = None,
 ) -> dict:
     return maybe_rotate_database_if_due(
         db_path=db_path,
@@ -315,6 +442,7 @@ def rotate_database_now(
         source=source,
         blocked_role_lock_paths=blocked_role_lock_paths,
         blocked_emergency_roots=blocked_emergency_roots,
+        ignored_lock_nonces=ignored_lock_nonces,
     )
 
 
@@ -333,6 +461,7 @@ def maybe_rotate_database_if_due(
     source: str = "auto_rotation",
     blocked_role_lock_paths: Any = None,
     blocked_emergency_roots: Any = None,
+    ignored_lock_nonces: Mapping[str, str] | None = None,
 ) -> dict:
     """
     Архивирует БД, только если:
@@ -388,6 +517,7 @@ def maybe_rotate_database_if_due(
 
             active_role_locks = find_active_rotation_role_locks(
                 blocked_role_lock_paths,
+                ignored_lock_nonces=ignored_lock_nonces,
                 logger=logger,
             )
             if active_role_locks:
@@ -586,6 +716,14 @@ def maybe_rotate_database_if_due(
                 "rollback_error": rollback_error,
             }
 
+        undo_state_path = _record_manual_rotation_undo_state(
+            source=source,
+            db_path=db_path,
+            archive_dir=archive_dir,
+            archived_path=archived_path,
+            backup_path=backup_path,
+        )
+
         logger.warning(
             "DB lifecycle rotation completed: %s -> %s | backup=%s | source=%s",
             db_path,
@@ -593,10 +731,103 @@ def maybe_rotate_database_if_due(
             backup_path,
             source,
         )
-        return {"status": "rotated", "archived_path": archived_path, "backup_path": backup_path}
+        return {
+            "status": "rotated",
+            "archived_path": archived_path,
+            "backup_path": backup_path,
+            "undo_state_path": undo_state_path,
+        }
     finally:
         if temp_new_db_path:
             _remove_db_with_sidecars(temp_new_db_path)
+        if db_lock:
+            db_lock.release()
+        lock.release()
+
+
+def cancel_manual_rotation(
+    *,
+    db_path: str,
+    archive_dir: str,
+    rotation_lock_path: str,
+    db_lock_path: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    blocked_role_lock_paths: Any = None,
+    blocked_emergency_roots: Any = None,
+    ignored_lock_nonces: Mapping[str, str] | None = None,
+) -> dict:
+    """Возвращает предыдущий цикл только пока в новом цикле не было пациента."""
+    logger = logger or logging.getLogger(__name__)
+    status = manual_rotation_undo_status(db_path=db_path, archive_dir=archive_dir)
+    if not status.get("available"):
+        return {"status": "undo_unavailable", "reason": status.get("reason", "not_available")}
+    state = dict(status["state"])
+    lock = FileWriteLock(rotation_lock_path, stale_timeout_sec=60.0, logger=logger)
+    owner_id = f"{socket.gethostname()}:{os.getpid()}:db_rotation_undo"
+    if not lock.acquire(owner_id=owner_id, source="db_rotation_undo"):
+        return {"status": "rotation_lock_busy"}
+    db_lock = None
+    moved_new_path = ""
+    try:
+        if db_lock_path:
+            db_lock = FileWriteLock(db_lock_path, stale_timeout_sec=10 * 60, logger=logger)
+            if not db_lock.acquire(owner_id=owner_id, source="db_rotation_undo"):
+                return {"status": "db_lock_busy"}
+        active_role_locks = find_active_rotation_role_locks(
+            blocked_role_lock_paths,
+            ignored_lock_nonces=ignored_lock_nonces,
+            logger=logger,
+        )
+        if active_role_locks:
+            return {"status": "deferred_active_role_lock", "blocked_roles": active_role_locks}
+        active_emergency_sessions = find_active_emergency_nurse_sessions(
+            blocked_emergency_roots,
+            logger=logger,
+        )
+        if active_emergency_sessions:
+            return {
+                "status": "deferred_active_emergency_session",
+                "blocked_emergency_sessions": active_emergency_sessions,
+            }
+        status = manual_rotation_undo_status(db_path=db_path, archive_dir=archive_dir)
+        if not status.get("available"):
+            return {"status": "undo_unavailable", "reason": status.get("reason", "not_available")}
+        archived_path = os.path.abspath(str(state["archived_path"]))
+        for path in (db_path, archived_path):
+            conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=5.0)
+            try:
+                configure_connection(conn, readonly=True)
+                ok, result = run_quick_check(conn)
+                if not ok:
+                    return {"status": "undo_validation_failed", "path": path, "error": str(result)}
+            finally:
+                conn.close()
+        base_name = os.path.splitext(os.path.basename(db_path))[0]
+        moved_new_path = _build_unique_archive_path(archive_dir, f"{base_name}_manual_rotation_cancelled")
+        try:
+            os.replace(db_path, moved_new_path)
+            for ext in ("-journal", "-wal", "-shm"):
+                if os.path.exists(f"{db_path}{ext}"):
+                    os.replace(f"{db_path}{ext}", f"{moved_new_path}{ext}")
+            os.replace(archived_path, db_path)
+            for ext in ("-journal", "-wal", "-shm"):
+                if os.path.exists(f"{archived_path}{ext}"):
+                    os.replace(f"{archived_path}{ext}", f"{db_path}{ext}")
+        except Exception as exc:
+            rollback_error = ""
+            if moved_new_path and os.path.exists(moved_new_path) and not os.path.exists(db_path):
+                try:
+                    os.replace(moved_new_path, db_path)
+                    for ext in ("-journal", "-wal", "-shm"):
+                        if os.path.exists(f"{moved_new_path}{ext}"):
+                            os.replace(f"{moved_new_path}{ext}", f"{db_path}{ext}")
+                except Exception as rollback_exc:
+                    rollback_error = str(rollback_exc)
+            return {"status": "undo_failed", "error": str(exc), "rollback_error": rollback_error}
+        _remove_manual_rotation_undo_state(archive_dir)
+        logger.warning("Manual DB rotation cancelled: restored=%s retained_new_cycle=%s", db_path, moved_new_path)
+        return {"status": "undo_rotated", "retained_new_cycle_path": moved_new_path}
+    finally:
         if db_lock:
             db_lock.release()
         lock.release()
